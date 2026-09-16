@@ -25,6 +25,7 @@ import { createDesktopServiceRuntime } from './service-runtime.js';
 import { createServiceProcessClient } from './service-process-client.js';
 import { createSetupWindowManager } from './setup-window.js';
 import { createShutdownCoordinator } from './shutdown-coordinator.js';
+import { clearUpdateInstallMarker, createUpdateInstallMarker } from './update-install-marker.js';
 import { createTaskCodeIdeLauncher } from './task-code-ide.js';
 import { createTaskbarCompletionBadge } from './taskbar-completion-badge.js';
 import { taskActivityBlockReason } from './tool-sleep-blocker.js';
@@ -656,6 +657,9 @@ async function createDesktopHost(options = {}) {
     updateInstallPrepared = false;
     const taskBlock = taskActivityBlockReason(desktopPower.getStatus(), 'installing the update');
     if (taskBlock) throw new Error(taskBlock);
+    if (process.platform === 'win32') {
+      await createUpdateInstallMarker(app, { targetVersion: appUpdater?.getStatus()?.availableVersion });
+    }
     const stopped = await stopServer({ silent: true, preserveDashboard: true });
     if (stopped?.cleanup?.clean === false) {
       throw new Error('Rel.AI could not stop its local runtime cleanly for the update.');
@@ -675,6 +679,7 @@ async function createDesktopHost(options = {}) {
   }
 
   async function recoverApplicationUpdate() {
+    await clearUpdateInstallMarker(app).catch(() => {});
     allowUpdaterQuit = false;
     isQuitting = false;
     updateInstallPrepared = false;

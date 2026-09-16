@@ -85,6 +85,7 @@
       "app-updater.js",
       "app-updater-events.js",
       "app-updater-state.js",
+      "update-install-marker.js",
       "app-updater-status.js",
       "macos-manual-updater.js",
       "update-version.js",
@@ -531,6 +532,7 @@
     "nsis": {
       "artifactName": "Rel.AI-MCP-Setup-${version}.${ext}",
       "installerIcon": "build/installer-icon.ico",
+      "include": "build/installer.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowElevation": true,

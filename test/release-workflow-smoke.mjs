@@ -29,6 +29,7 @@ function copyFixture() {
     'electron/package.json',
     'electron/package-lock.json',
     'electron/build/installer-icon.ico',
+    'electron/build/installer.nsh',
     'electron/renderer/status.html',
     'electron/scripts/verify-fuses.js',
     'src/contracts/package.json',
@@ -171,8 +172,14 @@ function verifyPackageContracts() {
   assert.deepEqual(electronPackage.build.win.target, ['nsis', 'portable']);
   assert.equal(electronPackage.build.win.icon, 'build/icon.png');
   assert.equal(electronPackage.build.nsis.installerIcon, 'build/installer-icon.ico');
+  assert.equal(electronPackage.build.nsis.include, 'build/installer.nsh');
+  assert.ok(electronPackage.build.files.includes('update-install-marker.js'), 'packaged desktop builds must include the update-install launch guard');
   const installerIcon = fs.readFileSync(path.join(tmp, 'electron', electronPackage.build.nsis.installerIcon));
   assert.deepEqual([...installerIcon.subarray(0, 4)], [0, 0, 1, 0], 'the dedicated Windows installer icon must remain a valid ICO asset');
+  const installerInclude = fs.readFileSync(path.join(tmp, 'electron', electronPackage.build.nsis.include), 'utf8');
+  assert.match(installerInclude, /customInit[\s\S]*isUpdated[\s\S]*Silent[\s\S]*SpiderBanner::Show/, 'silent in-app Windows updates must keep an installer-owned progress surface visible');
+  assert.match(installerInclude, /customInstall[\s\S]*update-installing\.json/, 'successful Windows updates must clear the update-in-progress marker before relaunch');
+  assert.match(installerInclude, /\.onInstFailed[\s\S]*update-installing\.json/, 'failed Windows updates must clear the update-in-progress marker so the shortcut is not left blocked');
   assert.deepEqual(electronPackage.build.linux.target, ['AppImage', 'deb']);
   assert.deepEqual(electronPackage.build.mac.target, ['dmg']);
   assert.equal(electronPackage.build.mac.identity, null);

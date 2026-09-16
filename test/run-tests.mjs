@@ -47,6 +47,7 @@ const files = [
   'durable-state-database-unit.mjs',
   'electron-updater-config-unit.mjs',
   'app-updater-unit.mjs',
+  'update-install-marker-unit.mjs',
   'update-support-policy-unit.mjs',
   'update-support-policy-http-unit.mjs',
   'connector-refresh-modal-unit.mjs',
