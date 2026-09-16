@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { statePath } from './stateLayout.js';
 import { openStateDatabase, setStateMeta, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
-import { failureCategoryFromCode, normalizeFailureCategory } from './analyticsFailureCategory.ts';
+import { failureCategoryFromEvent, normalizeFailureCategory } from './analyticsFailureCategory.ts';
 import {
   analyticsUseCaseForOperation,
   normalizeAnalyticsTaskIntent,
@@ -160,7 +160,7 @@ function recordLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOu
     const durationMs = boundedDuration(event.durationMs);
     const success = event.ok === true ? 1 : 0;
     const failure = success ? 0 : 1;
-    const category: AnalyticsFailureCategory | '' = failure ? failureCategoryFromCode(event.errorCode) : '';
+    const category: AnalyticsFailureCategory | '' = failure ? failureCategoryFromEvent(event) : '';
     const outcome = classifyAnalyticsOutcome(event);
     const performancePhases = sanitizePerformancePhases(event.timings?.phaseMs || event.performancePhases);
     const reliability = reliabilityCountersForOutcome(outcome);

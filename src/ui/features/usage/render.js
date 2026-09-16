@@ -4,7 +4,8 @@ const METRIC_HELP = Object.freeze({
   toolCalls: 'Total Rel.AI tool actions recorded in this range. The change compares with the previous equivalent period.',
   recoverableFailures: 'Actions with a recoverable task or context problem. A retry or context refresh can usually resolve the problem.',
   operationSuccessRate: 'Share of recorded actions where the requested command or check succeeded. Rate changes use percentage points (pp); 90% to 95% is +5 pp.',
-  averageDuration: 'Average elapsed time per completed action in this range. The change compares with the previous equivalent period when available.'
+  averageDuration: 'Average elapsed time per completed action in this range. The change compares with the previous equivalent period when available.',
+  requestDeliveryRate: 'Share of MCP requests that finished delivering a response. Server-error responses can still be delivered, so this measures delivery rather than tool success.'
 });
 
 export function analyticsMetrics(scope, previous) {
@@ -21,7 +22,16 @@ export function analyticsMetrics(scope, previous) {
     metric('Actions', 'toolCalls', integer(scope.toolCalls), '', { neutral: true }),
     metric('Retryable problems', 'recoverableFailures', integer(scope.recoverableFailures), 'Usually fixed by retrying or refreshing context', { inverse: true }),
     metric('Successful actions', 'operationSuccessRate', scope.completed ? percent(scope.operationSuccessRate) : '—', 'Whether the command or check itself succeeded', { rate: true, sparkKey: 'operationSuccessRate', available: scope.completed > 0, previousAvailable: Number(previous?.completed || 0) > 0 }),
-    metric('Average time', 'averageDuration', duration(scope.averageDuration), scope.completed ? 'Per completed action' : '', { inverse: true, sparkKey: 'averageDuration', available: scope.completed > 0, previousAvailable: Number(previous?.completed || 0) > 0 })
+    metric('Average time', 'averageDuration', duration(scope.averageDuration), scope.completed ? 'Per completed action' : '', { inverse: true, sparkKey: 'averageDuration', available: scope.completed > 0, previousAvailable: Number(previous?.completed || 0) > 0 }),
+    ...(scope.transport && Number(scope.transport.request_started || 0) > 0
+      ? [metric(
+          'Request delivery',
+          'requestDeliveryRate',
+          percent(scope.requestDeliveryRate),
+          `${integer(scope.transport.response_delivered)} of ${integer(scope.transport.request_started)} responses delivered${Number(scope.transport.connection_closed || 0) > 0 ? ` · ${integer(scope.transport.connection_closed)} closed early` : ''}${Number(scope.transport.upstream_5xx || 0) > 0 ? ` · ${integer(scope.transport.upstream_5xx)} server-error responses` : ''}`,
+          { rate: true, spark: false, available: true, previousAvailable: Number(previous?.transport?.request_started || 0) > 0 }
+        )]
+      : [])
   ];
 }
 
@@ -57,7 +67,25 @@ export function timelineModel(values, metricLabel = 'Actions') {
 }
 
 export function failureCategoryLabel(category) {
-  return ({ cancelled: 'Cancelled', timeout: 'Timed out', authorization: 'Sign-in', capacity: 'Busy', transport: 'Connection', policy: 'Safety rule', workspace: 'Project folder', git: 'Git', process: 'Command', validation: 'Input or check', runtime: 'Other' })[String(category || '').toLowerCase()] || 'Other';
+  return ({
+    cancelled: 'Cancelled',
+    timeout: 'Timed out',
+    authorization: 'Sign-in & access',
+    capacity: 'Busy / resources',
+    transport: 'Connection',
+    policy: 'Safety & approval',
+    workspace: 'Project & files',
+    git: 'Git',
+    process: 'Command',
+    validation: 'Input or check',
+    task: 'Task state',
+    stale: 'Changed state',
+    search: 'Search & index',
+    desktop: 'Browser & desktop',
+    app: 'App & local data',
+    internal: 'Internal error',
+    unclassified: 'Unclassified'
+  })[String(category || '').toLowerCase()] || 'Unclassified';
 }
 
 export function integer(value) {

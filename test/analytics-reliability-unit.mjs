@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { OUTCOME_CLASSES, classifyAnalyticsOutcome } from '../src/analyticsOutcome.js';
+import { failureCategoryFromEvent, normalizeFailureCategory } from '../src/analyticsFailureCategory.ts';
 import { withStateDatabase } from '../src/stateDatabase.ts';
 import { flushLocalAnalytics, recordLocalToolOutcome, recordLocalTransportEvent, readLocalUsageSnapshot } from '../src/localAnalytics.js';
 import { analyticsBounds, analyticsRangeScope, normalizeUsageSnapshot } from '../src/ui/features/usage/range-model.js';
@@ -16,6 +17,18 @@ assert.equal(classifyAnalyticsOutcome({ ok: false, errorMessage: 'Path is a dire
 assert.equal(classifyAnalyticsOutcome({ ok: false, errorMessage: 'ExceptionGroup: unhandled errors in a TaskGroup' }), OUTCOME_CLASSES.INFRASTRUCTURE_FAILURE);
 assert.equal(classifyAnalyticsOutcome({ ok: false, operationName: 'relai_validate', errorCode: 'ERR_MODULE_NOT_FOUND' }), OUTCOME_CLASSES.INFRASTRUCTURE_FAILURE, 'validator infrastructure crashes must not count as reliable operation failures');
 assert.equal(classifyAnalyticsOutcome({ ok: false, errorMessage: 'Operation cancelled.' }), OUTCOME_CLASSES.CANCELLED);
+assert.equal(failureCategoryFromEvent({ errorCode: 'TASK_NOT_FOUND' }), 'task');
+assert.equal(failureCategoryFromEvent({ errorCode: 'EDIT_CONTEXT_MISMATCH' }), 'stale');
+assert.equal(failureCategoryFromEvent({ errorCode: 'INDEX_NOT_READY' }), 'search');
+assert.equal(failureCategoryFromEvent({ errorCode: 'BROWSER_TARGET_NOT_FOUND' }), 'desktop');
+assert.equal(failureCategoryFromEvent({ errorCode: 'SQLITE_BUSY' }), 'app');
+assert.equal(failureCategoryFromEvent({ errorCode: 'ERR_MODULE_NOT_FOUND' }), 'internal');
+assert.equal(failureCategoryFromEvent({ errorCode: 'APPROVAL_PRINCIPAL_MISMATCH' }), 'policy');
+assert.equal(failureCategoryFromEvent({ errorCode: 'TUNNEL_ACCESS_DENIED' }), 'authorization');
+assert.equal(failureCategoryFromEvent({ operationName: 'relai_exec', errorMessage: 'spawn EINVAL' }), 'process');
+assert.equal(failureCategoryFromEvent({ operationName: 'relai_exec', errorMessage: 'command exited with code 1' }), 'process');
+assert.equal(failureCategoryFromEvent({ operationName: 'relai_validate', errorMessage: 'test exited 1' }), 'validation');
+assert.equal(normalizeFailureCategory('runtime'), 'unclassified', 'legacy runtime buckets must be presented as unclassified rather than Other');
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-reliability-'));
 const config = { stateDir };
@@ -51,6 +64,7 @@ try {
   const bounds = analyticsBounds('24h', { now: new Date('2026-08-15T03:00:00Z') });
   const scope = analyticsRangeScope([model], bounds);
   assert.deepEqual(scope.transport, snapshot.transport, 'global analytics range must preserve transport delivery counters separately from tool outcomes');
+  assert.equal(scope.requestDeliveryRate, 100, 'delivered server-error responses still count as delivered transport responses');
   assert.equal(analyticsRangeScope([model], bounds, { workspace: 'repo' }).transport, null, 'global tunnel delivery counters must not be misattributed to a project');
   assert.equal(scope.reliabilityRate.toFixed(2), '100.00');
   assert.equal(scope.operationSuccessRate, 0, 'all recorded operations in this fixture failed even though two failures were reliable tool behavior');

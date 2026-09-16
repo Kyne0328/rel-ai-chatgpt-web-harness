@@ -214,21 +214,41 @@ function verifyWorkflowContracts() {
   const windowsCi = ciWorkflow.slice(windowsCiStart, windowsCiEnd);
   const linuxCiStart = ciWorkflow.indexOf('packaged-linux:');
   const linuxCi = ciWorkflow.slice(linuxCiStart);
-  const windowsSourceGateIndex = windowsCi.indexOf('npm run test:all');
+  const sharedCiSourceGateIndex = ciWorkflow.indexOf('npm run test:all');
   const windowsPackageIndex = windowsCi.indexOf('npm run electron:build:windows');
   const linuxPackageIndex = linuxCi.indexOf('npm run electron:dist:linux');
   const linuxSizeIndex = linuxCi.indexOf('npm run electron:size:linux');
-  const releaseSourceGateIndex = workflow.indexOf('npm run test:release');
-  const windowsBuildIndex = workflow.indexOf('npm run electron:dist:windows');
+  const releaseGateStart = workflow.indexOf('release-gate:');
+  const windowsReleaseStart = workflow.indexOf('\n  windows:', releaseGateStart);
+  const linuxReleaseStart = workflow.indexOf('\n  linux:', windowsReleaseStart);
+  const macReleaseStart = workflow.indexOf('\n  mac:', linuxReleaseStart);
+  const releaseGate = workflow.slice(releaseGateStart, windowsReleaseStart);
+  const windowsRelease = workflow.slice(windowsReleaseStart, linuxReleaseStart);
+  const linuxRelease = workflow.slice(linuxReleaseStart, macReleaseStart);
+  const macRelease = workflow.slice(macReleaseStart, workflow.indexOf('\n  windows-install-upgrade:', macReleaseStart));
+  const releaseSourceGateIndex = releaseGate.indexOf('npm run test:release');
+  const windowsBuildIndex = windowsRelease.indexOf('npm run electron:dist:windows');
 
   assert.ok(windowsCiStart >= 0 && windowsCiEnd > windowsCiStart, 'normal CI must keep a dedicated Windows packaging job');
-  assert.ok(windowsSourceGateIndex >= 0, 'normal Windows CI must run the complete source gate before release/CD');
-  assert.ok(windowsSourceGateIndex < windowsPackageIndex, 'normal Windows CI must fail source regressions before spending time packaging');
+  assert.ok(sharedCiSourceGateIndex >= 0 && sharedCiSourceGateIndex < windowsCiStart, 'normal CI must validate shared source once before platform packaging');
+  assert.match(windowsCi, /needs:\s+test/, 'Windows packaging must wait for the shared CI gate');
+  assert.doesNotMatch(windowsCi, /npm run test:all/, 'Windows packaging must not rerun the cross-platform source suite');
+  assert.ok(windowsPackageIndex >= 0, 'normal Windows CI must keep packaging after its platform checks');
   assert.ok(linuxCiStart >= 0, 'normal CI must keep a dedicated Linux packaging job');
+  assert.match(linuxCi, /needs:\s+test/, 'Linux packaging must wait for the same shared CI gate');
   assert.ok(linuxPackageIndex >= 0, 'normal Linux CI must build the release artifacts used by the package-size gate');
   assert.ok(linuxSizeIndex > linuxPackageIndex, 'normal Linux CI must enforce the release package-size guard after packaging');
-  assert.ok(releaseSourceGateIndex >= 0);
-  assert.ok(releaseSourceGateIndex < windowsBuildIndex);
+  assert.ok(releaseGateStart >= 0 && windowsReleaseStart > releaseGateStart, 'release workflow must have one shared gate before platform builders');
+  assert.match(releaseGate, /runs-on: ubuntu-latest/);
+  assert.ok(releaseSourceGateIndex >= 0, 'shared release gate must run the complete release source suite');
+  assert.match(releaseGate, /benchmark:mcp-startup/);
+  assert.match(releaseGate, /benchmark:observability:strict/);
+  assert.match(releaseGate, /npm run test:frontend/);
+  assert.ok(windowsBuildIndex >= 0);
+  assert.doesNotMatch(windowsRelease, /npm run test:release|npm run test:frontend|benchmark:/, 'Windows release packaging must keep only platform-specific validation');
+  for (const platformSection of [windowsRelease, linuxRelease, macRelease]) {
+    assert.match(platformSection, /- release-gate/, 'every platform release build must wait for the shared release gate');
+  }
   assert.doesNotMatch(workflow, /Install gateway test dependencies|gateway\/package\.json/i, 'public release workflow must not depend on the private gateway workspace');
   assert.doesNotMatch(workflow, /scripts\/fetch-(?:tunnel-client|zoekt)/, 'platform workflows must let the shared packager provision pinned runtime binaries');
   assert.match(workflow, /preflight:[\s\S]*Verify release consistency[\s\S]*npm run release:check/, 'release preflight must run generated-asset and version consistency checks before platform packaging jobs');
@@ -236,6 +256,7 @@ function verifyWorkflowContracts() {
   for (const pattern of [
     /workflow_dispatch:/,
     /preflight:/,
+    /release-gate:/,
     /windows:/,
     /linux:/,
     /mac:/,

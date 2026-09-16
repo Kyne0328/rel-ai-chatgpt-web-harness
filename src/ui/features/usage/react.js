@@ -28,7 +28,8 @@ const METRIC_ICONS = Object.freeze({
   toolCalls: 'activity',
   recoverableFailures: 'refresh',
   operationSuccessRate: 'success',
-  averageDuration: 'timer'
+  averageDuration: 'timer',
+  requestDeliveryRate: 'connection'
 });
 
 export function createUsageRoute(useDashboardSlices) {
@@ -228,9 +229,6 @@ function UsageContent({ bounds, current, previous }) {
   const chart = CHART_METRICS.find(([key]) => key === chartKey) || CHART_METRICS[0];
   const fallback = current.usedMonthlyFallback && current.points.every(point => point.toolCalls === 0 && point.requests === 0);
   const infrastructureFailures = Number(current.infrastructureFailures || 0);
-  const transport = current.kind === 'all' ? current.transport : null;
-  const transportFailures = Number(transport?.connection_closed || 0) + Number(transport?.upstream_5xx || 0);
-  const transportObserved = transport && Object.values(transport).some(value => Number(value || 0) > 0);
   return h(React.Fragment, null,
     h('section', { className: 'usage-overview', 'aria-label': `${current.label} analytics for ${bounds.label}` },
       fallback ? h('p', { className: 'usage-series-note' }, 'Hourly trends are unavailable for older monthly totals.') : null,
@@ -240,14 +238,6 @@ function UsageContent({ bounds, current, previous }) {
             h('strong', null, `${integer(infrastructureFailures)} Rel.AI internal ${infrastructureFailures === 1 ? 'error' : 'errors'}`),
             h('span', null, `Confirmed infrastructure ${infrastructureFailures === 1 ? 'failure' : 'failures'} in this range.`),
             h('a', { href: routeHref('diagnostics') }, 'Open Troubleshooting')
-          )
-        : null,
-      transportObserved
-        ? h('div', { className: `connection-notice${transportFailures ? ' bad' : ''} usage-transport-alert`, role: 'status', 'data-usage-transport': true },
-            h(Icon, { name: transportFailures ? 'warning' : 'connection', size: 16 }),
-            h('strong', null, 'Connection delivery'),
-            h('span', null, `Started ${integer(transport.request_started)} · Reached runtime ${integer(transport.request_reached_runtime)} · Delivered ${integer(transport.response_delivered)} · Cancelled ${integer(transport.request_cancelled)} · Connection closed ${integer(transport.connection_closed)} · Upstream 5xx ${integer(transport.upstream_5xx)}`),
-            transportFailures ? h('a', { href: routeHref('diagnostics') }, 'Open Troubleshooting') : null
           )
         : null,
       h('div', { className: 'usage-metrics' }, analyticsMetrics(current, previous).map(metric => h(Metric, { key: metric.key, metric })))
@@ -496,7 +486,7 @@ function FailureCategories({ rows = [], totalFailures = 0 }) {
   const max = Math.max(1, ...visible.map(row => row.failures));
   return h('section', { className: 'card usage-breakdown usage-bar-card' },
     h('div', { className: 'card-head' },
-      h('div', null, h('h3', null, 'Problems by type'), h('p', null, 'Grouped by category. Recent details are available in Troubleshooting.'))
+      h('div', null, h('h3', null, 'Unsuccessful actions by reason'), h('p', null, 'Grouped by cause. Recent details are available in Troubleshooting.'))
     ),
     h('div', { className: 'card-body' }, visible.length
       ? h('div', { className: 'usage-bar-list' }, visible.map(row => h(BarRow, {

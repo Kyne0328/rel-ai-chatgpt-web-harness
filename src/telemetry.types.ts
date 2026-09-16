@@ -70,7 +70,13 @@ export const ANALYTICS_FAILURE_CATEGORIES = Object.freeze([
   'git',
   'process',
   'validation',
-  'runtime'
+  'task',
+  'stale',
+  'search',
+  'desktop',
+  'app',
+  'internal',
+  'unclassified'
 ] as const);
 
 export type AnalyticsFailureCategory = typeof ANALYTICS_FAILURE_CATEGORIES[number];

@@ -18,9 +18,9 @@
 .usage-side-by-side { @apply grid min-w-0 gap-3; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .usage-side-by-side > .card { min-width: 0; }
 .usage-loading { @apply rounded-xl border p-5 text-[12px]; color: var(--ui-text-secondary); border-color: var(--ui-border-default); background: var(--ui-surface-primary); }
-.usage-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); border: 1px solid var(--ui-border-default); border-radius: var(--radius-lg); overflow: visible; background: var(--ui-surface-primary); }
+.usage-metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); border: 1px solid var(--ui-border-default); border-radius: var(--radius-lg); overflow: visible; background: var(--ui-surface-primary); }
 .usage-metric { @apply grid min-w-0 gap-1 p-4; border-right: 1px solid var(--ui-border-default); border-bottom: 0; }
-.usage-metric:nth-child(4n) { border-right: 0; }
+.usage-metric:last-child { border-right: 0; }
 .usage-metric-label-row { @apply flex min-w-0 items-center justify-between gap-1; }
 .usage-metric-label-main { @apply flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden; }
 .usage-metric-icon { @apply shrink-0; color: var(--ui-text-tertiary); }

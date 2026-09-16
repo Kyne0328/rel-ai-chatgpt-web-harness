@@ -117,6 +117,16 @@ assert.equal(noBaselineMetrics.find(metric => metric.key === 'operationSuccessRa
 
 const comparedMetrics = analyticsMetrics(currentMetricScope, { ...previousWithoutRateBaselines, toolCalls: 10, reliabilityCalls: 10, reliableCalls: 9, reliabilityRate: 90, completed: 10, operationSuccessRate: 90, averageDuration: 7000 });
 assert.equal(comparedMetrics.find(metric => metric.key === 'operationSuccessRate')?.delta?.text, '+2.7 pp', 'Measured success rates must compare in percentage points');
+const deliveryMetrics = analyticsMetrics({
+  ...currentMetricScope,
+  requestDeliveryRate: 99.91,
+  transport: { request_started: 2193, response_delivered: 2191, connection_closed: 2, upstream_5xx: 15 }
+}, { ...previousWithoutRateBaselines, requestDeliveryRate: 100, transport: { request_started: 100, response_delivered: 100 } });
+const deliveryMetric = deliveryMetrics.find(metric => metric.key === 'requestDeliveryRate');
+assert.equal(deliveryMetric?.value, '99.9%');
+assert.match(deliveryMetric?.detail || '', /2,191 of 2,193 responses delivered/);
+assert.match(deliveryMetric?.detail || '', /2 closed early/);
+assert.match(deliveryMetric?.detail || '', /15 server-error responses/);
 const timeline = timelineModel([1, 3, 2], 'Actions');
 assert.match(timeline.summary, /Peak 3/);
 assert.match(timeline.summary, /Overall trend increasing/);
@@ -146,6 +156,8 @@ assert.doesNotMatch(usageRender, /metric\('Reliable actions'|metric\('Internal e
 assert.doesNotMatch(usageReact, /\['infrastructureFailures', 'Internal errors'/, 'Internal errors must not remain in the normal timeline metric switcher');
 assert.match(usageReact, /usage-infrastructure-alert/, 'Confirmed infrastructure failures must surface only as an exceptional Analytics warning');
 assert.match(usageReact, /Open Troubleshooting/, 'Infrastructure warnings must link to Troubleshooting');
+assert.doesNotMatch(usageReact, /usage-transport-alert|Connection delivery/, 'Historical transport counters must not render as a standalone warning banner');
+assert.match(usageRender, /Request delivery/, 'Transport delivery must be integrated as a neutral Analytics metric');
 assert.match(workspacesReact, /Successful actions/, 'Project analytics must show normal success rate instead of the reliability percentage');
 assert.doesNotMatch(workspacesReact, /label: 'Reliable'/, 'Project analytics must not expose the diagnostic reliability percentage');
 for (const field of ['requests', 'toolCalls', 'successes', 'failures', 'executionMs', 'activeDays']) {
@@ -156,8 +168,11 @@ assert.match(usageReact, /Retry/);
 assert.match(usageReact, /Refresh/);
 assert.match(usageRender, /operationSuccessRate/);
 assert.match(usageRender, /recoverableFailures/);
-assert.match(usageCombined, /Problems by type/);
+assert.match(usageCombined, /Unsuccessful actions by reason/);
 assert.match(usageCombined, /Recent details are available in Troubleshooting/);
+for (const label of ['Task state', 'Changed state', 'Search & index', 'Browser & desktop', 'App & local data', 'Internal error', 'Unclassified']) {
+  assert.match(usageRender, new RegExp(label.replace(/[&]/g, '\\&')), `Analytics must expose the refined failure label ${label}.`);
+}
 assert.doesNotMatch(usageRender, /Trend starts now|Completed outcomes|Workspace position|usage-fact-strip|<h3>Outcomes<\/h3>/);
 
 const snapshot = buildUsageModel({
@@ -172,7 +187,7 @@ assert.equal('source' in snapshot, false);
 assert.equal('devices' in snapshot, false);
 assert.equal(snapshot.totals.toolCalls, 5);
 assert.equal(snapshot.tools[0].tool, 'relai_read');
-assert.deepEqual(snapshot.failureCategories, [{ category: 'runtime', failures: 1 }]);
+assert.deepEqual(snapshot.failureCategories, [{ category: 'policy', failures: 1 }], 'known error-code values must normalize into a useful failure category');
 assert.equal(currentUsageMonth(new Date('2026-08-08T00:00:00.000Z')), '2026-08');
 assert.throws(() => buildUsageModel({ ok: true, month: '2026-08', totals: { requests: -1 } }), /Usage is unavailable|invalid value/);
 
