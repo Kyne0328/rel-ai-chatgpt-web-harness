@@ -30,6 +30,8 @@ jobs:
         run: node electron/node_modules/electron/install.js
       - name: Verify Electron test binary
         run: test -x electron/node_modules/electron/dist/electron
+      - name: Run shared source gate
+        run: xvfb-run --auto-servernum npm run test:all
       - name: Enforce MCP startup performance budget
         run: npm run benchmark:mcp-startup
       - name: Enforce Repository Intelligence performance budget
@@ -42,9 +44,9 @@ jobs:
         run: npm run benchmark:computer:strict
       - name: Test local browser capabilities
         run: xvfb-run --auto-servernum npm run test:web-automation
-      - run: xvfb-run --auto-servernum npm run test:all
 
   packaged-windows:
+    needs: test
     runs-on: windows-latest
     timeout-minutes: 35
     name: packaged Windows application
@@ -62,8 +64,16 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm ci --no-audit --no-fund
         working-directory: electron
-      - name: Run Windows source gate
-        run: npm run test:all
+      - name: Run Windows platform regression tests
+        shell: pwsh
+        run: |
+          node test/electron-platform-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/current-unpacked-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/app-updater-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/installer-test-entrypoints-unit.mjs
       - name: Build unpacked Windows application
         run: npm run electron:build:windows
       - name: Resolve current unpacked application
@@ -89,6 +99,7 @@ jobs:
         run: npm run test:connector-acceptance -- --dir '${{ steps.unpacked.outputs.path }}'
 
   packaged-linux:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 35
     name: packaged Linux application

@@ -1,7 +1,7 @@
 {
   "name": "rel-ai-mcp-launcher",
   "desktopName": "com.relai.mcp.desktop",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Desktop runtime and dashboard for the Rel.AI ChatGPT Web harness.",
@@ -85,6 +85,7 @@
       "app-updater.js",
       "app-updater-events.js",
       "app-updater-state.js",
+      "update-install-marker.js",
       "app-updater-status.js",
       "macos-manual-updater.js",
       "update-version.js",
@@ -531,6 +532,7 @@
     "nsis": {
       "artifactName": "Rel.AI-MCP-Setup-${version}.${ext}",
       "installerIcon": "build/installer-icon.ico",
+      "include": "build/installer.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowElevation": true,

@@ -23,7 +23,20 @@ export const APPLICATION_NAV_ITEMS = Object.freeze([
   route('settings', 'Settings', 'settings', 'Change connection, preferences, and app settings.', 'Application')
 ]);
 
-export const DESKTOP_NAV_ITEMS = Object.freeze([...WORK_NAV_ITEMS, ...APPLICATION_NAV_ITEMS]);
+export const EXTENSIONS_NAV_ITEM = route(
+  'extensions',
+  'Extensions',
+  'extensions',
+  'Browse Rel.AI extensions and resources for building integrations.',
+  'Application'
+);
+
+export const DESKTOP_NAV_ITEMS = Object.freeze([
+  ...WORK_NAV_ITEMS,
+  APPLICATION_NAV_ITEMS[0],
+  EXTENSIONS_NAV_ITEM,
+  APPLICATION_NAV_ITEMS[1]
+]);
 export const MOBILE_PRIMARY_NAV_ITEMS = Object.freeze([
   WORK_NAV_ITEMS.find(item => item.id === 'home'),
   WORK_NAV_ITEMS.find(item => item.id === 'tasks'),
@@ -33,7 +46,9 @@ export const MOBILE_PRIMARY_NAV_ITEMS = Object.freeze([
 export const MOBILE_MORE_NAV_ITEMS = Object.freeze([
   WORK_NAV_ITEMS.find(item => item.id === 'code'),
   WORK_NAV_ITEMS.find(item => item.id === 'browser'),
-  ...APPLICATION_NAV_ITEMS
+  APPLICATION_NAV_ITEMS[0],
+  EXTENSIONS_NAV_ITEM,
+  APPLICATION_NAV_ITEMS[1]
 ].filter(Boolean));
 export const MOBILE_NAV_ITEMS = Object.freeze([...DESKTOP_NAV_ITEMS]);
 
@@ -58,5 +73,5 @@ export function desktopNavigationOwner(sectionId) {
 }
 
 export function navigationCommands() {
-  return [...WORK_NAV_ITEMS, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS];
+  return [...WORK_NAV_ITEMS, EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS];
 }

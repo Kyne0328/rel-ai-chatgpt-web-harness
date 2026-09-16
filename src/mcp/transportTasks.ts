@@ -106,7 +106,8 @@ async function handleTransportTaskRequest(config: any, message: any, options: an
       bounds,
       scopeOnly: true,
       deliveryAware: true,
-      persistFallback: false
+      persistFallback: false,
+      requireTerminalResult: definition?.operationName === 'work.begin'
     });
   }
   const estimate = synchronousEstimate(name, validated.value, bounds, options);
@@ -276,6 +277,16 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
         errorCode: 'TOOL_EXECUTION_FAILED'
       }, true), deliveryCallback(config, started.record, options));
     }
+  }
+
+  if (options.requireTerminalResult === true) {
+    const settled = await started.record.promise;
+    if (settled.ok) return successResponse(message.id, settled.result, deliveryCallback(config, started.record, options));
+    return successResponse(message.id, toolResult({
+      ok: false,
+      error: settled.error instanceof Error ? settled.error.message : String(settled.error || 'Task start failed.'),
+      errorCode: 'TOOL_EXECUTION_FAILED'
+    }, true), deliveryCallback(config, started.record, options));
   }
 
   enableFallbackCompletionNotice(config, started.record);

@@ -23,21 +23,16 @@ function createBrowserRoute() {
           void Promise.resolve(browser.setBounds({ visible: false })).catch(() => {});
           return;
         }
-        const rect = element.getBoundingClientRect();
-        const visible = rect.width >= 1 && rect.height >= 1
-          && rect.bottom > 0 && rect.right > 0
-          && rect.top < window.innerHeight && rect.left < window.innerWidth;
-        if (!visible) {
-          void Promise.resolve(browser.setBounds({ visible: false })).catch(() => {});
+        const bounds = clipBrowserSurfaceBounds(
+          element.getBoundingClientRect(),
+          window.innerWidth,
+          window.innerHeight
+        );
+        if (!bounds.visible) {
+          void Promise.resolve(browser.setBounds(bounds)).catch(() => {});
           return;
         }
-        void Promise.resolve(browser.setBounds({
-          visible: true,
-          x: Math.max(0, Math.round(rect.left)),
-          y: Math.max(0, Math.round(rect.top)),
-          width: Math.max(1, Math.round(rect.width)),
-          height: Math.max(1, Math.round(rect.height))
-        })).catch(nextError => setError(errorMessage(nextError)));
+        void Promise.resolve(browser.setBounds(bounds)).catch(nextError => setError(errorMessage(nextError)));
       });
     }, [browser, state.active]);
 
@@ -337,6 +332,30 @@ function createBrowserRoute() {
   };
 }
 
+function clipBrowserSurfaceBounds(rect, viewportWidth, viewportHeight) {
+  const width = Math.max(0, Math.round(Number(viewportWidth) || 0));
+  const height = Math.max(0, Math.round(Number(viewportHeight) || 0));
+  const left = Number(rect?.left);
+  const top = Number(rect?.top);
+  const right = Number(rect?.right);
+  const bottom = Number(rect?.bottom);
+  if (![left, top, right, bottom].every(Number.isFinite) || width < 1 || height < 1) return { visible: false };
+
+  const x = Math.max(0, Math.round(left));
+  const y = Math.max(0, Math.round(top));
+  const clippedRight = Math.min(width, Math.round(right));
+  const clippedBottom = Math.min(height, Math.round(bottom));
+  if (clippedRight <= x || clippedBottom <= y) return { visible: false };
+
+  return {
+    visible: true,
+    x,
+    y,
+    width: clippedRight - x,
+    height: clippedBottom - y
+  };
+}
+
 function emptyState(available) {
   return {
     ok: true,
@@ -430,4 +449,4 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Embedded browser operation failed.');
 }
 
-export { createBrowserRoute };
+export { clipBrowserSurfaceBounds, createBrowserRoute };

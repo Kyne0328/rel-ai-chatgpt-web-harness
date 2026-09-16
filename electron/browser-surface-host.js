@@ -582,8 +582,10 @@ function createBrowserSurfaceHost(options = {}) {
     wc.on('before-input-event', event => {
       if (record.control === 'ai' && page.aiInputDepth === 0) event.preventDefault();
     });
-    wc.on('before-mouse-event', event => {
-      if (record.control === 'ai' && page.aiInputDepth === 0) event.preventDefault();
+    wc.on('before-mouse-event', (event, mouse) => {
+      if (record.control !== 'ai' || page.aiInputDepth !== 0) return;
+      event.preventDefault();
+      if (mouse?.type === 'mouseWheel') forwardWheelToDashboard(page, mouse);
     });
     wc.on('render-process-gone', (_event, details) => {
       if (page.closing) return;
@@ -762,6 +764,25 @@ function createBrowserSurfaceHost(options = {}) {
     win.contentView.addChildView(page.view);
     attached = { page, window: win };
     if (record.control === 'user') page.webContents.focus?.();
+  }
+
+  function forwardWheelToDashboard(page, mouse) {
+    const win = getDashboardWindow();
+    if (attached?.page !== page || attached?.window !== win || win?.isDestroyed?.()) return;
+    const x = Math.round(page.bounds.x + (Number(mouse?.x) || 0));
+    const y = Math.round(page.bounds.y + (Number(mouse?.y) || 0));
+    win.webContents?.sendInputEvent?.({
+      type: 'mouseWheel',
+      x,
+      y,
+      deltaX: Number(mouse?.deltaX) || 0,
+      deltaY: Number(mouse?.deltaY) || 0,
+      ...(Number.isFinite(Number(mouse?.wheelTicksX)) ? { wheelTicksX: Number(mouse.wheelTicksX) } : {}),
+      ...(Number.isFinite(Number(mouse?.wheelTicksY)) ? { wheelTicksY: Number(mouse.wheelTicksY) } : {}),
+      ...(mouse?.hasPreciseScrollingDeltas === true ? { hasPreciseScrollingDeltas: true } : {}),
+      canScroll: mouse?.canScroll !== false,
+      ...(Array.isArray(mouse?.modifiers) && mouse.modifiers.length ? { modifiers: mouse.modifiers } : {})
+    });
   }
 
   function syncPageRuntime(record, page) {

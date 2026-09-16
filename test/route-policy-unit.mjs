@@ -9,6 +9,7 @@ assert.equal(canonicalPathFor('settings/dashboard'), 'home');
 assert.equal(canonicalPathFor('settings/desktop'), 'home');
 assert.equal(canonicalPathFor('missing'), 'home');
 assert.equal(canonicalPathFor('tools'), 'tools');
+assert.equal(canonicalPathFor('extensions'), 'extensions');
 assert.equal(canonicalPathFor('settings/advanced'), 'home');
 assert.equal(canonicalPathFor('settings/learning'), 'home');
 assert.equal(canonicalPathFor('settings/memory'), 'home');
@@ -34,6 +35,7 @@ assert.equal(normalizeRouteKey('workspaces?workspace=myapp&focus=1'), 'workspace
 assert.equal(normalizeRouteKey('workspaces?create=1'), 'workspaces?create=1', 'Add project deep links must preserve the create request');
 assert.equal(normalizeRouteKey('workspaces?create=true'), 'workspaces', 'Add project deep links must reject non-canonical create values');
 assert.equal(normalizeRouteKey('settings/connection?workspace=app'), 'settings/connection');
+assert.equal(normalizeRouteKey('extensions?token=secret'), 'extensions');
 
 assert.equal(routeAllowsParam('activity', 'search'), true);
 assert.equal(routeAllowsParam('code', 'file'), true);

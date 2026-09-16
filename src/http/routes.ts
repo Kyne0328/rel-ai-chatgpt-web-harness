@@ -25,6 +25,7 @@ import {
 } from './dashboard.ts';
 import { handleApiComputer, handleApiComputerAction } from './dashboardComputer.ts';
 import { handleApiDiagnostics, handleApiDiagnosticsReset } from './dashboardDiagnostics.ts';
+import { handleApiExtensions, handleApiExtensionsAction } from './dashboardExtensions.ts';
 import { handleApiProcessStop } from './dashboardProcesses.ts';
 import { getMcpAccess } from './mcp.ts';
 import { handleMcpDelete, handleMcpGetDiagnostic, handleMcpStreamable, sendMcpTransportError } from './mcpTransport.ts';
@@ -44,6 +45,8 @@ const NOT_FOUND_PAYLOAD = {
     logsApi: 'GET /api/logs',
     diagnosticsApi: 'GET /api/diagnostics',
     diagnosticsResetApi: 'POST /api/diagnostics/reset',
+    extensionsApi: 'GET /api/extensions',
+    extensionsActionApi: 'POST /api/extensions',
     updateWorkspacesApi: 'POST /api/workspaces',
     workspacePreflightApi: 'GET /api/workspace/preflight?workspace=...',
     events: 'GET /events',
@@ -81,6 +84,7 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/tasks/session': { auth: authDashboard, handler: handleTaskSession },
   '/api/logs': { auth: authDashboard, handler: handleApiLogs },
   '/api/diagnostics': { auth: authDashboard, handler: handleApiDiagnostics },
+  '/api/extensions': { auth: authDashboard, handler: handleApiExtensions },
   '/api/computer': { auth: authDashboard, handler: handleApiComputer },
   '/api/release-notes': { auth: authDashboard, handler: handleReleaseNotes },
   '/api/workspace/preflight': { auth: authDashboard, handler: handleWorkspacePreflight },
@@ -91,6 +95,7 @@ const POST_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/onboarding/complete': { auth: authDashboard, handler: handleOnboardingComplete },
   '/api/workspaces': { auth: authDashboard, handler: handleApiWorkspaces },
   '/api/diagnostics/reset': { auth: authDashboard, handler: handleApiDiagnosticsReset },
+  '/api/extensions': { auth: authDashboard, handler: handleApiExtensionsAction },
   '/api/computer': { auth: authDashboard, handler: handleApiComputerAction },
   '/api/pick-folder': { auth: authDashboard, handler: handlePickFolder },
   '/api/open-folder': { auth: authDashboard, handler: handleOpenFolder },

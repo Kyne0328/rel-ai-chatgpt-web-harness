@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { matchingRelevanceTerms, relevanceTerms } from './context/relevance.js';
+import { extensionSkillRecords } from './extensions/registry.js';
 
 const MAX_SKILLS = 100;
 const MAX_SKILL_FILE_BYTES = 512 * 1024;
@@ -68,19 +69,29 @@ function selectRelevantSkills(skills, taskText, options = {}) {
 function skillRecords(workspace, options = {}) {
   const projectRoot = path.join(path.resolve(workspace.path), '.agents', 'skills');
   const userRoot = path.resolve(options.userRoot || path.join(os.homedir(), '.agents', 'skills'));
-  const roots = [
-    { source: 'project', root: projectRoot },
-    { source: 'user', root: userRoot }
+  const sources = [
+    recordsUnder(projectRoot, 'project'),
+    safeExtensionSkillRecords(options.config),
+    recordsUnder(userRoot, 'user')
   ];
   const byName = new Map();
-  for (const entry of roots) {
-    for (const record of recordsUnder(entry.root, entry.source)) {
+  for (const records of sources) {
+    for (const record of records) {
       if (!byName.has(record.name)) byName.set(record.name, record);
       if (byName.size >= MAX_SKILLS) break;
     }
     if (byName.size >= MAX_SKILLS) break;
   }
   return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function safeExtensionSkillRecords(config) {
+  if (!config?.stateDir) return [];
+  try {
+    return extensionSkillRecords(config);
+  } catch {
+    return [];
+  }
 }
 
 function recordsUnder(root, source) {

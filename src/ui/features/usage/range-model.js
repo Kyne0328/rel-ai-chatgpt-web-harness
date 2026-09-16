@@ -172,6 +172,9 @@ export function analyticsRangeScope(models, bounds, { workspace = '', monthlyFal
     operationSuccessRate: totals.successes + totals.failures ? totals.successes / (totals.successes + totals.failures) * 100 : 0,
     reliabilityRate: totals.reliabilityCalls ? totals.reliableCalls / totals.reliabilityCalls * 100 : null,
     averageDuration: totals.successes + totals.failures ? totals.executionMs / (totals.successes + totals.failures) : 0,
+    requestDeliveryRate: transport && Number(transport.request_started || 0) > 0
+      ? Number(transport.response_delivered || 0) / Number(transport.request_started) * 100
+      : null,
     transport,
     tools,
     workspaces,

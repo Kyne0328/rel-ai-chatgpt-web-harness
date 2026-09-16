@@ -131,12 +131,12 @@ jobs:
         if: steps.preflight.outputs.publish == 'true'
         run: npm run release:check
 
-  windows:
-    name: Build Windows release
+  release-gate:
+    name: Validate release source
     needs: preflight
     if: needs.preflight.outputs.publish == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -158,24 +158,55 @@ jobs:
       - name: Install Electron test binary
         run: node electron/node_modules/electron/install.js
       - name: Verify Electron test binary
-        shell: pwsh
-        run: |
-          $electronBinary = 'electron/node_modules/electron/dist/electron.exe'
-          if (-not (Test-Path -LiteralPath $electronBinary -PathType Leaf)) {
-            throw "Electron test binary is missing after installation: $electronBinary"
-          }
+        run: test -x electron/node_modules/electron/dist/electron
       - name: Run release source gate
-        run: npm run test:release
+        run: xvfb-run --auto-servernum npm run test:release
       - name: Enforce release performance budgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run benchmark:mcp-startup
+          node scripts/repository-intelligence-benchmark.mjs --files 5000 --mutations 50 --json --max-full-ms 30000 --max-incremental-ms 5000
+          xvfb-run --auto-servernum npm run benchmark:observability:strict
+      - name: Verify complete frontend browser behavior
+        run: xvfb-run --auto-servernum npm run test:frontend
+
+  windows:
+    name: Build Windows release
+    needs:
+      - preflight
+      - release-gate
+    if: needs.preflight.outputs.publish == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Node.js
+        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            electron/package-lock.json
+      - name: Use declared npm
+        run: node scripts/ensure-package-manager.mjs
+      - name: Install project dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install Electron dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: electron
+      - name: Run Windows platform regression tests
         shell: pwsh
         run: |
-          npm run benchmark:mcp-startup
+          node test/electron-platform-unit.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/repository-intelligence-benchmark.mjs --files 5000 --mutations 50 --json --max-full-ms 30000 --max-incremental-ms 5000
+          node test/current-unpacked-unit.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run benchmark:observability:strict
-      - name: Verify complete frontend browser behavior
-        run: npm run test:frontend
+          node test/app-updater-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/installer-test-entrypoints-unit.mjs
       - name: Build Windows release
         run: npm run electron:dist:windows
         env:
@@ -220,7 +251,9 @@ jobs:
 
   linux:
     name: Build Linux release
-    needs: preflight
+    needs:
+      - preflight
+      - release-gate
     if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -308,7 +341,9 @@ jobs:
 
   mac:
     name: Build macOS release (${{ matrix.arch }})
-    needs: preflight
+    needs:
+      - preflight
+      - release-gate
     if: needs.preflight.outputs.publish == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60

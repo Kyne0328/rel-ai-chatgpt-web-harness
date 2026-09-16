@@ -47,6 +47,7 @@ const files = [
   'durable-state-database-unit.mjs',
   'electron-updater-config-unit.mjs',
   'app-updater-unit.mjs',
+  'update-install-marker-unit.mjs',
   'update-support-policy-unit.mjs',
   'update-support-policy-http-unit.mjs',
   'connector-refresh-modal-unit.mjs',
@@ -132,6 +133,7 @@ const files = [
   'windows-uia-adapter-unit.mjs',
   'midscene-computer-adapter-unit.mjs',
   'web-automation-contract-unit.mjs',
+  'browser-ui-bounds-unit.mjs',
   'window-security-unit.mjs'
 ];
 
