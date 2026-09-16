@@ -107,13 +107,17 @@ function createHarness({ failOpen = false } = {}) {
   };
   const childViews = new Set();
   const sent = [];
+  const dashboardInputEvents = [];
   const dashboard = {
     isDestroyed: () => false,
     contentView: {
       addChildView(view) { childViews.add(view); },
       removeChildView(view) { childViews.delete(view); }
     },
-    webContents: { send: (...args) => sent.push(args) }
+    webContents: {
+      send: (...args) => sent.push(args),
+      sendInputEvent: event => dashboardInputEvents.push(event)
+    }
   };
   const routes = [];
   const events = [];
@@ -127,7 +131,7 @@ function createHarness({ failOpen = false } = {}) {
     },
     onEvent: event => events.push(event)
   });
-  return { host, sessions, views, webContents, childViews, routes, sent, events };
+  return { host, sessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents };
 }
 
 {
@@ -162,6 +166,56 @@ function createHarness({ failOpen = false } = {}) {
   const { host } = createHarness({ failOpen: true });
   await assert.rejects(() => host.run({ action: 'start' }), /dashboard unavailable/);
   assert.equal(host.getState().active, false, 'a failed dashboard handoff must not leave a hidden native browser session active');
+}
+
+{
+  const { host, webContents, dashboardInputEvents } = createHarness();
+  const started = await host.run({ action: 'start' });
+  await host.run({ action: 'open_page', nativeSessionId: started.nativeSessionId });
+  await host.setBounds({ visible: true, x: 10, y: 20, width: 1440, height: 900 });
+
+  let prevented = false;
+  webContents[0].emit('before-mouse-event', { preventDefault: () => { prevented = true; } }, {
+    type: 'mouseWheel',
+    x: 100,
+    y: 120,
+    deltaX: 4,
+    deltaY: -160,
+    wheelTicksX: 1,
+    wheelTicksY: -3,
+    hasPreciseScrollingDeltas: true,
+    canScroll: true,
+    modifiers: ['shift']
+  });
+  assert.equal(prevented, true, 'AI ownership must still block wheel input from reaching the webpage');
+  assert.deepEqual(dashboardInputEvents, [{
+    type: 'mouseWheel',
+    x: 110,
+    y: 140,
+    deltaX: 4,
+    deltaY: -160,
+    wheelTicksX: 1,
+    wheelTicksY: -3,
+    hasPreciseScrollingDeltas: true,
+    canScroll: true,
+    modifiers: ['shift']
+  }], 'wheel input over an AI-owned browser view must be forwarded to the dashboard at the matching screen position');
+
+  prevented = false;
+  webContents[0].emit('before-mouse-event', { preventDefault: () => { prevented = true; } }, {
+    type: 'mouseDown', x: 100, y: 120, button: 'left'
+  });
+  assert.equal(prevented, true, 'AI ownership must continue blocking non-wheel pointer input');
+  assert.equal(dashboardInputEvents.length, 1, 'non-wheel pointer input must not leak into the dashboard');
+
+  await host.setControl('user');
+  prevented = false;
+  webContents[0].emit('before-mouse-event', { preventDefault: () => { prevented = true; } }, {
+    type: 'mouseWheel', x: 100, y: 120, deltaY: -160
+  });
+  assert.equal(prevented, false, 'user takeover must leave wheel input on the webpage');
+  assert.equal(dashboardInputEvents.length, 1, 'user-owned webpage scrolling must not be redirected to the dashboard');
+  await host.closeAll();
 }
 
 {
