@@ -287,7 +287,7 @@ function verifyWorkflowContracts() {
     /release-assets\.txt/,
     /SHA256SUMS\.txt/,
     /gh release upload "\$VERSION" "\$\{assets\[@\]\}" --repo "\$GITHUB_REPOSITORY" --clobber/,
-    /release edit "\$VERSION"[\s\S]*--draft=false/,
+    /release edit "\$VERSION"[\s\S]*--draft=false[\s\S]*--prerelease/,
     /actions\/attest-build-provenance@/,
     /actions\/attest-sbom@/,
     /dist\/\*\.AppImage/,
@@ -320,8 +320,10 @@ function verifyWorkflowContracts() {
     'publishing must wait for installed release lifecycle validation');
   assert.match(workflow, /release_draft[\s\S]*recover_draft=true[\s\S]*Recovering interrupted draft release/,
     'an interrupted draft release must remain recoverable instead of being mistaken for a completed publication');
-  assert.match(workflow, /RECOVER_DRAFT:[\s\S]*gh release upload[\s\S]*--clobber[\s\S]*release edit[\s\S]*--draft=false/,
-    'draft recovery must replace partial assets and publish the recovered release');
+  assert.match(workflow, /RECOVER_DRAFT:[\s\S]*gh release upload[\s\S]*--clobber[\s\S]*release edit[\s\S]*--draft=false[\s\S]*--prerelease/,
+    'draft recovery must replace partial assets and publish the recovered release as a pre-release');
+  assert.match(workflow, /release create "\$VERSION"[\s\S]*--prerelease/,
+    'new automated releases must be published as pre-releases until manually promoted');
   assert.match(
     workflow,
     /linux-install-upgrade:[\s\S]*apt-get install --yes --no-install-recommends xvfb xauth[\s\S]*Validate fresh install and in-place upgrade/,

@@ -557,9 +557,9 @@ jobs:
           done
           if [ "$RECOVER_DRAFT" = 'true' ]; then
             gh release upload "$VERSION" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
-            arguments=(release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Rel.AI MCP $VERSION" --draft=false)
+            arguments=(release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Rel.AI MCP $VERSION" --draft=false --prerelease)
           else
-            arguments=(release create "$VERSION" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Rel.AI MCP $VERSION")
+            arguments=(release create "$VERSION" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Rel.AI MCP $VERSION" --prerelease)
           fi
           if [ "$CHANGELOG_NOTES_FOUND" = 'true' ]; then
             arguments+=(--notes-file release-notes.md)
