@@ -65,7 +65,7 @@ async function validateWindowsLifecycle({ currentArtifact, currentVersion, previ
       console.log(`Installed previous Windows release v${previous.version} from ${previous.asset.name}.`);
     }
 
-    installWindowsPackage(currentArtifact);
+    installWindowsPackage(currentArtifact, { updaterStyle: Boolean(previous) });
     const installedRoot = findInstalledWindowsRoot(currentVersion);
     if (previousRoot) {
       assert.equal(path.resolve(installedRoot), path.resolve(previousRoot), 'Windows upgrade installed side-by-side instead of replacing the existing application.');
@@ -113,8 +113,9 @@ async function validateLinuxLifecycle({ currentArtifact, currentVersion, previou
   verifyInstalledConnector(installedRoot);
 }
 
-function installWindowsPackage(installer) {
-  runChecked(installer, ['/S'], { timeoutMs: 180_000 });
+function installWindowsPackage(installer, options = {}) {
+  const args = options.updaterStyle === true ? ['--updated', '/S'] : ['/S'];
+  runChecked(installer, args, { timeoutMs: 180_000 });
 }
 
 function installLinuxPackage(deb) {

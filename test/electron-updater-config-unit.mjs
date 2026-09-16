@@ -16,7 +16,7 @@ assert.deepEqual(config, {
   provider: 'github',
   owner: 'Kyne0328',
   repo: 'rel-ai-chatgpt-web-harness',
-  releaseType: 'release',
+  releaseType: 'prerelease',
   updaterCacheDirName: 'rel-ai-mcp-launcher-updater'
 });
 
@@ -33,7 +33,7 @@ try {
     'provider: github',
     'owner: Kyne0328',
     'repo: rel-ai-chatgpt-web-harness',
-    'releaseType: release',
+    'releaseType: prerelease',
     'updaterCacheDirName: rel-ai-mcp-launcher-updater',
     ''
   ].join('\n'));

@@ -39,7 +39,7 @@
         "provider": "github",
         "owner": "Kyne0328",
         "repo": "rel-ai-chatgpt-web-harness",
-        "releaseType": "release"
+        "releaseType": "prerelease"
       }
     ],
     "directories": {
