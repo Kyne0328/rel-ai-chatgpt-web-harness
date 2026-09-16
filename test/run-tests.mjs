@@ -132,6 +132,7 @@ const files = [
   'windows-uia-adapter-unit.mjs',
   'midscene-computer-adapter-unit.mjs',
   'web-automation-contract-unit.mjs',
+  'browser-ui-bounds-unit.mjs',
   'window-security-unit.mjs'
 ];
 
