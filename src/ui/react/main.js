@@ -22,6 +22,7 @@ import { connectionLayerViews, connectionSummary } from '../connection-state.js'
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import {
   APPLICATION_NAV_ITEMS,
+  EXTENSIONS_NAV_ITEM,
   MOBILE_MORE_NAV_ITEMS,
   MOBILE_PRIMARY_NAV_ITEMS,
   SETTINGS_NAV_ITEMS,
@@ -86,6 +87,7 @@ registerReactSection('tasks', createLazyRoute(() => import('../features/sessions
 registerReactSection('workspaces', createLazyRoute(() => import('../features/workspaces/react.js'), 'createWorkspacesRoute', useDashboardSlices, 'workspaces'));
 registerReactSection('code', createLazyRoute(() => import('../features/code/react.js'), 'createCodeRoute', useDashboardSlices, 'code'));
 registerReactSection('browser', createLazyRoute(() => import('../features/browser/react.js'), 'createBrowserRoute', undefined, 'browser'));
+registerReactSection('extensions', createLazyRoute(() => import('../features/extensions/react.js'), 'createExtensionsRoute', undefined, 'extensions'));
 registerReactSection('processes', createLazyRoute(() => import('../features/processes/react.js'), 'createProcessesRoute', useDashboardSlices, 'processes'));
 registerReactSection('tools', createLazyRoute(() => import('../features/tools/react.js'), 'createToolsRoute', undefined, 'tools'));
 registerReactSection('usage', createLazyRoute(() => import('../features/usage/react.js'), 'createUsageRoute', useDashboardSlices, 'usage'));
@@ -393,6 +395,7 @@ function DesktopSidebar({ collapsed, openAccordion, route, setOpenAccordion, tog
         openAccordion,
         setOpenAccordion
       }),
+      h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }),
       h(SidebarAccordion, {
         parent: APPLICATION_NAV_ITEMS[1],
         items: SETTINGS_NAV_ITEMS,

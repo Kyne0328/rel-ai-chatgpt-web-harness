@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.1.0] — 2026-09-16
+
+### Extensions
+- **Add the first public Rel.AI Extensions experience.** A new Extensions destination is available from the desktop and mobile navigation, with Installed, Discover, and Developer views for browsing the canonical catalog, reviewing declared access, installing or updating extensions, checking readiness, removing installed packages, refreshing catalog data, and opening the public extension repository and manifest schema.
+- **Add a secure local extension registry for Skill and CLI extensions.** Rel.AI validates strict v1 manifests and catalog entries, semantic-version compatibility, supported platforms, required commands, declared permissions, safe relative paths, HTTPS download URLs, per-file and package size limits, and SHA-256 hashes before installing only manifest-declared files. Installs use staging and atomic replacement, reject unsafe symlink/path states, preserve the previous installation on failure, and expose catalog failures without hiding already installed extensions.
+- **Integrate installed extension skills into normal Rel.AI skill discovery.** Ready extension skills are discovered between project-local and user-global skills, so project instructions keep highest precedence while installed extensions remain reusable across workspaces. Extension registry actions are exposed only through authenticated dashboard GET/POST APIs; installation and updates require explicit permission-review confirmation, and removal requires explicit confirmation.
+- **Establish `Kyne0328/rel-ai-extensions` as the external developer catalog and package specification.** The companion repository now includes the machine-readable manifest schema, Skill and CLI examples, a Node-based validator, permission reference, local development and unpublished-test workflow, GitHub Actions validation, stable LF package-byte rules for cross-platform hashes, Apache-2.0 repository licensing, and a documented fork → validate → test → catalog PR publishing flow. Rel.AI can use an alternate HTTPS catalog through `REL_AI_EXTENSIONS_CATALOG_URL` for development without adding a second local-file installation path.
+- **Keep the public Rel.AI MCP connector surface stable while adding extensions.** Extensions reuse the existing Rel.AI capability and authorization model instead of dynamically adding public MCP tools; the release remains at tool-surface version 80 with 15 public tools. MCP-server extensions are not part of this release.
+
+### Task lifecycle reliability
+- **Keep `work.begin` attached until Rel.AI returns its durable work ID.** The resilient non-Tasks fallback path no longer detaches `work.begin` when the normal fallback grace period expires. It waits for that invocation to finish, returns the accepted `work_id`, and preserves delivery-aware replay so a retry after a lost response reuses the original task instead of creating a duplicate. Other eligible fallback operations keep their existing bounded detach behavior.
+- **Add regression coverage for the task-start handoff failure.** The fallback test now deliberately makes `work.begin` exceed the short fallback grace period and proves that the connector still returns the durable task identity and executes the start only once across a retry.
+
+### Desktop and Pulse
+- **Keep Pulse available in the idle state instead of repeatedly hiding and recreating it.** Idle projection now remains visible with `No local task is active.`, and taskless/unlinked activity reuses the existing Pulse window. This removes the hide/show transition that could make short unlinked tool activity appear as a flash while retaining the normal working, waiting, and action-required state changes.
+
+### UI, validation, and release metadata
+- **Regenerate the production dashboard assets for the Extensions route and navigation changes.** Route policy, sidebar/mobile navigation, authenticated HTTP access, extension registry behavior, and generated frontend ownership all have focused regression coverage.
+- **Bump the application release from 1.0.1 to 1.1.0 across root, Electron, workspace packages, status UI, lockfiles, and the release manifest.** Protocol version `2026-07-28`, schema version 7, tool-surface version 80, and the 15-tool public MCP surface remain unchanged.
+
+Bump root/electron/workspace/status UI/lockfiles/release manifest to 1.1.0.
+
 ## [1.0.1] — 2026-09-15
 
 ### Embedded browser

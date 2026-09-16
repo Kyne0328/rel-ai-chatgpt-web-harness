@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SETTINGS_NAV_ITEMS, SYSTEM_NAV_ITEMS } from '../src/ui/navigation-catalog.js';
+import { EXTENSIONS_NAV_ITEM, SETTINGS_NAV_ITEMS, SYSTEM_NAV_ITEMS } from '../src/ui/navigation-catalog.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 
-for (const item of [...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS]) {
+for (const item of [EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS]) {
   assert.ok(item.icon, `${item.label} must keep an icon for the collapsed sidebar`);
 }
 
@@ -23,6 +23,7 @@ assert.doesNotMatch(shell, /id="sidebarToggle"/, 'server shell must not duplicat
 assert.match(bootstrap, /relai_sidebar_collapsed/);
 assert.match(reactShell, /APPLICATION_NAV_ITEMS\[0\]/);
 assert.match(reactShell, /APPLICATION_NAV_ITEMS\[1\]/);
+assert.match(reactShell, /EXTENSIONS_NAV_ITEM/);
 assert.match(reactShell, /SYSTEM_NAV_ITEMS/);
 assert.match(reactShell, /SETTINGS_NAV_ITEMS/);
 assert.match(reactShell, /id: 'sidebarToggle'/);

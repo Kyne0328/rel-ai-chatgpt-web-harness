@@ -39,6 +39,7 @@ try {
   assert.match(unauthorizedDashboardBody.error || '', /Dashboard authorization expired/i);
   assert.doesNotMatch(unauthorizedDashboardBody.error || '', /Bearer|REL_AI_MCP_TOKEN/i);
   assert.equal((await fetch(`${base}/dashboard`, { headers: { authorization: `Bearer ${token}` } })).status, 401, 'MCP bearer credentials must not authorize the dashboard');
+  assert.equal((await fetch(`${base}/api/extensions`)).status, 401, 'extension catalog data must require dashboard authorization');
   const dashboardLogin = await fetch(`${base}/dashboard?token=${encodeURIComponent(token)}`);
   assert.equal(dashboardLogin.status, 200);
   const dashboardCookie = String(dashboardLogin.headers.get('set-cookie') || '').split(';')[0];

@@ -61,11 +61,11 @@ function projectPulseStatus(status = {}) {
     };
   }
   return {
-    visible: false,
+    visible: true,
     tone: 'idle',
     badge: 'Idle',
     title: 'Rel.AI is idle',
-    detail: '',
+    detail: 'No local task is active.',
     route: '#home',
     taskCount: 0,
     actionRequired: false

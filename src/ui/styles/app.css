@@ -543,6 +543,30 @@
   .empty-state-copy { @apply max-w-lg text-[13px] leading-6; color: var(--ui-text-secondary); max-width: 65ch; }
   .empty-state-action { @apply mt-2; }
 
+  .extensions-page { @apply gap-4; }
+  .extensions-tabs { @apply flex w-fit gap-1 rounded-lg border p-1; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+  .extensions-tab { @apply min-h-9 rounded-md px-3 text-[13px] font-semibold; color: var(--ui-text-secondary); }
+  .extensions-tab:hover { color: var(--ui-text-primary); background: color-mix(in srgb, var(--ui-surface-primary) 72%, transparent); }
+  .extensions-tab.is-active { color: var(--ui-text-primary); background: var(--ui-surface-primary); box-shadow: var(--ui-electron-elevation1); }
+  .extensions-list { @apply grid gap-3; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .extension-card { @apply min-w-0; }
+  .extension-card-head { @apply items-start; }
+  .extension-card-head > div { @apply min-w-0; }
+  .extension-id { @apply mt-0.5 block truncate text-[11px]; color: var(--ui-text-tertiary); }
+  .extension-card-body { @apply grid gap-3; }
+  .extension-card-body > p { @apply text-[13px] leading-5; color: var(--ui-text-secondary); }
+  .extension-meta { @apply flex flex-wrap gap-x-3 gap-y-1 text-[12px]; color: var(--ui-text-tertiary); }
+  .extension-permissions { @apply flex flex-wrap items-center gap-2; }
+  .extension-permissions-label { @apply text-[11px] font-semibold uppercase tracking-wide; color: var(--ui-text-tertiary); }
+  .extension-permission { @apply rounded-md border px-2 py-1 text-[11px]; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+  .extension-card-actions { @apply flex flex-wrap items-center gap-2 pt-1; }
+  .extension-warning { @apply rounded-md border p-2 text-[12px] leading-5; border-color: var(--ui-status-warning-border); background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground) !important; }
+  .extensions-developer { @apply grid gap-3; }
+  .extensions-guidelines { @apply grid gap-2 pl-5 text-[13px] leading-5; color: var(--ui-text-secondary); }
+  .extension-install-root { @apply grid gap-1 rounded-md border p-3; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+  .extension-install-root span { @apply text-[11px] font-semibold uppercase tracking-wide; color: var(--ui-text-tertiary); }
+  .extension-install-root code { @apply break-all text-[12px]; }
+
   .overlay-backdrop { @apply fixed inset-0 overflow-auto; overscroll-behavior: contain; }
   .drawer-panel { @apply flex flex-col; }
   .toast-region { @apply fixed right-4 top-4 flex w-[min(380px,calc(100vw-32px))] flex-col gap-2; z-index: var(--z-toast); }
@@ -609,6 +633,7 @@
   .topbar { @apply flex-col items-stretch gap-3; }
   .top-controls { @apply justify-start; }
   .layout-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+  .extensions-list { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 760px) {

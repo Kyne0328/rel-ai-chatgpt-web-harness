@@ -165,6 +165,7 @@ freshRead.onDelivered();
 let workBeginExecutions = 0;
 const workBeginExecute = async () => {
   workBeginExecutions += 1;
+  await delay(30);
   return toolResult({
     ok: true,
     workspace: 'app',
@@ -177,16 +178,16 @@ const workBeginExecute = async () => {
 const acceptedWorkBegin = await handleTransportTaskRequest({}, workBeginMessage(1004), {
   principal: 'principal-work-begin-replay',
   transportType: 'streamable-http',
-  synchronousFallbackGraceMs: 50,
+  synchronousFallbackGraceMs: 5,
   executeToolResult: workBeginExecute
 });
 assert.equal(workBeginExecutions, 1);
-assert.equal(acceptedWorkBegin.body.result.structuredContent.work_id, 'work_replay_safe_begin');
+assert.equal(acceptedWorkBegin.body.result.structuredContent.work_id, 'work_replay_safe_begin', 'work.begin must not detach before returning its durable work_id');
 assert.equal(typeof acceptedWorkBegin.onDelivered, 'function');
 const retriedWorkBegin = await handleTransportTaskRequest({}, workBeginMessage(1005), {
   principal: 'principal-work-begin-replay',
   transportType: 'streamable-http',
-  synchronousFallbackGraceMs: 50,
+  synchronousFallbackGraceMs: 5,
   executeToolResult: workBeginExecute
 });
 assert.equal(workBeginExecutions, 1, 'retrying work.begin after losing its response must replay the accepted task instead of creating a second task');

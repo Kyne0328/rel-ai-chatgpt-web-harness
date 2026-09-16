@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { PULSE_UNLINKED_SHOW_DELAY_MS, createPulseWindowManager, pulseBounds } from '../electron/pulse-window.js';
+import { createPulseWindowManager, pulseBounds } from '../electron/pulse-window.js';
 import { projectPulseStatus } from '../electron/pulse-state.js';
 
 const waitingApproval = projectPulseStatus({
@@ -46,7 +46,7 @@ const staleAttention = projectPulseStatus({
   }
 });
 assert.equal(staleAttention.actionRequired, false, 'stale task rows must not pin Pulse in Action required');
-assert.equal(staleAttention.visible, false, 'an idle activity snapshot must not stay visible because of stale task rows');
+assert.equal(staleAttention.visible, true, 'idle Pulse must remain visible without treating stale task rows as live activity');
 
 const connectionAttention = projectPulseStatus({
   serverRunning: true,
@@ -93,9 +93,10 @@ assert.equal(ordinaryWaiting.actionRequired, false);
 assert.doesNotMatch(ordinaryWaiting.detail, /waiting on you/i, 'ordinary remote reasoning gaps must not be mislabeled as user input');
 
 const connectedIdle = projectPulseStatus({ serverRunning: true, tunnelStatus: 'running' });
-assert.equal(connectedIdle.visible, false, 'Pulse must stay out of the way when Rel.AI is merely connected');
+assert.equal(connectedIdle.visible, true, 'Pulse must remain available while Rel.AI is idle');
 assert.equal(connectedIdle.tone, 'idle');
-assert.equal(projectPulseStatus({ serverRunning: false }).visible, false);
+assert.equal(connectedIdle.detail, 'No local task is active.');
+assert.equal(projectPulseStatus({ serverRunning: false }).visible, true);
 
 const pulseHtml = readFileSync(new URL('../electron/renderer/pulse.html', import.meta.url), 'utf8');
 const pulseCss = readFileSync(new URL('../electron/renderer/pulse.css', import.meta.url), 'utf8');
@@ -230,18 +231,20 @@ appReady = true;
 assert.equal(manager.start(), true);
 assert.equal(manager.start(), false, 'Pulse startup must be idempotent');
 manager.update({ serverRunning: true, tunnelStatus: 'running' });
-assert.equal(manager.getWindow(), null, 'Connected idle state must not create a persistent overlay');
+const idleWindow = manager.getWindow();
+assert.ok(idleWindow, 'Connected idle state must keep a persistent Pulse overlay');
+assert.equal(idleWindow.visible, true);
 manager.update({
   serverRunning: true, tunnelStatus: 'running',
   taskActivity: { state: 'working', activeCalls: 1, activeTaskCount: 0, tool: 'relai_read', tasks: [] }
 });
-assert.equal(manager.getWindow(), null, 'a short unlinked tool call must not flash Pulse onto the screen');
+assert.equal(manager.getWindow(), idleWindow, 'unlinked activity must reuse the persistent Pulse window');
+assert.equal(idleWindow.visible, true, 'unlinked activity must not hide an already-visible idle Pulse');
 manager.update({
   serverRunning: true, tunnelStatus: 'running',
   taskActivity: { state: 'idle', activeCalls: 0, activeTaskCount: 0, tasks: [] }
 });
-await new Promise(resolve => setTimeout(resolve, PULSE_UNLINKED_SHOW_DELAY_MS + 30));
-assert.equal(manager.getWindow(), null, 'ending an unlinked call before the visibility delay must cancel the pending Pulse show');
+assert.equal(idleWindow.visible, true, 'Pulse must remain visible when unlinked activity ends');
 manager.update({
   serverRunning: true, tunnelStatus: 'running',
   taskActivity: {
@@ -319,14 +322,12 @@ manager.update({
   serverRunning: true, tunnelStatus: 'running',
   taskActivity: { state: 'idle', activeCalls: 0, activeTaskCount: 0, tasks: [] }
 });
-assert.equal(window.visible, false);
+assert.equal(window.visible, true, 'Pulse must remain visible when task activity returns to idle');
 manager.update({
   serverRunning: true, tunnelStatus: 'running',
   taskActivity: { state: 'working', activeCalls: 1, activeTaskCount: 0, tool: 'relai_exec', tasks: [] }
 });
-assert.equal(window.visible, false, 'an existing hidden Pulse window must still debounce unlinked activity');
-await new Promise(resolve => setTimeout(resolve, PULSE_UNLINKED_SHOW_DELAY_MS + 30));
-assert.equal(window.visible, true, 'a sustained unlinked tool call must still surface Pulse after the anti-flicker delay');
+assert.equal(window.visible, true, 'unlinked activity must update the persistent Pulse in place');
 assert.equal(manager.stop(), true);
 assert.equal(manager.stop(), false, 'Pulse shutdown must be idempotent');
 assert.equal(manager.getWindow(), null);
