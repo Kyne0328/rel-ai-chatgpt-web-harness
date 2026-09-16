@@ -50,6 +50,7 @@ function copyFixture() {
     'scripts/verify-updater-artifacts.mjs',
     'scripts/verify-fuses.mjs',
     'scripts/verify-macos-release.mjs',
+    'scripts/validate-installed-release.mjs',
     'scripts/current-unpacked.mjs',
     'scripts/active-controller-guard.mjs',
     '.github/workflows/ci.yml',
@@ -177,7 +178,7 @@ function verifyPackageContracts() {
   const installerIcon = fs.readFileSync(path.join(tmp, 'electron', electronPackage.build.nsis.installerIcon));
   assert.deepEqual([...installerIcon.subarray(0, 4)], [0, 0, 1, 0], 'the dedicated Windows installer icon must remain a valid ICO asset');
   const installerInclude = fs.readFileSync(path.join(tmp, 'electron', electronPackage.build.nsis.include), 'utf8');
-  assert.match(installerInclude, /customInit[\s\S]*isUpdated[\s\S]*Silent[\s\S]*SpiderBanner::Show/, 'silent in-app Windows updates must keep an installer-owned progress surface visible');
+  assert.doesNotMatch(installerInclude, /SpiderBanner::Show/, 'silent in-app Windows updates must not create SpiderBanner UI before electron-builder reaches its install section');
   assert.match(installerInclude, /customInstall[\s\S]*update-installing\.json/, 'successful Windows updates must clear the update-in-progress marker before relaunch');
   assert.match(installerInclude, /\.onInstFailed[\s\S]*update-installing\.json/, 'failed Windows updates must clear the update-in-progress marker so the shortcut is not left blocked');
   assert.deepEqual(electronPackage.build.linux.target, ['AppImage', 'deb']);
@@ -216,6 +217,8 @@ function verifyPackageContracts() {
 function verifyWorkflowContracts() {
   const ciWorkflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'ci.yml'), 'utf8');
   const workflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'release.yml'), 'utf8');
+  const installedReleaseValidator = fs.readFileSync(path.join(tmp, 'scripts', 'validate-installed-release.mjs'), 'utf8');
+  assert.match(installedReleaseValidator, /\['--updated', '\/S'\]/, 'Windows release validation must exercise the updater-specific silent upgrade path');
   const windowsCiStart = ciWorkflow.indexOf('packaged-windows:');
   const windowsCiEnd = ciWorkflow.indexOf('\n  packaged-linux:', windowsCiStart);
   const windowsCi = ciWorkflow.slice(windowsCiStart, windowsCiEnd);
@@ -348,10 +351,10 @@ function verifyWorkflowContracts() {
     'publishing must wait for installed release lifecycle validation');
   assert.match(workflow, /release_draft[\s\S]*recover_draft=true[\s\S]*Recovering interrupted draft release/,
     'an interrupted draft release must remain recoverable instead of being mistaken for a completed publication');
-  assert.match(workflow, /RECOVER_DRAFT:[\s\S]*gh release upload[\s\S]*--clobber[\s\S]*release edit[\s\S]*--draft=false[\s\S]*--prerelease/,
-    'draft recovery must replace partial assets and publish the recovered release as a pre-release');
-  assert.match(workflow, /release create "\$VERSION"[\s\S]*--prerelease/,
-    'new automated releases must be published as pre-releases until manually promoted');
+  assert.match(workflow, /release edit[^\n]*--draft=false[^\n]*--prerelease/,
+    'draft recovery must replace partial assets and publish the recovered release as a prerelease');
+  assert.match(workflow, /release create[^\n]*--prerelease/,
+    'new automated GitHub releases must start as prereleases until manually promoted');
   assert.match(
     workflow,
     /linux-install-upgrade:[\s\S]*apt-get install --yes --no-install-recommends xvfb xauth[\s\S]*Validate fresh install and in-place upgrade/,
