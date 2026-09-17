@@ -11,11 +11,20 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.WORK_BEGIN,
     title: "Start Logical Task",
-    description: "Create an optional durable workspace-bound Rel.AI work session and return its opaque work_id plus compact repository bootstrap context. Use a work session when durable ownership, recovery, task-scoped review, or task-scoped publication is useful. Supplying work_id attributes compatible operations to that session; omitting it leaves them workspace- or resource-scoped.",
-    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"title":{"type":"string","minLength":1,"maxLength":100},"objective":{"type":"string","minLength":1,"maxLength":500},"contextSummary":{"type":"string","maxLength":3000,"description":"Optional compact host-provided context that Rel.AI may preserve with this work session. Do not include chain-of-thought, secrets, or a full conversation transcript."},"bootstrap":{"type":"string","enum":["compact","full","none"],"description":"Initial repository context returned with the task. Defaults to compact."},"instructionPath":{"type":"string","maxLength":1000,"description":"Optional workspace-relative file or directory used to discover applicable nested AGENTS.md instructions."}},"required":["workspace"],"additionalProperties":false},
+    description: "Create a durable workspace-bound work session and promptly return its work_id. Carry this ID on subsequent task operations. Repository context is fetched separately with relai_work action context; begin never scans the repository.",
+    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"title":{"type":"string","minLength":1,"maxLength":100},"objective":{"type":"string","minLength":1,"maxLength":500},"contextSummary":{"type":"string","maxLength":3000,"description":"Optional compact host-provided context that Rel.AI may preserve with this work session. Do not include chain-of-thought, secrets, or a full conversation transcript."},"bootstrap":{"type":"string","enum":["compact","full","none"],"description":"Preferred mode for the separate context call. Begin returns identity only; fetch context with action context and work_id."},"instructionPath":{"type":"string","maxLength":1000,"description":"Optional workspace-relative file or directory used to discover applicable nested AGENTS.md instructions."}},"required":["workspace"],"additionalProperties":false},
     handlerName: 'startTask',
     behavior: {"taskScope":"none"},
     dashboard: {"category":"Workflow"}
+  },
+  {
+    name: OP.WORK_CONTEXT,
+    title: 'Load Task Context',
+    description: 'Load repository bootstrap and continuity context for an existing work_id. Begin the task first so slow context loading cannot hide its identity.',
+    inputSchema: { type: 'object', properties: { workspace: { type: 'string' }, bootstrap: { type: 'string', enum: ['compact', 'full', 'none'] }, instructionPath: { type: 'string', maxLength: 1000 } }, required: ['workspace'], additionalProperties: false },
+    handlerName: 'taskContext',
+    behavior: { taskScope: 'required', longRunning: true },
+    dashboard: { category: 'Workflow' }
   },
   {
     name: OP.SNAPSHOT,

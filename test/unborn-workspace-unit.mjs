@@ -41,8 +41,9 @@ try {
   }, context);
   assert.equal(task.ok, true);
   assert.match(task.work_id, /^[0-9a-f-]{36}$/i);
-  assert.equal(task.bootstrap?.git?.branch, 'main');
-  assert.equal(task.bootstrap?.git?.unborn, true);
+  const taskContext = await rawCallTool('relai_work', { action: 'context', work_id: task.work_id }, context);
+  assert.equal(taskContext.bootstrap?.git?.branch, 'main');
+  assert.equal(taskContext.bootstrap?.git?.unborn, true);
 
   const preview = await rawCallTool('relai_edit', {
     work_id: task.work_id,

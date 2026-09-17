@@ -34,7 +34,6 @@ export const EXTENSIONS_NAV_ITEM = route(
 export const DESKTOP_NAV_ITEMS = Object.freeze([
   ...WORK_NAV_ITEMS,
   APPLICATION_NAV_ITEMS[0],
-  EXTENSIONS_NAV_ITEM,
   APPLICATION_NAV_ITEMS[1]
 ]);
 export const MOBILE_PRIMARY_NAV_ITEMS = Object.freeze([
@@ -47,7 +46,6 @@ export const MOBILE_MORE_NAV_ITEMS = Object.freeze([
   WORK_NAV_ITEMS.find(item => item.id === 'code'),
   WORK_NAV_ITEMS.find(item => item.id === 'browser'),
   APPLICATION_NAV_ITEMS[0],
-  EXTENSIONS_NAV_ITEM,
   APPLICATION_NAV_ITEMS[1]
 ].filter(Boolean));
 export const MOBILE_NAV_ITEMS = Object.freeze([...DESKTOP_NAV_ITEMS]);
@@ -59,7 +57,7 @@ export const SETTINGS_NAV_ITEMS = Object.freeze([
   route('about', 'About', 'settings/about', 'View app, developer, source code, and license information.', 'Settings')
 ]);
 
-const ROUTES = new Map([...DESKTOP_NAV_ITEMS, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => [item.path, item]));
+const ROUTES = new Map([...DESKTOP_NAV_ITEMS, EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => [item.path, item]));
 
 export function routeMetadata(path) {
   return ROUTES.get(String(path || '').toLowerCase()) || ROUTES.get('home');
@@ -73,5 +71,5 @@ export function desktopNavigationOwner(sectionId) {
 }
 
 export function navigationCommands() {
-  return [...WORK_NAV_ITEMS, EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS];
+  return [...WORK_NAV_ITEMS, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS];
 }

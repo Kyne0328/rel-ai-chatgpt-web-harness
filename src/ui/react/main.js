@@ -22,7 +22,6 @@ import { connectionLayerViews, connectionSummary } from '../connection-state.js'
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import {
   APPLICATION_NAV_ITEMS,
-  EXTENSIONS_NAV_ITEM,
   MOBILE_MORE_NAV_ITEMS,
   MOBILE_PRIMARY_NAV_ITEMS,
   SETTINGS_NAV_ITEMS,
@@ -395,7 +394,6 @@ function DesktopSidebar({ collapsed, openAccordion, route, setOpenAccordion, tog
         openAccordion,
         setOpenAccordion
       }),
-      h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }),
       h(SidebarAccordion, {
         parent: APPLICATION_NAV_ITEMS[1],
         items: SETTINGS_NAV_ITEMS,

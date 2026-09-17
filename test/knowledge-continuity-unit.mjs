@@ -73,6 +73,7 @@ try {
     action: 'begin', workspace: 'app', title: 'Remember continuity marker', objective: 'Remember continuity marker',
     contextSummary: 'Host capsule alpha', bootstrap: 'compact'
   }, context);
+  first.bootstrap = (await callTool('relai_work', { action: 'context', work_id: first.work_id }, context)).bootstrap;
   assert.equal(first.bootstrap.hostContextSummary, 'Host capsule alpha');
   await callTool('relai_work', { action: 'finish', workspace: 'app', work_id: first.work_id, summary: 'Continuity marker stored.' }, context);
   await flushTaskHistoryPersistence();
@@ -86,6 +87,7 @@ try {
     action: 'begin', workspace: 'app', title: 'Continue continuity marker', objective: 'Continue continuity marker',
     contextSummary: 'Host capsule beta', bootstrap: 'compact'
   }, context);
+  second.bootstrap = (await callTool('relai_work', { action: 'context', work_id: second.work_id }, context)).bootstrap;
   assert.equal(second.bootstrap.hostContextSummary, 'Host capsule beta');
   assert(second.bootstrap.conversationContinuity?.some(item => item.goal?.includes('Remember continuity marker')));
   assert(second.bootstrap.conversationContinuity?.every(item => !('workId' in item) && !('workspace' in item)));
@@ -104,6 +106,7 @@ try {
     action: 'begin', workspace: 'app', title: 'Investigate dashboard display', objective: 'Investigate dashboard display behavior',
     contextSummary: 'The analytics panel is blank until I switch tabs.', bootstrap: 'compact'
   }, { publicHttpOnly: true, conversationId: 'retrieval-consumer-chat' });
+  retrievalConsumer.bootstrap = (await callTool('relai_work', { action: 'context', work_id: retrievalConsumer.work_id }, { publicHttpOnly: true, conversationId: 'retrieval-consumer-chat' })).bootstrap;
   assert(retrievalConsumer.bootstrap?.relatedTasks?.some(item => /overview analytics/i.test(item.goal || '')),
     'task bootstrap must use host context to recall the same completed task even when title/objective wording differs');
   await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: retrievalConsumer.work_id, reason: 'retrieval bootstrap regression complete' }, { publicHttpOnly: true, conversationId: 'retrieval-consumer-chat' });
@@ -162,6 +165,7 @@ try {
   const compactWithRepositorySummary = await callTool('relai_work', {
     action: 'begin', workspace: 'app', title: 'Inspect alpha syntax', objective: 'Inspect alpha syntax', bootstrap: 'compact'
   }, context);
+  compactWithRepositorySummary.bootstrap = (await callTool('relai_work', { action: 'context', work_id: compactWithRepositorySummary.work_id }, context)).bootstrap;
   assert.equal(compactWithRepositorySummary.bootstrap?.repositoryIntelligence?.summaryOnly, true, 'compact task bootstrap must reuse the cheap cached Repository Intelligence summary when available');
   await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: compactWithRepositorySummary.work_id, reason: 'compact bootstrap regression complete' }, context);
 

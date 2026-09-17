@@ -74,6 +74,28 @@ function normalizeTaskGoal(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+// Recovery suggestions must never cross a principal, conversation, or workspace.
+// They do not select an implicit owner for an unattributed operation.
+function taskAttributionHint(config, workspace, principal, conversationId) {
+  const conversation = String(conversationId || '').trim();
+  if (!conversation || !workspace) return '';
+  const fingerprint = principalFingerprint(principal || 'anonymous');
+  const activity = getToolActivity();
+  const persisted = findTaskReuseCandidates(config, workspace, conversation, 24);
+  const candidates = [...activity.tasks, ...persisted,
+    ...(conversation.length < 4 ? readTaskHistory(config, activity, { limit: 50, summary: true })
+      .filter(session => session.workspace === workspace && session.correlation?.conversationId === conversation)
+      .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: false })).filter(Boolean) : [])];
+  const ids = [...new Set(candidates.filter(session =>
+    !isTerminalTaskStatus(session.status)
+    && String(session.workspace || '') === workspace
+    && String(session.correlation?.conversationId || '') === conversation
+    && safeEqual(String(session.principalFingerprint || ''), fingerprint)
+  ).map(session => String(session.id || session.taskId || '')).filter(Boolean))];
+  if (!ids.length) return '';
+  return `Unfinished work in this conversation: ${ids.slice(0, 5).join(', ')}. Retry with the appropriate work_id to continue that task, or independent:true for intentionally separate workspace work. No task has been selected automatically.`;
+}
+
 function startTask(workspace, args = {}) {
   const context = getCurrentToolActivityContext();
   if (!context?.taskId) {
@@ -180,4 +202,4 @@ function withTaskIdentity(value, taskId) {
   return { ok: true, value, work_id: identity };
 }
 
-export { startTask, taskBootstrapFromSnapshot, assertKnownTask, assertTaskWorkspaceOwnership, findReusableTask, isTerminalTaskReference, taskAuditContext, withTaskIdentity };
+export { startTask, taskBootstrapFromSnapshot, assertKnownTask, assertTaskWorkspaceOwnership, findReusableTask, taskAttributionHint, isTerminalTaskReference, taskAuditContext, withTaskIdentity };

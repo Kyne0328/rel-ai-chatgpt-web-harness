@@ -32,6 +32,7 @@ type IntegrityConfig = Record<string, any>;
 type IntegrityEvent = Record<string, any>;
 
 interface RepositoryBaseline {
+  pending?: boolean;
   branch: string;
   head: string;
   unborn: boolean;
@@ -155,6 +156,29 @@ async function recordTaskIntegrityEvent(config: IntegrityConfig, event: Integrit
       { cause: error }
     );
   }
+}
+
+// Capture the ownership baseline before the first operation can change files,
+// inside its workspace queue. Creating an identity must not wait on Git.
+async function ensureTaskBaseline(config: IntegrityConfig, taskId: string, workspaceAlias: string): Promise<IntegrityAuthority | null> {
+  const initial = readTaskIntegrity(config, taskId, workspaceAlias);
+  if (!initial?.baseline.pending) return initial;
+  const workspace = resolveWorkspace(config, workspaceAlias);
+  const repository = await repositoryStateForEvent(workspace, config, { tool: OP.WORK_BEGIN });
+  return withIntegrityTransaction(config, db => {
+    const authority = readTaskRow(db, taskId);
+    if (!authority?.baseline.pending || !repository.baseline) return authority;
+    authority.baseline = repository.baseline;
+    authority.ambientChangedFiles = repository.baseline.changedFiles;
+    const state = normalizeWorkspaceState(readWorkspaceRow(db, workspaceAlias) || createWorkspaceState(workspaceAlias));
+    reconcileWorkspaceOwners(state, repository.baseline.changedFiles);
+    for (const file of repository.baseline.changedFiles) {
+      if (!state.uncommittedOwners[file]?.length) addWorkspaceOwner(state, file, AMBIENT_OWNER);
+    }
+    writeTaskRow(db, taskId, authority);
+    writeWorkspaceRow(db, workspaceAlias, state);
+    return authority;
+  });
 }
 
 function readTaskIntegrity(config: IntegrityConfig, taskId: unknown, workspaceAlias = ''): IntegrityAuthority | null {
@@ -409,6 +433,9 @@ function createWorkspaceState(workspace: unknown): WorkspaceIntegrityState {
 
 async function repositoryStateForEvent(workspace: Record<string, any>, config: IntegrityConfig, event: IntegrityEvent): Promise<RepositoryEventState> {
   const tool = clean(event?.tool);
+  if (tool === OP.WORK_BEGIN && event.deferBaseline === true) {
+    return { baseline: { pending: true, branch: '', head: '', unborn: false, changedFiles: [] }, changedFiles: null };
+  }
   const needsChangedFiles = tool === OP.WORK_BEGIN
     || REPOSITORY_RECONCILE_TOOLS.has(tool)
     || Boolean(clean(event?.validationStatus));
@@ -641,6 +668,7 @@ export {
   readTaskIntegrity,
   readWorkspaceIntegrity,
   recordTaskIntegrityEvent,
+  ensureTaskBaseline,
   releaseTaskChangedFiles,
   taskCommitOwnership,
   taskOwnedChangedFiles

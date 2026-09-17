@@ -41,6 +41,7 @@ try {
   const { createLocalAdminPolicy } = await import('../src/mcp/authorizationPolicy.js');
   const authorizationPolicy = createLocalAdminPolicy();
   const owner = {
+    conversationId: 'work-continuity-regression',
     publicHttpOnly: true,
     transportType: 'test',
     principal: { issuer: 'https://issuer.example', clientId: 'client-a', subject: 'user-a', authMode: 'oauth', scopes: ['mcp'], authorizationPolicy }
@@ -54,15 +55,56 @@ try {
     principal: { issuer: 'https://issuer.example', clientId: 'client-a', subject: 'user-b', authMode: 'oauth', scopes: ['mcp'], authorizationPolicy }
   };
 
-  const started = await callTool('relai_work', { action: 'begin',
-    workspace: 'repo',
-    title: 'Principal ownership',
-    bootstrap: 'none'
-  }, owner);
+  const { runWorkspaceOperation } = await import('../src/workspaceOperationQueue.js');
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const busyWorkspace = runWorkspaceOperation('repo', async () => {
+    entered.resolve();
+    await release.promise;
+  }, { scope: 'workspace', mode: 'write' });
+  await entered.promise;
+  let started;
+  let deadline;
+  try {
+    started = await Promise.race([
+      callTool('relai_work', { action: 'begin', workspace: 'repo', title: 'Principal ownership', bootstrap: 'full' }, owner),
+      new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('begin waited on an unrelated workspace operation')), 5000); })
+    ]);
+  } finally {
+    clearTimeout(deadline);
+    release.resolve();
+    await busyWorkspace;
+  }
   assert.ok(started.work_id);
   assert.equal(started.identity, 'work_session');
   assert.equal(started.workspace, 'repo');
   assert.equal(started.workspaceBinding, undefined, 'compact begin omits a duplicate workspace binding');
+  assert.equal(started.bootstrap, undefined, 'even an explicit full bootstrap must not delay delivery of the task ID');
+  assert.match(started.nextAction, /work_id.*context/);
+  const { readTaskIntegrity } = await import('../src/taskIntegrity.ts');
+  assert.equal(readTaskIntegrity({ stateDir }, started.work_id).baseline.pending, true, 'begin must not wait for Git baseline probes');
+  const { resetToolActivity } = await import('../src/toolActivity.js');
+  await taskHistoryStore.flushTaskHistoryPersistence();
+  resetToolActivity();
+  const replayed = await callTool('relai_work', { action: 'begin', workspace: 'repo', title: 'Principal ownership' }, sameOwner);
+  assert.equal(replayed.work_id, started.work_id, 'a lost begin response must be recoverable after live state is reset');
+  const concurrent = await Promise.all([1, 2].map(() => callTool('relai_work', { action: 'begin', workspace: 'repo', title: 'Concurrent retry' }, sameOwner)));
+  assert.equal(concurrent[0].work_id, concurrent[1].work_id, 'simultaneous retries must share one durable ID');
+  await callTool('relai_work', { action: 'cancel', work_id: concurrent[0].work_id }, sameOwner);
+  const detachedRead = await callTool('relai_read', { workspace: 'repo', paths: ['probe.txt'] }, sameOwner);
+  assert.equal(detachedRead.work_id, undefined, 'recovery hints must not infer attribution');
+  assert.ok(detachedRead.warning.includes(started.work_id));
+  const detachedOther = await callTool('relai_read', { workspace: 'repo', paths: ['probe.txt'] }, otherOwner);
+  assert.equal(detachedOther.warning, undefined, 'other principals must not receive task IDs');
+  const detachedChat = await callTool('relai_read', { workspace: 'repo', paths: ['probe.txt'] }, { ...owner, conversationId: 'separate-chat' });
+  assert.equal(detachedChat.warning, undefined, 'other conversations must not receive task IDs');
+  await assert.rejects(() => callTool('relai_edit', { workspace: 'repo', path: 'blocked.txt', content: 'must not write' }, sameOwner), error => error.code === 'TASK_ATTRIBUTION_REQUIRED' && error.message.includes(started.work_id));
+  assert.equal(fs.existsSync(path.join(workspacePath, 'blocked.txt')), false);
+  await callTool('relai_edit', { workspace: 'repo', independent: true, path: 'independent.txt', content: 'separate work' }, sameOwner);
+  assert.equal(fs.readFileSync(path.join(workspacePath, 'independent.txt'), 'utf8'), 'separate work');
+  await assert.rejects(() => callTool('relai_read', { work_id: started.work_id, independent: true, paths: ['probe.txt'] }, sameOwner), error => error.code === 'TASK_SCOPE_CONFLICT');
+  await callTool('relai_edit', { work_id: started.work_id, path: 'linked.txt', content: 'task work' }, sameOwner);
+  assert.equal(readTaskIntegrity({ stateDir }, started.work_id).baseline.pending, undefined, 'baseline must be captured before attributed mutations');
 
   const continued = await callTool('relai_read', {
     work_id: started.work_id,

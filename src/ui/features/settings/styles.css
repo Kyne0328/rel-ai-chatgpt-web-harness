@@ -6,9 +6,9 @@
   gap: 18px;
 }
 .workspace-validation-preference-row p { margin-top: 4px; color: var(--ui-text-secondary); font-size: 12px; line-height: 1.5; }
-.connection-advanced-settings { margin-top: 14px; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
-.connection-advanced-settings > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; }
-.connection-advanced-settings[open] > summary, .connection-account-switch[open] > summary { border-bottom: 1px solid var(--ui-border-default); }
+.connection-advanced-settings, .developer-options { margin-top: 14px; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
+.connection-advanced-settings > summary, .developer-options > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; }
+.connection-advanced-settings[open] > summary, .connection-account-switch[open] > summary, .developer-options[open] > summary { border-bottom: 1px solid var(--ui-border-default); }
 .connection-account-switch { border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
 .connection-account-switch > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; }
 .connection-account-switch-body { padding: 14px; }
@@ -128,6 +128,8 @@
 .local-data-row span, .local-data-row strong { @apply text-[12px]; }
 .local-data-row strong { @apply whitespace-nowrap; }
 .local-data-actions { @apply flex flex-wrap gap-2; }
+.about-build-trigger { all: unset; border-radius: 4px; cursor: default; }
+.about-build-trigger:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 2px; }
 
 }
 

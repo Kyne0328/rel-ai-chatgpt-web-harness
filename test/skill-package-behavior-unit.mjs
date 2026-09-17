@@ -14,8 +14,9 @@ assert.deepEqual(validation.skills, expected);
 const workflow = read('skills/rel-ai-workflow/SKILL.md');
 assert.match(descriptionOf(workflow), /inspect.*read.*edit.*test.*build.*debug.*validate.*review.*publish/i);
 assert.match(descriptionOf(workflow), /Do not use.*no repository or local runtime access/i);
-assert.match(workflow, /durable `work_id` is optional/i);
-assert.match(workflow, /ownership, recovery, task-scoped review\/publication, or durable history materially helps/i);
+assert.match(workflow, /Start or reuse a durable `work_id` for substantial or multi-step repository work/i);
+assert.match(workflow, /including read-first investigation, implementation, and final verification/i);
+assert.match(workflow, /Isolated reads and small one-shot operations may stay workspace-scoped without a task/i);
 assert.match(workflow, /One-shot tests, builds, linters, source checks, and release gates belong in `relai_exec` or `relai_validate`/);
 assert.match(workflow, /relai:\/\/server\/tool-surface/);
 assert.match(workflow, /shortest sufficient path/i);
@@ -29,8 +30,8 @@ assert.match(workflow, /\[references\/safety\.md\]\(references\/safety\.md\).*de
 const planning = read('skills/rel-ai-planning/SKILL.md');
 assert.match(descriptionOf(planning), /Do not use for small localized changes/i);
 assert.match(planning, /Reuse an active `work_id`/);
-assert.match(planning, /Planning itself does not require a work session/);
-assert.match(planning, /open one only when persistent ownership, recovery, or task-scoped execution will materially help/i);
+assert.match(planning, /For substantial or multi-stage repository planning, start a durable work session before repository inspection/i);
+assert.match(planning, /Small localized planning that needs only an isolated read may stay workspace-scoped without a task/i);
 assert.match(planning, /Do not trigger for small localized changes/);
 assert.match(planning, /explicit completion conditions/);
 assert.match(planning, /cumulative consolidation/i);
@@ -48,6 +49,8 @@ assert.match(descriptionOf(investigation), /Do not use.*final completion or rele
 assert.match(investigation, /bootstrap.*search\/inspect.*targeted reads.*bounded measurement.*broader reads only if required/i);
 assert.match(investigation, /sufficient proof/i);
 assert.match(investigation, /stop when.*proof/i);
+assert.match(investigation, /For substantial or multi-step repository investigations, start `relai_work` with action `begin`/i);
+assert.match(investigation, /Only isolated read or inspection questions should stay directly at workspace scope without a task/i);
 assert.match(investigation, /This skill does not edit/i);
 
 const debugging = read('skills/rel-ai-debugging/SKILL.md');
@@ -65,7 +68,8 @@ assert.match(verification, /inspect existing coverage/i);
 assert.match(verification, /extend, consolidate, or replace/i);
 assert.match(verification, /distinct meaningful concern/i);
 assert.match(verification, /local UI.*state\/runtime.*protocol\/API.*packaging\/platform\/release/i);
-assert.match(verification, /If a durable work session exists, its owner may close it; verification itself does not require or own a session/i);
+assert.match(verification, /For substantial final verification, release readiness, or multi-step validation, start a durable work session if none exists/i);
+assert.match(verification, /Only an isolated one-shot check should run directly at workspace scope without a task/i);
 
 const processSkill = read('skills/rel-ai-dev-process/SKILL.md');
 assert.match(descriptionOf(processSkill), /must stay alive across later steps/i);

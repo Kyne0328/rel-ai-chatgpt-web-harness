@@ -31,7 +31,23 @@ import { createReviewCheckpoint, replayReviewCheckpoint } from '../reviewCheckpo
 import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
 import { getToolActivity } from '../toolActivity.js';
-const startTaskHandler = inWorkspace(async (workspace, config, args, context) => {
+const startTaskHandler = inWorkspace(async (workspace, _config, args, context) => {
+  const task = startTask(workspace, args);
+  const recovered = context?.requestTaskContext?.session;
+  const activity = getToolActivity();
+  const current = activity.tasks.find(item => String(item.id || item.taskId || '') === task.work_id);
+  const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
+  const contextRequest = { action: 'context', work_id: task.work_id, bootstrap: args.bootstrap || 'compact', ...(args.instructionPath ? { instructionPath: args.instructionPath } : {}) };
+  return {
+    ...task,
+    ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
+    ...(recovered ? { bootstrap: { recoveredTask: compactSessionSummary(recovered) } } : {}),
+    nextAction: `Use work_id "${task.work_id}" on subsequent operations for this task. Fetch repository context when needed with relai_work ${JSON.stringify(contextRequest)}.`
+  };
+});
+
+const taskContextHandler = inWorkspace(async (workspace, config, args, context) => {
+  args = { ...context?.requestTaskContext?.session, ...args };
   const task = startTask(workspace, args);
   const taskActivity = getToolActivity();
   const currentTask = taskActivity.tasks.find(item => String(item.id || item.taskId || '') === task.work_id) || null;
@@ -102,6 +118,7 @@ function scheduleIntelligenceWarmup(workspace, config) {
 
 const HANDLERS = Object.freeze({
   startTask: startTaskHandler,
+  taskContext: taskContextHandler,
   repoSnapshot: inWorkspace(async (workspace, config, args) => {
     const result = await repoSnapshot(workspace, config, args);
     scheduleIntelligenceWarmup(workspace, config);

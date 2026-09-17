@@ -29,7 +29,7 @@ const cases = [
     activeRelatedWork: [{ goal: 'Sibling task', status: 'running' }], nextAction: 'Use bootstrap.'
   }, {
     ok: true, workspace: 'repo', work_id: 'work_begin', status: 'planning', identity: 'work_session',
-    title: 'Contract work', objective: 'Characterize results.', intent: 'investigation', activeRelatedWork: [{ goal: 'Sibling task', status: 'running' }]
+    title: 'Contract work', objective: 'Characterize results.', intent: 'investigation', activeRelatedWork: [{ goal: 'Sibling task', status: 'running' }], nextAction: 'Use bootstrap.'
   }),
   fixture('relai_work:status', 'relai_work', 'status', OP.WORK_STATUS, 'work_status', {
     ok: true, version: '0.24.0', runtime: 'node', tools: ['relai_read'],

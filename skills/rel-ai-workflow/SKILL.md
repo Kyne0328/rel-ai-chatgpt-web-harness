@@ -5,7 +5,7 @@ description: Use when work must inspect, read, edit, test, build, debug, validat
 
 # Rel.AI Workflow
 
-This is the routing skill for repository work. A durable `work_id` is optional; open one when ownership, recovery, task-scoped review/publication, or durable history materially helps. Reuse an active work session instead of opening another merely for a tool call.
+This is the routing skill for repository work. Start or reuse a durable `work_id` for substantial or multi-step repository work before the first project operation, including read-first investigation, implementation, and final verification. Isolated reads and small one-shot operations may stay workspace-scoped without a task. Reuse an active work session instead of opening another merely for a tool call.
 
 ## Shortest sufficient path
 

@@ -2,7 +2,7 @@
 
 ## Context economy
 
-When a durable work session is useful, begin it once and reuse its bootstrap. Otherwise start directly with the smallest workspace-scoped evidence needed. Escalate context only when the current decision requires it: search or inspect before broad reads, batch related reads, and reuse evidence that is still current. A handoff should carry conclusions and evidence locations so the next specialist does not restart the same investigation.
+For substantial or multi-step repository work, begin a durable work session before the first project operation and carry its work_id on subsequent task operations, including when the first steps are read-only. Begin returns the durable identity before repository scanning; fetch bootstrap with relai_work action context using that ID when needed, and reuse that context. If a mutation reports TASK_ATTRIBUTION_REQUIRED, retry with the matching work_id; use independent:true only for intentionally separate workspace work. Isolated reads, inspections, and small one-shot operations can start directly with the smallest workspace-scoped evidence needed. Escalate context only when the current decision requires it: search or inspect before broad reads, batch related reads, and reuse evidence that is still current. A handoff should carry conclusions and evidence locations so the next specialist does not restart the same investigation.
 
 ## Read -> edit -> validate
 

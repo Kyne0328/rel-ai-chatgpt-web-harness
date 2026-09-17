@@ -51,7 +51,7 @@ assert.deepEqual(
   'stale profile configuration must not change discovery'
 );
 assert.ok(Buffer.byteLength(JSON.stringify(connectorInstructions(config)), 'utf8') > 0, 'connector instructions must serialize to a non-empty payload');
-assert.match(connectorInstructions(config), /work_id is optional durable attribution/i, 'global instructions must make durable task identity optional');
+assert.match(connectorInstructions(config), /work_id is durable task attribution/i, 'global instructions must define durable task identity without framing substantial work as optional');
 assert.match(connectorInstructions(config), /omit it for workspace\/resource work and never infer one/i, 'global instructions must prohibit ambiguous implicit task attribution');
 assert.match(connectorInstructions(config), /approval/i, 'global instructions retain approval safety where defined');
 assert.match(connectorInstructions(config), /authoritative evidence/i, 'global instructions retain truthful evidence semantics');
@@ -83,7 +83,7 @@ for (const schema of schemas) {
   assert.deepEqual(publicSchema.outputSchema.required, ['ok']);
 }
 const importUnsafeRootKeywords = ['oneOf', 'anyOf', 'allOf', 'if', 'then', 'else', 'not', 'propertyNames'];
-const capabilityRoutingDescriptions = new Set(['relai_read', 'relai_edit', 'relai_ui', 'relai_browser', 'relai_desktop', 'relai_computer']);
+const capabilityRoutingDescriptions = new Set(['relai_work', 'relai_read', 'relai_edit', 'relai_ui', 'relai_browser', 'relai_desktop', 'relai_computer']);
 for (const schema of publicSchemas) {
   for (const keyword of importUnsafeRootKeywords) {
     assert.equal(schema.inputSchema[keyword], undefined, `${schema.name} discovery must not use root ${keyword}`);
@@ -98,7 +98,10 @@ for (const schema of publicSchemas) {
     assert.doesNotMatch(schema.description || '', /\b(?:use when|use for|use to|do not|prefer|should|must)\b/i, `${schema.name} connector description must stay declarative unless it owns host/local capability routing`);
   }
 }
-const publicWorkSchema = publicSchemas.find(item => item.name === 'relai_work')?.inputSchema;
+const publicWork = publicSchemas.find(item => item.name === 'relai_work');
+assert.match(publicWork?.description || '', /Use begin for substantial or multi-step repository work, including read-first investigations/i, 'relai_work discovery must tell the agent when durable task creation is expected');
+assert.doesNotMatch(publicWork?.description || '', /one optional durable workspace task/i, 'relai_work discovery must not frame substantial task creation as merely optional');
+const publicWorkSchema = publicWork?.inputSchema;
 for (const field of ['workspace', 'title', 'objective', 'bootstrap', 'instructionPath', 'summary', 'reason', 'work_id']) {
   assert.ok(publicWorkSchema?.properties?.[field], `relai_work connector schema must expose ${field}`);
 }
@@ -157,7 +160,7 @@ for (const removed of removedDirectNames) {
 }
 
 const publicSchemaByName = new Map(publicSchemas.map(schema => [schema.name, schema]));
-assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'status', 'finish', 'cancel']);
+assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'status', 'finish', 'cancel']);
 const processSchema = schemaByName.get('relai_process');
 assert.deepEqual(processSchema.inputSchema.properties.action.enum, ['start', 'read', 'write', 'stop', 'list']);
 assert.ok(processSchema.inputSchema.properties.kind.enum.includes('service'));

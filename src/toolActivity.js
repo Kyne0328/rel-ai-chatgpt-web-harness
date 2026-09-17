@@ -608,7 +608,7 @@ function createToolActivityTracker(options = {}) {
       status,
       resumeStatus,
       progress: normalizeTaskProgress(task.progress, status),
-      currentStage: 'Inactive',
+      currentStage: 'Waiting for next action',
       currentActivity: task.currentActivity,
       calls: task.calls,
       toolCallCount: task.calls,

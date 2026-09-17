@@ -63,7 +63,8 @@ async function validateExecutableOperationInput(
   const name = String(operationName || '');
   const validator = OPERATION_INPUT_VALIDATORS.get(name);
   if (!validator) throw new Error(`Unknown internal operation '${name}'.`);
-  const input = Object.fromEntries(Object.entries(args || {}).filter(([key]) => !['work_id', '_operationTaskId'].includes(key)));
+  if (args.independent != null && typeof args.independent !== 'boolean') throw new Error('independent must be a boolean.');
+  const input = Object.fromEntries(Object.entries(args || {}).filter(([key]) => !['work_id', 'independent', '_operationTaskId'].includes(key)));
   const result = await validator.validate(input);
   if (!result.issues) return;
   const details = result.issues.map(issue => {

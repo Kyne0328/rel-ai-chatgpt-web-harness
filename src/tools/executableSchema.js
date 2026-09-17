@@ -3,6 +3,7 @@ import { z } from 'zod';
 const WORK_ID_SCHEMA = zodJsonSchema(
   z.string().min(1).max(200).describe('Opaque ID returned when a repository work session begins.')
 );
+const INDEPENDENT_SCHEMA = { type: 'boolean', description: 'Set true only for intentionally independent workspace/resource work, outside any unfinished task in this conversation. Cannot be combined with work_id.' };
 
 function executableInputSchema(definition, catalogTool) {
   const actionScopes = (catalogTool?.actions || []).map(action => action.behavior?.taskScope || definition.behavior?.taskScope || 'required');
@@ -11,6 +12,7 @@ function executableInputSchema(definition, catalogTool) {
     : (definition.behavior?.taskScope || 'required');
   const properties = { ...(definition.inputSchema?.properties || {}) };
   if (taskScope !== 'none') properties.work_id = WORK_ID_SCHEMA;
+  if (taskScope === 'optional') properties.independent = INDEPENDENT_SCHEMA;
   const required = [...(definition.inputSchema?.required || [])];
   applyTaskScope(required, taskScope);
   const branches = Array.isArray(definition.inputSchema?.oneOf)
@@ -24,6 +26,7 @@ function executableActionBranch(branch, catalogTool, fallbackTaskScope) {
   const taskScope = catalogTool?.actions?.find(item => item.action === action)?.behavior?.taskScope || fallbackTaskScope;
   if (taskScope === 'none') return branch;
   const properties = { ...(branch.properties || {}), work_id: WORK_ID_SCHEMA };
+  if (taskScope === 'optional') properties.independent = INDEPENDENT_SCHEMA;
   const required = [...(branch.required || [])];
   applyTaskScope(required, taskScope);
   return { ...branch, properties, required };

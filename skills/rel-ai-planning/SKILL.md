@@ -5,7 +5,7 @@ description: Use for non-trivial repository features, refactors, migrations, or 
 
 # Rel.AI Planning
 
-Reuse an active `work_id` when the objective already benefits from durable task tracking. Planning itself does not require a work session; open one only when persistent ownership, recovery, or task-scoped execution will materially help the approved plan.
+Reuse an active `work_id` when present. For substantial or multi-stage repository planning, start a durable work session before repository inspection so the plan and any later execution keep one identity. Small localized planning that needs only an isolated read may stay workspace-scoped without a task.
 
 Use this skill only when architecture or sequencing is genuinely non-trivial. Do not trigger for small localized changes whose implementation path is already clear after targeted inspection.
 Planning defines architecture, dependencies, completion conditions, and meaningful risks; it does not prescribe a fixed tool ritual. During execution, choose the next repository action from current evidence, the demonstrated boundary, and hard runtime constraints.

@@ -111,8 +111,9 @@ try {
     title: 'Review session persistence',
     objective: 'Review canonical session activity persistence.'
   }, { ...context, requestId: 'request-5' });
-  assert.equal(contextual.bootstrap?.suggestedSkills?.[0]?.name, 'session-review', 'relai_work begin must expose the relevant discovered skill');
-  assert.match(contextual.bootstrap?.relatedTasks?.[0]?.outcome || '', /Inspected and verified session activity persistence/i, 'relai_work begin must expose relevant completed task context');
+  const loadedContext = await callTool('relai_work', { action: 'context', work_id: contextual.work_id }, { ...context, requestId: 'request-context' });
+  assert.equal(loadedContext.bootstrap?.suggestedSkills?.[0]?.name, 'session-review', 'relai_work context must expose the relevant discovered skill');
+  assert.match(loadedContext.bootstrap?.relatedTasks?.[0]?.outcome || '', /Inspected and verified session activity persistence/i, 'relai_work context must expose relevant completed task context');
   await callTool('relai_work', {
     action: 'finish',
     workspace: 'repo',

@@ -1,5 +1,6 @@
 const OPERATION_IDS = Object.freeze({
   WORK_BEGIN: 'work.begin',
+  WORK_CONTEXT: 'work.context',
   WORK_STATUS: 'work.status',
   WORK_FINISH: 'work.finish',
   WORK_CANCEL: 'work.cancel',

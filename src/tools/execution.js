@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { resolveWorkspace } from '../config.js';
 import { fallbackExecutionStatus } from '../mcp/fallbackExecutions.js';
 import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
-import { claimTaskChangedFiles } from '../taskIntegrity.ts';
+import { claimTaskChangedFiles, ensureTaskBaseline } from '../taskIntegrity.ts';
 import { runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { runWorkspaceOperation } from '../workspaceOperationQueue.js';
 import {
@@ -70,8 +70,12 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       };
 
       const result = await runWorkspaceOperation(
-        executionName === OP.WORK_CANCEL || backgroundStatusMode ? '' : effectiveArgs?.workspace,
+        executionName === OP.WORK_BEGIN || executionName === OP.WORK_CANCEL || backgroundStatusMode ? '' : effectiveArgs?.workspace,
         async () => {
+          if (taskId && workspace && executionName !== OP.WORK_BEGIN && definition?.annotations?.readOnlyHint !== true) {
+            const integrity = await ensureTaskBaseline(config, taskId, workspace.alias);
+            if (requestTaskContext && integrity) requestTaskContext.integrity = integrity;
+          }
           sessionStart = await measurePerformancePhase(
             'tool.session',
             () => maybeStartSession(config, executionName, effectiveArgs || {}, { taskId })

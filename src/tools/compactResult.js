@@ -16,7 +16,6 @@ function slimCompactPublicResult(publicName, action, value) {
   if (!value || typeof value !== 'object') return value;
   if (publicName === 'relai_work' && action === 'begin') {
     const next = { ...value };
-    delete next.nextAction;
     if (next.workspaceBinding?.alias === next.workspace) delete next.workspaceBinding;
     return pruneEmpty(next);
   }

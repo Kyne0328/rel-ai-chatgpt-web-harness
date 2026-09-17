@@ -63,6 +63,14 @@ try {
   lockHolder.exec('ROLLBACK');
   lockHolder.close();
 
+  const deferredId = 'deferred-baseline-task';
+  await recordTaskIntegrityEvent(config, event(deferredId, 'work.begin', { deferBaseline: true }));
+  assert.equal(readTaskIntegrity(config, deferredId, 'app').baseline.pending, true);
+  const deferred = await taskIntegrity.ensureTaskBaseline(config, deferredId, 'app');
+  assert.ok(deferred.baseline.changedFiles.includes('ambient.txt'), 'deferred baseline must still protect pre-existing dirty files');
+  assert.equal(deferred.baseline.pending, undefined);
+  assert.deepEqual(deferred.taskOwnedChangedFiles, []);
+
   await recordTaskIntegrityEvent(config, event(taskOne, 'work.begin'));
   const initial = readTaskIntegrity(config, taskOne, 'app');
   assert.ok(initial.baseline.changedFiles.includes('ambient.txt'));

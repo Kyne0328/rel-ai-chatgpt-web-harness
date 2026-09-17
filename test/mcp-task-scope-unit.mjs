@@ -13,9 +13,10 @@ for (const name of ['workspaceList', 'workspaceInspect', 'workspaceTree', 'works
   assert.equal(Object.hasOwn(toolExports, name), false, `${name} must not remain a public tools.js export`);
 }
 const instructions = connectorInstructions({ workspaces: { repo: { path: '/repo' } } });
-assert.match(instructions, /work_id is optional durable attribution/i);
-assert.match(instructions, /substantial\/multi-step mutation starts relai_work begin; carry work_id/i);
-assert.match(instructions, /isolated reads\/inspection\/small one-shots omit it for workspace\/resource work/i);
+assert.match(instructions, /work_id is durable task attribution/i);
+assert.match(instructions, /substantial or multi-step repository work, start relai_work begin before the first project operation and carry work_id/i);
+assert.match(instructions, /even when the first steps are read-only investigation/i);
+assert.match(instructions, /isolated reads\/inspection\/small one-shots may omit it for workspace\/resource work/i);
 assert.match(instructions, /never infer one/i);
 assert.match(instructions, /path\/resource ownership/i);
 assert.match(instructions, /stale-write\/collision protection/i);
@@ -27,4 +28,4 @@ assert.match(instructions, /authoritative evidence; report only checks actually 
 assert.match(instructions, /agent chooses actions and validation/i);
 assert.match(instructions, /validation is factual evidence, not execution permission/i);
 
-console.log('MCP SDK boundary exposes only /mcp and treats work_id as optional durable attribution.');
+console.log('MCP SDK boundary exposes only /mcp and requires durable attribution for substantial or multi-step repository work.');

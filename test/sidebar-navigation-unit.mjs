@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EXTENSIONS_NAV_ITEM, SETTINGS_NAV_ITEMS, SYSTEM_NAV_ITEMS } from '../src/ui/navigation-catalog.js';
+import { DESKTOP_NAV_ITEMS, EXTENSIONS_NAV_ITEM, SETTINGS_NAV_ITEMS, SYSTEM_NAV_ITEMS } from '../src/ui/navigation-catalog.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
@@ -23,7 +23,8 @@ assert.doesNotMatch(shell, /id="sidebarToggle"/, 'server shell must not duplicat
 assert.match(bootstrap, /relai_sidebar_collapsed/);
 assert.match(reactShell, /APPLICATION_NAV_ITEMS\[0\]/);
 assert.match(reactShell, /APPLICATION_NAV_ITEMS\[1\]/);
-assert.match(reactShell, /EXTENSIONS_NAV_ITEM/);
+assert.ok(!DESKTOP_NAV_ITEMS.some(item => item.id === EXTENSIONS_NAV_ITEM.id), 'Extensions must stay out of the normal sidebar');
+assert.doesNotMatch(reactShell, /item: EXTENSIONS_NAV_ITEM/, 'The React shell must not render Extensions as a normal navigation item');
 assert.match(reactShell, /SYSTEM_NAV_ITEMS/);
 assert.match(reactShell, /SETTINGS_NAV_ITEMS/);
 assert.match(reactShell, /id: 'sidebarToggle'/);

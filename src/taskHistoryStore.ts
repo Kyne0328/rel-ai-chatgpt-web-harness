@@ -511,7 +511,7 @@ function reconcileInactiveStoredSession(session: TaskRecord, activeIds: Set<stri
     status: 'inactive',
     resumeStatus: session.resumeStatus || session.status,
     progress: normalizeTaskProgress(session.progress || { mode: 'indeterminate', label: 'Ready to resume' }, 'inactive'),
-    currentStage: 'Inactive',
+    currentStage: 'Waiting for next action',
     completionKnown: false,
     endReason: '',
     terminalReason: '',

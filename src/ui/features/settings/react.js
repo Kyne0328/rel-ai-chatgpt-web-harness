@@ -13,6 +13,9 @@ import { supportPolicyView } from './desktop-update-policy.js';
 
 const h = React.createElement;
 const RELEASES_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
+const DEVELOPER_OPTIONS_STORAGE_KEY = 'relai_developer_options_unlocked';
+const DEVELOPER_UNLOCK_CLICK_COUNT = 5;
+const DEVELOPER_UNLOCK_WINDOW_MS = 2500;
 const NOTIFICATION_DEFAULTS = Object.freeze({
   enabled: true,
   taskCompleted: true,
@@ -557,6 +560,7 @@ function normalizeNotificationPreferences(value = {}) {
 function ApplicationPage({ computerControl }) {
   const [lifecycle, setLifecycle] = useState(undefined);
   const [desktopStatus, setDesktopStatus] = useState(undefined);
+  const developerOptionsUnlocked = readDeveloperOptionsUnlocked();
   const desktop = window.relaiDesktop;
   useEffect(() => {
     let active = true;
@@ -573,12 +577,29 @@ function ApplicationPage({ computerControl }) {
       h(ComputerControlSettings, { initial: computerControl }),
       h(ApplicationUpdates, { lifecycle, buildStatus: desktopStatus?.buildStatus }),
       h(LocalDataSettings),
+      developerOptionsUnlocked ? h(DeveloperOptions) : null,
       typeof desktop?.quitApp === 'function' || typeof desktop?.logout === 'function'
         ? h(Card, { title: 'Application controls' },
             typeof desktop?.logout === 'function' ? h(LogoutRow) : null,
             typeof desktop?.quitApp === 'function' ? h(QuitRow) : null
           )
         : null
+    )
+  );
+}
+
+function DeveloperOptions() {
+  return h('details', { className: 'settings-advanced developer-options' },
+    h('summary', null, 'Developer options'),
+    h('div', { className: 'settings-panel-body' },
+      h('p', { className: 'settings-help' }, 'Experimental developer features are kept here until they are ready for normal use.'),
+      h('div', { className: 'setting-row' },
+        h('div', { className: 'setting-row-copy' },
+          h('strong', null, 'Extensions'),
+          h('span', null, 'Manage and test Rel.AI skill and CLI extensions.')
+        ),
+        h('a', { className: 'buttonlike secondary compact-button', href: '#extensions' }, 'Open Extensions')
+      )
     )
   );
 }
@@ -992,6 +1013,15 @@ function AboutPage({ metadata, buildStatus = {} }) {
   const developer = metadata.developer || {};
   const developerUrl = validatedGitHubUrl(developer.profileUrl);
   const buildId = buildIdOf(buildStatus);
+  const developerUnlockRef = useRef({ count: 0, startedAt: 0 });
+  const onBuildClick = () => {
+    if (readDeveloperOptionsUnlocked()) return;
+    const next = advanceDeveloperUnlockClicks(developerUnlockRef.current);
+    developerUnlockRef.current = next.unlocked ? { count: 0, startedAt: 0 } : next;
+    if (!next.unlocked) return;
+    try { window.localStorage.setItem(DEVELOPER_OPTIONS_STORAGE_KEY, '1'); } catch {}
+    toast('Developer options unlocked.', { variant: 'success' });
+  };
   const documentLink = (path, label) => {
     const href = repositoryDocumentUrl(repositoryUrl, path);
     return href
@@ -1004,7 +1034,12 @@ function AboutPage({ metadata, buildStatus = {} }) {
       h('div', { className: 'about-product' }, h('img', { src: '/public/assets/relai-logo.png', width: 193, height: 187, alt: '', 'aria-hidden': 'true' }), h('div', null,
         h('h4', null, metadata.name || 'Rel.AI MCP'),
         h('p', null, `Version: ${metadata.version ? `v${metadata.version}` : 'Unknown version'}`),
-        buildId ? h('p', null, `Build: ${buildId}`) : null
+        buildId ? h('p', null, 'Build: ', h('button', {
+          className: 'about-build-trigger',
+          type: 'button',
+          onClick: onBuildClick,
+          'aria-label': `Build ${buildId}`
+        }, buildId)) : null
       )),
       h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, 'Developed by ', developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${developer.name} on GitHub (@${developer.username})` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')),
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || '')),
@@ -1023,6 +1058,18 @@ function AboutPage({ metadata, buildStatus = {} }) {
 
 function AboutRow({ label, children }) {
   return h('div', { className: 'setting-row about-detail-row' }, h('div', { className: 'setting-row-copy' }, h('strong', null, label)), children);
+}
+
+function readDeveloperOptionsUnlocked() {
+  try { return window.localStorage.getItem(DEVELOPER_OPTIONS_STORAGE_KEY) === '1'; } catch { return false; }
+}
+
+function advanceDeveloperUnlockClicks(state = {}, now = Date.now()) {
+  const startedAt = Number(state.startedAt || 0);
+  const withinWindow = startedAt > 0 && now - startedAt <= DEVELOPER_UNLOCK_WINDOW_MS;
+  const count = withinWindow ? Number(state.count || 0) + 1 : 1;
+  const nextStartedAt = withinWindow ? startedAt : now;
+  return { count, startedAt: nextStartedAt, unlocked: count >= DEVELOPER_UNLOCK_CLICK_COUNT };
 }
 
 function validatedGitHubUrl(value) {
@@ -1048,4 +1095,4 @@ function normalizeReleaseNoteText(value) { return String(value || '').replace(/<
 function messageOf(error) { return error instanceof Error ? error.message : String(error || 'The operation failed.'); }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; }
 
-export { connectionGuideMode, connectionPrimaryAction, normalizeNotificationPreferences, normalizeReleaseNoteText, updateView };
+export { advanceDeveloperUnlockClicks, connectionGuideMode, connectionPrimaryAction, normalizeNotificationPreferences, normalizeReleaseNoteText, updateView };

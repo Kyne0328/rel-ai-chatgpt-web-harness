@@ -74,7 +74,7 @@ const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 const OPERATION_REGISTRY = RAW_OPERATION_REGISTRY as unknown as readonly OperationRegistryRecord[];
 
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT, OP.INSPECT, OP.SEARCH_SEMANTIC,
+  OP.WORK_CONTEXT, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT, OP.INSPECT, OP.SEARCH_SEMANTIC,
   OP.PROCESS_READ, OP.PROCESS_LIST, OP.CHANGES_TIDY_PLAN, OP.VALIDATE_HTTP, OP.CHANGES_DIFF, OP.CHANGES_REPLAY,
   OP.WORK_STATUS, OP.PUBLISH_DRAFT_PR
 ]);
@@ -95,6 +95,7 @@ const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
 // the Tasks capability. Clients without it keep the same public operations, but long work
 // can continue under work_id after the tool response returns; no legacy operation names are retained.
 const NATIVE_TASK_ELIGIBLE_TOOLS: ReadonlySet<string> = new Set([
+  OP.WORK_CONTEXT,
   OP.SEARCH_SEMANTIC,
   OP.INSPECT,
   OP.EDIT,
@@ -176,7 +177,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Workspace Work',
-    description: 'Manages one optional durable workspace task: begin, status, finish, or cancel. Status also reports fallback operations that outlive a connector request.',
+    description: 'Manages a durable workspace task. Use begin for substantial or multi-step repository work, including read-first investigations; it returns work_id promptly. context loads repository context using that ID; status, finish, and cancel manage its lifecycle. Carry work_id on subsequent task operations.',
     annotations: annotations(false, false, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
     dashboard: { category: 'Workflow', capabilities: ['workflow'] }
@@ -408,6 +409,7 @@ function getPublicActionContract(definition: CatalogToolDefinition, action: stri
     const taskScope = definition.behavior?.taskScope || TASK_SCOPE.REQUIRED;
     const fields = Object.keys(definition.inputSchema?.properties || {}).filter(field => field !== 'action');
     if (taskScope !== TASK_SCOPE.NONE && !fields.includes('work_id')) fields.push('work_id');
+    if (taskScope === TASK_SCOPE.OPTIONAL && !fields.includes('independent')) fields.push('independent');
     const required = [...(definition.inputSchema?.required || [])].filter(field => field !== 'action');
     if (taskScope === TASK_SCOPE.REQUIRED || taskScope === TASK_SCOPE.OPTIONAL) {
       const workspaceIndex = required.indexOf('workspace');
@@ -423,6 +425,7 @@ function getPublicActionContract(definition: CatalogToolDefinition, action: stri
   const taskScope = mapping?.behavior?.taskScope || operation?.behavior?.taskScope || TASK_SCOPE.REQUIRED;
   const fields = Object.keys(branch.properties || {}).filter(field => field !== 'action');
   if (taskScope !== TASK_SCOPE.NONE && !fields.includes('work_id')) fields.push('work_id');
+  if (taskScope === TASK_SCOPE.OPTIONAL && !fields.includes('independent')) fields.push('independent');
   const required = [...(branch.required || [])].filter(field => field !== 'action');
   if (taskScope === TASK_SCOPE.REQUIRED || taskScope === TASK_SCOPE.OPTIONAL) {
     const workspaceIndex = required.indexOf('workspace');

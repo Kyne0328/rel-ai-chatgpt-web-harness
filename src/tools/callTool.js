@@ -16,7 +16,7 @@ import { describeToolOperation } from './operation.js';
 import { resolveExecutableToolCall, validateExecutableOperationInput } from './runtimeRegistry.js';
 import { getToolNames, isToolCallable } from './schema.js';
 import { applyCautionAudit, buildExtraAudit, invalidateSessionCacheForCall } from './session.js';
-import { assertKnownTask, assertTaskWorkspaceOwnership, findReusableTask, isTerminalTaskReference, taskAuditContext, withTaskIdentity } from './task.js';
+import { assertKnownTask, assertTaskWorkspaceOwnership, findReusableTask, taskAttributionHint, isTerminalTaskReference, taskAuditContext, withTaskIdentity } from './task.js';
 import { deterministicActionId } from '../workflow/contracts.js';
 import { classifyTaskIntent } from '../workflow/intent.js';
 import { recordLocalTaskCompletion, recordLocalToolOutcome } from '../localAnalytics.js';
@@ -68,6 +68,9 @@ async function callToolObserved(name, args = {}, context = {}) {
     const taskAware = taskScoped || taskScope === 'optional';
     effectivePrincipal = principalForContext(context, connector);
     requestedTaskId = normalizeTaskId(effectiveArgs?.work_id);
+    if (requestedTaskId && effectiveArgs?.independent === true) {
+      throw taskError('TASK_SCOPE_CONFLICT', 'Choose work_id for task work or independent:true for separate workspace work, not both.');
+    }
     if (taskScoped && !requestedTaskId) {
       throw taskError('TASK_ID_REQUIRED', `${name} requires the work_id returned by relai_work action begin.`);
     }
@@ -92,6 +95,9 @@ async function callToolObserved(name, args = {}, context = {}) {
         workspace: authorizedWorkspace
       });
     }
+    await validateExecutableOperationInput(operationName, effectiveArgs, {
+      publicLabel: resolved.action ? `${name} action '${resolved.action}'` : name
+    });
     if (operationName === OP.WORK_BEGIN) {
       const reusableTask = findReusableTask(
         config,
@@ -127,9 +133,12 @@ async function callToolObserved(name, args = {}, context = {}) {
         topology: null
       };
     }
-    await validateExecutableOperationInput(operationName, effectiveArgs, {
-      publicLabel: resolved.action ? `${name} action '${resolved.action}'` : name
-    });
+    const attributionHint = taskScope === 'optional' && !requestedTaskId && effectiveArgs?.independent !== true
+      ? taskAttributionHint(config, authorizedWorkspace, effectivePrincipal, context?.conversationId)
+      : '';
+    if (attributionHint && definition.annotations?.readOnlyHint !== true) {
+      throw taskError('TASK_ATTRIBUTION_REQUIRED', attributionHint, { retryable: true, allowedAlternatives: [attributionHint] });
+    }
     const repeatCall = observeRepeatCall({
       connector,
       taskId: requestedTaskId,
@@ -205,6 +214,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       ...taskAuditContext(context, finishActivity, requestedTaskId, operationName, valueOk, value),
       tool: operationName,
       publicTool: name,
+      ...(operationName === OP.WORK_BEGIN ? { deferBaseline: true } : {}),
       internalOperation: operationName === name ? undefined : operationName,
       action: resolved.action || undefined,
       operation: finishActivity?.operation,
@@ -255,8 +265,9 @@ async function callToolObserved(name, args = {}, context = {}) {
         workId
       }))
       : withTaskIdentity(value, workId);
-    const responseWithRepeatWarning = repeatCall && responseValue && typeof responseValue === 'object'
-      ? { ...responseValue, warning: repeatCall.warning }
+    const warning = [repeatCall?.warning, attributionHint].filter(Boolean).join(' ');
+    const responseWithRepeatWarning = warning && responseValue && typeof responseValue === 'object'
+      ? { ...responseValue, warning: [responseValue.warning, warning].filter(Boolean).join(' ') }
       : responseValue;
     return ok(responseWithRepeatWarning);
   } catch (error) {
