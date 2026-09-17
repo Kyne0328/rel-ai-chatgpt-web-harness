@@ -82,6 +82,7 @@
       "runtime-log-buffer.js",
       "runtime-log-snapshot.js",
       "diagnostic-files.js",
+      "app-identity.js",
       "app-updater.js",
       "app-updater-events.js",
       "app-updater-state.js",

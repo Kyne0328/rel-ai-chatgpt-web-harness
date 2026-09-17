@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createAppUpdater } from './app-updater.js';
+import { configureApplicationIdentity } from './app-identity.js';
 import { createBrowserSurfaceHost } from './browser-surface-host.js';
 import { readBuildStatus } from './build-provenance.js';
 import { createDashboardWindowManager } from './dashboard-window.js';
@@ -921,19 +922,6 @@ async function createDesktopHost(options = {}) {
   }
 
   return Object.freeze({ start });
-}
-
-function configureApplicationIdentity(app) {
-  const devUserDataPath = String(process.env.REL_AI_ELECTRON_DEV_USER_DATA || '').trim();
-  if (devUserDataPath) {
-    app.setName('Rel.AI MCP Dev');
-    app.setPath('userData', path.resolve(devUserDataPath));
-  } else {
-    app.setName('Rel.AI MCP');
-  }
-  if (process.platform === 'win32') {
-    app.setAppUserModelId(devUserDataPath ? 'com.relai.mcp.dev' : 'com.relai.mcp');
-  }
 }
 
 function requireDesktopDependencies(options) {

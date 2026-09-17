@@ -18,8 +18,15 @@ import {
   safeStorage,
   utilityProcess
 } from 'electron';
+import { configureApplicationIdentity } from './app-identity.js';
 import { updateInstallLaunchGuard } from './update-install-marker.js';
 import { normalizeWizardConfig, saveLauncherConfig } from './launcher-config.js';
+
+// Application identity must be set before any app.getPath('userData') call.
+// Otherwise the update guard resolves the default package-derived profile
+// (rel-ai-mcp-launcher) instead of the canonical profile (Rel.AI MCP), and
+// Electron safeStorage then decrypts with the wrong profile key.
+configureApplicationIdentity(app);
 
 const updateLaunchGuard = updateInstallLaunchGuard(app, {
   platform: process.platform,
