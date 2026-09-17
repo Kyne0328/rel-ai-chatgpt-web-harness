@@ -43,8 +43,7 @@ try {
 }
 assert.match(defaultDevUserDataPath('/tmp/home').replaceAll('\\', '/'), /\/tmp\/home\/\.rel-ai-mcp-dev\/electron-user-data$/);
 assert.match(mainSource, /createDesktopHost/);
-assert.match(desktopHostSource, /REL_AI_ELECTRON_DEV_USER_DATA/);
-assert.match(desktopHostSource, /app\.setPath\('userData'/);
+assert.match(desktopHostSource, /configureApplicationIdentity\(app\)/, 'the desktop host must apply the shared application identity, including the isolated dev profile');
 
 const help = spawnSync(process.execPath, [path.join(root, 'scripts', 'electron-dev-watch.mjs'), '--help'], {
   cwd: root,

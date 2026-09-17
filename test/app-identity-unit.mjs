@@ -39,7 +39,9 @@ try {
     const app = fakeApp();
     configureApplicationIdentity(app);
     assert.deepEqual(app.calls[0], ['setName', 'Rel.AI MCP Dev']);
-    assert.ok(app.calls.some(([method]) => method === 'setPath'), 'dev override must redirect the user-data path');
+    assert.deepEqual(app.calls.find(([method]) => method === 'setPath'),
+      ['setPath', 'userData', path.resolve('tmp', 'relai-dev-profile')],
+      'dev override must redirect userData to the resolved development profile');
   } finally {
     delete process.env.REL_AI_ELECTRON_DEV_USER_DATA;
   }
