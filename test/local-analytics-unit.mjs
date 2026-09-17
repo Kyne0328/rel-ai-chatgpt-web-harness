@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { LOCAL_ANALYTICS_RETENTION_DAYS, clearLocalAnalytics, flushLocalAnalytics, pruneLocalAnalytics, recordLocalTaskCompletion, recordLocalToolOutcome, readLocalUsageSnapshot, readLocalUsageSnapshotAsync } from '../src/localAnalytics.js';
+import { LOCAL_ANALYTICS_RETENTION_DAYS, clearLocalAnalytics, flushLocalAnalytics, pruneLocalAnalytics, recordLocalTaskCompletion, recordLocalToolOutcome, recordLocalTransportEvent, readLocalUsageSnapshot, readLocalUsageSnapshotAsync } from '../src/localAnalytics.js';
 import { failureCategoryFromCode } from '../src/analyticsFailureCategory.js';
 import { stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
 
@@ -73,6 +73,46 @@ try {
   assert.equal(cleared.ok, true);
   assert.ok(cleared.removedFiles >= 1);
   assert.equal(readLocalUsageSnapshot(config, '2026-08').totals.toolCalls, 0, 'clearing analytics must clear the SQLite analytics rows');
+
+  const freshResetStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-analytics-reset-'));
+  try {
+    const freshReset = await clearLocalAnalytics({ stateDir: freshResetStateDir });
+    assert.equal(freshReset.ok, true, 'clearing analytics must work before normalized tables exist');
+  } finally {
+    await new Promise(resolve => setImmediate(resolve));
+    fs.rmSync(freshResetStateDir, { recursive: true, force: true });
+  }
+
+  const matureStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-analytics-mature-'));
+  try {
+    const aggregate = { toolCalls: 1, successes: 1, failures: 0, reliabilityCalls: 1, reliableCalls: 1, infrastructureFailures: 0, operationFailures: 0, recoverableFailures: 0, cancellations: 0, executionMs: 1 };
+    const matureDocument = {
+      schemaVersion: 5,
+      month: '2026-08',
+      totals: { requests: 512, ...aggregate },
+      transport: { request_started: 0, request_reached_runtime: 0, request_cancelled: 0, connection_closed: 0, upstream_5xx: 0, response_delivered: 0 },
+      tools: Array.from({ length: 512 }, (_, index) => ({ tool: `tool-${index}-${'x'.repeat(120)}`, ...aggregate })),
+      workspaces: [], workspaceTools: [], activityMatrix: [], workspaceActivityMatrix: [], taskIntents: [], workspaceTaskIntents: [],
+      failureCategories: [], workspaceFailureCategories: [], performancePhases: {}, hours: []
+    };
+    withStateDatabase({ stateDir: matureStateDir }, db => db.prepare('INSERT INTO analytics_months(month,updated_at_ms,payload) VALUES(?,?,?)').run('2026-08', 10, JSON.stringify(matureDocument)));
+    assert.equal(recordLocalToolOutcome({ stateDir: matureStateDir }, { tool: 'hot-tool', workspace: 'repo', ok: true, durationMs: 5, at: '2026-08-15T02:30:00Z' }), true);
+    assert.equal(recordLocalTransportEvent({ stateDir: matureStateDir }, { event: 'request_started', count: 2, at: '2026-08-15T02:30:00Z' }), true);
+    assert.equal(recordLocalTaskCompletion({ stateDir: matureStateDir }, { workspace: 'repo', taskIntent: 'bugfix', at: '2026-08-15T02:30:00Z' }), true);
+    const matureSnapshot = readLocalUsageSnapshot({ stateDir: matureStateDir }, '2026-08');
+    assert.equal(matureSnapshot.totals.toolCalls, 2, 'mature analytics writes must update normalized total counters');
+    assert.equal(matureSnapshot.tools.find(row => row.tool === 'hot-tool')?.toolCalls, 1, 'mature analytics writes must update only affected indexed dimensions');
+    assert.equal(matureSnapshot.transport.request_started, 2, 'mature analytics transport writes must update normalized transport counters');
+    assert.equal(matureSnapshot.taskIntents.find(row => row.intent === 'bugfix')?.tasks, 1, 'mature task completion writes must update normalized intent counters');
+    assert.ok(withStateDatabase({ stateDir: matureStateDir }, db => Number(db.prepare('SELECT COUNT(*) AS count FROM analytics_counter_rows').get()?.count || 0)) > 512,
+      'mature analytics must store counters in indexed rows instead of rewriting the monthly document on each event');
+    await flushLocalAnalytics({ stateDir: matureStateDir });
+    const materialized = withStateDatabase({ stateDir: matureStateDir }, db => JSON.parse(db.prepare('SELECT payload FROM analytics_months WHERE month=?').get('2026-08').payload));
+    assert.equal(materialized.totals.toolCalls, 2, 'analytics counters must materialize to the durable monthly document on flush');
+  } finally {
+    await new Promise(resolve => setImmediate(resolve));
+    fs.rmSync(matureStateDir, { recursive: true, force: true });
+  }
 
   const flushRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-analytics-flush-'));
   try {

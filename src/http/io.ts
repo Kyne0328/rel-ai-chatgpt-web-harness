@@ -5,6 +5,7 @@ import { ERROR_CODES } from '../contracts/errors.ts';
 import type { HttpRequestError, HttpServerOptions, JsonRecord } from './types.ts';
 
 const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_SSE_QUEUE_BYTES = 1024 * 1024;
 
 function isAuthorized(
   req: IncomingMessage,
@@ -193,13 +194,127 @@ function sendSse(
   data: unknown,
   options: { id?: string | number } = {}
 ): void {
+  if (res.writableEnded || res.destroyed) return;
+  res.write(frameSse(event, data, options));
+}
+
+interface SseWriterOptions {
+  readonly maxQueuedBytes?: unknown;
+  readonly onOverflow?: () => void;
+}
+
+interface SseWriter {
+  send(event: string, data: unknown, options?: { id?: string | number }): boolean;
+  comment(value: string): boolean;
+  close(options?: { destroy?: boolean }): void;
+  readonly queuedBytes: number;
+}
+
+/**
+ * Queue dashboard events per connection and stop producing when a slow reader
+ * exceeds the bounded queue. `drain` resumes FIFO delivery, preserving event
+ * order and letting the dashboard reconnect and fetch a fresh snapshot.
+ */
+function createSseWriter(
+  res: ServerResponse<IncomingMessage>,
+  options: SseWriterOptions = {}
+): SseWriter {
+  const configuredLimit = Number(options.maxQueuedBytes);
+  const maxQueuedBytes = Number.isSafeInteger(configuredLimit) && configuredLimit > 0
+    ? configuredLimit
+    : DEFAULT_MAX_SSE_QUEUE_BYTES;
+  const queue: string[] = [];
+  let queuedBytes = 0;
+  let draining = false;
+  let closed = false;
+
+  const fail = (): void => {
+    if (closed) return;
+    closed = true;
+    queue.length = 0;
+    queuedBytes = 0;
+    options.onOverflow?.();
+    if (!res.destroyed && !res.writableEnded) res.destroy();
+  };
+
+  const pump = (): void => {
+    if (closed || draining || res.destroyed || res.writableEnded) return;
+    while (queue.length) {
+      const frame = queue.shift();
+      if (frame == null) break;
+      queuedBytes = Math.max(0, queuedBytes - Buffer.byteLength(frame, 'utf8'));
+      let accepted = false;
+      try {
+        accepted = res.write(frame);
+      } catch {
+        close({ destroy: true });
+        return;
+      }
+      if (!accepted) {
+        draining = true;
+        res.once('drain', () => {
+          draining = false;
+          pump();
+        });
+        return;
+      }
+    }
+  };
+
+  const enqueue = (frame: string): boolean => {
+    if (closed || res.destroyed || res.writableEnded) return false;
+    const frameBytes = Buffer.byteLength(frame, 'utf8');
+    if (frameBytes > maxQueuedBytes || queuedBytes + frameBytes > maxQueuedBytes) {
+      fail();
+      return false;
+    }
+    queue.push(frame);
+    queuedBytes += frameBytes;
+    pump();
+    return !closed;
+  };
+
+  const close = ({ destroy = false }: { destroy?: boolean } = {}): void => {
+    if (closed) {
+      if (destroy && !res.destroyed && !res.writableEnded) res.destroy();
+      return;
+    }
+    closed = true;
+    queue.length = 0;
+    queuedBytes = 0;
+    if (destroy && !res.destroyed && !res.writableEnded) res.destroy();
+  };
+
+  // A response can close independently of the request object. Release queued
+  // frames in either case so a disconnected dashboard cannot retain its FIFO.
+  res.once('close', () => close());
+  res.once('error', () => close());
+
+  return {
+    send(event, data, sendOptions = {}) {
+      return enqueue(frameSse(event, data, sendOptions));
+    },
+    comment(value) {
+      return enqueue(`: ${String(value || '').replace(/[\r\n]/g, '')}\n\n`);
+    },
+    close,
+    get queuedBytes() { return queuedBytes; }
+  };
+}
+
+function frameSse(
+  event: string,
+  data: unknown,
+  options: { id?: string | number } = {}
+): string {
+  const lines: string[] = [];
   if (options.id != null && options.id !== '') {
-    res.write(`id: ${String(options.id).replace(/[\r\n]/g, '')}\n`);
+    lines.push(`id: ${String(options.id).replace(/[\r\n]/g, '')}`);
   }
-  res.write(`event: ${event}\n`);
-  const text = typeof data === 'string' ? data : JSON.stringify(data);
-  for (const line of text.split(/\r?\n/)) res.write(`data: ${line}\n`);
-  res.write('\n');
+  lines.push(`event: ${String(event || '').replace(/[\r\n]/g, '')}`);
+  const serialized = typeof data === 'string' ? data : JSON.stringify(data);
+  for (const line of String(serialized ?? '').split(/\r?\n/)) lines.push(`data: ${line}`);
+  return `${lines.join('\n')}\n\n`;
 }
 
 function sendHtml(
@@ -236,6 +351,7 @@ function contentTypeForStaticAsset(filePath: string): string {
 
 export {
   DEFAULT_MAX_BODY_BYTES,
+  DEFAULT_MAX_SSE_QUEUE_BYTES,
   contentTypeForStaticAsset,
   isAuthorized,
   normalizeMaxBodyBytes,
@@ -244,5 +360,6 @@ export {
   sendHtml,
   sendJson,
   sendSse,
+  createSseWriter,
   setBaseHeaders
 };

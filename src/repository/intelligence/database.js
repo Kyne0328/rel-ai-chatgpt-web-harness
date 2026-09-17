@@ -198,8 +198,14 @@ function currentGeneration(db) {
   return db.prepare('SELECT * FROM generations WHERE id=? AND status=?').get(id, 'committed') || null;
 }
 
-function listManifest(db) {
-  return db.prepare('SELECT id, path, language, is_test, size_bytes, mtime_ms, ctime_ms, content_hash, parser, parser_version, generation_id, parse_error FROM files ORDER BY path').all()
+function listManifest(db, relativePaths = null) {
+  const paths = Array.isArray(relativePaths)
+    ? [...new Set(relativePaths.map(value => String(value || '')).filter(Boolean))]
+    : [];
+  const query = paths.length
+    ? `SELECT id, path, language, is_test, size_bytes, mtime_ms, ctime_ms, content_hash, parser, parser_version, generation_id, parse_error FROM files WHERE path IN (${sqlPlaceholders(paths.length)}) ORDER BY path`
+    : 'SELECT id, path, language, is_test, size_bytes, mtime_ms, ctime_ms, content_hash, parser, parser_version, generation_id, parse_error FROM files ORDER BY path';
+  return db.prepare(query).all(...(paths.length ? paths : []))
     .map(row => ({
       id: Number(row.id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1,
       sizeBytes: Number(row.size_bytes), mtimeMs: Number(row.mtime_ms), ctimeMs: Number(row.ctime_ms), contentHash: String(row.content_hash),
@@ -329,19 +335,7 @@ function relationshipSourceIdsForNames(db, names = []) {
   return [...sourceFileIds];
 }
 
-function resolveRelationships(db, { workspaceRoot = null, sourceFileIds = null } = {}) {
-  const scopedSourceIds = Array.isArray(sourceFileIds)
-    ? [...new Set(sourceFileIds.map(Number).filter(value => Number.isSafeInteger(value) && value > 0))]
-    : null;
-  if (scopedSourceIds && scopedSourceIds.length === 0) return;
-  const sourceFilter = scopedSourceIds ? `source_file_id IN (${sqlPlaceholders(scopedSourceIds.length)})` : '';
-  if (scopedSourceIds) {
-    db.prepare(`UPDATE imports SET target_path=NULL, target_file_id=NULL WHERE ${sourceFilter}`).run(...scopedSourceIds);
-    db.prepare(`DELETE FROM edges WHERE ${sourceFilter}`).run(...scopedSourceIds);
-  } else {
-    db.prepare('UPDATE imports SET target_path=NULL, target_file_id=NULL').run();
-    db.prepare("DELETE FROM edges WHERE type IN ('IMPORTS','CALLS','INHERITS','IMPLEMENTS','USES_TYPE','TESTS','HANDLES','HTTP_CALLS','LISTENS_ON','EMITS')").run();
-  }
+function loadResolutionContext(db, workspaceRoot = null) {
   const files = db.prepare('SELECT id, path, language, is_test FROM files ORDER BY path').all().map(row => ({
     id: Number(row.id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1
   }));
@@ -352,6 +346,27 @@ function resolveRelationships(db, { workspaceRoot = null, sourceFileIds = null }
   const ecosystem = workspaceRoot && files.some(file => supportsEcosystemResolution(file.language))
     ? createEcosystemResolver(workspaceRoot, pathToId.keys())
     : null;
+  return { files, pathToId, fileById, suffixIndex, directoryIndex, ecosystem };
+}
+
+function resolveRelationships(db, { workspaceRoot = null, sourceFileIds = null, resolutionCache = null } = {}) {
+  const scopedSourceIds = Array.isArray(sourceFileIds)
+    ? [...new Set(sourceFileIds.map(Number).filter(value => Number.isSafeInteger(value) && value > 0))]
+    : null;
+  if (scopedSourceIds && scopedSourceIds.length === 0) return;
+  if (scopedSourceIds) return resolveScopedRelationships(db, { workspaceRoot, sourceFileIds: scopedSourceIds, resolutionCache });
+  const sourceFilter = scopedSourceIds ? `source_file_id IN (${sqlPlaceholders(scopedSourceIds.length)})` : '';
+  if (scopedSourceIds) {
+    db.prepare(`UPDATE imports SET target_path=NULL, target_file_id=NULL WHERE ${sourceFilter}`).run(...scopedSourceIds);
+    db.prepare(`DELETE FROM edges WHERE ${sourceFilter}`).run(...scopedSourceIds);
+  } else {
+    db.prepare('UPDATE imports SET target_path=NULL, target_file_id=NULL').run();
+    db.prepare("DELETE FROM edges WHERE type IN ('IMPORTS','CALLS','INHERITS','IMPLEMENTS','USES_TYPE','TESTS','HANDLES','HTTP_CALLS','LISTENS_ON','EMITS')").run();
+  }
+  const cachedContext = resolutionCache?.context;
+  const context = cachedContext || loadResolutionContext(db, workspaceRoot);
+  const { files, pathToId, fileById, suffixIndex, directoryIndex, ecosystem } = context;
+  if (resolutionCache && !cachedContext) resolutionCache.context = context;
   const imports = scopedSourceIds
     ? db.prepare(`SELECT source_file_id, specifier FROM imports WHERE ${sourceFilter}`).all(...scopedSourceIds)
     : db.prepare('SELECT source_file_id, specifier FROM imports').all();
@@ -403,18 +418,198 @@ function resolveRelationships(db, { workspaceRoot = null, sourceFileIds = null }
   resolveHintRelationships(db, { files, fileById, pathToId, suffixIndex, directoryIndex, symbolsByName, insertEdge, ecosystem, sourceFileIds: scopedSourceIds });
 }
 
+// Incremental refreshes usually touch a handful of files. Keep all reads in this
+// path keyed by those files (and by the names they reference) so a large index
+// does not have to be materialized just to rebuild a few edges. A context from a
+// preceding full generation supplies the expensive path indexes when available.
+function resolveScopedRelationships(db, { workspaceRoot = null, sourceFileIds, resolutionCache = null }) {
+  const ids = [...new Set(sourceFileIds.map(Number).filter(value => Number.isSafeInteger(value) && value > 0))];
+  if (!ids.length) return;
+  if (resolutionCache && !resolutionCache.context) resolutionCache.context = loadResolutionContext(db, workspaceRoot);
+  const cachedContext = resolutionCache?.context;
+  const sourceFilter = `source_file_id IN (${sqlPlaceholders(ids.length)})`;
+  const fileFilter = `id IN (${sqlPlaceholders(ids.length)})`;
+  const sourceFiles = db.prepare(`SELECT id, path, language, is_test FROM files WHERE ${fileFilter} ORDER BY path`).all(...ids)
+    .map(row => ({ id: Number(row.id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1 }));
+  // Keep the scoped resolver's local map bounded. The cached full-generation
+  // map is used only by the path resolver for O(1) target lookups.
+  const fileById = new Map(sourceFiles.map(file => [file.id, file]));
+  const imports = db.prepare(`SELECT source_file_id, specifier FROM imports WHERE ${sourceFilter}`).all(...ids);
+  const pathResolver = createScopedImportResolver(db, workspaceRoot, resolutionCache);
+
+  db.prepare(`UPDATE imports SET target_path=NULL, target_file_id=NULL WHERE ${sourceFilter}`).run(...ids);
+  db.prepare(`DELETE FROM edges WHERE ${sourceFilter}`).run(...ids);
+  const updateImport = db.prepare('UPDATE imports SET target_path=?, target_file_id=? WHERE source_file_id=? AND specifier=?');
+  const insertEdge = db.prepare(`
+    INSERT INTO edges(source_symbol_id, target_symbol_id, source_file_id, target_file_id, type, target_name, provider, confidence)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const importedIdsBySource = new Map();
+  const testEdges = new Set();
+  for (const item of imports) {
+    const sourceId = Number(item.source_file_id);
+    const source = fileById.get(sourceId);
+    if (!source) continue;
+    const target = pathResolver(source, String(item.specifier));
+    if (!target) continue;
+    updateImport.run(target.path, target.id, source.id, String(item.specifier));
+    insertEdge.run(null, null, source.id, target.id, 'IMPORTS', null, 'tree-sitter', 0.82);
+    const targetFile = target.file;
+    const testEdgeKey = `${source.id}:${target.id}`;
+    if (source.test && targetFile && !targetFile.test && !testEdges.has(testEdgeKey)) {
+      insertEdge.run(null, null, source.id, target.id, 'TESTS', target.path, 'graph-derived', 0.99);
+      testEdges.add(testEdgeKey);
+    }
+    if (!importedIdsBySource.has(sourceId)) importedIdsBySource.set(sourceId, new Set());
+    importedIdsBySource.get(sourceId).add(target.id);
+  }
+
+  const callRows = db.prepare(`SELECT o.file_id, o.name, o.enclosing_symbol_id FROM occurrences o WHERE o.role='call' AND o.file_id IN (${sqlPlaceholders(ids.length)})`)
+    .all(...ids);
+  const callNames = [...new Set(callRows.map(row => String(row.name || '')).filter(Boolean))];
+  const symbolsByName = loadSymbolsByNames(db, callNames);
+  for (const call of callRows) {
+    const sourceFileId = Number(call.file_id);
+    const targets = symbolsByName.get(String(call.name)) || [];
+    const target = chooseCallTarget(sourceFileId, targets, importedIdsBySource.get(sourceFileId));
+    if (!target) continue;
+    const confidence = Number(target.file_id) === sourceFileId ? 0.88 : 0.84;
+    insertEdge.run(call.enclosing_symbol_id == null ? null : Number(call.enclosing_symbol_id), Number(target.id), sourceFileId,
+      Number(target.file_id), 'CALLS', String(call.name), 'tree-sitter', confidence);
+  }
+
+  const hints = db.prepare(`SELECT * FROM relation_hints WHERE ${sourceFilter} ORDER BY id`).all(...ids);
+  const hintNames = new Set();
+  const hintQualifiedNames = new Set();
+  for (const hint of hints) {
+    if (hint.source_qualified_name) hintQualifiedNames.add(String(hint.source_qualified_name));
+    if (hint.target_qualified_name) hintQualifiedNames.add(String(hint.target_qualified_name));
+    if (hint.target_name) hintNames.add(String(hint.target_name));
+  }
+  const routeEventNames = [...hintNames].filter(name => hints.some(hint =>
+    (hint.type === 'HTTP_CALLS' || hint.type === 'EMITS') && String(hint.target_name || '') === name));
+  const routeEventHints = routeEventNames.length
+    ? db.prepare(`SELECT * FROM relation_hints WHERE type IN ('HANDLES','LISTENS_ON') AND target_name IN (${sqlPlaceholders(routeEventNames.length)}) ORDER BY id`).all(...routeEventNames)
+    : [];
+  for (const hint of routeEventHints) {
+    if (hint.source_qualified_name) hintQualifiedNames.add(String(hint.source_qualified_name));
+  }
+  const hintSymbolsByName = loadSymbolsByNames(db, [...hintNames]);
+  for (const [name, rows] of hintSymbolsByName) symbolsByName.set(name, rows);
+  const symbolsByQualified = loadSymbolsByQualifiedNames(db, [...hintQualifiedNames]);
+  const targetFileIds = new Set([...routeEventHints].map(hint => Number(hint.source_file_id)).filter(Number.isInteger));
+  const targetFiles = targetFileIds.size
+    ? db.prepare(`SELECT id, path, language, is_test FROM files WHERE id IN (${sqlPlaceholders(targetFileIds.size)})`).all(...targetFileIds)
+      .map(row => ({ id: Number(row.id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1 }))
+    : [];
+  for (const file of targetFiles) fileById.set(file.id, file);
+
+  resolveHintRelationships(db, {
+    files: cachedContext?.files || [...fileById.values()], fileById,
+    pathToId: cachedContext?.pathToId || new Map(), suffixIndex: cachedContext?.suffixIndex || new Map(),
+    directoryIndex: cachedContext?.directoryIndex || new Map(), symbolsByName, symbolsByQualified, insertEdge,
+    ecosystem: cachedContext?.ecosystem || null,
+    sourceFileIds: ids, hints, routeTargets: uniqueHintTargets(routeEventHints, 'HANDLES'),
+    eventTargets: uniqueHintTargets(routeEventHints, 'LISTENS_ON'), resolveImportPath: pathResolver
+  });
+}
+
+function createScopedImportResolver(db, workspaceRoot, resolutionCache) {
+  const cachedContext = resolutionCache?.context;
+  const fallbackStatement = db.prepare('SELECT id, path, language, is_test FROM files WHERE path=?');
+  const fallbackLookup = relativePath => fallbackStatement.get(relativePath);
+  const byPath = new Map();
+  const lookup = relativePath => {
+    const normalized = String(relativePath || '').replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/').replace(/\/$/, '');
+    if (!normalized) return null;
+    if (cachedContext?.pathToId?.has(normalized)) {
+      const id = Number(cachedContext.pathToId.get(normalized));
+      const file = cachedContext.fileById.get(id);
+      return file ? { id, path: normalized, file } : null;
+    }
+    if (byPath.has(normalized)) return byPath.get(normalized);
+    const row = fallbackLookup(normalized);
+    const value = row ? { id: Number(row.id), path: String(row.path), file: { id: Number(row.id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1 } } : null;
+    byPath.set(normalized, value);
+    return value;
+  };
+  return (source, specifier) => {
+    if (cachedContext?.pathToId && cachedContext?.suffixIndex) {
+      const targetPath = resolveImportPath(source.path, specifier, cachedContext.pathToId, cachedContext.suffixIndex,
+        cachedContext.directoryIndex, cachedContext.ecosystem, source.language);
+      if (!targetPath) return null;
+      const id = Number(cachedContext.pathToId.get(targetPath));
+      const file = cachedContext.fileById.get(id);
+      return file ? { id, path: targetPath, file } : null;
+    }
+    const clean = String(specifier || '').replaceAll('\\', '/').replace(/[{}*]/g, '').trim();
+    if (!clean) return null;
+    const language = String(source.language || '').toLowerCase();
+    if (['javascript', 'typescript', 'tsx'].includes(language) && !clean.startsWith('.')) return null;
+    const bases = clean.startsWith('.')
+      ? [path.posix.normalize(path.posix.join(path.posix.dirname(source.path), clean))]
+      : [clean.replace(/^@/, '').replaceAll('.', '/').replace(/^crate\//, '').replace(/^self\//, '').replace(/^\/+/, '')];
+    for (const base of bases) {
+      for (const candidate of candidatePathVariants(base)) {
+        const target = lookup(candidate);
+        if (target) return target;
+      }
+    }
+    return null;
+  };
+}
+
+function candidatePathVariants(value) {
+  const normalized = String(value || '').replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/').replace(/\/$/, '');
+  if (!normalized) return [];
+  const extensions = ['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.py', '.go', '.rs', '.java', '.kt', '.cs', '.c', '.cpp', '.cc', '.cxx', '.h', '.hpp', '.hh', '.rb', '.php', '.vue', '.json'];
+  const base = stripKnownExtension(normalized);
+  return [...new Set([normalized, base, ...extensions.map(ext => base + ext), ...extensions.map(ext => path.posix.join(base, `index${ext}`)), path.posix.join(base, '__init__.py')])];
+}
+
+function loadSymbolsByNames(db, names) {
+  const result = new Map();
+  forEachChunk([...new Set(names.map(value => String(value || '')).filter(Boolean))], 200, chunk => {
+    const placeholders = sqlPlaceholders(chunk.length);
+    for (const row of db.prepare(`SELECT id, file_id, name FROM symbols WHERE name IN (${placeholders}) ORDER BY name, file_id, id`).all(...chunk)) {
+      const name = String(row.name);
+      if (!result.has(name)) result.set(name, []);
+      result.get(name).push(row);
+    }
+  });
+  return result;
+}
+
+function loadSymbolsByQualifiedNames(db, names) {
+  const result = new Map();
+  const normalized = names == null ? null : [...new Set(names.map(value => String(value || '')).filter(Boolean))];
+  const chunks = normalized == null ? [null] : chunkValues(normalized, 200);
+  for (const chunk of chunks) {
+    const rows = chunk == null
+      ? db.prepare('SELECT id, file_id, name, qualified_name FROM symbols').all()
+      : db.prepare(`SELECT id, file_id, name, qualified_name FROM symbols WHERE qualified_name IN (${sqlPlaceholders(chunk.length)})`).all(...chunk);
+    for (const row of rows) {
+      const name = String(row.qualified_name);
+      if (!result.has(name)) result.set(name, []);
+      result.get(name).push(row);
+    }
+  }
+  return result;
+}
+
+function chunkValues(values, size) {
+  const chunks = [];
+  for (let offset = 0; offset < values.length; offset += size) chunks.push(values.slice(offset, offset + size));
+  return chunks;
+}
+
 function resolveHintRelationships(db, context) {
   const { fileById, pathToId, suffixIndex, directoryIndex, symbolsByName, insertEdge, ecosystem } = context;
   const sourceFileIds = Array.isArray(context.sourceFileIds) ? new Set(context.sourceFileIds.map(Number)) : null;
-  const symbolsByQualified = new Map();
-  for (const row of db.prepare('SELECT id, file_id, name, qualified_name FROM symbols').all()) {
-    const qualified = String(row.qualified_name);
-    if (!symbolsByQualified.has(qualified)) symbolsByQualified.set(qualified, []);
-    symbolsByQualified.get(qualified).push(row);
-  }
-  const hints = db.prepare('SELECT * FROM relation_hints ORDER BY id').all();
-  const routeTargets = uniqueHintTargets(hints, 'HANDLES');
-  const eventTargets = uniqueHintTargets(hints, 'LISTENS_ON');
+  const symbolsByQualified = context.symbolsByQualified || loadSymbolsByQualifiedNames(db, null);
+  const hints = context.hints || db.prepare('SELECT * FROM relation_hints ORDER BY id').all();
+  const routeTargets = context.routeTargets || uniqueHintTargets(hints, 'HANDLES');
+  const eventTargets = context.eventTargets || uniqueHintTargets(hints, 'LISTENS_ON');
 
   for (const hint of hints) {
     const sourceFileId = Number(hint.source_file_id);
@@ -427,8 +622,15 @@ function resolveHintRelationships(db, context) {
     const targetQualified = hint.target_qualified_name == null ? '' : String(hint.target_qualified_name);
     const targetName = hint.target_name == null ? '' : String(hint.target_name);
     const moduleSpecifier = hint.module_specifier == null ? '' : String(hint.module_specifier);
-    const moduleTargetPath = moduleSpecifier ? resolveImportPath(sourceFile.path, moduleSpecifier, pathToId, suffixIndex, directoryIndex, ecosystem, sourceFile.language) : null;
-    let targetFileId = moduleTargetPath ? pathToId.get(moduleTargetPath) : null;
+    const moduleResolution = moduleSpecifier
+      ? (context.resolveImportPath
+        ? context.resolveImportPath(sourceFile, moduleSpecifier)
+        : resolveImportPath(sourceFile.path, moduleSpecifier, pathToId, suffixIndex, directoryIndex, ecosystem, sourceFile.language))
+      : null;
+    const moduleTargetPath = typeof moduleResolution === 'string' ? moduleResolution : moduleResolution?.path || null;
+    let targetFileId = moduleResolution && typeof moduleResolution === 'object'
+      ? Number(moduleResolution.id)
+      : moduleTargetPath ? pathToId.get(moduleTargetPath) : null;
     let targetSymbol = null;
 
     const relationshipTargetKey = relationshipKey(String(hint.type), targetName);
@@ -610,6 +812,8 @@ function metaValue(db, key, fallback = '') {
 
 function indexProducerVersion(db) { return metaValue(db, 'producer_version', ''); }
 function setIndexProducerVersion(db, value) { setMeta(db, 'producer_version', String(value || '')); }
+function indexParserVersion(db) { return metaValue(db, 'parser_version', ''); }
+function setIndexParserVersion(db, value) { setMeta(db, 'parser_version', String(value || '')); }
 
 export {
   beginGeneration,
@@ -620,6 +824,7 @@ export {
   failBuildingGenerations,
   finishGeneration,
   indexProducerVersion,
+  indexParserVersion,
   indexStats,
   listManifest,
   openIndexDatabase,
@@ -628,5 +833,6 @@ export {
   relationshipSourceIdsForNames,
   repositoryIndexPath,
   resolveRelationships,
-  setIndexProducerVersion
+  setIndexProducerVersion,
+  setIndexParserVersion
 };

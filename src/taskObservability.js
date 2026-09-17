@@ -465,8 +465,8 @@ function sanitizeActivityEventRecord(event) {
   return value;
 }
 
-function buildSafeActivityProjection(record) {
-  const event = sanitizeActivityEventRecord(record);
+function buildSafeActivityProjection(record, options = {}) {
+  const event = options.alreadySanitized ? record : sanitizeActivityEventRecord(record);
   if (!event || typeof event !== 'object') return {};
   return {
     eventId: event.eventId || event.id,
@@ -490,7 +490,7 @@ function buildSafeActivityProjection(record) {
   };
 }
 
-function sanitizeTaskRecord(record) {
+function sanitizeTaskRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return record;
   const value = { ...record };
   value.status = normalizeHistoricalTaskStatus(value.status, value);
@@ -510,7 +510,9 @@ function sanitizeTaskRecord(record) {
   })) {
     if (value[key] != null) value[key] = sanitizeDisplayText(value[key], limit);
   }
-  if (Array.isArray(value.events)) value.events = value.events.map(sanitizeActivityEventRecord).filter(Boolean);
+  if (!options.eventsAlreadySanitized && Array.isArray(value.events)) {
+    value.events = value.events.map(sanitizeActivityEventRecord).filter(Boolean);
+  }
   if (Array.isArray(value.currentOperations)) value.currentOperations = value.currentOperations.map(item => sanitizeStructuredValue(item, 0)).filter(Boolean);
   if (value.semanticProgress && typeof value.semanticProgress === 'object') value.semanticProgress = sanitizeStructuredValue(value.semanticProgress, 0);
   if (value.correlation && typeof value.correlation === 'object') value.correlation = sanitizeStructuredValue(value.correlation, 0);
@@ -519,8 +521,8 @@ function sanitizeTaskRecord(record) {
   return value;
 }
 
-function sanitizeTaskRecordForProjection(record) {
-  const value = sanitizeTaskRecord(record);
+function sanitizeTaskRecordForProjection(record, options = {}) {
+  const value = sanitizeTaskRecord(record, options);
   if (!value || typeof value !== 'object') return value;
   const projected = { ...value };
   delete projected.workflowEvidence;

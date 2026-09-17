@@ -15,6 +15,7 @@ const configPath = path.join(temp, 'config.json');
 // warm in-process tools/list budget remains strict and platform-independent.
 const defaultColdBudgetMs = process.platform === 'win32' ? 3500 : 1500;
 const coldBudgetMs = Number(process.env.REL_AI_MCP_COLD_START_BUDGET_MS || defaultColdBudgetMs);
+const firstListBudgetMs = Number(process.env.REL_AI_MCP_FIRST_LIST_BUDGET_MS || (process.platform === 'win32' ? 1000 : 500));
 const warmListBudgetMs = Number(process.env.REL_AI_MCP_WARM_LIST_BUDGET_MS || 20);
 fs.writeFileSync(configPath, JSON.stringify({
   version: 3,
@@ -51,15 +52,18 @@ try {
   }
 
   const coldMedian = median(cold);
+  const firstListMedian = median(firstList);
   const warmMedian = median(warm);
-  assert.ok(coldMedian <= coldBudgetMs, `cold discovery median ${coldMedian.toFixed(2)}ms exceeds ${coldBudgetMs}ms`);
-  assert.ok(warmMedian <= warmListBudgetMs, `warm tools/list median ${warmMedian.toFixed(2)}ms exceeds ${warmListBudgetMs}ms`);
-  console.log(JSON.stringify({
+  const report = {
     coldDiscoverMs: summarize(cold),
     firstToolsListMs: summarize(firstList),
     warmToolsListMs: summarize(warm),
-    budgets: { coldBudgetMs, warmListBudgetMs }
-  }));
+    budgets: { coldBudgetMs, firstListBudgetMs, warmListBudgetMs }
+  };
+  console.log(JSON.stringify(report));
+  assert.ok(coldMedian <= coldBudgetMs, `cold discovery median ${coldMedian.toFixed(2)}ms exceeds ${coldBudgetMs}ms`);
+  assert.ok(firstListMedian <= firstListBudgetMs, `first tools/list median ${firstListMedian.toFixed(2)}ms exceeds ${firstListBudgetMs}ms`);
+  assert.ok(warmMedian <= warmListBudgetMs, `warm tools/list median ${warmMedian.toFixed(2)}ms exceeds ${warmListBudgetMs}ms`);
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });
 }

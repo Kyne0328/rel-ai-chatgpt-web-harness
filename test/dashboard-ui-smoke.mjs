@@ -9,7 +9,7 @@ import { advanceDeveloperUnlockClicks } from '../src/ui/features/settings/react.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
-const shell = read('src/http/dashboard.ts');
+const shell = read('src/http/dashboardShell.ts');
 const reactShell = read('src/ui/react/main.js');
 const dashboard = read('public/dashboard.js');
 const router = read('src/ui/router.js');
@@ -36,7 +36,8 @@ assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'system')?.href, '#proce
 assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'system')?.label, 'System');
 assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'extensions'), undefined);
 assert.equal(routeMetadata('extensions').id, 'extensions', 'Extensions must remain a valid hidden route');
-assert.ok(!navigationCommands().some(item => item.id === 'extensions'), 'Extensions must stay out of the command palette');
+assert.ok(!navigationCommands().some(item => item.id === 'extensions'), 'Extensions must stay out of quick navigation by default');
+assert.ok(navigationCommands({ includeExtensions: true }).some(item => item.id === 'extensions'), 'Developer mode must add Extensions to quick navigation');
 const settingsNavIds = SETTINGS_NAV_ITEMS.map(item => item.id);
 for (const required of ['connection', 'preferences', 'application', 'about']) assert.ok(settingsNavIds.includes(required), `${required} settings must remain reachable`);
 assert.equal(SETTINGS_NAV_ITEMS.find(item => item.id === 'connection')?.href, '#settings/connection');
@@ -61,8 +62,11 @@ assert.match(extensionsReact, /confirmPermissions: true/, 'Extension installatio
 assert.match(reactShell, /registerReactSection\('settings'/, 'Settings must remain a canonical React route');
 assert.match(reactShell, /registerReactSection\('diagnostics'/, 'Troubleshooting must remain a canonical React route');
 assert.match(settingsReact, /h\('h2', null, title\)/, 'Settings pages must continue the shell H1 with an H2');
-assert.match(settingsReact, /developerOptionsUnlocked \? h\(DeveloperOptions\) : null/, 'Developer options must stay hidden until they are unlocked');
-assert.match(settingsReact, /href: '#extensions'/, 'Unlocked developer options must provide the hidden Extensions route');
+assert.match(settingsReact, /developerOptionsUnlocked \? h\(DeveloperOptions, \{/, 'Developer options must stay hidden until they are unlocked');
+assert.match(settingsReact, /label: 'Developer mode'/, 'Unlocked developer options must expose a Developer mode toggle');
+assert.match(settingsReact, /writeDeveloperModeEnabled\(enabled\)/, 'Developer mode changes must persist');
+assert.match(reactShell, /developerModeEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'Developer mode must expose Extensions in desktop navigation');
+assert.match(reactShell, /developerModeEnabled \? \[\.\.\.MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM\]/, 'Developer mode must expose Extensions in mobile navigation');
 assert.match(settingsReact, /DEVELOPER_UNLOCK_CLICK_COUNT = 5/, 'Developer options must require five build clicks');
 assert.match(settingsReact, /DEVELOPER_UNLOCK_WINDOW_MS = 2500/, 'Developer option clicks must occur in a short time window');
 let unlockState = {};

@@ -13,6 +13,9 @@ const IDLE_EVICT_MS = 2 * 60 * 1000;
 const DIAGNOSTIC_WAIT_MS = 3_000;
 const MAX_LSP_DIAGNOSTICS = 200;
 const MAX_SEMANTIC_EDIT_FILES = 100;
+// Keep a busy session bounded even when it continuously visits new files.
+const MAX_OPEN_DOCUMENTS = 64;
+const MAX_OPEN_DOCUMENT_BYTES = 8 * 1024 * 1024;
 const sessions = new Map();
 
 const BUNDLED_ROOT = fileURLToPath(new URL('../../node_modules/', import.meta.url));
@@ -54,6 +57,7 @@ class LspSession {
     this.client = null;
     this.capabilities = {};
     this.openDocuments = new Map();
+    this.pendingDocumentUris = new Map();
     this.publishedDiagnostics = new Map();
     this.documentQueue = Promise.resolve();
     this.lastUsedAt = 0;
@@ -63,6 +67,7 @@ class LspSession {
     this.startPromise = null;
     this.stopPromise = null;
     this.lifecycleController = null;
+    this.documentAccessSequence = 0;
     this.state = 'idle';
     this.disposed = false;
   }
@@ -148,6 +153,8 @@ class LspSession {
     if (!client || client.state !== 'running') throw new Error(`${this.spec.id} is not running.`);
     const started = Date.now();
     const signal = combineAbortSignals(options.signal, this.lifecycleController?.signal);
+    const documentUri = String(params?.textDocument?.uri || '');
+    if (documentUri) this.pendingDocumentUris.set(documentUri, Number(this.pendingDocumentUris.get(documentUri) || 0) + 1);
     try {
       const result = await client.request(method, params, { ...options, signal });
       this.lastResponseMs = Date.now() - started;
@@ -158,6 +165,12 @@ class LspSession {
       this.lastError = client.lastError || (error instanceof Error ? error.message : String(error));
       if (client.state === 'failed') this.state = 'failed';
       throw error;
+    } finally {
+      if (documentUri) {
+        const pending = Number(this.pendingDocumentUris.get(documentUri) || 0) - 1;
+        if (pending > 0) this.pendingDocumentUris.set(documentUri, pending);
+        else this.pendingDocumentUris.delete(documentUri);
+      }
     }
   }
 
@@ -179,29 +192,68 @@ class LspSession {
   async openDocument(relativePath, options = {}) {
     if (this.disposed) throw disposedSessionError(this.spec);
     const safe = resolveSafePath(this.workspace.path, relativePath, { operation: 'read' });
-    const text = fs.readFileSync(safe.absolutePath, 'utf8');
     const stat = fs.statSync(safe.absolutePath);
     const current = this.openDocuments.get(safe.relativePath);
     const uri = pathToFileURL(safe.absolutePath).href;
     if (current && current.mtimeMs === stat.mtimeMs && current.size === stat.size) {
+      current.lastUsedAt = Date.now();
+      current.accessSequence = ++this.documentAccessSequence;
       this.touch();
       return current;
     }
+    const text = fs.readFileSync(safe.absolutePath, 'utf8');
     await this.ensure(options);
     const client = this.client;
     if (!client || client.state !== 'running') throw new Error(`${this.spec.id} is not running.`);
     if (current) {
-      this.publishedDiagnostics.delete(diagnosticUriKey(current.uri));
-      client.notify('textDocument/didClose', { textDocument: { uri: current.uri } });
+      this.closeDocument(safe.relativePath, current);
     }
     const languageId = languageIdForPath(this.spec, safe.relativePath);
-    const document = { uri, text, languageId, version: (current?.version || 0) + 1, mtimeMs: stat.mtimeMs, size: stat.size };
+    const document = {
+      uri,
+      text,
+      languageId,
+      version: (current?.version || 0) + 1,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      lastUsedAt: Date.now(),
+      accessSequence: ++this.documentAccessSequence
+    };
     client.notify('textDocument/didOpen', {
       textDocument: { uri, languageId, version: document.version, text }
     });
     this.openDocuments.set(safe.relativePath, document);
+    this.evictOpenDocuments(safe.relativePath);
     this.touch();
     return document;
+  }
+
+  evictOpenDocuments(pinnedPath = '') {
+    if (this.openDocuments.size <= MAX_OPEN_DOCUMENTS && this.openDocumentBytes() <= MAX_OPEN_DOCUMENT_BYTES) return;
+    const candidates = [...this.openDocuments.entries()]
+      .filter(([relativePath, document]) => relativePath !== pinnedPath && !this.pendingDocumentUris.has(document.uri))
+      .sort(([, left], [, right]) => Number(left.accessSequence || 0) - Number(right.accessSequence || 0));
+    let bytes = this.openDocumentBytes();
+    for (const [relativePath, document] of candidates) {
+      if (this.openDocuments.size <= MAX_OPEN_DOCUMENTS && bytes <= MAX_OPEN_DOCUMENT_BYTES) break;
+      this.closeDocument(relativePath, document);
+      bytes -= Math.max(0, Number(document.size || 0));
+    }
+  }
+
+  openDocumentBytes() {
+    let bytes = 0;
+    for (const document of this.openDocuments.values()) bytes += Math.max(0, Number(document.size || 0));
+    return bytes;
+  }
+
+  closeDocument(relativePath, document = this.openDocuments.get(relativePath)) {
+    if (!document) return;
+    this.publishedDiagnostics.delete(diagnosticUriKey(document.uri));
+    if (this.client?.state === 'running') {
+      this.client.notify('textDocument/didClose', { textDocument: { uri: document.uri } });
+    }
+    this.openDocuments.delete(relativePath);
   }
 
   async diagnostics(relativePath, options = {}) {
@@ -253,9 +305,7 @@ class LspSession {
     for (const relativePath of paths) {
       const current = this.openDocuments.get(relativePath);
       if (current) {
-        this.publishedDiagnostics.delete(diagnosticUriKey(current.uri));
-        client.notify('textDocument/didClose', { textDocument: { uri: current.uri } });
-        this.openDocuments.delete(relativePath);
+        this.closeDocument(relativePath, current);
       }
       try {
         const safe = resolveSafePath(this.workspace.path, relativePath, { operation: 'read' });
@@ -305,6 +355,7 @@ class LspSession {
     const client = this.client;
     this.client = null;
     this.openDocuments.clear();
+    this.pendingDocumentUris.clear();
     this.publishedDiagnostics.clear();
     if (client) await client.stop().catch(() => {});
     this.lifecycleController = null;

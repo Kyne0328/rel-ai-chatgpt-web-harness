@@ -61,7 +61,7 @@ function pathMetadataFingerprint(root, relativePath) {
   }
 }
 
-function readFilesystemStatusMap(workspace) {
+async function readFilesystemStatusMap(workspace) {
   const root = path.resolve(workspace.path);
   // Mutation accounting is an integrity boundary, not a read-context boundary.
   // Cover the whole workspace even when normal repository context is narrowed.
@@ -76,7 +76,7 @@ function readFilesystemStatusMap(workspace) {
     if (!current) break;
     let entries;
     try {
-      entries = fs.readdirSync(current.absolutePath, { withFileTypes: true });
+      entries = await fs.promises.readdir(current.absolutePath, { withFileTypes: true });
     } catch {
       complete = false;
       continue;
@@ -100,10 +100,26 @@ function readFilesystemStatusMap(workspace) {
       if (fileCount > MAX_FILESYSTEM_MUTATION_FILES) {
         return { snapshot, complete: false };
       }
-      snapshot.set(relativePath, pathMetadataFingerprint(root, relativePath));
+      snapshot.set(relativePath, await pathMetadataFingerprintAsync(root, relativePath));
+      // A non-Git execution may need to inspect tens of thousands of files.
+      // Yield periodically so mutation accounting cannot monopolize the
+      // service event loop while retaining its whole-workspace coverage.
+      if (fileCount % 128 === 0) await new Promise(resolve => setImmediate(resolve));
     }
   }
   return { snapshot, complete };
+}
+
+async function pathMetadataFingerprintAsync(root, relativePath) {
+  const absolute = path.resolve(root, relativePath);
+  if (!isPathInside(absolute, root)) return 'outside';
+  try {
+    const stat = await fs.promises.lstat(absolute, { bigint: true });
+    return [stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino].join(':');
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
+    return `missing:${String(code || '')}`;
+  }
 }
 
 function changedStatusFiles(before, after) {
@@ -138,7 +154,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   const maxOutputBytes = clampNumber(args.maxOutputBytes, 1000, 16 * 1024 * 1024, 2 * 1024 * 1024);
   const trackMutation = context.mutationTrackingRequired !== false;
   const statusBefore = trackMutation ? await readGitStatusMap(workspace, config) : null;
-  const filesystemBefore = trackMutation && !statusBefore ? readFilesystemStatusMap(workspace) : null;
+  const filesystemBefore = trackMutation && !statusBefore ? await readFilesystemStatusMap(workspace) : null;
   const signal = combineAbortSignals(
     getCurrentTaskAbortSignal(),
     args._operationTaskId ? nativeToolTaskSignal(args._operationTaskId) : undefined,
@@ -186,7 +202,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       changed = changedStatusFiles(statusBefore, statusAfter);
       mutationTracking = 'git';
     } else if (!statusBefore && filesystemBefore) {
-      const filesystemAfter = readFilesystemStatusMap(workspace);
+      const filesystemAfter = await readFilesystemStatusMap(workspace);
       changed = changedStatusFiles(filesystemBefore.snapshot, filesystemAfter.snapshot);
       mutationTracking = 'filesystem';
       mutationUnknown = filesystemBefore.complete !== true || filesystemAfter.complete !== true;

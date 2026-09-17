@@ -23,7 +23,7 @@ function canonicalTaskSnapshot(record = {}) {
   const inactive = status === 'inactive';
   const activeCalls = terminal || inactive ? 0 : Math.max(0, Number(sanitized.activeCalls || 0));
   const events = Array.isArray(sanitized.events)
-    ? sanitized.events.map(sanitizeActivityEventRecord).filter(Boolean).slice(-MAX_SESSION_EVENTS)
+    ? sanitized.events.slice(-MAX_SESSION_EVENTS)
     : [];
   const currentOperations = terminal || inactive
     ? []
@@ -53,7 +53,7 @@ function canonicalTaskSnapshot(record = {}) {
     endedAt: terminal ? sanitized.endedAt || sanitized.completedAt || sanitized.cancelledAt || sanitized.updatedAt || null : null,
     completedAt: status === 'completed' ? sanitized.completedAt || sanitized.endedAt || sanitized.updatedAt || null : null,
     cancelledAt: status === 'cancelled' ? sanitized.cancelledAt || sanitized.endedAt || sanitized.updatedAt || null : null
-  });
+  }, { eventsAlreadySanitized: true });
 }
 
 function reduceTaskLifecycleAuditEvent(session, event = {}) {

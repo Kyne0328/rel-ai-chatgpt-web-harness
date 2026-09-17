@@ -1,18 +1,24 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { Worker } from 'node:worker_threads';
 
 import type { TaskDto } from './contracts/tasks.ts';
 import { getStateDir } from './statePaths.js';
 import { setStateMeta, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
 import { normalizeTaskProgress, sanitizeTaskRecord } from './taskObservability.js';
-import { isTerminalTaskStatus } from './taskState.js';
+import { upsertTaskHistorySession } from './taskHistoryPersistence.ts';
 
 const MAX_SESSIONS = 500;
 const TASK_HISTORY_VERSION = 3;
 const HISTORY_FORMAT_MARKER = '.task-history-v3';
 const LEGACY_MIGRATION_KEY = 'task_history_legacy_migrated_v1';
+const EVENT_INDEX_MIGRATION_KEY = 'task_history_event_index_v1';
 const migratedStateDirs = new Set<string>();
+let writeWorker: Worker | null = null;
+let writeRequestSequence = 0;
+const pendingWriteRequests = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
+let storageMetrics = { writes: 0, bytes: 0, durationMs: 0 };
 
 type TaskHistoryConfig = Record<string, unknown> & { stateDir?: string };
 type StoredTaskSession = TaskDto & Record<string, any>;
@@ -84,7 +90,7 @@ function listSessionSummaries(directory: string, limit = MAX_SESSIONS): StoredTa
       LIMIT ?
     `).all(Math.max(0, Math.floor(Number(limit) || 0))) as unknown as TaskHistoryRow[];
     return parseSessionRows(db, rows);
-  }, { transaction: true }) as StoredTaskSession[];
+  }, { transaction: false }) as StoredTaskSession[];
 }
 
 function findSessionsContaining(directory: string, values: unknown, options: SessionTextSearchOptions = {}): StoredTaskSession[] {
@@ -122,31 +128,19 @@ function listRecentSessionEvents(directory: string, limit = MAX_SESSIONS): Recor
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
+    ensureTaskHistoryEventIndex(db);
     const rows = db.prepare(`
       SELECT
-        task.id,
-        CASE WHEN json_valid(task.payload) THEN json_extract(task.payload, '$.workspace') END AS workspace,
-        CASE WHEN json_valid(task.payload) THEN json_extract(task.payload, '$.taskId') END AS task_id,
-        CASE WHEN json_valid(task.payload) THEN json_extract(task.payload, '$.sessionId') END AS session_id,
-        event.value AS payload
-      FROM task_history AS task
-      CROSS JOIN json_each(
-        CASE WHEN json_valid(task.payload) THEN task.payload ELSE '{"events":[]}' END,
-        '$.events'
-      ) AS event
-      WHERE event.type = 'object'
+        task_id AS id,
+        workspace,
+        session_id,
+        payload
+      FROM task_history_events
       ORDER BY
-        COALESCE(
-          json_extract(event.value, '$.timestamp'),
-          json_extract(event.value, '$.ts'),
-          json_extract(event.value, '$.at'),
-          json_extract(event.value, '$.createdAt'),
-          json_extract(event.value, '$.startedAt'),
-          ''
-        ) DESC,
-        task.updated_at_ms DESC,
-        task.id ASC,
-        CAST(event.key AS INTEGER) DESC
+        event_timestamp DESC,
+        task_updated_at_ms DESC,
+        task_id ASC,
+        event_index DESC
       LIMIT ?
     `).all(Math.max(0, Math.floor(Number(limit) || 0))) as unknown as TaskHistoryEventRow[];
     return rows.flatMap(row => {
@@ -249,11 +243,18 @@ function writeSession(directory: string, session: StoredTaskSession | Record<str
   if (!sanitized) throw new Error('Task history writes require a current session record.');
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
-  withStateDatabase(config, (db: DatabaseSync) => upsertSession(db, sanitized), { transaction: true });
+  const started = Date.now();
+  const result = withStateDatabase(config, (db: DatabaseSync) => upsertTaskHistorySession(db, sanitized), { transaction: true });
+  recordStorageWrite(Number(result?.bytes || 0), Date.now() - started);
 }
 
 async function writeSessionAsync(directory: string, session: StoredTaskSession | Record<string, any>): Promise<void> {
-  writeSession(directory, session);
+  if (!session?.id) return;
+  const sanitized = normalizeStoredSession(session, { forWrite: true });
+  if (!sanitized) throw new Error('Task history writes require a current session record.');
+  const config = configForDirectory(directory);
+  migrateLegacyTaskHistory(config);
+  await enqueueWorkerWrite(config, sanitized);
 }
 
 function pruneSessions(directory: string, limit = MAX_SESSIONS): void {
@@ -261,19 +262,18 @@ function pruneSessions(directory: string, limit = MAX_SESSIONS): void {
   migrateLegacyTaskHistory(config);
   withStateDatabase(config, (db: DatabaseSync) => {
     const max = Math.max(0, Math.floor(Number(limit) || 0));
-    const rows = db.prepare('SELECT id,payload FROM task_history ORDER BY updated_at_ms DESC,id ASC').all() as unknown as TaskHistoryRow[];
-    if (rows.length <= max) return;
-    let retained = rows.length;
-    const remove = db.prepare('DELETE FROM task_history WHERE id=?');
-    for (let index = rows.length - 1; index >= 0 && retained > max; index -= 1) {
-      const row = rows[index];
-      if (!row) continue;
-      const session = parseStoredSession(row.payload);
-      if (!session || isTerminalTaskStatus(session.status)) {
-        remove.run(String(row.id));
-        retained -= 1;
-      }
-    }
+    const row = db.prepare('SELECT COUNT(*) AS count FROM task_history').get() as { count?: unknown } | undefined;
+    const excess = Math.max(0, Number(row?.count || 0) - max);
+    if (!excess) return;
+    db.prepare(`DELETE FROM task_history WHERE id IN (
+      SELECT id FROM task_history
+      WHERE CASE
+        WHEN json_valid(payload) THEN lower(COALESCE(json_extract(payload, '$.status'), '')) IN ('completed','failed','cancelled')
+        ELSE 1
+      END
+      ORDER BY updated_at_ms ASC,id DESC
+      LIMIT ?
+    )`).run(excess);
   }, { transaction: true });
 }
 
@@ -291,14 +291,6 @@ function parseStoredSession(payload: unknown): StoredTaskSession | null {
   }
 }
 
-function upsertSession(db: DatabaseSync, session: StoredTaskSession, updatedAtMs: unknown = Date.now()): void {
-  const previous = db.prepare('SELECT updated_at_ms FROM task_history WHERE id=?').get(session.id) as { updated_at_ms?: unknown } | undefined;
-  const stamp = Math.max(Math.floor(Number(updatedAtMs) || Date.now()), Number(previous?.updated_at_ms || 0) + 1);
-  db.prepare(`INSERT INTO task_history(id,updated_at_ms,payload) VALUES(?,?,?)
-    ON CONFLICT(id) DO UPDATE SET updated_at_ms=excluded.updated_at_ms,payload=excluded.payload`)
-    .run(session.id, stamp, JSON.stringify(session));
-}
-
 function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
   let stateKey = '';
   try {
@@ -309,6 +301,7 @@ function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
   if (stateKey && migratedStateDirs.has(stateKey)) return;
   let migrated = false;
   withStateDatabase(config, (db: DatabaseSync) => {
+    ensureTaskHistoryEventIndex(db);
     if (stateMetaValue(db, LEGACY_MIGRATION_KEY, '') === '1') return;
     const directory = getTaskHistoryDir(config);
     let entries: fs.Dirent[] = [];
@@ -327,7 +320,7 @@ function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
         if (!session) continue;
         let mtimeMs = Date.now();
         try { mtimeMs = fs.statSync(file).mtimeMs; } catch {}
-        upsertSession(db, session, mtimeMs);
+        upsertTaskHistorySession(db, session, mtimeMs);
       } catch {}
     }
     setStateMeta(db, LEGACY_MIGRATION_KEY, '1');
@@ -335,6 +328,161 @@ function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
   }, { transaction: true });
   if (stateKey) migratedStateDirs.add(stateKey);
   if (migrated) removeLegacyHistoryFiles(config);
+}
+
+/**
+ * Keep a small, indexed projection of retained activity events. Dashboard
+ * reads should never have to expand every task's JSON timeline just to find
+ * the newest rows. Triggers keep the projection in sync for both the service
+ * process and the task-history storage worker.
+ */
+function ensureTaskHistoryEventIndex(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_history_events(
+      task_id TEXT NOT NULL,
+      event_key TEXT NOT NULL,
+      event_index INTEGER NOT NULL,
+      task_updated_at_ms INTEGER NOT NULL,
+      event_timestamp TEXT NOT NULL,
+      workspace TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      PRIMARY KEY(task_id,event_key)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS task_history_events_recent_idx
+      ON task_history_events(event_timestamp DESC,task_updated_at_ms DESC,task_id ASC,event_index DESC);
+    CREATE TRIGGER IF NOT EXISTS task_history_events_after_insert
+    AFTER INSERT ON task_history
+    BEGIN
+      DELETE FROM task_history_events WHERE task_id=NEW.id;
+      INSERT OR REPLACE INTO task_history_events(
+        task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+      )
+      SELECT
+        NEW.id,
+        COALESCE(
+          NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
+          'index'
+        ) || ':index:' || CAST(event.key AS TEXT),
+        CAST(event.key AS INTEGER),
+        NEW.updated_at_ms,
+        COALESCE(
+          CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+          CAST(json_extract(event.value,'$.ts') AS TEXT),
+          CAST(json_extract(event.value,'$.at') AS TEXT),
+          CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+          CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+          ''
+        ),
+        COALESCE(
+          CAST(json_extract(event.value,'$.workspace') AS TEXT),
+          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
+          ''
+        ),
+        COALESCE(
+          CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
+          NEW.id
+        ),
+        event.value
+      FROM json_each(
+        CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
+        '$.events'
+      ) AS event
+      WHERE event.type='object';
+    END;
+    CREATE TRIGGER IF NOT EXISTS task_history_events_after_update
+    AFTER UPDATE OF updated_at_ms,payload ON task_history
+    BEGIN
+      DELETE FROM task_history_events WHERE task_id=NEW.id;
+      INSERT OR REPLACE INTO task_history_events(
+        task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+      )
+      SELECT
+        NEW.id,
+        COALESCE(
+          NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
+          'index'
+        ) || ':index:' || CAST(event.key AS TEXT),
+        CAST(event.key AS INTEGER),
+        NEW.updated_at_ms,
+        COALESCE(
+          CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+          CAST(json_extract(event.value,'$.ts') AS TEXT),
+          CAST(json_extract(event.value,'$.at') AS TEXT),
+          CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+          CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+          ''
+        ),
+        COALESCE(
+          CAST(json_extract(event.value,'$.workspace') AS TEXT),
+          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
+          ''
+        ),
+        COALESCE(
+          CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
+          NEW.id
+        ),
+        event.value
+      FROM json_each(
+        CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
+        '$.events'
+      ) AS event
+      WHERE event.type='object';
+    END;
+    CREATE TRIGGER IF NOT EXISTS task_history_events_after_delete
+    AFTER DELETE ON task_history
+    BEGIN
+      DELETE FROM task_history_events WHERE task_id=OLD.id;
+    END;
+  `);
+  if (stateMetaValue(db, EVENT_INDEX_MIGRATION_KEY, '') === '1') return;
+  db.exec(`
+    INSERT OR REPLACE INTO task_history_events(
+      task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+    )
+    SELECT
+      task.id,
+      COALESCE(
+        NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
+        'index'
+      ) || ':index:' || CAST(event.key AS TEXT),
+      CAST(event.key AS INTEGER),
+      task.updated_at_ms,
+      COALESCE(
+        CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+        CAST(json_extract(event.value,'$.ts') AS TEXT),
+        CAST(json_extract(event.value,'$.at') AS TEXT),
+        CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+        CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+        ''
+      ),
+      COALESCE(
+        CAST(json_extract(event.value,'$.workspace') AS TEXT),
+        CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.workspace') AS TEXT) END,
+        ''
+      ),
+      COALESCE(
+        CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+        CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.sessionId') AS TEXT) END,
+        task.id
+      ),
+      event.value
+    FROM task_history AS task
+    CROSS JOIN json_each(
+      CASE WHEN json_valid(task.payload) THEN task.payload ELSE '{"events":[]}' END,
+      '$.events'
+    ) AS event
+    WHERE event.type='object';
+  `);
+  setStateMeta(db, EVENT_INDEX_MIGRATION_KEY, '1');
 }
 
 function removeLegacyHistoryFiles(config: TaskHistoryConfig = {}): void {
@@ -359,6 +507,68 @@ function resetTaskHistoryCaches(): void {
   migratedStateDirs.clear();
 }
 
+function taskHistoryStorageMetricsSnapshot(): { writes: number; bytes: number; durationMs: number } {
+  return { ...storageMetrics };
+}
+
+function resetTaskHistoryStorageMetrics(): void {
+  storageMetrics = { writes: 0, bytes: 0, durationMs: 0 };
+}
+
+function enqueueWorkerWrite(config: TaskHistoryConfig, session: StoredTaskSession): Promise<void> {
+  const worker = ensureWriteWorker();
+  const id = ++writeRequestSequence;
+  worker.ref();
+  return new Promise((resolve, reject) => {
+    pendingWriteRequests.set(id, { resolve, reject });
+    worker.postMessage({ id, stateDir: getStateDir(config), session });
+  });
+}
+
+function ensureWriteWorker(): Worker {
+  if (writeWorker) return writeWorker;
+  const worker = new Worker(new URL('./taskHistoryStorageWorker.js', import.meta.url));
+  writeWorker = worker;
+  worker.on('message', message => settleWorkerWrite(worker, message));
+  worker.on('error', error => failWriteWorker(worker, error));
+  worker.on('exit', code => {
+    if (writeWorker !== worker) return;
+    failWriteWorker(worker, new Error(`Task history storage worker exited with code ${code}.`));
+  });
+  worker.unref();
+  return worker;
+}
+
+function settleWorkerWrite(worker: Worker, message: Record<string, any>): void {
+  const id = Number(message?.id || 0);
+  const pending = pendingWriteRequests.get(id);
+  if (!pending) return;
+  pendingWriteRequests.delete(id);
+  if (message.ok === true) {
+    recordStorageWrite(Number(message.bytes || 0), Number(message.durationMs || 0));
+    pending.resolve();
+  } else {
+    const error = new Error(String(message.error?.message || 'Task history write failed.')) as Error & { code?: string };
+    if (message.error?.code) error.code = String(message.error.code);
+    pending.reject(error);
+  }
+  if (pendingWriteRequests.size === 0 && writeWorker === worker) worker.unref();
+}
+
+function failWriteWorker(worker: Worker, error: unknown): void {
+  if (writeWorker === worker) writeWorker = null;
+  const failure = error instanceof Error ? error : new Error(String(error || 'Task history storage worker failed.'));
+  for (const pending of pendingWriteRequests.values()) pending.reject(failure);
+  pendingWriteRequests.clear();
+  try { worker.unref(); } catch {}
+}
+
+function recordStorageWrite(bytes: number, durationMs: number): void {
+  storageMetrics.writes += 1;
+  storageMetrics.bytes += Math.max(0, Number(bytes || 0));
+  storageMetrics.durationMs += Math.max(0, Number(durationMs || 0));
+}
+
 function errorCode(error: unknown): string {
   return error && typeof error === 'object' && 'code' in error ? String(error.code || '') : '';
 }
@@ -377,6 +587,8 @@ export {
   removeSession,
   removeWorkspaceSessions,
   resetTaskHistoryCaches,
+  resetTaskHistoryStorageMetrics,
+  taskHistoryStorageMetricsSnapshot,
   writeSession,
   writeSessionAsync
 };

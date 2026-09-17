@@ -51,26 +51,31 @@ assert.equal(lifecycleMarkerResult.clean, false, 'a failed clean-shutdown marker
 assert.equal(lifecycleMarkerResult.errors[0]?.step, 'lifecycle marker');
 
 const forcedClose = deferred();
-const shutdownGate = deferred();
-let closeCallback = null;
-let shutdownPromise = Promise.resolve();
 const closing = closeHttpServer({
-  close(callback) { closeCallback = callback; },
+  close() {},
   closeIdleConnections() {},
   closeAllConnections() { forcedClose.resolve(); },
-  waitForShutdown() { return shutdownPromise; }
+  waitForShutdown() { throw new Error('network close must not wait on runtime cleanup'); }
 }, { timeoutMs: 5 });
-let closeSettled = false;
-void closing.then(() => { closeSettled = true; });
 await forcedClose.promise;
-await new Promise(resolve => setImmediate(resolve));
-assert.equal(closeSettled, false, 'forcing connections closed must not report shutdown complete before the server close event');
-shutdownPromise = shutdownGate.promise;
-closeCallback();
-await new Promise(resolve => setImmediate(resolve));
-assert.equal(closeSettled, false, 'server close must still wait for registered MCP shutdown work');
-shutdownGate.resolve();
-assert.deepEqual(await closing, { closed: true, forced: true });
+const forcedResult = await closing;
+assert.equal(forcedResult.closed, false, 'a forced network close must report that graceful server close was not confirmed');
+assert.equal(forcedResult.forced, true);
+assert.match(forcedResult.error, /did not close within/i);
+
+const hungService = deferred();
+const boundedShutdown = createShutdownCoordinator({
+  stopService: () => hungService.promise,
+  serviceTimeoutMs: 10,
+  stepTimeoutMs: 10,
+  flushTimeoutMs: 10
+});
+const boundedStartedAt = Date.now();
+const boundedResult = await boundedShutdown.prepare('timeout-regression');
+assert.ok(Date.now() - boundedStartedAt < 500, 'shutdown preparation must have a terminal deadline even when service cleanup never settles');
+assert.equal(boundedResult.clean, false);
+assert.equal(boundedResult.errors[0]?.step, 'service');
+assert.match(boundedResult.errors[0]?.message || '', /did not finish within/i);
 
 function deferred() {
   let resolve;

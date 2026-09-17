@@ -56,6 +56,7 @@ registerIpcHandlers({
   getDesktopSettings: () => ({ ok: true }),
   saveDesktopSettings: value => ({ ok: true, value }),
   getLifecycleStatus: () => ({ ok: true }),
+  acknowledgeConnectorRefresh: () => ({ ok: true }),
   setLaunchAtLogin: value => value,
   setKeepAwake: value => value,
   setAppPreferences: value => ({ ok: true, status: value }),

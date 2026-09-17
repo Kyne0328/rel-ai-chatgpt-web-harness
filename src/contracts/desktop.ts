@@ -95,6 +95,7 @@ export interface DesktopIpcRequestMap {
   'desktop:settings:get': [];
   'desktop:settings:save': [settings: Record<string, unknown>];
   'desktop:lifecycle:get': [];
+  'desktop:lifecycle:acknowledge-connector-refresh': [];
   'desktop:startup:set': [enabled: boolean];
   'desktop:keep-awake:set': [enabled: boolean];
   'desktop:app-preferences:set': [patch: Record<string, unknown>];
@@ -140,6 +141,7 @@ export interface DesktopIpcResponseMap {
   'desktop:settings:get': Record<string, unknown>;
   'desktop:settings:save': Record<string, unknown>;
   'desktop:lifecycle:get': Record<string, unknown>;
+  'desktop:lifecycle:acknowledge-connector-refresh': Record<string, unknown>;
   'desktop:analytics:local': Record<string, unknown>;
   'desktop:diagnostics:export': Record<string, unknown>;
   'desktop:diagnostics:tunnel-doctor': Record<string, unknown>;
@@ -190,6 +192,7 @@ export const DESKTOP_IPC = Object.freeze({
   DESKTOP_SETTINGS_GET: 'desktop:settings:get',
   DESKTOP_SETTINGS_SAVE: 'desktop:settings:save',
   DESKTOP_LIFECYCLE_GET: 'desktop:lifecycle:get',
+  DESKTOP_LIFECYCLE_ACK_CONNECTOR_REFRESH: 'desktop:lifecycle:acknowledge-connector-refresh',
   DESKTOP_STARTUP_SET: 'desktop:startup:set',
   DESKTOP_KEEP_AWAKE_SET: 'desktop:keep-awake:set',
   DESKTOP_APP_PREFERENCES_SET: 'desktop:app-preferences:set',
@@ -266,6 +269,7 @@ export const DESKTOP_IPC_INPUT_CONTRACT = Object.freeze({
   [DESKTOP_IPC.DESKTOP_SETTINGS_GET]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_SETTINGS_SAVE]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_LIFECYCLE_GET]: input('handle', ['dashboard'], 'reject'),
+  [DESKTOP_IPC.DESKTOP_LIFECYCLE_ACK_CONNECTOR_REFRESH]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_STARTUP_SET]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_KEEP_AWAKE_SET]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_APP_PREFERENCES_SET]: input('handle', ['dashboard'], 'reject'),

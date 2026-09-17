@@ -3,32 +3,10 @@ import { Hono, type Context } from 'hono';
 
 import { ERROR_CODES, errorPayload } from '../contracts/errors.ts';
 import { isDashboardAuthorized } from './auth.ts';
-import {
-  handleApiLogs,
-  handleApiTools,
-  handleApiWorkspaces,
-  handleConnection,
-  handleDashboard,
-  handleDashboardV10,
-  handleEvents,
-  handleFavicon,
-  handleHealth,
-  handleOnboardingComplete,
-  handleOnboardingStatus,
-  handleOpenFolder,
-  handlePickFolder,
-  handleReleaseNotes,
-  handleStaticAsset,
-  handleTaskSession,
-  handleWorkspaceChecks,
-  handleWorkspacePreflight
-} from './dashboard.ts';
-import { handleApiComputer, handleApiComputerAction } from './dashboardComputer.ts';
-import { handleApiDiagnostics, handleApiDiagnosticsReset } from './dashboardDiagnostics.ts';
-import { handleApiExtensions, handleApiExtensionsAction } from './dashboardExtensions.ts';
-import { handleApiProcessStop } from './dashboardProcesses.ts';
+import { handleDashboard, handleFavicon, handleStaticAsset } from './dashboardShell.ts';
+import { handleHealth } from './health.ts';
 import { getMcpAccess } from './mcp.ts';
-import { handleMcpDelete, handleMcpGetDiagnostic, handleMcpStreamable, sendMcpTransportError } from './mcpTransport.ts';
+import { sendMcpTransportError } from './mcpResponses.ts';
 import { setBaseHeaders, sendJson } from './io.ts';
 import { errorCodeForRequest } from './serverPolicy.ts';
 import type { HttpRequestError, HttpRouteContext, ResolvedHttpServerOptions, RouteDefinition } from './types.ts';
@@ -73,34 +51,55 @@ function authNone(): boolean {
   return true;
 }
 
+const loadDashboard = () => import('./dashboard.ts');
+const loadDashboardComputer = () => import('./dashboardComputer.ts');
+const loadDashboardDiagnostics = () => import('./dashboardDiagnostics.ts');
+const loadDashboardExtensions = () => import('./dashboardExtensions.ts');
+const loadDashboardProcesses = () => import('./dashboardProcesses.ts');
+let mcpTransportPromise: ReturnType<typeof importMcpTransport> | null = null;
+function importMcpTransport() { return import('./mcpTransport.ts'); }
+function loadMcpTransport() {
+  mcpTransportPromise ||= importMcpTransport();
+  return mcpTransportPromise;
+}
+
+function lazyRoute(loader: () => Promise<unknown>, exportName: string): RouteDefinition['handler'] {
+  return async ctx => {
+    const module = await loader() as Record<string, unknown>;
+    const handler = module[exportName];
+    if (typeof handler !== 'function') throw new Error(`HTTP route handler '${exportName}' is unavailable.`);
+    await (handler as RouteDefinition['handler'])(ctx);
+  };
+}
+
 const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/dashboard': { auth: authDashboard, handler: handleDashboard },
   '/favicon.ico': { auth: authNone, handler: handleFavicon },
   '/health': { auth: authNone, handler: handleHealth },
-  '/api/tools': { auth: authDashboard, handler: handleApiTools },
-  '/api/onboarding/status': { auth: authDashboard, handler: handleOnboardingStatus },
-  '/api/connection': { auth: authDashboard, handler: handleConnection },
-  '/api/dashboard/v10': { auth: authDashboard, handler: handleDashboardV10 },
-  '/api/tasks/session': { auth: authDashboard, handler: handleTaskSession },
-  '/api/logs': { auth: authDashboard, handler: handleApiLogs },
-  '/api/diagnostics': { auth: authDashboard, handler: handleApiDiagnostics },
-  '/api/extensions': { auth: authDashboard, handler: handleApiExtensions },
-  '/api/computer': { auth: authDashboard, handler: handleApiComputer },
-  '/api/release-notes': { auth: authDashboard, handler: handleReleaseNotes },
-  '/api/workspace/preflight': { auth: authDashboard, handler: handleWorkspacePreflight },
-  '/events': { auth: authDashboard, handler: handleEvents }
+  '/api/tools': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiTools') },
+  '/api/onboarding/status': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleOnboardingStatus') },
+  '/api/connection': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleConnection') },
+  '/api/dashboard/v10': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleDashboardV10') },
+  '/api/tasks/session': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskSession') },
+  '/api/logs': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiLogs') },
+  '/api/diagnostics': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnostics') },
+  '/api/extensions': { auth: authDashboard, handler: lazyRoute(loadDashboardExtensions, 'handleApiExtensions') },
+  '/api/computer': { auth: authDashboard, handler: lazyRoute(loadDashboardComputer, 'handleApiComputer') },
+  '/api/release-notes': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleReleaseNotes') },
+  '/api/workspace/preflight': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleWorkspacePreflight') },
+  '/events': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleEvents') }
 });
 
 const POST_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
-  '/api/onboarding/complete': { auth: authDashboard, handler: handleOnboardingComplete },
-  '/api/workspaces': { auth: authDashboard, handler: handleApiWorkspaces },
-  '/api/diagnostics/reset': { auth: authDashboard, handler: handleApiDiagnosticsReset },
-  '/api/extensions': { auth: authDashboard, handler: handleApiExtensionsAction },
-  '/api/computer': { auth: authDashboard, handler: handleApiComputerAction },
-  '/api/pick-folder': { auth: authDashboard, handler: handlePickFolder },
-  '/api/open-folder': { auth: authDashboard, handler: handleOpenFolder },
-  '/api/workspace/checks': { auth: authDashboard, handler: handleWorkspaceChecks },
-  '/api/processes/stop': { auth: authDashboard, handler: handleApiProcessStop }
+  '/api/onboarding/complete': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleOnboardingComplete') },
+  '/api/workspaces': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiWorkspaces') },
+  '/api/diagnostics/reset': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnosticsReset') },
+  '/api/extensions': { auth: authDashboard, handler: lazyRoute(loadDashboardExtensions, 'handleApiExtensionsAction') },
+  '/api/computer': { auth: authDashboard, handler: lazyRoute(loadDashboardComputer, 'handleApiComputerAction') },
+  '/api/pick-folder': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handlePickFolder') },
+  '/api/open-folder': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleOpenFolder') },
+  '/api/workspace/checks': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleWorkspaceChecks') },
+  '/api/processes/stop': { auth: authDashboard, handler: lazyRoute(loadDashboardProcesses, 'handleApiProcessStop') }
 });
 
 function createHttpApp(options: ResolvedHttpServerOptions) {
@@ -132,9 +131,9 @@ function createHttpApp(options: ResolvedHttpServerOptions) {
     app.get(route, c => dispatchDirect(c, options, handleStaticAsset));
   }
 
-  app.get('/mcp', c => dispatchDirect(c, options, handleMcpGetDiagnostic));
-  app.post('/mcp', c => dispatchDirect(c, options, handleMcpStreamable));
-  app.delete('/mcp', c => dispatchDirect(c, options, handleMcpDelete));
+  app.get('/mcp', c => dispatchDirect(c, options, lazyRoute(loadMcpTransport, 'handleMcpGetDiagnostic')));
+  app.post('/mcp', c => dispatchDirect(c, options, lazyRoute(loadMcpTransport, 'handleMcpStreamable')));
+  app.delete('/mcp', c => dispatchDirect(c, options, lazyRoute(loadMcpTransport, 'handleMcpDelete')));
 
   app.notFound(c => {
     sendJson(c.env.outgoing, 404, NOT_FOUND_PAYLOAD);
@@ -183,6 +182,16 @@ function routeContext(c: NodeContext, options: ResolvedHttpServerOptions): HttpR
   };
 }
 
+async function prewarmHttpRoutes(): Promise<void> {
+  await loadMcpTransport();
+}
+
+async function shutdownHttpRoutes(): Promise<void> {
+  if (!mcpTransportPromise) return;
+  const transport = await mcpTransportPromise;
+  await transport.shutdownMcpTransport();
+}
+
 function alreadySentResponse(): Response {
   return new Response(null, { headers: { [ALREADY_SENT_HEADER]: '1' } });
 }
@@ -206,4 +215,4 @@ function blockMcpForRuntimeAccess(
   return true;
 }
 
-export { createHttpApp };
+export { createHttpApp, prewarmHttpRoutes, shutdownHttpRoutes };

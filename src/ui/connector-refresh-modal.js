@@ -7,7 +7,7 @@ const STORAGE_PREFIX = 'relai_connector_refresh';
 
 function prepareConnectorRefreshNotice(lifecycle = {}, storage) {
   const currentVersion = cleanVersion(lifecycle.currentVersion);
-  const connectorRevision = cleanRevision(lifecycle.connectorRevision) || currentVersion;
+  const connectorRevision = connectorRevisionForLifecycle(lifecycle);
   if (!connectorRevision) return null;
 
   const acknowledgedKey = storageKey('acknowledged', connectorRevision);
@@ -51,6 +51,11 @@ function initConnectorRefreshModal(options = {}) {
 
   void bridge.getLifecycleStatus().then(lifecycle => {
     if (cancelled) return;
+    const connectorRevision = connectorRevisionForLifecycle(lifecycle);
+    if (lifecycle?.connectorRefreshRequired === true && connectorRevision && readStorage(storage, storageKey('acknowledged', connectorRevision)) === '1') {
+      if (typeof bridge.acknowledgeConnectorRefresh === 'function') void Promise.resolve(bridge.acknowledgeConnectorRefresh()).catch(() => {});
+      return;
+    }
     const view = prepareConnectorRefreshNotice(lifecycle, storage);
     if (!view) return;
 
@@ -72,7 +77,16 @@ function initConnectorRefreshModal(options = {}) {
       title: view.title,
       content,
       size: 'compact',
-      onClose: () => acknowledgeConnectorRefreshNotice(view, storage)
+      onClose: () => {
+        const acknowledge = bridge.acknowledgeConnectorRefresh;
+        if (typeof acknowledge !== 'function') {
+          acknowledgeConnectorRefreshNotice(view, storage);
+          return;
+        }
+        void Promise.resolve(acknowledge()).then(result => {
+          if (result?.ok !== false) acknowledgeConnectorRefreshNotice(view, storage);
+        }).catch(() => {});
+      }
     });
   }).catch(() => {});
 
@@ -95,6 +109,10 @@ function writeStorage(storage, key, value) {
 
 function removeStorage(storage, key) {
   try { storage?.removeItem?.(key); } catch {}
+}
+
+function connectorRevisionForLifecycle(lifecycle = {}) {
+  return cleanRevision(lifecycle.connectorRevision) || cleanVersion(lifecycle.currentVersion);
 }
 
 function cleanVersion(value) {

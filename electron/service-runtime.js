@@ -5,6 +5,9 @@ import { createPerformanceBreakdown } from '../src/performanceObservability.js';
 const LOCAL_READY_TIMEOUT_MS = 5_000;
 const LOCAL_READY_POLL_MS = 100;
 const LOCAL_READY_REQUEST_TIMEOUT_MS = 750;
+const STOP_STARTUP_WAIT_TIMEOUT_MS = 16_000;
+const LOCAL_START_MAX_ATTEMPTS = 2;
+const LOCAL_START_RETRY_DELAY_MS = 250;
 
 function createDesktopServiceRuntime(deps) {
   const {
@@ -22,7 +25,8 @@ function createDesktopServiceRuntime(deps) {
     setStatus,
     replaceCurrentStatus,
     pushStatus,
-    fetchImpl = globalThis.fetch
+    fetchImpl = globalThis.fetch,
+    startupStopTimeoutMs = STOP_STARTUP_WAIT_TIMEOUT_MS
   } = deps;
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required.');
 
@@ -80,14 +84,43 @@ function createDesktopServiceRuntime(deps) {
     }
     const { guiConfig, apiKey } = prepared;
 
+    setStatus({
+      serverRunning: false,
+      starting: true,
+      tunnelStatus: 'starting',
+      tunnelId: guiConfig.tunnelId,
+      error: '',
+      errorCode: ''
+    });
+
     let actualPort;
     try {
       serviceProcessClient.updateContext({ runtimeLogs: runtimeLogs.snapshot() });
-      const localService = await timing.measure('desktop.local_service', () => serviceProcessClient.start({
-        host: '127.0.0.1',
-        port: guiConfig.port,
-        token: guiConfig.token
-      }));
+      let localService = null;
+      for (let attempt = 1; attempt <= LOCAL_START_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          localService = await timing.measure('desktop.local_service', () => serviceProcessClient.start({
+            host: '127.0.0.1',
+            port: guiConfig.port,
+            token: guiConfig.token
+          }));
+          break;
+        } catch (error) {
+          const retryable = attempt < LOCAL_START_MAX_ATTEMPTS && isRetryableLocalStartupError(error);
+          if (!retryable) throw error;
+          runtimeLogs.append?.('Local service process did not spawn. Rel.AI is retrying once with a fresh service process.', {
+            level: 'warning',
+            source: 'desktop-lifecycle',
+            code: 'local_service_start_retry',
+            details: {
+              attempt,
+              errorCode: String(error?.code || ''),
+              message: formatError(error)
+            }
+          });
+          await delay(LOCAL_START_RETRY_DELAY_MS);
+        }
+      }
       actualPort = Number(localService.port || guiConfig.port);
       await timing.measure('desktop.readiness', () => waitForLocalApplicationReady(fetchImpl, actualPort, guiConfig.token));
       activePort = actualPort;
@@ -112,6 +145,7 @@ function createDesktopServiceRuntime(deps) {
     const localUrl = `http://127.0.0.1:${actualPort}`;
     setStatus({
       serverRunning: true,
+      starting: false,
       tunnelStatus: 'starting',
       tunnelId: guiConfig.tunnelId,
       tunnelHealthUrl: '',
@@ -313,7 +347,8 @@ function createDesktopServiceRuntime(deps) {
     startPromise = null;
     localReadyPromise = null;
     if (pendingLocalReady) {
-      try { await pendingLocalReady; } catch {}
+      const startupSettled = await waitForPromise(pendingLocalReady, startupStopTimeoutMs);
+      if (!startupSettled) await serviceProcessClient.dispose({ stop: false }).catch(() => {});
     }
     const [localRuntime, secureTunnel] = await Promise.all([
       serviceProcessClient.stop().catch(error => ({
@@ -357,25 +392,48 @@ function createDesktopServiceRuntime(deps) {
 }
 
 async function waitForLocalApplicationReady(fetchImpl, port, token, timeoutMs = LOCAL_READY_TIMEOUT_MS) {
-  const deadline = Date.now() + Math.max(500, Number(timeoutMs || LOCAL_READY_TIMEOUT_MS));
+  const totalTimeoutMs = Math.max(500, Number(timeoutMs || LOCAL_READY_TIMEOUT_MS));
+  const deadline = Date.now() + totalTimeoutMs;
   let lastError = '';
   while (Date.now() < deadline) {
     try {
+      const healthTimeoutMs = Math.max(1, Math.min(LOCAL_READY_REQUEST_TIMEOUT_MS, deadline - Date.now()));
       const health = await fetchImpl(`http://127.0.0.1:${port}/health`, {
-        signal: AbortSignal.timeout(LOCAL_READY_REQUEST_TIMEOUT_MS)
+        signal: AbortSignal.timeout(healthTimeoutMs)
       });
+      if (Date.now() >= deadline) break;
+      const mcpTimeoutMs = Math.max(1, Math.min(LOCAL_READY_REQUEST_TIMEOUT_MS, deadline - Date.now()));
       const mcp = await fetchImpl(`http://127.0.0.1:${port}/mcp`, {
         headers: { authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(LOCAL_READY_REQUEST_TIMEOUT_MS)
+        signal: AbortSignal.timeout(mcpTimeoutMs)
       });
       if (health?.ok && Number(mcp?.status || 0) === 405) return true;
       lastError = `health=${health?.status || 0}, mcp=${mcp?.status || 0}`;
     } catch (error) {
       lastError = formatError(error);
     }
-    await delay(LOCAL_READY_POLL_MS);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs > 0) await delay(Math.min(LOCAL_READY_POLL_MS, remainingMs));
   }
-  throw new Error(`Local Rel.AI service did not become responsive within ${Math.round(timeoutMs / 1000)} seconds${lastError ? `: ${lastError}` : '.'}`);
+  throw new Error(`Local Rel.AI service did not become responsive within ${Math.round(totalTimeoutMs / 1000)} seconds${lastError ? `: ${lastError}` : '.'}`);
+}
+
+async function waitForPromise(promise, timeoutMs) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(() => true, () => true),
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve(false), Math.max(1, Number(timeoutMs || 1)));
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function isRetryableLocalStartupError(error) {
+  return String(error?.code || '') === 'REL_AI_SERVICE_SPAWN_TIMEOUT';
 }
 
 function tunnelErrorCode(error, errorCodes) {

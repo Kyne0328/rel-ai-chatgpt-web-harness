@@ -15,6 +15,8 @@ const HEALTH_REQUEST_TIMEOUT_MS = 1_500;
 const MONITOR_INTERVAL_MS = 2_000;
 const DEGRADED_FAILURE_THRESHOLD = 3;
 const FAILED_FAILURE_THRESHOLD = 30;
+const FAILED_OUTAGE_TIMEOUT_MS = 30_000;
+const STOP_PROCESS_TIMEOUT_MS = 5_000;
 const TUNNEL_RUNTIME_UNAVAILABLE_CODE = 'tunnel_runtime_unavailable';
 const FATAL_TUNNEL_CODES = new Set([
   'tunnel_authentication_failed',
@@ -38,7 +40,9 @@ function createSecureTunnelRuntime({
   onStatus = () => {},
   monitorIntervalMs = MONITOR_INTERVAL_MS,
   degradedFailureThreshold = DEGRADED_FAILURE_THRESHOLD,
-  failedFailureThreshold = FAILED_FAILURE_THRESHOLD
+  failedFailureThreshold = FAILED_FAILURE_THRESHOLD,
+  failedOutageTimeoutMs = FAILED_OUTAGE_TIMEOUT_MS,
+  stopProcessTimeoutMs = STOP_PROCESS_TIMEOUT_MS
 } = {}) {
   if (typeof spawnImpl !== 'function') throw new TypeError('spawnImpl is required.');
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required.');
@@ -55,6 +59,8 @@ function createSecureTunnelRuntime({
   const monitorDelayMs = Math.max(50, Number(monitorIntervalMs || MONITOR_INTERVAL_MS));
   const degradedAfterFailures = Math.max(1, Math.floor(Number(degradedFailureThreshold || DEGRADED_FAILURE_THRESHOLD)));
   const failedAfterFailures = Math.max(degradedAfterFailures + 1, Math.floor(Number(failedFailureThreshold || FAILED_FAILURE_THRESHOLD)));
+  const failedAfterMs = Math.max(50, Number(failedOutageTimeoutMs || FAILED_OUTAGE_TIMEOUT_MS));
+  const stopTimeoutMs = Math.max(50, Number(stopProcessTimeoutMs || STOP_PROCESS_TIMEOUT_MS));
   let state = freezeState({
     state: 'stopped',
     tunnelId: '',
@@ -140,7 +146,7 @@ function createSecureTunnelRuntime({
         outageStartedAt: null
       });
       if (ownedChild && ownedChild.exitCode === null) {
-        fatalStopPromise = stopProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 })
+        fatalStopPromise = stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 })
           .catch(() => ({ exited: false, forced: false }))
           .finally(() => {
             if (child === ownedChild) child = null;
@@ -231,7 +237,7 @@ function createSecureTunnelRuntime({
       const failure = fatalFailure || normalizeTunnelFailure(error);
       if (runGeneration === generation) {
         if (fatalStopPromise) await fatalStopPromise;
-        else if (ownedChild?.exitCode === null) await stopProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
+        else if (ownedChild?.exitCode === null) await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
         if (child === ownedChild) child = null;
         await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
         update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, consecutiveFailures: 0, outageStartedAt: null });
@@ -255,7 +261,7 @@ function createSecureTunnelRuntime({
       } catch (error) {
         if (FATAL_TUNNEL_CODES.has(String(error?.code || ''))) {
           if (child === ownedChild) child = null;
-          await stopProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
+          await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
           update({
             state: 'failed',
             tunnelId,
@@ -295,9 +301,9 @@ function createSecureTunnelRuntime({
 
       consecutiveFailures += 1;
       outageStartedAt ||= Date.now();
-      if (consecutiveFailures >= failedAfterFailures) {
+      if (consecutiveFailures >= failedAfterFailures || Date.now() - outageStartedAt >= failedAfterMs) {
         if (child === ownedChild) child = null;
-        await stopProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
+        await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
         update({
           state: 'failed',
           tunnelId,
@@ -405,7 +411,16 @@ function createSecureTunnelRuntime({
       update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null });
       return { stopped: true, exited: true, forced: false };
     }
-    const result = await stopProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 });
+    let result;
+    try {
+      result = await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 });
+    } catch (error) {
+      if (monitorPromise) await Promise.race([monitorPromise, delay(100)]).catch(() => {});
+      monitorPromise = null;
+      transportFailureStreak = 0;
+      update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null });
+      return { stopped: false, exited: false, forced: true, error: messageOf(error) };
+    }
     if (monitorPromise) await Promise.race([monitorPromise, delay(100)]).catch(() => {});
     monitorPromise = null;
     transportFailureStreak = 0;
@@ -415,6 +430,25 @@ function createSecureTunnelRuntime({
 
   function snapshot() {
     return { ...state, processOwned: Boolean(child && child.exitCode === null) };
+  }
+
+  async function stopOwnedProcess(ownedChild, stopOptions) {
+    let timer = null;
+    try {
+      return await Promise.race([
+        Promise.resolve(stopProcess(ownedChild, stopOptions)),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(
+            `OpenAI tunnel-client did not stop within ${Math.round(stopTimeoutMs / 100) / 10} seconds.`
+          )), stopTimeoutMs);
+        })
+      ]);
+    } catch (error) {
+      try { ownedChild?.kill?.('SIGKILL'); } catch {}
+      throw error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   function update(patch) {

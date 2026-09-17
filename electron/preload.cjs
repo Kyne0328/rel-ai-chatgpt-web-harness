@@ -39,6 +39,7 @@ if (surface === 'dashboard') {
     downloadUpdate: () => ipcRenderer.invoke('desktop:update:download'),
     installUpdate: () => ipcRenderer.invoke('desktop:update:install'),
     getLifecycleStatus: () => ipcRenderer.invoke('desktop:lifecycle:get'),
+    acknowledgeConnectorRefresh: () => ipcRenderer.invoke('desktop:lifecycle:acknowledge-connector-refresh'),
     setLaunchAtLogin: enabled => ipcRenderer.invoke('desktop:startup:set', enabled === true),
     setKeepAwake: enabled => ipcRenderer.invoke('desktop:keep-awake:set', enabled === true),
     setAppPreferences: patch => ipcRenderer.invoke('desktop:app-preferences:set', patch),

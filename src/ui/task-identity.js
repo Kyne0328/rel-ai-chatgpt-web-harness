@@ -224,7 +224,7 @@ export function workSessionStateView(value = {}) {
     failed: ['Failed', true, false, 'bad'],
     cancelled: ['Cancelled', true, false, ''],
     expired: ['Expired', true, false, ''],
-    inactive: ['Waiting for next action', false, false, '']
+    inactive: ['Inactive', false, false, '']
   };
   const inactiveContext = status === 'inactive' && typeof value === 'object'
     ? normalize(value.resumeStatus || (value.validation === 'failed' ? 'validation_failed' : ''))

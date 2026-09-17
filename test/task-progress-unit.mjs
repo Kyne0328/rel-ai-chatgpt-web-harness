@@ -20,7 +20,7 @@ for (const [status, className, state, fallback] of [
 const inactive = taskProgressView({ mode: 'indeterminate', label: 'Waiting for the next task step' }, 'inactive');
 assert.equal(inactive.kind, 'static');
 assert.match(inactive.className, /static paused/);
-assert.equal(inactive.state, 'Waiting for next action');
+assert.equal(inactive.state, 'Inactive');
 assert.equal(inactive.label, 'Ready to resume');
 
 for (const [status, className] of [

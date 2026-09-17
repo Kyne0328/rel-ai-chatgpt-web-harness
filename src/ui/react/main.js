@@ -19,9 +19,11 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { HashRouter, useLocation } from 'react-router-dom';
 import { Icon } from '../components/icons.js';
 import { connectionLayerViews, connectionSummary } from '../connection-state.js';
+import { DEVELOPER_MODE_CHANGE_EVENT, DEVELOPER_MODE_STORAGE_KEY, readDeveloperModeEnabled } from '../developer-mode.js';
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import {
   APPLICATION_NAV_ITEMS,
+  EXTENSIONS_NAV_ITEM,
   MOBILE_MORE_NAV_ITEMS,
   MOBILE_PRIMARY_NAV_ITEMS,
   SETTINGS_NAV_ITEMS,
@@ -242,6 +244,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   ));
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [developerModeEnabled, setDeveloperModeEnabled] = useState(() => readDeveloperModeEnabled());
   const paletteOpener = useRef(null);
   const previousRouteKey = useRef(route.key);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -271,6 +274,19 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const refreshDeveloperMode = () => setDeveloperModeEnabled(readDeveloperModeEnabled());
+    const onStorage = event => {
+      if (event.key === DEVELOPER_MODE_STORAGE_KEY) refreshDeveloperMode();
+    };
+    window.addEventListener(DEVELOPER_MODE_CHANGE_EVENT, refreshDeveloperMode);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(DEVELOPER_MODE_CHANGE_EVENT, refreshDeveloperMode);
+      window.removeEventListener('storage', onStorage);
+    };
   }, []);
 
   const toggleSidebar = () => {
@@ -306,13 +322,14 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     },
       h(DesktopSidebar, {
         collapsed: sidebarCollapsed,
+        developerModeEnabled,
         openAccordion,
         route,
         setOpenAccordion,
         toggleSidebar
       }),
       h('main', { id: 'main', className: 'main', tabIndex: -1, 'aria-labelledby': 'pageTitle' },
-        h(MobileNavigation, { open: mobileMoreOpen, route, setOpen: setMobileMoreOpen }),
+        h(MobileNavigation, { developerModeEnabled, open: mobileMoreOpen, route, setOpen: setMobileMoreOpen }),
         h('header', { className: 'topbar' },
           h('div', { className: 'title-wrap' },
             h('h1', { className: 'page-title', id: 'pageTitle', tabIndex: -1 }, route.title),
@@ -347,6 +364,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     ),
     h(CommandPalette, {
       data,
+      developerModeEnabled,
       onAddWorkspace,
       onClose: closePalette,
       open: paletteOpen,
@@ -357,7 +375,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   );
 }
 
-function DesktopSidebar({ collapsed, openAccordion, route, setOpenAccordion, toggleSidebar }) {
+function DesktopSidebar({ collapsed, developerModeEnabled, openAccordion, route, setOpenAccordion, toggleSidebar }) {
   const surface = document.documentElement.dataset.surface || 'browser';
   return h('aside', { className: 'sidebar', id: 'desktopSidebar' },
     h('div', { className: 'brand' },
@@ -386,6 +404,7 @@ function DesktopSidebar({ collapsed, openAccordion, route, setOpenAccordion, tog
     ),
     h('div', { className: 'sidebar-group secondary-nav' },
       h('div', { className: 'sidebar-group-label' }, 'Application'),
+      developerModeEnabled ? h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }) : null,
       h(SidebarAccordion, {
         parent: APPLICATION_NAV_ITEMS[0],
         items: SYSTEM_NAV_ITEMS,
@@ -434,9 +453,10 @@ function SidebarAccordion({ parent, items, activeOwner, activePath, openAccordio
   );
 }
 
-function MobileNavigation({ open, route, setOpen }) {
+function MobileNavigation({ developerModeEnabled, open, route, setOpen }) {
   const detailsRef = useRef(null);
-  const moreActive = MOBILE_MORE_NAV_ITEMS.some(item => item.id === route.owner);
+  const moreItems = developerModeEnabled ? [...MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM] : MOBILE_MORE_NAV_ITEMS;
+  const moreActive = moreItems.some(item => item.id === route.owner);
   useEffect(() => {
     const onPointerDown = event => {
       if (open && detailsRef.current && !detailsRef.current.contains(event.target)) setOpen(false);
@@ -469,7 +489,7 @@ function MobileNavigation({ open, route, setOpen }) {
         h('span', { className: 'nav-label' }, 'More')
       ),
       h('div', { className: 'mobile-nav-more-menu' },
-        MOBILE_MORE_NAV_ITEMS.map(item => h(NavLink, {
+        moreItems.map(item => h(NavLink, {
           key: item.id,
           item,
           active: route.owner === item.id,
@@ -747,11 +767,11 @@ function RecoveryNotice({ recovery }) {
   );
 }
 
-function CommandPalette({ data, onAddWorkspace, onClose, open, opener }) {
+function CommandPalette({ data, developerModeEnabled, onAddWorkspace, onClose, open, opener }) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef(null);
-  const commands = useMemo(() => buildCommands(data, onAddWorkspace, onClose), [data?.config?.workspaces, onAddWorkspace, onClose]);
+  const commands = useMemo(() => buildCommands(data, developerModeEnabled, onAddWorkspace, onClose), [data?.config?.workspaces, developerModeEnabled, onAddWorkspace, onClose]);
   const visible = useMemo(() => {
     const normalized = normalizeSearch(query);
     return commands.filter(command => !normalized || command.searchText.includes(normalized)).slice(0, 14);
@@ -858,8 +878,8 @@ function CommandPalette({ data, onAddWorkspace, onClose, open, opener }) {
   ));
 }
 
-function buildCommands(data, onAddWorkspace, closePalette) {
-  const commands = navigationCommands().map(item => ({
+function buildCommands(data, developerModeEnabled, onAddWorkspace, closePalette) {
+  const commands = navigationCommands({ includeExtensions: developerModeEnabled }).map(item => ({
     id: item.path.replaceAll('/', '-'),
     label: item.group === 'Settings' ? `Settings · ${item.label}` : item.label,
     description: item.description,

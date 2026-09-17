@@ -8,11 +8,14 @@ import {
   checkpointSqlite,
   createSqliteBackup,
   isSqliteCorruptionError,
+  isSqliteValidationCurrent,
   restoreSqliteBackup,
-  sqliteBackupPath
+  sqliteBackupPath,
+  writeSqliteValidationStamp
 } from './sqliteDurability.ts';
 
 const KNOWLEDGE_SCHEMA_VERSION = 4;
+const KNOWLEDGE_VALIDATION_KEY = `knowledge-v${KNOWLEDGE_SCHEMA_VERSION}`;
 const DEFAULT_BOOTSTRAP_BYTES = 4096;
 
 const META_SCHEMA_SQL = `
@@ -120,20 +123,25 @@ function removeLegacyGenericMemory(db) {
 function initializeKnowledgeDatabase(config = {}) {
   const file = knowledgeDatabasePath(config);
   if (!fs.existsSync(file)) return { ok: true, skipped: true, recovered: false, path: file };
+  const validated = isSqliteValidationCurrent(file, KNOWLEDGE_VALIDATION_KEY);
   try {
     const db = openKnowledgeDatabase(config);
     try {
-      assertSqliteIntegrity(db, 'Knowledge database');
-      return { ok: true, recovered: false, path: file };
+      if (!validated) assertSqliteIntegrity(db, 'Knowledge database');
     } finally {
       db.close();
     }
+    if (!validated) {
+      try { writeSqliteValidationStamp(file, KNOWLEDGE_VALIDATION_KEY); } catch {}
+    }
+    return { ok: true, recovered: false, path: file };
   } catch (error) {
     if (!isSqliteCorruptionError(error)) throw error;
     const recovery = restoreSqliteBackup(file, { label: 'Knowledge database' });
     const db = openKnowledgeDatabase(config);
     try { assertSqliteIntegrity(db, 'Knowledge database'); }
     finally { db.close(); }
+    try { writeSqliteValidationStamp(file, KNOWLEDGE_VALIDATION_KEY); } catch {}
     return { ok: true, recovered: true, path: file, ...recovery };
   }
 }
@@ -142,14 +150,17 @@ function maintainKnowledgeDatabase(config = {}) {
   const file = knowledgeDatabasePath(config);
   if (!fs.existsSync(file)) return { ok: true, skipped: true, path: file };
   const db = openKnowledgeDatabase(config);
+  let result;
   try {
     const checkpoint = checkpointSqlite(db, 'Knowledge database');
     const integrity = assertSqliteIntegrity(db, 'Knowledge database');
     const backup = createSqliteBackup(db, file, { label: 'Knowledge database' });
-    return { ok: true, path: file, checkpoint, integrity, backupPath: backup.path };
+    result = { ok: true, path: file, checkpoint, integrity, backupPath: backup.path };
   } finally {
     db.close();
   }
+  try { writeSqliteValidationStamp(file, KNOWLEDGE_VALIDATION_KEY); } catch {}
+  return result;
 }
 
 function ensureLearningState(config) {

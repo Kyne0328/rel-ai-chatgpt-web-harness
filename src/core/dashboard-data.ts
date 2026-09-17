@@ -60,9 +60,9 @@ function buildDashboardPayload(
     ? options.getTaskActivity() as TaskActivity
     : createEmptyTaskActivity();
   const connectionProjection = buildDashboardConnectionProjection(config, options);
-  const limit = Math.max(Number(options.limit || 100), 200);
+  const limit = Math.min(500, Math.max(1, Math.floor(Number(options.limit || 100))));
   const base = productUx.dashboardData(config, { limit });
-  const persistedTasks: TaskRecord[] = readTaskHistory(config, taskActivity, { limit: 500, summary: true });
+  const persistedTasks: TaskRecord[] = readTaskHistory(config, taskActivity, { limit, summary: true, maintain: false });
   const persistedActivityEvents = readRecentTaskHistoryEvents(config, limit * 2);
   const tasks = persistedTasks.map(summarizeDashboardTask);
   const liveActivityTasks = Array.isArray(taskActivity.tasks) ? taskActivity.tasks : [];
@@ -216,7 +216,7 @@ function mergeDashboardActivityEntry(existing: JsonRecord, incoming: JsonRecord)
   for (const key of ['summary', 'message', 'currentActivity', 'title', 'operation', 'path']) {
     if (!displayText(incoming?.[key]) && displayText(existing?.[key])) merged[key] = existing[key];
   }
-  merged.safeCopy = buildSafeActivityProjection(merged);
+  merged.safeCopy = buildSafeActivityProjection(merged, { alreadySanitized: true });
   return merged;
 }
 
@@ -227,7 +227,7 @@ function displayText(value: unknown): string {
 function normalizeDashboardActivity(entry: JsonRecord): JsonRecord {
   entry = asJsonRecord(sanitizeActivityEventRecord(entry));
   const status = typeof entry.status === 'string' ? entry.status : entry.ok === false ? 'failed' : 'succeeded';
-  const safeCopy = buildSafeActivityProjection({ ...entry, status });
+  const safeCopy = buildSafeActivityProjection({ ...entry, status }, { alreadySanitized: true });
   const tool = asJsonRecord(entry.tool);
   const result = asJsonRecord(entry.result);
   const error = asJsonRecord(entry.error);

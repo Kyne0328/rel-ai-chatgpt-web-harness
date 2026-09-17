@@ -91,6 +91,14 @@ assert.equal((await second.setKeepAwake(false)).status.keepAwake, false);
 await second.markCleanShutdown();
 
 const statePath = path.join(stateDir, 'desktop-lifecycle.json');
+const preDurableState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+delete preDurableState.pendingConnectorRefreshRevision;
+fs.writeFileSync(statePath, `${JSON.stringify(preDurableState, null, 2)}\n`);
+const migrated = createDesktopLifecycleManager({ app, platform: 'win32', env: {}, now, connectorRevision: 'surface-a', onLog: (message, options) => logs.push({ message, options }) });
+assert.equal((await migrated.start()).connectorRefreshRequired, true, 'existing lifecycle state from before durable refresh tracking must recover a potentially missed notice');
+assert.equal((await migrated.acknowledgeConnectorRefresh()).ok, true);
+await migrated.markCleanShutdown();
+
 const previousState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const { connectorRevision: _legacyConnectorRevision, ...legacyState } = previousState;
 fs.writeFileSync(statePath, `${JSON.stringify({ ...legacyState, version: '0.20.7', running: true }, null, 2)}\n`);
@@ -106,23 +114,37 @@ const changedSurface = createDesktopLifecycleManager({ app, platform: 'win32', e
 const changedSurfaceStatus = await changedSurface.start();
 assert.equal(changedSurfaceStatus.updated, false);
 assert.equal(changedSurfaceStatus.connectorRefreshRequired, true, 'a changed connector revision must request refresh even without an app-version change');
+assert.equal(changedSurfaceStatus.pendingConnectorRefreshRevision, 'surface-c');
 await changedSurface.markCleanShutdown();
 
 const interruptedState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 fs.writeFileSync(statePath, `${JSON.stringify({ ...interruptedState, running: true }, null, 2)}\n`);
 const recovered = createDesktopLifecycleManager({ app, platform: 'win32', env: {}, now, connectorRevision: 'surface-c', onLog: (message, options) => logs.push({ message, options }) });
 assert.equal((await recovered.start()).recoveredAfterUncleanShutdown, true);
-assert.equal(recovered.getStatus().connectorRefreshRequired, false, 'restarting the same connector revision must not request another refresh');
+assert.equal(recovered.getStatus().connectorRefreshRequired, true, 'an unacknowledged connector refresh must survive a restart');
+assert.equal((await recovered.acknowledgeConnectorRefresh()).ok, true);
+assert.equal(recovered.getStatus().connectorRefreshRequired, false, 'acknowledging the notice must clear the durable refresh requirement');
 assert.ok(logs.some(entry => entry.options.code === 'unclean_shutdown_detected'));
+await recovered.markCleanShutdown();
 
-const background = createDesktopLifecycleManager({ app, platform: 'win32', env: {}, argv: ['RelAI.exe', '--background'], now, connectorRevision: 'surface-b' });
-assert.equal((await background.start()).openedAtLogin, true);
+const acknowledgedRestart = createDesktopLifecycleManager({ app, platform: 'win32', env: {}, now, connectorRevision: 'surface-c', onLog: (message, options) => logs.push({ message, options }) });
+assert.equal((await acknowledgedRestart.start()).connectorRefreshRequired, false, 'an acknowledged connector revision must stay cleared on the next launch');
+await acknowledgedRestart.markCleanShutdown();
+
+const background = createDesktopLifecycleManager({ app, platform: 'win32', env: {}, argv: ['RelAI.exe', '--background'], now, connectorRevision: 'surface-d' });
+const backgroundStatus = await background.start();
+assert.equal(backgroundStatus.openedAtLogin, true);
+assert.equal(backgroundStatus.connectorRefreshRequired, true, 'a connector change detected during a background launch must remain pending');
 await background.markCleanShutdown();
+
+const afterBackground = createDesktopLifecycleManager({ app, platform: 'win32', env: {}, now, connectorRevision: 'surface-d' });
+assert.equal((await afterBackground.start()).connectorRefreshRequired, true, 'background startup must not consume the connector refresh notice');
+assert.equal((await afterBackground.acknowledgeConnectorRefresh()).ok, true);
+await afterBackground.markCleanShutdown();
 
 const portable = createDesktopLifecycleManager({ app, platform: 'win32', env: { PORTABLE_EXECUTABLE_FILE: 'RelAI.exe' }, now, connectorRevision: 'surface-b' });
 assert.equal((await portable.start()).launchAtLogin.supported, false);
 assert.equal(portable.setLaunchAtLogin(true).errorCode, 'startup_setting_not_supported');
 
-await recovered.markCleanShutdown();
 fs.rmSync(stateDir, { recursive: true, force: true });
 console.log('Desktop lifecycle unit tests passed.');

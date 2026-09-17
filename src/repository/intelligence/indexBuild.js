@@ -10,6 +10,7 @@ import {
   deleteIndexedPath,
   ensureIndexSchema,
   finishGeneration,
+  indexParserVersion,
   indexProducerVersion,
   indexStats,
   listManifest,
@@ -18,6 +19,7 @@ import {
   relationshipImpactForPaths,
   relationshipSourceIdsForNames,
   resolveRelationships,
+  setIndexParserVersion,
   setIndexProducerVersion
 } from './database.js';
 import { enhancedResolverLanguages, isTestPath, languageForPath, PARSER_VERSION, structuralLanguages } from './languages.js';
@@ -29,6 +31,7 @@ const DEFAULT_MAX_INDEX_FILES = 100000;
 const MAX_INDEXED_FILE_BYTES = 1024 * 1024;
 const WRITE_BATCH_SIZE = 100;
 const PARSE_CONCURRENCY = 8;
+const relationshipResolutionCaches = new Map();
 
 async function executeRepositoryIndexJob(job, signal) {
   const kind = normalizeJobKind(job?.kind);
@@ -111,16 +114,22 @@ async function refreshRepositoryIndex(job, signal) {
   try {
     db = openIndexDatabase(databaseFile);
     ensureIndexSchema(db);
-    const integrity = checkIndexIntegrity(db);
-    if (!integrity.ok) {
-      const error = new Error(`Repository Intelligence index integrity check failed: ${integrity.message}`);
-      error.code = 'INDEX_INTEGRITY_FAILED';
-      throw error;
-    }
     const previousGeneration = currentGeneration(db);
-    const manifest = listManifest(db);
+    const requestedPaths = normalizeRequestedPaths(job?.paths);
+    const incrementalCandidate = Boolean(previousGeneration && requestedPaths.length && normalizeJobKind(job?.kind) === 'refresh');
+    const parserVersionChanged = parserVersionChangedForIndex(db);
+    const manifest = incrementalCandidate && !parserVersionChanged
+      ? listManifest(db, requestedPaths)
+      : listManifest(db);
     const manifestByPath = new Map(manifest.map(item => [item.path, item]));
-    const parserVersionChanged = manifest.some(item => item.parserVersion !== PARSER_VERSION);
+    if (!incrementalCandidate || parserVersionChanged) {
+      const integrity = checkIndexIntegrity(db);
+      if (!integrity.ok) {
+        const error = new Error(`Repository Intelligence index integrity check failed: ${integrity.message}`);
+        error.code = 'INDEX_INTEGRITY_FAILED';
+        throw error;
+      }
+    }
     const runtimeProducerVersion = intelligenceRuntimeFingerprint();
     const producerVersionChanged = Boolean(previousGeneration && indexProducerVersion(db) !== runtimeProducerVersion);
     if (producerVersionChanged) {
@@ -128,7 +137,6 @@ async function refreshRepositoryIndex(job, signal) {
       error.code = 'INDEX_PRODUCER_CHANGED';
       throw error;
     }
-    const requestedPaths = normalizeRequestedPaths(job?.paths);
     let scan = previousGeneration && requestedPaths.length && !parserVersionChanged && !producerVersionChanged
       ? scanSelectedPaths(workspace, requestedPaths)
       : scanWorkspace(workspace, maxFiles);
@@ -216,11 +224,21 @@ async function refreshRepositoryIndex(job, signal) {
         for (const sourceId of relationshipImpactForPaths(db, changedPaths).sourceFileIds) impacted.add(sourceId);
         if (impacted.size <= 500) relationshipSourceIds = [...impacted];
       }
-      resolveRelationships(db, { workspaceRoot: workspace.path, sourceFileIds: relationshipSourceIds });
+      // A full relationship pass must rebuild its path/symbol context after
+      // additions, deletions, or any scope-safety fallback; otherwise a
+      // generation cache could omit newly indexed files.
+      const resolutionCache = relationshipResolutionCacheFor(
+        databaseFile,
+        previousGeneration,
+        scan.mode === 'full' || relationshipSourceIds == null
+      );
+      resolveRelationships(db, { workspaceRoot: workspace.path, sourceFileIds: relationshipSourceIds, resolutionCache });
       setIndexProducerVersion(db, runtimeProducerVersion);
+      setIndexParserVersion(db, PARSER_VERSION);
       finishGeneration(db, generationId, 'committed', processedFiles + skippedChangedFiles + deleted.length);
       db.exec('COMMIT');
       generationTransactionOpen = false;
+      if (resolutionCache) resolutionCache.generationId = Number(generationId);
     } catch (error) {
       if (generationTransactionOpen) {
         try { db.exec('ROLLBACK'); } catch {}
@@ -509,6 +527,32 @@ function throwIfAborted(signal) {
 
 function boundedErrorMessage(error) {
   return String(error instanceof Error ? error.message : error || 'Unknown error').slice(0, 2000);
+}
+
+function parserVersionChangedForIndex(db) {
+  const stored = Number(indexParserVersion(db));
+  if (Number.isFinite(stored) && stored > 0) return stored !== PARSER_VERSION;
+  // Indexes created before the parser-version metadata was introduced need a
+  // one-time compatibility check. Every subsequent refresh uses the O(1) meta
+  // value written at generation commit.
+  const versions = db.prepare('SELECT DISTINCT parser_version FROM files').all();
+  return versions.some(row => Number(row.parser_version) !== PARSER_VERSION);
+}
+
+function relationshipResolutionCacheFor(databaseFile, previousGeneration, fullScan) {
+  if (fullScan) {
+    const cache = { generationId: 0, context: null };
+    relationshipResolutionCaches.set(databaseFile, cache);
+    return cache;
+  }
+  const cache = relationshipResolutionCaches.get(databaseFile);
+  if (cache && Number(cache.generationId) === Number(previousGeneration?.id)) return cache;
+  // A worker may have been evicted since the last full generation. Recreate a
+  // cache shell so the scoped resolver can repopulate its path metadata once;
+  // this preserves ecosystem/alias import behavior after worker restart.
+  const replacement = { generationId: Number(previousGeneration?.id || 0), context: null };
+  relationshipResolutionCaches.set(databaseFile, replacement);
+  return replacement;
 }
 
 async function mapWithConcurrency(items, limit, mapper) {

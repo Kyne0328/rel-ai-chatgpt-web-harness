@@ -166,6 +166,7 @@ function shouldInterceptTool(definition: any, args: any = {}) {
 }
 
 function shouldUseResilientFallback(definition: any, args: any = {}) {
+  if (definition?.operationName === 'read' && args?.asResource === true) return false;
   return TRANSPORT_RESILIENT_OPERATION_NAMES.has(String(definition?.operationName || ''))
     && !catalogApprovalRequirement(definition.name, args || {});
 }

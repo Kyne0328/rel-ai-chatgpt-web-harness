@@ -37,12 +37,21 @@ function createDesktopLifecycleManager(options = {}) {
     const previous = await readState();
     const currentVersion = cleanVersion(app.getVersion());
     const previousConnectorRevision = cleanText(previous.connectorRevision, 240);
+    const previousPendingConnectorRevision = cleanText(previous.pendingConnectorRefreshRevision, 240);
+    const hasDurableConnectorRefreshState = Object.hasOwn(previous, 'pendingConnectorRefreshRevision');
     const updated = Boolean(previous.version && previous.version !== currentVersion);
-    const connectorRefreshRequired = Boolean(previous.version && currentConnectorRevision && (
+    const connectorChanged = Boolean(previous.version && currentConnectorRevision && (
       previousConnectorRevision
         ? previousConnectorRevision !== currentConnectorRevision
         : updated
     ));
+    const migrateUntrackedConnectorRefresh = Boolean(previous.version && currentConnectorRevision && !hasDurableConnectorRefreshState);
+    const pendingConnectorRefreshRevision = connectorChanged || migrateUntrackedConnectorRefresh
+      ? currentConnectorRevision
+      : previousPendingConnectorRevision === currentConnectorRevision
+        ? currentConnectorRevision
+        : '';
+    const connectorRefreshRequired = Boolean(pendingConnectorRefreshRevision);
     const launchAtLogin = readLaunchAtLogin();
     launchId = crypto.randomUUID();
     status = {
@@ -51,6 +60,7 @@ function createDesktopLifecycleManager(options = {}) {
       previousVersion: previous.version && previous.version !== currentVersion ? cleanVersion(previous.version) : '',
       firstLaunch: !previous.version,
       updated,
+      pendingConnectorRefreshRevision,
       connectorRefreshRequired,
       recoveredAfterUncleanShutdown: previous.running === true && !updated,
       launchCount: Math.max(0, Number(previous.launchCount || 0)) + 1,
@@ -103,6 +113,23 @@ function createDesktopLifecycleManager(options = {}) {
       onLog(message, { source: 'desktop-lifecycle', level: 'error', code: codes.failed });
       return { ok: false, errorCode: codes.failed, error: message, status: snapshot() };
     }
+  }
+
+  async function acknowledgeConnectorRefresh() {
+    if (!status.connectorRefreshRequired) return { ok: true, status: snapshot() };
+    const previousPendingRevision = status.pendingConnectorRefreshRevision;
+    status = { ...status, pendingConnectorRefreshRevision: '', connectorRefreshRequired: false };
+    if (!await writeState(persistedState(Boolean(launchId)))) {
+      status = { ...status, pendingConnectorRefreshRevision: previousPendingRevision, connectorRefreshRequired: true };
+      return {
+        ok: false,
+        errorCode: codes.state,
+        error: 'Connector refresh acknowledgement could not be saved. Try again.',
+        status: snapshot()
+      };
+    }
+    onLog('ChatGPT connector refresh notice acknowledged.', { source: 'desktop-lifecycle' });
+    return { ok: true, status: snapshot() };
   }
 
   async function setKeepAwake(enabled) {
@@ -203,6 +230,7 @@ function createDesktopLifecycleManager(options = {}) {
     return {
       version: status.currentVersion,
       connectorRevision: status.connectorRevision,
+      pendingConnectorRefreshRevision: status.pendingConnectorRefreshRevision,
       running,
       launchId,
       launchCount: status.launchCount,
@@ -236,7 +264,7 @@ function createDesktopLifecycleManager(options = {}) {
     return { ...status, launchAtLogin: { ...status.launchAtLogin } };
   }
 
-  return { start, markCleanShutdown, getStatus, setLaunchAtLogin, setKeepAwake, setPreferences };
+  return { start, markCleanShutdown, getStatus, acknowledgeConnectorRefresh, setLaunchAtLogin, setKeepAwake, setPreferences };
 }
 
 function baseStatus(app, support, connectorRevision = '') {
@@ -246,6 +274,7 @@ function baseStatus(app, support, connectorRevision = '') {
     firstLaunch: false,
     updated: false,
     connectorRevision: cleanText(connectorRevision, 240),
+    pendingConnectorRefreshRevision: '',
     connectorRefreshRequired: false,
     recoveredAfterUncleanShutdown: false,
     launchCount: 0,

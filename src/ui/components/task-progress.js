@@ -1,7 +1,7 @@
 const STATIC_PROGRESS_STATES = Object.freeze({
   failed: Object.freeze({ fallback: 'Task failed', state: 'Failed', className: 'terminal failed' }),
   cancelled: Object.freeze({ fallback: 'Task cancelled', state: 'Cancelled', className: 'terminal cancelled' }),
-  inactive: Object.freeze({ fallback: 'Ready to resume', state: 'Waiting for next action', className: 'paused' }),
+  inactive: Object.freeze({ fallback: 'Ready to resume', state: 'Inactive', className: 'paused' }),
   expired: Object.freeze({ fallback: 'Task expired', state: 'Expired', className: 'terminal cancelled' }),
   validation_failed: Object.freeze({ fallback: 'Fix the issues and run checks again', state: 'Action required', className: 'paused failed' }),
   blocked: Object.freeze({ fallback: 'Resolve the blocker to continue', state: 'Action required', className: 'paused blocked' }),

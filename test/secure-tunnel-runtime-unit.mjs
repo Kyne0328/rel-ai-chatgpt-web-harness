@@ -18,6 +18,11 @@ function fakeSpawn(executable, args, options) {
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.exitCode = null;
+  child.kill = signal => {
+    child.killedWith = signal;
+    child.exitCode = 1;
+    return true;
+  };
   const healthIndex = args.indexOf('--health.url-file');
   fs.writeFileSync(args[healthIndex + 1], 'http://127.0.0.1:49001\n');
   spawned = { executable, args, options, child };
@@ -103,6 +108,44 @@ try {
   assert.ok(persistentRuntime.snapshot().consecutiveFailures >= 4, 'persistent outage must escalate only after the second failure threshold');
 
   operational = true;
+
+  const elapsedOutageRuntime = createSecureTunnelRuntime({
+    spawnImpl: fakeSpawn,
+    fetchImpl: fetchTunnel,
+    stopProcess: async child => { child.exitCode = 0; return { exited: true, forced: false }; },
+    resolveExecutable: () => process.execPath,
+    makeEnvironment: makeTunnelProcessEnvironment,
+    stateDir,
+    monitorIntervalMs: 10,
+    degradedFailureThreshold: 2,
+    failedFailureThreshold: 1000,
+    failedOutageTimeoutMs: 50
+  });
+  await elapsedOutageRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333, localToken: 'local-secret', apiKey: 'sk-runtime-elapsed-outage-123456', timeoutMs: 1000 });
+  operational = false;
+  await waitFor(() => elapsedOutageRuntime.snapshot().state === 'failed');
+  assert.ok(elapsedOutageRuntime.snapshot().consecutiveFailures < 1000,
+    'persistent outage escalation must be bounded by elapsed outage time instead of waiting only for a large probe-count threshold');
+  operational = true;
+
+  const boundedStopRuntime = createSecureTunnelRuntime({
+    spawnImpl: fakeSpawn,
+    fetchImpl: fetchTunnel,
+    stopProcess: () => new Promise(() => {}),
+    resolveExecutable: () => process.execPath,
+    makeEnvironment: makeTunnelProcessEnvironment,
+    stateDir,
+    stopProcessTimeoutMs: 50
+  });
+  await boundedStopRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333, localToken: 'local-secret', apiKey: 'sk-runtime-bounded-stop-123456', timeoutMs: 1000 });
+  const boundedStopChild = spawned.child;
+  const boundedStopStartedAt = Date.now();
+  const boundedStopResult = await boundedStopRuntime.stop();
+  assert.ok(Date.now() - boundedStopStartedAt < 500, 'tunnel shutdown must not wait indefinitely for an unresponsive process supervisor');
+  assert.equal(boundedStopResult.stopped, false);
+  assert.equal(boundedStopResult.forced, true);
+  assert.equal(boundedStopChild.killedWith, 'SIGKILL', 'stop timeout must make a final direct termination attempt');
+  assert.equal(boundedStopRuntime.snapshot().state, 'stopped');
 
   let authChild = null;
   let authStopped = false;

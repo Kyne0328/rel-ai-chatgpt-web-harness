@@ -6,7 +6,9 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createToolActivityTracker } from '../src/toolActivity.js';
 import { flushTaskHistoryPersistence, recordTaskActivityEvent, readTaskHistory } from '../src/taskHistoryStore.ts';
-import { resetTaskHistoryCaches } from '../src/taskHistoryStorage.ts';
+import { resetTaskHistoryCaches, resetTaskHistoryStorageMetrics, taskHistoryStorageMetricsSnapshot } from '../src/taskHistoryStorage.ts';
+import { stateDatabasePath } from '../src/stateDatabase.ts';
+import { createFairResourceScheduler } from '../src/hostResourceScheduler.js';
 import { buildDashboardPayload, buildDashboardTaskDelta } from '../src/core/dashboard-data.ts';
 import { DASHBOARD_TASK_EVENT_COALESCE_MS, createDashboardTaskEventBatcher } from '../src/core/dashboard-event-batcher.ts';
 import { flushLocalAnalytics, readLocalUsageSnapshot, recordLocalToolOutcome } from '../src/localAnalytics.js';
@@ -32,7 +34,6 @@ fs.writeFileSync(config.auditLogPath, '');
 const metrics = [];
 const tracker = createToolActivityTracker({ idleMs: 60_000 });
 let activityEvents = 0;
-let persistenceWrites = 0;
 let snapshotPublications = 0;
 let taskDeltaProjectionMs = 0;
 const taskEventBatcher = createDashboardTaskEventBatcher({
@@ -43,16 +44,6 @@ const taskEventBatcher = createDashboardTaskEventBatcher({
     snapshotPublications += 1;
   }
 });
-const originalRename = fs.renameSync;
-const originalAsyncRename = fs.promises.rename;
-fs.renameSync = function patchedRename(source, target) {
-  if (String(source).includes(`${path.sep}sessions${path.sep}`) && String(source).endsWith('.tmp') && String(target).endsWith('.json')) persistenceWrites += 1;
-  return originalRename.call(fs, source, target);
-};
-fs.promises.rename = async function patchedAsyncRename(source, target) {
-  if (String(source).includes(`${path.sep}sessions${path.sep}`) && String(source).endsWith('.tmp') && String(target).endsWith('.json')) persistenceWrites += 1;
-  return originalAsyncRename.call(fs.promises, source, target);
-};
 const unsubscribe = tracker.onToolActivity(event => {
   activityEvents += 1;
   recordTaskActivityEvent(config, event, { defer: true });
@@ -63,10 +54,11 @@ try {
   const start = tracker.beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.begin', workspace: 'app', createTask: true, title: 'Benchmark task' });
   const taskId = start.taskId;
   start({ ok: true });
-  const historyDirectory = path.join(config.stateDir, 'sessions');
-  const beforeStorage = directoryBytes(historyDirectory);
+  await flushTaskHistoryPersistence();
+  resetTaskHistoryStorageMetrics();
+  const stateDbFile = stateDatabasePath(config);
+  const beforeStorage = sqliteFileSetBytes(stateDbFile);
   const eventBaseline = activityEvents;
-  const writeBaseline = persistenceWrites;
   const publicationBaseline = snapshotPublications;
   const taskDeltaBaseline = taskDeltaProjectionMs;
   for (let index = 0; index < 100; index += 1) {
@@ -81,13 +73,17 @@ try {
   }
   await delay(DASHBOARD_TASK_EVENT_COALESCE_MS + 20);
   await flushTaskHistoryPersistence();
-  const afterStorage = directoryBytes(historyDirectory);
+  const afterStorage = sqliteFileSetBytes(stateDbFile);
+  const storageMetrics = taskHistoryStorageMetricsSnapshot();
+  const queueWaitEvents = await measureUncontendedQueueWaitEvents(100);
   addMetric('activity_events_per_100_tool_calls', '100 serial task-scoped tool calls with one progress update each', null, activityEvents - eventBaseline, 0, 305, '<=');
-  addMetric('persistence_writes_per_100_tool_calls', 'same workload; coalesced async atomic history writes', null, persistenceWrites - writeBaseline, 0, 10, '<=');
+  addMetric('persistence_writes_per_100_tool_calls', 'same workload; completed SQLite task-history upsert transactions', null, storageMetrics.writes, 0, 10, '<=');
   addMetric('snapshot_publications_per_100_tool_calls', `${DASHBOARD_TASK_EVENT_COALESCE_MS} ms production dashboard task-event batcher under serial burst`, null, snapshotPublications - publicationBaseline, 0, 5, '<=');
   addMetric('task_delta_projection_100_tool_calls_ms', 'production incremental task projection work for the coalesced 100-call burst', null, round(taskDeltaProjectionMs - taskDeltaBaseline), 0, 50, '<=');
-  addMetric('queue_wait_events_per_100_tool_calls', 'serial uncontended workspace workload', null, 0, 0, 0, '<=');
-  addMetric('task_history_storage_growth_bytes', '100 task-scoped calls', null, afterStorage - beforeStorage, 0, 2 * 1024 * 1024, '<=');
+  addMetric('queue_wait_events_per_100_tool_calls', '100 serial acquisitions through the production fair scheduler; observed queued admissions', null, queueWaitEvents, 0, 0, '<=');
+  addMetric('task_history_storage_growth_bytes', '100 task-scoped calls; durable-state.sqlite plus WAL/SHM files', null, afterStorage - beforeStorage, 0, 2 * 1024 * 1024, '<=');
+  addMetric('task_history_payload_bytes_written', 'same workload; serialized payload bytes accepted by SQLite upserts', null, storageMetrics.bytes, 0, 2 * 1024 * 1024, '<=');
+  addMetric('task_history_write_duration_ms', 'same workload; cumulative storage-worker SQLite transaction duration', null, round(storageMetrics.durationMs), 0, 2_000, '<=');
 
   global.gc?.();
   const heapBefore = process.memoryUsage().heapUsed;
@@ -108,11 +104,23 @@ try {
   addMetric('snapshot_serialization_size_bytes', 'current canonical task snapshot', null, Buffer.byteLength(serialized), 0, 512 * 1024, '<=');
   addMetric('snapshot_serialization_latency_ms', 'JSON serialization of current snapshot', null, round(serializationMs), 0, 25, '<=');
 
-  const sanitizerStart = performance.now();
-  for (let index = 0; index < 10_000; index += 1) {
-    sanitizeDisplayText(`Completed ${index}. Authorization: Bearer synthetic-${index} password=synthetic-${index} tokenizer safe.`, 500);
+  const sanitizerSamples = [];
+  for (let sample = 0; sample < 5; sample += 1) {
+    const sanitizerStart = performance.now();
+    for (let index = 0; index < 10_000; index += 1) {
+      sanitizeDisplayText(`Completed ${index}. Authorization: Bearer synthetic-${index} password=synthetic-${index} tokenizer safe.`, 500);
+    }
+    sanitizerSamples.push(performance.now() - sanitizerStart);
   }
-  addMetric('sanitization_10000_summaries_ms', '10,000 credential-like completion strings', null, round(performance.now() - sanitizerStart), 0, 250, '<=');
+  addMetric(
+    'sanitization_10000_summaries_ms',
+    '10,000 credential-like completion strings; median of 5',
+    null,
+    round(median(sanitizerSamples)),
+    round(range(sanitizerSamples)),
+    250,
+    '<='
+  );
 
   const analyticsStart = performance.now();
   for (let index = 0; index < 1000; index += 1) {
@@ -212,8 +220,6 @@ try {
   await flushTaskHistoryPersistence();
   await flushLocalAnalytics(config);
   resetTaskHistoryCaches();
-  fs.renameSync = originalRename;
-  fs.promises.rename = originalAsyncRename;
   fs.rmSync(temp, { recursive: true, force: true });
 }
 
@@ -324,14 +330,22 @@ function runRendererBenchmark() {
   }
 }
 
-function directoryBytes(directory) {
-  if (!fs.existsSync(directory)) return 0;
-  let total = 0;
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const target = path.join(directory, entry.name);
-    total += entry.isDirectory() ? directoryBytes(target) : fs.statSync(target).size;
+function sqliteFileSetBytes(file) {
+  return [file, `${file}-wal`, `${file}-shm`].reduce((total, target) => {
+    try { return total + fs.statSync(target).size; } catch { return total; }
+  }, 0);
+}
+
+async function measureUncontendedQueueWaitEvents(count) {
+  const scheduler = createFairResourceScheduler({ heavy: 1 });
+  let queuedAdmissions = 0;
+  for (let index = 0; index < count; index += 1) {
+    const before = scheduler.stats().heavy;
+    if (before.active >= before.limit || before.queued > 0) queuedAdmissions += 1;
+    const lease = await scheduler.acquire('heavy', `serial-${index}`);
+    lease.release();
   }
-  return total;
+  return queuedAdmissions;
 }
 
 function gitCommit() {

@@ -54,7 +54,7 @@ const nextLaunchNotice = prepareConnectorRefreshNotice({
 assert.ok(nextLaunchNotice, 'an unacknowledged refresh notice must survive a restart after the update launch');
 
 acknowledgeConnectorRefreshNotice(nextLaunchNotice, updateStorage);
-assert.equal(prepareConnectorRefreshNotice({ currentVersion: '0.27.4', connectorRevision: 'surface-61' }, updateStorage), null, 'acknowledged notices must not reappear for the same connector revision');
+assert.equal(prepareConnectorRefreshNotice({ currentVersion: '0.27.4', connectorRevision: 'surface-61', connectorRefreshRequired: true }, updateStorage), null, 'acknowledged notices must not reappear for the same connector revision');
 
 assert.equal(prepareConnectorRefreshNotice({
   currentVersion: '0.27.5',

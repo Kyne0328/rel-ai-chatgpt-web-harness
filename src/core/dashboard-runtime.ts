@@ -1,7 +1,6 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 
-import { getApplicationMetadata } from '../appMetadata.js';
 import { readAudit } from '../audit.js';
 import * as configEditor from '../configEditor.js';
 import { ensureConfig, getConfigPath, readConfig } from '../config.js';
@@ -55,21 +54,6 @@ let dashboardConnectionRevision = 0;
 let dashboardConnectionMcpRevision = -1;
 let dashboardConnectionDesktopRevision = '';
 const configCache: { path: string; mtimeMs: number; value: JsonRecord | null } = { path: '', mtimeMs: -1, value: null };
-
-export function dashboardHealth(options: DashboardRuntimeOptions = {}): JsonRecord {
-  const mcpConnection = mcpConnectionManager.snapshot();
-  const application = getApplicationMetadata();
-  return {
-    ok: mcpConnection.status !== 'failed',
-    name: application.name,
-    version: application.version,
-    transports: ['streamable-http'],
-    auth: options.token ? 'bearer' : 'disabled',
-    serverStatus: mcpConnection.status,
-    toolManifestVersion: mcpConnection.toolManifestVersion,
-    activeToolCount: mcpConnection.currentActiveToolCount
-  };
-}
 
 export function dashboardTools(): JsonRecord {
   return getToolMetadata();
@@ -228,8 +212,9 @@ export function dashboardTaskSession(taskId: string): JsonRecord | null {
 export function dashboardLogs(options: DashboardRuntimeOptions = {}, limit = 100): JsonRecord {
   const config = readConfig();
   const taskActivity = typeof options.getTaskActivity === 'function' ? options.getTaskActivity() : {};
-  const tasks = readTaskHistory(config, taskActivity, { limit: 500 });
-  return mergeDashboardActivity(productUx.liveLogTail(config, { limit }), tasks, limit);
+  const requestedLimit = Math.min(500, Math.max(1, Math.floor(Number(limit || 100))));
+  const tasks = readTaskHistory(config, taskActivity, { limit: requestedLimit, summary: true, maintain: false });
+  return mergeDashboardActivity(productUx.liveLogTail(config, { limit: requestedLimit }), tasks, requestedLimit);
 }
 
 export function dashboardReleaseNotes(): JsonRecord {

@@ -251,4 +251,95 @@ await assert.rejects(
 await deferredDispose;
 assert.equal(deferredChild.killed, true);
 
+let spawnWatchdogForks = 0;
+const neverSpawnChild = new DeferredSpawnUtilityProcess();
+const spawnWatchdogClient = createServiceProcessClient({
+  utilityProcess: {
+    fork() {
+      spawnWatchdogForks += 1;
+      return spawnWatchdogForks === 1 ? neverSpawnChild : new FakeUtilityProcess();
+    }
+  },
+  modulePath: '/app/electron/service-process.js',
+  spawnTimeoutMs: 20
+});
+await assert.rejects(
+  () => spawnWatchdogClient.start({ host: '127.0.0.1', port: 3333, token: 'secret' }),
+  error => error?.code === 'REL_AI_SERVICE_SPAWN_TIMEOUT' && /did not spawn within/i.test(error.message),
+  'a utility process that never emits spawn must be invalidated instead of blocking desktop startup forever'
+);
+assert.equal(neverSpawnChild.killed, true, 'the spawn watchdog must terminate the unusable child');
+assert.equal((await spawnWatchdogClient.start({ host: '127.0.0.1', port: 3333, token: 'secret' })).port, 4567,
+  'a startup retry after a spawn timeout must use a fresh utility process');
+assert.equal(spawnWatchdogForks, 2);
+await spawnWatchdogClient.dispose({ stop: false });
+
+class NonResponsiveStartUtilityProcess extends FakeUtilityProcess {
+  postMessage(message) {
+    this.sent.push(message);
+    if (message.type === 'request' && message.method !== 'start') super.postMessage(message);
+  }
+}
+
+let requestWatchdogForks = 0;
+let invalidationExitCalls = 0;
+const hungRequestChild = new NonResponsiveStartUtilityProcess();
+const requestWatchdogClient = createServiceProcessClient({
+  utilityProcess: {
+    fork() {
+      requestWatchdogForks += 1;
+      return requestWatchdogForks === 1 ? hungRequestChild : new FakeUtilityProcess();
+    }
+  },
+  modulePath: '/app/electron/service-process.js',
+  startTimeoutMs: 20,
+  onExit: () => { invalidationExitCalls += 1; }
+});
+await assert.rejects(
+  () => requestWatchdogClient.start({ host: '127.0.0.1', port: 3333, token: 'secret' }),
+  error => error?.code === 'REL_AI_SERVICE_REQUEST_TIMEOUT'
+    && error?.method === 'start'
+    && /request timed out: start/i.test(error.message),
+  'a lifecycle request timeout must terminate the child instead of leaving a poisoned lifecycle queue behind'
+);
+assert.equal(hungRequestChild.killed, true, 'timed-out lifecycle requests must invalidate the owned utility process');
+assert.equal(invalidationExitCalls, 0, 'intentional timeout invalidation must not trigger the unexpected-exit auto-restart path');
+assert.equal((await requestWatchdogClient.start({ host: '127.0.0.1', port: 3333, token: 'secret' })).port, 4567,
+  'the request after timeout must execute on a new utility process generation');
+assert.equal(requestWatchdogForks, 2);
+await requestWatchdogClient.dispose({ stop: false });
+
+class UncleanStopUtilityProcess extends FakeUtilityProcess {
+  postMessage(message) {
+    this.sent.push(message);
+    if (message.type !== 'request') return;
+    const result = message.method === 'start'
+      ? { ok: true, port: 4567 }
+      : message.method === 'stop'
+        ? { ok: false, cleanup: { clean: false, localService: { closed: false, forced: true } } }
+        : null;
+    if (result) queueMicrotask(() => this.emit('message', { type: 'response', id: message.id, ok: true, result }));
+  }
+}
+
+let uncleanStopForks = 0;
+const uncleanStopChild = new UncleanStopUtilityProcess();
+const uncleanStopClient = createServiceProcessClient({
+  utilityProcess: {
+    fork() {
+      uncleanStopForks += 1;
+      return uncleanStopForks === 1 ? uncleanStopChild : new FakeUtilityProcess();
+    }
+  },
+  modulePath: '/app/electron/service-process.js'
+});
+await uncleanStopClient.start({ host: '127.0.0.1', port: 3333, token: 'secret' });
+const uncleanStop = await uncleanStopClient.stop();
+assert.equal(uncleanStop.cleanup.clean, false);
+assert.equal(uncleanStopChild.killed, true, 'an unclean stop result must invalidate the uncertain utility process generation');
+assert.equal((await uncleanStopClient.start({ host: '127.0.0.1', port: 3333, token: 'secret' })).port, 4567,
+  'the next start after an unclean stop must use a fresh utility process');
+assert.equal(uncleanStopForks, 2);
+await uncleanStopClient.dispose({ stop: false });
+
 console.log('Electron utility-process service bridge contracts passed.');

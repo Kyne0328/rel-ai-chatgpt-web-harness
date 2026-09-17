@@ -54,6 +54,7 @@ try {
   }
 
   maintainStateDatabase(migrationConfig);
+  assert.equal(fs.existsSync(`${migrationFile}.validated.json`), true, 'verified state maintenance must leave a lightweight startup validation stamp');
   fs.writeFileSync(migrationFile, 'not a sqlite database', 'utf8');
   const recovered = initializeStateDatabase(migrationConfig);
   assert.equal(recovered.recovered, true, 'corrupt durable state must recover from the last verified backup');
@@ -98,6 +99,7 @@ try {
   );
   maintainKnowledgeDatabase(knowledgeConfig);
   assert.equal(fs.existsSync(knowledgeDatabaseBackupPath(knowledgeConfig)), true, 'knowledge shutdown maintenance must create a verified backup');
+  assert.equal(fs.existsSync(`${knowledgeDatabasePath(knowledgeConfig)}.validated.json`), true, 'verified knowledge maintenance must leave a lightweight startup validation stamp');
   fs.writeFileSync(knowledgeDatabasePath(knowledgeConfig), 'corrupt knowledge database', 'utf8');
   const knowledgeRecovery = initializeKnowledgeDatabase(knowledgeConfig);
   assert.equal(knowledgeRecovery.recovered, true);

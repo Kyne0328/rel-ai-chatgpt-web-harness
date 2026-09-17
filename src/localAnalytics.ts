@@ -32,11 +32,19 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 const LOCAL_ANALYTICS_RETENTION_DAYS = 180;
 const RETENTION_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const NORMALIZED_ANALYTICS_THRESHOLD_BYTES = 64 * 1024;
 const LEGACY_MIGRATION_KEY = 'local_analytics_legacy_migrated_v1';
 const retentionPruneTimes = new Map<string, number>();
 const retentionPruneTimers = new Map<string, { timer: NodeJS.Timeout; config: AnalyticsConfig }>();
 const analyticsWriteDatabases = new Map<string, StateDatabase>();
 const analyticsWriteCloseScheduled = new Set<string>();
+// A single request turn commonly records several dimensions in the same
+// month. Reuse the parsed document across short-lived writer connections and
+// compare the durable row version before every update so another process's
+// write is still observed immediately.
+const analyticsWriteDocuments = new Map<string, { document: AnalyticsDocument; updatedAtMs: number }>();
+const MAX_ANALYTICS_DOCUMENT_CACHE = 16;
+const analyticsCounterConfigs = new Map<string, AnalyticsConfig>();
 
 interface AnalyticsConfig extends TelemetryConfig {
   stateDir?: string;
@@ -143,6 +151,24 @@ interface AnalyticsDocument {
 
 type StateDatabase = DatabaseSync;
 
+const NORMALIZED_ANALYTICS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS analytics_counter_state(
+  month TEXT PRIMARY KEY,
+  source_updated_at_ms INTEGER NOT NULL,
+  dirty INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS analytics_counter_rows(
+  month TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  dimension_key TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY(month,bucket,kind,dimension_key)
+) STRICT;
+CREATE INDEX IF NOT EXISTS analytics_counter_rows_month_idx
+  ON analytics_counter_rows(month,bucket,kind);
+`;
+
 interface PruneOptions {
   retentionDays?: unknown;
   now?: Date | string | number | null;
@@ -167,7 +193,11 @@ function recordLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOu
     let migratedLegacy = false;
     withAnalyticsWriteDatabase(config, (db: StateDatabase) => {
       migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
-      const document = readDocumentFromDatabase(db, month);
+      if (shouldUseNormalizedAnalytics(db, month, config)) {
+        recordNormalizedToolOutcome(db, month, hour, tool, workspace, intent, useCase, success, failure, durationMs, category, reliability, performancePhases);
+        return;
+      }
+      const document = readAnalyticsWriteDocument(db, keyForAnalyticsDocument(config, month), month);
       incrementTotals(document.totals, success, failure, durationMs, reliability);
       incrementPerformancePhases(document.performancePhases, performancePhases);
       incrementNamed(document.tools, 'tool', tool, success, failure, durationMs, reliability);
@@ -196,7 +226,7 @@ function recordLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOu
         incrementFailureCategory(hourly.failureCategories, category);
         if (workspace) incrementWorkspaceFailureCategory(hourly.workspaceFailureCategories, workspace, category);
       }
-      upsertDocument(db, document);
+      upsertAnalyticsWriteDocument(db, config, document);
     });
     if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
@@ -220,11 +250,15 @@ function recordLocalTransportEvent(
     let migratedLegacy = false;
     withAnalyticsWriteDatabase(config, (db: StateDatabase) => {
       migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
-      const document = readDocumentFromDatabase(db, month);
+      if (shouldUseNormalizedAnalytics(db, month, config)) {
+        recordNormalizedTransportEvent(db, month, hour, eventName, count);
+        return;
+      }
+      const document = readAnalyticsWriteDocument(db, keyForAnalyticsDocument(config, month), month);
       incrementTransport(document.transport, eventName, count);
       const hourly = findOrCreate(document.hours, row => row.hour === hour, () => emptyHour(hour));
       incrementTransport(hourly.transport, eventName, count);
-      upsertDocument(db, document);
+      upsertAnalyticsWriteDocument(db, config, document);
     });
     if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
@@ -242,8 +276,16 @@ function recordLocalTaskCompletion(config: AnalyticsConfig = {}, event: { worksp
     const workspace = boundedLabel(event.workspace, 160);
     const intent = normalizeAnalyticsTaskIntent(event.taskIntent, 'auto');
     let migratedLegacy = false;
+    // This path uses the shared short-lived connection rather than the
+    // analytics writer. Invalidate a same-turn cached month so a completion
+    // cannot be overwritten by a later tool outcome.
+    clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
     withStateDatabase(config, (db: StateDatabase) => {
       migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
+      if (shouldUseNormalizedAnalytics(db, month, config)) {
+        recordNormalizedTaskCompletion(db, month, hour, workspace, intent);
+        return;
+      }
       const document = readDocumentFromDatabase(db, month);
       incrementTaskIntent(document.taskIntents, intent);
       if (workspace) incrementWorkspaceTaskIntent(document.workspaceTaskIntents, workspace, intent);
@@ -379,18 +421,176 @@ function readDocument(config: AnalyticsConfig, month: string): AnalyticsDocument
   return withStateDatabase(config, (db: StateDatabase) => readDocumentFromDatabase(db, month)) as AnalyticsDocument;
 }
 
+function keyForAnalyticsDocument(config: AnalyticsConfig, month: string): string {
+  return `${statePath(config, 'durable-state.sqlite')}\u0000${month}`;
+}
+
+function readAnalyticsWriteDocument(db: StateDatabase, key: string, month: string): AnalyticsDocument {
+  const cached = analyticsWriteDocuments.get(key);
+  const row = db.prepare('SELECT updated_at_ms,payload FROM analytics_months WHERE month=?').get(month) as { updated_at_ms?: unknown; payload?: unknown } | undefined;
+  const updatedAtMs = Math.max(0, Math.floor(Number(row?.updated_at_ms) || 0));
+  if (cached && row && cached.updatedAtMs === updatedAtMs) {
+    // Touch insertion order to keep recently used months in the bounded LRU.
+    analyticsWriteDocuments.delete(key);
+    analyticsWriteDocuments.set(key, cached);
+    return cached.document;
+  }
+  let document: AnalyticsDocument;
+  try { document = row ? parseDocument(String(row.payload || ''), month) : emptyDocument(month); }
+  catch { document = emptyDocument(month); }
+  analyticsWriteDocuments.delete(key);
+  analyticsWriteDocuments.set(key, { document, updatedAtMs });
+  while (analyticsWriteDocuments.size > MAX_ANALYTICS_DOCUMENT_CACHE) {
+    const oldest = analyticsWriteDocuments.keys().next().value;
+    if (oldest === undefined) break;
+    analyticsWriteDocuments.delete(oldest);
+  }
+  return document;
+}
+
+function upsertAnalyticsWriteDocument(db: StateDatabase, config: AnalyticsConfig, document: AnalyticsDocument): void {
+  const updatedAtMs = Date.now();
+  upsertDocument(db, document, updatedAtMs);
+  const key = keyForAnalyticsDocument(config, document.month);
+  const cached = analyticsWriteDocuments.get(key);
+  if (cached?.document === document) cached.updatedAtMs = updatedAtMs;
+}
+
 async function readDocumentFresh(config: AnalyticsConfig, month: string): Promise<AnalyticsDocument> {
   return readDocument(config, month);
 }
 
 function readDocumentFromDatabase(db: StateDatabase, month: string): AnalyticsDocument {
-  const row = db.prepare('SELECT payload FROM analytics_months WHERE month=?').get(month) as { payload?: unknown } | undefined;
+  ensureNormalizedAnalyticsSchema(db);
+  const row = db.prepare('SELECT updated_at_ms,payload FROM analytics_months WHERE month=?').get(month) as { updated_at_ms?: unknown; payload?: unknown } | undefined;
   if (!row) return emptyDocument(month);
+  const counterState = db.prepare('SELECT source_updated_at_ms,dirty FROM analytics_counter_state WHERE month=?').get(month) as { source_updated_at_ms?: unknown; dirty?: unknown } | undefined;
+  if (counterState && Number(counterState.dirty) === 1 && Number(counterState.source_updated_at_ms || 0) === Number(row.updated_at_ms || 0)) {
+    return readNormalizedAnalyticsDocument(db, month);
+  }
   try {
     return parseDocument(String(row.payload || ''), month);
   } catch {
     return emptyDocument(month);
   }
+}
+
+function ensureNormalizedAnalyticsSchema(db: StateDatabase, config?: AnalyticsConfig): void {
+  db.exec(NORMALIZED_ANALYTICS_SCHEMA_SQL);
+  if (config) analyticsCounterConfigs.set(statePath(config, 'durable-state.sqlite'), { ...config });
+}
+
+function shouldUseNormalizedAnalytics(db: StateDatabase, month: string, config?: AnalyticsConfig): boolean {
+  ensureNormalizedAnalyticsSchema(db, config);
+  const state = db.prepare('SELECT source_updated_at_ms,dirty FROM analytics_counter_state WHERE month=?').get(month) as { source_updated_at_ms?: unknown; dirty?: unknown } | undefined;
+  if (state) return true;
+  const row = db.prepare('SELECT length(payload) AS bytes FROM analytics_months WHERE month=?').get(month) as { bytes?: unknown } | undefined;
+  return Number(row?.bytes || 0) >= NORMALIZED_ANALYTICS_THRESHOLD_BYTES;
+}
+
+function initializeNormalizedAnalytics(db: StateDatabase, month: string): void {
+  const row = db.prepare('SELECT updated_at_ms,payload FROM analytics_months WHERE month=?').get(month) as { updated_at_ms?: unknown; payload?: unknown } | undefined;
+  let document = emptyDocument(month);
+  let sourceUpdatedAtMs = 0;
+  if (row) {
+    sourceUpdatedAtMs = Math.max(0, Math.floor(Number(row.updated_at_ms) || 0));
+    try { document = parseDocument(String(row.payload || ''), month); } catch {}
+  }
+  db.prepare('DELETE FROM analytics_counter_rows WHERE month=?').run(month);
+  seedNormalizedAnalyticsDocument(db, document);
+  db.prepare(`INSERT INTO analytics_counter_state(month,source_updated_at_ms,dirty) VALUES(?,?,0)
+    ON CONFLICT(month) DO UPDATE SET source_updated_at_ms=excluded.source_updated_at_ms,dirty=excluded.dirty`)
+    .run(month, sourceUpdatedAtMs);
+}
+
+function ensureNormalizedAnalyticsMonth(db: StateDatabase, month: string): void {
+  const row = db.prepare('SELECT updated_at_ms FROM analytics_months WHERE month=?').get(month) as { updated_at_ms?: unknown } | undefined;
+  const state = db.prepare('SELECT source_updated_at_ms FROM analytics_counter_state WHERE month=?').get(month) as { source_updated_at_ms?: unknown } | undefined;
+  if (!state || Number(state.source_updated_at_ms || 0) !== Number(row?.updated_at_ms || 0)) initializeNormalizedAnalytics(db, month);
+}
+
+function seedNormalizedAnalyticsDocument(db: StateDatabase, document: AnalyticsDocument): void {
+  const month = document.month;
+  writeNormalizedCounter(db, month, '', 'totals', '', document.totals);
+  writeNormalizedCounter(db, month, '', 'transport', '', document.transport);
+  writeNormalizedCounter(db, month, '', 'performance', '', document.performancePhases);
+  for (const row of document.tools) writeNormalizedCounter(db, month, '', 'tool', row.tool, row);
+  for (const row of document.workspaces) writeNormalizedCounter(db, month, '', 'workspace', row.workspace, row);
+  for (const row of document.workspaceTools) writeNormalizedCounter(db, month, '', 'workspaceTool', `${row.workspace}\u0000${row.tool}`, row);
+  for (const row of document.activityMatrix) writeNormalizedCounter(db, month, '', 'activityMatrix', `${row.intent}\u0000${row.useCase}`, row);
+  for (const row of document.workspaceActivityMatrix) writeNormalizedCounter(db, month, '', 'workspaceActivityMatrix', `${row.workspace}\u0000${row.intent}\u0000${row.useCase}`, row);
+  for (const row of document.taskIntents) writeNormalizedCounter(db, month, '', 'taskIntent', row.intent, row);
+  for (const row of document.workspaceTaskIntents) writeNormalizedCounter(db, month, '', 'workspaceTaskIntent', `${row.workspace}\u0000${row.intent}`, row);
+  for (const row of document.failureCategories) writeNormalizedCounter(db, month, '', 'failureCategory', row.category, row);
+  for (const row of document.workspaceFailureCategories) writeNormalizedCounter(db, month, '', 'workspaceFailureCategory', `${row.workspace}\u0000${row.category}`, row);
+  for (const hour of document.hours) {
+    const bucket = hour.hour;
+    writeNormalizedCounter(db, month, bucket, 'totals', '', hour);
+    writeNormalizedCounter(db, month, bucket, 'transport', '', hour.transport);
+    writeNormalizedCounter(db, month, bucket, 'performance', '', hour.performancePhases);
+    for (const row of hour.tools) writeNormalizedCounter(db, month, bucket, 'tool', row.tool, row);
+    for (const row of hour.workspaces) writeNormalizedCounter(db, month, bucket, 'workspace', row.workspace, row);
+    for (const row of hour.workspaceTools) writeNormalizedCounter(db, month, bucket, 'workspaceTool', `${row.workspace}\u0000${row.tool}`, row);
+    for (const row of hour.activityMatrix) writeNormalizedCounter(db, month, bucket, 'activityMatrix', `${row.intent}\u0000${row.useCase}`, row);
+    for (const row of hour.workspaceActivityMatrix) writeNormalizedCounter(db, month, bucket, 'workspaceActivityMatrix', `${row.workspace}\u0000${row.intent}\u0000${row.useCase}`, row);
+    for (const row of hour.taskIntents) writeNormalizedCounter(db, month, bucket, 'taskIntent', row.intent, row);
+    for (const row of hour.workspaceTaskIntents) writeNormalizedCounter(db, month, bucket, 'workspaceTaskIntent', `${row.workspace}\u0000${row.intent}`, row);
+    for (const row of hour.failureCategories) writeNormalizedCounter(db, month, bucket, 'failureCategory', row.category, row);
+    for (const row of hour.workspaceFailureCategories) writeNormalizedCounter(db, month, bucket, 'workspaceFailureCategory', `${row.workspace}\u0000${row.category}`, row);
+  }
+}
+
+function writeNormalizedCounter(db: StateDatabase, month: string, bucket: string, kind: string, dimensionKey: string, value: unknown): void {
+  db.prepare(`INSERT INTO analytics_counter_rows(month,bucket,kind,dimension_key,payload) VALUES(?,?,?,?,?)
+    ON CONFLICT(month,bucket,kind,dimension_key) DO UPDATE SET payload=excluded.payload`)
+    .run(month, bucket, kind, dimensionKey, JSON.stringify(value || {}));
+}
+
+function readNormalizedAnalyticsDocument(db: StateDatabase, month: string): AnalyticsDocument {
+  const document = emptyDocument(month);
+  const rows = db.prepare('SELECT bucket,kind,dimension_key,payload FROM analytics_counter_rows WHERE month=? ORDER BY bucket,kind,dimension_key').all(month) as Array<{ bucket?: unknown; kind?: unknown; dimension_key?: unknown; payload?: unknown }>;
+  for (const row of rows) {
+    let value: Record<string, any>;
+    try { value = asRecord(JSON.parse(String(row.payload || '{}'))); } catch { continue; }
+    const bucket = String(row.bucket || '');
+    const kind = String(row.kind || '');
+    if (!bucket) assignNormalizedDocumentRow(document, kind, value);
+    else {
+      const hour = findOrCreate(document.hours, item => item.hour === bucket, () => emptyHour(bucket));
+      assignNormalizedHourRow(hour, kind, value);
+    }
+  }
+  return sanitizeDocument(document, month);
+}
+
+function assignNormalizedDocumentRow(document: AnalyticsDocument, kind: string, value: Record<string, any>): void {
+  if (kind === 'totals') document.totals = { ...emptyAggregate(true), ...value };
+  else if (kind === 'transport') document.transport = { ...emptyTransportAggregate(), ...value };
+  else if (kind === 'performance') document.performancePhases = sanitizePerformancePhases(value);
+  else if (kind === 'tool') document.tools.push(value as NamedAggregate<'tool'>);
+  else if (kind === 'workspace') document.workspaces.push(value as NamedAggregate<'workspace'>);
+  else if (kind === 'workspaceTool') document.workspaceTools.push(value as WorkspaceToolAggregate);
+  else if (kind === 'activityMatrix') document.activityMatrix.push(value as ActivityMatrixAggregate);
+  else if (kind === 'workspaceActivityMatrix') document.workspaceActivityMatrix.push(value as WorkspaceActivityMatrixAggregate);
+  else if (kind === 'taskIntent') document.taskIntents.push(value as TaskIntentAggregate);
+  else if (kind === 'workspaceTaskIntent') document.workspaceTaskIntents.push(value as WorkspaceTaskIntentAggregate);
+  else if (kind === 'failureCategory') document.failureCategories.push(value as FailureCategoryAggregate);
+  else if (kind === 'workspaceFailureCategory') document.workspaceFailureCategories.push(value as WorkspaceFailureCategoryAggregate);
+}
+
+function assignNormalizedHourRow(hour: AnalyticsHour, kind: string, value: Record<string, any>): void {
+  if (kind === 'totals') Object.assign(hour, value);
+  else if (kind === 'transport') hour.transport = { ...emptyTransportAggregate(), ...value };
+  else if (kind === 'performance') hour.performancePhases = sanitizePerformancePhases(value);
+  else if (kind === 'tool') hour.tools.push(value as NamedAggregate<'tool'>);
+  else if (kind === 'workspace') hour.workspaces.push(value as NamedAggregate<'workspace'>);
+  else if (kind === 'workspaceTool') hour.workspaceTools.push(value as WorkspaceToolAggregate);
+  else if (kind === 'activityMatrix') hour.activityMatrix.push(value as ActivityMatrixAggregate);
+  else if (kind === 'workspaceActivityMatrix') hour.workspaceActivityMatrix.push(value as WorkspaceActivityMatrixAggregate);
+  else if (kind === 'taskIntent') hour.taskIntents.push(value as TaskIntentAggregate);
+  else if (kind === 'workspaceTaskIntent') hour.workspaceTaskIntents.push(value as WorkspaceTaskIntentAggregate);
+  else if (kind === 'failureCategory') hour.failureCategories.push(value as FailureCategoryAggregate);
+  else if (kind === 'workspaceFailureCategory') hour.workspaceFailureCategories.push(value as WorkspaceFailureCategoryAggregate);
 }
 
 function upsertDocument(db: StateDatabase, document: AnalyticsDocument, updatedAtMs: unknown = Date.now()): void {
@@ -441,6 +641,8 @@ function migrateLegacyLocalAnalyticsInDatabase(db: StateDatabase, config: Analyt
 }
 
 async function flushLocalAnalytics(config?: AnalyticsConfig): Promise<{ ok: true; failed: 0; pending: 0 }> {
+  closeAnalyticsWriteDatabases(config);
+  materializeNormalizedAnalytics(config);
   const pending = [...retentionPruneTimers.values()];
   retentionPruneTimers.clear();
   for (const { timer, config: pendingConfig } of pending) {
@@ -450,6 +652,31 @@ async function flushLocalAnalytics(config?: AnalyticsConfig): Promise<{ ok: true
   }
   closeAnalyticsWriteDatabases(config);
   return { ok: true, failed: 0, pending: 0 };
+}
+
+function materializeNormalizedAnalytics(config?: AnalyticsConfig): void {
+  const configs = config
+    ? [config]
+    : [...analyticsCounterConfigs.values()];
+  for (const current of configs) {
+    try {
+      withStateDatabase(current, (db: StateDatabase) => {
+        ensureNormalizedAnalyticsSchema(db, current);
+        const states = db.prepare('SELECT month FROM analytics_counter_state WHERE dirty=1').all() as Array<{ month?: unknown }>;
+        for (const state of states) {
+          const month = normalizeMonth(state.month);
+          if (!month) continue;
+          const document = readNormalizedAnalyticsDocument(db, month);
+          upsertDocument(db, document);
+          const updated = db.prepare('SELECT updated_at_ms FROM analytics_months WHERE month=?').get(month) as { updated_at_ms?: unknown } | undefined;
+          db.prepare('UPDATE analytics_counter_state SET source_updated_at_ms=?,dirty=0 WHERE month=?')
+            .run(Math.max(0, Math.floor(Number(updated?.updated_at_ms) || 0)), month);
+        }
+      }, { transaction: true });
+    } catch (error) {
+      if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] local analytics counter materialization:', error);
+    }
+  }
 }
 
 function withAnalyticsWriteDatabase<TResult>(config: AnalyticsConfig, operation: (db: StateDatabase) => TResult): TResult {
@@ -470,6 +697,7 @@ function withAnalyticsWriteDatabase<TResult>(config: AnalyticsConfig, operation:
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch {}
     analyticsWriteDatabases.delete(key);
+    clearAnalyticsWriteDocuments(key);
     try { db.close(); } catch {}
     throw error;
   }
@@ -489,6 +717,13 @@ function closeAnalyticsWriteDatabase(key: string): void {
   if (!db) return;
   analyticsWriteDatabases.delete(key);
   try { db.close(); } catch {}
+}
+
+function clearAnalyticsWriteDocuments(databaseKey: string): void {
+  const prefix = `${databaseKey}\u0000`;
+  for (const key of analyticsWriteDocuments.keys()) {
+    if (key.startsWith(prefix)) analyticsWriteDocuments.delete(key);
+  }
 }
 
 function closeAnalyticsWriteDatabases(config?: AnalyticsConfig): void {
@@ -516,6 +751,9 @@ function scheduleRetentionPrune(config: AnalyticsConfig = {}): boolean {
 }
 
 async function pruneLocalAnalytics(config: AnalyticsConfig = {}, options: PruneOptions = {}): Promise<{ ok: true; removedFiles: number; removedBytes: number }> {
+  closeAnalyticsWriteDatabases(config);
+  clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
+  materializeNormalizedAnalytics(config);
   migrateLegacyLocalAnalytics(config);
   const retentionDays = Math.max(1, Math.floor(Number(options.retentionDays || LOCAL_ANALYTICS_RETENTION_DAYS)));
   const now = options.now instanceof Date ? options.now : new Date(options.now == null ? Date.now() : options.now);
@@ -530,7 +768,10 @@ async function pruneLocalAnalytics(config: AnalyticsConfig = {}, options: PruneO
       if (monthEndMs(row.month) >= cutoffMs) continue;
       removedFiles += 1;
       removedBytes += Buffer.byteLength(String(row.payload || ''), 'utf8');
-      remove.run(String(row.month || ''));
+      const month = String(row.month || '');
+      remove.run(month);
+      db.prepare('DELETE FROM analytics_counter_rows WHERE month=?').run(month);
+      db.prepare('DELETE FROM analytics_counter_state WHERE month=?').run(month);
     }
     return { ok: true as const, removedFiles, removedBytes };
   }, { transaction: true }) as { ok: true; removedFiles: number; removedBytes: number };
@@ -541,6 +782,9 @@ async function pruneLocalAnalytics(config: AnalyticsConfig = {}, options: PruneO
 function removeWorkspaceLocalAnalytics(config: AnalyticsConfig = {}, workspaceValue: unknown = ''): { ok: true; updatedMonths: number; removedToolCalls: number } {
   const workspace = boundedLabel(workspaceValue, 160);
   if (!workspace) return { ok: true, updatedMonths: 0, removedToolCalls: 0 };
+  closeAnalyticsWriteDatabases(config);
+  clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
+  materializeNormalizedAnalytics(config);
   migrateLegacyLocalAnalytics(config);
   return withStateDatabase(config, (db: StateDatabase) => {
     const rows = db.prepare('SELECT month,payload FROM analytics_months').all() as Array<{ month?: unknown; payload?: unknown }>;
@@ -607,6 +851,8 @@ function removeWorkspaceLocalAnalytics(config: AnalyticsConfig = {}, workspaceVa
       }
       document.hours = document.hours.filter(hour => number(hour.toolCalls) > 0 || transportTotal(hour.transport) > 0);
       upsertDocument(db, document);
+      db.prepare('DELETE FROM analytics_counter_rows WHERE month=?').run(month);
+      db.prepare('DELETE FROM analytics_counter_state WHERE month=?').run(month);
       updatedMonths += 1;
     }
     return { ok: true as const, updatedMonths, removedToolCalls };
@@ -615,11 +861,18 @@ function removeWorkspaceLocalAnalytics(config: AnalyticsConfig = {}, workspaceVa
 
 async function clearLocalAnalytics(config: AnalyticsConfig = {}): Promise<{ ok: true; removedFiles: number; removedBytes: number }> {
   closeAnalyticsWriteDatabases(config);
+  clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
   migrateLegacyLocalAnalytics(config);
   const result = withStateDatabase(config, (db: StateDatabase) => {
+    // Older state databases may not have received the normalized counter
+    // tables yet. Keep clear/reset safe on a fresh database as well as on a
+    // mature one.
+    ensureNormalizedAnalyticsSchema(db, config);
     const rows = db.prepare('SELECT payload FROM analytics_months').all() as Array<{ payload?: unknown }>;
     const removedBytes = rows.reduce((sum, row) => sum + Buffer.byteLength(String(row.payload || ''), 'utf8'), 0);
     db.exec('DELETE FROM analytics_months');
+    db.exec('DELETE FROM analytics_counter_rows');
+    db.exec('DELETE FROM analytics_counter_state');
     return { ok: true as const, removedFiles: rows.length, removedBytes };
   }, { transaction: true }) as { ok: true; removedFiles: number; removedBytes: number };
   retentionPruneTimes.delete(statePath(config, 'durable-state.sqlite'));
@@ -937,6 +1190,121 @@ function incrementWorkspaceFailureCategory(rows: WorkspaceFailureCategoryAggrega
   const normalized = normalizeFailureCategory(category);
   const row = findOrCreate(rows, item => item.workspace === workspace && item.category === normalized, () => ({ workspace, category: normalized, failures: 0 }));
   row.failures = number(row.failures) + 1;
+}
+
+function updateNormalizedCounter(
+  db: StateDatabase,
+  month: string,
+  bucket: string,
+  kind: string,
+  dimensionKey: string,
+  create: () => Record<string, any>,
+  update: (value: Record<string, any>) => void
+): void {
+  const row = db.prepare(`SELECT payload FROM analytics_counter_rows
+    WHERE month=? AND bucket=? AND kind=? AND dimension_key=?`).get(month, bucket, kind, dimensionKey) as { payload?: unknown } | undefined;
+  let value = create();
+  if (row) {
+    try { value = { ...value, ...asRecord(JSON.parse(String(row.payload || '{}'))) }; } catch {}
+  }
+  update(value);
+  writeNormalizedCounter(db, month, bucket, kind, dimensionKey, value);
+}
+
+function markNormalizedAnalyticsDirty(db: StateDatabase, month: string): void {
+  db.prepare('UPDATE analytics_counter_state SET dirty=1 WHERE month=?').run(month);
+}
+
+function incrementNormalizedAggregate(db: StateDatabase, month: string, bucket: string, success: number, failure: number, durationMs: number, reliability: ReliabilityCounters, includeRequests = false): void {
+  updateNormalizedCounter(db, month, bucket, 'totals', '', () => emptyAggregate(includeRequests), value => {
+    if (includeRequests) incrementTotals(value as AnalyticsAggregate, success, failure, durationMs, reliability);
+    else incrementAggregate(value as AnalyticsAggregate, success, failure, durationMs, reliability);
+  });
+}
+
+function incrementNormalizedPerformance(db: StateDatabase, month: string, bucket: string, phases: PerformancePhaseDurations): void {
+  updateNormalizedCounter(db, month, bucket, 'performance', '', () => ({}), value => incrementPerformancePhases(value, phases));
+}
+
+function recordNormalizedToolOutcome(
+  db: StateDatabase,
+  month: string,
+  hour: string,
+  tool: string,
+  workspace: string,
+  intent: AnalyticsTaskIntent,
+  useCase: AnalyticsUseCase,
+  success: number,
+  failure: number,
+  durationMs: number,
+  category: AnalyticsFailureCategory | '',
+  reliability: ReliabilityCounters,
+  performancePhases: PerformancePhaseDurations
+): void {
+  ensureNormalizedAnalyticsMonth(db, month);
+  incrementNormalizedAggregate(db, month, '', success, failure, durationMs, reliability, true);
+  incrementNormalizedPerformance(db, month, '', performancePhases);
+  incrementNormalizedAggregate(db, month, hour, success, failure, durationMs, reliability, true);
+  incrementNormalizedPerformance(db, month, hour, performancePhases);
+  incrementNormalizedNamed(db, month, '', 'tool', tool, success, failure, durationMs, reliability);
+  incrementNormalizedNamed(db, month, hour, 'tool', tool, success, failure, durationMs, reliability);
+  incrementNormalizedMatrix(db, month, '', 'activityMatrix', `${intent}\u0000${useCase}`, { intent, useCase }, success, failure, durationMs, reliability);
+  incrementNormalizedMatrix(db, month, hour, 'activityMatrix', `${intent}\u0000${useCase}`, { intent, useCase }, success, failure, durationMs, reliability);
+  if (workspace) {
+    incrementNormalizedNamed(db, month, '', 'workspace', workspace, success, failure, durationMs, reliability);
+    incrementNormalizedNamed(db, month, hour, 'workspace', workspace, success, failure, durationMs, reliability);
+    incrementNormalizedMatrix(db, month, '', 'workspaceTool', `${workspace}\u0000${tool}`, { workspace, tool }, success, failure, durationMs, reliability);
+    incrementNormalizedMatrix(db, month, hour, 'workspaceTool', `${workspace}\u0000${tool}`, { workspace, tool }, success, failure, durationMs, reliability);
+    incrementNormalizedMatrix(db, month, '', 'workspaceActivityMatrix', `${workspace}\u0000${intent}\u0000${useCase}`, { workspace, intent, useCase }, success, failure, durationMs, reliability);
+    incrementNormalizedMatrix(db, month, hour, 'workspaceActivityMatrix', `${workspace}\u0000${intent}\u0000${useCase}`, { workspace, intent, useCase }, success, failure, durationMs, reliability);
+  }
+  if (failure) {
+    incrementNormalizedFailure(db, month, '', category);
+    incrementNormalizedFailure(db, month, hour, category);
+    if (workspace) {
+      incrementNormalizedWorkspaceFailure(db, month, '', workspace, category);
+      incrementNormalizedWorkspaceFailure(db, month, hour, workspace, category);
+    }
+  }
+  markNormalizedAnalyticsDirty(db, month);
+}
+
+function incrementNormalizedNamed(db: StateDatabase, month: string, bucket: string, kind: string, name: string, success: number, failure: number, durationMs: number, reliability: ReliabilityCounters): void {
+  const field = kind === 'workspace' ? { workspace: name } : { tool: name };
+  updateNormalizedCounter(db, month, bucket, kind, name, () => ({ ...field, ...emptyAggregate() }), value => incrementAggregate(value as AnalyticsAggregate, success, failure, durationMs, reliability));
+}
+
+function incrementNormalizedMatrix(db: StateDatabase, month: string, bucket: string, kind: string, key: string, identity: Record<string, any>, success: number, failure: number, durationMs: number, reliability: ReliabilityCounters): void {
+  updateNormalizedCounter(db, month, bucket, kind, key, () => ({ ...identity, ...emptyAggregate() }), value => incrementAggregate(value as AnalyticsAggregate, success, failure, durationMs, reliability));
+}
+
+function incrementNormalizedFailure(db: StateDatabase, month: string, bucket: string, category: AnalyticsFailureCategory | ''): void {
+  if (!category) return;
+  updateNormalizedCounter(db, month, bucket, 'failureCategory', category, () => ({ category, failures: 0 }), value => { value.failures = number(value.failures) + 1; });
+}
+
+function incrementNormalizedWorkspaceFailure(db: StateDatabase, month: string, bucket: string, workspace: string, category: AnalyticsFailureCategory | ''): void {
+  if (!category) return;
+  updateNormalizedCounter(db, month, bucket, 'workspaceFailureCategory', `${workspace}\u0000${category}`, () => ({ workspace, category, failures: 0 }), value => { value.failures = number(value.failures) + 1; });
+}
+
+function recordNormalizedTransportEvent(db: StateDatabase, month: string, hour: string, event: TransportEventName, count: number): void {
+  ensureNormalizedAnalyticsMonth(db, month);
+  updateNormalizedCounter(db, month, '', 'transport', '', emptyTransportAggregate, value => { value[event] = number(value[event]) + count; });
+  updateNormalizedCounter(db, month, hour, 'transport', '', emptyTransportAggregate, value => { value[event] = number(value[event]) + count; });
+  markNormalizedAnalyticsDirty(db, month);
+}
+
+function recordNormalizedTaskCompletion(db: StateDatabase, month: string, hour: string, workspace: string, intent: AnalyticsTaskIntent): void {
+  ensureNormalizedAnalyticsMonth(db, month);
+  updateNormalizedCounter(db, month, '', 'taskIntent', intent, () => ({ intent, tasks: 0 }), value => { value.tasks = number(value.tasks) + 1; });
+  updateNormalizedCounter(db, month, hour, 'taskIntent', intent, () => ({ intent, tasks: 0 }), value => { value.tasks = number(value.tasks) + 1; });
+  if (workspace) {
+    const key = `${workspace}\u0000${intent}`;
+    updateNormalizedCounter(db, month, '', 'workspaceTaskIntent', key, () => ({ workspace, intent, tasks: 0 }), value => { value.tasks = number(value.tasks) + 1; });
+    updateNormalizedCounter(db, month, hour, 'workspaceTaskIntent', key, () => ({ workspace, intent, tasks: 0 }), value => { value.tasks = number(value.tasks) + 1; });
+  }
+  markNormalizedAnalyticsDirty(db, month);
 }
 
 function incrementPerformancePhases(target: PerformancePhaseDurations, phases: PerformancePhaseDurations): void {

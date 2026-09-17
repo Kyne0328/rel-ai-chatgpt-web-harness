@@ -152,6 +152,142 @@ try {
     apiKey: 'test-api-key'
   }, 'tunnel diagnostics must use the active local MCP endpoint and encrypted tunnel credential');
 
+  let hungDisposeCalls = 0;
+  let hungStopCalls = 0;
+  let hungStatus = { serverRunning: false, tunnelStatus: 'stopped' };
+  const neverStartingLocalService = deferred();
+  const hungRuntime = createDesktopServiceRuntime({
+    app: { getVersion: () => '0.26.0' },
+    connection: {
+      generateToken: () => 'generated-token',
+      writeLaunchEnv() {},
+      writeConnectionProfile() {}
+    },
+    configModule: {
+      ensureConfig() {},
+      getConfigPath: () => configPath
+    },
+    serviceProcessClient: {
+      isListening: () => false,
+      updateContext() {},
+      start: () => neverStartingLocalService.promise,
+      async stop() {
+        hungStopCalls += 1;
+        return { ok: true, cleanup: { clean: true } };
+      },
+      async dispose() { hungDisposeCalls += 1; }
+    },
+    dashboardWindowManager: { async close() {} },
+    runtimeLogs: { snapshot: () => ({ available: true, revision: 0, count: 0, entries: [] }) },
+    fetchImpl: async () => ({ ok: true, status: 200 }),
+    secureTunnelRuntime: {
+      snapshot: () => ({ state: 'stopped', processOwned: false }),
+      async start() { return { cancelled: true }; },
+      async stop() { return { stopped: true, exited: true }; }
+    },
+    tunnelCredentials: { getApiKey: () => 'test-api-key' },
+    errorCodes: {
+      CONFIGURATION_INVALID: 'configuration_invalid',
+      LOCAL_PORT_IN_USE: 'local_port_in_use',
+      LOCAL_SERVICE_START_FAILED: 'local_service_start_failed',
+      SECURE_TUNNEL_FAILED: 'secure_tunnel_failed',
+      TUNNEL_RUNTIME_UNAVAILABLE: 'tunnel_runtime_unavailable'
+    },
+    getCurrentStatus: () => hungStatus,
+    setStatus: next => { hungStatus = { ...hungStatus, ...next }; },
+    replaceCurrentStatus: next => { hungStatus = next; },
+    pushStatus() {},
+    startupStopTimeoutMs: 20
+  });
+  void hungRuntime.startServer();
+  await new Promise(resolve => setImmediate(resolve));
+  const hungStopStartedAt = Date.now();
+  const hungStopped = await hungRuntime.stopServer({ preserveDashboard: true });
+  assert.ok(Date.now() - hungStopStartedAt < 500, 'shutdown must not wait indefinitely for a local startup that never settles');
+  assert.equal(hungDisposeCalls, 1, 'expired startup wait must force-dispose the utility process generation');
+  assert.equal(hungStopCalls, 1, 'shutdown must continue through the normal local cleanup path after forced invalidation');
+  assert.equal(hungStopped.cleanup.clean, true);
+
+  let retryListening = false;
+  let retryStartCalls = 0;
+  let retryFailureCode = 'REL_AI_SERVICE_SPAWN_TIMEOUT';
+  const retryLogs = [];
+  let retryStatus = { serverRunning: false, tunnelStatus: 'stopped' };
+  const retryRuntime = createDesktopServiceRuntime({
+    app: { getVersion: () => '0.26.0' },
+    connection: {
+      generateToken: () => 'generated-token',
+      writeLaunchEnv() {},
+      writeConnectionProfile() {}
+    },
+    configModule: {
+      ensureConfig() {},
+      getConfigPath: () => configPath
+    },
+    serviceProcessClient: {
+      isListening: () => retryListening,
+      updateContext() {},
+      async start() {
+        retryStartCalls += 1;
+        if (retryStartCalls === 1 && retryFailureCode) {
+          const error = new Error(retryFailureCode === 'REL_AI_SERVICE_SPAWN_TIMEOUT'
+            ? 'Rel.AI service process did not spawn in time.'
+            : 'Rel.AI service request timed out: start');
+          error.code = retryFailureCode;
+          if (retryFailureCode === 'REL_AI_SERVICE_REQUEST_TIMEOUT') error.method = 'start';
+          throw error;
+        }
+        retryListening = true;
+        return { ok: true, port: 4888 };
+      },
+      async stop() {
+        retryListening = false;
+        return { ok: true, cleanup: { clean: true } };
+      },
+      async dispose() {}
+    },
+    dashboardWindowManager: { async close() {} },
+    runtimeLogs: {
+      snapshot: () => ({ available: true, revision: 0, count: 0, entries: [] }),
+      append: (message, options) => retryLogs.push({ message, options })
+    },
+    fetchImpl: async url => ({ ok: url.endsWith('/health'), status: url.endsWith('/mcp') ? 405 : 200 }),
+    secureTunnelRuntime: {
+      snapshot: () => ({ state: retryStatus.tunnelStatus || 'stopped', processOwned: false }),
+      async start() { return { ok: true, healthUrl: 'http://127.0.0.1:49001' }; },
+      async stop() { return { stopped: true, exited: true }; }
+    },
+    tunnelCredentials: { getApiKey: () => 'test-api-key' },
+    errorCodes: {
+      CONFIGURATION_INVALID: 'configuration_invalid',
+      LOCAL_PORT_IN_USE: 'local_port_in_use',
+      LOCAL_SERVICE_START_FAILED: 'local_service_start_failed',
+      SECURE_TUNNEL_FAILED: 'secure_tunnel_failed',
+      TUNNEL_RUNTIME_UNAVAILABLE: 'tunnel_runtime_unavailable'
+    },
+    getCurrentStatus: () => retryStatus,
+    setStatus: next => { retryStatus = { ...retryStatus, ...next }; },
+    replaceCurrentStatus: next => { retryStatus = next; },
+    pushStatus() {}
+  });
+  const recoveredLaunch = await retryRuntime.startServer();
+  assert.equal(retryStartCalls, 2, 'a utility-process spawn timeout must retry automatically once');
+  assert.equal(recoveredLaunch.serverRunning, true);
+  assert.equal(recoveredLaunch.tunnelStatus, 'running');
+  assert.equal(retryLogs.filter(entry => entry.options?.code === 'local_service_start_retry').length, 1,
+    'automatic spawn retry must be visible in diagnostics');
+
+  await retryRuntime.stopServer({ preserveDashboard: true });
+  retryStartCalls = 0;
+  retryFailureCode = 'REL_AI_SERVICE_REQUEST_TIMEOUT';
+  retryLogs.length = 0;
+  const requestTimeoutFailure = await retryRuntime.startServer();
+  assert.equal(retryStartCalls, 1, 'an expensive start-request timeout must not repeat the same initialization in a fresh process');
+  assert.equal(requestTimeoutFailure.serverRunning, false);
+  assert.equal(requestTimeoutFailure.errorCode, 'local_service_start_failed');
+  assert.equal(retryLogs.filter(entry => entry.options?.code === 'local_service_start_retry').length, 0,
+    'start-request timeouts must not be logged as retryable spawn failures');
+
   let terminalStatus = { serverRunning: false, tunnelStatus: 'stopped' };
   let terminalListening = false;
   const terminalRuntime = createDesktopServiceRuntime({

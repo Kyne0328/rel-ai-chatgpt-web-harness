@@ -1,14 +1,13 @@
-import * as api from '@opentelemetry/api';
-import { NodeTracerProvider, BatchSpanProcessor, ParentBasedSampler, TraceIdRatioBasedSampler } from '@opentelemetry/sdk-trace-node';
-import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
-import { resourceFromAttributes } from '@opentelemetry/resources';
-import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
+import type * as OpenTelemetryApi from '@opentelemetry/api';
+import type { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { packageMetadata as pkg } from './packageMetadata.js';
 import type { TelemetryConfig, TelemetryStatus } from './telemetry.types.ts';
 
 const REDACTED_ATTRIBUTE = '[redacted]';
 const MAX_ATTRIBUTE_CHARS = 1000;
 let provider: NodeTracerProvider | null = null;
+let runtimeApi: typeof import('@opentelemetry/api') | null = null;
+let initializationPromise: Promise<boolean> | null = null;
 let initializedEndpoint = '';
 let initializedSampleRatio: number | null = null;
 
@@ -18,7 +17,7 @@ type SafeAttributes = Record<string, SafeAttributeValue>;
 
 interface RunSpanOptions {
   carrier?: Record<string, unknown>;
-  kind?: api.SpanKind;
+  kind?: OpenTelemetryApi.SpanKind;
 }
 
 function configuredTelemetryEndpoint(config: TelemetryConfig = {}): string {
@@ -42,28 +41,49 @@ function telemetrySampleRatio(config: TelemetryConfig = {}): number {
 function initializeTelemetry(config: TelemetryConfig = {}): boolean {
   const endpoint = telemetryEndpoint(config);
   if (!endpoint) return false;
+  if (provider || initializationPromise) return true;
+  initializationPromise = initializeTelemetryRuntime(config, endpoint)
+    .catch(error => {
+      initializationPromise = null;
+      if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] telemetry initialization:', error);
+      return false;
+    });
+  return true;
+}
+
+async function initializeTelemetryRuntime(config: TelemetryConfig, endpoint: string): Promise<boolean> {
+  const [api, sdk, exporterModule, resources, conventions] = await Promise.all([
+    import('@opentelemetry/api'),
+    import('@opentelemetry/sdk-trace-node'),
+    import('@opentelemetry/exporter-trace-otlp-http'),
+    import('@opentelemetry/resources'),
+    import('@opentelemetry/semantic-conventions')
+  ]);
   if (provider) return true;
   const sampleRatio = telemetrySampleRatio(config);
-  const exporter = new OTLPTraceExporter({ url: endpoint });
-  provider = new NodeTracerProvider({
-    resource: resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: 'rel-ai-mcp',
-      [ATTR_SERVICE_VERSION]: pkg.version,
+  const exporter = new exporterModule.OTLPTraceExporter({ url: endpoint });
+  provider = new sdk.NodeTracerProvider({
+    resource: resources.resourceFromAttributes({
+      [conventions.ATTR_SERVICE_NAME]: 'rel-ai-mcp',
+      [conventions.ATTR_SERVICE_VERSION]: pkg.version,
       'service.instance.id': String(process.pid),
       'relai.telemetry.mode': 'optional'
     }),
-    sampler: new ParentBasedSampler({ root: new TraceIdRatioBasedSampler(sampleRatio) }),
-    spanProcessors: [new BatchSpanProcessor(exporter)]
+    sampler: new sdk.ParentBasedSampler({ root: new sdk.TraceIdRatioBasedSampler(sampleRatio) }),
+    spanProcessors: [new sdk.BatchSpanProcessor(exporter)]
   });
   provider.register();
+  runtimeApi = api;
   initializedEndpoint = endpoint;
   initializedSampleRatio = sampleRatio;
   return true;
 }
 
-function tracer(config: TelemetryConfig = {}): api.Tracer {
+async function initializedTelemetryApi(config: TelemetryConfig): Promise<typeof import('@opentelemetry/api') | null> {
+  if (!telemetryEndpoint(config)) return null;
   initializeTelemetry(config);
-  return api.trace.getTracer('rel-ai-mcp', pkg.version);
+  const initialized = await initializationPromise;
+  return initialized && provider ? runtimeApi : null;
 }
 
 function sanitizeAttributes(attributes: Record<string, unknown> = {}): SafeAttributes {
@@ -108,8 +128,10 @@ function sanitizeScalar(value: unknown): SafeAttributeScalar {
 }
 
 function traceContextEnvironment(): Record<string, string> {
+  const api = runtimeApi;
+  if (!api || !provider) return {};
   const carrier: Record<string, string> = {};
-  const setter: api.TextMapSetter<Record<string, string>> = {
+  const setter: OpenTelemetryApi.TextMapSetter<Record<string, string>> = {
     set: (target, key, value) => { target[String(key).toLowerCase()] = String(value); }
   };
   api.propagation.inject(api.context.active(), carrier, setter);
@@ -119,8 +141,8 @@ function traceContextEnvironment(): Record<string, string> {
   };
 }
 
-function extractTraceContext(carrier: Record<string, unknown> = {}): api.Context {
-  const getter: api.TextMapGetter<Record<string, unknown>> = {
+function extractTraceContext(api: typeof import('@opentelemetry/api'), carrier: Record<string, unknown> = {}): OpenTelemetryApi.Context {
+  const getter: OpenTelemetryApi.TextMapGetter<Record<string, unknown>> = {
     keys: source => Object.keys(source || {}),
     get: (source, key) => (source?.[String(key).toLowerCase()] ?? source?.[key]) as string | string[] | undefined
   };
@@ -134,10 +156,11 @@ async function runSpan<T>(
   operation: () => T | Promise<T>,
   options: RunSpanOptions = {}
 ): Promise<T> {
-  if (!telemetryEndpoint(config)) return operation();
-  const parentContext = options.carrier ? extractTraceContext(options.carrier) : api.context.active();
-  const span = tracer(config).startSpan(String(name || 'relai.operation'), {
-    attributes: sanitizeAttributes(attributes) as api.Attributes,
+  const api = await initializedTelemetryApi(config);
+  if (!api) return operation();
+  const parentContext = options.carrier ? extractTraceContext(api, options.carrier) : api.context.active();
+  const span = api.trace.getTracer('rel-ai-mcp', pkg.version).startSpan(String(name || 'relai.operation'), {
+    attributes: sanitizeAttributes(attributes) as OpenTelemetryApi.Attributes,
     kind: options.kind || api.SpanKind.INTERNAL
   }, parentContext);
   try {
@@ -159,16 +182,23 @@ function safeExceptionType(error: unknown): string {
 }
 
 function addSpanEvent(name: unknown, attributes: Record<string, unknown> = {}): void {
-  api.trace.getSpan(api.context.active())?.addEvent(String(name || 'event'), sanitizeAttributes(attributes) as api.Attributes);
+  const api = runtimeApi;
+  if (!api || !provider) return;
+  api.trace.getSpan(api.context.active())?.addEvent(String(name || 'event'), sanitizeAttributes(attributes) as OpenTelemetryApi.Attributes);
 }
 
 function setSpanAttributes(attributes: Record<string, unknown> = {}): void {
-  api.trace.getSpan(api.context.active())?.setAttributes(sanitizeAttributes(attributes) as api.Attributes);
+  const api = runtimeApi;
+  if (!api || !provider) return;
+  api.trace.getSpan(api.context.active())?.setAttributes(sanitizeAttributes(attributes) as OpenTelemetryApi.Attributes);
 }
 
 async function shutdownTelemetry(): Promise<void> {
+  if (initializationPromise) await initializationPromise.catch(() => false);
   const current = provider;
   provider = null;
+  runtimeApi = null;
+  initializationPromise = null;
   initializedEndpoint = '';
   initializedSampleRatio = null;
   if (current) await current.shutdown();

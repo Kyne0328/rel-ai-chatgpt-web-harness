@@ -59,6 +59,7 @@ interface ReadSessionOptions {
 interface ReadHistoryOptions {
   limit?: number;
   summary?: boolean;
+  maintain?: boolean;
 }
 
 interface EpisodeOptions {
@@ -252,13 +253,15 @@ function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapsh
     .map((task: TaskDto | Record<string, any>) => canonicalTaskSnapshot(task) as TaskRecord)
     .slice(0, MAX_SESSIONS);
   const activeIds = new Set(active.filter((session: TaskRecord) => session.status !== 'inactive').map((session: TaskRecord) => session.id).filter(Boolean));
+  const maintain = options.maintain !== false;
+  const storedLimit = Math.min(MAX_SESSIONS, Math.max(limit, active.length));
   const directory = getTaskHistoryDir(config);
   let persisted: TaskRecord[] = [];
   try {
     ensureCurrentHistory(config);
     const storedSessions = options.summary === true
-      ? listSessionSummaries(directory, MAX_SESSIONS)
-      : listSessions(directory, MAX_SESSIONS);
+      ? listSessionSummaries(directory, storedLimit)
+      : listSessions(directory, storedLimit);
     persisted = storedSessions.map((session: StoredTaskSession) => {
       const pending = readPendingSession(directory, session.id);
       const needsFullRecord = options.summary === true
@@ -267,11 +270,11 @@ function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapsh
         && !isTerminalTaskStatus(session.status);
       const current = pending || (needsFullRecord ? readSession(directory, session.id) : null) || session as TaskRecord;
       if (isStoredSessionNoise(current, activeIds)) {
-        discardStoredSession(directory, current.id);
+        if (maintain) discardStoredSession(directory, current.id);
         return null;
       }
       const reconciled = reconcileInactiveStoredSession(current, activeIds);
-      if (reconciled !== current) persistSession(directory, reconciled, { defer: true });
+      if (maintain && reconciled !== current) persistSession(directory, reconciled, { defer: true });
       return reconciled;
     }).filter((session: TaskRecord | null): session is TaskRecord => Boolean(session));
     const persistedIds = new Set(persisted.map((session: TaskRecord) => session.id));
@@ -511,7 +514,7 @@ function reconcileInactiveStoredSession(session: TaskRecord, activeIds: Set<stri
     status: 'inactive',
     resumeStatus: session.resumeStatus || session.status,
     progress: normalizeTaskProgress(session.progress || { mode: 'indeterminate', label: 'Ready to resume' }, 'inactive'),
-    currentStage: 'Waiting for next action',
+    currentStage: 'Inactive',
     completionKnown: false,
     endReason: '',
     terminalReason: '',
@@ -565,7 +568,11 @@ function historicalTitle(session: TaskRecord): string {
 
 function publicSession(session: TaskRecord): TaskRecord {
   if (!session || typeof session !== 'object') return session;
-  const { version: _version, principalFingerprint: _principalFingerprint, ...value } = sanitizeTaskRecordForProjection(session) as TaskRecord;
+  // Stored and live sessions have already crossed the canonical sanitizer
+  // boundary. Reusing their bounded event array avoids rescanning up to 200
+  // events for every public projection while retaining the projection's
+  // durable-field redaction.
+  const { version: _version, principalFingerprint: _principalFingerprint, ...value } = sanitizeTaskRecordForProjection(session, { eventsAlreadySanitized: true }) as TaskRecord;
   const terminal = isTerminalTaskStatus(value.status);
   const publicStatus = value.status;
   return {

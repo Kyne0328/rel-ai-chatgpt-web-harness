@@ -40,7 +40,7 @@ const deps = {
   saveDesktopSettings: settings => ({ ok: true, settings }),
   getLocalUsage: month => ({ ok: true, month }),
   getUpdateStatus: () => ({ state: 'idle' }), checkForUpdates: () => ({ ok: true }), downloadUpdate: () => ({ ok: true }), installUpdate: () => ({ ok: true }),
-  getLifecycleStatus: () => ({ ok: true }), setLaunchAtLogin: enabled => enabled,
+  getLifecycleStatus: () => ({ ok: true }), acknowledgeConnectorRefresh: () => ({ ok: true }), setLaunchAtLogin: enabled => enabled,
   getCurrentStatus: () => ({ serverRunning: true }),
   getDashboardWindowState: () => ({ platform: 'win32', customTitleBar: true }),
   minimizeDashboardWindow: () => ({ minimized: true }), toggleDashboardMaximize: () => ({ maximized: true }), requestDashboardClose: () => ({ ok: true }),

@@ -179,6 +179,8 @@ function verifyPackageContracts() {
   assert.deepEqual([...installerIcon.subarray(0, 4)], [0, 0, 1, 0], 'the dedicated Windows installer icon must remain a valid ICO asset');
   const installerInclude = fs.readFileSync(path.join(tmp, 'electron', electronPackage.build.nsis.include), 'utf8');
   assert.doesNotMatch(installerInclude, /SpiderBanner::Show/, 'silent in-app Windows updates must not create SpiderBanner UI before electron-builder reaches its install section');
+  assert.match(installerInclude, /customWelcomePage[\s\S]*Update Rel\.AI MCP[\s\S]*already installed[\s\S]*update the existing installation/, 'manual Windows installers must clearly present an existing installation as an update');
+  assert.match(installerInclude, /customInstallMode[\s\S]*hasPerUserInstallation[\s\S]*isForceCurrentInstall[\s\S]*hasPerMachineInstallation[\s\S]*isForceMachineInstall/, 'manual Windows updates must keep the existing installation scope instead of presenting a fresh-install scope choice');
   assert.match(installerInclude, /customInstall[\s\S]*update-installing\.json/, 'successful Windows updates must clear the update-in-progress marker before relaunch');
   assert.match(installerInclude, /\.onInstFailed[\s\S]*update-installing\.json/, 'failed Windows updates must clear the update-in-progress marker so the shortcut is not left blocked');
   assert.deepEqual(electronPackage.build.linux.target, ['AppImage', 'deb']);

@@ -9,11 +9,14 @@ import {
   checkpointSqlite,
   createSqliteBackup,
   isSqliteCorruptionError,
+  isSqliteValidationCurrent,
   restoreSqliteBackup,
-  sqliteBackupPath
+  sqliteBackupPath,
+  writeSqliteValidationStamp
 } from './sqliteDurability.ts';
 
 const STATE_SCHEMA_VERSION = 2;
+const STATE_VALIDATION_KEY = `state-v${STATE_SCHEMA_VERSION}`;
 
 interface StateDatabaseConfig extends Record<string, unknown> {
   stateDir?: string;
@@ -185,15 +188,19 @@ function ensureStateSchema(db: DatabaseSync, file: string): void {
 
 function initializeStateDatabase(config: StateDatabaseConfig = {}): DatabasePersistenceResult {
   const file = stateDatabasePath(config);
+  const validated = isSqliteValidationCurrent(file, STATE_VALIDATION_KEY);
   try {
     const db = openStateDatabase(config);
     if (!db) throw new Error('Durable state database could not be opened.');
     try {
-      assertSqliteIntegrity(db, 'Durable state database');
-      return { ok: true, recovered: false, path: file };
+      if (!validated) assertSqliteIntegrity(db, 'Durable state database');
     } finally {
       db.close();
     }
+    if (!validated) {
+      try { writeSqliteValidationStamp(file, STATE_VALIDATION_KEY); } catch {}
+    }
+    return { ok: true, recovered: false, path: file };
   } catch (error) {
     if (!isSqliteCorruptionError(error)) throw error;
     const recovery = restoreSqliteBackup(file, { label: 'Durable state database' });
@@ -201,6 +208,7 @@ function initializeStateDatabase(config: StateDatabaseConfig = {}): DatabasePers
     if (!db) throw new Error('Recovered durable state database could not be opened.');
     try { assertSqliteIntegrity(db, 'Durable state database'); }
     finally { db.close(); }
+    try { writeSqliteValidationStamp(file, STATE_VALIDATION_KEY); } catch {}
     return { path: file, ...recovery };
   }
 }
@@ -210,14 +218,17 @@ function maintainStateDatabase(config: StateDatabaseConfig = {}): DatabasePersis
   if (!fs.existsSync(file)) return { ok: true, skipped: true, path: file };
   const db = openStateDatabase(config);
   if (!db) return { ok: true, skipped: true, path: file };
+  let result: DatabasePersistenceResult;
   try {
     const checkpoint = checkpointSqlite(db, 'Durable state database');
     const integrity = assertSqliteIntegrity(db, 'Durable state database');
     const backup = createSqliteBackup(db, file, { label: 'Durable state database' });
-    return { ok: true, path: file, checkpoint, integrity, backupPath: backup.path };
+    result = { ok: true, path: file, checkpoint, integrity, backupPath: backup.path };
   } finally {
     db.close();
   }
+  try { writeSqliteValidationStamp(file, STATE_VALIDATION_KEY); } catch {}
+  return result;
 }
 
 function stateMetaValue(db: DatabaseSync, key: unknown, fallback: unknown = ''): unknown {

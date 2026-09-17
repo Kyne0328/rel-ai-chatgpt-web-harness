@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { clearTaskHistory, getTaskHistoryDir, readCrossWorkspaceTaskEpisodes, readRecentWorkflowEvidence, readRelevantTaskEpisodes, readTaskHistory, readTaskHistorySessionRecord, recordTaskHistoryEvent, recordWorkflowEvidenceBatch } from "../src/taskHistoryStore.ts";
+import { clearTaskHistory, flushTaskHistoryPersistence, getTaskHistoryDir, readCrossWorkspaceTaskEpisodes, readRecentTaskHistoryEvents, readRecentWorkflowEvidence, readRelevantTaskEpisodes, readTaskHistory, readTaskHistorySessionRecord, recordTaskActivityEvent, recordTaskHistoryEvent, recordWorkflowEvidenceBatch } from "../src/taskHistoryStore.ts";
 import { writeSession } from '../src/taskHistoryStorage.ts';
+import { withStateDatabase } from '../src/stateDatabase.ts';
 import { principalFingerprint } from '../src/mcp/principal.js';
 import { assertKnownTask } from '../src/tools/task.js';
 
@@ -40,6 +41,15 @@ try {
   }
   assert.equal(fs.existsSync(path.join(sandbox, 'durable-state.sqlite')), true, 'current task history must be persisted in the shared SQLite store');
   assert.equal(fs.existsSync(path.join(sandbox, '.task-history-v3')), false, 'obsolete task-history format markers must not be recreated');
+  const eventProjection = withStateDatabase(config, db => ({
+    count: Number(db.prepare('SELECT COUNT(*) AS count FROM task_history_events').get()?.count || 0),
+    plan: db.prepare(`EXPLAIN QUERY PLAN
+      SELECT task_id,payload FROM task_history_events
+      ORDER BY event_timestamp DESC,task_updated_at_ms DESC,task_id ASC,event_index DESC LIMIT ?`).all(20)
+  }));
+  assert.equal(eventProjection.count, 251, 'retained events must be maintained in the indexed history projection');
+  assert.match(eventProjection.plan.map(item => String(item.detail || '')).join('\n'), /task_history_events_recent_idx/,
+    'recent event reads must use the indexed event projection instead of expanding every retained timeline');
 
   let sessions = readTaskHistory(config, { state: 'idle' }, { limit: 500 });
   assert.equal(sessions.length, 251);
@@ -213,7 +223,7 @@ try {
   assert.equal(stalePlanning.endReason || '', '');
   assert.equal(stalePlanning.activeCalls, 0);
   assert.deepEqual(stalePlanning.currentOperations, []);
-  assert.equal(stalePlanning.currentStage, 'Waiting for next action');
+  assert.equal(stalePlanning.currentStage, 'Inactive');
   assert.equal(stalePlanning.endedAt == null, true, 'inactive sessions must not receive a terminal timestamp');
   assert.ok(stalePlanning.inactiveAt, 'inactive sessions must retain the inactivity transition time');
   assert.equal(readTaskHistorySessionRecord(config, 'stale-planning-session').status, 'inactive', 'reconciliation must persist the resumable inactive state');
@@ -238,6 +248,15 @@ try {
   assert.equal(staleTerminal.activeCalls, 0, 'terminal history must not expose stale active calls');
   assert.deepEqual(staleTerminal.currentOperations, [], 'terminal history must not expose stale running operations');
   assert.equal(staleTerminal.progress.mode, 'indeterminate', 'historical progress may remain indeterminate because rendering is status-aware');
+
+  recordTaskActivityEvent(config, {
+    task: { id: 'worker-projection-task', taskId: 'worker-projection-task', workspace: 'repo', status: 'planning' },
+    activityEvent: { eventId: 'worker-projection-event', timestamp: new Date(Date.now() + 1).toISOString(), tool: 'read', status: 'succeeded', summary: 'Worker persisted event.' }
+  }, { defer: true });
+  const flushed = await flushTaskHistoryPersistence();
+  assert.equal(flushed.ok, true, 'deferred task-history worker write must complete before projection read');
+  assert.equal(readRecentTaskHistoryEvents(config, 1)[0]?.eventId, 'worker-projection-event',
+    'task-history worker writes must update the indexed recent-event projection through SQLite triggers');
 
   clearTaskHistory(config);
   assert.equal(fs.existsSync(historyDir), false);

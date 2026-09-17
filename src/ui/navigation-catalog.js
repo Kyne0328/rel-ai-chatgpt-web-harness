@@ -70,6 +70,11 @@ export function desktopNavigationOwner(sectionId) {
   return id;
 }
 
-export function navigationCommands() {
-  return [...WORK_NAV_ITEMS, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS];
+export function navigationCommands({ includeExtensions = false } = {}) {
+  return [
+    ...WORK_NAV_ITEMS,
+    ...(includeExtensions ? [EXTENSIONS_NAV_ITEM] : []),
+    ...SYSTEM_NAV_ITEMS,
+    ...SETTINGS_NAV_ITEMS
+  ];
 }

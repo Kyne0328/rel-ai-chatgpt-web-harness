@@ -1,13 +1,12 @@
 import * as http from "node:http";
+import { performance } from 'node:perf_hooks';
 import { getRequestListener } from '@hono/node-server';
 import * as connection from "./connectionProfile.js";
 import { DEFAULT_MAX_BODY_BYTES, normalizeMaxBodyBytes } from './http/io.ts';
 import { isLoopbackHost } from './http/serverPolicy.ts';
-import { shutdownMcpTransport } from './http/mcpTransport.ts';
-import { createHttpApp } from './http/routes.ts';
+import { createHttpApp, prewarmHttpRoutes, shutdownHttpRoutes } from './http/routes.ts';
 import type { HttpServerOptions, RelaiHttpServer, ResolvedHttpServerOptions } from './http/types.ts';
 import { createRelaiCoreRuntime } from './core/runtime.ts';
-import { pruneManagedProcesses } from "./processManager.js";
 import { ensureConfig, getConfigPath } from './config.js';
 import { buildToolManifest } from './mcp/toolManifest.js';
 import { resolveConnectionGenerations } from './mcp/connectionGenerations.js';
@@ -24,6 +23,7 @@ function resolveHttpRequestTimeoutMs(maxBodyBytes: unknown): number {
 }
 
 function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
+  const startupStarted = performance.now();
   const isolated = options.isolated === true
     || Number(options.port) === 0
     || process.env.REL_AI_MCP_ISOLATED === '1';
@@ -59,12 +59,18 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     throw new Error('REL_AI_MCP_ALLOW_NO_AUTH is permitted only on a loopback bind.');
   }
 
+  const configurationStarted = performance.now();
   ensureConfig();
   const coreRuntime = createRelaiCoreRuntime({
     isolated,
     stopManagedProcessesOnShutdown: options.stopManagedProcessesOnClose !== false
   });
-  const { config: runtimeConfig } = coreRuntime.start();
+  const configurationMs = performance.now() - configurationStarted;
+  const coreRuntimeStarted = performance.now();
+  const coreStartup = coreRuntime.start();
+  const coreRuntimeMs = performance.now() - coreRuntimeStarted;
+  const runtimeConfig = coreStartup.config as Record<string, unknown>;
+  const manifestStarted = performance.now();
   const manifest = buildToolManifest(runtimeConfig);
   const generations = resolveConnectionGenerations(runtimeConfig, { token, host, port });
   mcpConnectionManager.configure({
@@ -73,10 +79,7 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     configurationGeneration: generations.configurationGeneration,
     manifest
   });
-  if (!isolated) {
-    pruneManagedProcesses(runtimeConfig);
-  }
-
+  const manifestMs = performance.now() - manifestStarted;
   const routeOptions: ResolvedHttpServerOptions = {
     ...options,
     host,
@@ -96,6 +99,7 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     ...(onRuntimeLogChange ? { onRuntimeLogChange } : {})
   };
 
+  const httpSetupStarted = performance.now();
   const app = createHttpApp(routeOptions);
   const requestListener = getRequestListener(app.fetch, {
     hostname: host,
@@ -103,12 +107,20 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     autoCleanupIncoming: false
   });
   const server = http.createServer(requestListener) as RelaiHttpServer;
+  server.startupTimings = {
+    configurationMs,
+    coreRuntimeMs,
+    ...numericTimingRecord(coreStartup.startupTimings),
+    manifestMs,
+    httpSetupMs: performance.now() - httpSetupStarted,
+    beforeListenMs: performance.now() - startupStarted
+  };
 
   let shutdownPromise: Promise<unknown> = Promise.resolve();
   server.on('close', () => {
     shutdownPromise = (async () => {
       const transportCleanup = await Promise.allSettled([
-        shutdownMcpTransport(),
+        shutdownHttpRoutes(),
         mcpConnectionManager.shutdown('http_server_closed')
       ]);
       const runtimeCleanup = await coreRuntime.shutdown();
@@ -148,7 +160,10 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     process.exit(1);
   });
 
+  const listenStarted = performance.now();
   server.listen(port, host, () => {
+    server.startupTimings.listenMs = performance.now() - listenStarted;
+    server.startupTimings.localReadyMs = performance.now() - startupStarted;
     mcpConnectionManager.markReady();
     const address = server.address();
     const actualPort = address && typeof address === "object" ? address.port : port;
@@ -164,12 +179,31 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     console.error(`[rel-ai-mcp] Dashboard: ${summary.dashboardUrl}`);
     console.error(`[rel-ai-mcp] Local MCP: ${summary.localMcpUrl}`);
     console.error('[rel-ai-mcp] ChatGPT connectivity is provided only by OpenAI Secure MCP Tunnel.');
+    setImmediate(() => {
+      void prewarmHttpRoutes().catch(error => debugStartupPrewarm('MCP transport', error));
+      if (!isolated) {
+        void import('./processManager.js')
+          .then(module => module.pruneManagedProcesses(runtimeConfig))
+          .catch(error => debugStartupPrewarm('managed-process cleanup', error));
+      }
+    });
     if (!token) {
       console.error("[rel-ai-mcp] Notice: HTTP auth is disabled. Use only on a trusted local network.");
     }
   });
 
   return server;
+}
+
+function numericTimingRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1])));
+}
+
+function debugStartupPrewarm(component: string, error: unknown): void {
+  if (!process.env.REL_AI_MCP_DEBUG) return;
+  console.error(`[rel-ai-mcp] ${component} prewarm failed: ${shutdownErrorMessage(error)}`);
 }
 
 function shutdownErrorMessage(error: unknown): string {

@@ -70,4 +70,5 @@ export interface HttpRequestError extends Error {
 
 export interface RelaiHttpServer extends Server<typeof IncomingMessage, typeof ServerResponse> {
   waitForShutdown: () => Promise<unknown>;
+  startupTimings: Record<string, number>;
 }

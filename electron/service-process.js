@@ -6,17 +6,17 @@ import { projectServiceActivityEvent, projectServiceActivitySnapshot } from './s
 const parentPort = process.parentPort;
 if (!parentPort) throw new Error('Rel.AI service process requires an Electron utility-process parent port.');
 
-const [httpModule, toolActivity, dashboardSessions, coreDesktopOperations, desktopManager, browserDriver] = await Promise.all([
-  importResourceModule('src/httpServer.ts'),
-  importResourceModule('src/toolActivity.js'),
-  importResourceModule('src/http/dashboardSessions.ts'),
-  importResourceModule('src/core/desktop-operations.ts'),
-  importResourceModule('src/desktopManager.ts'),
-  importResourceModule('src/browser/browserDriver.ts')
-]);
+const LISTEN_TIMEOUT_MS = 10_000;
+const SHUTDOWN_CLEANUP_TIMEOUT_MS = 5_000;
 
-desktopManager.configureDesktopNativeBridge(payload => callNative('desktopOperation', payload));
-browserDriver.configureBrowserNativeBridge((payload, options) => callNative('browserOperation', payload, options));
+let httpModulePromise = null;
+let toolActivityPromise = null;
+let dashboardSessionsPromise = null;
+let coreDesktopOperationsPromise = null;
+let desktopManagerPromise = null;
+let browserDriverPromise = null;
+let loadedToolActivity = null;
+let unsubscribeActivity = null;
 
 let httpServer = null;
 let activeToken = '';
@@ -33,10 +33,6 @@ const pendingNativeRequests = new Map();
 const runtimeLogListeners = new Set();
 const desktopStatusListeners = new Set();
 
-const unsubscribeActivity = toolActivity.onToolActivity(event => {
-  const projected = projectServiceActivityEvent(event);
-  if (projected) post({ type: 'activity', event: projected });
-});
 parentPort.on('message', event => {
   const message = event?.data || {};
   if (message.type === 'request') {
@@ -48,7 +44,9 @@ parentPort.on('message', event => {
     return;
   }
   if (message.type === 'native-event') {
-    browserDriver.dispatchBrowserNativeEvent(message.event || {});
+    void loadBrowserDriver()
+      .then(browserDriver => browserDriver.dispatchBrowserNativeEvent(message.event || {}))
+      .catch(error => post({ type: 'log', level: 'warning', message: `Browser event bridge failed: ${errorMessage(error)}` }));
     return;
   }
   if (message.type === 'native-response') settleNativeRequest(message);
@@ -76,12 +74,12 @@ async function dispatchRequest(method, payload) {
   if (method === 'start') return runLifecycle(() => startService(payload));
   if (method === 'stop') return runLifecycle(stopService);
   if (method === 'dashboard-bootstrap') return createDashboardBootstrap();
-  if (method === 'activity-snapshot') return projectServiceActivitySnapshot(toolActivity.getToolActivity());
-  if (method === 'desktop-local-usage') return coreDesktopOperations.getDesktopLocalUsage(payload.month);
-  if (method === 'desktop-onboarding-handoff') return coreDesktopOperations.markDesktopOnboardingHandoff();
-  if (method === 'desktop-task-code-workspace') return coreDesktopOperations.getDesktopTaskCodeWorkspace(payload);
-  if (method === 'desktop-task-code-diff') return coreDesktopOperations.readDesktopTaskCodeDiff(payload);
-  if (method === 'desktop-task-code-workspace-path') return coreDesktopOperations.getDesktopTaskCodeWorkspacePath(payload);
+  if (method === 'activity-snapshot') return projectServiceActivitySnapshot((await loadToolActivity()).getToolActivity());
+  if (method === 'desktop-local-usage') return (await loadCoreDesktopOperations()).getDesktopLocalUsage(payload.month);
+  if (method === 'desktop-onboarding-handoff') return (await loadCoreDesktopOperations()).markDesktopOnboardingHandoff();
+  if (method === 'desktop-task-code-workspace') return (await loadCoreDesktopOperations()).getDesktopTaskCodeWorkspace(payload);
+  if (method === 'desktop-task-code-diff') return (await loadCoreDesktopOperations()).readDesktopTaskCodeDiff(payload);
+  if (method === 'desktop-task-code-workspace-path') return (await loadCoreDesktopOperations()).getDesktopTaskCodeWorkspacePath(payload);
   throw new Error(`Unknown service-process request: ${method}`);
 }
 
@@ -101,6 +99,12 @@ async function startService(payload = {}) {
   const token = String(payload.token || '');
   let server = null;
   try {
+    const [httpModule, toolActivity] = await Promise.all([
+      loadHttpModule(),
+      loadToolActivity(),
+      loadDesktopManager(),
+      loadBrowserDriver()
+    ]);
     server = httpModule.startHttpServer({
       host,
       port,
@@ -138,7 +142,7 @@ async function startService(payload = {}) {
     return { ok: true, port: actualPort };
   } catch (error) {
     try { server?.closeAllConnections?.(); } catch {}
-    if (server?.listening) await closeHttpServer(server).catch(() => {});
+    if (server) await closeHttpServer(server).catch(() => {});
     httpServer = null;
     activeToken = '';
     activePort = 0;
@@ -153,10 +157,13 @@ async function stopService() {
   activePort = 0;
   const localService = await closeHttpServer(ownedServer);
   const shutdownResult = ownedServer?.waitForShutdown
-    ? await ownedServer.waitForShutdown()
+    ? await waitForShutdownCleanup(ownedServer)
     : null;
   const runtimeCleanup = normalizeRuntimeCleanup(shutdownResult);
-  dashboardSessions.clearDashboardSessions();
+  if (dashboardSessionsPromise) {
+    const dashboardSessions = await dashboardSessionsPromise.catch(() => null);
+    dashboardSessions?.clearDashboardSessions?.();
+  }
   publishActivitySnapshot();
   const clean = localService.closed !== false && runtimeCleanup.clean !== false;
   return {
@@ -170,6 +177,25 @@ async function stopService() {
       ...(runtimeCleanup.reported ? {} : { runtimeCleanupReported: false })
     }
   };
+}
+
+async function waitForShutdownCleanup(server) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      Promise.resolve(server.waitForShutdown()),
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve({
+          clean: false,
+          managedProcesses: { attempted: 0, stopped: 0, orphaned: 1 },
+          repositoryIntelligence: { closed: false },
+          errors: [{ step: 'runtimeCleanup', error: `Runtime cleanup did not finish within ${SHUTDOWN_CLEANUP_TIMEOUT_MS / 1000} seconds.` }]
+        }), SHUTDOWN_CLEANUP_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function normalizeRuntimeCleanup(value) {
@@ -192,8 +218,9 @@ function normalizeRuntimeCleanup(value) {
   };
 }
 
-function createDashboardBootstrap() {
+async function createDashboardBootstrap() {
   if (!httpServer?.listening || !activeToken || !activePort) throw new Error('Local service is not running.');
+  const dashboardSessions = await loadDashboardSessions();
   return {
     ok: true,
     port: activePort,
@@ -222,7 +249,11 @@ function updateDesktopContext(next = {}) {
       try { listener(next.runtimeLogChange); } catch {}
     }
   }
-  if (next.transportEvent) coreDesktopOperations.recordDesktopTransportEvent(next.transportEvent);
+  if (next.transportEvent) {
+    void loadCoreDesktopOperations()
+      .then(coreDesktopOperations => coreDesktopOperations.recordDesktopTransportEvent(next.transportEvent))
+      .catch(error => post({ type: 'log', level: 'warning', message: `Desktop transport telemetry failed: ${errorMessage(error)}` }));
+  }
 }
 
 function runtimeLogSnapshot(options = {}) {
@@ -293,20 +324,74 @@ function nativeCancelledError(reason) {
 }
 
 function publishActivitySnapshot() {
+  if (!loadedToolActivity) return;
   post({
     type: 'activity',
-    event: { phase: 'snapshot', snapshot: projectServiceActivitySnapshot(toolActivity.getToolActivity()) }
+    event: { phase: 'snapshot', snapshot: projectServiceActivitySnapshot(loadedToolActivity.getToolActivity()) }
   });
 }
 
-function waitForListening(server) {
+function loadHttpModule() {
+  httpModulePromise ||= importResourceModule('src/httpServer.ts');
+  return httpModulePromise;
+}
+
+function loadToolActivity() {
+  if (!toolActivityPromise) {
+    toolActivityPromise = importResourceModule('src/toolActivity.js').then(toolActivity => {
+      loadedToolActivity = toolActivity;
+      unsubscribeActivity ||= toolActivity.onToolActivity(event => {
+        const projected = projectServiceActivityEvent(event);
+        if (projected) post({ type: 'activity', event: projected });
+      });
+      return toolActivity;
+    });
+  }
+  return toolActivityPromise;
+}
+
+function loadDashboardSessions() {
+  dashboardSessionsPromise ||= importResourceModule('src/http/dashboardSessions.ts');
+  return dashboardSessionsPromise;
+}
+
+function loadCoreDesktopOperations() {
+  coreDesktopOperationsPromise ||= importResourceModule('src/core/desktop-operations.ts');
+  return coreDesktopOperationsPromise;
+}
+
+function loadDesktopManager() {
+  if (!desktopManagerPromise) {
+    desktopManagerPromise = importResourceModule('src/desktopManager.ts').then(desktopManager => {
+      desktopManager.configureDesktopNativeBridge(payload => callNative('desktopOperation', payload));
+      return desktopManager;
+    });
+  }
+  return desktopManagerPromise;
+}
+
+function loadBrowserDriver() {
+  if (!browserDriverPromise) {
+    browserDriverPromise = importResourceModule('src/browser/browserDriver.ts').then(browserDriver => {
+      browserDriver.configureBrowserNativeBridge((payload, options) => callNative('browserOperation', payload, options));
+      return browserDriver;
+    });
+  }
+  return browserDriverPromise;
+}
+
+function waitForListening(server, timeoutMs = LISTEN_TIMEOUT_MS) {
   if (server?.listening) return Promise.resolve(server.address().port);
   return new Promise((resolve, reject) => {
     const onListening = () => finish(() => resolve(server.address().port));
     const onError = error => finish(() => reject(error));
+    const timer = setTimeout(() => finish(() => reject(new Error(
+      `Local Rel.AI HTTP server did not begin listening within ${Math.round(timeoutMs / 1000)} seconds.`
+    ))), Math.max(1, Number(timeoutMs || LISTEN_TIMEOUT_MS)));
     server.once('listening', onListening);
     server.once('error', onError);
     function finish(action) {
+      clearTimeout(timer);
       server.off('listening', onListening);
       server.off('error', onError);
       action();

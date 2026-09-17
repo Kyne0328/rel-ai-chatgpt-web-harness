@@ -1,3 +1,5 @@
+import { performance } from 'node:perf_hooks';
+
 import { readConfig } from '../config.js';
 import { initializeKnowledgeDatabase, maintainKnowledgeDatabase } from '../knowledgeStore.js';
 import { pruneNativeToolTasks } from '../mcp/nativeToolTasks.js';
@@ -34,14 +36,31 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
 
   function start(): Record<string, unknown> {
     if (startup) return startup;
+    const stateStarted = performance.now();
+    const state = initializeStateDatabase(config);
+    const stateDatabaseMs = performance.now() - stateStarted;
+    const knowledgeStarted = performance.now();
+    const knowledge = initializeKnowledgeDatabase(config);
+    const knowledgeDatabaseMs = performance.now() - knowledgeStarted;
+    const telemetryStarted = performance.now();
+    const telemetry = isolated ? false : initializeTelemetry(config);
+    const telemetrySetupMs = performance.now() - telemetryStarted;
+    const pruneStarted = performance.now();
+    if (!isolated) pruneNativeToolTasks(config);
+    const nativeTaskPruneMs = performance.now() - pruneStarted;
     startup = {
       config,
       isolated,
-      state: initializeStateDatabase(config),
-      knowledge: initializeKnowledgeDatabase(config),
-      telemetry: isolated ? false : initializeTelemetry(config)
+      state,
+      knowledge,
+      telemetry,
+      startupTimings: {
+        stateDatabaseMs,
+        knowledgeDatabaseMs,
+        telemetrySetupMs,
+        nativeTaskPruneMs
+      }
     };
-    if (!isolated) pruneNativeToolTasks(config);
     return startup;
   }
 

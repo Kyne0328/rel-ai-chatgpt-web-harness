@@ -113,7 +113,10 @@ interface OutputSpillResult {
 interface OutputSpillWriter {
   start(buffer: Buffer): void;
   append(buffer: Buffer): void;
-  finish(): OutputSpillResult | null;
+  flush(): Promise<void>;
+  finish(): Promise<OutputSpillResult | null>;
+  readonly pendingBytes: number;
+  waitForLowWatermark(limit?: number): Promise<void>;
 }
 
 function processPid(target: ProcessTarget): number {
@@ -394,18 +397,31 @@ async function runProcess(command: string, args: readonly string[] = [], options
     };
 
     const subprocess = execa(file, shell ? [] : processArgs, execaOptions);
+    const stdoutBackpressure = createOutputBackpressure(subprocess.stdout, stdoutSpill);
+    const stderrBackpressure = createOutputBackpressure(subprocess.stderr, stderrSpill);
     subprocess.stdout?.on('data', (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       stdoutBytes += buffer.length;
       stdoutBuffer.append(buffer);
+      stdoutBackpressure.observe();
     });
     subprocess.stderr?.on('data', (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       stderrBytes += buffer.length;
       stderrBuffer.append(buffer);
+      stderrBackpressure.observe();
     });
 
-    const result = await subprocess;
+    let result;
+    try {
+      result = await subprocess;
+    } finally {
+      // Cancellation and process errors must release a paused pipe so execa can
+      // finish its own stream cleanup. The spill writer remains ordered and is
+      // drained below before its file descriptor is closed.
+      stdoutBackpressure.release();
+      stderrBackpressure.release();
+    }
     const terminationOutcome = (result.timedOut || result.isCanceled)
       ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
       : null;
@@ -415,8 +431,11 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBuffer.append('\n[rel-ai-mcp operation cancelled]\n');
     }
 
-    const stdoutSpillResult = stdoutSpill.finish();
-    const stderrSpillResult = stderrSpill.finish();
+    await Promise.all([stdoutSpill.flush(), stderrSpill.flush()]);
+    const [stdoutSpillResult, stderrSpillResult] = await Promise.all([
+      stdoutSpill.finish(),
+      stderrSpill.finish()
+    ]);
     const spawnError = result.failed
       && !result.signal
       && !result.timedOut
@@ -490,6 +509,44 @@ function hardenedGitArgs(config: ProcessRuntimeConfig, args: readonly string[]):
 function processOutputText(buffer: BoundedOutputBuffer, preserveWhitespace = false): string {
   const text = buffer.text();
   return preserveWhitespace ? text : text.trim();
+}
+
+const OUTPUT_SPILL_HIGH_WATER_BYTES = 4 * 1024 * 1024;
+const OUTPUT_SPILL_LOW_WATER_BYTES = 1024 * 1024;
+
+interface OutputBackpressureSource {
+  pause?(): unknown;
+  resume?(): unknown;
+  readonly destroyed?: boolean;
+}
+
+function createOutputBackpressure(
+  source: OutputBackpressureSource | null | undefined,
+  spill: OutputSpillWriter
+): { observe(): void; release(): void } {
+  let paused = false;
+  let released = false;
+
+  const observe = (): void => {
+    if (released || paused || !source || typeof source.pause !== 'function') return;
+    if (spill.pendingBytes < OUTPUT_SPILL_HIGH_WATER_BYTES) return;
+    paused = true;
+    source.pause();
+    void spill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES).then(() => {
+      if (released || !paused) return;
+      paused = false;
+      if (!source.destroyed && typeof source.resume === 'function') source.resume();
+    });
+  };
+
+  const release = (): void => {
+    released = true;
+    if (!paused) return;
+    paused = false;
+    if (!source?.destroyed && typeof source?.resume === 'function') source.resume();
+  };
+
+  return { observe, release };
 }
 
 const TRUNCATED_OUTPUT_MARKER = '\n[rel-ai-mcp truncated output]\n';

@@ -68,15 +68,19 @@ async function createDesktopHost(options = {}) {
   registerLocalScheme(protocol);
   configureApplicationIdentity(app);
 
-  const [connection, configModule, errorContracts, processModule, processEnvironment] = await Promise.all([
+  const [connection, configModule, errorContracts, processEnvironment] = await Promise.all([
     importResourceModule('src/connectionProfile.js'),
     importResourceModule('src/config.js'),
     importResourceModule('src/contracts/errors.ts'),
-    importResourceModule('src/process.js'),
     importResourceModule('src/processEnvironment.js')
   ]);
   const { ERROR_CODES } = errorContracts;
-  const { terminateProcessTree } = processModule;
+  let processModulePromise = null;
+  const terminateProcessTree = async (...args) => {
+    processModulePromise ||= importResourceModule('src/process.js');
+    const processModule = await processModulePromise;
+    return processModule.terminateProcessTree(...args);
+  };
   const { makeServiceProcessEnvironment, makeTunnelProcessEnvironment } = processEnvironment;
   const iconPath = app.isPackaged
     ? path.join(process.resourcesPath, 'app-icon.png')
@@ -379,6 +383,7 @@ async function createDesktopHost(options = {}) {
     downloadUpdate: downloadApplicationUpdate,
     installUpdate: installApplicationUpdate,
     getLifecycleStatus: desktopLifecycle.getStatus,
+    acknowledgeConnectorRefresh: desktopLifecycle.acknowledgeConnectorRefresh,
     setLaunchAtLogin: desktopLifecycle.setLaunchAtLogin,
     setKeepAwake,
     setAppPreferences,
@@ -851,7 +856,7 @@ async function createDesktopHost(options = {}) {
     try {
       if (launchOptions.restart) await stopServer({ silent: true, preserveDashboard: true });
       const pendingStart = startServer();
-      const status = launchOptions.firstRun || launchOptions.background
+      const status = launchOptions.background
         ? await pendingStart
         : await serviceRuntime.waitUntilListening(0);
       if (!serviceRuntime.isListening()) {

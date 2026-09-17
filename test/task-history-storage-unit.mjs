@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { listRecentSessionEvents, listSessionSummaries, listSessions, readSession, resetTaskHistoryCaches, writeSession } from '../src/taskHistoryStorage.ts';
-import { stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
+import { listRecentSessionEvents, listSessionSummaries, listSessions, readSession, resetTaskHistoryCaches, writeSession, writeSessionAsync } from '../src/taskHistoryStorage.ts';
+import { openStateDatabase, stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-history-storage-'));
 const directory = path.join(stateDir, 'sessions');
@@ -25,6 +25,24 @@ try {
   }, { transaction: true });
   assert.equal(listSessions(directory, 10)[0]?.summary, 'after!', 'SQLite readers must observe another process durable update immediately');
   assert.equal(readSession(directory, id)?.summary, 'after!');
+
+  const lock = openStateDatabase(config);
+  assert.ok(lock, 'task-history async-write test requires the state database');
+  lock.exec('BEGIN IMMEDIATE');
+  try {
+    const pendingWrite = writeSessionAsync(directory, { id: 'worker-write', workspace: 'repo', summary: 'worker' });
+    const firstSettled = await Promise.race([
+      pendingWrite.then(() => 'write'),
+      new Promise(resolve => setTimeout(() => resolve('timer'), 25))
+    ]);
+    assert.equal(firstSettled, 'timer', 'a locked SQLite write must wait in the storage worker without stalling the service event loop');
+    lock.exec('ROLLBACK');
+    await pendingWrite;
+  } finally {
+    if (lock.isTransaction) lock.exec('ROLLBACK');
+    lock.close();
+  }
+  assert.equal(readSession(directory, 'worker-write')?.summary, 'worker', 'worker-backed async writes must preserve durability acknowledgements');
 
   const completedId = 'completed-task';
   writeSession(directory, {

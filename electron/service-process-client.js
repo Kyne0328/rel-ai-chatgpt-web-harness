@@ -1,5 +1,7 @@
 import { applyRuntimeLogChange } from './runtime-log-snapshot.js';
 
+const SPAWN_TIMEOUT_MS = 10_000;
+
 function createServiceProcessClient(options = {}) {
   const {
     utilityProcess,
@@ -8,7 +10,10 @@ function createServiceProcessClient(options = {}) {
     env,
     nativeHandlers = {},
     onLog = () => {},
-    onExit = () => {}
+    onExit = () => {},
+    spawnTimeoutMs = SPAWN_TIMEOUT_MS,
+    startTimeoutMs = 30_000,
+    stopTimeoutMs = 12_000
   } = options;
   if (!utilityProcess || typeof utilityProcess.fork !== 'function') throw new TypeError('Electron utilityProcess is required.');
   if (!modulePath) throw new TypeError('A service-process module path is required.');
@@ -40,7 +45,7 @@ function createServiceProcessClient(options = {}) {
 
   async function start(payload = {}) {
     await ensureChild();
-    const result = await request('start', payload, 15_000);
+    const result = await request('start', payload, startTimeoutMs);
     activePort = Number(result?.port || 0);
     return result;
   }
@@ -48,7 +53,12 @@ function createServiceProcessClient(options = {}) {
   async function stop() {
     if (!child) return { ok: true, cleanup: { clean: true, managedProcesses: { attempted: 0, stopped: 0, orphaned: 0 }, localService: { closed: true, forced: false } } };
     activePort = 0;
-    return request('stop', {}, 12_000);
+    const owned = child;
+    const result = await request('stop', {}, stopTimeoutMs);
+    if (result?.ok === false || result?.cleanup?.clean === false) {
+      invalidateChild(owned, new Error('Rel.AI service process could not confirm a clean stop.'));
+    }
+    return result;
   }
 
   async function dashboardBootstrap() {
@@ -139,6 +149,7 @@ function createServiceProcessClient(options = {}) {
       const finish = (action) => {
         if (settled) return;
         settled = true;
+        clearTimeout(spawnTimer);
         utility.off('spawn', onSpawn);
         utility.off('exit', onEarlyExit);
         if (cancelSpawn === onCancel) cancelSpawn = null;
@@ -147,6 +158,13 @@ function createServiceProcessClient(options = {}) {
       const onSpawn = () => finish(resolve);
       const onEarlyExit = code => finish(() => reject(new Error(`Rel.AI service process exited during startup with code ${code}.`)));
       const onCancel = () => finish(() => reject(new Error('Rel.AI service process closed during startup.')));
+      const waitMs = Math.max(1, Number(spawnTimeoutMs || SPAWN_TIMEOUT_MS));
+      const spawnTimer = setTimeout(() => finish(() => {
+        const error = new Error(`Rel.AI service process did not spawn within ${Math.round(waitMs / 100) / 10} seconds.`);
+        error.code = 'REL_AI_SERVICE_SPAWN_TIMEOUT';
+        invalidateChild(utility, error);
+        reject(error);
+      }), waitMs);
       cancelSpawn = onCancel;
       utility.once('spawn', onSpawn);
       utility.once('exit', onEarlyExit);
@@ -211,9 +229,12 @@ function createServiceProcessClient(options = {}) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`Rel.AI service request timed out: ${method}`));
+        const error = new Error(`Rel.AI service request timed out: ${method}`);
+        error.code = 'REL_AI_SERVICE_REQUEST_TIMEOUT';
+        error.method = method;
+        reject(error);
+        if (method === 'start' || method === 'stop') invalidateChild(utility, error);
       }, timeoutMs);
-      timer.unref?.();
       pending.set(id, { resolve, reject, timer });
       utility.postMessage({ type: 'request', id, method, payload });
     });
@@ -299,6 +320,20 @@ function createServiceProcessClient(options = {}) {
       entry.reject(error);
     }
     pending.clear();
+  }
+
+  function invalidateChild(utility, reason) {
+    if (utility !== child) return;
+    child = null;
+    spawnPromise = null;
+    cancelSpawn = null;
+    activePort = 0;
+    currentActivity = emptyActivity();
+    publishActivity({ phase: 'snapshot', snapshot: currentActivity });
+    rejectPending(reason instanceof Error ? reason : new Error(String(reason || 'Rel.AI service process invalidated.')));
+    abortNativeRequests(reason);
+    utility.removeAllListeners();
+    try { utility.kill(); } catch {}
   }
 
   function logChunk(chunk, level) {

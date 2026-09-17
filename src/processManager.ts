@@ -102,6 +102,12 @@ interface PtyProcess {
   readonly _agent?: { readonly _conoutSocketWorker?: PtyWorker };
 }
 
+interface LogSource {
+  pause?(): unknown;
+  resume?(): unknown;
+  readonly destroyed?: boolean;
+}
+
 interface NodePtyApi {
   spawn(executable: string, argv: readonly string[], options: GenericRecord): PtyProcess;
 }
@@ -137,6 +143,8 @@ interface ManagedProcessRecord extends GenericRecord {
   pid?: number | null;
   stdoutBytes: number;
   stderrBytes: number;
+  stdoutDroppedBytes: number;
+  stderrDroppedBytes: number;
   stdoutStartOffset: number;
   stderrStartOffset: number;
   stdoutPath: string;
@@ -153,6 +161,9 @@ interface ManagedProcessRecord extends GenericRecord {
   persistTimer: NodeJS.Timeout | null;
   logBuffers: Record<LogStream, Buffer[]>;
   logBufferBytes: Record<LogStream, number>;
+  logPendingBytes: Record<LogStream, number>;
+  logPaused: Record<LogStream, boolean>;
+  logSources: Record<LogStream, LogSource | null>;
   logFlushTimers: Record<LogStream, NodeJS.Timeout | null>;
   logWritePromises: Record<LogStream, Promise<void>>;
   persistenceFailureHandled: boolean;
@@ -225,6 +236,8 @@ const METADATA_RESCAN_INTERVAL_MS = 30_000;
 const METADATA_PRUNE_INTERVAL_MS = 60_000;
 const LOG_FLUSH_DELAY_MS = 10;
 const LOG_FLUSH_MAX_BYTES = 64 * 1024;
+const LOG_PENDING_HIGH_WATER_BYTES = 1024 * 1024;
+const LOG_PENDING_LOW_WATER_BYTES = 256 * 1024;
 const ACTIVE_STATUSES = Object.freeze({ has: isActiveProcessStatus });
 const TERMINAL_STATUSES = Object.freeze({ has: isTerminalProcessStatus });
 const processes = new Map<string, ManagedProcessRecord>();
@@ -337,6 +350,8 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     signal: '',
     stdoutBytes: 0,
     stderrBytes: 0,
+    stdoutDroppedBytes: 0,
+    stderrDroppedBytes: 0,
     stdoutStartOffset: 0,
     stderrStartOffset: 0,
     stdoutPath,
@@ -354,6 +369,9 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     persistTimer: null,
     logBuffers: { stdout: [], stderr: [] },
     logBufferBytes: { stdout: 0, stderr: 0 },
+    logPendingBytes: { stdout: 0, stderr: 0 },
+    logPaused: { stdout: false, stderr: false },
+    logSources: { stdout: null, stderr: null },
     logFlushTimers: { stdout: null, stderr: null },
     logWritePromises: { stdout: Promise.resolve(), stderr: Promise.resolve() },
     persistenceFailureHandled: false,
@@ -435,6 +453,8 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
           stdio: ['pipe', 'pipe', 'pipe']
         }));
         record.child = child;
+        record.logSources.stdout = child.stdout || null;
+        record.logSources.stderr = child.stderr || null;
         record.pid = child.pid || null;
         initialState = observeInitialProcessState(child, startupSignal);
         child.stdout?.on('data', chunk => appendLog(config, record, 'stdout', chunk));
@@ -627,13 +647,49 @@ function writeInitialProcessInput(record: ManagedProcessRecord, input: unknown):
 function appendLog(config: ManagedProcessConfig, record: ManagedProcessRecord, stream: LogStream, chunk: Buffer | string): void {
   if (record.discarded || record.persistenceFailureHandled) return;
   const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-  record.logBuffers[stream].push(buffer);
-  record.logBufferBytes[stream] += buffer.length;
-  if (record.logBufferBytes[stream] >= LOG_FLUSH_MAX_BYTES) {
-    flushLogBuffer(config, record, stream);
+  // node-pty does not expose a pause/resume API. Bound its persistence queue
+  // explicitly and report omitted bytes while retaining the ordered prefix and
+  // tail already accepted by the log writer.
+  const source = record.logSources[stream];
+  if (record.pty && (!source || typeof source.pause !== 'function')
+    && record.logPendingBytes[stream] >= LOG_PENDING_HIGH_WATER_BYTES) {
+    const droppedKey = stream === 'stdout' ? 'stdoutDroppedBytes' : 'stderrDroppedBytes';
+    record[droppedKey] = Number(record[droppedKey] || 0) + buffer.length;
+    scheduleMetadataPersist(config, record);
     return;
   }
-  scheduleLogFlush(config, record, stream);
+  record.logBuffers[stream].push(buffer);
+  record.logBufferBytes[stream] += buffer.length;
+  record.logPendingBytes[stream] += buffer.length;
+  if (record.logBufferBytes[stream] >= LOG_FLUSH_MAX_BYTES) {
+    flushLogBuffer(config, record, stream);
+  }
+  else scheduleLogFlush(config, record, stream);
+  pauseLogSourceIfNeeded(record, stream);
+}
+
+function pauseLogSourceIfNeeded(record: ManagedProcessRecord, stream: LogStream): void {
+  if (record.logPaused[stream] || record.logPendingBytes[stream] < LOG_PENDING_HIGH_WATER_BYTES) return;
+  const source = record.logSources[stream];
+  if (!source || typeof source.pause !== 'function') return;
+  record.logPaused[stream] = true;
+  source.pause();
+}
+
+function resumeLogSourceIfReady(record: ManagedProcessRecord, stream: LogStream): void {
+  if (!record.logPaused[stream] || record.logPendingBytes[stream] > LOG_PENDING_LOW_WATER_BYTES) return;
+  const source = record.logSources[stream];
+  record.logPaused[stream] = false;
+  if (source && !source.destroyed && typeof source.resume === 'function') source.resume();
+}
+
+function resumeLogSources(record: ManagedProcessRecord): void {
+  for (const stream of ['stdout', 'stderr'] as const) {
+    if (!record.logPaused[stream]) continue;
+    const source = record.logSources[stream];
+    record.logPaused[stream] = false;
+    if (source && !source.destroyed && typeof source.resume === 'function') source.resume();
+  }
 }
 
 function scheduleLogFlush(config: ManagedProcessConfig, record: ManagedProcessRecord, stream: LogStream): void {
@@ -667,6 +723,10 @@ function flushLogBuffer(config: ManagedProcessConfig, record: ManagedProcessReco
     })
     .catch(error => {
       handlePersistenceFailure(config, record, error);
+    })
+    .finally(() => {
+      record.logPendingBytes[stream] = Math.max(0, record.logPendingBytes[stream] - buffer.length);
+      resumeLogSourceIfReady(record, stream);
     });
   return record.logWritePromises[stream];
 }
@@ -1032,6 +1092,8 @@ function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotO
     signal: record.signal || null,
     stdoutBytes: Number(record.stdoutBytes || 0),
     stderrBytes: Number(record.stderrBytes || 0),
+    ...(Number(record.stdoutDroppedBytes || 0) > 0 ? { stdoutDroppedBytes: Number(record.stdoutDroppedBytes) } : {}),
+    ...(Number(record.stderrDroppedBytes || 0) > 0 ? { stderrDroppedBytes: Number(record.stderrDroppedBytes) } : {}),
     stdoutRetainedFromOffset: Number(record.stdoutStartOffset || 0),
     stderrRetainedFromOffset: Number(record.stderrStartOffset || 0),
     environmentKeys: record.environmentKeys || []
@@ -1057,6 +1119,8 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
     record.exitCode,
     record.signal || '',
     record.error || '',
+    Number(record.stdoutDroppedBytes || 0),
+    Number(record.stderrDroppedBytes || 0),
     record.pty === true,
     Number(record.columns || 0),
     Number(record.rows || 0)
@@ -1066,6 +1130,7 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
 function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord, fields: Partial<ManagedProcessRecord>): void {
   if (TERMINAL_STATUSES.has(record.status) && record.endedAt) return;
   clearScheduledPersist(record);
+  resumeLogSources(record);
   releaseManagedProcessResource(record);
   Object.assign(record, fields, { endedAt: new Date().toISOString() });
   record.child = null;
@@ -1149,6 +1214,8 @@ function metadataRecord(record: ManagedProcessRecord): GenericRecord {
     pid: record.pid || null,
     stdoutBytes: Number(record.stdoutBytes || 0),
     stderrBytes: Number(record.stderrBytes || 0),
+    stdoutDroppedBytes: Number(record.stdoutDroppedBytes || 0),
+    stderrDroppedBytes: Number(record.stderrDroppedBytes || 0),
     stdoutStartOffset: Number(record.stdoutStartOffset || 0),
     stderrStartOffset: Number(record.stderrStartOffset || 0),
     environmentKeys: record.environmentKeys || [],
@@ -1190,6 +1257,7 @@ function handlePersistenceFailure(config: ManagedProcessConfig, record: ManagedP
   record.persistenceFailureHandled = true;
   clearScheduledPersist(record);
   clearScheduledLogFlushes(record);
+  resumeLogSources(record);
   record.error = `Managed process persistence failed: ${error instanceof Error ? error.message : String(error)}`;
   void terminateManagedRecord(record, { graceMs: 0, forceWaitMs: DEFAULT_FORCE_WAIT_MS })
     .then(outcome => {
@@ -1242,6 +1310,8 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       pid: Number.isSafeInteger(Number(metadata.pid)) ? Number(metadata.pid) : null,
       stdoutBytes,
       stderrBytes,
+      stdoutDroppedBytes: Number(metadata.stdoutDroppedBytes || 0),
+      stderrDroppedBytes: Number(metadata.stderrDroppedBytes || 0),
       stdoutStartOffset: Number.isFinite(Number(metadata.stdoutStartOffset))
         ? Number(metadata.stdoutStartOffset)
         : Math.max(0, stdoutBytes - stdoutSize),
@@ -1262,6 +1332,9 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       persistTimer: null,
       logBuffers: { stdout: [], stderr: [] },
       logBufferBytes: { stdout: 0, stderr: 0 },
+      logPendingBytes: { stdout: 0, stderr: 0 },
+      logPaused: { stdout: false, stderr: false },
+      logSources: { stdout: null, stderr: null },
       logFlushTimers: { stdout: null, stderr: null },
       logWritePromises: { stdout: Promise.resolve(), stderr: Promise.resolve() },
       persistenceFailureHandled: false,

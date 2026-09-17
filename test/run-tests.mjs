@@ -117,6 +117,7 @@ const files = [
   'search-tool-unit.mjs',
   'validation-strategy-unit.mjs',
   'output-spill-unit.mjs',
+  'http-sse-backpressure-unit.mjs',
   'tool-failure-accounting-unit.mjs',
   'tool-action-contract-unit.mjs',
   'tool-output-validation-unit.mjs',

@@ -41,6 +41,53 @@ function sqliteBackupPath(file: unknown): string {
   return `${String(file)}.bak`;
 }
 
+function sqliteValidationStampPath(file: unknown): string {
+  return `${String(file)}.validated.json`;
+}
+
+function isSqliteValidationCurrent(file: unknown, validationKey: unknown): boolean {
+  const source = path.resolve(String(file));
+  try {
+    const stored = JSON.parse(fs.readFileSync(sqliteValidationStampPath(source), 'utf8')) as Record<string, unknown>;
+    return Number(stored.version || 0) === 1
+      && String(stored.validationKey || '') === String(validationKey || '')
+      && JSON.stringify(stored.files || null) === JSON.stringify(sqliteFileSignatures(source));
+  } catch {
+    return false;
+  }
+}
+
+function writeSqliteValidationStamp(file: unknown, validationKey: unknown): void {
+  const source = path.resolve(String(file));
+  if (!fs.existsSync(source)) return;
+  const target = sqliteValidationStampPath(source);
+  const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  try {
+    fs.writeFileSync(temporary, JSON.stringify({
+      version: 1,
+      validationKey: String(validationKey || ''),
+      files: sqliteFileSignatures(source)
+    }), { mode: 0o600 });
+    promoteFile(temporary, target);
+    try { fs.chmodSync(target, 0o600); } catch {}
+  } finally {
+    try { fs.rmSync(temporary, { force: true }); } catch {}
+  }
+}
+
+function sqliteFileSignatures(file: string): Record<string, unknown> {
+  return Object.fromEntries(['', '-wal', '-shm'].map(suffix => {
+    const target = `${file}${suffix}`;
+    try {
+      const stat = fs.statSync(target);
+      return [suffix || 'primary', { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs }];
+    } catch {
+      return [suffix || 'primary', null];
+    }
+  }));
+}
+
 function checkSqliteIntegrity(db: DatabaseSync, options: { full?: boolean } = {}): SqliteIntegrityResult {
   const pragma = options.full === true ? 'integrity_check' : 'quick_check';
   const rows = db.prepare(`PRAGMA ${pragma}`).all() as Array<Record<string, unknown>>;
@@ -173,5 +220,7 @@ export {
   createSqliteBackup,
   isSqliteCorruptionError,
   restoreSqliteBackup,
-  sqliteBackupPath
+  isSqliteValidationCurrent,
+  sqliteBackupPath,
+  writeSqliteValidationStamp
 };

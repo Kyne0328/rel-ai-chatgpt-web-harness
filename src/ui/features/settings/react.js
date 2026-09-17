@@ -5,6 +5,7 @@ import { Icon } from '../../components/icons.js';
 import { openModal } from '../../components/modal.js';
 import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection } from '../../connection-state.js';
+import { readDeveloperModeEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperModeEnabled } from '../../developer-mode.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath } from '../../router.js';
 import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL, RELAI_CONNECTOR_ICON_FILENAME, downloadRelaiConnectorIcon } from './connection-guidance.js';
@@ -13,7 +14,6 @@ import { supportPolicyView } from './desktop-update-policy.js';
 
 const h = React.createElement;
 const RELEASES_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
-const DEVELOPER_OPTIONS_STORAGE_KEY = 'relai_developer_options_unlocked';
 const DEVELOPER_UNLOCK_CLICK_COUNT = 5;
 const DEVELOPER_UNLOCK_WINDOW_MS = 2500;
 const NOTIFICATION_DEFAULTS = Object.freeze({
@@ -561,6 +561,7 @@ function ApplicationPage({ computerControl }) {
   const [lifecycle, setLifecycle] = useState(undefined);
   const [desktopStatus, setDesktopStatus] = useState(undefined);
   const developerOptionsUnlocked = readDeveloperOptionsUnlocked();
+  const [developerModeEnabled, setDeveloperModeState] = useState(() => readDeveloperModeEnabled());
   const desktop = window.relaiDesktop;
   useEffect(() => {
     let active = true;
@@ -577,7 +578,10 @@ function ApplicationPage({ computerControl }) {
       h(ComputerControlSettings, { initial: computerControl }),
       h(ApplicationUpdates, { lifecycle, buildStatus: desktopStatus?.buildStatus }),
       h(LocalDataSettings),
-      developerOptionsUnlocked ? h(DeveloperOptions) : null,
+      developerOptionsUnlocked ? h(DeveloperOptions, {
+        enabled: developerModeEnabled,
+        onChange: enabled => setDeveloperModeState(writeDeveloperModeEnabled(enabled))
+      }) : null,
       typeof desktop?.quitApp === 'function' || typeof desktop?.logout === 'function'
         ? h(Card, { title: 'Application controls' },
             typeof desktop?.logout === 'function' ? h(LogoutRow) : null,
@@ -588,18 +592,17 @@ function ApplicationPage({ computerControl }) {
   );
 }
 
-function DeveloperOptions() {
+function DeveloperOptions({ enabled, onChange }) {
   return h('details', { className: 'settings-advanced developer-options' },
     h('summary', null, 'Developer options'),
     h('div', { className: 'settings-panel-body' },
       h('p', { className: 'settings-help' }, 'Experimental developer features are kept here until they are ready for normal use.'),
-      h('div', { className: 'setting-row' },
-        h('div', { className: 'setting-row-copy' },
-          h('strong', null, 'Extensions'),
-          h('span', null, 'Manage and test Rel.AI skill and CLI extensions.')
-        ),
-        h('a', { className: 'buttonlike secondary compact-button', href: '#extensions' }, 'Open Extensions')
-      )
+      h(ToggleRow, {
+        label: 'Developer mode',
+        help: 'Show developer-only features such as Extensions in the main menu.',
+        checked: enabled,
+        onChange
+      })
     )
   );
 }
@@ -1019,8 +1022,8 @@ function AboutPage({ metadata, buildStatus = {} }) {
     const next = advanceDeveloperUnlockClicks(developerUnlockRef.current);
     developerUnlockRef.current = next.unlocked ? { count: 0, startedAt: 0 } : next;
     if (!next.unlocked) return;
-    try { window.localStorage.setItem(DEVELOPER_OPTIONS_STORAGE_KEY, '1'); } catch {}
-    toast('Developer options unlocked.', { variant: 'success' });
+    unlockDeveloperOptions();
+    toast('Developer options unlocked. Turn on Developer mode in App settings.', { variant: 'success' });
   };
   const documentLink = (path, label) => {
     const href = repositoryDocumentUrl(repositoryUrl, path);
@@ -1058,10 +1061,6 @@ function AboutPage({ metadata, buildStatus = {} }) {
 
 function AboutRow({ label, children }) {
   return h('div', { className: 'setting-row about-detail-row' }, h('div', { className: 'setting-row-copy' }, h('strong', null, label)), children);
-}
-
-function readDeveloperOptionsUnlocked() {
-  try { return window.localStorage.getItem(DEVELOPER_OPTIONS_STORAGE_KEY) === '1'; } catch { return false; }
 }
 
 function advanceDeveloperUnlockClicks(state = {}, now = Date.now()) {
