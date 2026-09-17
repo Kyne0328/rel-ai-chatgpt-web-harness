@@ -213,7 +213,7 @@ try {
   assert.equal(stalePlanning.endReason || '', '');
   assert.equal(stalePlanning.activeCalls, 0);
   assert.deepEqual(stalePlanning.currentOperations, []);
-  assert.equal(stalePlanning.currentStage, 'Inactive');
+  assert.equal(stalePlanning.currentStage, 'Waiting for next action');
   assert.equal(stalePlanning.endedAt == null, true, 'inactive sessions must not receive a terminal timestamp');
   assert.ok(stalePlanning.inactiveAt, 'inactive sessions must retain the inactivity transition time');
   assert.equal(readTaskHistorySessionRecord(config, 'stale-planning-session').status, 'inactive', 'reconciliation must persist the resumable inactive state');

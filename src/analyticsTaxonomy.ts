@@ -44,6 +44,7 @@ const OPERATION_USE_CASE: Readonly<Record<string, AnalyticsUseCase>> = Object.fr
   [OP.PUBLISH_PUSH]: 'publish',
   [OP.PUBLISH_DRAFT_PR]: 'publish',
   [OP.WORK_BEGIN]: 'work_session',
+  [OP.WORK_CONTEXT]: 'work_session',
   [OP.WORK_STATUS]: 'work_session',
   [OP.WORK_FINISH]: 'work_session',
   [OP.WORK_CANCEL]: 'work_session'

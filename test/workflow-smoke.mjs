@@ -113,8 +113,7 @@ try {
   const read = structuredContentOf(await client.waitFor(4));
   if (!read.items[0].content.includes('# Smoke')) throw new Error('Read failed.');
 
-  taskCall(30, 'relai_inspect', { workspace: 'smoke', action: 'symbol', symbol: 'smokeValue' });
-  const codeInspect = structuredContentOf(await client.waitFor(30));
+  const codeInspect = await completedTaskCall(30, 'relai_inspect', { workspace: 'smoke', action: 'symbol', symbol: 'smokeValue' });
   if (!codeInspect.ok || codeInspect.index?.freshness !== 'current' || !codeInspect.definitions?.some(item => item.path === 'src/helper.js')) {
     throw new Error(`Code intelligence dispatch failed: ${JSON.stringify(codeInspect)}`);
   }
@@ -222,12 +221,13 @@ try {
 
   taskId = '';
   taskCall(32, 'relai_work', { action: 'begin', workspace: 'smoke', bootstrap: 'full' });
-  const graphBootstrapped = structuredContentOf(await client.waitFor(32));
-  taskId = graphBootstrapped.work_id;
+  const graphTask = structuredContentOf(await client.waitFor(32));
+  taskId = graphTask.work_id;
+  const graphBootstrapped = await completedTaskCall(33, 'relai_work', { action: 'context', workspace: 'smoke', bootstrap: 'full' });
   if (!graphBootstrapped.bootstrap?.repositoryIntelligence?.available) throw new Error('Warm Repository Intelligence context was not included in work bootstrap.');
   if (!graphBootstrapped.bootstrap.repositoryIntelligence.recommendedReadOrder?.length) throw new Error('Graph bootstrap did not include a targeted read order.');
-  taskCall(33, 'relai_work', { action: 'cancel', workspace: 'smoke', reason: 'Bootstrap regression verified.' });
-  const cancelled = structuredContentOf(await client.waitFor(33));
+  taskCall(34, 'relai_work', { action: 'cancel', workspace: 'smoke', reason: 'Bootstrap regression verified.' });
+  const cancelled = structuredContentOf(await client.waitFor(34));
   if (!cancelled.ok) throw new Error('Second smoke work session did not cancel cleanly.');
 
   console.log('Public tool workflow smoke test passed.');

@@ -21,9 +21,10 @@ try {
     throw new Error('stdio must advertise native Tasks support through the task-aware transport');
   }
   const serverInstructions = String(discovery.result?.instructions || '');
-  if (!/work_id is optional durable attribution/i.test(serverInstructions)
+  if (!/work_id is durable task attribution/i.test(serverInstructions)
+      || !/substantial or multi-step repository work, start relai_work begin before the first project operation and carry work_id/i.test(serverInstructions)
       || !/validation is factual evidence, not execution permission/i.test(serverInstructions)) {
-    throw new Error('server/discover did not advertise the optional-task and factual-validation invariants');
+    throw new Error('server/discover did not advertise the task-attribution and factual-validation invariants');
   }
   if (/Inspect relevant files|Validate after changes|recovery guidance/i.test(serverInstructions)) {
     throw new Error('server/discover must not duplicate specialist workflow tactics in global instructions');

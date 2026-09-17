@@ -192,7 +192,7 @@ const inactiveBlockedView = workSessionStateView({
 });
 assert.equal(inactiveBlockedView.label, 'Blocked');
 const inactiveProgress = taskProgressView({ mode: 'indeterminate', label: 'Waiting for the next task step' }, 'inactive');
-assert.equal(inactiveProgress.state, 'Inactive');
+assert.equal(inactiveProgress.state, 'Waiting for next action');
 assert.match(inactiveProgress.label, /Ready to resume/i);
 assert.doesNotMatch(inactiveProgress.label, /expired/i, 'resumable inactive sessions must not be presented as expired');
 

@@ -87,7 +87,8 @@ try {
   assert.equal(discovery.body.result?._meta?.[SERVER_INFO_META_KEY]?.name, 'rel-ai-mcp');
   assert.equal(discovery.body.result?._meta?.[SERVER_INFO_META_KEY]?.version, expectedVersion, 'HTTP discovery must report the canonical package version');
   const serverInstructions = discovery.body.result?.instructions || '';
-  assert.match(serverInstructions, /work_id is optional durable attribution/i);
+  assert.match(serverInstructions, /work_id is durable task attribution/i);
+  assert.match(serverInstructions, /substantial or multi-step repository work, start relai_work begin before the first project operation and carry work_id/i);
   assert.match(serverInstructions, /approval/i);
   assert.match(serverInstructions, /authoritative evidence/i);
   assert.match(serverInstructions, /validation is factual evidence, not execution permission/i);
