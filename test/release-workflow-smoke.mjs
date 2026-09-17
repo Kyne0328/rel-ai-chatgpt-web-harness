@@ -318,7 +318,7 @@ function verifyWorkflowContracts() {
     /release-assets\.txt/,
     /SHA256SUMS\.txt/,
     /gh release upload "\$VERSION" "\$\{assets\[@\]\}" --repo "\$GITHUB_REPOSITORY" --clobber/,
-    /release edit "\$VERSION"[\s\S]*--draft=false/,
+    /release edit "\$VERSION"[\s\S]*--draft=false[\s\S]*--prerelease/,
     /actions\/attest-build-provenance@/,
     /actions\/attest-sbom@/,
     /dist\/\*\.AppImage/,
