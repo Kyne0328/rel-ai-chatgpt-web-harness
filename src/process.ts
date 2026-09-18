@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { execa, type Options as ExecaOptions } from 'execa';
 import { resolveGitExecutable } from './gitExecutable.js';
 import { makeProcessEnvironment } from './processEnvironment.js';
+import { extensionBinRoot } from './extensions/paths.js';
 import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
@@ -371,7 +372,8 @@ async function runProcess(command: string, args: readonly string[] = [], options
     const executable = isGit ? (resolveGitExecutable() || command) : command;
     const childEnvironment = makeProcessEnvironment(options.env, {
       allow: config.processEnvironment?.allow,
-      inheritCredentials: options.inheritCredentials === true
+      inheritCredentials: options.inheritCredentials === true,
+      pathAppend: extensionBinRoot(config)
     });
     Object.assign(childEnvironment, traceContextEnvironment());
     const processArgs = isGit ? hardenedGitArgs(config, args) : [...args];

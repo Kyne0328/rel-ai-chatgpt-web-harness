@@ -4,6 +4,11 @@ import * as path from 'node:path';
 import semver from 'semver';
 import { z } from 'zod';
 import { getApplicationMetadata } from '../appMetadata.js';
+import {
+  extensionBinRoot,
+  managedExtensionCommandMetadataPath,
+  managedExtensionCommandPath
+} from './paths.js';
 
 const CATALOG_URL = 'https://raw.githubusercontent.com/Kyne0328/rel-ai-extensions/main/catalog.json';
 const MANIFEST_FILENAME = 'relai-extension.json';
@@ -12,9 +17,15 @@ const MAX_CATALOG_BYTES = 1024 * 1024;
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_EXTENSION_FILE_BYTES = 1024 * 1024;
 const MAX_EXTENSION_TOTAL_BYTES = 8 * 1024 * 1024;
+const MAX_INSTALL_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 const EXTENSION_ID_PATTERN = /^[a-z0-9][a-z0-9.-]{0,79}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const INSTALL_ARCHITECTURES = Object.freeze(['x64', 'arm64']);
+const RESERVED_MANAGED_COMMANDS = new Set([
+  'bash', 'cmd', 'git', 'node', 'npm', 'npx', 'powershell', 'pwsh', 'python', 'python3',
+  'rel-ai-mcp', 'rel-ai-mcp-http', 'sh', 'zsh'
+]);
 const PERMISSIONS = Object.freeze([
   'workspace.read',
   'workspace.write',
@@ -29,6 +40,20 @@ let catalogCache = null;
 const extensionFileSchema = z.object({
   path: z.string().min(1).max(240),
   sha256: z.string().regex(SHA256_PATTERN)
+}).strict();
+
+const binaryArtifactSchema = z.object({
+  platform: z.enum(['win32', 'darwin', 'linux']),
+  arch: z.enum(INSTALL_ARCHITECTURES),
+  url: z.string().url(),
+  sha256: z.string().regex(SHA256_PATTERN)
+}).strict().superRefine((artifact, ctx) => {
+  if (!isHttpsUrl(artifact.url)) ctx.addIssue({ code: 'custom', path: ['url'], message: 'Binary artifact URLs must use HTTPS.' });
+});
+
+const binaryInstallSchema = z.object({
+  type: z.literal('binary'),
+  artifacts: z.array(binaryArtifactSchema).min(1).max(12)
 }).strict();
 
 const extensionManifestSchema = z.object({
@@ -56,6 +81,7 @@ const extensionManifestSchema = z.object({
     skill: z.string().min(1).max(240),
     command: z.string().regex(/^[A-Za-z0-9._+-]{1,100}$/).optional()
   }).strict(),
+  install: binaryInstallSchema.optional(),
   files: z.array(extensionFileSchema).min(1).max(64)
 }).strict().superRefine((manifest, ctx) => {
   if (!semver.valid(manifest.version)) {
@@ -82,6 +108,23 @@ const extensionManifestSchema = z.object({
   } else if (manifest.kind === 'cli' && !manifest.requires.commands.includes(manifest.entrypoints.command)) {
     ctx.addIssue({ code: 'custom', path: ['requires', 'commands'], message: 'CLI extensions must list entrypoints.command in requires.commands.' });
   }
+  if (manifest.kind === 'cli' && !manifest.permissions.includes('command.execute')) {
+    ctx.addIssue({ code: 'custom', path: ['permissions'], message: 'CLI extensions must declare command.execute.' });
+  }
+  if (manifest.install && manifest.kind !== 'cli') {
+    ctx.addIssue({ code: 'custom', path: ['install'], message: 'Only CLI extensions may declare install artifacts.' });
+  }
+  if (manifest.install && manifest.entrypoints.command && RESERVED_MANAGED_COMMANDS.has(normalizeCommandName(manifest.entrypoints.command))) {
+    ctx.addIssue({ code: 'custom', path: ['entrypoints', 'command'], message: 'This command name is reserved and cannot be auto-installed by an extension.' });
+  }
+  if (manifest.install) {
+    const targets = new Set();
+    for (const [index, artifact] of manifest.install.artifacts.entries()) {
+      const target = `${artifact.platform}/${artifact.arch}`;
+      if (targets.has(target)) ctx.addIssue({ code: 'custom', path: ['install', 'artifacts', index], message: `Duplicate install artifact target '${target}'.` });
+      targets.add(target);
+    }
+  }
 });
 
 const catalogEntrySchema = z.object({
@@ -94,6 +137,7 @@ const catalogEntrySchema = z.object({
   repository: z.string().url(),
   publisher: z.string().min(1).max(100),
   permissions: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
+  autoInstall: z.boolean().optional(),
   featured: z.boolean().optional()
 }).strict().superRefine((entry, ctx) => {
   if (!semver.valid(entry.version)) ctx.addIssue({ code: 'custom', path: ['version'], message: 'version must be valid semantic versioning.' });
@@ -132,11 +176,11 @@ function listInstalledExtensions(config = {}) {
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return []; }
   return entries
     .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.startsWith('.'))
-    .map(entry => readInstalledExtension(path.join(root, entry.name), entry.name))
+    .map(entry => readInstalledExtension(path.join(root, entry.name), entry.name, config))
     .sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id)));
 }
 
-function readInstalledExtension(directory, directoryName = path.basename(directory)) {
+function readInstalledExtension(directory, directoryName = path.basename(directory), config = {}) {
   try {
     const manifestPath = path.join(directory, MANIFEST_FILENAME);
     const manifestStat = fs.lstatSync(manifestPath);
@@ -146,7 +190,7 @@ function readInstalledExtension(directory, directoryName = path.basename(directo
     const manifest = parseExtensionManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
     if (manifest.id !== directoryName) throw new Error(`Manifest id '${manifest.id}' does not match extension directory '${directoryName}'.`);
     verifyInstalledFiles(directory, manifest);
-    const readiness = extensionReadiness(manifest);
+    const readiness = extensionReadiness(manifest, config);
     return { ...publicManifest(manifest), ...readiness };
   } catch (error) {
     return {
@@ -163,7 +207,7 @@ function readInstalledExtension(directory, directoryName = path.basename(directo
   }
 }
 
-function extensionReadiness(manifest) {
+function extensionReadiness(manifest, config = {}) {
   const appVersion = String(getApplicationMetadata()?.version || '0.0.0');
   const reasons = [];
   if (!semver.satisfies(appVersion, manifest.compatibility.relai, { includePrerelease: true })) {
@@ -172,7 +216,7 @@ function extensionReadiness(manifest) {
   if (manifest.requires.platforms.length && !manifest.requires.platforms.includes(process.platform)) {
     reasons.push(`Supports ${manifest.requires.platforms.join(', ')}; this computer is ${process.platform}.`);
   }
-  const missingCommands = manifest.requires.commands.filter(command => !commandAvailable(command));
+  const missingCommands = manifest.requires.commands.filter(command => !commandAvailable(command, config));
   if (missingCommands.length) reasons.push(`Missing required command${missingCommands.length === 1 ? '' : 's'}: ${missingCommands.join(', ')}.`);
   const ready = reasons.length === 0;
   return {
@@ -238,6 +282,100 @@ async function fetchExtensionCatalog(options = {}) {
   return catalog;
 }
 
+async function prepareManagedCommandInstall(config, manifest) {
+  if (manifest.kind !== 'cli' || !manifest.install) return null;
+  const command = String(manifest.entrypoints.command || '').trim();
+  if (!command) return null;
+  const systemAvailable = systemCommandAvailable(command, config);
+  const owner = readManagedCommandOwner(config, command);
+  const target = managedExtensionCommandPath(config, command);
+  const metadataTarget = managedExtensionCommandMetadataPath(config, command);
+  if (owner && owner !== manifest.id && !systemAvailable) {
+    throw new Error(`Cannot auto-install '${command}' because it is managed by extension '${owner}'.`);
+  }
+  if (systemAvailable && owner !== manifest.id) return null;
+  if (fs.existsSync(target) && !owner) {
+    throw new Error(`Refusing to replace unowned managed command '${command}'.`);
+  }
+  const artifact = manifest.install.artifacts.find(item => item.platform === process.platform && item.arch === process.arch);
+  if (!artifact) {
+    throw new Error(`No auto-install artifact is available for ${process.platform}/${process.arch}.`);
+  }
+  const content = await fetchFile(artifact.url, MAX_INSTALL_ARTIFACT_BYTES, `CLI artifact for ${manifest.id}`, { timeoutMs: 120_000 });
+  const digest = crypto.createHash('sha256').update(content).digest('hex');
+  if (digest !== artifact.sha256) throw new Error(`Checksum mismatch for CLI artifact '${command}'.`);
+
+  const binRoot = extensionBinRoot(config);
+  fs.mkdirSync(binRoot, { recursive: true, mode: 0o700 });
+  const nonce = crypto.randomUUID();
+  const stagingTarget = path.join(binRoot, `.install-${manifest.id}-${nonce}`);
+  const stagingMetadata = `${stagingTarget}.json`;
+  const backupTarget = `${target}.backup-${nonce}`;
+  const backupMetadata = `${metadataTarget}.backup-${nonce}`;
+  fs.writeFileSync(stagingTarget, content, { mode: 0o700 });
+  if (process.platform !== 'win32') fs.chmodSync(stagingTarget, 0o755);
+  fs.writeFileSync(stagingMetadata, `${JSON.stringify({
+    schemaVersion: 1,
+    extensionId: manifest.id,
+    command,
+    platform: process.platform,
+    arch: process.arch,
+    url: artifact.url,
+    sha256: artifact.sha256,
+    installedAt: new Date().toISOString()
+  }, null, 2)}\n`, { mode: 0o600 });
+  return {
+    command,
+    target,
+    metadataTarget,
+    stagingTarget,
+    stagingMetadata,
+    backupTarget,
+    backupMetadata,
+    targetPromoted: false,
+    metadataPromoted: false,
+    committed: false
+  };
+}
+
+function commitManagedCommandInstall(install) {
+  if (!install) return;
+  if (fs.existsSync(install.target)) fs.renameSync(install.target, install.backupTarget);
+  if (fs.existsSync(install.metadataTarget)) fs.renameSync(install.metadataTarget, install.backupMetadata);
+  try {
+    fs.renameSync(install.stagingTarget, install.target);
+    install.targetPromoted = true;
+    fs.renameSync(install.stagingMetadata, install.metadataTarget);
+    install.metadataPromoted = true;
+    if (process.platform !== 'win32') fs.chmodSync(install.target, 0o755);
+    install.committed = true;
+  } catch (error) {
+    rollbackManagedCommandInstall(install);
+    throw error;
+  }
+}
+
+function rollbackManagedCommandInstall(install) {
+  if (!install) return;
+  fs.rmSync(install.stagingTarget, { force: true });
+  fs.rmSync(install.stagingMetadata, { force: true });
+  if (install.targetPromoted || install.committed) fs.rmSync(install.target, { force: true });
+  if (install.metadataPromoted || install.committed) fs.rmSync(install.metadataTarget, { force: true });
+  if (!fs.existsSync(install.target) && fs.existsSync(install.backupTarget)) fs.renameSync(install.backupTarget, install.target);
+  if (!fs.existsSync(install.metadataTarget) && fs.existsSync(install.backupMetadata)) fs.renameSync(install.backupMetadata, install.metadataTarget);
+  install.targetPromoted = false;
+  install.metadataPromoted = false;
+  install.committed = false;
+}
+
+function finalizeManagedCommandInstall(install) {
+  if (!install) return;
+  fs.rmSync(install.stagingTarget, { force: true });
+  fs.rmSync(install.stagingMetadata, { force: true });
+  fs.rmSync(install.backupTarget, { force: true });
+  fs.rmSync(install.backupMetadata, { force: true });
+}
+
 async function installExtension(config, id, options = {}) {
   const extensionId = normalizeExtensionId(id);
   const catalog = await fetchExtensionCatalog({ ...options, refresh: true });
@@ -251,7 +389,10 @@ async function installExtension(config, id, options = {}) {
   if (JSON.stringify([...manifest.permissions].sort()) !== JSON.stringify([...entry.permissions].sort())) {
     throw new Error('Catalog permissions do not match the extension manifest. Refresh the catalog before installing.');
   }
-  const readiness = extensionReadiness(manifest);
+  if (Boolean(manifest.install) !== Boolean(entry.autoInstall)) {
+    throw new Error('Catalog auto-install metadata does not match the extension manifest. Refresh the catalog before installing.');
+  }
+  const readiness = extensionReadiness(manifest, config);
   if (!semver.satisfies(String(getApplicationMetadata()?.version || '0.0.0'), manifest.compatibility.relai, { includePrerelease: true })) {
     throw new Error(readiness.error || 'This extension is not compatible with the installed Rel.AI version.');
   }
@@ -263,8 +404,10 @@ async function installExtension(config, id, options = {}) {
   const target = path.join(root, manifest.id);
   const staging = path.join(root, `.install-${manifest.id}-${crypto.randomUUID()}`);
   const backup = path.join(root, `.backup-${manifest.id}-${crypto.randomUUID()}`);
+  const managedInstall = await prepareManagedCommandInstall(config, manifest);
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   let totalBytes = 0;
+  let packageCommitted = false;
   try {
     for (const file of manifest.files) {
       const fileUrl = new URL(file.path.replaceAll('\\', '/'), entry.manifestUrl).href;
@@ -282,17 +425,23 @@ async function installExtension(config, id, options = {}) {
       schemaVersion: 1,
       manifestUrl: entry.manifestUrl,
       catalogUrl: resolveCatalogUrl(options),
-      installedAt: new Date().toISOString()
+      installedAt: new Date().toISOString(),
+      managedCommand: managedInstall?.command || ''
     }, null, 2)}\n`, { mode: 0o600 });
     if (fs.existsSync(target)) fs.renameSync(target, backup);
     fs.renameSync(staging, target);
+    packageCommitted = true;
+    commitManagedCommandInstall(managedInstall);
     if (fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    finalizeManagedCommandInstall(managedInstall);
   } catch (error) {
     fs.rmSync(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    rollbackManagedCommandInstall(managedInstall);
+    if (packageCommitted) fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     if (!fs.existsSync(target) && fs.existsSync(backup)) fs.renameSync(backup, target);
     throw error;
   }
-  return readInstalledExtension(target, manifest.id);
+  return readInstalledExtension(target, manifest.id, config);
 }
 
 function removeExtension(config, id) {
@@ -302,8 +451,9 @@ function removeExtension(config, id) {
   let stat;
   try { stat = fs.lstatSync(target); } catch { return { ok: true, id: extensionId, removed: false }; }
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Refusing to remove an unsafe extension path.');
+  const removedCommands = removeManagedCommandsOwnedBy(config, extensionId);
   fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-  return { ok: true, id: extensionId, removed: true };
+  return { ok: true, id: extensionId, removed: true, removedCommands };
 }
 
 function verifyInstalledFiles(directory, manifest) {
@@ -331,7 +481,8 @@ function publicManifest(manifest) {
     homepage: manifest.homepage || '',
     permissions: manifest.permissions,
     requires: manifest.requires,
-    entrypoints: manifest.entrypoints
+    entrypoints: manifest.entrypoints,
+    autoInstall: Boolean(manifest.install)
   };
 }
 
@@ -372,10 +523,11 @@ async function fetchJsonDocument(url, maxBytes, label) {
   try { return JSON.parse(content.toString('utf8')); } catch (error) { throw new Error(`The ${label} did not contain valid JSON.`, { cause: error }); }
 }
 
-async function fetchFile(url, maxBytes, label) {
+async function fetchFile(url, maxBytes, label, options = {}) {
   if (!isHttpsUrl(url)) throw new Error(`The ${label} URL must use HTTPS.`);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeoutMs = Math.min(120_000, Math.max(1_000, Number(options.timeoutMs) || 8_000));
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal, redirect: 'follow', headers: { 'User-Agent': 'Rel.AI-MCP-Extensions/1' } });
     if (!response.ok) throw new Error(`Could not download ${label}: HTTP ${response.status}.`);
@@ -393,10 +545,16 @@ async function fetchFile(url, maxBytes, label) {
   }
 }
 
-function commandAvailable(command) {
+function normalizeCommandName(value) {
+  return path.basename(String(value || '').trim()).toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/i, '');
+}
+
+function systemCommandAvailable(command, config = {}) {
   const name = String(command || '').trim();
   if (!name) return false;
-  const pathEntries = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const managedRoot = path.resolve(extensionBinRoot(config));
+  const pathEntries = String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+    .filter(directory => path.resolve(directory) !== managedRoot);
   const extensions = process.platform === 'win32'
     ? String(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
     : [''];
@@ -404,12 +562,65 @@ function commandAvailable(command) {
     for (const extension of extensions) {
       const candidate = path.join(directory, process.platform === 'win32' && path.extname(name) ? name : `${name}${extension}`);
       try {
-        const stat = fs.statSync(candidate);
-        if (stat.isFile()) return true;
+        const stat = fs.lstatSync(candidate);
+        if (stat.isFile() && !stat.isSymbolicLink()) return true;
       } catch {}
     }
   }
   return false;
+}
+
+function readManagedCommandOwner(config, command) {
+  const metadataPath = managedExtensionCommandMetadataPath(config, command);
+  try {
+    const stat = fs.lstatSync(metadataPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) return '';
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+    if (metadata?.schemaVersion !== 1) return '';
+    if (String(metadata?.command || '') !== String(command || '')) return '';
+    const extensionId = String(metadata?.extensionId || '');
+    return EXTENSION_ID_PATTERN.test(extensionId) ? extensionId : '';
+  } catch {
+    return '';
+  }
+}
+
+function commandAvailable(command, config = {}) {
+  if (systemCommandAvailable(command, config)) return true;
+  if (!readManagedCommandOwner(config, command)) return false;
+  try {
+    const stat = fs.lstatSync(managedExtensionCommandPath(config, command));
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function removeManagedCommandsOwnedBy(config, extensionId) {
+  const root = path.resolve(extensionBinRoot(config));
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return []; }
+  const removed = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith('.relai-owner.json')) continue;
+    const metadataPath = path.join(root, entry.name);
+    let metadata;
+    try {
+      const stat = fs.lstatSync(metadataPath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) continue;
+      metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (String(metadata?.extensionId || '') !== extensionId) continue;
+    const commandPath = metadataPath.slice(0, -'.relai-owner.json'.length);
+    const relativeCommand = path.relative(root, path.resolve(commandPath));
+    if (!relativeCommand || relativeCommand.startsWith('..') || path.isAbsolute(relativeCommand) || relativeCommand.includes(path.sep)) continue;
+    fs.rmSync(commandPath, { force: true });
+    fs.rmSync(metadataPath, { force: true });
+    removed.push(String(metadata?.command || path.basename(commandPath)));
+  }
+  return [...new Set(removed)].sort((left, right) => left.localeCompare(right));
 }
 
 function errorMessage(error) {

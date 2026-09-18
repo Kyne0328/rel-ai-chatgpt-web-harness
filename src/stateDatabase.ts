@@ -120,20 +120,30 @@ function openStateDatabase(config: StateDatabaseConfig = {}, options: OpenStateD
   if (!readonly) fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   if (readonly && !fs.existsSync(file)) return null;
   const timeout = Math.max(0, Math.floor(Number(options.timeoutMs ?? 5000)));
-  const db = new DatabaseSync(file, { readOnly: readonly, timeout });
-  try {
-    db.enableLoadExtension(false);
-    db.exec('PRAGMA foreign_keys=ON');
-    if (!readonly) {
-      db.exec('PRAGMA journal_mode=WAL');
-      db.exec('PRAGMA synchronous=NORMAL');
-      ensureStateSchema(db, file);
-      try { fs.chmodSync(file, 0o600); } catch {}
+  // SQLite can reject a journal-mode change immediately despite busy_timeout
+  // when another connection holds a transaction. Retry only initialization;
+  // replaying an arbitrary caller operation could duplicate side effects.
+  const deadline = performance.now() + timeout;
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const remainingTimeout = Math.max(0, Math.ceil(deadline - performance.now()));
+    const db = new DatabaseSync(file, { readOnly: readonly, timeout: remainingTimeout });
+    try {
+      db.enableLoadExtension(false);
+      db.exec('PRAGMA foreign_keys=ON');
+      if (!readonly) {
+        db.exec('PRAGMA journal_mode=WAL');
+        db.exec('PRAGMA synchronous=NORMAL');
+        ensureStateSchema(db, file);
+        try { fs.chmodSync(file, 0o600); } catch {}
+      }
+      return db;
+    } catch (error) {
+      try { db.close(); } catch {}
+      const remaining = deadline - performance.now();
+      if (!isSqliteBusyError(error) || remaining <= 0) throw error;
+      Atomics.wait(sleeper, 0, 0, Math.min(25, remaining));
     }
-    return db;
-  } catch (error) {
-    try { db.close(); } catch {}
-    throw error;
   }
 }
 

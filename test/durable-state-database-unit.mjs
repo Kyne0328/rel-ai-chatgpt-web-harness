@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { Worker } from 'node:worker_threads';
+import { once } from 'node:events';
 
 import {
   initializeStateDatabase,
@@ -24,6 +26,42 @@ import { readTaskIntegrity, readWorkspaceIntegrity } from '../src/taskIntegrity.
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-durable-db-'));
 
 try {
+  const contendedConfig = { stateDir: path.join(temp, 'contended') };
+  const contendedFile = stateDatabasePath(contendedConfig);
+  fs.mkdirSync(path.dirname(contendedFile), { recursive: true });
+  const fixtureDb = new DatabaseSync(contendedFile);
+  fixtureDb.exec('CREATE TABLE fixture(value TEXT)');
+  fixtureDb.close();
+  const writer = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(workerData);
+    db.exec('BEGIN IMMEDIATE');
+    db.exec("INSERT INTO fixture VALUES('preserved')");
+    parentPort.postMessage('locked');
+    parentPort.once('message', () => {
+      setTimeout(() => { db.exec('COMMIT'); db.close(); }, 150);
+    });
+  `, { eval: true, workerData: contendedFile });
+  const writerExited = once(writer, 'exit');
+  try {
+    await once(writer, 'message');
+    assert.throws(() => openStateDatabase(contendedConfig, { timeoutMs: 0 }), /database is locked/,
+      'a zero timeout must still report journal-mode lock contention');
+    writer.postMessage('release');
+    const opened = openStateDatabase(contendedConfig, { timeoutMs: 5000 });
+    try {
+      assert.equal(opened.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
+      assert.equal(opened.prepare('SELECT value FROM fixture').get().value, 'preserved',
+        'opening after contention must preserve the competing transaction');
+    } finally {
+      opened.close();
+    }
+    await writerExited;
+  } finally {
+    await writer.terminate();
+  }
+
   const migrationConfig = { stateDir: path.join(temp, 'migration') };
   const migrationFile = stateDatabasePath(migrationConfig);
   fs.mkdirSync(path.dirname(migrationFile), { recursive: true });

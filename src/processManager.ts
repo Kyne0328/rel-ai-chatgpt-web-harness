@@ -10,6 +10,7 @@ import { normalizeExecutionInvocation, resolveCommandCwd, normalizeCommandEnv } 
 import { redactCommandForAudit } from './commandDisplay.ts';
 import { isProcessTreeAlive, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
 import { makeProcessEnvironment } from './processEnvironment.js';
+import { extensionBinRoot } from './extensions/paths.js';
 import { createHttpTaskPrincipal, principalFingerprint } from './mcp/principal.ts';
 import { getStateDir } from './statePaths.js';
 import { readTaskHistorySession } from './taskHistoryStore.ts';
@@ -397,7 +398,10 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     'relai.process.pty': pty
   }, async () => {
     const { childEnvironment, startupSignal } = measurePerformancePhaseSync('process.setup', () => {
-      const childEnvironment = makeProcessEnvironment(env, { allow: config.processEnvironment?.allow });
+      const childEnvironment = makeProcessEnvironment(env, {
+        allow: config.processEnvironment?.allow,
+        pathAppend: extensionBinRoot(config)
+      });
       Object.assign(childEnvironment, traceContextEnvironment());
       const startupSignal = admissionSignal;
       return { childEnvironment, startupSignal };

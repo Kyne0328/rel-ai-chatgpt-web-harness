@@ -26,6 +26,11 @@ assert.equal(safe.AWS_SECRET_ACCESS_KEY, undefined);
 assert.equal(safe.CUSTOM_SAFE, undefined);
 assert.equal(safe.NODE_OPTIONS, undefined);
 
+const managedBin = path.resolve('/relai/extensions/.bin');
+const withManagedBin = makeProcessEnvironment({}, { source, pathAppend: [managedBin, managedBin] });
+assert.equal(withManagedBin.PATH.split(path.delimiter).at(-1), managedBin);
+assert.equal(withManagedBin.PATH.split(path.delimiter).filter(entry => path.resolve(entry) === managedBin).length, 1);
+
 const allowed = makeProcessEnvironment({}, { source, allow: ['CUSTOM_SAFE', 'GITHUB_TOKEN'] });
 assert.equal(allowed.CUSTOM_SAFE, 'kept only when allowed');
 assert.equal(allowed.GITHUB_TOKEN, 'secret');

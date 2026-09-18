@@ -71,11 +71,11 @@ async function verifyExecutionTimeoutExcludesQueueWait() {
   const command = runProcess(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10)'], {
     resourceClass: 'heavy',
     resourceOwner: 'repo-c',
-    queueTimeoutMs: 1500,
-    timeout: 1000
+    queueTimeoutMs: 5000,
+    timeout: 3000
   });
   await waitFor(() => hostResourceStats().heavy.queued === 1, 'one-shot command to enter the host queue');
-  await sleep(1200);
+  await sleep(3300);
   blockerA.release();
   const result = await command;
   blockerB.release();
@@ -83,8 +83,8 @@ async function verifyExecutionTimeoutExcludesQueueWait() {
   assert.equal(result.exitCode, 0);
   assert.equal(result.timedOut, false);
   assert.equal(result.queueTimedOut, undefined);
-  assert.ok(result.queueWaitMs >= 1000, `expected queue wait to exceed the execution timeout, got ${result.queueWaitMs}ms`);
-  assert.ok(performance.now() - started >= 1000, 'the command must actually have waited longer than its execution timeout before admission');
+  assert.ok(result.queueWaitMs >= 3000, `expected queue wait to exceed the execution timeout, got ${result.queueWaitMs}ms`);
+  assert.ok(performance.now() - started >= 3000, 'the command must actually have waited longer than its execution timeout before admission');
   assert.equal(hostResourceStats().heavy.active, 0);
 }
 

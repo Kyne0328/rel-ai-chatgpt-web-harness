@@ -149,6 +149,18 @@ function buildProcessEnvironment(extra, inheritedKeys, options) {
       .filter(entry => path.resolve(entry).toLowerCase() !== runtimeKey);
     env.PATH = [runtimeDirectory, ...inheritedPath].join(path.delimiter);
   }
+  const appendedPath = normalizePathEntries(options.pathAppend);
+  if (appendedPath.length) {
+    const existingPath = String(env.PATH || '').split(path.delimiter).filter(Boolean);
+    const seen = new Set(existingPath.map(pathKey));
+    const additions = appendedPath.filter(entry => {
+      const key = pathKey(entry);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    env.PATH = [...existingPath, ...additions].join(path.delimiter);
+  }
   env.REL_AI_MCP = '1';
 
   for (const [key, value] of Object.entries(extra || {})) {
@@ -164,6 +176,20 @@ function isAlwaysBlockedKey(key) {
   const value = String(key || '');
   const canonical = process.platform === 'win32' ? value.toUpperCase() : value;
   return ALWAYS_BLOCKED_KEYS.has(canonical);
+}
+
+function normalizePathEntries(value) {
+  if (value == null) return [];
+  const values = Array.isArray(value) ? value : [value];
+  return [...new Set(values
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+    .map(item => path.resolve(item)))];
+}
+
+function pathKey(value) {
+  const resolved = path.resolve(String(value || ''));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 function normalizeAllowedKeys(value) {
