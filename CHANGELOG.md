@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.2] — 2026-09-18
+
+### Performance and reliability
+- **Keep incremental repository relationship refreshes scoped when files are added or deleted.** Rel.AI now updates cached path-resolution state and re-resolves only affected import sources for safe structural changes, while retaining full relationship reconciliation for resolver-sensitive manifests and oversized or unsafe impact sets. This removes repository-size-dependent full rebuilds from ordinary add/delete updates without leaving stale or previously unresolved imports behind.
+- **Write local Analytics events directly to normalized SQLite counters.** Tool outcomes, transport events, and task completions no longer rewrite the full monthly JSON document on every event. The monthly document remains a materialized compatibility/read form, while event-time writes stay bounded to the affected counter rows.
+- **Avoid repeated task-event sanitization at trusted persistence boundaries.** Canonical task snapshots keep sanitization as the default for external/direct callers, while task-history and activity paths can explicitly reuse already-sanitized event timelines instead of rescanning the full bounded history on every merge.
+- **Improve Windows runtime and durable-state handoff reliability.** Child-process environments now prefer the active Rel.AI runtime directory at the front of `PATH` on Windows, and task-integrity writes allow a short 250 ms SQLite writer handoff so brief Analytics transactions do not create avoidable integrity-write failures.
+
+### Release metadata
+- **Bump Rel.AI MCP from 1.1.1 to 1.1.2 across release surfaces.** Root, Electron, workspace packages, lockfiles, desktop status UI, and the release manifest now report 1.1.2. The public connector remains at tool-surface version 81 with 15 tools; protocol version `2026-07-28` and schema version 7 remain unchanged.
+- **Validate the affected performance and persistence boundaries on Node 26.8.2.** Local Analytics, task history/storage/observability, and scoped repository-intelligence regressions pass together after the changes.
+
 ## [1.1.1] — 2026-09-17
 
 ### Task lifecycle and attribution

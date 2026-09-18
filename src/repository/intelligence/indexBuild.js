@@ -17,7 +17,9 @@ import {
   openIndexDatabase,
   replaceFileFacts,
   relationshipImpactForPaths,
+  relationshipSourceIdsForImportResolutionChanges,
   relationshipSourceIdsForNames,
+  refreshRelationshipResolutionCache,
   resolveRelationships,
   setIndexParserVersion,
   setIndexProducerVersion
@@ -156,14 +158,14 @@ async function refreshRepositoryIndex(job, signal) {
     }
 
     const changedPaths = changed.map(candidate => candidate.path);
+    const addedPaths = changed.filter(candidate => !manifestByPath.has(candidate.path)).map(candidate => candidate.path);
+    const relationshipPaths = [...new Set([...changedPaths, ...deleted])];
     const canScopeRelationships = scan.mode === 'incremental'
-      && deleted.length === 0
-      && changed.length > 0
-      && changed.length <= 100
-      && changed.every(candidate => manifestByPath.has(candidate.path))
-      && changed.every(candidate => !isRelationshipResolverSensitivePath(candidate.path));
+      && relationshipPaths.length > 0
+      && relationshipPaths.length <= 100
+      && relationshipPaths.every(relativePath => !isRelationshipResolverSensitivePath(relativePath));
     const relationshipImpact = canScopeRelationships
-      ? relationshipImpactForPaths(db, changedPaths)
+      ? relationshipImpactForPaths(db, relationshipPaths)
       : null;
     const relationshipNames = new Set(relationshipImpact?.relationshipNames || []);
     let relationshipScopeSafe = canScopeRelationships;
@@ -218,20 +220,27 @@ async function refreshRepositoryIndex(job, signal) {
     throwIfAborted(signal);
     try {
       let relationshipSourceIds = null;
-      if (relationshipImpact && relationshipScopeSafe) {
-        const impacted = new Set(relationshipImpact.sourceFileIds);
-        for (const sourceId of relationshipSourceIdsForNames(db, [...relationshipNames])) impacted.add(sourceId);
-        for (const sourceId of relationshipImpactForPaths(db, changedPaths).sourceFileIds) impacted.add(sourceId);
-        if (impacted.size <= 500) relationshipSourceIds = [...impacted];
-      }
-      // A full relationship pass must rebuild its path/symbol context after
-      // additions, deletions, or any scope-safety fallback; otherwise a
-      // generation cache could omit newly indexed files.
       const resolutionCache = relationshipResolutionCacheFor(
         databaseFile,
         previousGeneration,
-        scan.mode === 'full' || relationshipSourceIds == null
+        scan.mode === 'full' || !canScopeRelationships
       );
+      if (relationshipImpact && relationshipScopeSafe) {
+        if (addedPaths.length || deleted.length) {
+          refreshRelationshipResolutionCache(db, workspace.path, resolutionCache, { addedPaths, deletedPaths: deleted });
+        }
+        const impacted = new Set(relationshipImpact.sourceFileIds);
+        for (const sourceId of relationshipSourceIdsForNames(db, [...relationshipNames])) impacted.add(sourceId);
+        for (const sourceId of relationshipImpactForPaths(db, relationshipPaths).sourceFileIds) impacted.add(sourceId);
+        if (addedPaths.length || deleted.length) {
+          for (const sourceId of relationshipSourceIdsForImportResolutionChanges(db, workspace.path, resolutionCache)) impacted.add(sourceId);
+        }
+        if (impacted.size <= 500) relationshipSourceIds = [...impacted];
+      }
+      if (relationshipSourceIds == null && canScopeRelationships) {
+        // A large or unsafe impact set falls back to a full relationship pass.
+        resolutionCache.context = null;
+      }
       resolveRelationships(db, { workspaceRoot: workspace.path, sourceFileIds: relationshipSourceIds, resolutionCache });
       setIndexProducerVersion(db, runtimeProducerVersion);
       setIndexParserVersion(db, PARSER_VERSION);

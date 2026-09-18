@@ -33,6 +33,7 @@ write('src/target.js', 'export function target() { return 1; }\n');
 write('src/caller.js', "import { target } from './target.js';\nexport function caller() { return target(); }\n");
 write('src/routes.js', "export function getThing() { return true; }\nrouter.get('/v1/things', getThing);\n");
 write('src/client.js', "export function loadThing() { return fetch('/v1/things'); }\n");
+write('src/late-caller.js', "import './late-target.js';\nexport const lateCaller = true;\n");
 
 try {
   await repositoryIntelligence.ensure(workspace, config, { watch: false });
@@ -60,8 +61,21 @@ try {
     db.close();
   }
 
-  // Additions/deletions force a full relationship pass. Verify that the
-  // generation cache is refreshed so newly indexed files participate.
+  // A newly added target must update an unchanged import source without
+  // falling back to a repository-wide relationship rebuild.
+  write('src/late-target.js', 'export const lateTarget = true;\n');
+  repositoryIntelligence.noteMutation(workspace, config, ['src/late-target.js']);
+  const lateAddition = await repositoryIntelligence.ensure(workspace, config, { watch: false });
+  assert.equal(lateAddition.scanMode, 'incremental');
+  const lateDb = openIndexDatabase(repositoryIndexPath(config, workspace), { readonly: true });
+  try {
+    const imported = edgeRows(lateDb, 'IMPORTS', 'src/late-caller.js', 'src/late-target.js');
+    assert.ok(imported.length > 0, 'scoped addition must re-resolve previously unresolved imports');
+  } finally {
+    lateDb.close();
+  }
+
+  // Added callers and targets must also participate in the scoped generation.
   write('src/new-target.js', 'export function newTarget() { return 3; }\n');
   write('src/new-caller.js', "import { newTarget } from './new-target.js';\nexport function newCaller() { return newTarget(); }\n");
   repositoryIntelligence.noteMutation(workspace, config, ['src/new-target.js', 'src/new-caller.js']);
@@ -70,7 +84,7 @@ try {
   const addedDb = openIndexDatabase(repositoryIndexPath(config, workspace), { readonly: true });
   try {
     const imported = edgeRows(addedDb, 'IMPORTS', 'src/new-caller.js', 'src/new-target.js');
-    assert.ok(imported.length > 0, 'full relationship fallback must include newly added files');
+    assert.ok(imported.length > 0, 'scoped relationship refresh must include newly added files');
   } finally {
     addedDb.close();
   }
@@ -81,7 +95,7 @@ try {
   const deletedDb = openIndexDatabase(repositoryIndexPath(config, workspace), { readonly: true });
   try {
     const stale = edgeRows(deletedDb, 'IMPORTS', 'src/new-caller.js', 'src/new-target.js');
-    assert.equal(stale.length, 0, 'full relationship fallback must remove edges to deleted files');
+    assert.equal(stale.length, 0, 'scoped relationship refresh must remove edges to deleted files');
   } finally {
     deletedDb.close();
   }

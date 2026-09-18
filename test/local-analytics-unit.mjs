@@ -14,6 +14,15 @@ try {
   assert.equal(recordLocalToolOutcome(config, { tool: 'relai_inspect', operationName: 'inspect', taskIntent: 'investigation', workspace: 'other', ok: true, durationMs: 50, at: '2026-08-08T11:45:00Z' }), true);
   assert.equal(recordLocalTaskCompletion(config, { workspace: 'repo', taskIntent: 'bugfix', at: '2026-08-08T11:30:00Z' }), true);
 
+  const preFlushStorage = withStateDatabase(config, db => ({
+    monthlyRows: Number(db.prepare('SELECT COUNT(*) AS count FROM analytics_months WHERE month=?').get('2026-08')?.count || 0),
+    counterRows: Number(db.prepare('SELECT COUNT(*) AS count FROM analytics_counter_rows WHERE month=?').get('2026-08')?.count || 0),
+    dirty: Number(db.prepare('SELECT dirty FROM analytics_counter_state WHERE month=?').get('2026-08')?.dirty || 0)
+  }));
+  assert.equal(preFlushStorage.monthlyRows, 0, 'event writes must not rewrite the monthly JSON document before materialization');
+  assert.ok(preFlushStorage.counterRows > 0, 'event writes must update indexed analytics counters');
+  assert.equal(preFlushStorage.dirty, 1, 'normalized analytics must remain marked dirty until materialization');
+
   const snapshot = readLocalUsageSnapshot(config, '2026-08');
   assert.deepEqual(snapshot.privacy, {
     retentionDays: LOCAL_ANALYTICS_RETENTION_DAYS,

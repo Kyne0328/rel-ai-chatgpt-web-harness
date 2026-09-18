@@ -32,18 +32,11 @@ const MAX_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 const LOCAL_ANALYTICS_RETENTION_DAYS = 180;
 const RETENTION_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const NORMALIZED_ANALYTICS_THRESHOLD_BYTES = 64 * 1024;
 const LEGACY_MIGRATION_KEY = 'local_analytics_legacy_migrated_v1';
 const retentionPruneTimes = new Map<string, number>();
 const retentionPruneTimers = new Map<string, { timer: NodeJS.Timeout; config: AnalyticsConfig }>();
 const analyticsWriteDatabases = new Map<string, StateDatabase>();
 const analyticsWriteCloseScheduled = new Set<string>();
-// A single request turn commonly records several dimensions in the same
-// month. Reuse the parsed document across short-lived writer connections and
-// compare the durable row version before every update so another process's
-// write is still observed immediately.
-const analyticsWriteDocuments = new Map<string, { document: AnalyticsDocument; updatedAtMs: number }>();
-const MAX_ANALYTICS_DOCUMENT_CACHE = 16;
 const analyticsCounterConfigs = new Map<string, AnalyticsConfig>();
 
 interface AnalyticsConfig extends TelemetryConfig {
@@ -193,40 +186,8 @@ function recordLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOu
     let migratedLegacy = false;
     withAnalyticsWriteDatabase(config, (db: StateDatabase) => {
       migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
-      if (shouldUseNormalizedAnalytics(db, month, config)) {
-        recordNormalizedToolOutcome(db, month, hour, tool, workspace, intent, useCase, success, failure, durationMs, category, reliability, performancePhases);
-        return;
-      }
-      const document = readAnalyticsWriteDocument(db, keyForAnalyticsDocument(config, month), month);
-      incrementTotals(document.totals, success, failure, durationMs, reliability);
-      incrementPerformancePhases(document.performancePhases, performancePhases);
-      incrementNamed(document.tools, 'tool', tool, success, failure, durationMs, reliability);
-      incrementActivityMatrix(document.activityMatrix, intent, useCase, success, failure, durationMs, reliability);
-      if (workspace) {
-        incrementNamed(document.workspaces, 'workspace', workspace, success, failure, durationMs, reliability);
-        incrementWorkspaceTool(document.workspaceTools, workspace, tool, success, failure, durationMs, reliability);
-        incrementWorkspaceActivityMatrix(document.workspaceActivityMatrix, workspace, intent, useCase, success, failure, durationMs, reliability);
-      }
-      if (failure) {
-        incrementFailureCategory(document.failureCategories, category);
-        if (workspace) incrementWorkspaceFailureCategory(document.workspaceFailureCategories, workspace, category);
-      }
-
-      const hourly = findOrCreate(document.hours, row => row.hour === hour, () => emptyHour(hour));
-      incrementTotals(hourly, success, failure, durationMs, reliability);
-      incrementPerformancePhases(hourly.performancePhases, performancePhases);
-      incrementNamed(hourly.tools, 'tool', tool, success, failure, durationMs, reliability);
-      incrementActivityMatrix(hourly.activityMatrix, intent, useCase, success, failure, durationMs, reliability);
-      if (workspace) {
-        incrementNamed(hourly.workspaces, 'workspace', workspace, success, failure, durationMs, reliability);
-        incrementWorkspaceTool(hourly.workspaceTools, workspace, tool, success, failure, durationMs, reliability);
-        incrementWorkspaceActivityMatrix(hourly.workspaceActivityMatrix, workspace, intent, useCase, success, failure, durationMs, reliability);
-      }
-      if (failure) {
-        incrementFailureCategory(hourly.failureCategories, category);
-        if (workspace) incrementWorkspaceFailureCategory(hourly.workspaceFailureCategories, workspace, category);
-      }
-      upsertAnalyticsWriteDocument(db, config, document);
+      ensureNormalizedAnalyticsSchema(db, config);
+      recordNormalizedToolOutcome(db, month, hour, tool, workspace, intent, useCase, success, failure, durationMs, category, reliability, performancePhases);
     });
     if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
@@ -250,15 +211,8 @@ function recordLocalTransportEvent(
     let migratedLegacy = false;
     withAnalyticsWriteDatabase(config, (db: StateDatabase) => {
       migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
-      if (shouldUseNormalizedAnalytics(db, month, config)) {
-        recordNormalizedTransportEvent(db, month, hour, eventName, count);
-        return;
-      }
-      const document = readAnalyticsWriteDocument(db, keyForAnalyticsDocument(config, month), month);
-      incrementTransport(document.transport, eventName, count);
-      const hourly = findOrCreate(document.hours, row => row.hour === hour, () => emptyHour(hour));
-      incrementTransport(hourly.transport, eventName, count);
-      upsertAnalyticsWriteDocument(db, config, document);
+      ensureNormalizedAnalyticsSchema(db, config);
+      recordNormalizedTransportEvent(db, month, hour, eventName, count);
     });
     if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
@@ -276,23 +230,10 @@ function recordLocalTaskCompletion(config: AnalyticsConfig = {}, event: { worksp
     const workspace = boundedLabel(event.workspace, 160);
     const intent = normalizeAnalyticsTaskIntent(event.taskIntent, 'auto');
     let migratedLegacy = false;
-    // This path uses the shared short-lived connection rather than the
-    // analytics writer. Invalidate a same-turn cached month so a completion
-    // cannot be overwritten by a later tool outcome.
-    clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
     withStateDatabase(config, (db: StateDatabase) => {
       migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
-      if (shouldUseNormalizedAnalytics(db, month, config)) {
-        recordNormalizedTaskCompletion(db, month, hour, workspace, intent);
-        return;
-      }
-      const document = readDocumentFromDatabase(db, month);
-      incrementTaskIntent(document.taskIntents, intent);
-      if (workspace) incrementWorkspaceTaskIntent(document.workspaceTaskIntents, workspace, intent);
-      const hourly = findOrCreate(document.hours, row => row.hour === hour, () => emptyHour(hour));
-      incrementTaskIntent(hourly.taskIntents, intent);
-      if (workspace) incrementWorkspaceTaskIntent(hourly.workspaceTaskIntents, workspace, intent);
-      upsertDocument(db, document);
+      ensureNormalizedAnalyticsSchema(db, config);
+      recordNormalizedTaskCompletion(db, month, hour, workspace, intent);
     }, { transaction: true });
     if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
@@ -421,41 +362,6 @@ function readDocument(config: AnalyticsConfig, month: string): AnalyticsDocument
   return withStateDatabase(config, (db: StateDatabase) => readDocumentFromDatabase(db, month)) as AnalyticsDocument;
 }
 
-function keyForAnalyticsDocument(config: AnalyticsConfig, month: string): string {
-  return `${statePath(config, 'durable-state.sqlite')}\u0000${month}`;
-}
-
-function readAnalyticsWriteDocument(db: StateDatabase, key: string, month: string): AnalyticsDocument {
-  const cached = analyticsWriteDocuments.get(key);
-  const row = db.prepare('SELECT updated_at_ms,payload FROM analytics_months WHERE month=?').get(month) as { updated_at_ms?: unknown; payload?: unknown } | undefined;
-  const updatedAtMs = Math.max(0, Math.floor(Number(row?.updated_at_ms) || 0));
-  if (cached && row && cached.updatedAtMs === updatedAtMs) {
-    // Touch insertion order to keep recently used months in the bounded LRU.
-    analyticsWriteDocuments.delete(key);
-    analyticsWriteDocuments.set(key, cached);
-    return cached.document;
-  }
-  let document: AnalyticsDocument;
-  try { document = row ? parseDocument(String(row.payload || ''), month) : emptyDocument(month); }
-  catch { document = emptyDocument(month); }
-  analyticsWriteDocuments.delete(key);
-  analyticsWriteDocuments.set(key, { document, updatedAtMs });
-  while (analyticsWriteDocuments.size > MAX_ANALYTICS_DOCUMENT_CACHE) {
-    const oldest = analyticsWriteDocuments.keys().next().value;
-    if (oldest === undefined) break;
-    analyticsWriteDocuments.delete(oldest);
-  }
-  return document;
-}
-
-function upsertAnalyticsWriteDocument(db: StateDatabase, config: AnalyticsConfig, document: AnalyticsDocument): void {
-  const updatedAtMs = Date.now();
-  upsertDocument(db, document, updatedAtMs);
-  const key = keyForAnalyticsDocument(config, document.month);
-  const cached = analyticsWriteDocuments.get(key);
-  if (cached?.document === document) cached.updatedAtMs = updatedAtMs;
-}
-
 async function readDocumentFresh(config: AnalyticsConfig, month: string): Promise<AnalyticsDocument> {
   return readDocument(config, month);
 }
@@ -463,11 +369,11 @@ async function readDocumentFresh(config: AnalyticsConfig, month: string): Promis
 function readDocumentFromDatabase(db: StateDatabase, month: string): AnalyticsDocument {
   ensureNormalizedAnalyticsSchema(db);
   const row = db.prepare('SELECT updated_at_ms,payload FROM analytics_months WHERE month=?').get(month) as { updated_at_ms?: unknown; payload?: unknown } | undefined;
-  if (!row) return emptyDocument(month);
   const counterState = db.prepare('SELECT source_updated_at_ms,dirty FROM analytics_counter_state WHERE month=?').get(month) as { source_updated_at_ms?: unknown; dirty?: unknown } | undefined;
-  if (counterState && Number(counterState.dirty) === 1 && Number(counterState.source_updated_at_ms || 0) === Number(row.updated_at_ms || 0)) {
+  if (counterState && Number(counterState.dirty) === 1 && Number(counterState.source_updated_at_ms || 0) === Number(row?.updated_at_ms || 0)) {
     return readNormalizedAnalyticsDocument(db, month);
   }
+  if (!row) return emptyDocument(month);
   try {
     return parseDocument(String(row.payload || ''), month);
   } catch {
@@ -478,14 +384,6 @@ function readDocumentFromDatabase(db: StateDatabase, month: string): AnalyticsDo
 function ensureNormalizedAnalyticsSchema(db: StateDatabase, config?: AnalyticsConfig): void {
   db.exec(NORMALIZED_ANALYTICS_SCHEMA_SQL);
   if (config) analyticsCounterConfigs.set(statePath(config, 'durable-state.sqlite'), { ...config });
-}
-
-function shouldUseNormalizedAnalytics(db: StateDatabase, month: string, config?: AnalyticsConfig): boolean {
-  ensureNormalizedAnalyticsSchema(db, config);
-  const state = db.prepare('SELECT source_updated_at_ms,dirty FROM analytics_counter_state WHERE month=?').get(month) as { source_updated_at_ms?: unknown; dirty?: unknown } | undefined;
-  if (state) return true;
-  const row = db.prepare('SELECT length(payload) AS bytes FROM analytics_months WHERE month=?').get(month) as { bytes?: unknown } | undefined;
-  return Number(row?.bytes || 0) >= NORMALIZED_ANALYTICS_THRESHOLD_BYTES;
 }
 
 function initializeNormalizedAnalytics(db: StateDatabase, month: string): void {
@@ -697,7 +595,6 @@ function withAnalyticsWriteDatabase<TResult>(config: AnalyticsConfig, operation:
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch {}
     analyticsWriteDatabases.delete(key);
-    clearAnalyticsWriteDocuments(key);
     try { db.close(); } catch {}
     throw error;
   }
@@ -717,13 +614,6 @@ function closeAnalyticsWriteDatabase(key: string): void {
   if (!db) return;
   analyticsWriteDatabases.delete(key);
   try { db.close(); } catch {}
-}
-
-function clearAnalyticsWriteDocuments(databaseKey: string): void {
-  const prefix = `${databaseKey}\u0000`;
-  for (const key of analyticsWriteDocuments.keys()) {
-    if (key.startsWith(prefix)) analyticsWriteDocuments.delete(key);
-  }
 }
 
 function closeAnalyticsWriteDatabases(config?: AnalyticsConfig): void {
@@ -752,7 +642,6 @@ function scheduleRetentionPrune(config: AnalyticsConfig = {}): boolean {
 
 async function pruneLocalAnalytics(config: AnalyticsConfig = {}, options: PruneOptions = {}): Promise<{ ok: true; removedFiles: number; removedBytes: number }> {
   closeAnalyticsWriteDatabases(config);
-  clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
   materializeNormalizedAnalytics(config);
   migrateLegacyLocalAnalytics(config);
   const retentionDays = Math.max(1, Math.floor(Number(options.retentionDays || LOCAL_ANALYTICS_RETENTION_DAYS)));
@@ -783,7 +672,6 @@ function removeWorkspaceLocalAnalytics(config: AnalyticsConfig = {}, workspaceVa
   const workspace = boundedLabel(workspaceValue, 160);
   if (!workspace) return { ok: true, updatedMonths: 0, removedToolCalls: 0 };
   closeAnalyticsWriteDatabases(config);
-  clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
   materializeNormalizedAnalytics(config);
   migrateLegacyLocalAnalytics(config);
   return withStateDatabase(config, (db: StateDatabase) => {
@@ -861,7 +749,6 @@ function removeWorkspaceLocalAnalytics(config: AnalyticsConfig = {}, workspaceVa
 
 async function clearLocalAnalytics(config: AnalyticsConfig = {}): Promise<{ ok: true; removedFiles: number; removedBytes: number }> {
   closeAnalyticsWriteDatabases(config);
-  clearAnalyticsWriteDocuments(statePath(config, 'durable-state.sqlite'));
   migrateLegacyLocalAnalytics(config);
   const result = withStateDatabase(config, (db: StateDatabase) => {
     // Older state databases may not have received the normalized counter

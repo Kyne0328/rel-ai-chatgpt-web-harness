@@ -15,8 +15,8 @@ const DURABLE_FIELDS = Object.freeze([
   'workflow', 'workflowEvidence', 'backgroundOperation', 'principalFingerprint', 'repairable', 'contextSummary'
 ]);
 
-function canonicalTaskSnapshot(record = {}) {
-  const sanitized = sanitizeTaskRecord(record) || {};
+function canonicalTaskSnapshot(record = {}, options = {}) {
+  const sanitized = sanitizeTaskRecord(record, { eventsAlreadySanitized: options.eventsAlreadySanitized === true }) || {};
   const id = String(sanitized.taskId || sanitized.id || sanitized.sessionId || '').trim();
   const status = normalizeHistoricalTaskStatus(sanitized.status || sanitized.state, sanitized);
   const terminal = isTerminalTaskStatus(status);
@@ -56,8 +56,8 @@ function canonicalTaskSnapshot(record = {}) {
   }, { eventsAlreadySanitized: true });
 }
 
-function reduceTaskLifecycleAuditEvent(session, event = {}) {
-  const current = canonicalTaskSnapshot(session);
+function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
+  const current = canonicalTaskSnapshot(session, { eventsAlreadySanitized: options.eventsAlreadySanitized === true });
   const timestamp = timestampMs(event.ts || event.timestamp) || Date.now();
   const ended = timestamp + Math.max(0, Number(event.ms || event.durationMs || 0));
   const completion = event.ok !== false && (event.completionKnown === true || event.tool === OP.WORK_FINISH);
@@ -146,14 +146,15 @@ function reduceTaskLifecycleAuditEvent(session, event = {}) {
     activeCalls: 0,
     currentOperations: [],
     events: events.slice(-MAX_SESSION_EVENTS)
-  });
+  }, { eventsAlreadySanitized: true });
 }
 
-function mergeTaskLifecycleSnapshots(persisted, live) {
-  if (!persisted) return canonicalTaskSnapshot(live);
-  if (!live) return canonicalTaskSnapshot(persisted);
-  const durable = canonicalTaskSnapshot(persisted);
-  const active = canonicalTaskSnapshot(live);
+function mergeTaskLifecycleSnapshots(persisted, live, options = {}) {
+  const snapshotOptions = { eventsAlreadySanitized: options.eventsAlreadySanitized === true };
+  if (!persisted) return canonicalTaskSnapshot(live, snapshotOptions);
+  if (!live) return canonicalTaskSnapshot(persisted, snapshotOptions);
+  const durable = canonicalTaskSnapshot(persisted, snapshotOptions);
+  const active = canonicalTaskSnapshot(live, snapshotOptions);
   if (isTerminalTaskStatus(durable.status) && lifecycleTimestamp(durable) >= lifecycleTimestamp(active)) return durable;
   const merged = { ...durable, ...active };
   for (const field of DURABLE_FIELDS) {
@@ -166,7 +167,7 @@ function mergeTaskLifecycleSnapshots(persisted, live) {
   merged.failures = Math.max(Number(durable.failures || 0), Number(active.failures || 0));
   merged.completionKnown = durable.completionKnown === true || active.completionKnown === true;
   merged.events = mergeLifecycleEvents(durable.events || [], active.events || []);
-  return canonicalTaskSnapshot(merged);
+  return canonicalTaskSnapshot(merged, { eventsAlreadySanitized: true });
 }
 
 function lifecycleChangedFields(previous, current) {

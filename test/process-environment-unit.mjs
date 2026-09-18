@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import path from 'node:path';
 
 import { makeProcessEnvironment, normalizeAllowedKeys } from '../src/processEnvironment.js';
 
@@ -12,7 +13,12 @@ const source = {
 };
 
 const safe = makeProcessEnvironment({}, { source });
-assert.equal(safe.PATH, '/usr/bin');
+if (process.platform === 'win32') {
+  assert.equal(safe.PATH.split(path.delimiter)[0], path.dirname(process.execPath));
+  assert.ok(safe.PATH.split(path.delimiter).includes('/usr/bin'));
+} else {
+  assert.equal(safe.PATH, '/usr/bin');
+}
 assert.equal(safe.HOME, '/home/test');
 assert.equal(safe.REL_AI_MCP, '1');
 assert.equal(safe.GITHUB_TOKEN, undefined);

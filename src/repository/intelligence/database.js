@@ -335,18 +335,103 @@ function relationshipSourceIdsForNames(db, names = []) {
   return [...sourceFileIds];
 }
 
+function refreshRelationshipResolutionCache(db, workspaceRoot, resolutionCache, { addedPaths = [], deletedPaths = [] } = {}) {
+  if (!resolutionCache) return;
+  if (!resolutionCache.context) {
+    resolutionCache.context = loadResolutionContext(db, workspaceRoot);
+    return;
+  }
+  const context = resolutionCache.context;
+  if (!context.suffixMembers || !context.directoryMembers) {
+    const suffixState = buildImportSuffixState(context.pathToId.keys());
+    const directoryState = buildUniqueDirectoryState(context.pathToId.keys());
+    context.suffixIndex = suffixState.index;
+    context.suffixMembers = suffixState.members;
+    context.directoryIndex = directoryState.index;
+    context.directoryMembers = directoryState.members;
+  }
+
+  const deleted = new Set(deletedPaths.map(value => String(value || '')).filter(Boolean));
+  let ecosystemDirty = false;
+  for (const relativePath of deleted) {
+    const id = context.pathToId.get(relativePath);
+    const previous = id == null ? null : context.fileById.get(Number(id));
+    if (previous && supportsEcosystemResolution(previous.language)) ecosystemDirty = true;
+    updateImportSuffixMembership(context, relativePath, false);
+    updateDirectoryMembership(context, relativePath, false);
+    context.pathToId.delete(relativePath);
+    if (id != null) context.fileById.delete(Number(id));
+  }
+
+  const additions = [...new Set(addedPaths.map(value => String(value || '')).filter(Boolean))];
+  const addedFiles = [];
+  forEachChunk(additions, 200, chunk => {
+    const placeholders = sqlPlaceholders(chunk.length);
+    for (const row of db.prepare(`SELECT id, path, language, is_test FROM files WHERE path IN (${placeholders})`).all(...chunk)) {
+      const file = { id: Number(row.id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1 };
+      const previousId = context.pathToId.get(file.path);
+      if (previousId != null && Number(previousId) !== file.id) context.fileById.delete(Number(previousId));
+      context.pathToId.set(file.path, file.id);
+      context.fileById.set(file.id, file);
+      updateImportSuffixMembership(context, file.path, true);
+      updateDirectoryMembership(context, file.path, true);
+      if (supportsEcosystemResolution(file.language)) ecosystemDirty = true;
+      addedFiles.push(file);
+    }
+  });
+
+  if (deleted.size || addedFiles.length) {
+    const addedSet = new Set(addedFiles.map(file => file.path));
+    context.files = context.files.filter(file => !deleted.has(file.path) && !addedSet.has(file.path));
+    context.files.push(...addedFiles);
+  }
+  if (ecosystemDirty) {
+    context.ecosystem = workspaceRoot && [...context.fileById.values()].some(file => supportsEcosystemResolution(file.language))
+      ? createEcosystemResolver(workspaceRoot, context.pathToId.keys())
+      : null;
+  }
+}
+
+function relationshipSourceIdsForImportResolutionChanges(db, workspaceRoot, resolutionCache) {
+  const cachedContext = resolutionCache?.context;
+  const context = cachedContext || loadResolutionContext(db, workspaceRoot);
+  if (resolutionCache && !cachedContext) resolutionCache.context = context;
+  const rows = db.prepare(`
+    SELECT i.source_file_id, i.specifier, i.target_file_id, f.path, f.language, f.is_test
+    FROM imports i
+    JOIN files f ON f.id=i.source_file_id
+  `).all();
+  const sourceFileIds = new Set();
+  for (const row of rows) {
+    const source = { id: Number(row.source_file_id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1 };
+    const targetPath = resolveImportPath(source.path, String(row.specifier), context.pathToId, context.suffixIndex,
+      context.directoryIndex, context.ecosystem, source.language);
+    const nextTargetId = targetPath ? Number(context.pathToId.get(targetPath) || 0) : 0;
+    const currentTargetId = Number(row.target_file_id || 0);
+    if (nextTargetId !== currentTargetId) sourceFileIds.add(source.id);
+  }
+  return [...sourceFileIds];
+}
+
 function loadResolutionContext(db, workspaceRoot = null) {
   const files = db.prepare('SELECT id, path, language, is_test FROM files ORDER BY path').all().map(row => ({
     id: Number(row.id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1
   }));
   const pathToId = new Map(files.map(file => [file.path, file.id]));
   const fileById = new Map(files.map(file => [file.id, file]));
-  const suffixIndex = buildImportSuffixIndex(pathToId.keys());
-  const directoryIndex = buildUniqueDirectoryIndex(pathToId.keys());
+  const suffixState = buildImportSuffixState(pathToId.keys());
+  const directoryState = buildUniqueDirectoryState(pathToId.keys());
   const ecosystem = workspaceRoot && files.some(file => supportsEcosystemResolution(file.language))
     ? createEcosystemResolver(workspaceRoot, pathToId.keys())
     : null;
-  return { files, pathToId, fileById, suffixIndex, directoryIndex, ecosystem };
+  return {
+    files, pathToId, fileById,
+    suffixIndex: suffixState.index,
+    suffixMembers: suffixState.members,
+    directoryIndex: directoryState.index,
+    directoryMembers: directoryState.members,
+    ecosystem
+  };
 }
 
 function resolveRelationships(db, { workspaceRoot = null, sourceFileIds = null, resolutionCache = null } = {}) {
@@ -736,34 +821,66 @@ function resolveCandidateBase(value, pathToId, suffixIndex, directoryIndex = new
   return null;
 }
 
-function buildUniqueDirectoryIndex(paths) {
+function buildUniqueDirectoryState(paths) {
   const index = new Map();
+  const members = new Map();
   for (const filePath of paths) {
     const dir = path.posix.dirname(String(filePath));
     if (!dir || dir === '.') continue;
-    if (!index.has(dir)) index.set(dir, String(filePath));
-    else if (index.get(dir) !== filePath) index.set(dir, null);
+    updateUniqueIndexMember(index, members, dir, String(filePath), true);
   }
-  return index;
+  return { index, members };
 }
 
-function buildImportSuffixIndex(paths) {
+function buildImportSuffixState(paths) {
   const index = new Map();
+  const members = new Map();
   for (const filePath of paths) {
-    const withoutExtension = stripKnownExtension(filePath);
-    const parts = withoutExtension.split('/').filter(Boolean);
-    const variants = new Set([filePath, withoutExtension]);
-    if (parts.at(-1) === 'index' && parts.length > 1) variants.add(parts.slice(0, -1).join('/'));
-    for (let offset = 0; offset < parts.length; offset += 1) variants.add(parts.slice(offset).join('/'));
-    for (const key of variants) addUnambiguousSuffix(index, key, filePath);
+    for (const key of importSuffixKeys(filePath)) updateUniqueIndexMember(index, members, key, String(filePath), true);
   }
-  return index;
+  return { index, members };
 }
 
-function addUnambiguousSuffix(index, key, filePath) {
+function importSuffixKeys(filePath) {
+  const value = String(filePath);
+  const withoutExtension = stripKnownExtension(value);
+  const parts = withoutExtension.split('/').filter(Boolean);
+  const variants = new Set([value, withoutExtension]);
+  if (parts.at(-1) === 'index' && parts.length > 1) variants.add(parts.slice(0, -1).join('/'));
+  for (let offset = 0; offset < parts.length; offset += 1) variants.add(parts.slice(offset).join('/'));
+  return [...variants].filter(Boolean);
+}
+
+function updateImportSuffixMembership(context, filePath, present) {
+  for (const key of importSuffixKeys(filePath)) {
+    updateUniqueIndexMember(context.suffixIndex, context.suffixMembers, key, String(filePath), present);
+  }
+}
+
+function updateDirectoryMembership(context, filePath, present) {
+  const dir = path.posix.dirname(String(filePath));
+  if (!dir || dir === '.') return;
+  updateUniqueIndexMember(context.directoryIndex, context.directoryMembers, dir, String(filePath), present);
+}
+
+function updateUniqueIndexMember(index, members, key, filePath, present) {
   if (!key) return;
-  if (!index.has(key)) index.set(key, filePath);
-  else if (index.get(key) !== filePath) index.set(key, null);
+  let values = members.get(key);
+  if (!values && present) {
+    values = new Set();
+    members.set(key, values);
+  }
+  if (!values) return;
+  if (present) values.add(filePath);
+  else values.delete(filePath);
+  if (values.size === 0) {
+    members.delete(key);
+    index.delete(key);
+  } else if (values.size === 1) {
+    index.set(key, values.values().next().value);
+  } else {
+    index.set(key, null);
+  }
 }
 
 function stripKnownExtension(value) {
@@ -830,7 +947,9 @@ export {
   openIndexDatabase,
   replaceFileFacts,
   relationshipImpactForPaths,
+  relationshipSourceIdsForImportResolutionChanges,
   relationshipSourceIdsForNames,
+  refreshRelationshipResolutionCache,
   repositoryIndexPath,
   resolveRelationships,
   setIndexProducerVersion,

@@ -1,5 +1,7 @@
 'use strict';
 
+import * as path from 'node:path';
+
 const SAFE_INHERITED_KEYS = Object.freeze([
   'ALLUSERSPROFILE',
   'APPDATA',
@@ -115,7 +117,10 @@ function makeProcessEnvironment(extra = {}, options = {}) {
     for (const key of CREDENTIAL_INHERITED_KEYS) inheritedKeys.add(key);
   }
   for (const key of normalizeAllowedKeys(options.allow)) inheritedKeys.add(key);
-  return buildProcessEnvironment(extra, inheritedKeys, options);
+  return buildProcessEnvironment(extra, inheritedKeys, {
+    ...options,
+    preferRuntimeDirectoryOnPath: true
+  });
 }
 
 function makeServiceProcessEnvironment(extra = {}, options = {}) {
@@ -134,6 +139,15 @@ function buildProcessEnvironment(extra, inheritedKeys, options) {
   for (const key of inheritedKeys) {
     if (isAlwaysBlockedKey(key)) continue;
     if (source[key] != null) env[key] = String(source[key]);
+  }
+  if (options.preferRuntimeDirectoryOnPath === true && process.platform === 'win32' && env.PATH) {
+    const runtimeDirectory = path.dirname(process.execPath);
+    const runtimeKey = runtimeDirectory.toLowerCase();
+    const inheritedPath = String(env.PATH)
+      .split(path.delimiter)
+      .filter(Boolean)
+      .filter(entry => path.resolve(entry).toLowerCase() !== runtimeKey);
+    env.PATH = [runtimeDirectory, ...inheritedPath].join(path.delimiter);
   }
   env.REL_AI_MCP = '1';
 

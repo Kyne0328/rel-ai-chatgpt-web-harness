@@ -1,7 +1,7 @@
 {
   "name": "rel-ai-mcp",
   "productName": "Rel.AI MCP",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Local agency/runtime harness that turns ChatGPT Web into a repository- and computer-capable development agent.",
   "private": true,
   "type": "module",

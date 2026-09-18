@@ -11,7 +11,9 @@ import { setStateMeta, stateDatabasePath, stateMetaValue, withStateDatabase } fr
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
 
 const STORE_VERSION = 1;
-const INTEGRITY_SQLITE_TIMEOUT_MS = 0;
+// Integrity writes share durable-state.sqlite with short analytics transactions.
+// Allow brief writer handoff without restoring the multi-second synchronous stall.
+const INTEGRITY_SQLITE_TIMEOUT_MS = 250;
 const LEGACY_INTEGRITY_MIGRATION_KEY = 'task_integrity_legacy_migrated_v1';
 const AMBIENT_OWNER = '@ambient';
 const migratedIntegrityDatabases = new Set<string>();

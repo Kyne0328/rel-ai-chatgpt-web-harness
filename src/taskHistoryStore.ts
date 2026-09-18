@@ -108,7 +108,7 @@ function recordTaskHistoryEvent(config: TaskHistoryConfig, event: HistoryEvent):
   ensureCurrentHistory(config);
   const directory = getTaskHistoryDir(config);
   const taskId = cleanTaskId(event.taskId);
-  const session = reduceTaskLifecycleAuditEvent(readWorkingSession(directory, taskId) || emptySession(taskId), event) as TaskRecord;
+  const session = reduceTaskLifecycleAuditEvent(readWorkingSession(directory, taskId) || emptySession(taskId), event, { eventsAlreadySanitized: true }) as TaskRecord;
   persistSession(directory, session);
   return publicSession(session);
 }
@@ -147,8 +147,8 @@ function recordTaskActivityEvent(config: TaskHistoryConfig, activity: TaskActivi
     operation: task?.operation || task?.lastOperation || activity.operation || existing.operation || '',
     currentActivity: task?.currentActivity || event?.summary || existing.currentActivity || '',
     events: upsertActivityEvent(existing.events || [], event)
-  }) as TaskRecord;
-  const session = mergeTaskLifecycleSnapshots(existing, live) as TaskRecord;
+  }, { eventsAlreadySanitized: true }) as TaskRecord;
+  const session = mergeTaskLifecycleSnapshots(existing, live, { eventsAlreadySanitized: true }) as TaskRecord;
   persistSession(directory, session, options);
   return publicSession(session);
 }
@@ -250,7 +250,7 @@ function readTaskHistorySessionRecord(config: TaskHistoryConfig, taskId: unknown
 function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapshot = {}, options: ReadHistoryOptions = {}): TaskRecord[] {
   const limit = clamp(options.limit || 100, 1, MAX_SESSIONS);
   const active = (Array.isArray(activity?.tasks) ? activity.tasks : [])
-    .map((task: TaskDto | Record<string, any>) => canonicalTaskSnapshot(task) as TaskRecord)
+    .map((task: TaskDto | Record<string, any>) => canonicalTaskSnapshot(task, { eventsAlreadySanitized: true }) as TaskRecord)
     .slice(0, MAX_SESSIONS);
   const activeIds = new Set(active.filter((session: TaskRecord) => session.status !== 'inactive').map((session: TaskRecord) => session.id).filter(Boolean));
   const maintain = options.maintain !== false;
@@ -288,7 +288,7 @@ function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapsh
   for (const task of active) {
     const existing = byId.get(task.id);
     if (existing && task.status === 'inactive') continue;
-    byId.set(task.id, existing ? mergeTaskLifecycleSnapshots(existing, task) as TaskRecord : task);
+    byId.set(task.id, existing ? mergeTaskLifecycleSnapshots(existing, task, { eventsAlreadySanitized: true }) as TaskRecord : task);
   }
   return [...byId.values()]
     .sort((left, right) => eventTime(right) - eventTime(left))

@@ -791,7 +791,7 @@ function createToolActivityTracker(options = {}) {
       endedAt: task.endedAt || undefined,
       cancelledAt: task.cancelledAt || undefined,
       cancellationInitiator: task.cancellationInitiator || undefined
-    });
+    }, { eventsAlreadySanitized: true });
   }
 
   function notify(phase, task, extras = {}) {
