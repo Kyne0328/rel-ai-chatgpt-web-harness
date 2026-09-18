@@ -22,6 +22,7 @@ import {
   recordTaskValidationAffinity
 } from '../src/knowledgeStore.js';
 import { readTaskIntegrity, readWorkspaceIntegrity } from '../src/taskIntegrity.ts';
+import { readSessionPolicy, writeSessionPolicy } from '../src/policyResolver.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-durable-db-'));
 
@@ -60,6 +61,28 @@ try {
     await writerExited;
   } finally {
     await writer.terminate();
+  }
+
+  const policyWriter = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(workerData);
+    db.exec('BEGIN IMMEDIATE');
+    parentPort.postMessage('locked');
+    parentPort.once('message', () => {
+      setTimeout(() => { db.exec('COMMIT'); db.close(); }, 150);
+    });
+  `, { eval: true, workerData: contendedFile });
+  const policyWriterExited = once(policyWriter, 'exit');
+  try {
+    await once(policyWriter, 'message');
+    policyWriter.postMessage('release');
+    await writeSessionPolicy(contendedConfig, 'app', { taskId: 'lock-wait' });
+    assert.equal(readSessionPolicy(contendedConfig, 'app', 'lock-wait')?.taskId, 'lock-wait',
+      'session policy persistence must tolerate bounded contention from another durable-state writer');
+    await policyWriterExited;
+  } finally {
+    await policyWriter.terminate();
   }
 
   const migrationConfig = { stateDir: path.join(temp, 'migration') };

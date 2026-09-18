@@ -10,6 +10,7 @@ const electronPackage = JSON.parse(read('electron/package.json'));
 const nodeVersion = read('.node-version').trim();
 
 assert.equal(nodeVersion, '26.8.2', 'the repository must keep an exact tested Node runtime');
+assert.match(rootPackage.scripts?.check || '', /ensure-node-version\.mjs/, 'the normal local check gate must reject an unsupported executing Node runtime before validation');
 assert.equal(rootPackage.packageManager, 'npm@12.0.2', 'the repository must keep an exact npm runtime');
 assert.equal(electronPackage.overrides?.['js-yaml'], '4.3.2', 'Electron must independently pin the patched js-yaml release');
 

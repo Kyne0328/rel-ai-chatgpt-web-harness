@@ -10,7 +10,7 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 process.env.REL_AI_MCP_STATE_DIR = stateDir;
 process.env.REL_AI_MCP_TOKEN = token;
 
-import { invalidateConfigCache } from "../src/config.js";
+import { invalidateConfigCache, makeDefaultConfig } from "../src/config.js";
 import { createDashboardBootstrap } from "../src/http/dashboardSessions.ts";
 import { startHttpServer } from "../src/httpServer.ts";
 import { resetTaskHistoryCaches } from "../src/taskHistoryStorage.ts";
@@ -30,7 +30,7 @@ await dashboardLaunch.arrayBuffer();
 try {
   assert.equal(fs.existsSync(configPath), true, 'Hard-cutover server startup should materialize the canonical config immediately');
   const startupConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  assert.equal(startupConfig.version, 6);
+  assert.equal(startupConfig.version, makeDefaultConfig().version);
   assert.deepEqual(startupConfig.workspaces, {});
 
   const skip = await fetch(`${base}/api/onboarding/complete`, {

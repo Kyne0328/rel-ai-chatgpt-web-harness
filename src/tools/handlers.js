@@ -30,7 +30,8 @@ import { discoverRepositoryTopology, packageForPath } from '../workflow/topology
 import { createReviewCheckpoint, replayReviewCheckpoint } from '../reviewCheckpoints.js';
 import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
-import { getToolActivity } from '../toolActivity.js';
+import { getToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
+import { normalizeTaskPlan } from '../taskObservability.js';
 const startTaskHandler = inWorkspace(async (workspace, _config, args, context) => {
   const task = startTask(workspace, args);
   const recovered = context?.requestTaskContext?.session;
@@ -116,9 +117,30 @@ function scheduleIntelligenceWarmup(workspace, config) {
   timer.unref();
 }
 
+const taskPlanHandler = inWorkspace((workspace, _config, args, context) => {
+  const taskId = String(context?.taskId || args.work_id || '').trim();
+  const current = getToolActivity().tasks.find(item => String(item.id || item.taskId || '') === taskId) || null;
+  const currentPlan = current?.plan || { revision: 0, steps: [] };
+  const currentRevision = Math.max(0, Number(currentPlan.revision || 0));
+  const candidate = normalizeTaskPlan({ revision: currentRevision, steps: args.steps }) || { revision: currentRevision, steps: [] };
+  if (JSON.stringify(currentPlan.steps) === JSON.stringify(candidate.steps)) {
+    return { ok: true, workspace: workspace.alias, work_id: taskId, plan: currentPlan, message: 'Task plan is unchanged.' };
+  }
+  const plan = { ...candidate, revision: currentRevision + 1 };
+  updateCurrentToolActivity({ plan });
+  return {
+    ok: true,
+    workspace: workspace.alias,
+    work_id: taskId,
+    plan,
+    message: plan.steps.length ? `Task plan updated with ${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}.` : 'Task plan cleared.'
+  };
+});
+
 const HANDLERS = Object.freeze({
   startTask: startTaskHandler,
   taskContext: taskContextHandler,
+  taskPlan: taskPlanHandler,
   repoSnapshot: inWorkspace(async (workspace, config, args) => {
     const result = await repoSnapshot(workspace, config, args);
     scheduleIntelligenceWarmup(workspace, config);

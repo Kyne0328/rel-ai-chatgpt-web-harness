@@ -79,7 +79,7 @@ try {
       oldText: 'unchanged',
       newText: 'changed'
     }),
-    /conflicting primary edit forms.*Use exactly one form/i
+    /conflicting primary edit forms.*Use exactly one public edit form/i
   );
   assert.equal(fs.readFileSync(path.join(root, 'protected.txt'), 'utf8'), 'unchanged\n');
 

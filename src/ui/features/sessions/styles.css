@@ -78,6 +78,15 @@
 .task-detail-section > h3, .task-detail-heading h3 { @apply text-[12px] font-bold; }
 .task-detail-heading { @apply flex items-center justify-between gap-3; }
 .task-detail-heading > span { @apply inline-flex min-h-7 min-w-7 items-center justify-center rounded-full px-2 text-[11px] font-semibold; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); color: var(--ui-text-secondary); }
+.task-plan-list { @apply m-0 grid list-none gap-1.5 p-0; }
+.task-plan-step { @apply grid min-w-0 items-start gap-2 rounded-md px-2.5 py-2; grid-template-columns: 18px minmax(0,1fr); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
+.task-plan-marker { @apply inline-flex h-5 items-center justify-center text-[12px] font-bold; color: var(--ui-text-secondary); }
+.task-plan-copy { @apply grid min-w-0 gap-0.5; }
+.task-plan-copy strong { @apply break-words text-[12px] leading-5; color: var(--ui-text-primary); }
+.task-plan-copy > span { @apply break-words text-[11px] leading-5; color: var(--ui-text-secondary); }
+.task-plan-step.is-completed .task-plan-copy strong, .task-plan-step.is-skipped .task-plan-copy strong { color: var(--ui-text-secondary); }
+.task-plan-step.is-in_progress { background: var(--ui-surface-raised); border-color: var(--ui-border-default); }
+.task-plan-step.is-blocked { border-color: var(--ui-status-danger-border); }
 .task-detail-problems { @apply rounded-lg border p-3; background: var(--ui-status-danger-background); border-color: var(--ui-status-danger-border); }
 .task-detail-problems > h3 { color: var(--ui-status-danger-foreground); }
 .task-detail-problems ul { @apply m-0 grid gap-1 pl-4 text-[12px]; color: var(--ui-status-danger-foreground); }

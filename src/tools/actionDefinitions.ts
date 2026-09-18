@@ -85,7 +85,7 @@ const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   ...READ_ONLY_TOOLS, OP.PROCESS_STOP, OP.CHANGES_RESTORE, OP.CHANGES_RESET,
-  OP.WORK_CANCEL, OP.WORK_FINISH
+  OP.WORK_PLAN, OP.WORK_CANCEL, OP.WORK_FINISH
 ]);
 const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
@@ -108,7 +108,7 @@ const PERSISTENT_PROCESS_TOOLS: ReadonlySet<string> = new Set([
   OP.PROCESS_START, OP.PROCESS_READ, OP.PROCESS_WRITE, OP.PROCESS_STOP, OP.PROCESS_LIST
 ]);
 const ALWAYS_IMMEDIATE_TOOLS: ReadonlySet<string> = new Set([
-  OP.WORK_BEGIN, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT,
+  OP.WORK_BEGIN, OP.WORK_PLAN, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT,
   OP.WORK_STATUS, OP.WORK_CANCEL, OP.WORK_FINISH
 ]);
 
@@ -177,7 +177,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Workspace Work',
-    description: 'Manages a durable workspace task. Use begin for substantial or multi-step repository work, including read-first investigations; it returns work_id promptly. context loads repository context using that ID; status, finish, and cancel manage its lifecycle. Carry work_id on subsequent task operations.',
+    description: 'Manages a durable workspace task. Use begin for substantial or multi-step repository work, including read-first investigations; it returns work_id promptly. context loads repository context, plan records or replaces the ordered checklist, and status, finish, and cancel manage lifecycle state. Carry work_id on subsequent task operations.',
     annotations: annotations(false, false, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
     dashboard: { category: 'Workflow', capabilities: ['workflow'] }

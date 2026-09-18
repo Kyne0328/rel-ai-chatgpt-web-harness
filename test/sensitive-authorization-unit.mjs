@@ -28,12 +28,13 @@ try {
   fs.writeFileSync(path.join(root, '.env'), 'TOKEN=secret\n');
   fs.writeFileSync(path.join(root, '.npmrc'), '//registry.example/:_authToken=secret\n');
 
-  const noScope = await relaiGitCommit(workspace, config, { message: 'blocked' });
+  const noScope = await relaiGitCommit(workspace, config, { message: 'blocked', addAll: true });
   assert.equal(noScope.ok, false);
   assert.deepEqual(noScope.unauthorizedSecretPaths.sort(), ['.env', '.npmrc']);
 
   const partial = await relaiGitCommit(workspace, config, {
     message: 'partial',
+    addAll: true,
     sensitiveAuthorization: { operation: 'commit', paths: ['.env'], reason: 'User approved the environment file.' }
   });
   assert.equal(partial.ok, false);
@@ -53,6 +54,7 @@ try {
 
   const allowed = await relaiGitCommit(workspace, config, {
     message: 'authorized',
+    addAll: true,
     sensitiveAuthorization: {
       operation: 'commit',
       paths: ['.env', '.npmrc'],

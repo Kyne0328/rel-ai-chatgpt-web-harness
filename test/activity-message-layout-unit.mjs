@@ -14,7 +14,7 @@ assert.match(css, /^\.activity-table tbody \.activity-time-column\s*\{[^}]*align
 assert.match(css, /\.activity-col-message\s*\{[^}]*width:\s*auto/s, 'Activity content must consume the remaining width');
 assert.doesNotMatch(css, /\.activity-col-message\s*\{[^}]*width:\s*calc\(/s, 'Activity width must not depend on brittle calc chains');
 assert.match(css, /\.activity-message-copy\s*\{[^}]*min-width:/s, 'message text must retain an explicit readable minimum width');
-assert.match(css, /@media\s*\(max-width:[^)]+\)[\s\S]*\.activity-time-column[\s\S]*display:\s*none/s, 'the narrowest responsive layout must yield the lower-priority time column');
-assert.match(css, /@media\s*\(max-width:[^)]+\)[\s\S]*\.activity-col-message\s*\{[^}]*width:\s*100%/s, 'the Activity column must expand to full width when time is hidden'); // rigidity-ok: full width is the responsive contract after the time column is hidden.
+assert.doesNotMatch(css, /\.activity-time-column\s*\{[^}]*display:\s*none/s, 'responsive layouts must preserve the time column so chronology remains visible');
+assert.match(css, /@media\s*\(max-width:[^)]+\)[\s\S]*\.activity-col-message\s*\{[^}]*width:\s*100%/s, 'the Activity column must use the available narrow-layout width alongside the retained time column'); // rigidity-ok: full width is the responsive Activity-column contract.
 
 console.log('Activity message layout invariants passed.');

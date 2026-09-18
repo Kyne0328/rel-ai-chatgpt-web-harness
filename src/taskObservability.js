@@ -9,6 +9,8 @@ const MAX_OBJECTIVE_LENGTH = 500;
 const MAX_SUMMARY_LENGTH = 500;
 const MAX_METADATA_STRING = 500;
 const MAX_METADATA_ITEMS = 100;
+const MAX_TASK_PLAN_STEPS = 50;
+const TASK_PLAN_STEP_STATUSES = new Set(['pending', 'in_progress', 'completed', 'blocked', 'skipped']);
 const ALLOWED_METADATA_KEYS = new Set([
   'waitMs', 'queueMode', 'queued', 'pathCount', 'matchCount', 'returnedFileCount', 'returnedRangeCount',
   'returnedBytes', 'changedFileCount', 'changedFiles', 'validationStatus', 'validationLevel', 'validationLevelReason',
@@ -37,6 +39,7 @@ function titleForTool(tool, details = {}) {
   const suffix = path ? ` ${displayPath(path)}` : workspace ? ` ${workspace}` : '';
   const titles = {
     [OP.WORK_BEGIN]: workspace ? `Work in ${workspace}` : 'Start workspace task',
+    [OP.WORK_PLAN]: 'Update task plan',
     [OP.SNAPSHOT]: `Inspect repository${suffix}`,
     [OP.READ]: path ? `Read ${displayPath(path)}` : 'Read repository files',
     [OP.SEARCH_TEXT]: 'Search repository',
@@ -151,6 +154,23 @@ function determinateProgress(completedUnits, totalUnits, source = 'tool', label 
     percentage: Math.round((completed / total) * 100),
     source,
     ...(label ? { label: cleanText(label, 120) } : {})
+  };
+}
+
+function taskPlanRuntimeState(plan) {
+  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+  if (!steps.length) return null;
+  const resolved = steps.filter(step => step.status === 'completed' || step.status === 'skipped').length;
+  let activeIndex = steps.findIndex(step => step.status === 'in_progress');
+  if (activeIndex < 0) activeIndex = steps.findIndex(step => step.status === 'blocked');
+  if (activeIndex < 0) activeIndex = steps.findIndex(step => step.status === 'pending');
+  const active = activeIndex >= 0 ? steps[activeIndex] : null;
+  const currentStage = active?.status === 'blocked' ? 'Plan blocked' : active ? 'Following task plan' : 'Plan complete';
+  const currentActivity = active ? `Step ${activeIndex + 1} of ${steps.length}: ${active.title}` : `${resolved} of ${steps.length} plan steps resolved`;
+  return {
+    currentStage,
+    currentActivity,
+    progress: determinateProgress(resolved, steps.length, 'task_plan', currentActivity)
   };
 }
 
@@ -490,6 +510,27 @@ function buildSafeActivityProjection(record, options = {}) {
   };
 }
 
+function normalizeTaskPlan(plan = {}) {
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return undefined;
+  const steps = (Array.isArray(plan.steps) ? plan.steps : [])
+    .slice(0, MAX_TASK_PLAN_STEPS)
+    .map((step, index) => {
+      if (!step || typeof step !== 'object' || Array.isArray(step)) return null;
+      const title = sanitizeDisplayText(step.title, 300);
+      if (!title) return null;
+      const rawStatus = String(step.status || 'pending').trim().toLowerCase();
+      const status = TASK_PLAN_STEP_STATUSES.has(rawStatus) ? rawStatus : 'pending';
+      const id = sanitizeDisplayText(step.id, 80) || `step-${index + 1}`;
+      const detail = sanitizeDisplayText(step.detail, MAX_SUMMARY_LENGTH);
+      return compactObject({ id, title, status, detail: detail || undefined });
+    })
+    .filter(Boolean);
+  return {
+    revision: Math.max(0, Math.floor(Number(plan.revision) || 0)),
+    steps
+  };
+}
+
 function sanitizeTaskRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return record;
   const value = { ...record };
@@ -515,6 +556,7 @@ function sanitizeTaskRecord(record, options = {}) {
   }
   if (Array.isArray(value.currentOperations)) value.currentOperations = value.currentOperations.map(item => sanitizeStructuredValue(item, 0)).filter(Boolean);
   if (value.semanticProgress && typeof value.semanticProgress === 'object') value.semanticProgress = sanitizeStructuredValue(value.semanticProgress, 0);
+  if (value.plan && typeof value.plan === 'object') value.plan = normalizeTaskPlan(value.plan);
   if (value.correlation && typeof value.correlation === 'object') value.correlation = sanitizeStructuredValue(value.correlation, 0);
   if (value.backgroundOperation && typeof value.backgroundOperation === 'object') value.backgroundOperation = sanitizeStructuredValue(value.backgroundOperation, 0);
   delete value.workflow;
@@ -598,6 +640,8 @@ export {
   incompleteProgress,
 
   normalizeTaskProgress,
+  normalizeTaskPlan,
+  taskPlanRuntimeState,
   sanitizeActivityMetadata,
   sanitizeActivityEventRecord,
   sanitizeCompletionSummary,

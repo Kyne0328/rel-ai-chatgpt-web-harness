@@ -40,6 +40,20 @@ export interface TaskProgressDto {
   [key: string]: unknown;
 }
 
+export type TaskPlanStepStatus = 'pending' | 'in_progress' | 'completed' | 'blocked' | 'skipped';
+
+export interface TaskPlanStepDto {
+  id: string;
+  title: string;
+  status: TaskPlanStepStatus;
+  detail?: string;
+}
+
+export interface TaskPlanDto {
+  revision: number;
+  steps: TaskPlanStepDto[];
+}
+
 export interface TaskDto {
   id: string;
   taskId?: string;
@@ -54,6 +68,7 @@ export interface TaskDto {
   state?: string;
   completionKnown?: boolean;
   progress?: TaskProgressDto;
+  plan?: TaskPlanDto;
   activeCalls?: number;
   calls?: number;
   toolCallCount?: number;

@@ -272,6 +272,7 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
         h('strong', null, currentTitle),
         h('span', null, currentCopy)
       ),
+      h(PlanSection, { plan: session.plan }),
       h('div', { className: 'task-detail-grid task-detail-facts' },
         h(Detail, { label: 'Project', value: session.workspace || '—' }),
         h(DurationDetail, { session, live }),
@@ -338,6 +339,32 @@ function DurationDetail({ session, live }) {
   return h('div', null,
     h('span', null, 'Duration'),
     h('strong', { className: 'task-detail-clock', 'data-clock-elapsed-start': start }, formatDuration(sessionDurationMs(session), { live: true }))
+  );
+}
+
+function PlanSection({ plan }) {
+  const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+  if (!steps.length) return null;
+  const resolved = steps.filter(step => ['completed', 'skipped'].includes(String(step?.status || ''))).length;
+  return h('section', { className: 'task-detail-section task-plan-section', 'data-task-plan': '' },
+    h('div', { className: 'task-detail-heading' },
+      h('h3', null, 'Plan'),
+      h('span', { 'aria-label': `${resolved} of ${steps.length} steps resolved` }, `${resolved}/${steps.length}`)
+    ),
+    h('ol', { className: 'task-plan-list' },
+      ...steps.map((step, index) => {
+        const status = String(step?.status || 'pending');
+        const marker = status === 'completed' ? '✓' : status === 'skipped' ? '–' : status === 'in_progress' ? '●' : status === 'blocked' ? '!' : '○';
+        const statusLabel = status === 'in_progress' ? 'In progress' : status.charAt(0).toUpperCase() + status.slice(1);
+        return h('li', { key: `${String(step?.id || 'step')}:${index}`, className: `task-plan-step is-${status}`, 'data-plan-step-status': status },
+          h('span', { className: 'task-plan-marker', role: 'img', 'aria-label': statusLabel }, marker),
+          h('span', { className: 'task-plan-copy' },
+            h('strong', null, String(step?.title || `Step ${index + 1}`)),
+            step?.detail ? h('span', null, String(step.detail)) : null
+          )
+        );
+      })
+    )
   );
 }
 

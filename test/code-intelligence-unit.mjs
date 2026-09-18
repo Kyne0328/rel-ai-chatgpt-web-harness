@@ -92,7 +92,7 @@ try {
   assert.equal(Object.hasOwn(pathImpact, 'symbol'), false);
 
   const related = await relaiCodeInspect(workspace, {}, { action: 'related', query: 'math add' });
-  assert.equal(related.strategy, 'zoekt-fts5-tree-sitter-graph');
+  assert.equal(related.strategy, 'fts5-tree-sitter-graph');
   assert.equal(related.semanticEmbeddings, false);
   assert.equal(related.files[0].path, 'src/math.js');
 

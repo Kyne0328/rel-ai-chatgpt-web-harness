@@ -1,6 +1,7 @@
 // Runs the everyday behavior and safety regression suite. Release-only workflow,
 // packaging-policy, browser, and implementation-shape checks remain available through
 // named npm scripts or direct `node test/<file>` runs instead of blocking every change.
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -9,135 +10,51 @@ import { fileURLToPath } from 'node:url';
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(testDir, '..');
 
-const files = [
-  'repository-staleness-unit.mjs',
-  'intelligence-audit-regressions-unit.mjs',
-  'tunnel-credentials-unit.mjs',
-  'connection-profile-clear-unit.mjs',
-  'secure-tunnel-runtime-unit.mjs',
-  'tunnel-recovery-supervisor-unit.mjs',
-  'service-runtime-lifecycle-unit.mjs',
-  'core-runtime-boundary-unit.mjs',
-  'desktop-ui-smoke.mjs',
-  'competing-ownership-unit.mjs',
-  'toast-unit.mjs',
-  'secure-tunnel-packaging-contract-unit.mjs',
-  'authorization-policy-unit.mjs',
-  'workspace-recovery-unit.mjs',
-  'approval-broker-unit.mjs',
-  'connector-result-contract-unit.mjs',
-  'connector-read-result-unit.mjs',
-  'repeat-call-guard-unit.mjs',
-  'desktop-lifecycle-unit.mjs',
-  'desktop-manager-unit.mjs',
-  'electron-desktop-os-operations-unit.mjs',
-  'desktop-local-data-unit.mjs',
-  'desktop-settings-unit.mjs',
-  'dashboard-session-unit.mjs',
-  'dashboard-window-unit.mjs',
-  'dashboard-events-visibility-unit.mjs',
-  'dashboard-health-status-unit.mjs',
-  'dashboard-live-events-smoke.mjs',
-  'dashboard-react-store-unit.mjs',
-  'dashboard-clock-unit.mjs',
-  'dashboard-event-batcher-unit.mjs',
-  'durable-state-unit.mjs',
-  'state-backup-unit.mjs',
-  'packaged-runtime-dependencies-unit.mjs',
-  'durable-state-database-unit.mjs',
-  'electron-updater-config-unit.mjs',
-  'app-updater-unit.mjs',
-  'update-install-marker-unit.mjs',
-  'app-identity-unit.mjs',
-  'update-support-policy-unit.mjs',
-  'update-support-policy-http-unit.mjs',
-  'connector-refresh-modal-unit.mjs',
-  'electron-dynamic-resource-contract-unit.mjs',
-  'electron-product-path-unit.mjs',
-  'electron-dev-watch-unit.mjs',
-  'test-rigidity-audit-unit.mjs',
-  'audit-production-unit.mjs',
-  'color-token-staleness-unit.mjs',
-  'generated-assets-check-unit.mjs',
-  'build-provenance-unit.mjs',
-  'http-auth-smoke.mjs',
-  'mcp-app-ui-unit.mjs',
-  'search-filesystem-fallback-unit.mjs',
-  'stdio-shutdown-persistence-unit.mjs',
-  'http-smoke.mjs',
-  'ipc-security-unit.mjs',
-  'package-size-policy-unit.mjs',
-  'safety-paths.mjs',
-  'smoke.mjs',
-  'task-state-unit.mjs',
-  'task-semantic-progress-unit.mjs',
-  'task-history-storage-unit.mjs',
-  'task-history-live-unit.mjs',
-  'task-history-store-unit.mjs',
-  'task-retrieval-quality-unit.mjs',
-  'task-observability-integration.mjs',
-  'task-trace-unit.mjs',
-  'task-integrity-unit.mjs',
-  'multi-chat-task-isolation-unit.mjs',
-  'task-code-workspace-unit.mjs',
-  'task-code-ide-unit.mjs',
-  'task-completion-unit.mjs',
-  'task-reconciliation-unit.mjs',
-  'atomic-validation-race-unit.mjs',
-  'workspace-operation-queue-unit.mjs',
-  'host-resource-scheduler-unit.mjs',
-  'workspace-multi-source-runtime-unit.mjs',
-  'intelligence-runtime-unit.mjs',
-  'repository-architecture-unit.mjs',
-  'intelligence-lsp-unit.mjs',
-  'lsp-client-unit.mjs',
-  'branch-concurrency-unit.mjs',
-  'task-ownership-concurrency-unit.mjs',
-  'process-manager-unit.mjs',
-  'workflow-process-reuse-unit.mjs',
-  'process-pty-unit.mjs',
-  'review-checkpoints-unit.mjs',
-  'skill-discovery-unit.mjs',
-  'knowledge-continuity-unit.mjs',
-  'route-policy-unit.mjs',
-  'context/session-compaction-unit.mjs',
-  'artifact-intake-unit.mjs',
-  'artifact-resource-unit.mjs',
-  'baseline-tracking-unit.mjs',
-  'workspace-tidy-unit.mjs',
-  'unborn-workspace-unit.mjs',
-  'validation-task-scope-unit.mjs',
-  'edit-run-checks-completion-unit.mjs',
-  'edit-recovery-unit.mjs',
-  'exec-dirty-mutation-unit.mjs',
-  'exec-tool-unit.mjs',
-  'budget-multiplier-unit.mjs',
-  'deferred-operation-unit.mjs',
-  'abortable-promise-unit.mjs',
-  'search-tool-unit.mjs',
-  'validation-strategy-unit.mjs',
-  'output-spill-unit.mjs',
-  'http-sse-backpressure-unit.mjs',
-  'tool-failure-accounting-unit.mjs',
-  'tool-action-contract-unit.mjs',
-  'tool-output-validation-unit.mjs',
-  'tool-behavior-evaluator-unit.mjs',
-  'context/tool-discovery-budget-unit.mjs',
-  'plugin-metadata-unit.mjs',
-  'analytics-taxonomy-unit.mjs',
-  'local-analytics-unit.mjs',
-  'analytics-reliability-unit.mjs',
-  'tasks-telemetry-unit.mjs',
-  'usage-ui-contract-unit.mjs',
-  'repo-health.mjs',
-  'computer-manager-unit.mjs',
-  'computer-observation-unit.mjs',
-  'windows-uia-adapter-unit.mjs',
-  'midscene-computer-adapter-unit.mjs',
-  'web-automation-contract-unit.mjs',
-  'browser-ui-bounds-unit.mjs',
-  'window-security-unit.mjs'
-];
+const infrastructureFiles = new Set([
+  'check-js.mjs',
+  'run-tests.mjs',
+  'run-repository-intelligence-tests.mjs'
+]);
+
+const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const workflowDir = path.join(root, '.github', 'workflows');
+const workflowSources = fs.readdirSync(workflowDir)
+  .filter(name => /\.ya?ml$/i.test(name))
+  .map(name => fs.readFileSync(path.join(workflowDir, name), 'utf8'));
+const reachableScriptCommands = collectReachableScriptCommands(packageJson.scripts || {}, workflowSources);
+const gateSources = [...workflowSources, ...reachableScriptCommands].join('\n');
+const repositoryRunner = fs.readFileSync(path.join(testDir, 'run-repository-intelligence-tests.mjs'), 'utf8');
+const repositoryPattern = /^(?:repository-|intelligence-).+\.mjs$/;
+
+function collectReachableScriptCommands(scripts, workflowSources) {
+  const pending = [];
+  const seen = new Set();
+  const commands = [];
+  const enqueueReferences = source => {
+    for (const match of String(source || '').matchAll(/\bnpm\s+(?:run\s+)?([A-Za-z0-9:_-]+)/g)) {
+      if (typeof scripts[match[1]] === 'string' && !seen.has(match[1])) pending.push(match[1]);
+    }
+  };
+  for (const source of workflowSources) enqueueReferences(source);
+  while (pending.length) {
+    const name = pending.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const command = String(scripts[name] || '');
+    if (!command) continue;
+    commands.push(command);
+    enqueueReferences(command);
+  }
+  return commands;
+}
+
+const files = fs.readdirSync(testDir)
+  .filter(name => {
+    if (!name.endsWith('.mjs') || infrastructureFiles.has(name)) return false;
+    if (repositoryPattern.test(name) || repositoryRunner.includes(`'${name}'`) || repositoryRunner.includes(`"${name}"`)) return false;
+    return !gateSources.includes(`test/${name}`);
+  })
+  .sort((left, right) => left.localeCompare(right));
 
 const serialFiles = new Set([
   'artifact-resource-unit.mjs',

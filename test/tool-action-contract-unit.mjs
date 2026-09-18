@@ -202,6 +202,7 @@ function sampleArgs(entry) {
   if (entry.behavior?.taskScope === 'required') args.work_id = 'work_contract';
   switch (key) {
     case 'relai_work:begin': args.workspace = 'repo'; break;
+    case 'relai_work:plan': args.steps = [{ title: 'Contract plan step', status: 'pending' }]; break;
     case 'relai_work:finish': args.summary = 'Completed.'; break;
     case 'relai_search:text': args.pattern = 'needle'; break;
     case 'relai_search:semantic': args.query = 'needle'; break;

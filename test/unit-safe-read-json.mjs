@@ -7,6 +7,8 @@ import { safeReadJson } from "../src/safety.js";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'safe-read-json-'));
 const orig = console.warn;
+const previousDebug = process.env.REL_AI_MCP_DEBUG;
+process.env.REL_AI_MCP_DEBUG = '1';
 
 // valid JSON
 const validFile = path.join(tmp, 'valid.json');
@@ -57,5 +59,7 @@ try {
 const fallbackResult = safeReadJson(missingFile, { default: true });
 assert.deepEqual(fallbackResult, { default: true }, 'custom fallback returned on error');
 
+if (previousDebug == null) delete process.env.REL_AI_MCP_DEBUG;
+else process.env.REL_AI_MCP_DEBUG = previousDebug;
 fs.rmSync(tmp, { recursive: true });
 console.log('safeReadJson unit tests passed.');

@@ -18,7 +18,7 @@ assert.deepEqual(getApplicationMetadata(), {
     profileUrl: 'https://github.com/Kyne0328'
   },
   repositoryUrl: 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness',
-  license: 'MIT'
+  license: rootPackage.license
 });
 assert.deepEqual(rootPackage.author, { name: 'Kyne', url: 'https://github.com/Kyne0328' });
 assert.deepEqual(electronPackage.author, {
@@ -28,7 +28,7 @@ assert.deepEqual(electronPackage.author, {
 });
 assert.equal(electronPackage.homepage, 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness');
 assert.equal(rootPackage.productName, 'Rel.AI MCP');
-assert.match(readme, /## Developer\s+Rel\.AI MCP is developed by \[Kyne\]\(https:\/\/github\.com\/Kyne0328\)\./);
+assert.match(readme, /Created and maintained by <a href="https:\/\/github\.com\/Kyne0328"><strong>Kyne<\/strong><\/a>\./);
 assert.doesNotMatch(JSON.stringify(electronPackage), /Kyne Anthony/);
 
 console.log('Application metadata unit tests passed.');

@@ -11,7 +11,7 @@ for (const item of [EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_IT
   assert.ok(item.icon, `${item.label} must keep an icon for the collapsed sidebar`);
 }
 
-const shell = read('src/http/dashboard.ts');
+const shell = read('src/http/dashboardShell.ts');
 const bootstrap = read('src/http/dashboardShellChrome.ts');
 const reactShell = read('src/ui/react/main.js');
 const router = read('src/ui/router.js');

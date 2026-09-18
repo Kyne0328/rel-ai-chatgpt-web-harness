@@ -299,7 +299,8 @@ const previousConfig = process.env.REL_AI_MCP_CONFIG;
 process.env.REL_AI_MCP_CONFIG = path.join(sandbox, 'config.json');
 fs.writeFileSync(process.env.REL_AI_MCP_CONFIG, JSON.stringify({
   stateDir: path.join(sandbox, 'state'),
-  workspaces: {}
+  version: 7,
+  workspaces: { repo: { path: sandbox, commands: {}, testCommands: {} } }
 }, null, 2));
 
 try {
@@ -329,7 +330,7 @@ try {
 
   callEvents.length = 0;
   await assert.rejects(
-    () => callTool('relai_read', {}, { publicHttpOnly: true }),
+    () => callTool('relai_read', { workspace: 'repo' }, { publicHttpOnly: true }),
     error => /input validation|required property/i.test(String(error?.message || ''))
   );
   assert.deepEqual(callEvents, [], 'schema-level read rejection must happen before activity begins');

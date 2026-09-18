@@ -20,7 +20,7 @@ const electronPkg = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'pack
 const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const srcResource = electronPkg.build.extraResources.find(item => item.from === '../src');
 assert.ok(srcResource, 'Electron packaging must include the backend source runtime.');
-assert.deepEqual(srcResource.filter, ['**/*.js', '**/*.ts']);
+assert.deepEqual(srcResource.filter, ['**/*.js', '**/*.ts', '**/*.ps1']);
 assert.equal(fs.existsSync(path.join(root, 'src', 'mcp', 'ui', 'workflow-card.html')), false, 'Electron packaging must not retain the removed ChatGPT iframe task card.');
 
 for (const file of [

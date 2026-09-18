@@ -190,9 +190,15 @@ try {
   resetTaskHistoryCaches();
   server.closeAllConnections?.();
   await closeServer(server);
+  await server.waitForShutdown?.();
   if (previousConfigPath == null) delete process.env.REL_AI_MCP_CONFIG; else process.env.REL_AI_MCP_CONFIG = previousConfigPath;
   if (previousStateDir == null) delete process.env.REL_AI_MCP_STATE_DIR; else process.env.REL_AI_MCP_STATE_DIR = previousStateDir;
-  fs.rmSync(sandbox, { recursive: true, force: true });
+  fs.rmSync(sandbox, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 20 : 2,
+    retryDelay: 100
+  });
 }
 
 console.log('Dashboard typed live events and revision-based reconnect catch-up passed.');

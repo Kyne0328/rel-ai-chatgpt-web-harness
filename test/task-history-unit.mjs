@@ -91,6 +91,51 @@ assert.equal(merged.committed, true);
 assert.equal(merged.commitHead, 'fedcba9876543210fedcba9876543210fedcba98');
 assert.deepEqual(merged.commitHeads, ['fedcba9876543210fedcba9876543210fedcba98']);
 
+const persistedPlan = canonicalTaskSnapshot({
+  id: 'plan-task', taskId: 'plan-task', status: 'planning', workspace: 'repo', updatedAt: '2026-07-11T08:02:00.000Z',
+  plan: { revision: 1, steps: [{ id: 'inspect', title: 'Inspect implementation', status: 'in_progress' }] },
+  currentStage: 'Following task plan',
+  currentActivity: 'Step 1 of 1: Inspect implementation',
+  progress: { mode: 'determinate', completedUnits: 0, totalUnits: 1, source: 'task_plan', label: 'Step 1 of 1: Inspect implementation' }
+});
+const updatedPlan = canonicalTaskSnapshot({
+  ...persistedPlan,
+  status: 'running',
+  updatedAt: '2026-07-11T08:03:00.000Z',
+  plan: { revision: 2, steps: [
+    { id: 'inspect', title: 'Inspect implementation', status: 'completed' },
+    { id: 'validate', title: 'Run focused validation', status: 'in_progress' }
+  ] },
+  currentStage: 'Following task plan',
+  currentActivity: 'Step 2 of 2: Run focused validation',
+  progress: { mode: 'determinate', completedUnits: 1, totalUnits: 2, source: 'task_plan', label: 'Step 2 of 2: Run focused validation' }
+});
+const mergedPlan = mergeTaskLifecycleSnapshots(persistedPlan, updatedPlan);
+assert.equal(mergedPlan.plan.revision, 2, 'newer live task plan must replace the previously persisted checklist');
+assert.deepEqual(mergedPlan.plan.steps.map(step => step.status), ['completed', 'in_progress']);
+assert.equal(mergedPlan.progress.completedUnits, 1);
+assert.equal(mergedPlan.progress.totalUnits, 2);
+
+const mergedNewerPersistedPlan = mergeTaskLifecycleSnapshots(updatedPlan, persistedPlan);
+assert.equal(mergedNewerPersistedPlan.plan.revision, 2, 'a stale live snapshot must not replace a newer persisted checklist');
+assert.equal(mergedNewerPersistedPlan.progress.completedUnits, 1, 'merged task progress must be derived from the selected checklist revision');
+assert.equal(mergedNewerPersistedPlan.progress.totalUnits, 2);
+assert.equal(mergedNewerPersistedPlan.currentStage, 'Following task plan');
+assert.equal(mergedNewerPersistedPlan.currentActivity, 'Step 2 of 2: Run focused validation', 'plan-derived current activity must follow the selected checklist revision');
+
+const liveToolActivity = canonicalTaskSnapshot({
+  ...persistedPlan,
+  updatedAt: '2026-07-11T08:04:00.000Z',
+  currentStage: 'Reading repository',
+  currentActivity: 'Reading src/taskLifecycle.js',
+  activeCalls: 1
+});
+const mergedLiveToolActivity = mergeTaskLifecycleSnapshots(updatedPlan, liveToolActivity);
+assert.equal(mergedLiveToolActivity.plan.revision, 2);
+assert.equal(mergedLiveToolActivity.currentStage, 'Reading repository', 'a real live tool stage must not be overwritten just because its snapshot carries an older plan revision');
+assert.equal(mergedLiveToolActivity.currentActivity, 'Reading src/taskLifecycle.js');
+assert.equal(mergedLiveToolActivity.progress.totalUnits, 2, 'plan progress must still follow the selected checklist while a real tool activity remains visible');
+
 const changed = lifecycleChangedFields(persisted, merged);
 assert.ok(changed.includes('calls'));
 assert.ok(changed.includes('operation'));

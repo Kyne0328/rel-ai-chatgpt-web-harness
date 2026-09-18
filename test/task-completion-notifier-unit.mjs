@@ -80,7 +80,7 @@ finishRead();
 finishOther();
 assert.equal(runtime.getStatus().state, 'waiting');
 assert.equal(runtime.getStatus().activeTaskCount, 2);
-assert.equal(startedBlockers.size, 0, 'open work sessions must allow normal app suspension between connector calls');
+assert.equal(startedBlockers.size, 1, 'open logical work must keep the app eligible to continue across reasoning and approval gaps');
 assert.equal(notifications.length, 0, 'successful tool calls must not be presented as completed ChatGPT tasks');
 
 nowValue = 91_000;

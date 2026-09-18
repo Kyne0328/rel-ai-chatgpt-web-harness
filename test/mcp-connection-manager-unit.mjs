@@ -10,7 +10,7 @@ import { runtimeMetadata } from '../src/runtimeCompatibility.js';
 const neutralManifest = buildToolManifest({});
 assert.equal(neutralManifest.schemaVersion, runtimeMetadata().schemaVersion, 'public MCP manifest and runtime compatibility metadata must use the same schema revision');
 assert.ok(String(neutralManifest.instructions || '').trim(), 'public MCP instructions must not be empty');
-for (const invariant of [/approval/i, /task-ownership|ownership/i, /authoritative evidence/i, /completion/i]) {
+for (const invariant of [/approval/i, /task-ownership|ownership/i, /authoritative evidence/i, /validation/i]) {
   assert.match(neutralManifest.instructions, invariant, `public MCP instructions must retain the ${invariant} safety invariant`);
 }
 assert.ok(neutralManifest.tools.every(tool => tool.outputSchema), 'every canonical tool must include its output schema');

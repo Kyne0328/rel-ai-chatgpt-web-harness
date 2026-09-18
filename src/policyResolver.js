@@ -78,7 +78,7 @@ function migrateLegacySessionPolicies(config = {}) {
       }
     }
     setStateMeta(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '1');
-  }, { transaction: true, timeoutMs: 0 });
+  }, { transaction: true });
   try {
     for (const name of fs.readdirSync(directory)) {
       if (name.endsWith('-policy.json')) fs.rmSync(path.join(directory, name), { force: true });
@@ -117,7 +117,7 @@ function readSessionPolicies(config, alias) {
         policies.push(parsed);
       }
       return policies;
-    }, { transaction: true, timeoutMs: 0 });
+    }, { transaction: true });
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] session policy list:', error);
     return [];
@@ -141,7 +141,7 @@ function readSessionPolicy(config, alias, taskId = '') {
         return null;
       }
       return parsed;
-    }, { transaction: true, timeoutMs: 0 });
+    }, { transaction: true });
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] session policy read:', error);
     return null;
@@ -194,7 +194,7 @@ async function writeSessionPolicy(config, alias, { taskHint, workspaceRoot, task
     db.prepare(`INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)
       ON CONFLICT(workspace,task_id) DO UPDATE SET updated_at_ms=excluded.updated_at_ms,payload=excluded.payload`)
       .run(alias, resolved, nowMs, JSON.stringify(data));
-  }, { transaction: true, timeoutMs: 0 });
+  }, { transaction: true });
 }
 
 function touchSessionPolicy(config, alias, taskId = '') {
@@ -216,7 +216,7 @@ function touchSessionPolicy(config, alias, taskId = '') {
       db.prepare('UPDATE session_policies SET updated_at_ms=?,payload=? WHERE workspace=? AND task_id=?')
         .run(now, JSON.stringify(parsed), alias, resolved);
       return true;
-    }, { transaction: true, timeoutMs: 0 });
+    }, { transaction: true });
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] session policy touch:', error);
     return false;
@@ -244,7 +244,7 @@ function clearSessionPolicy(config, alias, taskId = '') {
     const cleared = withStateDatabase(config, db => {
       const result = db.prepare('DELETE FROM session_policies WHERE workspace=? AND task_id=?').run(alias, resolved);
       return Number(result.changes || 0) > 0;
-    }, { transaction: true, timeoutMs: 0 });
+    }, { transaction: true });
     return { cleared };
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] session policy clear:', error);

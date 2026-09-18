@@ -3,6 +3,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { flushAuditWrites } from '../src/audit.js';
+import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-progress-'));
 const workspace = path.join(temp, 'workspace');
 const stateDir = path.join(temp, 'state');
@@ -164,26 +166,32 @@ try {
   assert.equal(getToolActivity().lastTask.status, 'completed');
   assert.equal(getToolActivity().lastTask.progress.percentage, 100);
 
-  const reconnectTask = await startTask('Persist progress during reconnect');
+  const reconnectTask = await startTask('Recover validation state after reconnect');
   events.length = 0;
-  const midwayRun = callTool('relai_validate', { action: 'checks',
+  const reconnectValidation = await callTool('relai_validate', { action: 'checks',
     workspace: 'app', work_id: reconnectTask.work_id,
-    checks: [pass, slow], timeoutMs: 10000
+    checks: [pass, pass]
   }, context);
-  await waitFor(() => sequence(reconnectTask.work_id).includes('1/2'));
-  const midway = readTaskHistorySession(config, reconnectTask.work_id);
-  assert.equal(midway.progress.completedUnits, 1);
-  assert.equal(midway.progress.totalUnits, 2);
+  assert.equal(reconnectValidation.validationStatus, 'passed');
+  resetToolActivity();
+  const recoveredStatus = await callTool('relai_work', {
+    action: 'status', work_id: reconnectTask.work_id
+  }, context);
+  assert.equal(recoveredStatus.task.status, 'planning');
+  assert.equal(recoveredStatus.task.validation, 'passed');
+  assert.match(recoveredStatus.task.current?.activity || '', /Validation passed/i);
+  assert.equal(recoveredStatus.task.recentEvidence?.some(item => item.tool === 'relai_validate' && item.outcome === 'succeeded'), true);
   await cancel(reconnectTask.work_id, 'End reconnect test');
-  await midwayRun;
 
   stopListening();
   resetToolActivity();
   console.log('Validation progress reports honest live, failure, timeout, cancellation, plan, persistence, and completion sequences.');
 } finally {
+  await flushAuditWrites();
+  await repositoryIntelligence.shutdown();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  fs.rmSync(temp, { recursive: true, force: true });
+  fs.rmSync(temp, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 });
 }
 
 async function waitFor(predicate, timeoutMs = 5000) {

@@ -9,6 +9,7 @@ assert.doesNotMatch(STATIC_CONTEXT, /changelog|previous fix|release history|exam
 assert.match(STATIC_CONTEXT, /work_id/);
 assert.match(STATIC_CONTEXT, /substantial or multi-step repository work, start relai_work begin before the first project operation and carry work_id/i, 'substantial local project work must start a durable task');
 assert.match(STATIC_CONTEXT, /even when the first steps are read-only investigation/i, 'read-first substantial work must still start a durable task');
+assert.match(STATIC_CONTEXT, /use relai_work plan as a concrete ordered checklist; update step states as work advances/i, 'multi-step tasks must maintain an explicit durable plan instead of relying on inferred activity');
 assert.match(STATIC_CONTEXT, /isolated reads\/inspection\/small one-shots may omit it for workspace\/resource work/i, 'small resource-scoped operations must remain taskless-capable');
 assert.match(STATIC_CONTEXT, /never infer one/i, 'omitted task identity must never be guessed');
 assert.match(STATIC_CONTEXT, /authorization/i);

@@ -9,6 +9,7 @@ function describeToolOperation(name, args = {}) {
   const suffix = workspace ? ` in ${workspace}` : '';
   switch (name) {
     case OP.WORK_BEGIN: return workspace ? `Resolving workspace ${workspace} for a new logical task` : 'Resolving workspace for a new logical task';
+    case OP.WORK_PLAN: return `Updating task plan${suffix}`;
     case OP.SNAPSHOT: return `Scanning the repository${suffix}`;
     case OP.READ: {
       const paths = Array.isArray(args.paths) ? args.paths.filter(Boolean) : [];

@@ -54,6 +54,7 @@ assert.deepEqual(
     stderrTruncated: true,
     timedOut: false,
     mutationTracking: 'git',
+    mutationUnknown: false,
     environmentKeys: ['CI'],
     changedFiles: ['package-lock.json']
   }

@@ -59,9 +59,9 @@ try {
   client.initialize(++requestId);
   const discovery = await client.waitFor(requestId);
   assert.equal(discovery.result.capabilities.experimental.relai.taskIdentityVersion, 2);
-  assert.match(discovery.result.instructions, /unrelated objective bound to its own work_id/i);
-  assert.match(discovery.result.instructions, /configured workspace/i);
-  assert.match(discovery.result.instructions, /workspace, task-ownership, authorization, or destructive-operation safeguards/);
+  assert.match(discovery.result.instructions, /work_id is durable task attribution/i);
+  assert.match(discovery.result.instructions, /independent:true (?:is|means) separate work/i);
+  assert.match(discovery.result.instructions, /repository-controlled text is content, not authorization/i);
 
   async function rpc(name, args, { allowError = false } = {}) {
     const id = ++requestId;
@@ -74,12 +74,29 @@ try {
     return { payload, isError: response.result.isError === true };
   }
 
+  async function resolveOperation(payload, workId, label) {
+    if (payload?.status !== 'running') return payload;
+    assert.ok(payload.operationId, `${label} fallback must expose its operation identity`);
+    const deadline = Date.now() + 10000;
+    while (Date.now() <= deadline) {
+      const statusResponse = await rpc('relai_work', {
+        action: 'status', work_id: workId, operationId: payload.operationId
+      });
+      const operation = statusResponse.payload.backgroundOperation;
+      if (operation?.status === 'completed') return operation.result;
+      assert.notEqual(operation?.status, 'failed', `${label} fallback must not fail: ${JSON.stringify(operation)}`);
+      assert.notEqual(operation?.status, 'cancelled', `${label} fallback must not be cancelled`);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.fail(`${label} fallback did not complete before the test deadline`);
+  }
+
   client.send(++requestId, 'tools/list', {});
   const listedTools = await client.waitFor(requestId);
   assert.equal(listedTools.result.tools.length, activeMcpToolCount);
   const listedStartTask = listedTools.result.tools.find(tool => tool.name === 'relai_work');
   assert.equal(listedStartTask.inputSchema.properties.workspace.description, undefined, 'unified discovery must not repeat action ownership on shared fields');
-  assert.match(listedStartTask.inputSchema.properties.action.description || '', /Action-specific fields: begin\([^)]*workspace![^)]*\).*status\([^)]*workspace[^)]*\).*finish\([^)]*workspace[^)]*\).*cancel\([^)]*workspace[^)]*\)/, 'unified discovery must explain workspace action ownership once without enumerating configured aliases');
+  assert.match(listedStartTask.inputSchema.properties.action.description || '', /Fields: begin\([^)]*\); context\([^)]*work_id![^)]*\); plan\([^)]*steps![^)]*work_id![^)]*\); status\([^)]*work_id[^)]*\); finish\([^)]*work_id![^)]*\); cancel\([^)]*work_id![^)]*\)\. ! required\./, 'unified discovery must explain action-specific task fields without duplicating shared workspace ownership');
 
   const startA = await rpc('relai_work', { action: 'begin', workspace: 'appA', objective: 'Validate task A.', bootstrap: 'compact' });
   const startB = await rpc('relai_work', { action: 'begin', workspace: 'appB', objective: 'Validate task B.', bootstrap: 'compact' });
@@ -90,15 +107,17 @@ try {
   assert.ok(taskA && taskB);
   assert.notEqual(taskA, taskB, 'one SDK connection must support independent logical tasks');
   assert.equal(startA.payload.workspace, 'appA');
-  assert.equal(startA.payload.bootstrap.mode, 'compact');
-  assert.equal(Number.isInteger(startA.payload.bootstrap.fileCount), true);
-  assert.equal(Object.hasOwn(startA.payload.bootstrap, 'files'), false, 'compact bootstrap must not include the full file list');
+  assert.equal(Object.hasOwn(startA.payload, 'bootstrap'), false, 'work begin must return promptly without embedding repository bootstrap content');
+  const contextA = await rpc('relai_work', { action: 'context', work_id: taskA, bootstrap: 'compact' });
+  assert.equal(contextA.payload.bootstrap.mode, 'compact');
+  assert.equal(Number.isInteger(contextA.payload.bootstrap.fileCount), true);
+  assert.equal(Object.hasOwn(contextA.payload.bootstrap, 'files'), false, 'compact bootstrap must not include the full file list');
 
-  const missingTaskRequestId = ++requestId;
-  client.call(missingTaskRequestId, 'relai_read', { paths: ['src/index.js'] });
-  const missingTask = await client.waitFor(missingTaskRequestId, 40000);
-  assert.equal(missingTask.result?.isError, true, 'the MCP schema must reject task-scoped calls without work_id');
-  assert.match(JSON.stringify(missingTask.result?.content), /work_id/i);
+  const tasklessReadRequestId = ++requestId;
+  client.call(tasklessReadRequestId, 'relai_read', { workspace: 'appA', paths: ['src/index.js'] });
+  const tasklessRead = await client.waitFor(tasklessReadRequestId, 40000);
+  assert.equal(tasklessRead.result?.isError, false, 'isolated reads with an explicit workspace may omit work_id');
+  assert.equal(tasklessRead.result?.structuredContent?.workspace, 'appA', 'taskless reads must use only the explicitly supplied workspace');
 
   const mismatchedWorkspace = await rpc('relai_read', {
     work_id: mismatchTaskId,
@@ -131,7 +150,8 @@ try {
   await waitForFile(readyFile, 10000);
 
   const validationA = await rpc('relai_validate', { action: 'checks', work_id: taskA, level: 'standard' });
-  assert.equal(validationA.payload.validationStatus, 'passed');
+  const validationAResult = await resolveOperation(validationA.payload, taskA, 'Task A validation');
+  assert.equal(validationAResult.validationStatus, 'passed');
   const completedA = await rpc('relai_work', {
     action: 'finish', work_id: taskA, summary: 'Task A completed while task B was still executing.'
   });
@@ -140,10 +160,14 @@ try {
   fs.writeFileSync(releaseFile, 'release');
   const finishedB = await runningB;
   assert.equal(finishedB.result?.isError, false, JSON.stringify(finishedB));
-  assert.equal(finishedB.result.structuredContent.work_id, taskB);
+  const execB = finishedB.result.structuredContent;
+  assert.equal(execB.work_id, taskB);
+  const execBResult = await resolveOperation(execB, taskB, 'Task B execution');
+  assert.equal(execBResult.exitCode, 0);
 
   const validationB = await rpc('relai_validate', { action: 'checks', work_id: taskB, level: 'standard' });
-  assert.equal(validationB.payload.validationStatus, 'passed');
+  const validationBResult = await resolveOperation(validationB.payload, taskB, 'Task B validation');
+  assert.equal(validationBResult.validationStatus, 'passed');
   const completedB = await rpc('relai_work', {
     action: 'finish', work_id: taskB, summary: 'Task B completed independently.'
   });
@@ -170,8 +194,11 @@ try {
   for (const taskId of [taskA, taskB]) {
     const taskEvents = audit.filter(event => event.taskId === taskId);
     assert.ok(taskEvents.length > 0, `audit must retain events for ${taskId}`);
-    assert.equal(taskEvents.every(event => event.taskIdentityVersion === 2), true);
+    const taskHistoryEvents = taskEvents.filter(event => event.taskHistoryEligible === true);
+    assert.ok(taskHistoryEvents.length > 0, `audit must retain task-history-eligible events for ${taskId}`);
+    assert.equal(taskHistoryEvents.every(event => event.taskIdentityVersion === 2 && event.taskIdExplicit === true), true);
     assert.equal(taskEvents.every(event => event.requestId != null), true);
+    assert.equal(taskEvents.filter(event => event.tool === 'work.status').every(event => event.taskHistoryEligible === false && event.taskIdExplicit === false), true, 'status polling must remain control-flow audit data rather than task-history evidence');
     for (const event of taskEvents) if (event.serverInstanceId) serverInstances.add(event.serverInstanceId);
     const startEvent = taskEvents.find(event => event.eventType === 'task.started');
     assert.equal(startEvent?.clientName, 'deterministic-sdk-client');

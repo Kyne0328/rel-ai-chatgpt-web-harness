@@ -62,6 +62,8 @@ assert.doesNotMatch(connectorInstructions(config), /workspace-resolution error|f
 assert.doesNotMatch(connectorInstructions(config), /Inspect relevant files|Validate after changes|recovery guidance/i, 'discretionary workflow tactics belong to the workflow runtime/skills, not global MCP instructions');
 
 const manifest = getToolSurfaceManifest(config);
+const planOperation = getOperationDefinitions().find(item => item.name === OP.WORK_PLAN);
+assert.equal(planOperation?.outputSchema?.properties?.progress, undefined, 'work.plan must not advertise progress that its handler does not return');
 assert.ok(Number.isSafeInteger(manifest.schemaVersion) && manifest.schemaVersion > 0, 'manifest schema revision must remain a positive integer');
 assert.ok(Number.isSafeInteger(manifest.toolSurfaceVersion) && manifest.toolSurfaceVersion > 0, 'tool-surface revision must remain a positive integer');
 assert.equal(Object.hasOwn(manifest, 'profile'), false);
@@ -160,7 +162,7 @@ for (const removed of removedDirectNames) {
 }
 
 const publicSchemaByName = new Map(publicSchemas.map(schema => [schema.name, schema]));
-assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'status', 'finish', 'cancel']);
+assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'finish', 'cancel']);
 const processSchema = schemaByName.get('relai_process');
 assert.deepEqual(processSchema.inputSchema.properties.action.enum, ['start', 'read', 'write', 'stop', 'list']);
 assert.ok(processSchema.inputSchema.properties.kind.enum.includes('service'));
@@ -179,6 +181,9 @@ assert.deepEqual(editSchema.inputSchema.properties.stage.enum, ['start', 'append
 
 await valid('relai_work', { action: 'begin', workspace: 'repo' });
 await valid('relai_work', { action: 'begin' });
+await valid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ id: 'inspect', title: 'Inspect implementation', status: 'in_progress' }] });
+await valid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [] });
+await invalid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ title: 'Invalid state', status: 'working' }] });
 await valid('relai_work', { action: 'finish', work_id: 'work', summary: 'Done.' });
 await invalid('relai_work', { action: 'finish', work_id: 'work' });
 await valid('relai_process', { action: 'start', workspace: 'repo', command: 'npm run dev', kind: 'service', purpose: 'Run the development server.', reuseExisting: true });

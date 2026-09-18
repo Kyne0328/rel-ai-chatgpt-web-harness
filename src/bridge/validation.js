@@ -267,7 +267,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
       ? 'Validation was cancelled; partial results are preserved as evidence.'
       : scopeChanged
         ? 'Validation became stale because relevant repository content changed while checks were running.'
-        : 'One or more requested validation checks failed; the failing results are preserved as evidence.';
+        : 'One or more requested validation checks failed; review the failing validation results, correct the checks or code, then rerun validation.';
   const validationFingerprint = finalFingerprint.fingerprint;
   const validationResult = {
     ok,

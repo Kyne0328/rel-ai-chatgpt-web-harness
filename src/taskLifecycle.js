@@ -1,6 +1,7 @@
 import {
   completeProgress,
   normalizeTaskProgress,
+  taskPlanRuntimeState,
   sanitizeActivityEventRecord,
   sanitizeDisplayText,
   sanitizeTaskRecord
@@ -159,6 +160,28 @@ function mergeTaskLifecycleSnapshots(persisted, live, options = {}) {
   const merged = { ...durable, ...active };
   for (const field of DURABLE_FIELDS) {
     if (durable[field] !== undefined) merged[field] = durable[field];
+  }
+  if (durable.plan !== undefined || active.plan !== undefined) {
+    const durableRevision = Number(durable.plan?.revision ?? -1);
+    const activeRevision = Number(active.plan?.revision ?? -1);
+    const activePlanWins = active.plan !== undefined && (durable.plan === undefined || activeRevision >= durableRevision);
+    const selected = activePlanWins ? active : durable;
+    const losing = activePlanWins ? durable : active;
+    merged.plan = selected.plan;
+    const planState = taskPlanRuntimeState(merged.plan);
+    const losingPlanState = taskPlanRuntimeState(losing.plan);
+    if (planState) merged.progress = planState.progress;
+    else if (merged.progress?.source === 'task_plan') {
+      merged.progress = selected.progress?.source === 'task_plan'
+        ? { mode: 'indeterminate', label: 'No task plan' }
+        : selected.progress || { mode: 'indeterminate', label: 'No task plan' };
+    }
+    if (losingPlanState && merged.currentStage === losingPlanState.currentStage) {
+      merged.currentStage = planState?.currentStage || selected.currentStage;
+    }
+    if (losingPlanState && merged.currentActivity === losingPlanState.currentActivity) {
+      merged.currentActivity = planState?.currentActivity || selected.currentActivity;
+    }
   }
   merged.calls = Math.max(Number(durable.calls || 0), Number(active.calls || 0));
   merged.toolCallCount = Math.max(Number(durable.toolCallCount || 0), Number(active.toolCallCount || 0));

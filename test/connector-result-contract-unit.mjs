@@ -31,6 +31,21 @@ const cases = [
     ok: true, workspace: 'repo', work_id: 'work_begin', status: 'planning', identity: 'work_session',
     title: 'Contract work', objective: 'Characterize results.', intent: 'investigation', activeRelatedWork: [{ goal: 'Sibling task', status: 'running' }], nextAction: 'Use bootstrap.'
   }),
+  fixture('relai_work:plan', 'relai_work', 'plan', OP.WORK_PLAN, 'work_plan', {
+    ok: true, workspace: 'repo', work_id: 'work_plan',
+    plan: { revision: 3, steps: [
+      { id: 'inspect', title: 'Inspect implementation', status: 'completed' },
+      { id: 'validate', title: 'Run focused validation', status: 'in_progress' }
+    ] },
+    message: 'Task plan updated with 2 steps.'
+  }, {
+    ok: true, workspace: 'repo', work_id: 'work_plan',
+    plan: { revision: 3, steps: [
+      { id: 'inspect', title: 'Inspect implementation', status: 'completed' },
+      { id: 'validate', title: 'Run focused validation', status: 'in_progress' }
+    ] },
+    message: 'Task plan updated with 2 steps.'
+  }),
   fixture('relai_work:status', 'relai_work', 'status', OP.WORK_STATUS, 'work_status', {
     ok: true, version: '0.24.0', runtime: 'node', tools: ['relai_read'],
     toolSurface: { schemaVersion: 5, toolSurfaceVersion: 32, toolCount: 12, tools: [{ name: 'relai_read' }], deprecations: [] },

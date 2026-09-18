@@ -430,6 +430,7 @@ const FIELD_SCHEMAS = Object.freeze({
 
 const TOOL_FIELDS = Object.freeze({
   [OP.WORK_CONTEXT]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
+  [OP.WORK_PLAN]: ['ok', 'workspace', 'work_id', 'plan', 'message'],
   [OP.WORK_BEGIN]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
   [OP.SNAPSHOT]: ['ok', 'workspace', 'work_id', 'root', 'manifests', 'manifestContents', 'discoveredCommands', 'projectInstructions', 'skills', 'fileCount', 'effectiveMaxEntries', 'budgetMultiplied', 'files', 'returnedFileCount', 'omittedFiles', 'skipped', 'skippedCount', 'truncated', 'hints', 'git', 'recommendedFlow', 'writeGuidance', 'operationJournal', 'repository', 'changedFiles', 'next'],
   [OP.READ]: ['ok', 'workspace', 'work_id', 'items', 'resourceLink', 'skipped', 'requestedCount', 'returnedCount', 'partial', 'truncated', 'error'],
@@ -474,6 +475,7 @@ const SUCCESS_REQUIRED_FIELDS = Object.freeze({
   [OP.PROCESS_WRITE]: ['work_id', 'processId', 'acceptedBytes', 'status'],
   [OP.PROCESS_STOP]: ['processId', 'status', 'duplicate'],
   [OP.PROCESS_LIST]: ['processes', 'count'],
+  [OP.WORK_PLAN]: ['work_id', 'plan'],
   [OP.WORK_CANCEL]: ['work_id', 'status', 'duplicate'],
   [OP.WORK_FINISH]: ['work_id', 'completionKnown', 'validationStatus']
 });

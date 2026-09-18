@@ -75,7 +75,7 @@ function auditRepository(base = root) {
   const runnerPath = path.join(base, 'test', 'run-tests.mjs');
   if (fs.existsSync(runnerPath)) {
     const runner = fs.readFileSync(runnerPath, 'utf8');
-    for (const releaseOnly of ['release-workflow-smoke.mjs', 'frontend-streamlining-contract-unit.mjs', 'update-support-policy-integration-unit.mjs']) {
+    for (const releaseOnly of ['release-workflow-smoke.mjs', 'update-support-policy-integration-unit.mjs']) {
       if (runner.includes(`'${releaseOnly}'`) || runner.includes(`"${releaseOnly}"`)) {
         violations.push({ relativePath: 'test/run-tests.mjs', lineNumber: 1, kind: 'release-only-in-development', message: `${releaseOnly} must stay outside the everyday regression runner.` });
       }

@@ -7,7 +7,7 @@ const testDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(testDir);
 const testPattern = /^(?:repository-|intelligence-).+\.mjs$/;
 const tests = fs.readdirSync(testDir)
-  .filter(name => testPattern.test(name))
+  .filter(name => testPattern.test(name) || name === 'code-intelligence-unit.mjs')
   .sort((left, right) => left.localeCompare(right));
 
 if (!tests.length) throw new Error('No Repository Intelligence tests were discovered.');

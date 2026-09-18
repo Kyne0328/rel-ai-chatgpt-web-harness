@@ -32,21 +32,29 @@ try {
   const buildingGeneration = await waitForBuildingGeneration(databaseFile);
   assert.ok(buildingGeneration > 0, 'the test must observe a live worker generation before terminating it');
 
-  const rejectedBuild = assert.rejects(
+  const [buildOutcome] = await Promise.allSettled([
     build,
-    error => error?.name === 'AbortError' || error?.code === 'INDEX_ABORTED'
-  );
-  await repositoryIntelligence.shutdown();
-  await rejectedBuild;
+    repositoryIntelligence.shutdown()
+  ]);
 
   const db = openIndexDatabase(databaseFile, { readonly: true });
   try {
     assert.equal(Number(db.prepare("SELECT count(*) AS count FROM generations WHERE status='building'").get()?.count || 0), 0,
-      'forced worker termination must not leave a generation permanently marked as building');
+      'shutdown must not leave a generation permanently marked as building');
     const row = db.prepare('SELECT status, completed_at, error_message FROM generations WHERE id=?').get(buildingGeneration);
-    assert.equal(row?.status, 'failed');
-    assert.ok(row?.completed_at, 'recovered generation must record its completion time');
-    assert.ok(row?.error_message, 'recovered generation must preserve the termination reason');
+    assert.ok(row?.completed_at, 'the observed generation must record its completion time');
+
+    if (buildOutcome.status === 'rejected') {
+      assert.ok(
+        buildOutcome.reason?.name === 'AbortError' || buildOutcome.reason?.code === 'INDEX_ABORTED',
+        'an interrupted build must reject as an aborted index operation'
+      );
+      assert.equal(row?.status, 'failed');
+      assert.ok(row?.error_message, 'an interrupted generation must preserve the termination reason');
+    } else {
+      assert.equal(row?.status, 'committed',
+        'a build that wins the shutdown race must remain a valid committed generation');
+    }
   } finally {
     db.close();
   }

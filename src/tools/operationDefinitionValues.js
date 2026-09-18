@@ -27,6 +27,15 @@ const OPERATION_DEFINITION_VALUES = [
     dashboard: { category: 'Workflow' }
   },
   {
+    name: OP.WORK_PLAN,
+    title: 'Set Task Plan',
+    description: 'Replace the durable ordered checklist for the exact work_id. Use explicit step states rather than inferring whole-task progress from tool calls. Re-send the complete ordered list when the plan or a step status changes; steps:[] clears the checklist.',
+    inputSchema: { type: 'object', properties: { workspace: { type: 'string' }, steps: { type: 'array', maxItems: 50, items: { type: 'object', properties: { id: { type: 'string', minLength: 1, maxLength: 80 }, title: { type: 'string', minLength: 1, maxLength: 300 }, detail: { type: 'string', maxLength: 500 }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked', 'skipped'] } }, required: ['title', 'status'], additionalProperties: false } } }, required: ['workspace', 'steps'], additionalProperties: false },
+    handlerName: 'taskPlan',
+    behavior: { taskScope: 'required' },
+    dashboard: { category: 'Workflow' }
+  },
+  {
     name: OP.SNAPSHOT,
     title: "Repository Overview",
     description: "Read-only. Compact repository overview: file tree, manifests, detected checks, and project hints.",

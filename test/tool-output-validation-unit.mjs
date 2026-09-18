@@ -287,6 +287,7 @@ function requiredArgs(entry) {
   const key = `${entry.publicTool}:${entry.action}`;
   switch (key) {
     case 'relai_work:begin': return { workspace: 'repo' };
+    case 'relai_work:plan': return { steps: [{ title: 'Output validation plan step', status: 'pending' }] };
     case 'relai_work:finish': return { summary: 'Done.' };
     case 'relai_search:text': return { pattern: 'needle' };
     case 'relai_search:semantic': return { query: 'needle' };

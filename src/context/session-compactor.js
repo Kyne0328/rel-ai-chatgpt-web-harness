@@ -8,6 +8,7 @@ function compactSessionSummary(session = {}, options = {}) {
     goal: String(session.objective || session.title || '').trim() || undefined,
     summary: summary || undefined,
     changes: changedFiles.length ? changedFiles : undefined,
+    plan: compactPlan(session.plan),
     validation: compactValidation(session),
     hostContextSummary: String(session.contextSummary || '').trim() || undefined,
     current,
@@ -15,6 +16,18 @@ function compactSessionSummary(session = {}, options = {}) {
     continuity: options.continuity && Object.keys(options.continuity).length ? options.continuity : undefined,
     status: String(session.status || '').trim() || undefined
   });
+}
+
+function compactPlan(plan) {
+  if (!plan || typeof plan !== 'object' || !Array.isArray(plan.steps)) return undefined;
+  const steps = plan.steps.map((step, index) => prune({
+    id: String(step?.id || `step-${index + 1}`).trim(),
+    title: String(step?.title || '').trim(),
+    status: String(step?.status || 'pending').trim(),
+    detail: String(step?.detail || '').trim() || undefined
+  })).filter(step => step.title);
+  if (!steps.length) return undefined;
+  return prune({ revision: Math.max(0, Number(plan.revision || 0)), steps });
 }
 
 function compactCurrentState(session) {

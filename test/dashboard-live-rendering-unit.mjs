@@ -140,6 +140,12 @@ assert.match(sessionsReact, /className: 'task-file-more-row'/, 'Show more must r
 assert.doesNotMatch(sessionsReact, /task-detail-overflow-content|More \$\{title\.toLowerCase\(\)\}/, 'expanded files must not render in a disconnected secondary block');
 assert.doesNotMatch(sessionsReact, /task-detail-current\$\{sessionNeedsAttention\(session\)/, 'task progress card must stay neutral when a separate attention callout is present');
 assert.doesNotMatch(sessionsReact, /taskProgressHtml|Key activity|workflowTechnicalHtml/, 'Tasks must not reintroduce misleading per-tool whole-task progress or obsolete workflow guidance');
+assert.match(sessionsReact, /h\(PlanSection, \{ plan: session\.plan \}\)/, 'task Overview must render the durable plan independently from activity history');
+assert.match(sessionsReact, /data-plan-step-status/, 'durable plan steps must expose their explicit status for styling and regression coverage');
+assert.match(sessionsReact, /'aria-label': statusLabel/, 'each durable plan step must expose its state to assistive technology instead of relying on a visual glyph');
+assert.match(sessionsReact, /key: `\$\{String\(step\?\.id \|\| 'step'\)\}:\$\{index\}`/, 'plan rows must keep React keys unique even when optional external step IDs collide');
+assert.match(sessionsReact, /\['completed', 'skipped'\]/, 'plan resolved counts must come from explicit durable step states rather than tool-call history');
+assert.match(sessionsReact, /steps resolved/, 'skipped steps must be described as resolved rather than incorrectly reported as completed');
 assert.match(sessionsReact, /const ordered = orderSessionEvents\(session\.events \|\| \[\]\)/, 'open task Activity must render canonical task events instead of raw audit trace rows');
 assert.doesNotMatch(sessionsReact, /mergeSessionEvents\(traceEvents/, 'raw audit trace rows must not inflate the user-facing task Activity timeline');
 assert.match(sessionsReact, /data-show-older-events/, 'older task events must expand in the existing trace');

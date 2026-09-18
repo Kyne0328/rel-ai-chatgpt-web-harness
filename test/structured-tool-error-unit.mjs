@@ -38,11 +38,13 @@ try {
   const initialTaskId = initialTaskResponse.structuredContent.work_id;
   const response = await invoke('relai_read', { work_id: initialTaskId, paths: ['.env'], guidanceMode: 'none' });
 
-  assert.equal(response.isError, false, 'relai_read returns per-path skips rather than throwing');
+  assert.equal(response.isError, true, 'explicit reads of secret-bearing paths must fail at the safety boundary');
   const readPayload = response.structuredContent;
-  assert.equal(readPayload.ok, true);
-  assert.equal(readPayload.items.length, 0);
+  assert.equal(readPayload.ok, false);
+  assert.deepEqual(readPayload.items, []);
+  assert.equal(readPayload.skipped[0].path, '.env');
   assert.match(readPayload.skipped[0].reason, /blocked sensitive path/);
+  assert.match(readPayload.error, /None of the requested paths could be read/);
   assert.doesNotMatch(JSON.stringify(readPayload), /not-returned/);
 
   const dotWorkspaceResponse = await invoke('relai_work', { action: 'begin', workspace: '.' }, { publicHttpOnly: true });

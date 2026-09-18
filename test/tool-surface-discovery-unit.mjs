@@ -67,7 +67,8 @@ for (const variant of variants) {
     const malformed = await client.waitFor(6);
     assert.equal(malformed.result?.isError, true, 'runtime validation must surface malformed cross-action input as a tool error');
     assert.equal(malformed.result?.structuredContent?.ok, false);
-    assert.match(malformed.result?.structuredContent?.error || '', /Unsupported field 'query'/);
+    assert.match(malformed.result?.structuredContent?.error || '', /Invalid arguments for tool relai_search/);
+    assert.match(malformed.result?.structuredContent?.error || '', /additional properties|oneOf/i);
 
     client.call(7, 'relai_search', { action: 'text', work_id: work.work_id, pattern: 'surface', maxFiles: 201 });
     const boundedFailure = await client.waitFor(7);

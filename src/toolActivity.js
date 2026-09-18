@@ -7,12 +7,14 @@ import {
   createActivityEvent,
   deriveTaskTitle,
   incompleteProgress,
+  normalizeTaskPlan,
   normalizeTaskProgress,
   sanitizeActivityEventRecord,
   sanitizeActivityMetadata,
   sanitizeCompletionSummary,
   sanitizeDisplayText,
-  sanitizeTaskRecord
+  sanitizeTaskRecord,
+  taskPlanRuntimeState
 } from './taskObservability.js';
 import { isTerminalTaskStatus, transitionTaskStatus } from './taskState.js';
 import { TASK_RUNTIME_TERMINAL_PHASES } from './taskEvents.js';
@@ -114,7 +116,8 @@ function createToolActivityTracker(options = {}) {
       transitionTaskStatus(task, initialActivity.category === 'validation' ? 'validating' : 'running');
       task.currentStage = initialActivity.currentStage || operation.label;
       task.currentActivity = initialActivity.currentActivity || operation.detail;
-      task.progress = normalizeTaskProgress(initialActivity.progress, task.status);
+      const planState = taskPlanRuntimeState(task.plan);
+      task.progress = normalizeTaskProgress(planState?.progress || initialActivity.progress, task.status);
     }
     task.currentOperations.set(operationId, operation);
     task.events.push(operation.activity);
@@ -183,10 +186,23 @@ function createToolActivityTracker(options = {}) {
       task.updatedAt = task.lastActivityAt;
       task.currentStage = sanitizeDisplayText(patch.currentStage || current.activity?.title || task.currentStage || 'Running tool', 500);
       task.currentActivity = sanitizeDisplayText(patch.currentActivity || current.activity?.summary || current.detail || task.currentActivity || '', 500);
+      if (patch.plan !== undefined) {
+        task.plan = normalizeTaskPlan(patch.plan);
+        const planState = taskPlanRuntimeState(task.plan);
+        if (planState) {
+          task.currentStage = planState.currentStage;
+          task.currentActivity = planState.currentActivity;
+          task.progress = normalizeTaskProgress(planState.progress, task.status);
+        } else {
+          task.progress = { mode: 'indeterminate', label: 'No task plan' };
+        }
+      }
       if (patch.status && !isTerminalTaskStatus(task.status)) {
         transitionTaskStatus(task, patch.status, { blockedMeansApproval: true });
       }
-      if (patch.progress) task.progress = normalizeTaskProgress(patch.progress, task.status);
+      if (patch.progress && patch.plan === undefined && !taskPlanRuntimeState(task.plan)) {
+        task.progress = normalizeTaskProgress(patch.progress, task.status);
+      }
       finish.operation = task.lastOperation;
       notify('progress', task, {
         tool: current.tool,
@@ -235,9 +251,11 @@ function createToolActivityTracker(options = {}) {
         current.activity.summary = `${current.activity.summary || 'Operation completed.'} Waited ${formatWait(queueWaitMs)} for the workspace execution queue.`;
       }
       if (!terminalBeforeFinish) {
-        task.currentStage = completionActivity.currentStage || task.currentStage;
-        task.currentActivity = completionActivity.currentActivity || current.activity.summary || task.currentActivity;
-        task.progress = normalizeTaskProgress(completionActivity.progress || task.progress, task.status);
+        const planState = taskPlanRuntimeState(task.plan);
+        const restorePlanState = Boolean(planState && (task.activeCalls === 0 || current.internalOperation === OP.WORK_PLAN));
+        task.currentStage = (restorePlanState ? planState.currentStage : completionActivity.currentStage) || task.currentStage;
+        task.currentActivity = (restorePlanState ? planState.currentActivity : completionActivity.currentActivity) || current.activity.summary || task.currentActivity;
+        task.progress = normalizeTaskProgress(planState?.progress || completionActivity.progress || task.progress, task.status);
         task.successes += result.ok === false ? 0 : 1;
         task.errorSummary = result.ok === false && !blockedResult
           ? sanitizeDisplayText(result.error || current.activity.error?.message || '', 500)
@@ -439,6 +457,7 @@ function createToolActivityTracker(options = {}) {
     const events = Array.isArray(resumed?.events) ? resumed.events.slice(-200) : [];
     const sequence = Math.max(calls, ...events.map(event => Math.max(0, Number(event?.sequence || 0))));
     const resumedStartedAt = Date.parse(String(resumed?.startedAtIso || resumed?.startedAt || ''));
+    const plan = resumed?.plan ? normalizeTaskPlan(resumed.plan) : undefined;
     return {
       id,
       scopeId,
@@ -458,6 +477,7 @@ function createToolActivityTracker(options = {}) {
       principalFingerprint: String(details.principalFingerprint || resumed?.principalFingerprint || ''),
       status: resumed?.status === 'inactive' ? String(resumed.resumeStatus || 'planning') : String(resumed?.status || 'queued'),
       progress: normalizeTaskProgress(resumed?.progress || { mode: 'indeterminate', label: resumed ? 'Planning task' : 'Queued' }, resumed?.status === 'inactive' ? resumed.resumeStatus || 'planning' : resumed?.status || 'queued'),
+      plan,
       currentStage: String(resumed?.currentStage || (resumed ? 'Planning' : 'Queued')),
       currentActivity: String(details.operation || resumed?.currentActivity || ''),
       activeCalls: 0,
@@ -608,6 +628,7 @@ function createToolActivityTracker(options = {}) {
       status,
       resumeStatus,
       progress: normalizeTaskProgress(task.progress, status),
+      plan: task.plan,
       currentStage: 'Inactive',
       currentActivity: task.currentActivity,
       calls: task.calls,
@@ -659,6 +680,7 @@ function createToolActivityTracker(options = {}) {
       intent: task.intent,
       status,
       progress: completeProgress('Task completed'),
+      plan: task.plan,
       currentStage: 'Completed',
       currentActivity: completion.summary || task.currentActivity,
       completionKnown: true,
@@ -759,6 +781,7 @@ function createToolActivityTracker(options = {}) {
       status: task.status,
       state: task.activeCalls > 0 ? 'working' : 'waiting',
       progress: normalizeTaskProgress(task.progress, task.status),
+      plan: task.plan,
       currentStage: task.currentStage,
       currentActivity: task.currentActivity,
       completionKnown: false,
