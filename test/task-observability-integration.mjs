@@ -54,11 +54,14 @@ try {
     action: 'begin',
     workspace: 'repo',
     title: 'Inspect session activity model',
-    objective: 'Verify canonical task and activity persistence.'
+    objective: 'Verify canonical task and activity persistence.',
+    mode: 'goal'
   };
   const started = await callTool('relai_work', taskArgs, context);
   assert.ok(started.work_id);
   assert.equal(started.title, 'Inspect session activity model');
+  assert.equal(started.mode, 'goal');
+  assert.equal(started.goal_completed, false);
   const duplicateStart = await callTool('relai_work', taskArgs, { ...context, requestId: 'request-duplicate-start' });
   assert.equal(duplicateStart.work_id, started.work_id, 'same-conversation retries of the same active goal must reuse the existing logical task');
 
@@ -74,21 +77,27 @@ try {
     workspace: 'repo',
     work_id: started.work_id
   }, { ...context, requestId: 'request-3' });
+  assert.equal(status.task?.mode, 'goal');
+  assert.equal(status.task?.goal_completed, false, 'Goal mode must remain incomplete across intermediate tool calls');
   assert.equal(status.task?.current?.tool, 'relai_read', 'status must observe rather than overwrite the preceding task activity');
   assert.equal(status.task?.recentEvidence?.at(-1)?.tool, 'relai_read', 'status recovery must include persisted recent task activity');
   assert.match(status.task?.recentEvidence?.at(-1)?.summary || '', /Read/i);
 
-  await callTool('relai_work', { action: 'finish',
+  const finishedGoal = await callTool('relai_work', { action: 'finish',
     workspace: 'repo',
     work_id: started.work_id,
     summary: 'Inspected and verified session activity persistence.'
   }, { ...context, requestId: 'request-4' });
+  assert.equal(finishedGoal.mode, 'goal');
+  assert.equal(finishedGoal.goal_completed, true);
 
   const historyConfig = { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') };
   const session = await readCompletedSession(historyConfig, started.work_id);
   assert.equal(session.title, 'Inspect session activity model');
   assert.equal(session.objective, 'Verify canonical task and activity persistence.');
   assert.equal(session.status, 'completed');
+  assert.equal(session.goalMode, true);
+  assert.equal(session.goal_completed, true);
   assert.equal(session.progress.mode, 'complete');
   assert.equal(session.progress.percentage, 100);
   assert.equal(session.toolCallCount, 4);

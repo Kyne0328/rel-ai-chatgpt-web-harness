@@ -70,6 +70,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     workflowEvidence: persistedLearningSession.workflowEvidence || [],
     changedFiles
   };
+  const goalMode = learningSession.goalMode === true || learningSession.mode === 'goal';
   const completion = requestCurrentTaskCompletion({
     summary,
     validationStatus,
@@ -85,6 +86,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     work_id: completion.taskId,
     duplicate: completion.duplicate === true,
     completionKnown: true,
+    ...(goalMode ? { mode: 'goal', goal_completed: true } : {}),
     endReason: 'explicit_completion',
     completionSource,
     summary,
@@ -136,12 +138,14 @@ function finalizeDuplicateCompletion(config, workspace, context, previous) {
     residualState: String(previous.residualState || (Array.isArray(previous.residualChangedFiles) && previous.residualChangedFiles.length ? 'preserved_uncommitted' : 'clean'))
   });
   clearSessionPolicy(config, workspace.alias, context.taskId);
+  const goalMode = previous?.goalMode === true || previous?.mode === 'goal';
   return {
     ok: true,
     workspace: workspace.alias,
     work_id: context.taskId,
     duplicate: true,
     completionKnown: true,
+    ...(goalMode ? { mode: 'goal', goal_completed: true } : {}),
     endReason: 'explicit_completion',
     completionSource: WORK_FINISH_SOURCE,
     summary,

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVER_INFO_META_KEY } from '@modelcontextprotocol/server';
 import { TASKS_EXTENSION_REVISION } from '../src/mcp/protocol.js';
+import { GOAL_MODE_RESOURCE_MIME_TYPE, GOAL_MODE_RESOURCE_URI } from '../src/mcp/goalModeContract.js';
 import { recordTaskValidationAffinity, learnedValidationChecks } from '../src/knowledgeStore.js';
 import { readLocalUsageSnapshot, recordLocalTaskCompletion, recordLocalToolOutcome } from '../src/localAnalytics.js';
 import { repositoryIndexPath } from '../src/repository/intelligence/database.js';
@@ -121,7 +122,8 @@ try {
   const listedByName = new Map(listed.body.result.tools.map(tool => [tool.name, tool]));
   for (const name of activeToolNames) {
     assert.deepEqual(listedByName.get(name)?._meta?.securitySchemes, [{ type: 'noauth' }], `${name} must advertise noauth through ChatGPT compatibility metadata`);
-    assert.equal(listedByName.get(name)?._meta?.ui, undefined, `${name} must stay iframe-free`);
+    if (name === 'relai_work') assert.deepEqual(listedByName.get(name)?._meta?.ui, { resourceUri: GOAL_MODE_RESOURCE_URI });
+    else assert.equal(listedByName.get(name)?._meta?.ui, undefined, `${name} must stay iframe-free`);
     assert.equal(listedByName.get(name)?._meta?.['openai/outputTemplate'], undefined, `${name} must not attach a ChatGPT output template`);
   }
   assert.deepEqual(listedByName.get('relai_publish')?.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
@@ -369,8 +371,14 @@ try {
 
   const resources = await client.request('resources/list');
   assert.ok(resources.body.result.resources.some(item => item.uri === 'relai://server/tool-surface'));
+  assert.ok(resources.body.result.resources.some(item => item.uri === GOAL_MODE_RESOURCE_URI), 'resource discovery must advertise the Goal continuation MCP App');
   assert.equal(resources.body.result.resources.some(item => item.uri === 'ui://relai/approval/v1.html'), false, 'resource discovery must not advertise the removed approval card');
   assert.equal(resources.body.result._meta?.['io.modelcontextprotocol/cache']?.cacheScope || resources.body.result.cacheScope || 'private', 'private');
+
+  const goalUi = await client.request('resources/read', { uri: GOAL_MODE_RESOURCE_URI });
+  assert.equal(goalUi.body.result?.contents?.[0]?.mimeType, GOAL_MODE_RESOURCE_MIME_TYPE);
+  assert.match(goalUi.body.result?.contents?.[0]?.text || '', /ui\/message/);
+  assert.match(goalUi.body.result?.contents?.[0]?.text || '', /goal_completed/);
 
   const surface = await client.request('resources/read', { uri: 'relai://server/tool-surface' });
   assert.ok(surface.body.result?.contents, JSON.stringify(surface.body));

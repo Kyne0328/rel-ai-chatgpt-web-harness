@@ -53,6 +53,8 @@ export interface TaskDto {
   status: TaskStatus;
   state?: string;
   completionKnown?: boolean;
+  goalMode?: boolean;
+  goal_completed?: boolean;
   progress?: TaskProgressDto;
   activeCalls?: number;
   calls?: number;

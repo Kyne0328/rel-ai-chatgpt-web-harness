@@ -15,6 +15,8 @@ import { listResources, readResource, resourceCacheHint } from './resources.js';
 import { getPublicToolSchemas, getToolSurfaceManifest } from './tools/schema.ts';
 import { LOCAL_DEVELOPER_MODE } from './mcp/localDeveloperMode.js';
 import { ARTIFACT_RESOURCE_TEMPLATE } from './artifactResources.js';
+import { readGoalModeResource } from './mcp/goalModeApp.js';
+import { GOAL_MODE_RESOURCE_MIME_TYPE, GOAL_MODE_RESOURCE_URI } from './mcp/goalModeContract.js';
 
 interface RelaiMcpServerOptions {
   config?: Record<string, unknown>;
@@ -89,6 +91,16 @@ function createRelaiMcpServer(options: RelaiMcpServerOptions = {}): McpServer {
       cacheHint: resourceCacheHint(resource.uri)
     }, async (uri: URL) => readResource(uri.href));
   }
+  server.registerResource(
+    'Rel.AI Goal Continuation',
+    GOAL_MODE_RESOURCE_URI,
+    {
+      description: 'Compact MCP App view that safely continues an unfinished Rel.AI Goal across ChatGPT turns.',
+      mimeType: GOAL_MODE_RESOURCE_MIME_TYPE,
+      cacheHint: { ttlMs: 300000, cacheScope: 'private' }
+    },
+    async (uri: URL) => readGoalModeResource(uri.href)
+  );
   server.registerResource(
     'Rel.AI Artifact',
     new ResourceTemplate(ARTIFACT_RESOURCE_TEMPLATE, { list: undefined }),

@@ -1,3 +1,5 @@
+import { GOAL_MODE_RESOURCE_URI } from './goalModeContract.js';
+
 const TOOL_INVOCATION_STATUS = Object.freeze({
   relai_work: ['Updating Rel.AI task…', 'Rel.AI task updated'],
   relai_snapshot: ['Scanning repository…', 'Repository scanned'],
@@ -21,7 +23,8 @@ function toolUiMetadata(name) {
   if (!status) return undefined;
   return Object.freeze({
     'openai/toolInvocation/invoking': status[0],
-    'openai/toolInvocation/invoked': status[1]
+    'openai/toolInvocation/invoked': status[1],
+    ...(String(name || '') === 'relai_work' ? { ui: { resourceUri: GOAL_MODE_RESOURCE_URI } } : {})
   });
 }
 

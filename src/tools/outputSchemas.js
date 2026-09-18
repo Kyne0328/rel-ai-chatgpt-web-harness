@@ -219,6 +219,8 @@ const FIELD_SCHEMAS = Object.freeze({
   validationScope: STRING_ARRAY,
   validationAt: STRING_NULL,
   completionKnown: BOOLEAN,
+  goalMode: BOOLEAN,
+  goal_completed: BOOLEAN,
   completionSource: STRING,
   endReason: STRING,
   terminalReason: STRING,

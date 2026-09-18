@@ -168,6 +168,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       operation: describeToolOperation(operationName, effectiveArgs || {}),
       title: effectiveArgs?.title,
       objective: effectiveArgs?.objective,
+      goalMode: effectiveArgs?.mode === 'goal' || knownTask?.goalMode === true,
       contextSummary: effectiveArgs?.contextSummary,
       resumeTask: knownTask,
       correlation: {

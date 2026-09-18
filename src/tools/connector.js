@@ -90,6 +90,7 @@ function compactForConnector(name, value, args = {}) {
         validated: value.validated,
         validationStatus: value.validationStatus,
         completionKnown: value.completionKnown,
+        goal_completed: value.goal_completed,
         endReason: value.endReason,
         completionSource: value.completionSource,
         summary: value.summary,

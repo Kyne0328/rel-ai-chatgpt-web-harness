@@ -6,6 +6,7 @@ function compactSessionSummary(session = {}, options = {}) {
   const recentEvidence = recentActivity.length ? recentActivity : compactRecoveryEvidence(session.workflowEvidence);
   return prune({
     goal: String(session.objective || session.title || '').trim() || undefined,
+    ...(session.goalMode === true ? { mode: 'goal', goal_completed: session.goal_completed === true } : {}),
     summary: summary || undefined,
     changes: changedFiles.length ? changedFiles : undefined,
     validation: compactValidation(session),

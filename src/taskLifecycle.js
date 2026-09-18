@@ -112,6 +112,8 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
     sessionId: current.sessionId || event.taskId,
     title: current.title || historicalTitle(current, event),
     status,
+    goalMode: current.goalMode === true,
+    goal_completed: current.goalMode === true ? (current.goal_completed === true || completion) : undefined,
     progress: status === 'completed' ? completeProgress(current.progress?.label || 'Complete') : current.progress,
     completionKnown: current.completionKnown || completion,
     endReason: completion || current.completionKnown
@@ -166,6 +168,9 @@ function mergeTaskLifecycleSnapshots(persisted, live, options = {}) {
   merged.failedToolCallCount = Math.max(Number(durable.failedToolCallCount || 0), Number(active.failedToolCallCount || 0));
   merged.failures = Math.max(Number(durable.failures || 0), Number(active.failures || 0));
   merged.completionKnown = durable.completionKnown === true || active.completionKnown === true;
+  merged.goalMode = durable.goalMode === true || active.goalMode === true;
+  if (merged.goalMode) merged.goal_completed = durable.goal_completed === true || active.goal_completed === true;
+  else delete merged.goal_completed;
   merged.events = mergeLifecycleEvents(durable.events || [], active.events || []);
   return canonicalTaskSnapshot(merged, { eventsAlreadySanitized: true });
 }

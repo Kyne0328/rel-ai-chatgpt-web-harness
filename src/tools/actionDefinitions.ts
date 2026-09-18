@@ -177,7 +177,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Workspace Work',
-    description: 'Manages a durable workspace task. Use begin for substantial or multi-step repository work, including read-first investigations; it returns work_id promptly. context loads repository context using that ID; status, finish, and cancel manage its lifecycle. Carry work_id on subsequent task operations.',
+    description: 'Manages a durable workspace task. Use begin for substantial or multi-step repository work, including read-first investigations; it returns work_id promptly. Use begin with mode:"goal" when the same objective should continue across ChatGPT turns until explicit completion. context loads repository context using that ID; status, finish, and cancel manage its lifecycle. Carry work_id on subsequent task operations.',
     annotations: annotations(false, false, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
     dashboard: { category: 'Workflow', capabilities: ['workflow'] }

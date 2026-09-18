@@ -98,6 +98,7 @@ function taskAttributionHint(config, workspace, principal, conversationId) {
 
 function startTask(workspace, args = {}) {
   const context = getCurrentToolActivityContext();
+  const goalMode = args.mode === 'goal' || args.goalMode === true;
   if (!context?.taskId) {
     throw taskError('CONNECTION_CONTEXT_UNAVAILABLE', 'Rel.AI could not create a work session for this request.');
   }
@@ -111,7 +112,10 @@ function startTask(workspace, args = {}) {
     title: String(args.title || context.title || '').trim() || undefined,
     objective: String(args.objective || context.objective || '').trim() || undefined,
     intent: classifyTaskIntent(args.objective || context.objective),
-    nextAction: 'Use this work_id on operations that should belong to this durable session. Omit it for workspace- or resource-scoped operations; Rel.AI never guesses an omitted task. relai_work status restores compact durable task state after reconnect or context compaction.'
+    ...(goalMode ? { mode: 'goal', goal_completed: args.goal_completed === true } : {}),
+    nextAction: goalMode
+      ? 'Goal mode is active. Keep using this work_id across ChatGPT turns until explicit completion returns goal_completed:true. relai_work status restores the durable goal state after continuation or reconnect.'
+      : 'Use this work_id on operations that should belong to this durable session. Omit it for workspace- or resource-scoped operations; Rel.AI never guesses an omitted task. relai_work status restores compact durable task state after reconnect or context compaction.'
   };
 }
 

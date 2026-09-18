@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { GOAL_MODE_RESOURCE_URI } from '../src/mcp/goalModeContract.js';
 import { getOperationDefinitions } from '../src/tools/actionCatalog.js';
 import { OPERATION_ID_VALUES } from '../src/tools/operationIds.js';
 import { getToolSurfaceManifest } from '../src/tools/schema.js';
@@ -51,7 +52,8 @@ try {
   assert.deepEqual(listed.result.tools.filter(tool => tool.name.startsWith('relai_app_')).map(tool => tool.name), []);
   const listedByName = new Map(listed.result.tools.map(tool => [tool.name, tool]));
   for (const tool of listed.result.tools.filter(tool => getToolSurfaceManifest({ workspaces: {} }).tools.some(item => item.name === tool.name))) {
-    assert.equal(tool._meta?.ui, undefined, `${tool.name} must keep the canonical tool surface iframe-free`);
+    if (tool.name === 'relai_work') assert.deepEqual(tool._meta?.ui, { resourceUri: GOAL_MODE_RESOURCE_URI });
+    else assert.equal(tool._meta?.ui, undefined, `${tool.name} must keep the canonical tool surface iframe-free`);
     assert.equal(tool._meta?.['openai/outputTemplate'], undefined, `${tool.name} must not attach a ChatGPT output template`);
   }
   assert.equal(listedByName.has('relai_approval'), false);

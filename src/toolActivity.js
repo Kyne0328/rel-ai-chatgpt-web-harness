@@ -439,6 +439,7 @@ function createToolActivityTracker(options = {}) {
     const events = Array.isArray(resumed?.events) ? resumed.events.slice(-200) : [];
     const sequence = Math.max(calls, ...events.map(event => Math.max(0, Number(event?.sequence || 0))));
     const resumedStartedAt = Date.parse(String(resumed?.startedAtIso || resumed?.startedAt || ''));
+    const goalMode = details.goalMode === true || resumed?.goalMode === true || resumed?.mode === 'goal';
     return {
       id,
       scopeId,
@@ -454,6 +455,8 @@ function createToolActivityTracker(options = {}) {
       objective,
       contextSummary,
       intent: resumed?.intent || classifyTaskIntent(objective),
+      goalMode,
+      goal_completed: goalMode ? resumed?.goal_completed === true : undefined,
       correlation: mergeCorrelation(resumed?.correlation || {}, details.correlation, details.workspace || resumed?.workspace),
       principalFingerprint: String(details.principalFingerprint || resumed?.principalFingerprint || ''),
       status: resumed?.status === 'inactive' ? String(resumed.resumeStatus || 'planning') : String(resumed?.status || 'queued'),
@@ -605,6 +608,8 @@ function createToolActivityTracker(options = {}) {
       objective: task.objective,
       contextSummary: task.contextSummary,
       intent: task.intent,
+      goalMode: task.goalMode === true,
+      goal_completed: task.goalMode === true ? false : undefined,
       status,
       resumeStatus,
       progress: normalizeTaskProgress(task.progress, status),
@@ -657,6 +662,8 @@ function createToolActivityTracker(options = {}) {
       objective: task.objective,
       contextSummary: task.contextSummary,
       intent: task.intent,
+      goalMode: task.goalMode === true,
+      goal_completed: task.goalMode === true ? true : undefined,
       status,
       progress: completeProgress('Task completed'),
       currentStage: 'Completed',
@@ -756,6 +763,8 @@ function createToolActivityTracker(options = {}) {
       objective: task.objective,
       contextSummary: task.contextSummary,
       intent: task.intent,
+      goalMode: task.goalMode === true,
+      goal_completed: task.goalMode === true ? false : undefined,
       status: task.status,
       state: task.activeCalls > 0 ? 'working' : 'waiting',
       progress: normalizeTaskProgress(task.progress, task.status),

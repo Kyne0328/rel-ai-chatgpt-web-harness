@@ -91,7 +91,8 @@ for (const schema of publicSchemas) {
   assert.equal(schema.inputSchema.additionalProperties, false, `${schema.name} discovery must reject unknown fields`);
   assert.deepEqual(schema.annotations, schemaByName.get(schema.name)?.annotations, `${schema.name} must preserve truthful canonical annotations`);
   assert.deepEqual(schema._meta?.securitySchemes, [{ type: 'noauth' }], `${schema.name} must advertise local noauth through ChatGPT compatibility metadata`);
-  assert.equal(schema._meta?.ui, undefined, `${schema.name} must stay iframe-free`);
+  if (schema.name === 'relai_work') assert.match(schema._meta?.ui?.resourceUri || '', /^ui:\/\/relai\/goal-continuation-v1\.html$/);
+  else assert.equal(schema._meta?.ui, undefined, `${schema.name} must stay iframe-free`);
   assert.equal(schema._meta?.['openai/outputTemplate'], undefined, `${schema.name} must not attach a ChatGPT output template`);
   assert.ok(String(schema.description || '').trim().length > 0, `${schema.name} must have a concise connector description`);
   if (!capabilityRoutingDescriptions.has(schema.name)) {
@@ -102,7 +103,7 @@ const publicWork = publicSchemas.find(item => item.name === 'relai_work');
 assert.match(publicWork?.description || '', /Use begin for substantial or multi-step repository work, including read-first investigations/i, 'relai_work discovery must tell the agent when durable task creation is expected');
 assert.doesNotMatch(publicWork?.description || '', /one optional durable workspace task/i, 'relai_work discovery must not frame substantial task creation as merely optional');
 const publicWorkSchema = publicWork?.inputSchema;
-for (const field of ['workspace', 'title', 'objective', 'bootstrap', 'instructionPath', 'summary', 'reason', 'work_id']) {
+for (const field of ['workspace', 'title', 'objective', 'mode', 'bootstrap', 'instructionPath', 'summary', 'reason', 'work_id']) {
   assert.ok(publicWorkSchema?.properties?.[field], `relai_work connector schema must expose ${field}`);
 }
 assert.equal(publicWorkSchema?.allOf, undefined, 'relai_work discovery stays import-safe; action-specific validation belongs to the canonical runtime contract');
@@ -178,6 +179,8 @@ assert.match(editSchema.inputSchema.properties.updateText.description, /One logi
 assert.deepEqual(editSchema.inputSchema.properties.stage.enum, ['start', 'append', 'commit', 'abort'], 'canonical executable schema must retain the internal staged transport lifecycle');
 
 await valid('relai_work', { action: 'begin', workspace: 'repo' });
+await valid('relai_work', { action: 'begin', workspace: 'repo', mode: 'goal' });
+await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'background' });
 await valid('relai_work', { action: 'begin' });
 await valid('relai_work', { action: 'finish', work_id: 'work', summary: 'Done.' });
 await invalid('relai_work', { action: 'finish', work_id: 'work' });

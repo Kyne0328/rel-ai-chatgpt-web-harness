@@ -27,6 +27,8 @@ Use Rel.AI MCP with workspace "myapp". Start one work session, read the project,
 
 For substantial or multi-step local project goals, ChatGPT should start one Rel.AI work session before meaningful mutation and keep its `work_id` across edits, checks, review, recovery, and completion. Isolated reads, inspection, and genuinely small one-shot actions may use the authorized workspace directly without creating a durable task.
 
+For work that may outlive one ChatGPT turn, start `relai_work` with `mode:"goal"`. Goal mode keeps `goal_completed:false` across intermediate calls, inactivity, reconnects, and continuation turns. Explicit successful completion is the only path that advances the Goal to `goal_completed:true`. The `relai_work` MCP App view arms a continuation handoff before the observed ChatGPT tool-execution window, rechecks the same `work_id`, and uses the standard MCP Apps `ui/message` bridge to request another ChatGPT turn when the Goal is still unfinished. Cancellation or failure stops continuation. Automatic handoff depends on the connected ChatGPT host supporting MCP Apps messaging; the durable `work_id` remains resumable even when the host cannot initiate the follow-up.
+
 ## Why Rel.AI uses ChatGPT
 
 Rel.AI uses ChatGPT's app/tool path, not Codex. OpenAI currently documents that [Apps use the normal ChatGPT rate limits for your plan](https://help.openai.com/en/articles/11487775-connectors-in), while [Codex usage counts toward agentic usage](https://help.openai.com/en/articles/11369540-codex-and-chatgpt-plan-usage-limits). Rel.AI therefore does not draw from the Codex agentic allowance. Your normal ChatGPT plan limits still apply, so Rel.AI does not describe its usage as unlimited.
