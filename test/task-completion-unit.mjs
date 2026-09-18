@@ -6,7 +6,7 @@ import { flushLocalAnalytics, readLocalUsageSnapshot } from "../src/localAnalyti
 import { repositoryIntelligence } from "../src/repository/intelligence/service.js";
 import { resetTaskHistoryCaches } from "../src/taskHistoryStorage.ts";
 import { flushTaskHistoryPersistence } from "../src/taskHistoryStore.ts";
-import { resolvePolicy } from "../src/policyResolver.js";
+import { readSessionPolicy } from "../src/policyResolver.js";
 import { readTaskIntegrity } from '../src/taskIntegrity.ts';
 import { withStateDatabase } from '../src/stateDatabase.ts';
 import assert from 'node:assert/strict';
@@ -290,7 +290,7 @@ try {
   assert.equal(atomicCompletion.completionSource, 'relai_validate:checks');
   assert.equal(atomicCompletion.summary, 'Validated and completed atomically.');
   assert.match(atomicCompletion.nextAction, /completion was accepted/i);
-  assert.equal(resolvePolicy({ alias: 'app', path: workspace }, readConfig()).sessionActive, false);
+  assert.equal(readSessionPolicy(readConfig(), 'app', atomicTaskId), null, 'atomic completion must clear this task ownership state');
   const atomicStatus = getToolActivity();
   assert.equal(atomicStatus.state, 'idle');
   assert.equal(atomicStatus.lastTask.status, 'completed');
@@ -330,7 +330,7 @@ try {
   assert.equal(completion.validationStatus, 'passed');
   const completedTasksAfter = readLocalUsageSnapshot(readConfig(), analyticsMonth).taskIntents.reduce((sum, row) => sum + Number(row.tasks || 0), 0);
   assert.equal(completedTasksAfter, completedTasksBefore + 1, 'accepted task completion must increment local work-type analytics exactly once');
-  assert.equal(resolvePolicy({ alias: 'app', path: workspace }, readConfig()).sessionActive, false, 'explicit completion must clear only this task ownership state');
+  assert.equal(readSessionPolicy(readConfig(), 'app', taskId), null, 'explicit completion must clear only this task ownership state');
 
   const status = getToolActivity();
   assert.equal(status.state, 'idle');
