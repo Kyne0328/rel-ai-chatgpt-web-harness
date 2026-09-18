@@ -158,6 +158,7 @@ try {
     assert.equal(migrated.totals.reliabilityCalls, 0, 'schema-v2 reliability counters are ambiguous under the stricter classifier and must be reset');
     assert.equal(migrated.totals.infrastructureFailures, 0, 'schema-v2 internal-error counts must not be relabeled as confirmed failures');
     recordLocalToolOutcome({ stateDir: previousStateDir }, { tool: 'relai_read', workspace: 'repo', ok: true, durationMs: 5, at: '2026-08-15T02:30:00Z' });
+    await flushLocalAnalytics({ stateDir: previousStateDir });
     const persistedDocument = withStateDatabase({ stateDir: previousStateDir }, db => JSON.parse(db.prepare('SELECT payload FROM analytics_months WHERE month=?').get('2026-08').payload));
     assert.equal(persistedDocument.schemaVersion, 5);
     assert.equal(persistedDocument.totals.successes, 10);
@@ -196,6 +197,7 @@ try {
     assert.equal(migrated.totals.reliableCalls, 9);
     assert.equal(migrated.totals.operationFailures, 1);
     recordLocalToolOutcome({ stateDir: v3StateDir }, { tool: 'relai_read', operationName: 'read', taskIntent: 'investigation', workspace: 'repo', ok: true, durationMs: 5, at: '2026-08-15T02:30:00Z' });
+    await flushLocalAnalytics({ stateDir: v3StateDir });
     const persistedDocument = withStateDatabase({ stateDir: v3StateDir }, db => JSON.parse(db.prepare('SELECT payload FROM analytics_months WHERE month=?').get('2026-08').payload));
     assert.equal(persistedDocument.schemaVersion, 5);
     assert.equal(persistedDocument.totals.reliabilityCalls, 11);
