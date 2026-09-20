@@ -21,12 +21,14 @@ async function runAuditRedactionRegression(existingRoot = '') {
       nested: { message: `api_key=${secret}` },
       authorization: `Bearer ${secret}`
     });
+    void safeLogAudit(config, { tool: 'fire-and-forget-regression', ok: true });
     await flushAuditWrites(config.auditLogPath);
 
     const persisted = fs.readFileSync(config.auditLogPath, 'utf8');
     assert.equal(persisted.includes(secret), false, persisted);
     assert.match(persisted, /redacted/i);
     assert.match(persisted, /security-regression/);
+    assert.match(persisted, /fire-and-forget-regression/, 'flushAuditWrites must wait for safeLogAudit calls that have not enqueued their write yet');
   } finally {
     if (ownsRoot) fs.rmSync(root, { recursive: true, force: true });
   }

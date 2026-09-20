@@ -87,6 +87,8 @@
 .settings-validation-row > div { @apply grid min-w-0 gap-0.5; }
 .settings-validation-row > div span { @apply text-[12px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
 .settings-advanced { @apply max-w-5xl; }
+.developer-options { width: 100%; max-width: none; margin-top: 0; overflow: hidden; background: var(--ui-surface-primary); }
+.developer-options > .settings-panel-body { padding: 12px 14px 14px; }
 
 .appearance-preview { @apply grid gap-3 rounded-xl p-3; grid-template-columns: repeat(2,minmax(0,1fr)); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
 .appearance-swatch { @apply min-h-16 rounded-lg p-3; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); }

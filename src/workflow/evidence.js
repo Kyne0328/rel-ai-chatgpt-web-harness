@@ -39,7 +39,14 @@ function checkEvidenceReusable(receipt, current = {}) {
     && normalizeCommand(receipt.command) === normalizeCommand(current.command)
     && normalizeCwd(receipt.cwd) === normalizeCwd(current.cwd)
     && receipt.repositoryFingerprint
-    && String(receipt.repositoryFingerprint) === String(current.repositoryFingerprint || ''));
+    && String(receipt.repositoryFingerprint) === String(current.repositoryFingerprint || '')
+    && generationMatches(receipt.mutationGeneration, current.mutationGeneration)
+    && generationMatches(receipt.workspaceGeneration, current.workspaceGeneration));
+}
+
+function generationMatches(stored, current) {
+  if (current == null || current === '') return true;
+  return nonNegativeInt(stored) === nonNegativeInt(current);
 }
 
 function repeatFailureCount(receipts = []) {

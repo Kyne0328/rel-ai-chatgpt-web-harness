@@ -27,6 +27,7 @@ function createPulseWindowManager(options = {}) {
   let window = null;
   let rendererReady = false;
   let enabled = true;
+  let suppressed = false;
   let started = false;
   let themePreference = 'system';
   let expanded = false;
@@ -34,6 +35,7 @@ function createPulseWindowManager(options = {}) {
   let applyingGeometry = false;
   let geometryRevision = 0;
   let pendingShowTimer = null;
+  let recoveryScheduled = false;
   let currentStatus = {};
   let currentModel = projectPulseStatus(currentStatus);
   const wayland = platform === 'linux' && String(env.XDG_SESSION_TYPE || '').toLowerCase() === 'wayland';
@@ -54,6 +56,19 @@ function createPulseWindowManager(options = {}) {
     enabled = value !== false;
     sync();
     return enabled;
+  }
+
+  function setSuppressed(value) {
+    const next = value === true;
+    if (suppressed === next) return suppressed;
+    suppressed = next;
+    if (!suppressed && started && enabled && currentModel.visible && !isQuitting()) {
+      cancelPendingShow();
+      showCurrentModel();
+    } else {
+      sync();
+    }
+    return suppressed;
   }
 
   function update(status = {}) {
@@ -82,7 +97,7 @@ function createPulseWindowManager(options = {}) {
   }
 
   function sync() {
-    if (!started || !enabled || !currentModel.visible || isQuitting()) {
+    if (!started || !enabled || suppressed || !currentModel.visible || isQuitting()) {
       hide();
       return;
     }
@@ -128,10 +143,20 @@ function createPulseWindowManager(options = {}) {
     }
   }
 
+  function scheduleRecovery() {
+    if (recoveryScheduled || !started || !enabled || !currentModel.visible || isQuitting()) return;
+    recoveryScheduled = true;
+    setImmediate(() => {
+      recoveryScheduled = false;
+      if (!started || !enabled || !currentModel.visible || isQuitting()) return;
+      sync();
+    });
+  }
+
   function getOrCreateWindow() {
     if (window && !window.isDestroyed()) return window;
     const bounds = pulseBounds(screen, { expanded: false });
-    window = new BrowserWindow({
+    const createdWindow = new BrowserWindow({
       ...bounds,
       width: PULSE_WIDTH,
       height: PULSE_HEIGHT,
@@ -152,27 +177,39 @@ function createPulseWindowManager(options = {}) {
       backgroundColor: '#00000000',
       webPreferences: localWindowWebPreferences(preloadPath, 'relai-pulse', 'pulse')
     });
-    installProtocol(window.webContents.session.protocol);
-    secureLocalWindow(window, { allowedUrl: rendererUrl, onError: onSecurityError });
-    void Promise.resolve(window.loadURL(rendererUrl)).catch(error => {
+    window = createdWindow;
+    installProtocol(createdWindow.webContents.session.protocol);
+    secureLocalWindow(createdWindow, { allowedUrl: rendererUrl, onError: onSecurityError });
+    void Promise.resolve(createdWindow.loadURL(rendererUrl)).catch(error => {
       onSecurityError(new Error(`Pulse renderer failed to load: ${error instanceof Error ? error.message : String(error)}`));
     });
-    window.webContents.on('did-finish-load', () => {
+    createdWindow.webContents.on('did-finish-load', () => {
+      if (window !== createdWindow || createdWindow.isDestroyed()) return;
       rendererReady = true;
-      window?.webContents.send('pulse:update', pulseModel());
+      createdWindow.webContents.send('pulse:update', pulseModel());
     });
-    window.on('close', event => {
+    createdWindow.webContents.on('render-process-gone', () => {
+      if (window !== createdWindow || isQuitting()) return;
+      rendererReady = false;
+      if (!createdWindow.isDestroyed()) createdWindow.destroy();
+      scheduleRecovery();
+    });
+    createdWindow.on('close', event => {
       if (isQuitting()) return;
       event.preventDefault();
-      window?.hide();
+      createdWindow.hide();
+      scheduleRecovery();
     });
-    if (platform === 'win32' || platform === 'darwin') window.on('will-move', rememberManualPosition);
-    else if (!wayland) window.on('move', rememberPosition);
-    window.on('closed', () => {
-      window = null;
-      rendererReady = false;
+    if (platform === 'win32' || platform === 'darwin') createdWindow.on('will-move', rememberManualPosition);
+    else if (!wayland) createdWindow.on('move', rememberPosition);
+    createdWindow.on('closed', () => {
+      if (window === createdWindow) {
+        window = null;
+        rendererReady = false;
+      }
+      scheduleRecovery();
     });
-    return window;
+    return createdWindow;
   }
 
   function reposition() {
@@ -227,6 +264,7 @@ function createPulseWindowManager(options = {}) {
     screen.off?.('display-metrics-changed', reposition);
     geometryRevision += 1;
     applyingGeometry = false;
+    recoveryScheduled = false;
     cancelPendingShow();
     if (window && !window.isDestroyed()) window.destroy();
     window = null;
@@ -238,7 +276,7 @@ function createPulseWindowManager(options = {}) {
     return window && !window.isDestroyed() ? window : null;
   }
 
-  return { start, stop, update, setEnabled, setThemePreference, setExpanded, getWindow };
+  return { start, stop, update, setEnabled, setSuppressed, setThemePreference, setExpanded, getWindow };
 }
 
 function pulseBounds(screen, options = {}) {

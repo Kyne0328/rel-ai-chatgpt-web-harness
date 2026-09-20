@@ -148,7 +148,7 @@ npm run init-config
 npm run workspace:add
 ```
 
-Rel.AI discovers validation commands from the project's current manifests. Use `relai_validate` for explicit one-off checks and `relai_exec` for other bounded one-shot commands; command aliases are not stored in Rel.AI configuration.
+Rel.AI discovers validation commands from the project's current manifests. Use `relai_validate` for explicit one-off checks and `relai_exec` for other one-shot commands. Durable work can run until it exits or is explicitly cancelled; taskless work retains a bounded safety timeout. Command aliases are not stored in Rel.AI configuration.
 
 ## Packaging
 
@@ -192,7 +192,7 @@ Release publication, signing status, checksums, updater metadata, and artifact p
 
 ## Public product-path scanner
 
-`test/electron-product-path-unit.mjs` protects the installed-app path from developer-only setup language. Add new public documents or visible connection copy to its declared surface list when appropriate.
+`test/suite-desktop-runtime-unit.mjs` protects the installed-app path from developer-only setup language. Add new public documents or visible connection copy to its declared surface list when appropriate.
 
 The scanner intentionally excludes this development guide and other internal engineering documents.
 

@@ -17,7 +17,7 @@ Execution-mode policy
    |                                                |                           |
    v                                                v                           v
 Native MCP Task                               Bounded direct execution     Work-session continuation
-(one asynchronous MCP request)               (one bounded request)       (same work_id, status polling)
+(one asynchronous MCP request)               (one bounded request)       (same work_id, completion handoff)
    |                                                |                           |
    +--------------------------- same domain operation ---------------------------+
                                             |
@@ -66,7 +66,7 @@ Stdio uses a connection-scoped local principal. A server restart terminalizes ac
 ## Operator diagnostics
 
 - **Native MCP Tasks: Supported** means the observed request advertised the capability.
-- **Native MCP Tasks: Not advertised by client** means short operations complete directly while longer eligible operations may continue under the repository `work_id`. Detached work uses low-frequency status hints; agents should continue independent work instead of polling. Newly completed fallback operations are delivered once under `completedOperations` on a later Rel.AI call in the same authorized principal/workspace when available.
+- **Native MCP Tasks: Not advertised by client** means short operations complete directly while longer eligible operations may continue under the repository `work_id`. Agents should continue independent work instead of polling; newly completed fallback operations are delivered once under `completedOperations` on a later Rel.AI call in the same authorized principal/workspace when available. `relai_work status` is an explicit recovery/retrieval path, not a polling loop.
 - **Native MCP Tasks: Unknown** means no usable capability evidence has been observed.
 - Diagnostics describe capability-dependent behavior, not a single selected mode: supported clients may receive Native MCP Tasks for eligible long work, while non-Tasks clients use work-session continuation when the direct response window is exceeded.
 - A native `taskId`, repository `work_id`, and process `processId` identify different entities.

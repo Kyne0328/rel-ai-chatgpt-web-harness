@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { DESKTOP_NAV_ITEMS, MOBILE_MORE_NAV_ITEMS, MOBILE_NAV_ITEMS, MOBILE_PRIMARY_NAV_ITEMS, SETTINGS_NAV_ITEMS, navigationCommands, routeMetadata } from '../src/ui/navigation-catalog.js';
 import { activityFilterTransition, mergeActivityEntries } from '../src/ui/features/activity/model.js';
 import { repositorySummary } from '../src/ui/features/workspaces/model.js';
-import { advanceDeveloperUnlockClicks } from '../src/ui/features/settings/react.js';
+import { DEVELOPER_FEATURES } from '../src/ui/developer-mode.js';
+import { advanceDeveloperUnlockClicks, runtimeCompatibilityNotice } from '../src/ui/features/settings/react.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
@@ -14,6 +15,25 @@ const reactShell = read('src/ui/react/main.js');
 const dashboard = read('public/dashboard.js');
 const router = read('src/ui/router.js');
 const settingsReact = read('src/ui/features/settings/react.js');
+assert.match(settingsReact, /runtimeCompatibilityNotice/, 'About must surface repository/runtime skew only when compatibility metadata reports a mismatch');
+assert.match(settingsReact, /about-runtime-mismatch/, 'Runtime/source skew needs a bounded developer-facing notice instead of staying invisible');
+assert.equal(runtimeCompatibilityNotice(
+  { applicationVersion: '1.1.3' },
+  { applicationVersion: '1.1.3' },
+  { available: true, metadataMatches: true }
+), null, 'matching runtime/source metadata must stay silent');
+const restartNotice = runtimeCompatibilityNotice(
+  { applicationVersion: '1.1.2' },
+  { applicationVersion: '1.1.3' },
+  { available: true, metadataMatches: false, restartRequired: true, activeTasksPreventRestart: false }
+);
+assert.match(restartNotice?.message || '', /Restart Rel\.AI.*current source/i, 'restart-required skew must tell developers how to load the current source');
+const blockedRestartNotice = runtimeCompatibilityNotice(
+  { applicationVersion: '1.1.2' },
+  { applicationVersion: '1.1.3' },
+  { available: true, metadataMatches: false, restartRequired: true, activeTasksPreventRestart: true }
+);
+assert.match(blockedRestartNotice?.message || '', /Finish active tasks before restarting/i, 'active work must suppress misleading immediate-restart guidance');
 const extensionsReact = read('src/ui/features/extensions/react.js');
 const diagnosticsReact = read('src/ui/features/settings/diagnostics-react.js');
 const homeReact = read('src/ui/features/home/react.js');
@@ -37,7 +57,7 @@ assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'system')?.label, 'Syste
 assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'extensions'), undefined);
 assert.equal(routeMetadata('extensions').id, 'extensions', 'Extensions must remain a valid hidden route');
 assert.ok(!navigationCommands().some(item => item.id === 'extensions'), 'Extensions must stay out of quick navigation by default');
-assert.ok(navigationCommands({ includeExtensions: true }).some(item => item.id === 'extensions'), 'Developer mode must add Extensions to quick navigation');
+assert.ok(navigationCommands({ includeExtensions: true }).some(item => item.id === 'extensions'), 'The Extensions feature flag must add Extensions to quick navigation');
 const settingsNavIds = SETTINGS_NAV_ITEMS.map(item => item.id);
 for (const required of ['connection', 'preferences', 'application', 'about']) assert.ok(settingsNavIds.includes(required), `${required} settings must remain reachable`);
 assert.equal(SETTINGS_NAV_ITEMS.find(item => item.id === 'connection')?.href, '#settings/connection');
@@ -63,10 +83,11 @@ assert.match(reactShell, /registerReactSection\('settings'/, 'Settings must rema
 assert.match(reactShell, /registerReactSection\('diagnostics'/, 'Troubleshooting must remain a canonical React route');
 assert.match(settingsReact, /h\('h2', null, title\)/, 'Settings pages must continue the shell H1 with an H2');
 assert.match(settingsReact, /developerOptionsUnlocked \? h\(DeveloperOptions, \{/, 'Developer options must stay hidden until they are unlocked');
-assert.match(settingsReact, /label: 'Developer mode'/, 'Unlocked developer options must expose a Developer mode toggle');
-assert.match(settingsReact, /writeDeveloperModeEnabled\(enabled\)/, 'Developer mode changes must persist');
-assert.match(reactShell, /developerModeEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'Developer mode must expose Extensions in desktop navigation');
-assert.match(reactShell, /developerModeEnabled \? \[\.\.\.MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM\]/, 'Developer mode must expose Extensions in mobile navigation');
+assert.equal(DEVELOPER_FEATURES.extensions.label, 'Enable Extensions', 'Unlocked developer options must expose an individual Extensions flag');
+assert.match(settingsReact, /writeDeveloperFeatureEnabled\(feature, enabled\)/, 'Developer feature changes must persist independently');
+assert.doesNotMatch(settingsReact, /label: 'Developer mode'/, 'Developer options must not use a global Developer mode toggle');
+assert.match(reactShell, /extensionsEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'The Extensions flag must expose Extensions in desktop navigation');
+assert.match(reactShell, /extensionsEnabled \? \[\.\.\.MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM\]/, 'The Extensions flag must expose Extensions in mobile navigation');
 assert.match(settingsReact, /DEVELOPER_UNLOCK_CLICK_COUNT = 5/, 'Developer options must require five build clicks');
 assert.match(settingsReact, /DEVELOPER_UNLOCK_WINDOW_MS = 2500/, 'Developer option clicks must occur in a short time window');
 let unlockState = {};

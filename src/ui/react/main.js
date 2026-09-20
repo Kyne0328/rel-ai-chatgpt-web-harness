@@ -19,7 +19,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { HashRouter, useLocation } from 'react-router-dom';
 import { Icon } from '../components/icons.js';
 import { connectionLayerViews, connectionSummary } from '../connection-state.js';
-import { DEVELOPER_MODE_CHANGE_EVENT, DEVELOPER_MODE_STORAGE_KEY, readDeveloperModeEnabled } from '../developer-mode.js';
+import { DEVELOPER_FEATURE_CHANGE_EVENT, DEVELOPER_FEATURES, readDeveloperFeatureEnabled } from '../developer-mode.js';
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import {
   APPLICATION_NAV_ITEMS,
@@ -244,7 +244,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   ));
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [developerModeEnabled, setDeveloperModeEnabled] = useState(() => readDeveloperModeEnabled());
+  const [extensionsEnabled, setExtensionsEnabled] = useState(() => readDeveloperFeatureEnabled('extensions'));
   const paletteOpener = useRef(null);
   const previousRouteKey = useRef(route.key);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -277,14 +277,17 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   }, []);
 
   useEffect(() => {
-    const refreshDeveloperMode = () => setDeveloperModeEnabled(readDeveloperModeEnabled());
-    const onStorage = event => {
-      if (event.key === DEVELOPER_MODE_STORAGE_KEY) refreshDeveloperMode();
+    const refreshExtensionsFlag = event => {
+      if (event?.detail?.feature && event.detail.feature !== 'extensions') return;
+      setExtensionsEnabled(readDeveloperFeatureEnabled('extensions'));
     };
-    window.addEventListener(DEVELOPER_MODE_CHANGE_EVENT, refreshDeveloperMode);
+    const onStorage = event => {
+      if (event.key === DEVELOPER_FEATURES.extensions.storageKey) refreshExtensionsFlag();
+    };
+    window.addEventListener(DEVELOPER_FEATURE_CHANGE_EVENT, refreshExtensionsFlag);
     window.addEventListener('storage', onStorage);
     return () => {
-      window.removeEventListener(DEVELOPER_MODE_CHANGE_EVENT, refreshDeveloperMode);
+      window.removeEventListener(DEVELOPER_FEATURE_CHANGE_EVENT, refreshExtensionsFlag);
       window.removeEventListener('storage', onStorage);
     };
   }, []);
@@ -322,14 +325,14 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     },
       h(DesktopSidebar, {
         collapsed: sidebarCollapsed,
-        developerModeEnabled,
+        extensionsEnabled,
         openAccordion,
         route,
         setOpenAccordion,
         toggleSidebar
       }),
       h('main', { id: 'main', className: 'main', tabIndex: -1, 'aria-labelledby': 'pageTitle' },
-        h(MobileNavigation, { developerModeEnabled, open: mobileMoreOpen, route, setOpen: setMobileMoreOpen }),
+        h(MobileNavigation, { extensionsEnabled, open: mobileMoreOpen, route, setOpen: setMobileMoreOpen }),
         h('header', { className: 'topbar' },
           h('div', { className: 'title-wrap' },
             h('h1', { className: 'page-title', id: 'pageTitle', tabIndex: -1 }, route.title),
@@ -364,7 +367,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     ),
     h(CommandPalette, {
       data,
-      developerModeEnabled,
+      extensionsEnabled,
       onAddWorkspace,
       onClose: closePalette,
       open: paletteOpen,
@@ -375,7 +378,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   );
 }
 
-function DesktopSidebar({ collapsed, developerModeEnabled, openAccordion, route, setOpenAccordion, toggleSidebar }) {
+function DesktopSidebar({ collapsed, extensionsEnabled, openAccordion, route, setOpenAccordion, toggleSidebar }) {
   const surface = document.documentElement.dataset.surface || 'browser';
   return h('aside', { className: 'sidebar', id: 'desktopSidebar' },
     h('div', { className: 'brand' },
@@ -404,7 +407,7 @@ function DesktopSidebar({ collapsed, developerModeEnabled, openAccordion, route,
     ),
     h('div', { className: 'sidebar-group secondary-nav' },
       h('div', { className: 'sidebar-group-label' }, 'Application'),
-      developerModeEnabled ? h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }) : null,
+      extensionsEnabled ? h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }) : null,
       h(SidebarAccordion, {
         parent: APPLICATION_NAV_ITEMS[0],
         items: SYSTEM_NAV_ITEMS,
@@ -453,9 +456,9 @@ function SidebarAccordion({ parent, items, activeOwner, activePath, openAccordio
   );
 }
 
-function MobileNavigation({ developerModeEnabled, open, route, setOpen }) {
+function MobileNavigation({ extensionsEnabled, open, route, setOpen }) {
   const detailsRef = useRef(null);
-  const moreItems = developerModeEnabled ? [...MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM] : MOBILE_MORE_NAV_ITEMS;
+  const moreItems = extensionsEnabled ? [...MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM] : MOBILE_MORE_NAV_ITEMS;
   const moreActive = moreItems.some(item => item.id === route.owner);
   useEffect(() => {
     const onPointerDown = event => {
@@ -767,11 +770,11 @@ function RecoveryNotice({ recovery }) {
   );
 }
 
-function CommandPalette({ data, developerModeEnabled, onAddWorkspace, onClose, open, opener }) {
+function CommandPalette({ data, extensionsEnabled, onAddWorkspace, onClose, open, opener }) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef(null);
-  const commands = useMemo(() => buildCommands(data, developerModeEnabled, onAddWorkspace, onClose), [data?.config?.workspaces, developerModeEnabled, onAddWorkspace, onClose]);
+  const commands = useMemo(() => buildCommands(data, extensionsEnabled, onAddWorkspace, onClose), [data?.config?.workspaces, extensionsEnabled, onAddWorkspace, onClose]);
   const visible = useMemo(() => {
     const normalized = normalizeSearch(query);
     return commands.filter(command => !normalized || command.searchText.includes(normalized)).slice(0, 14);
@@ -878,8 +881,8 @@ function CommandPalette({ data, developerModeEnabled, onAddWorkspace, onClose, o
   ));
 }
 
-function buildCommands(data, developerModeEnabled, onAddWorkspace, closePalette) {
-  const commands = navigationCommands({ includeExtensions: developerModeEnabled }).map(item => ({
+function buildCommands(data, extensionsEnabled, onAddWorkspace, closePalette) {
+  const commands = navigationCommands({ includeExtensions: extensionsEnabled }).map(item => ({
     id: item.path.replaceAll('/', '-'),
     label: item.group === 'Settings' ? `Settings · ${item.label}` : item.label,
     description: item.description,

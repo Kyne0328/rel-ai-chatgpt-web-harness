@@ -52,9 +52,10 @@ assert.deepEqual(
 );
 assert.ok(Buffer.byteLength(JSON.stringify(connectorInstructions(config)), 'utf8') > 0, 'connector instructions must serialize to a non-empty payload');
 assert.match(connectorInstructions(config), /work_id is durable task attribution/i, 'global instructions must define durable task identity without framing substantial work as optional');
-assert.match(connectorInstructions(config), /omit it for workspace\/resource work and never infer one/i, 'global instructions must prohibit ambiguous implicit task attribution');
+assert.match(connectorInstructions(config), /isolated reads\/inspection\/small one-shots may omit it for workspace\/resource work.*never infer one/i, 'global instructions must prohibit ambiguous implicit task attribution while allowing isolated work to stay taskless');
 assert.match(connectorInstructions(config), /approval/i, 'global instructions retain approval safety where defined');
-assert.match(connectorInstructions(config), /authoritative evidence/i, 'global instructions retain truthful evidence semantics');
+assert.match(connectorInstructions(config), /results are authoritative/i, 'global instructions must identify returned results as authoritative evidence');
+assert.match(connectorInstructions(config), /report (?:only )?checks (?:actually )?performed/i, 'global instructions must require reporting performed checks rather than unverified checks');
 assert.match(connectorInstructions(config), /validation is factual evidence, not execution permission/i, 'global instructions must describe validation as evidence rather than permission');
 assert.match(connectorInstructions(config), /work_id omission never selects another task/i, 'global instructions must preserve explicit task-attribution isolation');
 assert.doesNotMatch(connectorInstructions(config), /workspace-resolution error|filesystem path that Rel\.AI already knows|brief normal assistant progress|Native tool invocation labels|private chain-of-thought|poll relai_work status/i,
@@ -101,7 +102,7 @@ for (const schema of publicSchemas) {
   }
 }
 const publicWork = publicSchemas.find(item => item.name === 'relai_work');
-assert.match(publicWork?.description || '', /Use begin for substantial or multi-step repository work, including read-first investigations/i, 'relai_work discovery must tell the agent when durable task creation is expected');
+assert.match(publicWork?.description || '', /Use begin once for substantial or multi-step work/i, 'relai_work discovery must tell the agent when durable task creation is expected without requiring an extra setup round trip');
 assert.doesNotMatch(publicWork?.description || '', /one optional durable workspace task/i, 'relai_work discovery must not frame substantial task creation as merely optional');
 const publicWorkSchema = publicWork?.inputSchema;
 for (const field of ['workspace', 'title', 'objective', 'bootstrap', 'instructionPath', 'summary', 'reason', 'work_id']) {
@@ -112,6 +113,7 @@ const publicSearchInputSchema = publicSchemas.find(item => item.name === 'relai_
 for (const field of ['queries', 'maxResults', 'maxFiles']) {
   assert.equal(publicSearchInputSchema?.properties?.[field]?.anyOf, undefined, `relai_search root ${field} schema must collapse bounded action variants instead of advertising a redundant union`);
 }
+assert.equal(publicSearchInputSchema?.properties?.queries?.maxItems, 8, 'flat discovery must advertise the widest supported batch without weakening action-specific runtime validation');
 assert.equal(publicSearchInputSchema?.properties?.pattern?.description, undefined, 'flat discovery must not repeat action ownership on individual fields');
 assert.equal(publicSearchInputSchema?.properties?.query?.description, undefined, 'flat discovery must not repeat action ownership on individual fields');
 assert.match(publicSearchInputSchema?.properties?.action?.description || '', /Fields: text\([^)]*pattern[^)]*\).*semantic\([^)]*query[^)]*\)/, 'flat discovery must summarize action-specific fields once on the action selector');
@@ -162,7 +164,7 @@ for (const removed of removedDirectNames) {
 }
 
 const publicSchemaByName = new Map(publicSchemas.map(schema => [schema.name, schema]));
-assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'finish', 'cancel']);
+assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'stop', 'finish', 'cancel']);
 const processSchema = schemaByName.get('relai_process');
 assert.deepEqual(processSchema.inputSchema.properties.action.enum, ['start', 'read', 'write', 'stop', 'list']);
 assert.ok(processSchema.inputSchema.properties.kind.enum.includes('service'));
@@ -172,7 +174,9 @@ assert.match(processSchema.inputSchema.properties.argv.description, /without she
 assert.match(processSchema.inputSchema.properties.input.description, /without closing the persistent stdin stream/i);
 const editSchema = schemaByName.get('relai_edit');
 assert.equal(editSchema.inputSchema.oneOf?.length, 10, 'relai_edit executable schema must retain all canonical edit-form variants');
-assert.match(editSchema.description, /semantic rename.*structural symbol edits.*exact replacement.*full-file content/i);
+for (const capability of [/semantic/i, /structural/i, /exact/i, /full-file/i]) {
+  assert.match(editSchema.description, capability, 'relai_edit discovery must retain every canonical edit capability after description compaction');
+}
 assert.deepEqual(editSchema.inputSchema.properties.symbolEdit.properties.action.enum, ['replace', 'insert_before', 'insert_after']);
 assert.doesNotMatch(editSchema.description, /transport-size fallback/i, 'normal edit guidance must not advertise the internal staged transport fallback');
 assert.match(editSchema.inputSchema.properties.content.description, /staged internally when needed/i);
@@ -183,6 +187,7 @@ await valid('relai_work', { action: 'begin', workspace: 'repo' });
 await valid('relai_work', { action: 'begin' });
 await valid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ id: 'inspect', title: 'Inspect implementation', status: 'in_progress' }] });
 await valid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [] });
+await valid('relai_work', { action: 'stop', workspace: 'repo', work_id: 'work', operationId: 'operation-1', reason: 'Stop the selected operation.' });
 await invalid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ title: 'Invalid state', status: 'working' }] });
 await valid('relai_work', { action: 'finish', work_id: 'work', summary: 'Done.' });
 await invalid('relai_work', { action: 'finish', work_id: 'work' });
@@ -198,7 +203,8 @@ await valid('relai_read', { work_id: 'work', paths: ['dist/report.zip'], asResou
 await valid('relai_search', { action: 'text', work_id: 'work', pattern: 'needle', maxFiles: 200, maxResults: 1000 });
 await valid('relai_search', { action: 'text', work_id: 'work', queries: ['needle', 'haystack'], maxFiles: 200 });
 await invalid('relai_search', { action: 'text', work_id: 'work', pattern: 'needle', queries: ['haystack'] });
-await invalid('relai_search', { action: 'text', work_id: 'work', queries: ['a', 'b', 'c', 'd', 'e'] });
+await valid('relai_search', { action: 'text', work_id: 'work', queries: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] });
+await invalid('relai_search', { action: 'text', work_id: 'work', queries: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] });
 await invalid('relai_search', { action: 'text', work_id: 'work', pattern: 'needle', maxFiles: 201 });
 await invalid('relai_search', { action: 'text', work_id: 'work', pattern: 'needle', maxResults: 1001 });
 await valid('relai_search', { action: 'semantic', work_id: 'work', query: 'needle', maxResults: 100, maxFiles: 20000 });

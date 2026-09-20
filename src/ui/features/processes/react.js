@@ -39,15 +39,19 @@ export function createProcessesRoute(useDashboardSlices) {
 
 const ProcessRow = memo(function ProcessRow({ row }) {
   const [stopState, setStopState] = useState('idle');
+  const [stopError, setStopError] = useState('');
   const stop = async () => {
     if (stopState === 'loading' || row.stopProcessId == null) return;
     setStopState('loading');
+    setStopError('');
     const result = await postJson('/api/processes/stop', { processId: row.stopProcessId, graceMs: 3000 }, { timeout: 10000 });
     if (result?.ok === false) {
       setStopState('error');
+      setStopError(String(result.error || 'The command could not be stopped.').slice(0, 320));
       return;
     }
     setStopState('success');
+    setStopError('');
     requestDashboardRefresh();
   };
   const stopText = stopState === 'loading' ? 'Stopping…' : stopState === 'success' ? 'Stopped' : stopState === 'error' ? 'Try again' : 'Stop';
@@ -87,6 +91,10 @@ const ProcessRow = memo(function ProcessRow({ row }) {
         state.status === 'stopping' ? h('span', { className: 'process-stop-state', role: 'status' }, 'Stopping…') : null
       )
     ),
+    stopError ? h('div', { className: 'connection-notice bad process-stop-error', role: 'alert' },
+      h('strong', null, 'Could not stop command'),
+      h('div', null, stopError)
+    ) : null,
     h('div', { className: 'process-command-summary' }, h('span', null, 'Command'), h('code', null, row.commandSummary)),
     row.error || ['failed', 'orphaned', 'unknown'].includes(state.status)
       ? h('div', { className: `connection-notice ${state.status === 'failed' ? 'bad' : 'warn'} process-recovery` },

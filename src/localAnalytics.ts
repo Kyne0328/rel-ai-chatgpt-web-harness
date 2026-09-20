@@ -234,7 +234,7 @@ function recordLocalTaskCompletion(config: AnalyticsConfig = {}, event: { worksp
       migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
       ensureNormalizedAnalyticsSchema(db, config);
       recordNormalizedTaskCompletion(db, month, hour, workspace, intent);
-    }, { transaction: true });
+    }, { transaction: true, timeoutMs: 0 });
     if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
     return true;
@@ -581,7 +581,7 @@ function withAnalyticsWriteDatabase<TResult>(config: AnalyticsConfig, operation:
   const key = statePath(config, 'durable-state.sqlite');
   let db = analyticsWriteDatabases.get(key);
   if (!db) {
-    const opened = openStateDatabase(config);
+    const opened = openStateDatabase(config, { timeoutMs: 0 });
     if (!opened) throw new Error('Local analytics database could not be opened.');
     db = opened;
     analyticsWriteDatabases.set(key, db);

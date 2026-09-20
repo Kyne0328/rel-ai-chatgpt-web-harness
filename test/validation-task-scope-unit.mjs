@@ -66,7 +66,8 @@ try {
   const validation = await callTool('relai_validate', {
     action: 'checks',
     workspace: 'app',
-    work_id: task.work_id
+    work_id: task.work_id,
+    complete: false
   }, context);
   assert.equal(validation.ok, true);
   assert.equal(validation.planSelection, 'focused', 'pre-existing dirty files must not broaden a one-file task validation plan');
@@ -101,7 +102,7 @@ try {
   await callTool('relai_edit', {
     workspace: 'app', work_id: configTask.work_id, path: 'src/config-owned.js', content: 'export const configOwned = true;\n'
   }, context);
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: configTask.work_id }, context);
+  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: configTask.work_id, complete: false }, context);
   const packagePath = path.join(workspacePath, 'package.json');
   const packageBefore = fs.readFileSync(packagePath, 'utf8');
   const packageJson = JSON.parse(packageBefore);

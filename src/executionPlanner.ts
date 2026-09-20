@@ -221,24 +221,36 @@ function postActionRecommendation(workspace: PlannerWorkspace, changedFiles: rea
 // change-verify-review loop costs one approval instead of three. When both are
 // requested, validation always finishes before diff capture so the returned diff
 // describes the final workspace even if a check creates or rewrites files.
-async function runPostActions(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, changedFiles: readonly unknown[] = []): Promise<PlannerRecord> {
+async function runPostActions(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, changedFiles: readonly unknown[] = [], signal?: AbortSignal): Promise<PlannerRecord> {
   const post: PlannerRecord = {};
   const wantsChecks = args.runChecks === true && !args.dryRun;
   const wantsDiff = args.returnDiff === true && !args.dryRun;
   const validationArgs = {
     level: args.level,
+    complete: false,
+    ...(args.work_id ? { work_id: args.work_id } : {}),
+    ...(args._operationTaskId ? { _operationTaskId: args._operationTaskId } : {}),
     ...(Array.isArray(changedFiles) && changedFiles.length ? { changedFiles } : {})
   };
   const runChecks = async (extra: PlannerRecord = {}): Promise<PlannerResult> => {
     try {
-      return await relaiVerify(workspace, config, { ...validationArgs, ...extra });
+      return await relaiVerify(workspace, config, { ...validationArgs, ...extra }, { signal });
     } catch (error) {
+      if (signal?.aborted) {
+        return {
+          ok: false,
+          cancelled: true,
+          validationStatus: 'cancelled',
+          executedUnits: 0,
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   };
   const runDiff = async (): Promise<PlannerResult> => {
     try {
-      return await relaiDiff(workspace, config, { maxBytes: args.maxBytes });
+      return await relaiDiff(workspace, config, { maxBytes: args.maxBytes }, { signal });
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -276,7 +288,7 @@ function attachPost(result: PlannerResult, post: PlannerRecord): PlannerResult {
 // Stream either a large patch (updateText) or a full-file replacement (content)
 // through the same bounded payload store without exposing separate write tools.
 
-async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs): Promise<PlannerResult> {
+async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
   const stage = String(args.stage || '').trim().toLowerCase();
   const hasPatchChunk = typeof args.updateText === 'string';
   const hasContentChunk = typeof args.content === 'string';
@@ -324,7 +336,7 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
     if (payload.kind !== 'patch') {
       const result = workspaceWrite(workspace, config, { ...args, writeId });
       const out = { ...result, plannerPath: 'write:staged', plannerReason: `staged full-file write ${stage}` };
-      return stage === 'commit' ? attachPost(out, await runPostActions(workspace, config, args, out.changedFiles)) : out;
+      return stage === 'commit' ? attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal)) : out;
     }
     if (stage === 'abort') {
       const existed = clearStagedPayload(config, workspace, writeId);
@@ -334,16 +346,16 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
     if (Buffer.byteLength(patch, 'utf8') !== payload.bytes) {
       throw new Error(`Staged patch payload size mismatch for writeId ${writeId}. Abort it and start again.`);
     }
-    const result = await relaiApplyPatch(workspace, config, { ...args, patch, returnDiff: false });
+    const result = await relaiApplyPatch(workspace, config, { ...args, patch, returnDiff: false }, { signal });
     if (!args.dryRun) clearStagedPayload(config, workspace, writeId);
     const out = { ...result, operation: 'stagedPatch:commit', writeId, plannerPath: 'apply-update:staged' };
-    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles));
+    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
   }
 
   throw new Error("relai_edit stage must be one of: start, append, commit, abort.");
 }
 
-async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs): Promise<PlannerResult> {
+async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
   const metrics = validateBatchEdits(workspace, args.edits);
   const compactResults = args.edits.length > BATCH_RESULT_COMPACT_THRESHOLD;
   const preflight = await preflightBatchEdits(workspace, config, args.edits, Boolean(args.dryRun));
@@ -368,7 +380,7 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
       ...(failure || {}),
       results: formatBatchResults(preflight.results, compactResults)
     };
-    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles));
+    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
   }
 
   const snapshotCapture = captureEditSnapshots(workspace, args.edits);
@@ -376,6 +388,7 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
   const results: PlannerResult[] = [];
   let allOk = true;
   for (const edit of args.edits) {
+    signal?.throwIfAborted?.();
     try {
       const r = await applyOneEdit(workspace, config, edit, false, { suppressJournal: true });
       results.push(r);
@@ -421,7 +434,7 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
     preflight: formatBatchResults(preflight.results, compactResults),
     results: formatBatchResults(results, compactResults)
   };
-  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles));
+  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
 }
 
 function batchFailureDetails(results: PlannerResult[], { phase, unchanged }: BatchFailureOptions): PlannerRecord {
@@ -514,13 +527,13 @@ function singlePlannerReason(hasReplacement: boolean, plannerPath: unknown): str
   return 'content provided — routing to direct full-file write';
 }
 
-async function _handleUpdateTextEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs): Promise<PlannerResult> {
-  const result = await relaiApplyPatch(workspace, config, { ...args, patch: args.updateText, returnDiff: false });
+async function _handleUpdateTextEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
+  const result = await relaiApplyPatch(workspace, config, { ...args, patch: args.updateText, returnDiff: false }, { signal });
   const out = { ...result, plannerPath: 'apply-update', plannerReason: 'updateText provided — routing to patch-shaped apply-update' };
-  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles));
+  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
 }
 
-async function _handleSymbolEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs): Promise<PlannerResult> {
+async function _handleSymbolEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
   const semantic = await resolveSymbolEdit(workspace, config, args.symbolEdit, { expectedSha256: args.expectedSha256 });
   const result = workspaceReplace(workspace, config, {
     path: semantic.path,
@@ -537,10 +550,10 @@ async function _handleSymbolEdit(workspace: PlannerWorkspace, config: PlannerCon
     plannerReason: `${semantic.target.action} resolved structurally to ${semantic.target.qualifiedName || semantic.target.name} in ${semantic.path}`,
     semanticTarget: semantic.target
   };
-  return attachPost(out, await runPostActions(workspace, config, args, result.changedFiles));
+  return attachPost(out, await runPostActions(workspace, config, args, result.changedFiles, signal));
 }
 
-async function _handleSingleEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs): Promise<PlannerResult> {
+async function _handleSingleEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
   const hasOldText = typeof args.oldText === 'string' && args.oldText.length > 0;
   const hasReplacements = Array.isArray(args.replacements) && args.replacements.length > 0;
   const hasReplacement = hasOldText || hasReplacements;
@@ -564,18 +577,18 @@ async function _handleSingleEdit(workspace: PlannerWorkspace, config: PlannerCon
     expectedSha256: args.expectedSha256
   }, args.dryRun);
   single.plannerReason = singlePlannerReason(hasReplacement, single.plannerPath);
-  return attachPost(single, await runPostActions(workspace, config, args, single.changedFiles));
+  return attachPost(single, await runPostActions(workspace, config, args, single.changedFiles, signal));
 }
 
 async function planEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, context: PlannerContext = {}): Promise<PlannerResult> {
   assertSupportedEditForm(args);
   if (args.file && typeof args.file === 'object' && !Array.isArray(args.file)) {
     const result = await importNativeArtifact(workspace, config, args, { signal: context.signal });
-    return attachPost(result, await runPostActions(workspace, config, args, result.changedFiles));
+    return attachPost(result, await runPostActions(workspace, config, args, result.changedFiles, context.signal));
   }
   if (args.semantic && typeof args.semantic === 'object') {
     const proposal = await repositoryIntelligence.semanticRename(workspace, args.semantic, { signal: context.signal });
-    const result = await _handleBatchEdits(workspace, config, { ...args, semantic: undefined, edits: proposal.edits });
+    const result = await _handleBatchEdits(workspace, config, { ...args, semantic: undefined, edits: proposal.edits }, context.signal);
     return {
       ...result,
       plannerPath: 'semantic:rename',
@@ -594,13 +607,13 @@ async function planEdit(workspace: PlannerWorkspace, config: PlannerConfig, args
   }
   if (typeof args.envAction === 'string' && args.envAction.trim()) {
     const result = runEnvOperation(workspace, config, args);
-    return attachPost(result, await runPostActions(workspace, config, { ...args, returnDiff: false }, result.changedFiles));
+    return attachPost(result, await runPostActions(workspace, config, { ...args, returnDiff: false }, result.changedFiles, context.signal));
   }
-  if (typeof args.stage === 'string' && args.stage.trim()) return handleStagedEdit(workspace, config, args);
-  if (Array.isArray(args.edits) && args.edits.length > 0) return _handleBatchEdits(workspace, config, args);
-  if (args.symbolEdit && typeof args.symbolEdit === 'object') return _handleSymbolEdit(workspace, config, args);
-  if (typeof args.updateText === 'string' && args.updateText.length > 0) return _handleUpdateTextEdit(workspace, config, args);
-  return _handleSingleEdit(workspace, config, args);
+  if (typeof args.stage === 'string' && args.stage.trim()) return handleStagedEdit(workspace, config, args, context.signal);
+  if (Array.isArray(args.edits) && args.edits.length > 0) return _handleBatchEdits(workspace, config, args, context.signal);
+  if (args.symbolEdit && typeof args.symbolEdit === 'object') return _handleSymbolEdit(workspace, config, args, context.signal);
+  if (typeof args.updateText === 'string' && args.updateText.length > 0) return _handleUpdateTextEdit(workspace, config, args, context.signal);
+  return _handleSingleEdit(workspace, config, args, context.signal);
 }
 
 const EDIT_FORM_GUIDANCE = 'Use exactly one public edit form: { semantic:{ action:"rename", path, line, column, newName } } for language-server rename, { symbolEdit:{ action, symbol, content, path? } } for an indexed structural symbol edit, { path, content } for a complete text file, { path, file } for a native ChatGPT file, { path, oldText, newText } or { path, replacements } for exact replacement, { updateText } for a patch, { edits } for an atomic batch, or { envAction, ... } for secret-safe environment work.';

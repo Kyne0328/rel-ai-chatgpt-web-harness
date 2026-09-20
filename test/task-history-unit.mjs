@@ -65,6 +65,15 @@ assert.equal(task.summary, 'Implemented and validated.');
 assert.ok(task.completedAt);
 assert.equal(task.cancelledAt, null);
 
+let cancelling = canonicalTaskSnapshot({ id: 'task-pending-cancel', taskId: 'task-pending-cancel', status: 'running', workspace: 'repo' });
+cancelling = reduceTaskLifecycleAuditEvent(cancelling, event('task-pending-cancel', {
+  operationId: 'cancel-pending', ts: '2026-07-11T06:30:00.000Z', tool: 'work.cancel',
+  taskCancellationStatus: 'cancelling', eventType: 'task.cancellation.requested'
+}));
+assert.equal(cancelling.status, 'running', 'a cancellation request must not fabricate terminal task history before owned work settles');
+assert.equal(cancelling.cancelledAt, null);
+assert.equal(cancelling.endedAt, null);
+
 let cancelled = canonicalTaskSnapshot({ id: 'task-2', taskId: 'task-2', status: 'planning', workspace: 'repo' });
 cancelled = reduceTaskLifecycleAuditEvent(cancelled, event('task-2', {
   operationId: 'cancel-1', ts: '2026-07-11T07:00:00.000Z', tool: 'work.cancel'

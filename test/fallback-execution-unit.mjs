@@ -131,6 +131,63 @@ assert.equal(fast.body.result.isError, false);
 assert.equal(fast.body.result.structuredContent.exitCode, 0);
 assert.equal(fast.body.result.structuredContent.stdout, 'fast');
 
+const deliveredWorkId = 'work_delivered_fallback_test';
+let deliveredWorkExecutions = 0;
+const deliveredWorkExecute = async () => {
+  deliveredWorkExecutions += 1;
+  return completedResult(deliveredWorkId, `delivered-${deliveredWorkExecutions}`);
+};
+const deliveredWork = await handleTransportTaskRequest({}, message(900, deliveredWorkId), {
+  principal: 'principal-delivered-work',
+  transportType: 'streamable-http',
+  synchronousFallbackGraceMs: 50,
+  executeToolResult: deliveredWorkExecute
+});
+assert.equal(deliveredWorkExecutions, 1);
+assert.equal(typeof deliveredWork.onDelivered, 'function');
+deliveredWork.onDelivered();
+const freshDeliveredWork = await handleTransportTaskRequest({}, message(901, deliveredWorkId), {
+  principal: 'principal-delivered-work',
+  transportType: 'streamable-http',
+  synchronousFallbackGraceMs: 50,
+  executeToolResult: deliveredWorkExecute
+});
+assert.equal(deliveredWorkExecutions, 2, 'a confirmed work-bound result must not be replayed as a fresh rerun');
+assert.equal(freshDeliveredWork.body.result.structuredContent.stdout, 'delivered-2');
+freshDeliveredWork.onDelivered();
+
+const deliveredFailureWorkId = 'work_delivered_failure_fallback_test';
+let deliveredFailureExecutions = 0;
+const deliveredFailureExecute = async () => {
+  deliveredFailureExecutions += 1;
+  return toolResult({
+    ok: false,
+    executed: true,
+    commandSucceeded: false,
+    workspace: 'app',
+    work_id: deliveredFailureWorkId,
+    durationMs: 5,
+    exitCode: 1,
+    stderr: `failure-${deliveredFailureExecutions}`
+  }, true);
+};
+const deliveredFailure = await handleTransportTaskRequest({}, message(902, deliveredFailureWorkId), {
+  principal: 'principal-delivered-failure',
+  transportType: 'streamable-http',
+  synchronousFallbackGraceMs: 50,
+  executeToolResult: deliveredFailureExecute
+});
+assert.equal(deliveredFailureExecutions, 1);
+deliveredFailure.onDelivered();
+const freshDeliveredFailure = await handleTransportTaskRequest({}, message(903, deliveredFailureWorkId), {
+  principal: 'principal-delivered-failure',
+  transportType: 'streamable-http',
+  synchronousFallbackGraceMs: 50,
+  executeToolResult: deliveredFailureExecute
+});
+assert.equal(deliveredFailureExecutions, 2, 'a confirmed failed work-bound result must execute again on an explicit rerun');
+freshDeliveredFailure.onDelivered();
+
 let resilientReadExecutions = 0;
 const resilientReadExecute = async () => {
   resilientReadExecutions += 1;
@@ -240,7 +297,7 @@ const slow = await handleTransportTaskRequest({}, message(2, slowWorkId), {
 });
 assert.equal(slow.body.result.isError, false);
 assert.equal(slow.body.result.structuredContent.status, 'running');
-assert.equal(slow.body.result.structuredContent.pollAfterMs, 30_000);
+assert.equal(Object.hasOwn(slow.body.result.structuredContent, 'pollAfterMs'), false, 'fallback continuation must not prompt the agent to poll');
 assert.equal(slow.body.result.structuredContent.revision, 1);
 assert.ok(slow.body.result.structuredContent.operationId);
 assert.ok(slow.body.result.structuredContent.updatedAt);
@@ -303,8 +360,23 @@ const cancellable = startFallbackExecution({
     else signal.addEventListener('abort', finish, { once: true });
   })
 });
-const cancellation = cancelFallbackExecution(cancelledWorkId, { reason: 'Explicit fallback cancellation test.' });
-assert.equal(cancellation.cancelled, true);
+const wrongOwnerCancellation = cancelFallbackExecution(cancellable.record.operationId, {
+  reason: 'Must not cross task ownership.',
+  expectedWorkId: 'work_other_fallback_test'
+});
+assert.equal(wrongOwnerCancellation.cancelled, false);
+assert.equal(wrongOwnerCancellation.mismatch, true);
+assert.equal(fallbackAbortObserved, false, 'a fallback operation ID must not cancel work owned by another logical task');
+assert.equal(fallbackExecutionStatus(cancelledWorkId).status, 'running');
+const cancellation = cancelFallbackExecution(cancellable.record.operationId, {
+  reason: 'Explicit fallback cancellation test.',
+  expectedWorkId: cancelledWorkId
+});
+assert.equal(cancellation.cancelled, false);
+assert.equal(cancellation.stopping, true);
+assert.equal(cancellation.record.status, 'running', 'fallback cancellation request must remain nonterminal until execution settles');
+assert.equal(fallbackExecutionStatus(cancelledWorkId).status, 'running');
+assert.equal(fallbackExecutionStatus(cancelledWorkId).stopping, true);
 await cancellable.record.promise;
 assert.equal(fallbackAbortObserved, true, 'explicit work-session cancellation must reach the detached operation signal');
 assert.equal(fallbackExecutionStatus(cancelledWorkId).status, 'cancelled');
@@ -329,7 +401,8 @@ try {
   assert.equal(Object.hasOwn(tasklessStarted.body.result.structuredContent, 'work_id'), false, 'taskless fallback must not invent a work_id');
   const tasklessOperationId = tasklessStarted.body.result.structuredContent.operationId;
   assert.ok(tasklessOperationId);
-  assert.match(tasklessStarted.body.result.structuredContent.nextAction, /operationId/i);
+  assert.match(tasklessStarted.body.result.structuredContent.nextAction, /completedOperations/i, 'taskless fallback completion should surface passively on a later Rel.AI call');
+  assert.doesNotMatch(tasklessStarted.body.result.structuredContent.nextAction, /poll/i, 'fallback guidance must not encourage polling while useful work remains');
   await delay(50);
   assert.equal(fallbackExecutionStatus(tasklessOperationId, { config }).status, 'completed');
   resetFallbackExecutions();
@@ -387,6 +460,33 @@ try {
     [],
     'terminal fallback replay must acknowledge the queued completion notice'
   );
+
+  const deliveredDurableWorkId = 'work_delivered_durable_fallback_test';
+  seedTask(config, deliveredDurableWorkId);
+  let deliveredDurableExecutions = 0;
+  const deliveredDurableExecute = async () => {
+    deliveredDurableExecutions += 1;
+    return completedResult(deliveredDurableWorkId, `durable-delivered-${deliveredDurableExecutions}`);
+  };
+  const deliveredDurable = await handleTransportTaskRequest(config, message(12, deliveredDurableWorkId), {
+    principal: 'principal-delivered-durable',
+    transportType: 'streamable-http',
+    synchronousFallbackGraceMs: 50,
+    executeToolResult: deliveredDurableExecute
+  });
+  assert.equal(deliveredDurableExecutions, 1);
+  deliveredDurable.onDelivered();
+  assert.equal(readTaskHistorySessionRecord(config, deliveredDurableWorkId).backgroundOperation.deliveryAcknowledged, true);
+  resetFallbackExecutions();
+  const freshDurable = await handleTransportTaskRequest(config, message(13, deliveredDurableWorkId), {
+    principal: 'principal-delivered-durable',
+    transportType: 'streamable-http',
+    synchronousFallbackGraceMs: 50,
+    executeToolResult: deliveredDurableExecute
+  });
+  assert.equal(deliveredDurableExecutions, 2, 'confirmed delivery must survive restart so a later work-bound rerun executes fresh');
+  assert.equal(freshDurable.body.result.structuredContent.stdout, 'durable-delivered-2');
+  freshDurable.onDelivered();
 
   const noticeWorkId = 'work_completion_notice_test';
   seedTask(config, noticeWorkId);

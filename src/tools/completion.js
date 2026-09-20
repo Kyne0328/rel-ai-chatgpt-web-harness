@@ -12,13 +12,15 @@ import { runWorkspaceMutationBoundary } from '../workspaceOperationQueue.js';
 const WORK_FINISH_SOURCE = 'relai_work:finish';
 const VALIDATE_CHECKS_SOURCE = 'relai_validate:checks';
 
-async function completeTask(config, args = {}) {
+async function completeTask(config, args = {}, handlerContext = {}) {
   const workspace = resolveWorkspace(config, args.workspace);
   const requestedTaskId = normalizeTaskId(args.work_id);
   if (!requestedTaskId) {
     throw taskError('TASK_ID_REQUIRED', 'relai_work with action "finish" requires the work_id returned by relai_work with action "begin".');
   }
   const context = requireMatchingTaskContext(requestedTaskId);
+  const signal = handlerContext.signal || getCurrentTaskAbortSignal();
+  signal?.throwIfAborted?.();
   const previous = readTaskHistorySession(config, requestedTaskId);
   if (previous?.completionKnown === true || previous?.status === 'completed') {
     return finalizeDuplicateCompletion(config, workspace, context, previous);
@@ -33,7 +35,7 @@ async function completeTask(config, args = {}) {
 
   const summary = normalizeCompletionSummary(args.summary);
   const authority = readTaskIntegrity(config, requestedTaskId, workspace.alias);
-  const validation = await factualValidationState(config, workspace, authority);
+  const validation = await factualValidationState(config, workspace, authority, { signal });
   return finalizeValidatedTask(config, workspace, {
     summary,
     validationStatus: validation.status,
@@ -41,7 +43,8 @@ async function completeTask(config, args = {}) {
     validationAt: authority?.validationAt || '',
     validationFingerprint: validation.fingerprint,
     changedFiles: authority?.taskOwnedChangedFiles || previous?.changedFiles || [],
-    completionSource: WORK_FINISH_SOURCE
+    completionSource: WORK_FINISH_SOURCE,
+    signal
   });
 }
 
@@ -60,7 +63,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     : changedFilesForTask(config, workspace.alias, taskId);
   const completionSource = String(options.completionSource || WORK_FINISH_SOURCE);
   const validationStatus = String(options.validationStatus || 'not_run');
-  const residualChangedFiles = await workspaceDirtyPaths(workspace, config, changedFiles);
+  const residualChangedFiles = await workspaceDirtyPaths(workspace, config, changedFiles, { signal: options.signal });
   const residualState = residualChangedFiles.length ? 'preserved_uncommitted' : 'clean';
   const persistedLearningSession = readTaskHistorySessionRecord(config, taskId, { reconcileInactive: false }) || {};
   const liveLearningSession = getToolActivity().tasks.find(task => task.id === taskId || task.taskId === taskId) || {};
@@ -103,18 +106,21 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
   return result;
 }
 
-async function finalizeValidationResult(config, workspace, validationResult, summary) {
-  const context = getCurrentToolActivityContext();
+async function finalizeValidationResult(config, workspace, validationResult, summary, executionContext = {}) {
+  const activityContext = getCurrentToolActivityContext();
+  const signal = executionContext.signal || getCurrentTaskAbortSignal();
+  signal?.throwIfAborted?.();
   const completion = await runWorkspaceMutationBoundary(workspace.alias, () => finalizeValidatedTask(config, workspace, {
     summary,
     validationStatus: 'passed',
     validationLevel: validationResult.validationLevel,
     validationAt: new Date().toISOString(),
     validationFingerprint: validationResult.validationFingerprint,
-    completionSource: VALIDATE_CHECKS_SOURCE
+    completionSource: VALIDATE_CHECKS_SOURCE,
+    signal
   }), {
-    taskId: context?.taskId || '',
-    signal: getCurrentTaskAbortSignal()
+    taskId: activityContext?.taskId || '',
+    signal
   });
   return {
     ...validationResult,
@@ -157,7 +163,7 @@ function finalizeDuplicateCompletion(config, workspace, context, previous) {
   };
 }
 
-async function factualValidationState(config, workspace, authority) {
+async function factualValidationState(config, workspace, authority, options = {}) {
   if (!authority) return { status: 'not_run', fingerprint: '' };
   const mutationGeneration = Number(authority.mutationGeneration || 0);
   const validationResult = String(authority.validationResult || 'not_run');
@@ -173,7 +179,7 @@ async function factualValidationState(config, workspace, authority) {
     const validationScope = Array.isArray(authority.validationScope)
       ? authority.validationScope
       : (authority.taskOwnedChangedFiles || []);
-    const currentFingerprint = await createValidationFingerprint(workspace, config, { paths: validationScope });
+    const currentFingerprint = await createValidationFingerprint(workspace, config, { paths: validationScope, signal: options.signal });
     if (currentFingerprint.fingerprint !== fingerprint) return { status: 'stale', fingerprint };
   }
   return { status: 'passed', fingerprint };

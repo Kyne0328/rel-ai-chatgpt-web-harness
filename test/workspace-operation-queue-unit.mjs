@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 import { getOperationDefinition } from '../src/tools/actionDefinitions.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
-import { runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations } from "../src/workspaceOperationQueue.js";
+import { blockWorkspaceMutations, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations } from "../src/workspaceOperationQueue.js";
 
 assert.equal(getOperationDefinition(OP.EDIT)?.behavior?.concurrencyScope, 'mutation', 'relai_edit mutations must coordinate with other mutations without blocking reads');
 assert.equal(getOperationDefinition(OP.EXEC)?.behavior?.concurrencyScope, 'mutation', 'relai_exec mutating commands must advertise mutation-level coordination');
@@ -274,6 +274,94 @@ async function nextTurn() {
   releaseGlobal.resolve();
   await globalWriter;
   assert.equal(taskCallRan, false);
+  assert.equal(pendingWorkspaceOperations(), 0);
+}
+
+// Detached/background callers can bound queue waiting without releasing the
+// operation that currently owns the lock. This prevents hidden fallback work from
+// forming an unbounded mutation backlog while preserving mutation exclusivity.
+{
+  const blockerStarted = deferred();
+  const releaseBlocker = deferred();
+  const blocker = runWorkspaceOperation('queue-timeout', async () => {
+    blockerStarted.resolve();
+    await releaseBlocker.promise;
+  }, {
+    mode: 'write', scope: 'mutation', taskId: 'blocker',
+    owner: { taskId: 'blocker', operationId: 'op-blocker', operation: 'Long mutation', startedAt: '2026-09-20T00:00:00.000Z' }
+  });
+  await blockerStarted.promise;
+
+  let timedOutRan = false;
+  await assert.rejects(
+    runWorkspaceOperation('queue-timeout', async () => { timedOutRan = true; }, {
+      mode: 'write', scope: 'mutation', taskId: 'queued', queueTimeoutMs: 25
+    }),
+    error => error?.code === 'WORKSPACE_OPERATION_QUEUE_TIMEOUT'
+      && error?.retryable === true
+      && error?.blockingTaskId === 'blocker'
+      && error?.blockingOperationId === 'op-blocker'
+      && error?.blockingOperation === 'Long mutation'
+      && Number(error?.queueTimeoutMs) > 0
+      && Number(error?.queueTimeoutMs) <= 25
+      && /waiting operation was not started/i.test(error.message)
+  );
+  assert.equal(timedOutRan, false);
+
+  releaseBlocker.resolve();
+  await blocker;
+  const after = await runWorkspaceOperation('queue-timeout', async () => 'released', {
+    mode: 'write', scope: 'mutation', taskId: 'after-timeout', queueTimeoutMs: 25
+  });
+  assert.equal(after, 'released', 'a timed-out waiter must not poison the mutation lane');
+  assert.equal(pendingWorkspaceOperations(), 0);
+}
+
+// If an active mutation cannot be proven stopped, quarantine that workspace's
+// mutation lane. Already-queued and new writers fail immediately instead of
+// waiting forever behind the stuck owner, while reads remain available.
+{
+  const blockerStarted = deferred();
+  const releaseBlocker = deferred();
+  const blocker = runWorkspaceOperation('mutation-quarantine', async () => {
+    blockerStarted.resolve();
+    await releaseBlocker.promise;
+  }, { mode: 'write', scope: 'mutation', taskId: 'stuck-a' });
+  await blockerStarted.promise;
+
+  let queuedMutationRan = false;
+  const queuedMutation = runWorkspaceOperation('mutation-quarantine', async () => {
+    queuedMutationRan = true;
+  }, { mode: 'write', scope: 'mutation', taskId: 'queued-b' });
+  await nextTurn();
+
+  blockWorkspaceMutations('mutation-quarantine', 'termination could not be confirmed');
+  await assert.rejects(
+    queuedMutation,
+    error => error?.code === 'WORKSPACE_MUTATION_BLOCKED' && error?.retryable === false
+  );
+  assert.equal(queuedMutationRan, false, 'quarantined queued mutation must never start');
+
+  await assert.rejects(
+    runWorkspaceOperation('mutation-quarantine', async () => {}, {
+      mode: 'write', scope: 'mutation', taskId: 'new-c'
+    }),
+    error => error?.code === 'WORKSPACE_MUTATION_BLOCKED'
+  );
+  await assert.rejects(
+    runWorkspaceOperation('mutation-quarantine', async () => {}, {
+      mode: 'write', scope: 'workspace', taskId: 'maintenance-d'
+    }),
+    error => error?.code === 'WORKSPACE_MUTATION_BLOCKED'
+  );
+
+  const read = await runWorkspaceOperation('mutation-quarantine', async () => 'read-ok', {
+    mode: 'read', scope: 'task', taskId: 'reader'
+  });
+  assert.equal(read, 'read-ok', 'mutation quarantine must not disable safe reads');
+
+  releaseBlocker.resolve();
+  await blocker;
   assert.equal(pendingWorkspaceOperations(), 0);
 }
 

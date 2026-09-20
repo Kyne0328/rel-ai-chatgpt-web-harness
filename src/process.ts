@@ -5,11 +5,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import { execa, type Options as ExecaOptions } from 'execa';
 import { resolveGitExecutable } from './gitExecutable.js';
 import { makeProcessEnvironment } from './processEnvironment.js';
-import { extensionBinRoot } from './extensions/paths.js';
+import { extensionCommandPathEntries } from './extensions/paths.js';
 import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
 import { acquireHostResource } from './hostResourceScheduler.js';
+import { clearCurrentMutationProcess, recordCurrentMutationProcess } from './mutationProcessOwnership.js';
 
 const TASKKILL_EXE = String.raw`C:\Windows\System32\taskkill.exe`;
 const DEFAULT_TERMINATION_GRACE_MS = 1000;
@@ -129,7 +130,7 @@ function processPid(target: ProcessTarget): number {
 function isProcessAlive(target: ProcessTarget): boolean {
   const pid = processPid(target);
   if (!pid) return false;
-  if (typeof target === 'object' && target) {
+  if (process.platform !== 'win32' && typeof target === 'object' && target) {
     if (typeof target.exitCode === 'number' || target.signalCode) return false;
   }
   return isPidAlive(pid);
@@ -216,14 +217,17 @@ async function terminateProcessTree(target: ProcessTarget, options: ProcessTreeT
     return { exited: true, forced: false, gracefulSignalSent: false, forceSignalSent: false };
   }
 
-  const gracefulSignalSent = process.platform === 'win32'
-    ? await signalWindowsProcessTree(target)
-    : signalProcessTree(target, { signal: options.signal || 'SIGTERM' });
-  const gracefulExit = process.platform === 'win32'
-    ? await waitForWindowsTargetsExit(trackedTargets, graceMs)
-    : await waitForProcessGroupExit(rootPid, graceMs);
-  if (gracefulExit) {
-    return { exited: true, forced: false, gracefulSignalSent, forceSignalSent: false };
+  let gracefulSignalSent = false;
+  if (graceMs > 0) {
+    gracefulSignalSent = process.platform === 'win32'
+      ? await signalWindowsProcessTree(target)
+      : signalProcessTree(target, { signal: options.signal || 'SIGTERM' });
+    const gracefulExit = process.platform === 'win32'
+      ? await waitForWindowsTargetsExit(trackedTargets, graceMs)
+      : await waitForProcessGroupExit(rootPid, graceMs);
+    if (gracefulExit) {
+      return { exited: true, forced: false, gracefulSignalSent, forceSignalSent: false };
+    }
   }
 
   const forceSignalSent = process.platform === 'win32'
@@ -373,12 +377,13 @@ async function runProcess(command: string, args: readonly string[] = [], options
     const childEnvironment = makeProcessEnvironment(options.env, {
       allow: config.processEnvironment?.allow,
       inheritCredentials: options.inheritCredentials === true,
-      pathAppend: extensionBinRoot(config)
+      pathAppend: extensionCommandPathEntries(config)
     });
     Object.assign(childEnvironment, traceContextEnvironment());
     const processArgs = isGit ? hardenedGitArgs(config, args) : [...args];
     const shell = options.shell === true;
     const file = shell ? (options.commandString || executable) : executable;
+    const ownsWindowsTermination = process.platform === 'win32' && (timeoutMs > 0 || Boolean(options.signal));
     const execaOptions: ExecaOptions = {
       ...(options.cwd ? { cwd: options.cwd } : {}),
       env: childEnvironment,
@@ -391,14 +396,35 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stdout: 'pipe',
       stderr: 'pipe',
       stripFinalNewline: false,
-      timeout: timeoutMs,
-      ...(options.signal ? { cancelSignal: options.signal } : {}),
-      killDescendants: true,
+      timeout: ownsWindowsTermination ? 0 : timeoutMs,
+      ...(!ownsWindowsTermination && options.signal ? { cancelSignal: options.signal } : {}),
+      killDescendants: !ownsWindowsTermination,
       forceKillAfterDelay: Math.max(1, terminationGraceMs),
       ...(options.input != null ? { input: String(options.input) } : {})
     };
 
     const subprocess = execa(file, shell ? [] : processArgs, execaOptions);
+    const subprocessClose = observeSubprocessClose(subprocess.nodeChildProcess);
+    const windowsTermination = {
+      kind: '' as 'timeout' | 'cancel' | '',
+      promise: null as Promise<ProcessTreeTerminationResult> | null
+    };
+    let windowsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let windowsAbortListener: (() => void) | null = null;
+    const requestWindowsTermination = (kind: 'timeout' | 'cancel'): void => {
+      if (!ownsWindowsTermination || windowsTermination.promise) return;
+      windowsTermination.kind = kind;
+      windowsTermination.promise = terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs });
+    };
+    if (ownsWindowsTermination) {
+      if (options.signal) {
+        windowsAbortListener = () => requestWindowsTermination('cancel');
+        if (options.signal.aborted) windowsAbortListener();
+        else options.signal.addEventListener('abort', windowsAbortListener, { once: true });
+      }
+      if (timeoutMs > 0) windowsTimeoutTimer = setTimeout(() => requestWindowsTermination('timeout'), timeoutMs);
+    }
+    const mutationProcessRecorded = Boolean(recordCurrentMutationProcess(subprocess.pid));
     const stdoutBackpressure = createOutputBackpressure(subprocess.stdout, stdoutSpill);
     const stderrBackpressure = createOutputBackpressure(subprocess.stderr, stderrSpill);
     subprocess.stdout?.on('data', (chunk: Buffer | string) => {
@@ -414,22 +440,42 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBackpressure.observe();
     });
 
+    const disposePostExitPipeDrain = armPostExitPipeDrain(subprocess, forceWaitMs, () => {
+      // Once the launched process exits, its own output is complete. A
+      // background descendant can still inherit these handles and keep Execa
+      // waiting for EOF forever. Resume any paused output first, give buffered
+      // data a short drain window, then detach only our read ends.
+      stdoutBackpressure.release();
+      stderrBackpressure.release();
+    });
     let result;
     try {
       result = await subprocess;
     } finally {
+      if (windowsTimeoutTimer) clearTimeout(windowsTimeoutTimer);
+      if (windowsAbortListener) options.signal?.removeEventListener('abort', windowsAbortListener);
+      disposePostExitPipeDrain();
       // Cancellation and process errors must release a paused pipe so execa can
       // finish its own stream cleanup. The spill writer remains ordered and is
       // drained below before its file descriptor is closed.
       stdoutBackpressure.release();
       stderrBackpressure.release();
     }
-    const terminationOutcome = (result.timedOut || result.isCanceled)
+    const windowsTerminationOutcome = windowsTermination.promise ? await windowsTermination.promise : null;
+    const timedOut = windowsTermination.kind === 'timeout' || result.timedOut === true;
+    const cancelled = windowsTermination.kind === 'cancel' || result.isCanceled === true;
+    const terminationOutcome = windowsTerminationOutcome || ((timedOut || cancelled)
       ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
-      : null;
-    if (result.timedOut) {
+      : null);
+    if (terminationOutcome?.exited === true) {
+      await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
+    }
+    if (mutationProcessRecorded && (!timedOut && !cancelled || terminationOutcome?.exited === true)) {
+      clearCurrentMutationProcess(subprocess.pid);
+    }
+    if (timedOut) {
       stderrBuffer.append(`\n[rel-ai-mcp timed out after ${timeoutMs}ms]\n`);
-    } else if (result.isCanceled) {
+    } else if (cancelled) {
       stderrBuffer.append('\n[rel-ai-mcp operation cancelled]\n');
     }
 
@@ -440,13 +486,13 @@ async function runProcess(command: string, args: readonly string[] = [], options
     ]);
     const spawnError = result.failed
       && !result.signal
-      && !result.timedOut
-      && !result.isCanceled
+      && !timedOut
+      && !cancelled
       && (result.exitCode == null || (process.platform === 'win32' && !shell && !windowsExecutableExists(executable, options.cwd, childEnvironment)));
-    const error = result.timedOut
+    const error = timedOut
       ? `Timed out after ${timeoutMs}ms`
-      : result.isCanceled
-        ? 'Operation cancelled.'
+      : cancelled
+        ? errorMessage(options.signal?.reason || 'Operation cancelled.')
         : spawnError
           ? String(result.originalMessage || result.shortMessage || result.message || 'Process failed to start.')
           : undefined;
@@ -457,10 +503,10 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stdout: processOutputText(stdoutBuffer, options.preserveOutputWhitespace),
       stderr: processOutputText(stderrBuffer, options.preserveOutputWhitespace),
       ...(error ? { error } : {}),
-      ...(result.isCanceled ? { cancelled: true } : {}),
-      timedOut: result.timedOut === true,
+      ...(cancelled ? { cancelled: true } : {}),
+      timedOut,
       ...(spawnError ? { spawnError: true } : {}),
-      ...((result.timedOut || result.isCanceled) ? {
+      ...((timedOut || cancelled) ? {
         terminationConfirmed: terminationOutcome?.exited === true,
         forcedTermination: result.isForcefullyTerminated === true || terminationOutcome?.forced === true
       } : {}),
@@ -478,6 +524,94 @@ async function runProcess(command: string, args: readonly string[] = [], options
   }
 }
 
+function observeSubprocessClose(
+  child: {
+    once?(event: string, listener: (...args: unknown[]) => void): unknown;
+    removeListener?(event: string, listener: (...args: unknown[]) => void): unknown;
+  } | null | undefined
+): Promise<void> {
+  if (!child?.once) return Promise.resolve();
+  return new Promise<void>(resolve => {
+    let settled = false;
+    const onClose = (): void => {
+      if (settled) return;
+      settled = true;
+      child.removeListener?.('close', onClose);
+      resolve();
+    };
+    child.once?.('close', onClose);
+  });
+}
+
+async function settleTerminatedSubprocess(
+  subprocess: {
+    readonly nodeChildProcess?: { unref?(): unknown } | null;
+    readonly stdin?: { readonly destroyed?: boolean; destroy?(): unknown } | null;
+    readonly stdout?: { readonly destroyed?: boolean; destroy?(): unknown } | null;
+    readonly stderr?: { readonly destroyed?: boolean; destroy?(): unknown } | null;
+  },
+  closePromise: Promise<void>,
+  waitMs: number
+): Promise<void> {
+  const child = subprocess.nodeChildProcess;
+  if (!child) return;
+  for (const stream of [subprocess.stdin, subprocess.stdout, subprocess.stderr]) {
+    if (!stream || stream.destroyed || typeof stream.destroy !== 'function') continue;
+    try { stream.destroy(); } catch {}
+  }
+  const closed = await Promise.race([
+    closePromise.then(() => true),
+    new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => resolve(false), Math.max(0, waitMs));
+      timer.unref?.();
+    })
+  ]);
+  if (!closed) child.unref?.();
+}
+
+function armPostExitPipeDrain(
+  subprocess: {
+    readonly nodeChildProcess?: {
+      readonly exitCode?: number | null;
+      readonly signalCode?: NodeJS.Signals | string | null;
+      once?(event: string, listener: (...args: unknown[]) => void): unknown;
+      removeListener?(event: string, listener: (...args: unknown[]) => void): unknown;
+    };
+    readonly stdout?: { readonly destroyed?: boolean; destroy?(): unknown } | null;
+    readonly stderr?: { readonly destroyed?: boolean; destroy?(): unknown } | null;
+  },
+  drainGraceMs: number,
+  onExit: () => void
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+  const processHandle = subprocess.nodeChildProcess;
+  const closeLingeringPipe = (stream: { readonly destroyed?: boolean; destroy?(): unknown } | null | undefined): void => {
+    if (!stream || stream.destroyed || typeof stream.destroy !== 'function') return;
+    try { stream.destroy(); } catch {}
+  };
+  const handleExit = (): void => {
+    if (disposed || timer) return;
+    onExit();
+    timer = setTimeout(() => {
+      if (disposed) return;
+      closeLingeringPipe(subprocess.stdout);
+      closeLingeringPipe(subprocess.stderr);
+    }, Math.max(0, drainGraceMs));
+    timer.unref?.();
+  };
+
+  if (processHandle?.exitCode != null || processHandle?.signalCode) queueMicrotask(handleExit);
+  else processHandle?.once?.('exit', handleExit);
+
+  return () => {
+    disposed = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    processHandle?.removeListener?.('exit', handleExit);
+  };
+}
+
 function terminalQueueResult(options: { readonly error: string; readonly cancelled?: boolean; readonly queueTimedOut?: boolean; readonly queueWaitMs: number }): RunProcessResult {
   return {
     exitCode: -1,
@@ -485,6 +619,7 @@ function terminalQueueResult(options: { readonly error: string; readonly cancell
     stderr: '',
     error: options.error,
     cancelled: options.cancelled === true,
+    ...(options.cancelled === true ? { terminationConfirmed: true, forcedTermination: false } : {}),
     timedOut: false,
     queueTimedOut: options.queueTimedOut === true,
     queueWaitMs: options.queueWaitMs,

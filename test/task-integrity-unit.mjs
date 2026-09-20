@@ -38,6 +38,7 @@ const failedMutationTask = 'failed-mutation-task';
 const embeddedValidationTask = 'embedded-validation-task';
 const failedPostCheckTask = 'failed-post-check-task';
 const unavailableTrackingTask = 'unavailable-tracking-task';
+const cancellationIntegrityTask = 'cancellation-integrity-task';
 const event = (taskId, tool, extra = {}) => ({
   taskId,
   workspace: 'app',
@@ -70,6 +71,16 @@ try {
   assert.ok(deferred.baseline.changedFiles.includes('ambient.txt'), 'deferred baseline must still protect pre-existing dirty files');
   assert.equal(deferred.baseline.pending, undefined);
   assert.deepEqual(deferred.taskOwnedChangedFiles, []);
+
+  await recordTaskIntegrityEvent(config, event(cancellationIntegrityTask, 'work.begin'));
+  await recordTaskIntegrityEvent(config, event(cancellationIntegrityTask, 'work.cancel', {
+    taskCancellationStatus: 'cancelling'
+  }));
+  assert.equal(readTaskIntegrity(config, cancellationIntegrityTask, 'app').cancelledAt, '', 'pending cancellation must not publish terminal integrity state');
+  await recordTaskIntegrityEvent(config, event(cancellationIntegrityTask, 'work.cancel', {
+    taskCancellationStatus: 'cancelled'
+  }));
+  assert.ok(readTaskIntegrity(config, cancellationIntegrityTask, 'app').cancelledAt, 'confirmed cancellation must publish terminal integrity state');
 
   await recordTaskIntegrityEvent(config, event(taskOne, 'work.begin'));
   const initial = readTaskIntegrity(config, taskOne, 'app');

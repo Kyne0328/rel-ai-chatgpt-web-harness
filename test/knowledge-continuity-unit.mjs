@@ -135,7 +135,7 @@ try {
   }, context);
 
   const validation = await callTool('relai_validate', {
-    action: 'checks', workspace: 'app', work_id: task.work_id, check: 'node --check src/index.js'
+    action: 'checks', workspace: 'app', work_id: task.work_id, check: 'node --check src/index.js', complete: false
   }, context);
   assert.equal(validation.validationStatus, 'passed');
 

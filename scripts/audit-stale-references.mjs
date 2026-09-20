@@ -44,7 +44,7 @@ const SOURCE_INVARIANTS = Object.freeze([
   ['types/boundaries.d.ts', /ToolLifecycleMetadata|lifecycle\?:\s*ToolLifecycleMetadata/, 'removed-tool-lifecycle-type'],
   ['scripts/electron-size-baseline.json', /"electronVersion"\s*:/, 'decorative-package-baseline-version'],
   ['scripts/electron-size-baseline-linux.json', /"electronVersion"\s*:/, 'decorative-package-baseline-version'],
-  ['test/mcp-legacy-adapter-unit.mjs', /chatgpt-local-compat-smoke\.mjs|Modern protocol:\\s\*/, 'stale-protocol-test-wording'],
+  ['test/suite-mcp-tools-unit.mjs', /chatgpt-local-compat-smoke\.mjs|Modern protocol:\\s\*/, 'stale-protocol-test-wording'],
   ['src/release.js', /Authentication:\s*OAuth/i, 'obsolete-oauth-setup-guidance'],
   ['src/config.js', /\b(?:toolMode|trustedLocalAgent|cleanupOlderThanHours)\b/, 'removed-hard-cutover-config'],
   ['src/httpServer.ts', /\/api\/(?:settings|history\/reset|mcp\/(?:recovery|connection)|health-monitor|caution-summary|readiness)\b/, 'removed-dashboard-http-surface'],

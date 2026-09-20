@@ -22,7 +22,9 @@ try {
   }
   const serverInstructions = String(discovery.result?.instructions || '');
   if (!/work_id is durable task attribution/i.test(serverInstructions)
-      || !/substantial or multi-step repository work, start relai_work begin before the first project operation and carry work_id/i.test(serverInstructions)
+      || !/substantial or multi-step repository work/i.test(serverInstructions)
+      || !/start relai_work begin/i.test(serverInstructions)
+      || !/carry work_id/i.test(serverInstructions)
       || !/validation is factual evidence, not execution permission/i.test(serverInstructions)) {
     throw new Error('server/discover did not advertise the task-attribution and factual-validation invariants');
   }

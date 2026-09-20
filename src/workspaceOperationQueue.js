@@ -13,6 +13,8 @@
 // unrelated operation eventually releases its lock.
 
 const locks = new Map();
+const mutationBlocks = new Map();
+const mutationBlockControllers = new Map();
 
 const READ = 'read';
 const WRITE = 'write';
@@ -23,7 +25,7 @@ const WORKSPACE_SCOPE = 'workspace';
 function lockStateFor(key) {
   let state = locks.get(key);
   if (!state) {
-    state = { activeReaders: 0, activeWriter: false, queue: [] };
+    state = { activeReaders: 0, activeWriter: false, activeWriterOwner: null, queue: [] };
     locks.set(key, state);
   }
   return state;
@@ -42,45 +44,71 @@ function admitWaiting(state) {
     if (state.activeWriter || state.activeReaders > 0) return;
     state.queue.shift();
     state.activeWriter = true;
+    state.activeWriterOwner = next.owner || null;
     next.admit();
     return;
   }
 }
 
-function acquire(state, mode, signal) {
+function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs) {
   throwIfAborted(signal);
   const queuedAt = Date.now();
   return new Promise((resolve, reject) => {
+    let timer = null;
+    const cleanupWait = () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      signal?.removeEventListener?.('abort', onAbort);
+    };
     const entry = {
       mode,
+      owner: owner && typeof owner === 'object' ? { ...owner } : null,
       settled: false,
       admit: () => {
         if (entry.settled) return;
         entry.settled = true;
-        signal?.removeEventListener?.('abort', onAbort);
+        cleanupWait();
         resolve(Date.now() - queuedAt);
       }
     };
-    const onAbort = () => {
-      if (entry.settled) return;
+    const removeWaitingEntry = () => {
       const index = state.queue.indexOf(entry);
-      if (index < 0) return;
+      if (index < 0) return false;
       state.queue.splice(index, 1);
+      return true;
+    };
+    const onAbort = () => {
+      if (entry.settled || !removeWaitingEntry()) return;
       entry.settled = true;
-      signal?.removeEventListener?.('abort', onAbort);
+      cleanupWait();
       reject(workspaceOperationAbortError(signal));
       admitWaiting(state);
     };
+    const boundedTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+      ? Math.max(1, Math.floor(Number(timeoutMs)))
+      : 0;
 
     state.queue.push(entry);
     signal?.addEventListener?.('abort', onAbort, { once: true });
+    if (boundedTimeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (entry.settled || !removeWaitingEntry()) return;
+        entry.settled = true;
+        cleanupWait();
+        reject(workspaceOperationQueueTimeoutError(reportedTimeoutMs, state));
+        admitWaiting(state);
+      }, boundedTimeoutMs);
+    }
     admitWaiting(state);
   });
 }
 
 function release(key, state, mode) {
   if (mode === READ) state.activeReaders = Math.max(0, state.activeReaders - 1);
-  else state.activeWriter = false;
+  else {
+    state.activeWriter = false;
+    state.activeWriterOwner = null;
+  }
   admitWaiting(state);
   deleteIdleLock(key, state);
 }
@@ -91,11 +119,11 @@ function deleteIdleLock(key, state) {
   }
 }
 
-async function withLock(key, mode, operation, signal) {
+async function withLock(key, mode, operation, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs) {
   const state = lockStateFor(key);
   let waitMs;
   try {
-    waitMs = await acquire(state, mode, signal);
+    waitMs = await acquire(state, mode, signal, timeoutMs, owner, reportedTimeoutMs);
   } catch (error) {
     deleteIdleLock(key, state);
     throw error;
@@ -133,6 +161,7 @@ function notifyWait(options, waitMs, details) {
 
 function workspaceOperationAbortError(signal) {
   const reason = signal?.reason;
+  if (reason?.code === 'WORKSPACE_MUTATION_BLOCKED') return reason;
   const message = reason instanceof Error && reason.message
     ? reason.message
     : 'Workspace operation was cancelled before execution.';
@@ -141,6 +170,73 @@ function workspaceOperationAbortError(signal) {
   error.code = 'WORKSPACE_OPERATION_ABORTED';
   error.retryable = true;
   return error;
+}
+
+function workspaceOperationQueueTimeoutError(timeoutMs, state = {}) {
+  const blocker = state.activeWriterOwner && typeof state.activeWriterOwner === 'object' ? state.activeWriterOwner : null;
+  const blockerLabel = blocker?.operation ? ` Blocked by ${blocker.operation}${blocker.taskId ? ` in task ${blocker.taskId}` : ''}.` : '';
+  const error = new Error(`Workspace operation queue wait exceeded ${timeoutMs}ms.${blockerLabel} The waiting operation was not started; retry after the blocker finishes or stop it.`);
+  error.code = 'WORKSPACE_OPERATION_QUEUE_TIMEOUT';
+  error.retryable = true;
+  error.queueTimeoutMs = timeoutMs;
+  if (blocker?.taskId) error.blockingTaskId = String(blocker.taskId);
+  if (blocker?.operationId) error.blockingOperationId = String(blocker.operationId);
+  if (blocker?.operation) error.blockingOperation = String(blocker.operation);
+  if (blocker?.startedAt) error.blockingStartedAt = blocker.startedAt;
+  return error;
+}
+
+function workspaceMutationBlockedError(workspace, block) {
+  const detail = String(block?.reason || 'Rel.AI could not confirm that a previous mutating process stopped.');
+  const error = new Error(`Workspace '${workspace}' mutations are blocked for safety: ${detail} Restart the Rel.AI MCP runtime after confirming no stale process is still modifying this workspace.`);
+  error.code = 'WORKSPACE_MUTATION_BLOCKED';
+  error.retryable = false;
+  error.blockedAt = block?.blockedAt || null;
+  return error;
+}
+
+function throwIfWorkspaceMutationBlocked(workspace) {
+  const block = mutationBlocks.get(workspace);
+  if (block) throw workspaceMutationBlockedError(workspace, block);
+}
+
+function mutationBlockControllerFor(workspace) {
+  let controller = mutationBlockControllers.get(workspace);
+  if (!controller) {
+    controller = new AbortController();
+    mutationBlockControllers.set(workspace, controller);
+  }
+  return controller;
+}
+
+function mutationQueueSignal(workspace, callerSignal) {
+  const blockSignal = mutationBlockControllerFor(workspace).signal;
+  if (!callerSignal) return blockSignal;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([callerSignal, blockSignal]);
+  const controller = new AbortController();
+  const forward = signal => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  if (callerSignal.aborted) forward(callerSignal);
+  else callerSignal.addEventListener('abort', () => forward(callerSignal), { once: true });
+  if (blockSignal.aborted) forward(blockSignal);
+  else blockSignal.addEventListener('abort', () => forward(blockSignal), { once: true });
+  return controller.signal;
+}
+
+function blockWorkspaceMutations(workspaceAlias, reason) {
+  const workspace = String(workspaceAlias || '').trim();
+  if (!workspace) return null;
+  const existing = mutationBlocks.get(workspace);
+  if (existing) return { ...existing };
+  const block = {
+    reason: reason instanceof Error ? reason.message : String(reason || 'Previous mutation termination was not confirmed.'),
+    blockedAt: new Date().toISOString()
+  };
+  mutationBlocks.set(workspace, block);
+  const controller = mutationBlockControllerFor(workspace);
+  if (!controller.signal.aborted) controller.abort(workspaceMutationBlockedError(workspace, block));
+  return { ...block };
 }
 
 function throwIfAborted(signal) {
@@ -162,6 +258,11 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
     return operation();
   }
 
+  const queueTimeoutMs = Number.isFinite(Number(options.queueTimeoutMs)) && Number(options.queueTimeoutMs) > 0
+    ? Math.floor(Number(options.queueTimeoutMs))
+    : 0;
+  const queueDeadline = queueTimeoutMs > 0 ? Date.now() + queueTimeoutMs : 0;
+  const remainingQueueMs = () => queueDeadline > 0 ? Math.max(1, queueDeadline - Date.now()) : 0;
   const mode = options.mode === READ ? READ : WRITE;
   const taskId = String(options.taskId || '').trim();
   const requestedScope = String(options.scope || '');
@@ -175,7 +276,10 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
   const outerKey = workspaceKey(workspace);
 
   if (scope === WORKSPACE_SCOPE) {
+    if (mode === WRITE) throwIfWorkspaceMutationBlocked(workspace);
+    const signal = mode === WRITE ? mutationQueueSignal(workspace, options.signal) : options.signal;
     return withLock(outerKey, mode, async (waitMs, state) => {
+      if (mode === WRITE) throwIfWorkspaceMutationBlocked(workspace);
       notifyWait(options, waitMs, {
         workspace,
         taskId,
@@ -184,14 +288,17 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
         queued: state.queue.length
       });
       return operation();
-    }, options.signal);
+    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
   }
 
   if (scope === MUTATION_SCOPE) {
+    throwIfWorkspaceMutationBlocked(workspace);
+    const signal = mutationQueueSignal(workspace, options.signal);
     return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => {
       const laneKey = taskKey(workspace, taskId);
       return withLock(laneKey, mode, async (taskWaitMs, taskState) => {
         return withLock(mutationKey(workspace), WRITE, async (mutationWaitMs, mutationState) => {
+          throwIfWorkspaceMutationBlocked(workspace);
           const waitMs = workspaceWaitMs + taskWaitMs + mutationWaitMs;
           notifyWait(options, waitMs, {
             workspace,
@@ -201,9 +308,9 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
             queued: workspaceState.queue.length + taskState.queue.length + mutationState.queue.length
           });
           return operation();
-        }, options.signal);
-      }, options.signal);
-    }, options.signal);
+        }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
+      }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
+    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
   }
 
   return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => {
@@ -218,8 +325,8 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
         queued: workspaceState.queue.length + taskState.queue.length
       });
       return operation();
-    }, options.signal);
-  }, options.signal);
+    }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs);
+  }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs);
 }
 
 function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
@@ -228,7 +335,13 @@ function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
     throwIfAborted(options.signal);
     return operation();
   }
+  const queueTimeoutMs = Number.isFinite(Number(options.queueTimeoutMs)) && Number(options.queueTimeoutMs) > 0
+    ? Math.floor(Number(options.queueTimeoutMs))
+    : 0;
+  throwIfWorkspaceMutationBlocked(workspace);
+  const signal = mutationQueueSignal(workspace, options.signal);
   return withLock(mutationKey(workspace), WRITE, async (waitMs, state) => {
+    throwIfWorkspaceMutationBlocked(workspace);
     notifyWait(options, waitMs, {
       workspace,
       taskId: String(options.taskId || '').trim(),
@@ -237,11 +350,11 @@ function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
       queued: state.queue.length
     });
     return operation();
-  }, options.signal);
+  }, signal, queueTimeoutMs, options.owner);
 }
 
 function pendingWorkspaceOperations() {
   return locks.size;
 }
 
-export { runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };
+export { blockWorkspaceMutations, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };

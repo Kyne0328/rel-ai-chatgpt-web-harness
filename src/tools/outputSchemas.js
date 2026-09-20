@@ -225,6 +225,8 @@ const FIELD_SCHEMAS = Object.freeze({
   cancelledAt: TIMESTAMP_NULL,
   progress: OBJECT,
   duplicate: BOOLEAN,
+  stoppedOperationIds: STRING_ARRAY,
+  stoppedOperationCount: NUMBER,
   reused: BOOLEAN,
   count: NUMBER,
   completedUnits: NUMBER,
@@ -458,6 +460,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.CHANGES_RESTORE]: ['ok', 'workspace', 'work_id', 'mode', 'paths', 'command', 'commandSummary', 'cwd', 'shell', 'durationMs', 'queueWaitMs', 'queueTimedOut', 'exitCode', 'stdout', 'stderr', 'stdoutBytes', 'stderrBytes', 'stdoutTruncated', 'stderrTruncated', 'timedOut', 'cancelled', 'terminationConfirmed', 'forcedTermination', 'signal', 'error'],
   [OP.CHANGES_RESET]: ['ok', 'workspace', 'work_id', 'mode', 'removeUntracked', 'reset', 'clean'],
   [OP.WORK_STATUS]: ['ok', 'version', 'workspace', 'work_id', 'operationId', 'workspaceAliases', 'workspaceCount', 'toolSurface', 'tools', 'toolGroups', 'scripts', 'ci', 'runtime', 'repositoryRuntime', 'runtimeCompatibility', 'repository', 'readiness', 'state', 'task', 'activeRelatedWork', 'backgroundOperation'],
+  [OP.WORK_STOP]: ['ok', 'workspace', 'work_id', 'status', 'duplicate', 'operationId', 'stoppedOperationIds', 'stoppedOperationCount', 'message'],
   [OP.PUBLISH_COMMIT]: ['ok', 'workspace', 'work_id', 'dryRun', 'message', 'addAll', 'paths', 'sensitiveAuthorization', 'statusBefore', 'add', 'commit', 'head', 'statusAfter', 'secretStagedFiles', 'unauthorizedSecretPaths', 'indexRestored', 'error'],
   [OP.PUBLISH_PUSH]: ['ok', 'workspace', 'work_id', 'remote', 'branch', 'dryRun', 'setUpstream', 'push'],
   [OP.PUBLISH_DRAFT_PR]: ['ok', 'workspace', 'work_id', 'base', 'head', 'title', 'body', 'changedFiles', 'changedFileCount', 'emptyDiff', 'draftOnly', 'remoteChanged', 'warning', 'diff'],
@@ -476,6 +479,7 @@ const SUCCESS_REQUIRED_FIELDS = Object.freeze({
   [OP.PROCESS_STOP]: ['processId', 'status', 'duplicate'],
   [OP.PROCESS_LIST]: ['processes', 'count'],
   [OP.WORK_PLAN]: ['work_id', 'plan'],
+  [OP.WORK_STOP]: ['work_id', 'status', 'duplicate', 'stoppedOperationCount'],
   [OP.WORK_CANCEL]: ['work_id', 'status', 'duplicate'],
   [OP.WORK_FINISH]: ['work_id', 'completionKnown', 'validationStatus']
 });

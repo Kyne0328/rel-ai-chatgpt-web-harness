@@ -158,6 +158,8 @@ assert.match(processesReact, /export function createProcessesRoute/, 'Processes 
 assert.match(processesReact, /key: row\.processId/, 'Process rows must reconcile by canonical process identity');
 assert.match(processesReact, /postJson\('\/api\/processes\/stop'/, 'Process stop must retain the existing backend lifecycle endpoint');
 assert.match(processesReact, /data-stop-process/, 'Process stop controls must remain discoverable');
+assert.match(processesReact, /stopError/, 'Process stop failures must retain their actionable error text instead of collapsing to a generic retry state');
+assert.match(processesReact, /role: 'alert'/, 'Process stop failures must be announced accessibly');
 assert.match(reactMain, /registerReactSection\('processes'/, 'Processes must be registered as a canonical React route');
 assert.match(reactMain, /registerReactSection\('usage'/, 'Analytics must be registered as a canonical React route');
 assert.match(toolsReact, /export function createToolsRoute/, 'Tools must expose one React route factory');
@@ -168,6 +170,8 @@ assert.match(usageReact, /loadAnalyticsData/, 'Analytics must retain the canonic
 assert.match(usageReact, /taskRevision/, 'Analytics must refresh from canonical live task revisions');
 assert.match(reactMain, /registerReactSection\('usage'/, 'Analytics must remain registered as a canonical React route');
 assert.match(diagnostics, /export function createDiagnosticsRoute/, 'Troubleshooting must expose one React route factory');
+assert.match(diagnostics, /visibilitychange/, 'Live Troubleshooting must reconcile feature-local report state after returning from a hidden window');
+assert.match(diagnostics, /load\(\{ silent: true \}\)/, 'Visibility catch-up must reuse the bounded silent diagnostics refresh path');
 assert.match(workspacesReact, /export function createWorkspacesRoute/, 'Projects must expose one React route factory');
 assert.match(reactMain, /registerReactSection\('workspaces'/, 'Projects must be registered as a canonical React route');
 assert.match(workspacesReact, /data-workspaces-react/, 'Projects React route must own the rendered feature root');

@@ -27,6 +27,13 @@ function evaluateToolBehavior(expectations, observations) {
     if (observed.tools.some(tool => tool.startsWith('relai_app_'))) {
       failures.push(failure(item, 'app_only_tool', 'An app-only helper was model-selected.'));
     }
+    if (item.maxCalls != null && observed.tools.length > item.maxCalls) {
+      failures.push(failure(item, 'excessive_calls', `Observed ${observed.tools.length} tool calls; scenario limit is ${item.maxCalls}.`));
+    }
+    const duplicateCalls = Math.max(0, observed.tools.length - new Set(observed.tools).size);
+    if (item.maxDuplicateCalls != null && duplicateCalls > item.maxDuplicateCalls) {
+      failures.push(failure(item, 'duplicate_calls', `Observed ${duplicateCalls} duplicate tool calls; scenario limit is ${item.maxDuplicateCalls}.`));
+    }
   }
 
   const failedKeys = new Set(failures.map(item => item.id));
@@ -54,14 +61,27 @@ function normalizeCases(value, label) {
       prompt: String(raw.prompt || '').trim(),
       expectedTools: stringArray(raw.expectedTools),
       forbiddenTools: stringArray(raw.forbiddenTools),
-      tools: stringArray(raw.tools),
-      renderedTools: stringArray(raw.renderedTools)
+      tools: label === 'observation' ? stringList(raw.tools) : stringArray(raw.tools),
+      renderedTools: stringArray(raw.renderedTools),
+      maxCalls: optionalNonNegativeInteger(raw.maxCalls, `${label} ${id} maxCalls`),
+      maxDuplicateCalls: optionalNonNegativeInteger(raw.maxDuplicateCalls, `${label} ${id} maxDuplicateCalls`)
     };
   });
 }
 
+function stringList(value) {
+  return Array.isArray(value) ? value.map(item => String(item || '').trim()).filter(Boolean) : [];
+}
+
 function stringArray(value) {
-  return Array.isArray(value) ? [...new Set(value.map(item => String(item || '').trim()).filter(Boolean))] : [];
+  return [...new Set(stringList(value))];
+}
+
+function optionalNonNegativeInteger(value, label) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) throw new Error(`${label} must be a non-negative integer.`);
+  return number;
 }
 
 function sameSet(left, right) {

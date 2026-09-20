@@ -9,7 +9,7 @@ import { buildUntrackedDiff, normalizePaths, truncateDiff } from './reviewDiff.j
 
 const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 
-async function relaiDiff(workspace, config, args = {}) {
+async function relaiDiff(workspace, config, args = {}, context = {}) {
   const staged = Boolean(args.staged);
   const redactSensitive = args.redactSensitive === true;
   const filterPath = resolveReviewFilter(workspace, args.path, redactSensitive);
@@ -27,7 +27,8 @@ async function relaiDiff(workspace, config, args = {}) {
   const stat = await runProcess('git', gitStatusArgs(), {
     cwd: workspace.path,
     timeout: 30000,
-    maxOutputBytes: INTERNAL_STATUS_MAX_BYTES
+    maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
+    signal: context.signal
   }, config);
   if (stat.exitCode !== 0 || stat.stdoutTruncated) {
     throw new Error(`git status failed for ${workspace.alias}: ${stat.stderr || (stat.stdoutTruncated ? 'output exceeded internal limit' : stat.exitCode)}`);
@@ -50,7 +51,7 @@ async function relaiDiff(workspace, config, args = {}) {
     ? changedPaths.filter(item => !isSecretPath(item))
     : changedPaths;
   const pathScoped = reviewedScope === 'task' || filterPath != null || sensitivePaths.length > 0;
-  const diff = await runOrdinaryDiff(workspace, config, staged, ordinaryPaths, pathScoped);
+  const diff = await runOrdinaryDiff(workspace, config, staged, ordinaryPaths, pathScoped, context.signal);
   let diffText = diff.stdout || '';
   if (!staged) {
     const untracked = new Set(ownership.entries.filter(entry => entry.untracked && !isSecretPath(entry.path)).map(entry => entry.path));
@@ -110,11 +111,11 @@ function resolveReviewFilter(workspace, rawPath, redactSensitive) {
   }).relativePath;
 }
 
-async function runOrdinaryDiff(workspace, config, staged, paths, pathScoped) {
+async function runOrdinaryDiff(workspace, config, staged, paths, pathScoped, signal) {
   if (pathScoped && paths.length === 0) return { stdout: '', stderr: '', exitCode: 0 };
   const args = ['diff', ...(staged ? ['--staged'] : [])];
   if (paths.length > 0) args.push('--', ...paths);
-  return runProcess('git', args, { cwd: workspace.path, timeout: 60000 }, config);
+  return runProcess('git', args, { cwd: workspace.path, timeout: 60000, signal }, config);
 }
 
 export { relaiDiff };

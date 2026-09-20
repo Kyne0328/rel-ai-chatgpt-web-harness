@@ -61,6 +61,7 @@ function titleForTool(tool, details = {}) {
     [OP.CHANGES_CHECKPOINT]: 'Checkpoint repository review',
     [OP.CHANGES_REPLAY]: 'Replay repository review',
     [OP.WORK_STATUS]: 'Inspect repository status',
+    [OP.WORK_STOP]: 'Stop running task operations',
     [OP.WORK_CANCEL]: 'Cancel work session',
     [OP.WORK_FINISH]: 'Finish work session'
   };
@@ -130,7 +131,11 @@ function progressForTool(name, args = {}, value = null, ok = true, phase = 'comp
   }
   const checks = Array.isArray(value?.checks) ? value.checks : [];
   const results = Array.isArray(value?.results) ? value.results : [];
-  const requestedChecks = Array.isArray(args?.checks) ? args.checks.length : 0;
+  // The validation handler normalizes aliases and removes duplicates before
+  // publishing determinate progress. Do not expose the raw request count from
+  // the generic "tool started" event or progress can temporarily claim a total
+  // that the validation run will never execute.
+  const requestedChecks = phase === 'running' ? 0 : (Array.isArray(args?.checks) ? args.checks.length : 0);
   const totalChecks = Math.max(Number(value?.totalUnits || 0), requestedChecks, checks.length, results.length);
   if (/checks|diagnostics/.test(String(name || '')) && totalChecks > 0) {
     const completed = phase === 'running'
@@ -384,6 +389,10 @@ function summaryForTool(name, args, value, error, operation, result) {
   }
   if (name === OP.PUBLISH_COMMIT) return value?.commit ? `Created Git commit ${cleanText(value.commit, 20)}.` : 'Created a Git commit.';
   if (name === OP.PUBLISH_PUSH) return 'Published the Git branch.';
+  if (name === OP.WORK_STOP) {
+    const count = Math.max(0, Number(value?.stoppedOperationCount || 0));
+    return count ? `Stop requested for ${count} running operation${count === 1 ? '' : 's'}.` : 'No matching running operation needed to be stopped.';
+  }
   if (name === OP.WORK_CANCEL) return sanitizeDisplayText(value?.terminalReason || args?.reason, MAX_SUMMARY_LENGTH) || 'Task cancellation was reported.';
   if (name === OP.WORK_FINISH) return sanitizeDisplayText(value?.summary || args?.summary, MAX_SUMMARY_LENGTH) || 'Task completion was reported.';
   return cleanText(result?.outcome, MAX_SUMMARY_LENGTH) || `${operation || titleForTool(name, args) || 'Tool operation'} completed.`;
@@ -531,6 +540,25 @@ function normalizeTaskPlan(plan = {}) {
   };
 }
 
+function terminalizeTaskPlan(plan = {}) {
+  const normalized = normalizeTaskPlan(plan);
+  if (!normalized?.steps?.length) return normalized;
+  let changed = false;
+  const steps = normalized.steps.map(step => {
+    if (step.status === 'completed' || step.status === 'skipped') return step;
+    changed = true;
+    const note = 'Task completed before this step reported a terminal outcome.';
+    return {
+      ...step,
+      status: 'skipped',
+      detail: step.detail ? `${note} Previous detail: ${step.detail}` : note
+    };
+  });
+  return changed
+    ? { ...normalized, revision: normalized.revision + 1, steps }
+    : normalized;
+}
+
 function sanitizeTaskRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return record;
   const value = { ...record };
@@ -556,7 +584,9 @@ function sanitizeTaskRecord(record, options = {}) {
   }
   if (Array.isArray(value.currentOperations)) value.currentOperations = value.currentOperations.map(item => sanitizeStructuredValue(item, 0)).filter(Boolean);
   if (value.semanticProgress && typeof value.semanticProgress === 'object') value.semanticProgress = sanitizeStructuredValue(value.semanticProgress, 0);
-  if (value.plan && typeof value.plan === 'object') value.plan = normalizeTaskPlan(value.plan);
+  if (value.plan && typeof value.plan === 'object') {
+    value.plan = value.status === 'completed' ? terminalizeTaskPlan(value.plan) : normalizeTaskPlan(value.plan);
+  }
   if (value.correlation && typeof value.correlation === 'object') value.correlation = sanitizeStructuredValue(value.correlation, 0);
   if (value.backgroundOperation && typeof value.backgroundOperation === 'object') value.backgroundOperation = sanitizeStructuredValue(value.backgroundOperation, 0);
   delete value.workflow;

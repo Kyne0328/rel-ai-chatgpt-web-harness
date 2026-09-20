@@ -2,13 +2,13 @@ import * as path from 'node:path';
 import { runProcess, summarizeCommand } from '../process.js';
 import { selectValidationLevel } from '../validationStrategy.js';
 import { resolvePolicy } from '../policyResolver.js';
-import { clampNumber } from './limits.js';
 import { getCurrentTaskAbortSignal, getCurrentToolActivityContext } from '../toolActivity.js';
 import { readTaskIntegrity, readWorkspaceIntegrity, taskOwnedChangedFiles } from '../taskIntegrity.ts';
 import { readRecentWorkflowEvidence, recordWorkflowEvidenceBatch } from '../taskHistoryStore.ts';
 import { buildWorkflowEvidenceReceipt, checkEvidenceReusable } from '../workflow/evidence.js';
 import { sanitizeDisplayText } from '../taskObservability.js';
 import { combineAbortSignals } from '../abortSignals.js';
+import { resolveOneShotTimeoutMs } from '../executionControl.js';
 import { finalizeValidationResult, normalizeCompletionSummary } from '../tools/completion.js';
 import { createValidationFingerprint, createValidationPlan, readValidationPlan } from './validationPlan.js';
 import { runSpan } from '../telemetry.js';
@@ -32,6 +32,11 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const completionRetryCount = Math.max(0, Number(context.completionRetryCount || 0));
   const currentTaskId = String(getCurrentToolActivityContext()?.taskId || context.taskId || args.work_id || '').trim();
   const logicalWorkspaceAlias = String(workspace.alias || '').trim();
+  const signal = combineAbortSignals(
+    getCurrentTaskAbortSignal(),
+    args._operationTaskId ? nativeToolTaskSignal(args._operationTaskId) : undefined,
+    context.signal
+  );
   const suppliedChangedFiles = Array.isArray(args.changedFiles)
     ? [...new Set(args.changedFiles.map(file => String(file || '').trim()).filter(Boolean))]
     : [];
@@ -51,7 +56,8 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   if (!args.planId && !hasRequestedChecks(args)) {
     validationPlan = await createValidationPlan(workspace, config, {
       release: String(args.level || '').toLowerCase() === 'release',
-      changedFiles: validationScope
+      changedFiles: validationScope,
+      signal
     });
     currentFingerprint = validationPlan.workspaceFingerprint
       ? { fingerprint: validationPlan.workspaceFingerprint }
@@ -63,7 +69,8 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   } else if (args.planId) {
     validationPlan = readValidationPlan(config, args.planId, workspace);
     currentFingerprint = await createValidationFingerprint(workspace, config, {
-      paths: validationPlan.validationScope || validationPlan.changedFiles || []
+      paths: validationPlan.validationScope || validationPlan.changedFiles || [],
+      signal
     });
     if (!validationPlan.workspaceFingerprint || validationPlan.workspaceFingerprint !== currentFingerprint.fingerprint) {
       throw new Error('Validation plan is stale because relevant workspace content changed. Run relai_validate with action "checks" again to generate a current internal plan.');
@@ -78,9 +85,12 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     ? validationPlan.validationScope
     : validationScope;
   const level = String(planSelection === 'focused' ? 'quick' : (args.level || planSelection || 'standard')).toLowerCase();
-  const complete = args.complete === true;
-  if (complete && !currentTaskId) throw new Error('relai_validate complete:true requires work_id because it closes a durable work session.');
-  const completionSummary = complete ? normalizeCompletionSummary(args.summary) : '';
+  const explicitWorkId = String(args.work_id || '').trim();
+  const complete = args.complete === true
+    ? Boolean(currentTaskId)
+    : Boolean(explicitWorkId) && args.complete !== false;
+  if (args.complete === true && !currentTaskId) throw new Error('relai_validate complete:true requires work_id because it closes a durable work session.');
+  const completionSummary = complete ? normalizeCompletionSummary(resolveCompletionSummary(args, context)) : '';
   const normalized = normalizeVerifyChecks(effectiveArgs, workspace.path, level);
   const { checks, checkUnits, skippedChecks, aliasNormalizations } = normalized;
   const { level: validationLevel, reason: validationLevelReason, changedFiles } = selectValidationLevel(workspace.path, workspace, args.validationLevel, validationScope);
@@ -89,7 +99,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   if (checks.length === 0) {
     return noChecksValidationResult(workspace, config, {
       level, skippedChecks, aliasNormalizations, validationLevel,
-      validationLevelReason, changedFiles, policy, validationScope: fingerprintScope
+      validationLevelReason, changedFiles, policy, validationScope: fingerprintScope, signal
     });
   }
 
@@ -97,7 +107,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const fullOutput = Boolean(args.fullOutput);
   const tailChars = fullOutput ? CHECK_OUTPUT_TAIL_FULL : CHECK_OUTPUT_TAIL_DEFAULT;
   const indexedResults = new Array(checks.length);
-  if (!currentFingerprint) currentFingerprint = await createValidationFingerprint(workspace, config, { paths: fingerprintScope });
+  if (!currentFingerprint) currentFingerprint = await createValidationFingerprint(workspace, config, { paths: fingerprintScope, signal });
   const recentEvidence = currentTaskId ? readRecentWorkflowEvidence(config, currentTaskId, 100) : [];
   const evidenceAuthority = currentTaskId ? (requestIntegrity || readTaskIntegrity(config, currentTaskId, logicalWorkspaceAlias)) : null;
   const evidenceWorkspace = currentTaskId ? readWorkspaceIntegrity(config, logicalWorkspaceAlias) : null;
@@ -105,11 +115,6 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const reusedCheckIds = new Array(checks.length);
   let executedUnits = 0;
   let reusedUnits = 0;
-  const signal = combineAbortSignals(
-    getCurrentTaskAbortSignal(),
-    args._operationTaskId ? nativeToolTaskSignal(args._operationTaskId) : undefined,
-    context.signal
-  );
   const effectiveUnits = checks.map((command, index) => checkUnits[index] || {
     id: `explicit:${index}`,
     command,
@@ -129,12 +134,28 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
       `validation ${index + 1}`,
       async () => {
         const command = unit.command;
-        const reusable = recentEvidence.find(receipt => checkEvidenceReusable(receipt, {
-          commandId: unit.id || `explicit:${index}`,
-          command,
-          cwd: unit.cwd || '.',
-          repositoryFingerprint: currentFingerprint.fingerprint
-        }));
+        const commandId = unit.id || `explicit:${index}`;
+        let evidenceFingerprint = currentFingerprint;
+        let reusable = null;
+        if (currentTaskId && !String(commandId).startsWith('explicit:')) {
+          evidenceFingerprint = await createValidationFingerprint(workspace, config, {
+            paths: fingerprintScope,
+            repositoryWide: true,
+            signal
+          });
+          if (recentEvidence.length) {
+            const reuseAuthority = readTaskIntegrity(config, currentTaskId, logicalWorkspaceAlias);
+            const reuseWorkspace = readWorkspaceIntegrity(config, logicalWorkspaceAlias);
+            reusable = recentEvidence.find(receipt => checkEvidenceReusable(receipt, {
+              commandId,
+              command,
+              cwd: unit.cwd || '.',
+              repositoryFingerprint: evidenceFingerprint.fingerprint,
+              mutationGeneration: reuseAuthority?.mutationGeneration ?? 0,
+              workspaceGeneration: reuseWorkspace?.generation ?? 0
+            }));
+          }
+        }
         if (reusable) {
           const reusedSummary = { command, cwd: unit.cwd || '.', ok: true, reused: true };
           indexedResults[index] = reusedSummary;
@@ -177,7 +198,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           cwd: path.resolve(workspace.path, unit.cwd || '.'),
           shell: true,
           commandString: command,
-          timeout: clampNumber(args.timeoutMs, 1000, 24 * 60 * 60 * 1000, 120000),
+          timeout: resolveOneShotTimeoutMs(args, context, { minMs: 1000, maxMs: 24 * 60 * 60 * 1000, fallbackMs: 120000 }),
           signal,
           resourceClass: 'heavy',
           resourceOwner: workspace.alias,
@@ -199,8 +220,8 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
               taskMutationGeneration: evidenceAuthority?.mutationGeneration || 0,
               taskWorkspaceGeneration: evidenceWorkspace?.generation || 0
             },
-            repositoryFingerprint: currentFingerprint.fingerprint,
-            commandId: unit.id || `explicit:${index}`
+            repositoryFingerprint: evidenceFingerprint?.fingerprint || currentFingerprint.fingerprint,
+            commandId
           });
           if (receipt) evidenceReceipts[index] = receipt;
         }
@@ -237,8 +258,10 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const reusedChecks = reusedCheckIds.filter(Boolean);
 
   const cancelled = signal?.aborted === true || results.some(item => item.cancelled === true);
-  const finalFingerprint = await createValidationFingerprint(workspace, config, { paths: fingerprintScope });
-  const scopeChanged = finalFingerprint.fingerprint !== currentFingerprint.fingerprint;
+  const finalFingerprint = cancelled
+    ? currentFingerprint
+    : await createValidationFingerprint(workspace, config, { paths: fingerprintScope, signal });
+  const scopeChanged = !cancelled && finalFingerprint.fingerprint !== currentFingerprint.fingerprint;
   if (scopeChanged && complete && !cancelled && completionRetryCount < 1) {
     return relaiVerify(workspace, config, args, {
       ...context,
@@ -285,7 +308,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     validated: results.length > 0,
     validationStatus,
     validationFingerprint,
-    validationScope: finalFingerprint.scopePaths,
+    validationScope: finalFingerprint.scopePaths || fingerprintScope,
     cancelled,
     completedUnits: completedValidationUnits(results),
     executedUnits,
@@ -300,7 +323,18 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   };
   if (!ok) return validationResult;
   if (!complete) return validationResult;
-  return finalizeValidationResult(config, workspace, validationResult, completionSummary);
+  return finalizeValidationResult(config, workspace, validationResult, completionSummary, { signal });
+}
+
+function resolveCompletionSummary(args = {}, context = {}) {
+  const supplied = String(args.summary || '').trim();
+  if (supplied) return supplied;
+  const session = context?.requestTaskContext?.session || {};
+  const title = String(session.title || '').trim();
+  const objective = String(session.objective || '').trim();
+  if (title) return `Completed ${title}.`;
+  if (objective) return `Completed task: ${objective}`;
+  return 'Validation passed and the task completed.';
 }
 
 // Re-exported so config summaries, diagnostics, and tests keep a single import site.

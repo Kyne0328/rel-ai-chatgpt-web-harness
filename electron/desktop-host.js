@@ -459,9 +459,13 @@ async function createDesktopHost(options = {}) {
     if (eventsBound) return;
     eventsBound = true;
     app.on('browser-window-created', (_event, win) => taskbarCompletionBadge.apply(win));
-    app.on('browser-window-focus', () => {
+    app.on('browser-window-focus', (_event, win) => {
       taskbarCompletionBadge.clear();
+      if (win === dashboardWindowManager.getWindow()) pulseWindowManager.setSuppressed(true);
       void appUpdater?.discoverUpdate?.();
+    });
+    app.on('browser-window-blur', (_event, win) => {
+      if (win === dashboardWindowManager.getWindow()) pulseWindowManager.setSuppressed(false);
     });
     app.on('second-instance', () => {
       const setupWindow = setupWindowManager.getWindow();

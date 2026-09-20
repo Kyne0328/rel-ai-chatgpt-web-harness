@@ -62,7 +62,9 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
   const timestamp = timestampMs(event.ts || event.timestamp) || Date.now();
   const ended = timestamp + Math.max(0, Number(event.ms || event.durationMs || 0));
   const completion = event.ok !== false && (event.completionKnown === true || event.tool === OP.WORK_FINISH);
-  const cancellation = event.ok !== false && event.tool === OP.WORK_CANCEL;
+  const cancellationStatus = String(event.taskCancellationStatus || '').trim().toLowerCase();
+  const cancellationPending = event.ok !== false && event.tool === OP.WORK_CANCEL && cancellationStatus === 'cancelling';
+  const cancellation = event.ok !== false && event.tool === OP.WORK_CANCEL && !cancellationPending;
   const changedFiles = unique([
     ...(current.changedFiles || []),
     ...(Array.isArray(event.taskOwnedChangedFiles) ? event.taskOwnedChangedFiles : []),
@@ -85,7 +87,9 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
     ? 'completed'
     : cancellation
       ? 'cancelled'
-      : isTerminalTaskStatus(current.status)
+      : cancellationPending
+        ? current.status
+        : isTerminalTaskStatus(current.status)
         ? current.status
         : recoverableValidationFailure
           ? 'validation_failed'

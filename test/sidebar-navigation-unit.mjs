@@ -24,7 +24,7 @@ assert.match(bootstrap, /relai_sidebar_collapsed/);
 assert.match(reactShell, /APPLICATION_NAV_ITEMS\[0\]/);
 assert.match(reactShell, /APPLICATION_NAV_ITEMS\[1\]/);
 assert.ok(!DESKTOP_NAV_ITEMS.some(item => item.id === EXTENSIONS_NAV_ITEM.id), 'Extensions must stay out of the default sidebar catalog');
-assert.match(reactShell, /developerModeEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'Developer mode must add Extensions to the application navigation');
+assert.match(reactShell, /extensionsEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'The Extensions feature flag must add Extensions to the application navigation');
 assert.match(reactShell, /SYSTEM_NAV_ITEMS/);
 assert.match(reactShell, /SETTINGS_NAV_ITEMS/);
 assert.match(reactShell, /id: 'sidebarToggle'/);

@@ -9,18 +9,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const execFileAsync = promisify(execFile);
 
 const RELEASE_GATE_CHECKS = Object.freeze([
-  check('capability_policy', 'Capability negotiation and execution-mode policy', 'test/mcp-execution-mode-unit.mjs'),
-  check('transport_bounds', 'Transport routing, timeout, output, abort, and cleanup bounds', 'test/mcp-transport-tasks-unit.mjs'),
+  check('capability_policy', 'MCP capability, transport, strict-protocol, and tool-surface contracts', 'test/suite-mcp-tools-unit.mjs'),
   check('task_lifecycle', 'Native task lifecycle, persistence, authorization, expiry, and redaction', 'test/native-task-service-unit.mjs'),
-  check('task_protocol', 'Native task protocol input, replay, capability, and ownership rules', 'test/native-task-protocol-unit.mjs'),
+  check('task_protocol', 'Native task protocol and core runtime contracts', 'test/suite-runtime-core-unit.mjs'),
   check('work_session_isolation', 'Principal-bound repository work-session ownership', 'test/work-session-principal-isolation-unit.mjs'),
-  check('strict_protocol', 'Strict MCP 2026 envelope and header validation', 'test/mcp-2026-header-unit.mjs'),
   check('http_matrix', 'HTTP capability matrix and synchronous task-protocol lifecycle', 'test/native-tasks-http.mjs'),
   check('process_lifecycle', 'Persistent-process independence, ownership, restart, and bounded logs', 'test/process-manager-unit.mjs'),
   check('process_cancellation', 'Finite-process cancellation and process-tree cleanup', 'test/process-cancellation-unit.mjs'),
-  check('tool_surface', 'Public tool count, probe removal, annotations, and result schemas', 'test/tool-registry-unit.mjs'),
-  check('dashboard_contract', 'Capability, task, work-session, process, and terminal dashboard states', 'test/dashboard-runtime-observability-unit.mjs'),
-  check('dashboard_rendering', 'Dashboard renderer smoke coverage', 'test/dashboard-ui-smoke.mjs'),
+  check('dashboard_contract', 'Dashboard capability, task, process, rendering, and state contracts', 'test/suite-dashboard-ui-unit.mjs'),
   check('stdio_discovery', 'stdio discovery and public tool surface', 'test/smoke.mjs'),
   check('http_discovery', 'HTTP discovery and native Tasks advertisement', 'test/http-smoke.mjs'),
   check('http_authentication', 'HTTP authentication and stateless ChatGPT initialization', 'test/http-auth-smoke.mjs'),

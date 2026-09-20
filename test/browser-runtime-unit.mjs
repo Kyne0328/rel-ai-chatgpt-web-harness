@@ -71,6 +71,23 @@ assert.equal(tabs.tabs.filter(tab => tab.active).length, 1);
 await runtime.closeTab(workspace, { sessionId, tabId: second.tabId, work_id: context.taskId }, context);
 assert.equal((await runtime.listTabs(workspace, { sessionId, work_id: context.taskId }, context)).count, 1);
 
+const capacityTabs = [];
+for (let index = 0; index < 7; index += 1) {
+  capacityTabs.push(await runtime.openTab(workspace, {
+    sessionId,
+    url: `https://intranet.example.test/capacity-${index}`,
+    work_id: context.taskId
+  }, context));
+}
+assert.equal((await runtime.listTabs(workspace, { sessionId, work_id: context.taskId }, context)).count, 8);
+await assert.rejects(
+  () => runtime.openTab(workspace, { sessionId, url: 'https://intranet.example.test/overflow', work_id: context.taskId }, context),
+  error => error?.code === 'BROWSER_TAB_LIMIT'
+);
+await runtime.closeTab(workspace, { sessionId, tabId: capacityTabs[0].tabId, work_id: context.taskId }, context);
+const replacementTab = await runtime.openTab(workspace, { sessionId, url: 'https://intranet.example.test/replacement', work_id: context.taskId }, context);
+assert.match(replacementTab.tabId, /^tab_/);
+
 await assert.rejects(
   () => runtime.navigate(workspace, { sessionId, url: 'javascript:alert(1)', work_id: context.taskId }, context),
   /http or https/i

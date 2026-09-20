@@ -6,6 +6,7 @@ import path from 'node:path';
 import { callTool as rawCallTool } from '../src/tools.js';
 import { getToolActivity, resetToolActivity } from '../src/toolActivity.js';
 import { flushTaskHistoryPersistence, readTaskHistorySession } from '../src/taskHistoryStore.ts';
+import { readTaskIntegrity } from '../src/taskIntegrity.ts';
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-task-plan-'));
 const previousConfig = process.env.REL_AI_MCP_CONFIG;
@@ -36,6 +37,8 @@ try {
     objective: 'Verify durable plan creation, retries, restart recovery, and concurrent updates.'
   });
   assert.ok(started.work_id);
+  assert.equal(readTaskIntegrity(config, started.work_id, 'repo')?.baseline?.pending, true,
+    'begin must keep repository baseline capture deferred until a mutation or validation boundary actually needs it');
 
   const initiallyCleared = await callTool('relai_work', {
     action: 'plan',
@@ -48,6 +51,8 @@ try {
   assert.equal(initiallyCleared.message, 'Task plan is unchanged.');
   assert.equal(getToolActivity().tasks.find(task => task.taskId === started.work_id || task.id === started.work_id)?.plan, undefined,
     'an initial no-op clear must not materialize empty durable plan state');
+  assert.equal(readTaskIntegrity(config, started.work_id, 'repo')?.baseline?.pending, true,
+    'plan bookkeeping must not trigger the expensive repository ownership baseline');
 
   const first = await callTool('relai_work', {
     action: 'plan',
@@ -86,6 +91,8 @@ try {
     paths: ['config.json'],
     guidanceMode: 'none'
   });
+  assert.equal(readTaskIntegrity(config, started.work_id, 'repo')?.baseline?.pending, true,
+    'ordinary read observation must not trigger the repository ownership baseline');
   const afterRead = getToolActivity().tasks.find(task => task.taskId === started.work_id || task.id === started.work_id);
   assert.equal(afterRead?.progress?.source, 'task_plan', 'ordinary tool activity must not replace explicit checklist progress');
   assert.equal(afterRead?.progress?.completedUnits, 1);
@@ -140,6 +147,59 @@ try {
   resetToolActivity();
   const restored = await callTool('relai_work', { action: 'status', work_id: started.work_id });
   assert.equal(restored.task?.plan?.revision, 5, 'the last serialized plan revision must survive restart recovery');
+
+  const piggybackTask = await callTool('relai_work', {
+    action: 'begin', workspace: 'repo', title: 'Piggyback plan regression', objective: 'Update plan state without separate plan calls.'
+  });
+  await callTool('relai_read', {
+    workspace: 'repo', work_id: piggybackTask.work_id, paths: ['config.json'], guidanceMode: 'none',
+    taskProgress: { steps: [
+      { id: 'inspect', title: 'Inspect implementation', status: 'in_progress' },
+      { id: 'validate', title: 'Validate implementation', status: 'pending' }
+    ] }
+  });
+  let piggybackLive = getToolActivity().tasks.find(task => task.taskId === piggybackTask.work_id || task.id === piggybackTask.work_id);
+  assert.equal(piggybackLive?.plan?.revision, 1, 'ordinary task calls must be able to establish a durable checklist');
+  assert.deepEqual(piggybackLive?.plan?.steps.map(step => step.status), ['in_progress', 'pending']);
+  await callTool('relai_read', {
+    workspace: 'repo', work_id: piggybackTask.work_id, paths: ['config.json'], guidanceMode: 'none',
+    taskProgress: { step: { id: 'inspect', status: 'completed', detail: 'Inspection complete.' } }
+  });
+  piggybackLive = getToolActivity().tasks.find(task => task.taskId === piggybackTask.work_id || task.id === piggybackTask.work_id);
+  assert.equal(piggybackLive?.plan?.revision, 2, 'piggybacked step transitions must advance the durable plan revision');
+  assert.deepEqual(piggybackLive?.plan?.steps.map(step => step.status), ['completed', 'pending']);
+
+  await callTool('relai_work', {
+    action: 'finish', workspace: 'repo', work_id: piggybackTask.work_id,
+    summary: 'Piggyback plan regression completed.'
+  });
+  await flushTaskHistoryPersistence();
+  const terminalPiggyback = readTaskHistorySession(config, piggybackTask.work_id);
+  assert.equal(terminalPiggyback?.status, 'completed');
+  assert.equal(terminalPiggyback?.plan?.revision, 3, 'terminal reconciliation must advance the plan revision once when unresolved steps remain');
+  assert.deepEqual(terminalPiggyback?.plan?.steps.map(step => step.status), ['completed', 'skipped'],
+    'a completed task must not persist pending, in-progress, or blocked checklist state');
+  assert.match(terminalPiggyback?.plan?.steps[1]?.detail || '', /completed before this step reported a terminal outcome/i,
+    'terminal reconciliation must preserve that an unresolved step was not explicitly reported as completed');
+
+  const finishProgressTask = await callTool('relai_work', {
+    action: 'begin', workspace: 'repo', title: 'Finish progress regression', objective: 'Finalize the last checklist step without a separate plan call.'
+  });
+  await callTool('relai_read', {
+    workspace: 'repo', work_id: finishProgressTask.work_id, paths: ['config.json'], guidanceMode: 'none',
+    taskProgress: { steps: [{ id: 'finish', title: 'Finish the task', status: 'in_progress' }] }
+  });
+  await callTool('relai_work', {
+    action: 'finish', workspace: 'repo', work_id: finishProgressTask.work_id,
+    summary: 'Finish progress regression completed.',
+    taskProgress: { step: { id: 'finish', status: 'completed' } }
+  });
+  await flushTaskHistoryPersistence();
+  const terminalFinishProgress = readTaskHistorySession(config, finishProgressTask.work_id);
+  assert.equal(terminalFinishProgress?.status, 'completed');
+  assert.equal(terminalFinishProgress?.plan?.revision, 2, 'finish must apply its final progress patch before terminal reconciliation');
+  assert.deepEqual(terminalFinishProgress?.plan?.steps.map(step => step.status), ['completed'],
+    'finish must preserve an explicitly completed final step instead of converting it to skipped');
 
   const cleared = await callTool('relai_work', {
     action: 'plan',

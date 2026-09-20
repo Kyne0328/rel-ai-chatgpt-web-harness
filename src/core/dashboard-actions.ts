@@ -26,6 +26,20 @@ export function resolveWorkspaceFolder(workspaceAlias: string): string {
   return workspace.path;
 }
 
+export async function controlDashboardTask(action: 'stop' | 'cancel', workId: string, operationId = ''): Promise<Record<string, unknown>> {
+  const taskId = String(workId || '').trim();
+  if (!taskId) throw new Error('work_id is required');
+  if (!['stop', 'cancel'].includes(action)) throw new Error('action must be stop or cancel');
+  return callTool('relai_work', {
+    action,
+    work_id: taskId,
+    ...(action === 'stop' && operationId ? { operationId: String(operationId).trim() } : {}),
+    reason: action === 'cancel'
+      ? 'Task cancelled from the Rel.AI dashboard.'
+      : 'Running operation stopped from the Rel.AI dashboard.'
+  }, { publicHttpOnly: false });
+}
+
 export async function runWorkspaceValidation(workspace: string): Promise<Record<string, unknown>> {
   let workId = '';
   try {

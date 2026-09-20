@@ -37,7 +37,7 @@ function createExtensionsRoute() {
       if (!entry?.id || busy) return;
       const permissions = permissionSummary(entry.permissions);
       const cliSetup = entry.autoInstall
-        ? ' If its required command is missing, Rel.AI may download the manifest-declared, SHA-256-verified platform binary into Rel.AI local data.'
+        ? ' If its required command is missing, Rel.AI may download the manifest-declared, SHA-256-verified platform binary or private tool bundle into Rel.AI local data.'
         : entry.kind === 'cli'
           ? ' This extension expects its required local command to already be installed.'
           : '';
@@ -51,7 +51,7 @@ function createExtensionsRoute() {
       });
       if (!confirmed) return;
       setBusy(`${action}:${entry.id}`);
-      const result = await postJson('/api/extensions', { action, id: entry.id, confirmPermissions: true }, { cache: 'no-store', timeout: 30000 });
+      const result = await postJson('/api/extensions', { action, id: entry.id, confirmPermissions: true }, { cache: 'no-store', timeout: 15 * 60 * 1000 });
       setBusy('');
       if (!result?.ok) {
         toast(result?.error || `Could not ${action} the extension.`, { variant: 'error' });
@@ -194,15 +194,16 @@ function DeveloperPanel({ installRoot }) {
         h(ExternalLink, { href: EXTENSION_SCHEMA_URL, label: 'Manifest schema' })
       ),
       h(DeveloperCard, { title: 'Supported adapters' },
-        h('p', { className: 'muted' }, 'Skill extensions add reusable ChatGPT instructions. CLI extensions pair a skill with a command and use Rel.AI’s current execution tools. If the command is missing, a CLI extension can provide SHA-256-pinned platform binaries that Rel.AI installs into its own local state.')
+        h('p', { className: 'muted' }, 'Skill extensions add reusable ChatGPT instructions. CLI extensions pair skills with local commands. They can provide either one SHA-256-pinned platform binary or a SHA-256-pinned ZIP tool bundle with multiple explicit command entrypoints and supporting files.')
       )
     ),
     h(DeveloperCard, { title: 'Security and execution model' },
       h('ul', { className: 'extensions-guidelines' },
         h('li', null, 'ChatGPT Web remains the reasoning and conversation host.'),
         h('li', null, 'Catalog permissions are declarations shown before installation; Rel.AI’s existing authorization policy still enforces local actions.'),
-        h('li', null, 'Package files and optional CLI binaries are downloaded only from HTTPS locations declared by the catalog-selected manifest, verified by SHA-256, and installed outside project folders.'),
-        h('li', null, 'Managed CLI binaries are appended to child PATH, so an extension cannot override an existing system command.'),
+        h('li', null, 'Package files and optional CLI artifacts are downloaded only from HTTPS locations declared by the catalog-selected manifest, verified by SHA-256, and installed outside project folders.'),
+        h('li', null, 'ZIP tool bundles are extracted into the extension’s private local folder with traversal, symlink, entry-count, and extracted-size checks.'),
+        h('li', null, 'Only declared managed command directories are appended after the inherited child PATH, so an extension cannot override an existing system command.'),
         h('li', null, 'Extensions are not imported as arbitrary code into the Rel.AI service process.')
       ),
       installRoot ? h('div', { className: 'extension-install-root' }, h('span', null, 'Local extension folder'), h('code', null, installRoot)) : null

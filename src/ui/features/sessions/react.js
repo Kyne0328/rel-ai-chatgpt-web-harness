@@ -1,7 +1,8 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { fetchJson } from '../../api.js';
+import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { copyText } from '../../clipboard.js';
+import { confirmAction } from '../../components/confirm-dialog.js';
 import { toast } from '../../components/toast.js';
 import { formatDuration, timeAgo } from '../../utils.js';
 import { getRouteParams, getWorkspaceFilter, routeHref, setWorkspaceFilter } from '../../router.js';
@@ -256,6 +257,44 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
   const currentCopy = live
     ? (semantic.currentActivity || operationValue || 'Task is open.')
     : (session.summary || session.endReason || sessionDescription(session, false, operationValue, semantic));
+  const [controlKey, setControlKey] = useState('');
+  useEffect(() => setControlKey(''), [id]);
+  const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
+  const controlTask = useCallback(async (action, operationId = '') => {
+    const key = operationId ? `stop:${operationId}` : action;
+    if (action === 'cancel') {
+      const confirmed = await confirmAction({
+        title: 'Cancel task?',
+        message: 'Cancel this task and stop its finite running operations?',
+        detail: 'Managed persistent processes keep running and can be stopped separately from Processes.',
+        confirmLabel: 'Cancel task',
+        danger: true
+      });
+      if (!confirmed) return;
+    }
+    setControlKey(key);
+    try {
+      const result = await postJson('/api/tasks/control', {
+        action,
+        work_id: id,
+        ...(operationId ? { operationId } : {})
+      }, { timeout: 10000, pauseTimeoutWhenHidden: false });
+      if (result?.ok === false) {
+        toast(result.error || 'The task action could not be completed.', { variant: 'error' });
+        return;
+      }
+      toast(action === 'cancel'
+        ? (result.status === 'cancelled' ? 'Task cancelled.' : 'Task cancellation requested.')
+        : result.stoppedOperationCount
+          ? `Stop requested for ${result.stoppedOperationCount} running operation${result.stoppedOperationCount === 1 ? '' : 's'}.`
+          : 'No matching running operation needed to be stopped.', { variant: 'success' });
+      requestDashboardRefresh();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
+    } finally {
+      setControlKey('');
+    }
+  }, [id]);
 
   return h('div', { className: 'detail-stack session-detail' },
     h('header', { className: 'task-detail-header' },
@@ -264,7 +303,19 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
         h('h2', { ref: headingRef, tabIndex: -1 }, session.title || operationValue),
         session.objective ? h('p', null, session.objective) : null
       ),
-      h(StatusPill, { state })
+      h('div', { className: 'task-detail-header-actions' },
+        h(StatusPill, { state }),
+        live && runningOperations.length ? h('button', {
+          className: 'secondary', type: 'button', 'data-stop-task-operations': '',
+          disabled: Boolean(controlKey),
+          onClick: () => { void controlTask('stop'); }
+        }, controlKey === 'stop' ? 'Stopping…' : 'Stop running operations') : null,
+        live ? h('button', {
+          className: 'secondary danger', type: 'button', 'data-cancel-task': '',
+          disabled: Boolean(controlKey),
+          onClick: () => { void controlTask('cancel'); }
+        }, controlKey === 'cancel' ? 'Cancelling…' : 'Cancel task') : null
+      )
     ),
     h(SessionTabs, { activeTab, setActiveTab }),
     h('div', { className: 'inspector-panel', id: 'session-panel-overview', role: 'tabpanel', 'aria-labelledby': 'session-tab-overview', tabIndex: 0, hidden: activeTab !== 'overview', 'data-session-panel': 'overview' },
@@ -291,7 +342,7 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
       )
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-technical', role: 'tabpanel', 'aria-labelledby': 'session-tab-technical', tabIndex: 0, hidden: activeTab !== 'technical', 'data-session-panel': 'technical' },
-      h(TechnicalDetails, { session, identities, state, operationValue }),
+      h(TechnicalDetails, { session, identities, state, operationValue, controlKey, onStopOperation: operationId => controlTask('stop', operationId) }),
       session.trace?.entries?.length
         ? h('div', { className: 'session-inline-actions' }, h('button', { className: 'secondary', type: 'button', onClick: () => exportTrace(session), 'data-export-task-trace': '' }, 'Export trace (.jsonl)'))
         : null
@@ -486,7 +537,7 @@ function EventRow({ event, session, older = false }) {
   );
 }
 
-function TechnicalDetails({ session, identities, state, operationValue }) {
+function TechnicalDetails({ session, identities, state, operationValue, controlKey, onStopOperation }) {
   return h('div', { className: 'task-detail-technical is-expanded' },
     h('section', { className: 'task-detail-section' },
       h('div', { className: 'task-detail-heading' }, h('h3', null, 'Identifiers')),
@@ -506,7 +557,7 @@ function TechnicalDetails({ session, identities, state, operationValue }) {
         h(Detail, { label: 'Completion confirmed', value: session.completionKnown ? 'Yes' : 'No' })
       )
     ),
-    h(CurrentOperations, { session })
+    h(CurrentOperations, { session, controlKey, onStopOperation })
   );
 }
 
@@ -523,17 +574,29 @@ function IdentifierDetail({ label, value }) {
   );
 }
 
-function CurrentOperations({ session }) {
+function CurrentOperations({ session, controlKey = '', onStopOperation }) {
   const executable = ['running', 'validating', 'working'].includes(String(session?.status || '')) && Number(session?.activeCalls || 0) > 0;
   const operations = executable && Array.isArray(session.currentOperations) ? session.currentOperations : [];
   if (!operations.length) return null;
   return h('section', { className: 'task-detail-section' },
     h('div', { className: 'task-detail-heading' }, h('h3', null, 'Running operations'), h('span', null, operations.length)),
-    h('div', { className: 'task-event-list' }, ...operations.map((operation, index) => h('div', { className: 'task-event', key: operation.invocationId || operation.operationId || `${operation.startedAt || ''}:${index}` },
-      h('span', { 'data-clock-elapsed-start': operation.startedAt || '' }, formatDuration(Date.now() - Number(operation.startedAt || Date.now()), { live: true })),
-      h('code', null, operation.label || operation.tool || 'operation'),
-      h(StatusPill, { state: { status: 'running', pillClass: 'working' }, label: 'running' })
-    )))
+    h('div', { className: 'task-event-list' }, ...operations.map((operation, index) => {
+      const operationId = String(operation.id || operation.operationId || operation.invocationId || '');
+      const stopping = Boolean(operation.stopRequestedAt) || controlKey === `stop:${operationId}`;
+      return h('div', { className: 'task-event', key: operationId || `${operation.startedAt || ''}:${index}` },
+        h('span', { 'data-clock-elapsed-start': operation.startedAt || '' }, formatDuration(Date.now() - Number(operation.startedAt || Date.now()), { live: true })),
+        h('code', null, operation.label || operation.tool || 'operation'),
+        h('div', { className: 'task-operation-actions' },
+          h(StatusPill, { state: { status: stopping ? 'stopping' : 'running', pillClass: 'working' }, label: stopping ? 'stopping' : 'running' }),
+          operationId ? h('button', {
+            className: 'secondary compact-button', type: 'button', 'data-stop-task-operation': operationId,
+            disabled: Boolean(controlKey) || stopping,
+            'aria-label': `Stop ${operation.label || operation.tool || 'running operation'}`,
+            onClick: () => { void onStopOperation?.(operationId); }
+          }, stopping ? 'Stopping…' : 'Stop') : null
+        )
+      );
+    }))
   );
 }
 

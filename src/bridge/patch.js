@@ -7,14 +7,15 @@ import { assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths } from "../repo
 import { clampNumber } from "./limits.js";
 import { relaiVerify, hasRequestedChecks } from "./validation.js";
 import { relaiDiff } from "./review.js";
+import { beginStructuredPatchTransaction, completeStructuredPatchTransaction } from '../structuredPatchTransaction.js';
 
 const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 
-async function relaiApplyPatch(workspace, config, args = {}) {
+async function relaiApplyPatch(workspace, config, args = {}, context = {}) {
   const rawPatch = String(args.patch || args.diff || args.updateText || "");
   assertPatchUpdateSafe(workspace, config, args, rawPatch);
   if (/^\*\*\* Begin Patch\b/m.test(rawPatch)) {
-    return applyStructuredOpenAIPatch(workspace, config, args, rawPatch);
+    return applyStructuredOpenAIPatch(workspace, config, args, rawPatch, context);
   }
   const patch = normalizeUnifiedDiffText(rawPatch);
   const patchBytes = Buffer.byteLength(patch, "utf8");
@@ -54,12 +55,12 @@ async function relaiApplyPatch(workspace, config, args = {}) {
   // must report changedFiles:[].
   const hashOf = (rel) => (fs.existsSync(path.join(workspace.path, rel)) ? fileSha256(workspace.path, rel) : null);
   const beforeHashes = new Map(touchedPaths.map((rel) => [rel, hashOf(rel)]));
-  const apply = await runProcess("git", ["apply", "-"], { cwd: workspace.path, input: patch, timeout: timeoutMs }, config);
+  const apply = await runProcess("git", ["apply", "-"], { cwd: workspace.path, input: patch, timeout: timeoutMs, signal: context.signal }, config);
   const changedFiles = apply.exitCode === 0
     ? touchedPaths.filter((rel) => hashOf(rel) !== beforeHashes.get(rel))
     : [];
-  const verify = hasRequestedChecks(args) ? await relaiVerify(workspace, config, args) : null;
-  const diff = args.returnDiff === false ? null : await relaiDiff(workspace, config, { maxBytes: args.maxDiffBytes || DEFAULT_MAX_DIFF_BYTES });
+  const verify = hasRequestedChecks(args) ? await relaiVerify(workspace, config, args, context) : null;
+  const diff = args.returnDiff === false ? null : await relaiDiff(workspace, config, { maxBytes: args.maxDiffBytes || DEFAULT_MAX_DIFF_BYTES }, context);
   const ok = apply.exitCode === 0 && (!verify || verify.ok);
   appendOperation(config, workspace, { id: operationId, type: "apply_patch", ok, paths: changedFiles, results: [{ operation: "applyPatch", bytes: patchBytes, touchedPaths, changedFiles, verified: verify ? verify.ok : null }] });
   return { ok, workspace: workspace.alias, operationId, operation: "applyPatch", changedFiles, touchedPaths, patchBytes, apply: summarizeCommand(apply), sourceFormat: "unified-diff", ...(verify ? { verify } : {}), ...(diff ? { diff } : {}) };
@@ -117,7 +118,7 @@ function handleOpenAIPatchSection(lines, i, out) {
   return i + 1;
 }
 
-async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch) {
+async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, context = {}) {
   const document = parseOpenAIPatchDocument(rawPatch);
   const plan = planStructuredPatch(workspace, document);
   const touchedPaths = plan.touchedPaths;
@@ -136,8 +137,12 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch) {
       touchedPaths
     };
   }
+  const changedSnapshots = plan.snapshots.filter(snapshot => plan.changedFiles.includes(snapshot.path));
+  const changedStates = plan.states.filter(state => plan.changedFiles.includes(state.path));
+  beginStructuredPatchTransaction(config, workspace, changedSnapshots, changedStates);
   const applied = applyStructuredPlan(workspace, plan);
   if (!applied.ok) {
+    if (applied.rollback?.ok === true) completeStructuredPatchTransaction(config, workspace);
     appendOperation(config, workspace, { id: operationId, type: "apply_patch", ok: false, paths: [], results: [{ operation: "applyPatch", rollback: applied.rollback, error: applied.error }] });
     return {
       ok: false,
@@ -151,9 +156,10 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch) {
       error: applied.error
     };
   }
+  completeStructuredPatchTransaction(config, workspace);
   const changedFiles = plan.changedFiles;
-  const verify = hasRequestedChecks(args) ? await relaiVerify(workspace, config, args) : null;
-  const diff = args.returnDiff === false ? null : await relaiDiff(workspace, config, { maxBytes: args.maxDiffBytes || DEFAULT_MAX_DIFF_BYTES });
+  const verify = hasRequestedChecks(args) ? await relaiVerify(workspace, config, args, context) : null;
+  const diff = args.returnDiff === false ? null : await relaiDiff(workspace, config, { maxBytes: args.maxDiffBytes || DEFAULT_MAX_DIFF_BYTES }, context);
   const ok = !verify || verify.ok;
   appendOperation(config, workspace, { id: operationId, type: "apply_patch", ok, paths: changedFiles, results: [{ operation: "applyPatch", bytes: Buffer.byteLength(rawPatch, "utf8"), touchedPaths: changedFiles, verified: verify ? verify.ok : null }] });
   return {

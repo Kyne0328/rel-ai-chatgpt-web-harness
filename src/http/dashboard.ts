@@ -15,7 +15,7 @@ import {
   updateDashboardWorkspace
 } from '../core/dashboard-runtime.ts';
 import { ERROR_CODES, errorPayload } from '../contracts/errors.ts';
-import { handleOpenFolder, handlePickFolder, handleWorkspaceChecks } from './dashboardActions.ts';
+import { handleOpenFolder, handlePickFolder, handleTaskControl, handleWorkspaceChecks } from './dashboardActions.ts';
 import { createSseWriter, readJsonBody, sendJson, sendSse } from './io.ts';
 import type { HttpRouteContext, HttpServerOptions } from './types.ts';
 
@@ -152,5 +152,6 @@ export {
   handleApiWorkspaces,
   handlePickFolder,
   handleOpenFolder,
+  handleTaskControl,
   handleWorkspaceChecks
 };

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -51,6 +52,39 @@ let desktopStatus = {
   error: '',
   localUrl: 'http://127.0.0.1:3333'
 };
+
+function removeSandboxAfterHandlesClose() {
+  const options = { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 2, retryDelay: 100 };
+  try {
+    fs.rmSync(sandbox, options);
+    return;
+  } catch (error) {
+    if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error;
+  }
+
+  const cleanupScript = `
+    const fs = require('node:fs');
+    const target = process.argv[1];
+    let attempts = 0;
+    const remove = () => {
+      try {
+        fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        process.exit(0);
+      } catch {
+        attempts += 1;
+        if (attempts >= 50) process.exit(0);
+        setTimeout(remove, 100);
+      }
+    };
+    setTimeout(remove, 100);
+  `;
+  const cleanup = spawn(process.execPath, ['-e', cleanupScript, sandbox], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true
+  });
+  cleanup.unref();
+}
 
 fs.writeFileSync(configPath, JSON.stringify({
   version: 2,
@@ -193,12 +227,7 @@ try {
   await server.waitForShutdown?.();
   if (previousConfigPath == null) delete process.env.REL_AI_MCP_CONFIG; else process.env.REL_AI_MCP_CONFIG = previousConfigPath;
   if (previousStateDir == null) delete process.env.REL_AI_MCP_STATE_DIR; else process.env.REL_AI_MCP_STATE_DIR = previousStateDir;
-  fs.rmSync(sandbox, {
-    recursive: true,
-    force: true,
-    maxRetries: process.platform === 'win32' ? 20 : 2,
-    retryDelay: 100
-  });
+  removeSandboxAfterHandlesClose();
 }
 
 console.log('Dashboard typed live events and revision-based reconnect catch-up passed.');

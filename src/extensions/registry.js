@@ -6,9 +6,12 @@ import { z } from 'zod';
 import { getApplicationMetadata } from '../appMetadata.js';
 import {
   extensionBinRoot,
+  managedExtensionBundleCommandPath,
   managedExtensionCommandMetadataPath,
   managedExtensionCommandPath
 } from './paths.js';
+import { extractToolBundleZip } from './toolBundle.js';
+import { beginExtensionInstallTransaction, completeExtensionInstallTransaction, markExtensionInstallCommitted, recoverInterruptedExtensionInstalls } from './installTransaction.js';
 
 const CATALOG_URL = 'https://raw.githubusercontent.com/Kyne0328/rel-ai-extensions/main/catalog.json';
 const MANIFEST_FILENAME = 'relai-extension.json';
@@ -18,6 +21,10 @@ const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_EXTENSION_FILE_BYTES = 1024 * 1024;
 const MAX_EXTENSION_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_INSTALL_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_TOOL_BUNDLE_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_TOOL_BUNDLE_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_TOOL_BUNDLE_FILE_BYTES = 1024 * 1024 * 1024;
+const MAX_TOOL_BUNDLE_ENTRIES = 20_000;
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 const EXTENSION_ID_PATTERN = /^[a-z0-9][a-z0-9.-]{0,79}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -56,6 +63,26 @@ const binaryInstallSchema = z.object({
   artifacts: z.array(binaryArtifactSchema).min(1).max(12)
 }).strict();
 
+const bundleCommandSchema = z.object({
+  command: z.string().regex(/^[A-Za-z0-9._+-]{1,100}$/),
+  path: z.string().min(1).max(240)
+}).strict();
+
+const bundleArtifactSchema = z.object({
+  platform: z.enum(['win32', 'darwin', 'linux']),
+  arch: z.enum(INSTALL_ARCHITECTURES),
+  url: z.string().url(),
+  sha256: z.string().regex(SHA256_PATTERN),
+  commands: z.array(bundleCommandSchema).min(1).max(20)
+}).strict().superRefine((artifact, ctx) => {
+  if (!isHttpsUrl(artifact.url)) ctx.addIssue({ code: 'custom', path: ['url'], message: 'Tool bundle URLs must use HTTPS.' });
+});
+
+const bundleInstallSchema = z.object({
+  type: z.literal('bundle'),
+  artifacts: z.array(bundleArtifactSchema).min(1).max(12)
+}).strict();
+
 const extensionManifestSchema = z.object({
   schemaVersion: z.literal(1),
   id: z.string().regex(EXTENSION_ID_PATTERN),
@@ -81,7 +108,7 @@ const extensionManifestSchema = z.object({
     skill: z.string().min(1).max(240),
     command: z.string().regex(/^[A-Za-z0-9._+-]{1,100}$/).optional()
   }).strict(),
-  install: binaryInstallSchema.optional(),
+  install: z.union([binaryInstallSchema, bundleInstallSchema]).optional(),
   files: z.array(extensionFileSchema).min(1).max(64)
 }).strict().superRefine((manifest, ctx) => {
   if (!semver.valid(manifest.version)) {
@@ -114,15 +141,46 @@ const extensionManifestSchema = z.object({
   if (manifest.install && manifest.kind !== 'cli') {
     ctx.addIssue({ code: 'custom', path: ['install'], message: 'Only CLI extensions may declare install artifacts.' });
   }
-  if (manifest.install && manifest.entrypoints.command && RESERVED_MANAGED_COMMANDS.has(normalizeCommandName(manifest.entrypoints.command))) {
+  if (manifest.install?.type === 'binary' && manifest.entrypoints.command && RESERVED_MANAGED_COMMANDS.has(normalizeCommandName(manifest.entrypoints.command))) {
     ctx.addIssue({ code: 'custom', path: ['entrypoints', 'command'], message: 'This command name is reserved and cannot be auto-installed by an extension.' });
   }
   if (manifest.install) {
     const targets = new Set();
+    let bundleCommandSet = null;
     for (const [index, artifact] of manifest.install.artifacts.entries()) {
       const target = `${artifact.platform}/${artifact.arch}`;
       if (targets.has(target)) ctx.addIssue({ code: 'custom', path: ['install', 'artifacts', index], message: `Duplicate install artifact target '${target}'.` });
       targets.add(target);
+      if (manifest.install.type !== 'bundle') continue;
+      const commands = new Set();
+      for (const [commandIndex, entry] of artifact.commands.entries()) {
+        const issuePath = ['install', 'artifacts', index, 'commands', commandIndex];
+        if (!isSafeRelativePath(entry.path)) {
+          ctx.addIssue({ code: 'custom', path: [...issuePath, 'path'], message: 'Tool bundle command paths must be safe relative paths.' });
+        }
+        const normalizedCommand = normalizeCommandName(entry.command);
+        if (isSafeRelativePath(entry.path) && normalizeCommandName(path.basename(entry.path)) !== normalizedCommand) {
+          ctx.addIssue({ code: 'custom', path: [...issuePath, 'path'], message: `Tool bundle command path must have the same executable name as '${entry.command}'.` });
+        }
+        if (RESERVED_MANAGED_COMMANDS.has(normalizedCommand)) {
+          ctx.addIssue({ code: 'custom', path: [...issuePath, 'command'], message: `Managed command '${entry.command}' is reserved.` });
+        }
+        if (commands.has(normalizedCommand)) {
+          ctx.addIssue({ code: 'custom', path: [...issuePath, 'command'], message: `Duplicate managed command '${entry.command}'.` });
+        }
+        commands.add(normalizedCommand);
+        if (!manifest.requires.commands.includes(entry.command)) {
+          ctx.addIssue({ code: 'custom', path: ['requires', 'commands'], message: `Tool bundle command '${entry.command}' must be listed in requires.commands.` });
+        }
+      }
+      if (manifest.entrypoints.command && !artifact.commands.some(entry => entry.command === manifest.entrypoints.command)) {
+        ctx.addIssue({ code: 'custom', path: ['entrypoints', 'command'], message: 'entrypoints.command must be provided by every tool bundle artifact.' });
+      }
+      const currentSet = [...commands].sort().join('\n');
+      if (bundleCommandSet == null) bundleCommandSet = currentSet;
+      else if (bundleCommandSet !== currentSet) {
+        ctx.addIssue({ code: 'custom', path: ['install', 'artifacts', index, 'commands'], message: 'Tool bundle artifacts must expose the same command names on every platform/architecture.' });
+      }
     }
   }
 });
@@ -171,6 +229,8 @@ function extensionsRoot(config = {}) {
 }
 
 function listInstalledExtensions(config = {}) {
+  const recovery = recoverInterruptedExtensionInstalls(config);
+  if (!recovery.ok) throw new Error(`Could not recover an interrupted extension installation: ${recovery.errors[0]?.error || 'unknown recovery error'}`);
   const root = extensionsRoot(config);
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return []; }
@@ -282,46 +342,119 @@ async function fetchExtensionCatalog(options = {}) {
   return catalog;
 }
 
-async function prepareManagedCommandInstall(config, manifest) {
+async function prepareManagedCommandInstall(config, manifest, extensionStaging) {
   if (manifest.kind !== 'cli' || !manifest.install) return null;
-  const command = String(manifest.entrypoints.command || '').trim();
-  if (!command) return null;
-  const systemAvailable = systemCommandAvailable(command, config);
-  const owner = readManagedCommandOwner(config, command);
-  const target = managedExtensionCommandPath(config, command);
-  const metadataTarget = managedExtensionCommandMetadataPath(config, command);
-  if (owner && owner !== manifest.id && !systemAvailable) {
-    throw new Error(`Cannot auto-install '${command}' because it is managed by extension '${owner}'.`);
-  }
-  if (systemAvailable && owner !== manifest.id) return null;
-  if (fs.existsSync(target) && !owner) {
-    throw new Error(`Refusing to replace unowned managed command '${command}'.`);
-  }
   const artifact = manifest.install.artifacts.find(item => item.platform === process.platform && item.arch === process.arch);
   if (!artifact) {
     throw new Error(`No auto-install artifact is available for ${process.platform}/${process.arch}.`);
   }
+  if (manifest.install.type === 'bundle') {
+    return await prepareManagedBundleInstall(config, manifest, artifact, extensionStaging);
+  }
+
+  const command = String(manifest.entrypoints.command || '').trim();
+  if (!command) return null;
+  const disposition = managedCommandDisposition(config, manifest.id, command);
+  if (!disposition) return null;
   const content = await fetchFile(artifact.url, MAX_INSTALL_ARTIFACT_BYTES, `CLI artifact for ${manifest.id}`, { timeoutMs: 120_000 });
   const digest = crypto.createHash('sha256').update(content).digest('hex');
   if (digest !== artifact.sha256) throw new Error(`Checksum mismatch for CLI artifact '${command}'.`);
 
   const binRoot = extensionBinRoot(config);
   fs.mkdirSync(binRoot, { recursive: true, mode: 0o700 });
+  const entry = createManagedCommandTransactionEntry(config, manifest, command, {
+    installType: 'binary',
+    url: artifact.url,
+    sha256: artifact.sha256
+  });
+  fs.writeFileSync(entry.stagingTarget, content, { mode: 0o700 });
+  if (process.platform !== 'win32') fs.chmodSync(entry.stagingTarget, 0o755);
+  return { entries: [entry], committed: false };
+}
+
+async function prepareManagedBundleInstall(config, manifest, artifact, extensionStaging) {
+  const managed = artifact.commands
+    .map(item => ({ item, disposition: managedCommandDisposition(config, manifest.id, item.command) }))
+    .filter(item => item.disposition);
+  if (!managed.length) return null;
+
+  const archivePath = path.join(extensionStaging, '.tool-bundle-download.zip');
+  const toolRoot = path.join(extensionStaging, '.tool');
+  await downloadVerifiedFile(
+    artifact.url,
+    MAX_TOOL_BUNDLE_ARCHIVE_BYTES,
+    `tool bundle for ${manifest.id}`,
+    archivePath,
+    artifact.sha256,
+    { timeoutMs: 15 * 60_000 }
+  );
+  try {
+    await extractToolBundleZip(archivePath, toolRoot, {
+      maxEntries: MAX_TOOL_BUNDLE_ENTRIES,
+      maxExtractedBytes: MAX_TOOL_BUNDLE_EXTRACTED_BYTES,
+      maxFileBytes: MAX_TOOL_BUNDLE_FILE_BYTES
+    });
+  } finally {
+    fs.rmSync(archivePath, { force: true });
+  }
+
+  for (const item of artifact.commands) {
+    const commandPath = safeJoin(toolRoot, item.path);
+    let stat;
+    try { stat = fs.lstatSync(commandPath); } catch {
+      throw new Error(`Tool bundle command '${item.command}' is missing declared path '${item.path}'.`);
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`Tool bundle command '${item.command}' is not a safe regular file.`);
+    }
+    if (process.platform !== 'win32') fs.chmodSync(commandPath, stat.mode | 0o111);
+  }
+
+  const entries = managed.map(({ item }) => createManagedCommandTransactionEntry(config, manifest, item.command, {
+    installType: 'bundle',
+    relativePath: item.path,
+    url: artifact.url,
+    sha256: artifact.sha256
+  }));
+  return { entries, committed: false };
+}
+
+function managedCommandDisposition(config, extensionId, command) {
+  const systemAvailable = systemCommandAvailable(command, config);
+  const owner = readManagedCommandOwner(config, command);
+  const target = managedExtensionCommandPath(config, command);
+  const metadataTarget = managedExtensionCommandMetadataPath(config, command);
+  if (owner && owner !== extensionId && !systemAvailable) {
+    throw new Error(`Cannot auto-install '${command}' because it is managed by extension '${owner}'.`);
+  }
+  if (systemAvailable && owner !== extensionId) return null;
+  if (fs.existsSync(target) && !owner) {
+    throw new Error(`Refusing to replace unowned managed command '${command}'.`);
+  }
+  if (fs.existsSync(metadataTarget) && !owner) {
+    throw new Error(`Refusing to replace unowned managed command metadata for '${command}'.`);
+  }
+  return { command, target, metadataTarget };
+}
+
+function createManagedCommandTransactionEntry(config, manifest, command, metadata) {
+  const { target, metadataTarget } = managedCommandDisposition(config, manifest.id, command);
+  const binRoot = extensionBinRoot(config);
+  fs.mkdirSync(binRoot, { recursive: true, mode: 0o700 });
   const nonce = crypto.randomUUID();
-  const stagingTarget = path.join(binRoot, `.install-${manifest.id}-${nonce}`);
-  const stagingMetadata = `${stagingTarget}.json`;
+  const stagingTarget = metadata.installType === 'binary'
+    ? path.join(binRoot, `.install-${manifest.id}-${normalizeCommandName(command)}-${nonce}`)
+    : '';
+  const stagingMetadata = path.join(binRoot, `.install-${manifest.id}-${normalizeCommandName(command)}-${nonce}.json`);
   const backupTarget = `${target}.backup-${nonce}`;
   const backupMetadata = `${metadataTarget}.backup-${nonce}`;
-  fs.writeFileSync(stagingTarget, content, { mode: 0o700 });
-  if (process.platform !== 'win32') fs.chmodSync(stagingTarget, 0o755);
   fs.writeFileSync(stagingMetadata, `${JSON.stringify({
     schemaVersion: 1,
     extensionId: manifest.id,
     command,
     platform: process.platform,
     arch: process.arch,
-    url: artifact.url,
-    sha256: artifact.sha256,
+    ...metadata,
     installedAt: new Date().toISOString()
   }, null, 2)}\n`, { mode: 0o600 });
   return {
@@ -332,22 +465,29 @@ async function prepareManagedCommandInstall(config, manifest) {
     stagingMetadata,
     backupTarget,
     backupMetadata,
+    targetExisted: fs.existsSync(target),
+    metadataExisted: fs.existsSync(metadataTarget),
     targetPromoted: false,
-    metadataPromoted: false,
-    committed: false
+    metadataPromoted: false
   };
 }
 
 function commitManagedCommandInstall(install) {
   if (!install) return;
-  if (fs.existsSync(install.target)) fs.renameSync(install.target, install.backupTarget);
-  if (fs.existsSync(install.metadataTarget)) fs.renameSync(install.metadataTarget, install.backupMetadata);
   try {
-    fs.renameSync(install.stagingTarget, install.target);
-    install.targetPromoted = true;
-    fs.renameSync(install.stagingMetadata, install.metadataTarget);
-    install.metadataPromoted = true;
-    if (process.platform !== 'win32') fs.chmodSync(install.target, 0o755);
+    for (const entry of install.entries) {
+      if (fs.existsSync(entry.target)) fs.renameSync(entry.target, entry.backupTarget);
+      if (fs.existsSync(entry.metadataTarget)) fs.renameSync(entry.metadataTarget, entry.backupMetadata);
+    }
+    for (const entry of install.entries) {
+      if (entry.stagingTarget) {
+        fs.renameSync(entry.stagingTarget, entry.target);
+        entry.targetPromoted = true;
+        if (process.platform !== 'win32') fs.chmodSync(entry.target, 0o755);
+      }
+      fs.renameSync(entry.stagingMetadata, entry.metadataTarget);
+      entry.metadataPromoted = true;
+    }
     install.committed = true;
   } catch (error) {
     rollbackManagedCommandInstall(install);
@@ -357,27 +497,33 @@ function commitManagedCommandInstall(install) {
 
 function rollbackManagedCommandInstall(install) {
   if (!install) return;
-  fs.rmSync(install.stagingTarget, { force: true });
-  fs.rmSync(install.stagingMetadata, { force: true });
-  if (install.targetPromoted || install.committed) fs.rmSync(install.target, { force: true });
-  if (install.metadataPromoted || install.committed) fs.rmSync(install.metadataTarget, { force: true });
-  if (!fs.existsSync(install.target) && fs.existsSync(install.backupTarget)) fs.renameSync(install.backupTarget, install.target);
-  if (!fs.existsSync(install.metadataTarget) && fs.existsSync(install.backupMetadata)) fs.renameSync(install.backupMetadata, install.metadataTarget);
-  install.targetPromoted = false;
-  install.metadataPromoted = false;
+  for (const entry of [...install.entries].reverse()) {
+    if (entry.stagingTarget) fs.rmSync(entry.stagingTarget, { force: true });
+    fs.rmSync(entry.stagingMetadata, { force: true });
+    if (entry.targetPromoted) fs.rmSync(entry.target, { force: true });
+    if (entry.metadataPromoted) fs.rmSync(entry.metadataTarget, { force: true });
+    if (!fs.existsSync(entry.target) && fs.existsSync(entry.backupTarget)) fs.renameSync(entry.backupTarget, entry.target);
+    if (!fs.existsSync(entry.metadataTarget) && fs.existsSync(entry.backupMetadata)) fs.renameSync(entry.backupMetadata, entry.metadataTarget);
+    entry.targetPromoted = false;
+    entry.metadataPromoted = false;
+  }
   install.committed = false;
 }
 
 function finalizeManagedCommandInstall(install) {
   if (!install) return;
-  fs.rmSync(install.stagingTarget, { force: true });
-  fs.rmSync(install.stagingMetadata, { force: true });
-  fs.rmSync(install.backupTarget, { force: true });
-  fs.rmSync(install.backupMetadata, { force: true });
+  for (const entry of install.entries) {
+    if (entry.stagingTarget) fs.rmSync(entry.stagingTarget, { force: true });
+    fs.rmSync(entry.stagingMetadata, { force: true });
+    fs.rmSync(entry.backupTarget, { force: true });
+    fs.rmSync(entry.backupMetadata, { force: true });
+  }
 }
 
 async function installExtension(config, id, options = {}) {
   const extensionId = normalizeExtensionId(id);
+  const recovery = recoverInterruptedExtensionInstalls(config);
+  if (!recovery.ok) throw new Error(`Could not recover an interrupted extension installation: ${recovery.errors[0]?.error || 'unknown recovery error'}`);
   const catalog = await fetchExtensionCatalog({ ...options, refresh: true });
   const entry = catalog.extensions.find(item => item.id === extensionId);
   if (!entry) throw new Error(`Extension '${extensionId}' is not in the Rel.AI extension catalog.`);
@@ -404,11 +550,12 @@ async function installExtension(config, id, options = {}) {
   const target = path.join(root, manifest.id);
   const staging = path.join(root, `.install-${manifest.id}-${crypto.randomUUID()}`);
   const backup = path.join(root, `.backup-${manifest.id}-${crypto.randomUUID()}`);
-  const managedInstall = await prepareManagedCommandInstall(config, manifest);
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
+  let managedInstall = null;
   let totalBytes = 0;
   let packageCommitted = false;
   try {
+    managedInstall = await prepareManagedCommandInstall(config, manifest, staging);
     for (const file of manifest.files) {
       const fileUrl = new URL(file.path.replaceAll('\\', '/'), entry.manifestUrl).href;
       const content = await fetchFile(fileUrl, MAX_EXTENSION_FILE_BYTES, `extension file ${file.path}`);
@@ -426,19 +573,30 @@ async function installExtension(config, id, options = {}) {
       manifestUrl: entry.manifestUrl,
       catalogUrl: resolveCatalogUrl(options),
       installedAt: new Date().toISOString(),
-      managedCommand: managedInstall?.command || ''
+      managedCommands: managedInstall?.entries.map(entry => entry.command) || []
     }, null, 2)}\n`, { mode: 0o600 });
+    beginExtensionInstallTransaction(config, {
+      id: manifest.id,
+      target,
+      staging,
+      backup,
+      targetExisted: fs.existsSync(target),
+      entries: managedInstall?.entries || []
+    });
     if (fs.existsSync(target)) fs.renameSync(target, backup);
     fs.renameSync(staging, target);
     packageCommitted = true;
     commitManagedCommandInstall(managedInstall);
+    markExtensionInstallCommitted(config, manifest.id);
     if (fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     finalizeManagedCommandInstall(managedInstall);
+    completeExtensionInstallTransaction(config, manifest.id);
   } catch (error) {
     fs.rmSync(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     rollbackManagedCommandInstall(managedInstall);
     if (packageCommitted) fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     if (!fs.existsSync(target) && fs.existsSync(backup)) fs.renameSync(backup, target);
+    completeExtensionInstallTransaction(config, manifest.id);
     throw error;
   }
   return readInstalledExtension(target, manifest.id, config);
@@ -446,6 +604,8 @@ async function installExtension(config, id, options = {}) {
 
 function removeExtension(config, id) {
   const extensionId = normalizeExtensionId(id);
+  const recovery = recoverInterruptedExtensionInstalls(config);
+  if (!recovery.ok) throw new Error(`Could not recover an interrupted extension installation: ${recovery.errors[0]?.error || 'unknown recovery error'}`);
   const root = extensionsRoot(config);
   const target = path.join(root, extensionId);
   let stat;
@@ -545,6 +705,59 @@ async function fetchFile(url, maxBytes, label, options = {}) {
   }
 }
 
+
+async function downloadVerifiedFile(url, maxBytes, label, destination, expectedSha256, options = {}) {
+  if (!isHttpsUrl(url)) throw new Error(`The ${label} URL must use HTTPS.`);
+  const controller = new AbortController();
+  const timeoutMs = Math.min(30 * 60_000, Math.max(1_000, Number(options.timeoutMs) || 120_000));
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let fd = null;
+  let completed = false;
+  try {
+    const response = await fetch(url, { signal: controller.signal, redirect: 'follow', headers: { 'User-Agent': 'Rel.AI-MCP-Extensions/1' } });
+    if (!response.ok) throw new Error(`Could not download ${label}: HTTP ${response.status}.`);
+    if (!isHttpsUrl(response.url || url)) throw new Error(`The ${label} redirected to a non-HTTPS URL.`);
+    const declaredLength = Number(response.headers.get('content-length') || 0);
+    if (declaredLength > maxBytes) throw new Error(`The ${label} exceeds the allowed size.`);
+    if (!response.body) throw new Error(`The ${label} response did not contain a body.`);
+
+    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    fd = fs.openSync(destination, 'wx', 0o600);
+    const digest = crypto.createHash('sha256');
+    const reader = response.body.getReader();
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        totalBytes += chunk.length;
+        if (totalBytes > maxBytes) {
+          controller.abort();
+          throw new Error(`The ${label} exceeds the allowed size.`);
+        }
+        digest.update(chunk);
+        fs.writeSync(fd, chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    const actualSha256 = digest.digest('hex');
+    if (actualSha256 !== expectedSha256) throw new Error(`Checksum mismatch for ${label}.`);
+    completed = true;
+    return { bytes: totalBytes, sha256: actualSha256 };
+  } catch (error) {
+    if (error?.name === 'AbortError') throw new Error(`Timed out downloading ${label}.`, { cause: error });
+    throw error;
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+    if (!completed) fs.rmSync(destination, { force: true });
+    clearTimeout(timeout);
+  }
+}
+
 function normalizeCommandName(value) {
   return path.basename(String(value || '').trim()).toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/i, '');
 }
@@ -570,26 +783,35 @@ function systemCommandAvailable(command, config = {}) {
   return false;
 }
 
-function readManagedCommandOwner(config, command) {
+function readManagedCommandMetadata(config, command) {
   const metadataPath = managedExtensionCommandMetadataPath(config, command);
   try {
     const stat = fs.lstatSync(metadataPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) return '';
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) return null;
     const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
-    if (metadata?.schemaVersion !== 1) return '';
-    if (String(metadata?.command || '') !== String(command || '')) return '';
+    if (metadata?.schemaVersion !== 1) return null;
+    if (String(metadata?.command || '') !== String(command || '')) return null;
     const extensionId = String(metadata?.extensionId || '');
-    return EXTENSION_ID_PATTERN.test(extensionId) ? extensionId : '';
+    if (!EXTENSION_ID_PATTERN.test(extensionId)) return null;
+    return metadata;
   } catch {
-    return '';
+    return null;
   }
+}
+
+function readManagedCommandOwner(config, command) {
+  return String(readManagedCommandMetadata(config, command)?.extensionId || '');
 }
 
 function commandAvailable(command, config = {}) {
   if (systemCommandAvailable(command, config)) return true;
-  if (!readManagedCommandOwner(config, command)) return false;
+  const metadata = readManagedCommandMetadata(config, command);
+  if (!metadata) return false;
   try {
-    const stat = fs.lstatSync(managedExtensionCommandPath(config, command));
+    const target = metadata.installType === 'bundle'
+      ? managedExtensionBundleCommandPath(config, metadata.extensionId, metadata.relativePath)
+      : managedExtensionCommandPath(config, command);
+    const stat = fs.lstatSync(target);
     return stat.isFile() && !stat.isSymbolicLink();
   } catch {
     return false;

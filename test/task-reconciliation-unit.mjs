@@ -7,6 +7,7 @@ import path from 'node:path';
 import { flushAuditWrites } from '../src/audit.js';
 import { readConfig } from '../src/config.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
+import { withStateDatabase } from '../src/stateDatabase.ts';
 import { flushTaskHistoryPersistence, readTaskHistory, readTaskHistorySessionRecord } from '../src/taskHistoryStore.ts';
 import { taskCommitOwnership } from '../src/taskIntegrity.ts';
 import { ensureCurrentHistory, getTaskHistoryDir, listSessions, pruneSessions, writeSession } from '../src/taskHistoryStorage.ts';
@@ -162,8 +163,38 @@ try {
   record('open-inactive', 'inactive', { resumeStatus: 'planning' });
   record('terminal-completed', 'completed', { completionKnown: true });
   record('terminal-cancelled', 'cancelled', { endReason: 'explicit_cancellation' });
+  withStateDatabase(pruneConfig, db => {
+    const insertIntegrity = db.prepare('INSERT INTO task_integrity_tasks(task_id,updated_at_ms,payload) VALUES(?,?,?)');
+    insertIntegrity.run('terminal-completed', Date.now(), JSON.stringify({ taskId: 'terminal-completed', completedAt: new Date().toISOString() }));
+    insertIntegrity.run('terminal-cancelled', Date.now(), JSON.stringify({ taskId: 'terminal-cancelled', cancelledAt: new Date().toISOString() }));
+    insertIntegrity.run('orphan-terminal', Date.now(), JSON.stringify({ taskId: 'orphan-terminal', completedAt: new Date().toISOString() }));
+    insertIntegrity.run('orphan-resumable', Date.now(), JSON.stringify({ taskId: 'orphan-resumable', completedAt: '', cancelledAt: '' }));
+    db.prepare('INSERT INTO workspace_integrity(workspace,updated_at_ms,payload) VALUES(?,?,?)')
+      .run('app', Date.now(), JSON.stringify({ workspace: 'app', uncommittedOwners: { 'owned.txt': ['terminal-completed'] } }));
+  }, { transaction: true });
   pruneSessions(pruneDirectory, 1);
   assert.deepEqual(listSessions(pruneDirectory, 10).map(session => session.id), ['open-inactive'], 'history pruning must preserve nonterminal work even when it exceeds the nominal retention target');
+  const retainedIntegrity = withStateDatabase(pruneConfig, db =>
+    db.prepare('SELECT task_id FROM task_integrity_tasks ORDER BY task_id').all().map(row => row.task_id)
+  , { transaction: true });
+  assert.deepEqual(
+    retainedIntegrity,
+    ['orphan-resumable', 'terminal-completed'],
+    'history pruning must retire unowned terminal integrity rows while preserving outstanding ownership and resumable authority'
+  );
+  withStateDatabase(pruneConfig, db => {
+    db.prepare('UPDATE workspace_integrity SET payload=? WHERE workspace=?')
+      .run(JSON.stringify({ workspace: 'app', uncommittedOwners: {} }), 'app');
+  }, { transaction: true });
+  pruneSessions(pruneDirectory, 1);
+  const integrityAfterOwnershipRelease = withStateDatabase(pruneConfig, db =>
+    db.prepare('SELECT task_id FROM task_integrity_tasks ORDER BY task_id').all().map(row => row.task_id)
+  , { transaction: true });
+  assert.deepEqual(
+    integrityAfterOwnershipRelease,
+    ['orphan-resumable'],
+    'a previously protected terminal orphan must retire after its outstanding ownership is released'
+  );
   fs.rmSync(pruneStateDir, { recursive: true, force: true });
 
   console.log('Task commit, inactivity recovery, cleanup retention, explicit completion, and residual-state tests passed.');

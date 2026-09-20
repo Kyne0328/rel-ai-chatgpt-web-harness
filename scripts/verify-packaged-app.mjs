@@ -73,6 +73,8 @@ const requiredFiles = [
   resourcePath('node_modules', '@hono', 'node-server', 'package.json'),
   resourcePath('node_modules', 'hono', 'package.json'),
   resourcePath('node_modules', 'zod', 'package.json'),
+  resourcePath('node_modules', 'yauzl', 'package.json'),
+  resourcePath('node_modules', 'pend', 'package.json'),
   resourcePath('node_modules', 'web-tree-sitter', 'package.json'),
   resourcePath('node_modules', 'web-tree-sitter', 'web-tree-sitter.js'),
   resourcePath('node_modules', 'web-tree-sitter', 'web-tree-sitter.wasm'),

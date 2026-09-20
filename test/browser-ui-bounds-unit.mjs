@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { clipBrowserSurfaceBounds } from '../src/ui/features/browser/react.js';
+import { clipBrowserSurfaceBounds, releaseBrowserRouteControl } from '../src/ui/features/browser/react.js';
 
 assert.deepEqual(
   clipBrowserSurfaceBounds(
@@ -52,4 +52,10 @@ assert.deepEqual(
   'right and bottom edges must stay inside the dashboard viewport'
 );
 
-console.log('Browser UI bounds stay inside the visible dashboard viewport.');
+const controlCalls = [];
+assert.equal(await releaseBrowserRouteControl({ setControl: async owner => { controlCalls.push(owner); } }), true);
+assert.deepEqual(controlCalls, ['ai'], 'leaving the Browser route must return any user-owned browser session to AI control');
+assert.equal(await releaseBrowserRouteControl({}), false, 'route cleanup must stay harmless when the desktop browser bridge is unavailable');
+assert.equal(await releaseBrowserRouteControl({ setControl: async () => { throw new Error('no active browser'); } }), false, 'route cleanup must not surface teardown races as user-visible failures');
+
+console.log('Browser UI bounds stay inside the visible dashboard viewport and route cleanup releases user takeover.');

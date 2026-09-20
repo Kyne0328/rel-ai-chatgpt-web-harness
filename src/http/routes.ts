@@ -98,6 +98,7 @@ const POST_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/computer': { auth: authDashboard, handler: lazyRoute(loadDashboardComputer, 'handleApiComputerAction') },
   '/api/pick-folder': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handlePickFolder') },
   '/api/open-folder': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleOpenFolder') },
+  '/api/tasks/control': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskControl') },
   '/api/workspace/checks': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleWorkspaceChecks') },
   '/api/processes/stop': { auth: authDashboard, handler: lazyRoute(loadDashboardProcesses, 'handleApiProcessStop') }
 });

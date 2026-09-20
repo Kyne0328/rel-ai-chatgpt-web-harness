@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -99,6 +99,39 @@ function waitForFile(file, timeoutMs = 10_000) {
   });
 }
 
+function removeTempRootAfterHandlesClose() {
+  const options = { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 };
+  try {
+    fs.rmSync(root, options);
+    return;
+  } catch (error) {
+    if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error;
+  }
+
+  const cleanupScript = `
+    const fs = require('node:fs');
+    const target = process.argv[1];
+    let attempts = 0;
+    const remove = () => {
+      try {
+        fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+        process.exit(0);
+      } catch {
+        attempts += 1;
+        if (attempts >= 50) process.exit(0);
+        setTimeout(remove, 100);
+      }
+    };
+    setTimeout(remove, 100);
+  `;
+  const cleanup = spawn(process.execPath, ['-e', cleanupScript, root], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true
+  });
+  cleanup.unref();
+}
+
 try {
   resetToolActivity();
   const primaryTask = await startTask('Atomic validation primary writer');
@@ -133,10 +166,12 @@ try {
     concurrentEditCompleted = true;
     return result;
   });
-  await Promise.race([
-    concurrentEdit,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('concurrent edit stayed blocked behind validation')), 3000))
+  const firstConcurrentResult = await Promise.race([
+    concurrentEdit.then(() => 'edit'),
+    completionPromise.then(() => 'validation', () => 'validation')
   ]);
+  assert.equal(firstConcurrentResult, 'edit', 'a workspace mutation must settle before the deliberately blocked validation command');
+  await concurrentEdit;
   assert.equal(concurrentEditCompleted, true, 'a workspace mutation must not wait for the entire validation command');
   fs.writeFileSync(validationReleasePath, 'release\\n');
 
@@ -178,10 +213,12 @@ try {
     unrelatedEditCompleted = true;
     return result;
   });
-  await Promise.race([
-    unrelatedEdit,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('unrelated edit stayed blocked behind validation')), 3000))
+  const firstUnrelatedResult = await Promise.race([
+    unrelatedEdit.then(() => 'edit'),
+    scopedCompletionPromise.then(() => 'validation', () => 'validation')
   ]);
+  assert.equal(firstUnrelatedResult, 'edit', 'an unrelated workspace mutation must settle before the deliberately blocked validation command');
+  await unrelatedEdit;
   assert.equal(unrelatedEditCompleted, true, 'unrelated workspace mutations must remain usable while another task validates');
   fs.writeFileSync(validationReleasePath, 'release\\n');
 
@@ -203,7 +240,7 @@ try {
   resetToolActivity();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  fs.rmSync(root, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 });
+  removeTempRootAfterHandlesClose();
 }
 
 console.log('Atomic validation resolves relevant races internally and ignores unrelated concurrent task changes.');

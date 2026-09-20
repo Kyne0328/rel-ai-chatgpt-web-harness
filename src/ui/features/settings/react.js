@@ -5,7 +5,7 @@ import { Icon } from '../../components/icons.js';
 import { openModal } from '../../components/modal.js';
 import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection } from '../../connection-state.js';
-import { readDeveloperModeEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperModeEnabled } from '../../developer-mode.js';
+import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath } from '../../router.js';
 import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL, RELAI_CONNECTOR_ICON_FILENAME, downloadRelaiConnectorIcon } from './connection-guidance.js';
@@ -16,6 +16,7 @@ const h = React.createElement;
 const RELEASES_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
 const DEVELOPER_UNLOCK_CLICK_COUNT = 5;
 const DEVELOPER_UNLOCK_WINDOW_MS = 2500;
+const DEVELOPER_FEATURE_FLAGS = Object.freeze(Object.values(DEVELOPER_FEATURES));
 const NOTIFICATION_DEFAULTS = Object.freeze({
   enabled: true,
   taskCompleted: true,
@@ -44,7 +45,13 @@ export function SettingsView({ data = {}, subPage = '' }) {
     connection: h(ConnectionPage, { data }),
     preferences: h(PreferencesPage),
     application: h(ApplicationPage, { computerControl: data.config?.computerControl }),
-    about: h(AboutPage, { metadata: data.application || {}, buildStatus: data.desktopStatus?.buildStatus })
+    about: h(AboutPage, {
+      metadata: data.application || {},
+      buildStatus: data.desktopStatus?.buildStatus,
+      runtime: data.runtime,
+      repositoryRuntime: data.repositoryRuntime,
+      runtimeCompatibility: data.runtimeCompatibility
+    })
   }[page] || h(PreferencesPage);
   return h('div', { id: '__settings-content', className: 'settings-content', 'data-settings-react': page }, content);
 }
@@ -561,7 +568,9 @@ function ApplicationPage({ computerControl }) {
   const [lifecycle, setLifecycle] = useState(undefined);
   const [desktopStatus, setDesktopStatus] = useState(undefined);
   const developerOptionsUnlocked = readDeveloperOptionsUnlocked();
-  const [developerModeEnabled, setDeveloperModeState] = useState(() => readDeveloperModeEnabled());
+  const [developerFeatures, setDeveloperFeatures] = useState(() => Object.fromEntries(
+    DEVELOPER_FEATURE_FLAGS.map(feature => [feature.id, readDeveloperFeatureEnabled(feature.id)])
+  ));
   const desktop = window.relaiDesktop;
   useEffect(() => {
     let active = true;
@@ -579,8 +588,11 @@ function ApplicationPage({ computerControl }) {
       h(ApplicationUpdates, { lifecycle, buildStatus: desktopStatus?.buildStatus }),
       h(LocalDataSettings),
       developerOptionsUnlocked ? h(DeveloperOptions, {
-        enabled: developerModeEnabled,
-        onChange: enabled => setDeveloperModeState(writeDeveloperModeEnabled(enabled))
+        enabledFeatures: developerFeatures,
+        onChange: (feature, enabled) => setDeveloperFeatures(current => ({
+          ...current,
+          [feature]: writeDeveloperFeatureEnabled(feature, enabled)
+        }))
       }) : null,
       typeof desktop?.quitApp === 'function' || typeof desktop?.logout === 'function'
         ? h(Card, { title: 'Application controls' },
@@ -592,17 +604,18 @@ function ApplicationPage({ computerControl }) {
   );
 }
 
-function DeveloperOptions({ enabled, onChange }) {
+function DeveloperOptions({ enabledFeatures, onChange }) {
   return h('details', { className: 'settings-advanced developer-options' },
     h('summary', null, 'Developer options'),
     h('div', { className: 'settings-panel-body' },
-      h('p', { className: 'settings-help' }, 'Experimental developer features are kept here until they are ready for normal use.'),
-      h(ToggleRow, {
-        label: 'Developer mode',
-        help: 'Show developer-only features such as Extensions in the main menu.',
-        checked: enabled,
-        onChange
-      })
+      h('p', { className: 'settings-help' }, 'Enable only the experimental features you want to use.'),
+      DEVELOPER_FEATURE_FLAGS.map(feature => h(ToggleRow, {
+        key: feature.id,
+        label: feature.label,
+        help: feature.help,
+        checked: enabledFeatures[feature.id] === true,
+        onChange: enabled => onChange(feature.id, enabled)
+      }))
     )
   );
 }
@@ -1011,11 +1024,12 @@ function QuitRow() {
   );
 }
 
-function AboutPage({ metadata, buildStatus = {} }) {
+function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime = {}, runtimeCompatibility = {} }) {
   const repositoryUrl = validatedGitHubUrl(metadata.repositoryUrl);
   const developer = metadata.developer || {};
   const developerUrl = validatedGitHubUrl(developer.profileUrl);
   const buildId = buildIdOf(buildStatus);
+  const runtimeNotice = runtimeCompatibilityNotice(runtime, repositoryRuntime, runtimeCompatibility);
   const developerUnlockRef = useRef({ count: 0, startedAt: 0 });
   const onBuildClick = () => {
     if (readDeveloperOptionsUnlocked()) return;
@@ -1023,7 +1037,7 @@ function AboutPage({ metadata, buildStatus = {} }) {
     developerUnlockRef.current = next.unlocked ? { count: 0, startedAt: 0 } : next;
     if (!next.unlocked) return;
     unlockDeveloperOptions();
-    toast('Developer options unlocked. Turn on Developer mode in App settings.', { variant: 'success' });
+    toast('Developer options unlocked. Choose the features you want to enable in App settings.', { variant: 'success' });
   };
   const documentLink = (path, label) => {
     const href = repositoryDocumentUrl(repositoryUrl, path);
@@ -1044,6 +1058,10 @@ function AboutPage({ metadata, buildStatus = {} }) {
           'aria-label': `Build ${buildId}`
         }, buildId)) : null
       )),
+      runtimeNotice ? h('div', { className: 'connection-notice warn about-runtime-mismatch', role: 'status' },
+        h('strong', null, runtimeNotice.title),
+        h('div', null, runtimeNotice.message)
+      ) : null,
       h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, 'Developed by ', developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${developer.name} on GitHub (@${developer.username})` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')),
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || '')),
       h(AboutRow, { label: 'License' }, documentLink('LICENSE', String(metadata.license || 'Apache-2.0')))
@@ -1061,6 +1079,22 @@ function AboutPage({ metadata, buildStatus = {} }) {
 
 function AboutRow({ label, children }) {
   return h('div', { className: 'setting-row about-detail-row' }, h('div', { className: 'setting-row-copy' }, h('strong', null, label)), children);
+}
+
+function runtimeCompatibilityNotice(runtime = {}, repositoryRuntime = {}, compatibility = {}) {
+  if (compatibility?.available !== true || compatibility?.metadataMatches !== false) return null;
+  const runningVersion = String(runtime?.applicationVersion || runtime?.packageVersion || '').trim();
+  const sourceVersion = String(repositoryRuntime?.applicationVersion || repositoryRuntime?.packageVersion || '').trim();
+  if (!runningVersion || !sourceVersion) return null;
+  const activeTasksPreventRestart = compatibility?.activeTasksPreventRestart === true;
+  const restartRequired = compatibility?.restartRequired === true;
+  const title = restartRequired ? 'Restart required to load current source' : 'Running runtime differs from current source';
+  const message = activeTasksPreventRestart
+    ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Finish active tasks before restarting Rel.AI to load the current source.`
+    : restartRequired
+      ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Restart Rel.AI to load the current source and tool surface.`
+      : `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. The connected runtime remains compatible, but development observations may not match this source tree exactly.`;
+  return { title, message, runningVersion, sourceVersion };
 }
 
 function advanceDeveloperUnlockClicks(state = {}, now = Date.now()) {
@@ -1094,4 +1128,4 @@ function normalizeReleaseNoteText(value) { return String(value || '').replace(/<
 function messageOf(error) { return error instanceof Error ? error.message : String(error || 'The operation failed.'); }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; }
 
-export { advanceDeveloperUnlockClicks, connectionGuideMode, connectionPrimaryAction, normalizeNotificationPreferences, normalizeReleaseNoteText, updateView };
+export { advanceDeveloperUnlockClicks, connectionGuideMode, connectionPrimaryAction, normalizeNotificationPreferences, normalizeReleaseNoteText, runtimeCompatibilityNotice, updateView };

@@ -1,7 +1,7 @@
 {
   "name": "rel-ai-mcp-launcher",
   "desktopName": "com.relai.mcp.desktop",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "private": true,
   "type": "module",
   "description": "Desktop runtime and dashboard for the Rel.AI ChatGPT Web harness.",
@@ -328,6 +328,8 @@
           "unicorn-magic/**",
           "pretty-ms/**",
           "simple-git/**",
+          "yauzl/**",
+          "pend/**",
           "!**/*.map",
           "!@modelcontextprotocol/*/src/**",
           "!@opentelemetry/*/src/**",

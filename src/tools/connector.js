@@ -16,6 +16,24 @@ function serializeConnectorResult({ publicName, action, operationName, value, ar
   return withTaskIdentity(publicResult, workId);
 }
 
+function compactBackgroundOperation(value) {
+  if (!value || typeof value !== 'object') return value;
+  return pruneEmpty({
+    operationId: value.operationId,
+    work_id: value.work_id,
+    workspace: value.workspace,
+    tool: value.tool,
+    status: value.status,
+    updatedAt: value.updatedAt,
+    completedAt: value.completedAt,
+    revision: value.revision,
+    cancellationRequestedAt: value.cancellationRequestedAt,
+    stopping: value.stopping,
+    error: value.error,
+    result: value.status && value.status !== 'running' ? value.result : undefined
+  });
+}
+
 function compactForConnector(name, value, args = {}) {
   if (!value || typeof value !== 'object') return value;
   switch (name) {
@@ -37,14 +55,39 @@ function compactForConnector(name, value, args = {}) {
       return { ...value, items };
     }
     case OP.WORK_STATUS: {
+      const full = String(args.detail || '').toLowerCase() === 'full';
       const workspace = value.workspace && typeof value.workspace === 'object'
-        ? pruneEmpty({
+        ? pruneEmpty(full ? {
             alias: value.workspace.alias,
             discoveredCommandKeys: value.workspace.discoveredCommandKeys,
             repository: compactRepositoryState(value.workspace.repository, { includeWorkspace: false }),
             error: value.workspace.error
+          } : {
+            alias: value.workspace.alias,
+            error: value.workspace.error
           })
         : value.workspace;
+      const targeted = Boolean(args.workspace || args.work_id || args.operationId);
+      if (!full && targeted) {
+        const compatibility = value.runtimeCompatibility?.metadataMatches === false
+          ? pruneEmpty({
+              status: value.runtimeCompatibility.status,
+              compatible: value.runtimeCompatibility.compatible,
+              restartRequired: value.runtimeCompatibility.restartRequired,
+              activeTasksPreventRestart: value.runtimeCompatibility.activeTasksPreventRestart,
+              message: value.runtimeCompatibility.message
+            })
+          : undefined;
+        return pruneEmpty({
+          ok: value.ok,
+          workspace,
+          work_id: value.work_id,
+          task: value.task,
+          activeRelatedWork: value.activeRelatedWork,
+          backgroundOperation: compactBackgroundOperation(value.backgroundOperation),
+          runtimeCompatibility: compatibility
+        });
+      }
       return pruneEmpty({
         ok: value.ok,
         version: value.version,
@@ -103,6 +146,27 @@ function compactForConnector(name, value, args = {}) {
         message: value.message,
         nextAction: value.nextAction,
         fullOutput: value.fullOutput
+      });
+    case OP.EDIT:
+      return pruneEmpty({
+        ok: value.ok,
+        workspace: value.workspace,
+        operation: value.operation,
+        path: value.path,
+        changed: value.changed,
+        changedFiles: value.changedFiles,
+        editCount: value.editCount,
+        appliedCount: value.appliedCount,
+        verified: value.verified,
+        bytes: value.bytes,
+        plannerPath: value.plannerPath,
+        plannerReason: value.plannerReason,
+        resultDetailsCompacted: value.resultDetailsCompacted,
+        validationStatus: value.validationStatus,
+        summary: value.summary,
+        error: value.error,
+        next: value.next,
+        ...(args.returnDiff === true ? { diff: value.diff } : {})
       });
     case OP.EXEC:
       return pruneEmpty({

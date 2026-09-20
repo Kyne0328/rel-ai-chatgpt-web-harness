@@ -15,6 +15,15 @@ assert.equal(passing.ok, true);
 assert.equal(passing.evaluated, expectations.length);
 assert.doesNotThrow(() => assertToolBehavior(passing));
 
+const wasteful = observations.map(item => ({
+  ...item,
+  tools: item.tools.length ? Array.from({ length: 100 }, () => item.tools).flat() : []
+}));
+const wastefulReport = evaluateToolBehavior(expectations, wasteful);
+assert.equal(wastefulReport.ok, false, 'repeating every selected tool must not pass the efficiency evaluator');
+assert.ok(wastefulReport.failures.some(item => item.kind === 'excessive_calls'));
+assert.ok(wastefulReport.failures.some(item => item.kind === 'duplicate_calls'));
+
 const wrong = structuredClone(observations);
 wrong.find(item => item.id === 'read-known-file').tools = ['relai_search'];
 wrong.find(item => item.id === 'one-shot-test').tools.push('relai_process');

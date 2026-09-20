@@ -6,6 +6,7 @@ import { runProcess } from '../process.js';
 import { nativeToolTaskSignal } from '../mcp/nativeToolTasks.js';
 import { getCurrentTaskAbortSignal } from '../toolActivity.js';
 import { combineAbortSignals } from '../abortSignals.js';
+import { isPersistentAdbInvocation, resolveOneShotTimeoutMs } from '../executionControl.js';
 import { outputSpillOwner } from '../outputSpill.js';
 import { runSpan } from '../telemetry.js';
 import { isReusableDependencyPath } from '../reusableDependencies.js';
@@ -26,16 +27,27 @@ function processExecutionError(code, message, retryable = false) {
   return error;
 }
 
-async function readGitStatusMap(workspace, config) {
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error(String(signal.reason || 'Operation cancelled.'));
+  error.name = 'AbortError';
+  throw error;
+}
+
+async function readGitStatusMap(workspace, config, signal) {
   // Mutation tracking only needs status records, not branch/ahead metadata. Preserve
   // Git's leading status column explicitly so branch output is no longer needed as a
   // whitespace sentinel for records such as " M file.js".
+  throwIfAborted(signal);
   const result = await runProcess('git', gitStatusArgs({ branch: false }), {
     cwd: workspace.path,
     timeout: 30000,
     maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
-    preserveOutputWhitespace: true
+    preserveOutputWhitespace: true,
+    signal
   }, config);
+  throwIfAborted(signal);
   if (result.exitCode !== 0 || result.stdoutTruncated) return null;
   return statusMutationSnapshot(workspace, result.stdout);
 }
@@ -61,7 +73,8 @@ function pathMetadataFingerprint(root, relativePath) {
   }
 }
 
-async function readFilesystemStatusMap(workspace) {
+async function readFilesystemStatusMap(workspace, signal) {
+  throwIfAborted(signal);
   const root = path.resolve(workspace.path);
   // Mutation accounting is an integrity boundary, not a read-context boundary.
   // Cover the whole workspace even when normal repository context is narrowed.
@@ -72,6 +85,7 @@ async function readFilesystemStatusMap(workspace) {
   let fileCount = 0;
 
   while (pending.length) {
+    throwIfAborted(signal);
     const current = pending.pop();
     if (!current) break;
     let entries;
@@ -82,6 +96,7 @@ async function readFilesystemStatusMap(workspace) {
       continue;
     }
     for (const entry of entries) {
+      throwIfAborted(signal);
       const relativePath = current.relativePath
         ? `${current.relativePath}/${entry.name}`
         : entry.name;
@@ -104,7 +119,10 @@ async function readFilesystemStatusMap(workspace) {
       // A non-Git execution may need to inspect tens of thousands of files.
       // Yield periodically so mutation accounting cannot monopolize the
       // service event loop while retaining its whole-workspace coverage.
-      if (fileCount % 128 === 0) await new Promise(resolve => setImmediate(resolve));
+      if (fileCount % 128 === 0) {
+        await new Promise(resolve => setImmediate(resolve));
+        throwIfAborted(signal);
+      }
     }
   }
   return { snapshot, complete };
@@ -148,19 +166,62 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     processArgv,
     executionLabel
   } = normalizeExecutionInvocation(args, 'relai_exec');
+  if (!command && isPersistentAdbInvocation(processExecutable, processArgv)) {
+    const error = processExecutionError(
+      'PERSISTENT_PROCESS_REQUIRED',
+      'This ADB command is a persistent stream or interactive session. Start it with relai_process action "start" so it has a stable processId and can be stopped independently of the task.'
+    );
+    error.allowedAlternatives = ['Use relai_process action "start" for adb logcat streams, tracking commands, or an interactive adb shell.'];
+    throw error;
+  }
   const cwd = resolveCommandCwd(workspace, args.cwd);
   const env = normalizeCommandEnv(args.env);
-  const timeoutMs = clampNumber(args.timeoutMs, 1000, 86400000, 120000);
+  const timeoutMs = resolveOneShotTimeoutMs(args, context, { minMs: 1000, maxMs: 86400000, fallbackMs: 120000 });
   const maxOutputBytes = clampNumber(args.maxOutputBytes, 1000, 16 * 1024 * 1024, 2 * 1024 * 1024);
-  const trackMutation = context.mutationTrackingRequired !== false;
-  const statusBefore = trackMutation ? await readGitStatusMap(workspace, config) : null;
-  const filesystemBefore = trackMutation && !statusBefore ? await readFilesystemStatusMap(workspace) : null;
   const signal = combineAbortSignals(
     getCurrentTaskAbortSignal(),
     args._operationTaskId ? nativeToolTaskSignal(args._operationTaskId) : undefined,
     context.signal
   );
+  const trackMutation = context.mutationTrackingRequired !== false;
   const commandSummary = redactCommandForAudit(displayCommand);
+  let statusBefore = null;
+  let filesystemBefore = null;
+  if (trackMutation) {
+    try {
+      statusBefore = await readGitStatusMap(workspace, config, signal);
+      filesystemBefore = !statusBefore ? await readFilesystemStatusMap(workspace, signal) : null;
+    } catch (error) {
+      if (!signal?.aborted) throw error;
+      return {
+        ok: true,
+        executed: false,
+        commandSucceeded: false,
+        workspace: workspace.alias,
+        command: commandSummary,
+        commandSummary,
+        cwd: cwd.relativePath,
+        shell: executionLabel,
+        exitCode: -1,
+        durationMs: 0,
+        queueWaitMs: 0,
+        stdout: '',
+        stderr: '',
+        stdoutBytes: 0,
+        stderrBytes: 0,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        timedOut: false,
+        cancelled: true,
+        terminationConfirmed: true,
+        error: signal.reason instanceof Error ? signal.reason.message : String(signal.reason || 'Operation cancelled.'),
+        changedFiles: [],
+        changedFilesTruncated: false,
+        mutationTracking: 'cancelled-before-execution',
+        mutationUnknown: true
+      };
+    }
+  }
   const result = await runSpan(config, 'relai.process.exec', {
     'relai.workspace': workspace.alias,
     'relai.process.command': commandSummary,
@@ -197,16 +258,22 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     changed = { files: [], truncated: false };
     mutationTracking = 'declared-read-only';
   } else {
-    const statusAfter = await readGitStatusMap(workspace, config);
-    if (statusBefore && statusAfter) {
-      changed = changedStatusFiles(statusBefore, statusAfter);
-      mutationTracking = 'git';
-    } else if (!statusBefore && filesystemBefore) {
-      const filesystemAfter = await readFilesystemStatusMap(workspace);
-      changed = changedStatusFiles(filesystemBefore.snapshot, filesystemAfter.snapshot);
-      mutationTracking = 'filesystem';
-      mutationUnknown = filesystemBefore.complete !== true || filesystemAfter.complete !== true;
-    } else {
+    try {
+      const statusAfter = await readGitStatusMap(workspace, config, signal);
+      if (statusBefore && statusAfter) {
+        changed = changedStatusFiles(statusBefore, statusAfter);
+        mutationTracking = 'git';
+      } else if (!statusBefore && filesystemBefore) {
+        const filesystemAfter = await readFilesystemStatusMap(workspace, signal);
+        changed = changedStatusFiles(filesystemBefore.snapshot, filesystemAfter.snapshot);
+        mutationTracking = 'filesystem';
+        mutationUnknown = filesystemBefore.complete !== true || filesystemAfter.complete !== true;
+      } else {
+        changed = { files: [], truncated: false };
+        mutationUnknown = true;
+      }
+    } catch (error) {
+      if (!signal?.aborted) throw error;
       changed = { files: [], truncated: false };
       mutationUnknown = true;
     }

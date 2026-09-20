@@ -170,7 +170,7 @@ try {
   assert.ok(edited.changedFiles?.includes('acceptance.txt'));
   assert.equal(fs.readFileSync(path.join(workspace, 'acceptance.txt'), 'utf8'), 'packaged connector acceptance verified\n');
 
-  const status = await callTool(primarySession, 19, 'relai_work', { action: 'status', workspace: 'acceptance', work_id: taskId });
+  const status = await callTool(primarySession, 19, 'relai_work', { action: 'status', workspace: 'acceptance', work_id: taskId, detail: 'full' });
   assert.equal(status.version, applicationVersion);
   assert.equal(status.toolSurface?.toolCount, toolCount);
   assert.equal(status.toolSurface?.toolSurfaceVersion, toolSurfaceVersion);

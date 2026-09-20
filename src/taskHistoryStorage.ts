@@ -264,17 +264,74 @@ function pruneSessions(directory: string, limit = MAX_SESSIONS): void {
     const max = Math.max(0, Math.floor(Number(limit) || 0));
     const row = db.prepare('SELECT COUNT(*) AS count FROM task_history').get() as { count?: unknown } | undefined;
     const excess = Math.max(0, Number(row?.count || 0) - max);
-    if (!excess) return;
-    db.prepare(`DELETE FROM task_history WHERE id IN (
-      SELECT id FROM task_history
+    if (!excess) {
+      retireObsoleteTaskIntegrity(db, []);
+      return;
+    }
+    const rows = db.prepare(`SELECT id FROM task_history
       WHERE CASE
         WHEN json_valid(payload) THEN lower(COALESCE(json_extract(payload, '$.status'), '')) IN ('completed','failed','cancelled')
         ELSE 1
       END
       ORDER BY updated_at_ms ASC,id DESC
       LIMIT ?
-    )`).run(excess);
+    `).all(excess) as unknown as Array<{ id: string }>;
+    const prunedIds = rows.map(row => String(row.id || '')).filter(Boolean);
+    if (prunedIds.length) {
+      const removeHistory = db.prepare('DELETE FROM task_history WHERE id=?');
+      for (const taskId of prunedIds) removeHistory.run(taskId);
+    }
+    retireObsoleteTaskIntegrity(db, prunedIds);
   }, { transaction: true });
+}
+
+function retireObsoleteTaskIntegrity(db: DatabaseSync, prunedTaskIds: string[]): void {
+  const protectedTasks = workspaceOwnershipTaskIds(db);
+  const removeIntegrity = db.prepare('DELETE FROM task_integrity_tasks WHERE task_id=?');
+  for (const taskId of prunedTaskIds) {
+    if (!protectedTasks.has(taskId)) removeIntegrity.run(taskId);
+  }
+
+  const orphaned = db.prepare(`
+    SELECT integrity.task_id,integrity.payload
+    FROM task_integrity_tasks AS integrity
+    LEFT JOIN task_history AS history ON history.id=integrity.task_id
+    WHERE history.id IS NULL
+  `).all() as unknown as Array<{ task_id: string; payload: string }>;
+  for (const row of orphaned) {
+    const taskId = String(row.task_id || '');
+    if (!taskId || protectedTasks.has(taskId) || !terminalIntegrityPayload(row.payload)) continue;
+    removeIntegrity.run(taskId);
+  }
+}
+
+function workspaceOwnershipTaskIds(db: DatabaseSync): Set<string> {
+  const owners = new Set<string>();
+  const rows = db.prepare('SELECT payload FROM workspace_integrity').all() as unknown as Array<{ payload: string }>;
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(String(row.payload || '{}'));
+      const uncommittedOwners = payload?.uncommittedOwners;
+      if (!uncommittedOwners || typeof uncommittedOwners !== 'object' || Array.isArray(uncommittedOwners)) continue;
+      for (const values of Object.values(uncommittedOwners)) {
+        if (!Array.isArray(values)) continue;
+        for (const value of values) {
+          const owner = String(value || '').trim();
+          if (owner && owner !== '@ambient') owners.add(owner);
+        }
+      }
+    } catch {}
+  }
+  return owners;
+}
+
+function terminalIntegrityPayload(value: unknown): boolean {
+  try {
+    const payload = JSON.parse(String(value || '{}'));
+    return Boolean(String(payload?.completedAt || '').trim() || String(payload?.cancelledAt || '').trim());
+  } catch {
+    return false;
+  }
 }
 
 function clearTaskHistory(config: TaskHistoryConfig = {}): void {

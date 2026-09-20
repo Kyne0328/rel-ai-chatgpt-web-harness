@@ -99,7 +99,8 @@ try {
       work_id: started.work_id,
       check: 'node --check src/mcpServer.js',
       timeoutMs: 30000,
-      stopOnFailure: true
+      stopOnFailure: true,
+      complete: false
     });
     const validation = structuredContentOf(await client.waitFor(5, 45_000));
     assert.equal(validation.ok, true, 'consolidated validation must receive work_id in the extracted artifact');

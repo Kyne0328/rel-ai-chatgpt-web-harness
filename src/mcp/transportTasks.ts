@@ -127,7 +127,8 @@ async function handleTransportTaskRequest(config: any, message: any, options: an
         ...options,
         capabilities,
         execute,
-        bounds
+        bounds,
+        deliveryAware: options.transportType === 'streamable-http'
       });
     }
     return errorFromPolicy(message.id, selection.error);
@@ -307,11 +308,10 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
     operationId: operation.operationId,
     updatedAt: operation.updatedAt,
     revision: operation.revision,
-    pollAfterMs: operation.pollAfterMs,
-    message: `${name} is still running safely in the background after this request returns. Continue independent work instead of polling when useful work remains.`,
+    message: `${name} is still running safely in the background after this request returns. Continue independent work instead of polling.`,
     nextAction: workId
-      ? `Continue independent work. Later Rel.AI calls in this workspace may report this completion under completedOperations. Call relai_work with action "status" and work_id "${workId}" only when you need the result or no other useful independent work remains.`
-      : `Continue independent work. Later Rel.AI calls in this workspace may report this completion under completedOperations. Call relai_work with action "status", workspace "${String(args.workspace || '')}", and operationId "${operation.operationId}" only when you need the result.`
+      ? `Continue independent work. A later Rel.AI call in this workspace can surface completion once under completedOperations. Use relai_work status only when you explicitly need this result before another useful call.`
+      : `Continue independent work. A later Rel.AI call in this workspace can surface completion once under completedOperations. Use relai_work status only when you explicitly need this operation before another useful call.`
   }, false), deliveryCallback(config, started.record, options));
 }
 

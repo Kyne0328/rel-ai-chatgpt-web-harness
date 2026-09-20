@@ -111,7 +111,7 @@ function startTask(workspace, args = {}) {
     title: String(args.title || context.title || '').trim() || undefined,
     objective: String(args.objective || context.objective || '').trim() || undefined,
     intent: classifyTaskIntent(args.objective || context.objective),
-    nextAction: 'Use this work_id on operations that should belong to this durable session. Omit it for workspace- or resource-scoped operations; Rel.AI never guesses an omitted task. relai_work status restores compact durable task state after reconnect or context compaction.'
+    nextAction: 'Use this work_id on task operations and inspect directly with batched read/search/snapshot calls. relai_work context is optional deeper continuity retrieval, and relai_work status is for reconnect/recovery rather than routine polling.'
   };
 }
 
@@ -167,6 +167,8 @@ function safeEqual(left, right) {
 function taskAuditContext(context, activity, requestedTaskId, toolName, ok, value = null) {
   const duplicateCompletion = toolName === OP.WORK_FINISH && value?.duplicate === true;
   const duplicateCancellation = toolName === OP.WORK_CANCEL && value?.duplicate === true;
+  const cancellationStatus = toolName === OP.WORK_CANCEL ? String(value?.status || '').trim().toLowerCase() : '';
+  const cancellationPending = cancellationStatus === 'cancelling';
   const taskId = activity?.taskId || requestedTaskId || '';
   const taskHistoryEligible = toolName !== OP.WORK_STATUS
     && Boolean(taskId && (requestedTaskId || toolName === OP.WORK_BEGIN));
@@ -185,12 +187,15 @@ function taskAuditContext(context, activity, requestedTaskId, toolName, ok, valu
     taskIdExplicit: taskHistoryEligible,
     taskHistoryEligible,
     duplicateRequest: duplicateCompletion || duplicateCancellation,
+    ...(cancellationStatus ? { taskCancellationStatus: cancellationStatus } : {}),
     eventType: toolName === OP.WORK_BEGIN
       ? (ok ? 'task.started' : 'task.start.rejected')
       : toolName === OP.WORK_FINISH
         ? (ok ? (duplicateCompletion ? 'task.completion.duplicate' : 'task.completion.committed') : 'task.completion.rejected')
         : toolName === OP.WORK_CANCEL
-          ? (ok ? (duplicateCancellation ? 'task.cancellation.duplicate' : 'task.cancellation.committed') : 'task.cancellation.rejected')
+          ? (ok
+            ? (cancellationPending ? 'task.cancellation.requested' : duplicateCancellation ? 'task.cancellation.duplicate' : 'task.cancellation.committed')
+            : 'task.cancellation.rejected')
           : 'tool.call.completed'
   };
 }

@@ -230,15 +230,13 @@ try {
 
   resetToolActivity();
   const missingSummaryTask = await startTask('atomic-completion-without-summary');
-  await assert.rejects(
-    () => callTool('relai_validate', { action: 'checks',
-      workspace: 'app',
-      work_id: missingSummaryTask,
-      level: 'standard',
-      complete: true
-    }, { publicHttpOnly: true }),
-    /summary is required/i
-  );
+  const generatedSummaryCompletion = await callTool('relai_validate', { action: 'checks',
+    workspace: 'app',
+    work_id: missingSummaryTask,
+    level: 'standard'
+  }, { publicHttpOnly: true });
+  assert.equal(generatedSummaryCompletion.completionKnown, true, 'successful validation with work_id must close the durable task by default');
+  assert.match(generatedSummaryCompletion.summary, /completed|validation passed/i, 'default completion must derive a non-empty summary');
 
   resetToolActivity();
   const failedAtomicTask = await startTask('failed-atomic-completion');
@@ -304,12 +302,47 @@ try {
 
   resetToolActivity();
   const context = { publicHttpOnly: true };
+  const busyTaskId = await startTask('completion-in-progress');
+  const busyExec = callTool('relai_exec', {
+    workspace: 'app',
+    work_id: busyTaskId,
+    executable: process.execPath,
+    argv: ['-e', 'setTimeout(() => process.exit(0), 800)']
+  }, context);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const busyFinishStartedAt = Date.now();
+  await assert.rejects(
+    callTool('relai_work', {
+      action: 'finish',
+      workspace: 'app',
+      work_id: busyTaskId,
+      summary: 'Must not wait behind this task active execution.'
+    }, context),
+    error => error?.code === 'TASK_COMPLETION_IN_PROGRESS' && error?.retryable === true
+  );
+  assert.ok(
+    Date.now() - busyFinishStartedAt < 500,
+    'work.finish must reject promptly when the same task still has active work instead of waiting in its workspace queue'
+  );
+  const busyExecResult = await busyExec;
+  assert.equal(busyExecResult.commandSucceeded, true);
+  const busyCompletion = await callTool('relai_work', {
+    action: 'finish',
+    workspace: 'app',
+    work_id: busyTaskId,
+    summary: 'Task completed after its active execution settled.'
+  }, context);
+  assert.equal(busyCompletion.completionKnown, true);
+
+  resetToolActivity();
+  const completionContext = { publicHttpOnly: true };
   const taskId = await startTask('shared-standalone-transport');
   const validation = await callTool('relai_validate', { action: 'checks',
     workspace: 'app',
     work_id: taskId,
-    level: 'standard'
-  }, context);
+    level: 'standard',
+    complete: false
+  }, completionContext);
   assert.equal(validation.ok, true);
   assert.equal(validation.work_id, taskId);
   assert.equal(validation.validationStatus, 'passed');
@@ -322,7 +355,7 @@ try {
     workspace: 'app',
     work_id: taskId,
     summary: 'Implemented and validated the requested code changes.'
-  }, context);
+  }, completionContext);
   assert.equal(completion.ok, true);
   assert.equal(completion.work_id, taskId);
   assert.equal(completion.completionKnown, true);
@@ -365,7 +398,8 @@ try {
   await callTool('relai_validate', { action: 'checks',
     workspace: 'app',
     work_id: restartTaskId,
-    level: 'standard'
+    level: 'standard',
+    complete: false
   }, rotatedValidationContext);
   resetToolActivity();
   const recoveredCompletion = await callTool('relai_work', { action: 'finish',
@@ -384,7 +418,7 @@ try {
     path: 'src/long-audit.js',
     content: 'console.log("long audit");\n'
   }, { publicHttpOnly: true });
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: longAuditTaskId, level: 'standard' }, { publicHttpOnly: true });
+  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: longAuditTaskId, level: 'standard', complete: false }, { publicHttpOnly: true });
   const filler = Array.from({ length: 10050 }, (_, index) => JSON.stringify({ ts: new Date().toISOString(), tool: 'noise', index })).join('\n');
   fs.appendFileSync(getAuditPath(readConfig()), `${filler}\n`, 'utf8');
   const longAuditCompletion = await callTool('relai_work', { action: 'finish',
@@ -403,7 +437,7 @@ try {
     path: 'src/external-fingerprint.js',
     content: 'console.log("validated content");\n'
   }, { publicHttpOnly: true });
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: externalMutationTaskId, level: 'standard' }, { publicHttpOnly: true });
+  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: externalMutationTaskId, level: 'standard', complete: false }, { publicHttpOnly: true });
   fs.writeFileSync(path.join(workspace, 'src', 'external-fingerprint.js'), 'console.log("changed outside the task ledger");\n');
   const externalCompletion = await callTool('relai_work', { action: 'finish',
     workspace: 'app',
@@ -416,7 +450,7 @@ try {
   resetToolActivity();
   const changedContext = { publicHttpOnly: true };
   const changedTaskId = await startTask('changed-after-validation');
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: changedTaskId, level: 'standard' }, changedContext);
+  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: changedTaskId, level: 'standard', complete: false }, changedContext);
   await callTool('relai_edit', {
     workspace: 'app',
     work_id: changedTaskId,
@@ -445,7 +479,7 @@ try {
     path: 'src/task-b.js',
     content: 'console.log("task b mutation");\n'
   }, sharedScope);
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: taskA, level: 'standard' }, sharedScope);
+  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: taskA, level: 'standard', complete: false }, sharedScope);
   const unvalidatedB = await callTool('relai_work', { action: 'finish',
     workspace: 'app',
     work_id: taskB,
@@ -463,7 +497,7 @@ try {
   const sharedWorkspaceScope = { publicHttpOnly: true };
   const taskE = await startTask('shared-workspace-conflict');
   const taskF = await startTask('shared-workspace-conflict');
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: taskE, level: 'standard' }, sharedWorkspaceScope);
+  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: taskE, level: 'standard', complete: false }, sharedWorkspaceScope);
   await callTool('relai_edit', {
     workspace: 'app',
     work_id: taskF,
@@ -489,7 +523,7 @@ try {
     workspace: 'app', work_id: taskG, path: 'src/overlap.js', content: 'export const owner = "task-g";\n'
   }, overlapScope);
   const taskH = await startTask('overlapping-task-scope');
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: taskG, level: 'standard' }, overlapScope);
+  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: taskG, level: 'standard', complete: false }, overlapScope);
   await callTool('relai_edit', {
     workspace: 'app',
     work_id: taskH,

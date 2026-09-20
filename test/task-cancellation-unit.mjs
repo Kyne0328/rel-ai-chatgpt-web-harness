@@ -2,9 +2,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { flushAuditWrites } from '../src/audit.js';
+import { flushLocalAnalytics } from '../src/localAnalytics.js';
+import { isProcessTreeAlive } from '../src/process.ts';
+import { stopAllManagedProcesses } from '../src/processManager.js';
+import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
+import { flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
+import { resetTaskHistoryCaches } from '../src/taskHistoryStorage.ts';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { isTerminalTaskReference } from '../src/tools/task.js';
-import { createToolActivityTracker } from '../src/toolActivity.js';
+import { createToolActivityTracker, resetToolActivity } from '../src/toolActivity.js';
 
 let now = 1000;
 const phases = [];
@@ -25,16 +32,21 @@ assert.equal(active.signal.aborted, false);
 assert.throws(() => tracker.cancelTask('unrelated-task', { reason: 'wrong task' }), error => error?.code === 'TASK_NOT_FOUND');
 now = 3000;
 const cancelled = tracker.cancelTask(taskId, { reason: 'Stop token=synthetic-cancel-secret now.', initiator: 'test' });
-assert.equal(cancelled.status, 'cancelled');
+assert.equal(cancelled.status, 'cancelling');
 assert.equal(cancelled.duplicate, false);
 assert.equal(cancelled.progress.completedUnits, 1);
 assert.equal(cancelled.progress.totalUnits, 3);
-assert.equal(cancelled.endedAt, 3000);
-assert.equal(cancelled.cancelledAt, 3000);
+assert.equal(cancelled.endedAt, null, 'cancellation must not publish a terminal timestamp before owned work settles');
+assert.equal(cancelled.cancelledAt, null, 'cancellation must not claim completion while an operation is still stopping');
 assert.equal(active.signal.aborted, true);
 assert.doesNotMatch(cancelled.terminalReason, /synthetic-cancel-secret/);
 assert.equal(tracker.cancelTask(taskId, { reason: 'duplicate' }).duplicate, true);
 assert.throws(() => active.requestCompletion({ summary: 'must not complete' }), error => error?.code === 'INVALID_TASK_STATE');
+assert.throws(
+  () => tracker.beginConnectorToolCall({ tool: 'relai_read', internalOperation: OP.READ, workspace: 'repo', taskId }),
+  error => error?.code === 'INVALID_TASK_STATE',
+  'new task work must not start after cancellation is requested'
+);
 active({ ok: false, error: 'Operation cancelled.', activity: { status: 'cancelled', summary: 'Validation cancelled.' } });
 const final = tracker.getToolActivity();
 assert.equal(final.state, 'idle');
@@ -45,6 +57,24 @@ assert.equal(final.lastTask.cancelledAt, 3000);
 assert.equal(final.lastTask.progress.completedUnits, 1);
 assert.equal(final.lastTask.progress.totalUnits, 3);
 assert.equal(phases.filter(phase => phase === 'cancelled').length, 1, 'cancellation must emit one terminal lifecycle transition');
+
+const stopTracker = createToolActivityTracker({ idleMs: 60_000, now: () => now });
+const stopStart = stopTracker.beginConnectorToolCall({ tool: 'relai_work', internalOperation: OP.WORK_BEGIN, workspace: 'repo', createTask: true });
+const stopTaskId = stopStart.taskId;
+stopStart({ ok: true });
+const firstOperation = stopTracker.beginConnectorToolCall({ tool: 'relai_exec', internalOperation: OP.EXEC, workspace: 'repo', taskId: stopTaskId });
+const secondOperation = stopTracker.beginConnectorToolCall({ tool: 'relai_read', internalOperation: OP.READ, workspace: 'repo', taskId: stopTaskId });
+const stoppedOne = stopTracker.stopTaskOperations(stopTaskId, { operationId: firstOperation.operationId, reason: 'Stop only the hanging command.' });
+assert.equal(stoppedOne.stoppedOperationCount, 1);
+assert.deepEqual(stoppedOne.stoppedOperationIds, [firstOperation.operationId]);
+assert.equal(firstOperation.signal.aborted, true);
+assert.equal(secondOperation.signal.aborted, false, 'stopping one operation must not abort sibling operations or the task');
+assert.notEqual(stopTracker.getToolActivity().tasks.find(task => task.taskId === stopTaskId)?.status, 'cancelled');
+firstOperation({ ok: false, cancelled: true });
+const stoppedRest = stopTracker.stopTaskOperations(stopTaskId, { reason: 'Stop remaining finite work.' });
+assert.equal(stoppedRest.stoppedOperationCount, 1);
+assert.equal(secondOperation.signal.aborted, true);
+secondOperation({ ok: false, cancelled: true });
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-task-cancellation-'));
 const workspace = path.join(temp, 'workspace');
@@ -70,7 +100,6 @@ try {
   const { readTaskHistorySession } = await import('../src/taskHistoryStore.ts');
   const { readAudit } = await import('../src/audit.js');
   const { fallbackExecutionStatus, startFallbackExecution } = await import('../src/mcp/fallbackExecutions.js');
-  const { resetToolActivity } = await import('../src/toolActivity.js');
   resetToolActivity();
   const context = { publicHttpOnly: true, requestId: 'cancel-test' };
   const started = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'Cancelable task' }, context);
@@ -87,6 +116,7 @@ try {
   }, context);
   assert.equal(managed.status, 'running');
   let fallbackAbortObserved = false;
+  let releaseFallback = null;
   const fallback = startFallbackExecution({
     config: { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') },
     workId: started.work_id,
@@ -94,12 +124,10 @@ try {
     workspace: 'app',
     signature: 'task-cancellation-fallback',
     run: signal => new Promise(resolve => {
-      const finish = () => {
-        fallbackAbortObserved = true;
-        resolve({ isError: true, structuredContent: { ok: false, cancelled: true } });
-      };
-      if (signal.aborted) finish();
-      else signal.addEventListener('abort', finish, { once: true });
+      releaseFallback = () => resolve({ isError: true, structuredContent: { ok: false, cancelled: true } });
+      const observeAbort = () => { fallbackAbortObserved = true; };
+      if (signal.aborted) observeAbort();
+      else signal.addEventListener('abort', observeAbort, { once: true });
     })
   });
   const result = await callTool('relai_work', { action: 'cancel',
@@ -109,12 +137,17 @@ try {
   }, context);
   assert.equal(result.ok, true);
   assert.equal(result.work_id, started.work_id);
-  assert.equal(result.status, 'cancelled');
+  assert.equal(result.status, 'cancelling');
   assert.equal(result.duplicate, false);
-  assert.equal(result.endReason, 'explicit_cancellation');
-  assert.ok(result.endedAt);
-  await fallback.record.promise;
+  assert.equal(result.endReason, 'cancellation_requested');
+  assert.equal(result.endedAt, undefined, 'nonterminal cancellation must not publish a terminal timestamp');
   assert.equal(fallbackAbortObserved, true, 'relai_work cancel must abort detached fallback execution, not only the logical task tracker');
+  const stoppingFallback = fallbackExecutionStatus(started.work_id);
+  assert.equal(stoppingFallback.status, 'running', 'task cancellation must remain nonterminal while detached work has not settled');
+  assert.equal(stoppingFallback.stopping, true);
+  releaseFallback();
+  await fallback.record.promise;
+  await Promise.resolve();
   assert.equal(fallbackExecutionStatus(started.work_id).status, 'cancelled');
   const stopped = await callTool('relai_process', {
     action: 'stop',
@@ -124,6 +157,7 @@ try {
     graceMs: 0
   }, context);
   assert.equal(stopped.status, 'stopped', 'terminal task identity must remain usable for owned resource cleanup');
+  assert.equal(isProcessTreeAlive(stopped.pid), false, 'managed process stop must not report stopped while its PID is still alive');
 
   const persisted = readTaskHistorySession({ stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') }, started.work_id);
   assert.equal(persisted.status, 'cancelled');
@@ -143,12 +177,28 @@ try {
     () => callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: 'unknown-task', reason: 'Wrong target' }, context),
     error => error?.code === 'TASK_NOT_FOUND'
   );
-  const audit = readAudit({ stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') }, { limit: 100 });
-  assert.ok(audit.entries.some(entry => entry.taskId === started.work_id && entry.eventType === 'task.cancellation.committed'));
+  let cancellationRequestedAudit = false;
+  let cancellationCommittedAudit = false;
+  for (let index = 0; index < 100 && !cancellationCommittedAudit; index += 1) {
+    await flushAuditWrites();
+    const audit = readAudit({ stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') }, { limit: 100 });
+    cancellationRequestedAudit = audit.entries.some(entry => entry.taskId === started.work_id && entry.eventType === 'task.cancellation.requested');
+    cancellationCommittedAudit = audit.entries.some(entry => entry.taskId === started.work_id && entry.eventType === 'task.cancellation.committed');
+    if (!cancellationCommittedAudit) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(cancellationRequestedAudit, true, 'two-phase cancellation must preserve the initial cancellation-request audit event');
+  assert.equal(cancellationCommittedAudit, true, 'deferred task cancellation must persist a terminal cancellation audit event after owned work settles');
 } finally {
+  await stopAllManagedProcesses({ stateDir }).catch(() => {});
+  await flushAuditWrites();
+  await flushTaskHistoryPersistence();
+  await flushLocalAnalytics();
+  await repositoryIntelligence.shutdown();
+  resetTaskHistoryCaches();
+  resetToolActivity();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  fs.rmSync(temp, { recursive: true, force: true });
+  await fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 console.log('Explicit logical-task cancellation is exact, idempotent, terminal, persistent, and preserves partial progress.');

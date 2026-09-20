@@ -6,6 +6,7 @@ import { clampNumber } from './limits.js';
 import { runSpan } from '../telemetry.js';
 import { nativeToolTaskSignal } from '../mcp/nativeToolTasks.js';
 import { combineAbortSignals } from '../abortSignals.js';
+import { resolveOneShotTimeoutMs } from '../executionControl.js';
 import { getCurrentTaskAbortSignal, updateCurrentToolActivity } from '../toolActivity.js';
 import { sanitizeDisplayText } from '../taskObservability.js';
 import { parallel, runPlan, sequence, step } from '../executionPlan.js';
@@ -18,7 +19,7 @@ async function relaiDiagnosticsRun(workspace, config, args = {}, context = {}) {
   if (!commands.length) {
     return { ok: false, workspace: workspace.alias, commands: [], diagnostics: [], message: 'No diagnostic command was detected. Pass command or configure lint/typecheck/analyze/vet/clippy checks.' };
   }
-  const timeout = clampNumber(args.timeoutMs, 1000, 24 * 60 * 60 * 1000, 180000);
+  const timeout = resolveOneShotTimeoutMs(args, context, { minMs: 1000, maxMs: 24 * 60 * 60 * 1000, fallbackMs: 180000 });
   const indexedResults = new Array(commands.length);
   const diagnosticsByIndex = new Array(commands.length);
   const signal = combineAbortSignals(

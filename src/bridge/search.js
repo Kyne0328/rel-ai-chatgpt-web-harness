@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { Worker } from 'node:worker_threads';
 import { resolveGitExecutable } from '../gitExecutable.js';
 import { appendLimited, terminateProcessTree } from '../process.js';
 import { makeProcessEnvironment } from '../processEnvironment.js';
-import { collectOptionsFromWorkspace, collectTextFiles, isSecretPath } from '../safety.js';
+import { collectOptionsFromWorkspace, isSecretPath } from '../safety.js';
 import { clampNumber } from './limits.js';
 import { buildContextualSearch } from './searchContext.js';
 import { resolveSearchPlan } from './searchPlanner.js';
@@ -135,6 +136,38 @@ async function runWorkspaceSearch(workspace, gitArgs, args, maxResults, signal) 
   };
 }
 
+async function collectFilesystemSearchTree(root, options, signal, deadline) {
+  if (signal?.aborted) throw searchAbortError(signal);
+  const remainingMs = Math.max(1, deadline - Date.now());
+  const worker = new Worker(new URL('./filesystemSearchCollectorWorker.js', import.meta.url), {
+    workerData: { root, options }
+  });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (action, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
+      worker.removeAllListeners();
+      void worker.terminate().catch(() => {});
+      action(value);
+    };
+    const onAbort = () => finish(reject, searchAbortError(signal));
+    const timer = setTimeout(() => finish(resolve, { files: [], skipped: [], truncated: true, timedOut: true }), remainingMs);
+    timer.unref?.();
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+    worker.once('message', message => {
+      if (message?.ok === true) finish(resolve, { ...message.result, timedOut: false });
+      else finish(reject, new Error(String(message?.error || 'Filesystem search collection failed.')));
+    });
+    worker.once('error', error => finish(reject, error));
+    worker.once('exit', code => {
+      if (!settled && code !== 0) finish(reject, new Error(`Filesystem search collector exited with code ${code}.`));
+    });
+  });
+}
+
 async function runFilesystemSearch(workspace, args, maxResults, signal) {
   if (signal?.aborted) throw searchAbortError(signal);
   const pattern = String(args.pattern || '');
@@ -147,12 +180,20 @@ async function runFilesystemSearch(workspace, args, maxResults, signal) {
   const needle = args.ignoreCase === true ? pattern.toLowerCase() : pattern;
   const glob = String(args.glob || '').trim();
   const deadline = Date.now() + SEARCH_TIMEOUT_MS;
-  const tree = collectTextFiles(workspace.path, collectOptionsFromWorkspace(workspace, { maxEntries: 50_000 }));
+  const tree = await collectFilesystemSearchTree(
+    workspace.path,
+    collectOptionsFromWorkspace(workspace, { maxEntries: 50_000 }),
+    signal,
+    deadline
+  );
   const matches = [];
   let matchCount = 0;
   let truncated = tree.truncated === true;
   let timedOut = false;
   let skippedLargeFiles = 0;
+  if (tree.timedOut) {
+    return { exitCode: 1, matches, matchCount, truncated: true, timedOut: true, stderr: '' };
+  }
 
   outer: for (const relativePath of tree.files) {
     if (signal?.aborted) throw searchAbortError(signal);

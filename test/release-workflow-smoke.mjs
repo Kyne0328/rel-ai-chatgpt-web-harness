@@ -148,6 +148,11 @@ function verifyPackageContracts() {
   );
   const packagedNodeModules = electronPackage.build.extraResources.find(resource => resource.to === 'node_modules')?.filter || [];
   assert.ok(packagedNodeModules.includes('yallist/**'), 'Electron packaging must include yallist because the bundled semver dependency resolves it through lru-cache at runtime');
+  assert.ok(packagedNodeModules.includes('yauzl/**'), 'Electron packaging must include yauzl because the packaged extension tool-bundle runtime extracts ZIP archives');
+  assert.ok(packagedNodeModules.includes('pend/**'), 'Electron packaging must include pend because the bundled yauzl runtime requires it');
+  assert.ok(rootPackage.dependencies?.yauzl, 'yauzl must remain a production dependency because the packaged extension runtime uses it');
+  assert.equal(rootPackage.devDependencies?.yauzl, undefined, 'yauzl must not be listed as a development-only dependency');
+  assert.ok((rootPackage.bundleDependencies || []).includes('yauzl'), 'yauzl must remain bundled so packaged installs resolve the extension runtime');
 
   for (const name of ['electron:build', 'electron:build:linux', 'electron:build:mac', 'electron:dist', 'electron:dist:linux', 'electron:dist:mac']) {
     assert.match(String(rootPackage.scripts[name] || ''), /scripts\/electron-package\.mjs/, `${name} must use the shared cross-platform packager`);
@@ -246,6 +251,8 @@ function verifyWorkflowContracts() {
   assert.match(windowsCi, /needs:\s+test/, 'Windows packaging must wait for the shared CI gate');
   assert.doesNotMatch(windowsCi, /npm run test:all/, 'Windows packaging must not rerun the cross-platform source suite');
   assert.ok(windowsPackageIndex >= 0, 'normal Windows CI must keep packaging after its platform checks');
+  assert.match(windowsCi, /node test\/process-cancellation-unit\.mjs/, 'normal Windows CI must exercise process-tree cancellation on Windows');
+  assert.match(windowsCi, /node test\/process-output-pipe-stall-unit\.mjs/, 'normal Windows CI must exercise descendant output-pipe shutdown on Windows');
   assert.ok(linuxCiStart >= 0, 'normal CI must keep a dedicated Linux packaging job');
   assert.match(linuxCi, /needs:\s+test/, 'Linux packaging must wait for the same shared CI gate');
   assert.ok(linuxPackageIndex >= 0, 'normal Linux CI must build the release artifacts used by the package-size gate');
@@ -257,6 +264,10 @@ function verifyWorkflowContracts() {
   assert.match(releaseGate, /benchmark:observability:strict/);
   assert.match(releaseGate, /npm run test:frontend/);
   assert.ok(windowsBuildIndex >= 0);
+  assert.match(windowsRelease, /node test\/process-cancellation-unit\.mjs/, 'Windows release packaging must exercise process-tree cancellation on Windows');
+  assert.match(windowsRelease, /node test\/process-output-pipe-stall-unit\.mjs/, 'Windows release packaging must exercise descendant output-pipe shutdown on Windows');
+  assert.match(macRelease, /node test\/process-cancellation-unit\.mjs/, 'macOS release packaging must exercise process-tree cancellation on macOS');
+  assert.match(macRelease, /node test\/process-output-pipe-stall-unit\.mjs/, 'macOS release packaging must exercise descendant output-pipe shutdown on macOS');
   assert.doesNotMatch(windowsRelease, /npm run test:release|npm run test:frontend|benchmark:/, 'Windows release packaging must keep only platform-specific validation');
   for (const platformSection of [windowsRelease, linuxRelease, macRelease]) {
     assert.match(platformSection, /- release-gate/, 'every platform release build must wait for the shared release gate');
@@ -294,6 +305,8 @@ function verifyWorkflowContracts() {
     /verify-packaged-computer-runtime\.mjs --platform win32/,
     /verify-packaged-computer-runtime\.mjs --platform linux/,
     /verify-packaged-computer-runtime\.mjs --platform darwin/,
+    /Smoke-test native Windows dashboard chrome[\s\S]*npm run test:custom-chrome-browser/,
+    /Smoke-test native macOS dashboard chrome[\s\S]*RELAI_CHROME_PLATFORM: darwin[\s\S]*npm run test:custom-chrome-browser/,
     /computer_runtime_args: --allow-headless/,
     /matrix\.computer_runtime_args/,
     /npm run verify:fuses -- --platform win32/,

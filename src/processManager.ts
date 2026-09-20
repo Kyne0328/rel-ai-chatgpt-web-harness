@@ -10,7 +10,7 @@ import { normalizeExecutionInvocation, resolveCommandCwd, normalizeCommandEnv } 
 import { redactCommandForAudit } from './commandDisplay.ts';
 import { isProcessTreeAlive, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
 import { makeProcessEnvironment } from './processEnvironment.js';
-import { extensionBinRoot } from './extensions/paths.js';
+import { extensionCommandPathEntries } from './extensions/paths.js';
 import { createHttpTaskPrincipal, principalFingerprint } from './mcp/principal.ts';
 import { getStateDir } from './statePaths.js';
 import { readTaskHistorySession } from './taskHistoryStore.ts';
@@ -400,7 +400,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     const { childEnvironment, startupSignal } = measurePerformancePhaseSync('process.setup', () => {
       const childEnvironment = makeProcessEnvironment(env, {
         allow: config.processEnvironment?.allow,
-        pathAppend: extensionBinRoot(config)
+        pathAppend: extensionCommandPathEntries(config)
       });
       Object.assign(childEnvironment, traceContextEnvironment());
       const startupSignal = admissionSignal;
@@ -863,6 +863,15 @@ async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedPro
 async function stopRecordInternal(config: ManagedProcessConfig, record: ManagedProcessRecord, options: StopRecordOptions = {}) {
   const target = record.child || record.pid;
   if (!target || !isProcessTreeAlive(target)) {
+    // PID death can be observed before Node emits ChildProcess "close". Reap
+    // the in-memory child/PTY handles here so a dead managed process cannot
+    // keep its workspace cwd and stdio pipes open after stop reports success.
+    if (record.child || record.ptyProcess) {
+      await terminateManagedRecord(record, {
+        graceMs: 0,
+        forceWaitMs: DEFAULT_FORCE_WAIT_MS
+      });
+    }
     if (!TERMINAL_STATUSES.has(record.status)) {
       finishRecord(config, record, {
         status: 'stopped',
@@ -1575,7 +1584,59 @@ async function terminateManagedRecord(record: ManagedProcessRecord, options: Sto
     await waitForPtyExit(exitPromise, 250);
     return fallback;
   }
-  return terminateProcessTree(record.child || record.pid, options);
+  const child = record.child;
+  if (!child) return terminateProcessTree(record.pid, options);
+  const closeWaiter = observeChildClose(child);
+  const outcome = await terminateProcessTree(child, options);
+  if (outcome.exited) {
+    const closedNaturally = await waitForChildClose(closeWaiter.promise, 500);
+    if (!closedNaturally) {
+      disposeChildProcessStreams(child);
+      const closedAfterStreamDisposal = await waitForChildClose(closeWaiter.promise, 1000);
+      if (!closedAfterStreamDisposal) child.unref?.();
+    }
+  }
+  closeWaiter.dispose();
+  return outcome;
+}
+
+function observeChildClose(child: ChildProcess): { promise: Promise<void>; dispose(): void } {
+  let settled = false;
+  let resolveClose: (() => void) | null = null;
+  const promise = new Promise<void>(resolve => { resolveClose = resolve; });
+  const onClose = () => {
+    if (settled) return;
+    settled = true;
+    resolveClose?.();
+  };
+  child.once('close', onClose);
+  return {
+    promise,
+    dispose() {
+      child.off?.('close', onClose);
+      if (!settled) {
+        settled = true;
+        resolveClose?.();
+      }
+    }
+  };
+}
+
+function waitForChildClose(closePromise: Promise<void>, timeoutMs: number): Promise<boolean> {
+  return Promise.race([
+    closePromise.then(() => true),
+    new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+      timer.unref?.();
+    })
+  ]);
+}
+
+function disposeChildProcessStreams(child: ChildProcess): void {
+  for (const stream of [child.stdin, child.stdout, child.stderr]) {
+    if (!stream || stream.destroyed || typeof stream.destroy !== 'function') continue;
+    try { stream.destroy(); } catch {}
+  }
 }
 
 async function disposeNodePtyResources(ptyProcess: PtyProcess): Promise<void> {

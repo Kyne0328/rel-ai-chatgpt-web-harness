@@ -41,7 +41,7 @@ Do not validate after every tiny edit. Validate at a meaningful implementation b
 
 ### Investigation
 
-`search/inspect -> targeted reads or measurements -> report`; read-only investigation does not need a synthetic task.
+`search/inspect -> targeted reads or measurements -> report` may stay taskless when the investigation is isolated and genuinely small. Substantial or multi-step investigation starts or reuses a durable work session before the first repository operation, including when the first steps are read-only.
 
 Investigation does not imply mutation or validation. Read and inspection evidence can be sufficient when the objective is explanatory.
 

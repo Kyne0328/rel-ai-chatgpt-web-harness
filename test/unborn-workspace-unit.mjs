@@ -52,7 +52,7 @@ try {
     dryRun: true
   }, context);
   assert.equal(preview.ok, true);
-  assert.equal(preview.dryRun, true);
+  assert.equal(preview.dryRun, undefined, 'compact edit results omit the request-only dryRun flag');
   assert.equal(fs.existsSync(path.join(workspacePath, 'src', 'index.js')), false);
 
   const edit = await rawCallTool('relai_edit', {

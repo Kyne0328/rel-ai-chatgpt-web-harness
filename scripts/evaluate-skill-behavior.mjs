@@ -63,10 +63,16 @@ function normalizeCases(value, label, options = {}) {
     const firstTool = nullableString(raw.firstTool);
     const firstAction = nullableString(raw.firstAction);
     const tools = Array.isArray(raw.tools) ? raw.tools.map(value => String(value || '').trim()).filter(Boolean) : [];
+    const taskMode = normalizeTaskMode(raw.taskMode, skills.length ? 'required' : 'none', `${label} ${key}`);
     if (options.requireExpectations !== false) {
-      if (skills.length > 0 && firstTool !== 'relai_work') throw new Error(`${label} ${key} with repository skills must expect relai_work first.`);
-      if (skills.length > 0 && firstAction !== 'begin') throw new Error(`${label} ${key} with repository skills must expect relai_work begin first.`);
+      if (skills.length === 0 && taskMode !== 'none') throw new Error(`${label} ${key} without repository skills must use taskMode "none".`);
       if (skills.length === 0 && (firstTool !== null || firstAction !== null)) throw new Error(`${label} ${key} without repository skills must not expect a repository tool call.`);
+      if (taskMode === 'required' && (firstTool !== 'relai_work' || firstAction !== 'begin')) {
+        throw new Error(`${label} ${key} requires a durable task and must expect relai_work begin first.`);
+      }
+      if (taskMode === 'existing' && firstTool === 'relai_work' && firstAction === 'begin') {
+        throw new Error(`${label} ${key} continues an existing task and must not expect a new relai_work begin.`);
+      }
     }
     return {
       ...raw,
@@ -75,10 +81,19 @@ function normalizeCases(value, label, options = {}) {
       skills,
       firstTool,
       firstAction,
+      taskMode,
       tools,
       forbiddenTool: nullableString(raw.forbiddenTool)
     };
   });
+}
+
+function normalizeTaskMode(value, fallback, label) {
+  const mode = String(value || fallback).trim().toLowerCase();
+  if (!['required', 'optional', 'existing', 'none'].includes(mode)) {
+    throw new Error(`${label} has invalid taskMode ${JSON.stringify(value)}.`);
+  }
+  return mode;
 }
 
 function normalizeSkills(value, label) {

@@ -89,15 +89,22 @@ assert.ok(prompts.some(item => item.skills.includes('rel-ai-debugging')));
 assert.ok(prompts.some(item => item.skills.includes('rel-ai-verification')));
 assert.ok(prompts.some(item => item.skills.includes('rel-ai-planning')));
 assert.ok(prompts.some(item => item.skills.includes('rel-ai-dev-process')));
-assert.ok(prompts.some(item => /Run npm test/i.test(item.prompt) && item.forbiddenTool === 'relai_process'), 'one-shot command needs a managed-process counterexample');
-assert.ok(prompts.some(item => /typo/i.test(item.prompt) && item.skills.length === 1), 'small localized change needs a planning counterexample');
+assert.ok(prompts.some(item => /Run npm test/i.test(item.prompt) && item.taskMode === 'optional' && item.firstTool === 'relai_validate' && item.forbiddenTool === 'relai_process'), 'one-shot checks must remain taskless-capable');
+assert.ok(prompts.some(item => /typo/i.test(item.prompt) && item.skills.length === 1 && item.taskMode === 'optional' && item.firstTool === 'relai_read'), 'small localized changes must remain taskless-capable');
+assert.ok(prompts.some(item => item.taskMode === 'existing' && item.firstTool !== 'relai_work'), 'continuation must reuse an existing task instead of beginning another');
+assert.ok(prompts.some(item => /multi-workspace routing/i.test(item.prompt) && (item.taskMode || 'required') === 'required'), 'substantial read-first investigation must require a durable task');
 for (const item of prompts) {
   assert.equal(new Set(item.skills).size, item.skills.length, `duplicate skill in ${item.prompt}`);
   for (const skill of item.skills) assert.ok(knownSkills.has(skill), `unknown skill ${skill} in ${item.prompt}`);
   if (item.skills.length) {
     assert.equal(item.skills[0], 'rel-ai-workflow');
-    assert.equal(item.firstTool, 'relai_work');
-    assert.equal(item.firstAction, 'begin');
+    if ((item.taskMode || 'required') === 'required') {
+      assert.equal(item.firstTool, 'relai_work');
+      assert.equal(item.firstAction, 'begin');
+    }
+    if (item.taskMode === 'existing') {
+      assert.notEqual(item.firstTool, 'relai_work', 'continuation must not start a second durable task');
+    }
   } else {
     assert.equal(item.firstTool, null);
     assert.equal(item.firstAction, null);

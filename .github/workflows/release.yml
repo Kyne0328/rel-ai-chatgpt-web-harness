@@ -206,7 +206,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node test/app-updater-unit.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/process-cancellation-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/process-output-pipe-stall-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node test/installer-test-entrypoints-unit.mjs
+      - name: Smoke-test native Windows dashboard chrome
+        run: npm run test:custom-chrome-browser
       - name: Build Windows release
         run: npm run electron:dist:windows
         env:
@@ -381,7 +387,13 @@ jobs:
           node test/current-unpacked-unit.mjs
           node test/app-updater-unit.mjs
           node test/macos-manual-updater-unit.mjs
+          node test/process-cancellation-unit.mjs
+          node test/process-output-pipe-stall-unit.mjs
           node test/installer-test-entrypoints-unit.mjs
+      - name: Smoke-test native macOS dashboard chrome
+        env:
+          RELAI_CHROME_PLATFORM: darwin
+        run: npm run test:custom-chrome-browser
       - name: Build macOS release
         env:
           REL_AI_TARGET_ARCH: ${{ matrix.arch }}

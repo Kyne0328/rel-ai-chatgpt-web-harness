@@ -27,6 +27,18 @@ assert.equal(JSON.stringify(receipt).includes('private output'), false);
 assert.equal(JSON.stringify(receipt).includes('secret'), false);
 assert.equal(checkEvidenceReusable(receipt, { commandId: 'npm:front-end:test', command: 'npm test', cwd: 'front-end', repositoryFingerprint: 'fingerprint-a' }), true);
 assert.equal(checkEvidenceReusable(receipt, { commandId: 'npm:front-end:test', command: 'npm test', cwd: 'front-end', repositoryFingerprint: 'fingerprint-b' }), false);
+assert.equal(checkEvidenceReusable(receipt, {
+  commandId: 'npm:front-end:test', command: 'npm test', cwd: 'front-end', repositoryFingerprint: 'fingerprint-a',
+  mutationGeneration: 3, workspaceGeneration: 8
+}), true);
+assert.equal(checkEvidenceReusable(receipt, {
+  commandId: 'npm:front-end:test', command: 'npm test', cwd: 'front-end', repositoryFingerprint: 'fingerprint-a',
+  mutationGeneration: 4, workspaceGeneration: 8
+}), false, 'task mutation generation changes must invalidate a prior pass');
+assert.equal(checkEvidenceReusable(receipt, {
+  commandId: 'npm:front-end:test', command: 'npm test', cwd: 'front-end', repositoryFingerprint: 'fingerprint-a',
+  mutationGeneration: 3, workspaceGeneration: 9
+}), false, 'workspace mutation generation changes must invalidate a prior pass');
 
 const failures = [
   buildWorkflowEvidenceReceipt({ tool: OP.EXEC, args: { command: 'npm test', cwd: 'front-end' }, result: { ok: false, exitCode: 1, errorCode: 'EXIT_1' }, auditEntry, repositoryFingerprint: 'x', commandId: 'npm:front-end:test' }),

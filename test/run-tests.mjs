@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { EVERYDAY_TEST_FILES } from './everyday-manifest.js';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(testDir, '..');
@@ -48,24 +49,46 @@ function collectReachableScriptCommands(scripts, workflowSources) {
   return commands;
 }
 
-const files = fs.readdirSync(testDir)
+const eligibleFiles = fs.readdirSync(testDir)
   .filter(name => {
     if (!name.endsWith('.mjs') || infrastructureFiles.has(name)) return false;
     if (repositoryPattern.test(name) || repositoryRunner.includes(`'${name}'`) || repositoryRunner.includes(`"${name}"`)) return false;
     return !gateSources.includes(`test/${name}`);
   })
   .sort((left, right) => left.localeCompare(right));
+const manifestFiles = [...EVERYDAY_TEST_FILES];
+const manifestSet = new Set(manifestFiles);
+if (manifestSet.size !== manifestFiles.length) {
+  throw new Error('test/everyday-manifest.js contains duplicate entries.');
+}
+const missingFiles = manifestFiles.filter(name => !fs.existsSync(path.join(testDir, name)));
+if (missingFiles.length) {
+  throw new Error(`Everyday test manifest references missing files: ${missingFiles.join(', ')}`);
+}
+const eligibleSet = new Set(eligibleFiles);
+const staleEntries = manifestFiles.filter(name => !eligibleSet.has(name));
+if (staleEntries.length) {
+  throw new Error(`Everyday test manifest contains files owned by another gate or runner: ${staleEntries.join(', ')}`);
+}
+const unclassifiedFiles = eligibleFiles.filter(name => !manifestSet.has(name));
+if (unclassifiedFiles.length) {
+  throw new Error(
+    `Unclassified everyday test files: ${unclassifiedFiles.join(', ')}. ` +
+    'Add the behavior to an existing suite-*-unit.mjs file, or explicitly register a standalone isolation test in everyday-manifest.js.'
+  );
+}
+const files = manifestFiles.slice().sort((left, right) => left.localeCompare(right));
 
 const serialFiles = new Set([
-  'artifact-resource-unit.mjs',
   'http-auth-smoke.mjs',
   'http-smoke.mjs',
   'smoke.mjs',
-  'generated-assets-check-unit.mjs',
   'process-manager-unit.mjs',
   'workflow-process-reuse-unit.mjs',
   'process-pty-unit.mjs',
-  'stdio-shutdown-persistence-unit.mjs'
+  'suite-config-io-unit.mjs',
+  'suite-release-build-unit.mjs',
+  'suite-runtime-core-unit.mjs'
 ]);
 const parallelEntries = files
   .map((name, index) => ({ name, index }))
@@ -147,7 +170,7 @@ const slowest = [...results]
   .slice(0, Math.min(5, results.length))
   .map(result => `${result.name} ${(result.durationMs / 1000).toFixed(1)}s`)
   .join(', ');
-console.log(`\n${files.length - failures.length}/${files.length} test files passed in ${suiteSeconds}s with ${jobCount} worker${jobCount === 1 ? '' : 's'}.`);
+console.log(`\n${files.length - failures.length}/${files.length} everyday test executables passed in ${suiteSeconds}s with ${jobCount} worker${jobCount === 1 ? '' : 's'}.`);
 if (slowest) console.log(`Slowest: ${slowest}`);
 if (failures.length) {
   console.error(`Failed: ${failures.map(result => result.name).join(', ')}`);

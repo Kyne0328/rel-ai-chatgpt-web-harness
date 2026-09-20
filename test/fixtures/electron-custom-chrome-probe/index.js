@@ -2,24 +2,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { app, BrowserWindow } from 'electron';
+import { dashboardWindowChrome } from '../../../electron/window-chrome.js';
 
 const targetUrl = process.env.RELAI_PROBE_TARGET_URL;
 const outputPath = process.env.RELAI_PROBE_OUTPUT_PATH;
 const expectedToolCount = Number(process.env.RELAI_EXPECTED_TOOL_COUNT || 0);
+const chromePlatform = String(process.env.RELAI_PROBE_CHROME_PLATFORM || 'win32');
 if (!targetUrl || !outputPath || !Number.isInteger(expectedToolCount) || expectedToolCount < 1) throw new Error('Custom chrome probe environment is incomplete.');
+if (!['win32', 'darwin'].includes(chromePlatform)) throw new Error(`Unsupported custom chrome probe platform: ${chromePlatform}`);
 
 app.whenReady().then(async () => {
   const root = path.dirname(fileURLToPath(import.meta.url));
   const consoleErrors = [];
+  const chrome = dashboardWindowChrome(chromePlatform);
   const win = new BrowserWindow({
     show: false,
     width: 1280,
     height: 820,
-    frame: false,
-    thickFrame: true,
-    titleBarStyle: 'hidden',
-    hasShadow: true,
-    roundedCorners: true,
+    ...chrome.windowOptions,
     webPreferences: {
       preload: path.join(root, 'preload.cjs'),
       contextIsolation: true,
@@ -83,7 +83,7 @@ app.whenReady().then(async () => {
         };
       })()`));
     }
-    fs.writeFileSync(outputPath, JSON.stringify({ measurements }, null, 2));
+    fs.writeFileSync(outputPath, JSON.stringify({ chromePlatform, controls: chrome.controls, measurements }, null, 2));
   } catch (error) {
     let diagnostic = {};
     try {

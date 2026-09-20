@@ -29,7 +29,9 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
   let existing = executionsByWorkId.get(id) || null;
   if (!existing && config) {
     const persisted = recoverPersistedFallback(config, id, now);
-    if (persisted && REPLAYABLE_FALLBACK_STATUSES.has(persisted.status)) existing = hydratePersistedRecord(persisted);
+    if (persisted && persisted.deliveryAcknowledged !== true && REPLAYABLE_FALLBACK_STATUSES.has(persisted.status)) {
+      existing = hydratePersistedRecord(persisted);
+    }
   }
   if (existing?.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
     if (existing.signature === signature) return { record: existing, reused: true };
@@ -65,6 +67,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
     persistedResult: null,
     isError: false,
     error: '',
+    cancellationRequestedAt: '',
+    cancellationReason: '',
     persist: persist !== false,
     deliveryAcknowledged: false,
     controller,
@@ -111,31 +115,40 @@ function cancelFallbackExecution(workId, options = {}) {
   const id = String(workId || '').trim();
   if (!id) return { cancelled: false, duplicate: false, record: null };
   const now = options.now || Date.now;
+  const expectedWorkId = String(options.expectedWorkId || '').trim();
   const reason = options.reason instanceof Error
     ? options.reason
     : new Error(String(options.reason || 'Work session cancelled by request.'));
-  let record = executionsByWorkId.get(id) || null;
+  let record = executionsByOperationId.get(id) || executionsByWorkId.get(id) || null;
   if (!record && options.config) {
-    const persisted = readPersistedFallback(options.config, id);
+    const persisted = recoverPersistedFallback(options.config, id, now);
     if (!persisted) return { cancelled: false, duplicate: false, record: null };
-    if (persisted.status !== FALLBACK_EXECUTION_STATUS.RUNNING) return { cancelled: false, duplicate: true, record: persisted };
-    const cancelled = {
-      ...persisted,
-      status: FALLBACK_EXECUTION_STATUS.CANCELLED,
-      updatedAt: new Date(timeValue(now)).toISOString(),
-      completedAt: new Date(timeValue(now)).toISOString(),
-      revision: Math.max(1, Number(persisted.revision || 1)) + 1,
-      error: reason.message
-    };
-    persistFallbackSnapshot(options.config, { ...cancelled, workId: String(cancelled.workId || id) });
-    return { cancelled: true, duplicate: false, record: cancelled };
+    if (expectedWorkId && String(persisted.workId || '') !== expectedWorkId) {
+      return { cancelled: false, duplicate: false, mismatch: true, record: null };
+    }
+    return { cancelled: false, duplicate: persisted.status !== FALLBACK_EXECUTION_STATUS.INTERRUPTED, record: persisted };
+  }
+  if (expectedWorkId && String(record?.workId || '') !== expectedWorkId) {
+    return { cancelled: false, duplicate: false, mismatch: true, record: null };
   }
   if (record.status !== FALLBACK_EXECUTION_STATUS.RUNNING) return { cancelled: false, duplicate: true, record: publicFallbackRecord(record, now) };
+  if (record.cancellationRequestedAt) {
+    return { cancelled: false, duplicate: true, record: publicFallbackRecord(record, now), settlement: record.promise || null };
+  }
+  const requestedAt = new Date(timeValue(now)).toISOString();
+  record.cancellationRequestedAt = requestedAt;
+  record.cancellationReason = reason.message;
+  record.updatedAt = requestedAt;
+  record.revision = Math.max(1, Number(record.revision || 1)) + 1;
   if (!record.controller.signal.aborted) record.controller.abort(reason);
-  settleCancelledRecord(record, now, reason);
   persistFallbackRecord(options.config, record);
-  if (record.noticeEnabled) enqueueFallbackCompletionNotice(options.config, record);
-  return { cancelled: true, duplicate: false, record: publicFallbackRecord(record, now) };
+  return {
+    cancelled: false,
+    stopping: true,
+    duplicate: false,
+    record: publicFallbackRecord(record, now),
+    settlement: record.promise || null
+  };
 }
 
 function enableFallbackCompletionNotice(config, record) {
@@ -148,21 +161,24 @@ function acknowledgeFallbackDelivery(config, reference) {
   const id = String(reference || '').trim();
   if (!id) return false;
   const record = executionsByOperationId.get(id) || executionsByWorkId.get(id) || null;
-  if (!record || record.workId) return false;
+  if (!record) return false;
+  record.deliveryAcknowledged = true;
+  persistFallbackRecord(config, record);
   if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
-    record.deliveryAcknowledged = true;
     return true;
   }
-  executionsByOperationId.delete(record.operationId);
   executionsByWorkId.delete(record.executionKey || record.operationId);
-  if (config && record.operationId) {
-    try { fs.rmSync(tasklessFallbackFile(config, record.operationId), { force: true }); } catch {}
+  if (!record.workId) {
+    executionsByOperationId.delete(record.operationId);
+    if (config && record.operationId) {
+      try { fs.rmSync(tasklessFallbackFile(config, record.operationId), { force: true }); } catch {}
+    }
   }
   return true;
 }
 
 function releaseDeliveredExecutionScope(record) {
-  if (!record || record.workId || record.deliveryAcknowledged !== true) return;
+  if (!record || record.deliveryAcknowledged !== true) return;
   executionsByWorkId.delete(record.executionKey || record.operationId);
 }
 
@@ -194,6 +210,7 @@ function publicFallbackRecord(record, now = Date.now) {
     updatedAt: record.updatedAt || record.startedAt,
     revision: Math.max(1, Number(record.revision || 1)),
     ...(running ? { pollAfterMs: fallbackPollAfterMs(record, now) } : {}),
+    ...(record.cancellationRequestedAt ? { cancellationRequestedAt: record.cancellationRequestedAt, stopping: true } : {}),
     ...(record.completedAt ? { completedAt: record.completedAt } : {}),
     ...(record.error ? { error: record.error } : {}),
     ...(structured && typeof structured === 'object' ? { result: structured } : {}),
@@ -352,7 +369,9 @@ function hydratePersistedRecord(record) {
     persistedResult: record.result && typeof record.result === 'object' ? record.result : null,
     isError: record.isError === true,
     error: String(record.error || ''),
-    deliveryAcknowledged: false,
+    cancellationRequestedAt: String(record.cancellationRequestedAt || ''),
+    cancellationReason: String(record.cancellationReason || ''),
+    deliveryAcknowledged: record.deliveryAcknowledged === true,
     controller: null,
     promise: null
   };
@@ -371,6 +390,9 @@ function persistentFallbackRecord(record) {
     startedAt: record.startedAt,
     updatedAt: record.updatedAt || record.startedAt,
     revision: Math.max(1, Number(record.revision || 1)),
+    ...(record.deliveryAcknowledged === true ? { deliveryAcknowledged: true } : {}),
+    ...(record.cancellationRequestedAt ? { cancellationRequestedAt: record.cancellationRequestedAt } : {}),
+    ...(record.cancellationReason ? { cancellationReason: record.cancellationReason } : {}),
     ...(record.completedAt ? { completedAt: record.completedAt } : {}),
     ...(record.error ? { error: record.error } : {}),
     ...(structured && typeof structured === 'object' ? { result: structured } : {}),

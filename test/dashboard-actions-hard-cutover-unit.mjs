@@ -35,7 +35,8 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 process.env.REL_AI_MCP_STATE_DIR = stateDir;
 
 try {
-  const { handleWorkspaceChecks } = await import('../src/http/dashboardActions.ts');
+  const { handleTaskControl, handleWorkspaceChecks } = await import('../src/http/dashboardActions.ts');
+  const { callTool } = await import('../src/tools.js');
   const req = Readable.from([Buffer.from(JSON.stringify({ workspace: 'repo' }))]);
   req.headers = { 'content-type': 'application/json' };
   const response = responseRecorder();
@@ -53,9 +54,32 @@ try {
   assert.match(result.work_id || '', /^[0-9a-f-]{36}$/i);
   assert.match(result.summary || '', /Dashboard validation completed for repo/);
 
+  const activeTask = await callTool('relai_work', {
+    action: 'begin', workspace: 'repo', bootstrap: 'none', title: 'Dashboard cancellation fixture'
+  }, { publicHttpOnly: false });
+  const cancelReq = Readable.from([Buffer.from(JSON.stringify({ action: 'cancel', work_id: activeTask.work_id }))]);
+  cancelReq.headers = { 'content-type': 'application/json' };
+  const cancelResponse = responseRecorder();
+  await handleTaskControl({
+    req: cancelReq,
+    res: cancelResponse.res,
+    ae: '',
+    options: { maxBodyBytes: 1024 * 1024 }
+  });
+  const cancelled = cancelResponse.json();
+  assert.equal(cancelResponse.status(), 200);
+  assert.equal(cancelled.ok, true, JSON.stringify(cancelled));
+  assert.equal(cancelled.status, 'cancelled', 'dashboard task control may commit immediately when no owned operation or fallback work remains to drain');
+  const committedCancellation = await callTool('relai_work', {
+    action: 'cancel', workspace: 'repo', work_id: activeTask.work_id, reason: 'Verify dashboard cancellation committed.'
+  }, { publicHttpOnly: false });
+  assert.equal(committedCancellation.status, 'cancelled');
+  assert.equal(committedCancellation.duplicate, true);
+
   const adapterSource = fs.readFileSync(new URL('../src/http/dashboardActions.ts', import.meta.url), 'utf8');
   const coreSource = fs.readFileSync(new URL('../src/core/dashboard-actions.ts', import.meta.url), 'utf8');
   assert.match(adapterSource, /runWorkspaceValidation\(workspace\)/, 'HTTP must delegate validation to the Core operation');
+  assert.match(adapterSource, /controlDashboardTask\(action, workId, operationId\)/, 'HTTP task controls must delegate to the Core operation');
   assert.doesNotMatch(adapterSource, /callTool\(/, 'HTTP must not own tool orchestration after the Core cutover');
   assert.doesNotMatch(coreSource, /callTool\('relai_run_checks'/);
   assert.match(coreSource, /callTool\('relai_work'/);

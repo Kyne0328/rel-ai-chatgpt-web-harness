@@ -88,7 +88,9 @@ try {
   assert.equal(discovery.body.result?._meta?.[SERVER_INFO_META_KEY]?.version, expectedVersion, 'HTTP discovery must report the canonical package version');
   const serverInstructions = discovery.body.result?.instructions || '';
   assert.match(serverInstructions, /work_id is durable task attribution/i);
-  assert.match(serverInstructions, /substantial or multi-step repository work, start relai_work begin before the first project operation and carry work_id/i);
+  assert.match(serverInstructions, /substantial or multi-step repository work/i);
+  assert.match(serverInstructions, /start relai_work begin/i);
+  assert.match(serverInstructions, /carry work_id/i);
   assert.match(serverInstructions, /approval/i);
   assert.match(serverInstructions, /authoritative evidence/i);
   assert.match(serverInstructions, /validation is factual evidence, not execution permission/i);
@@ -182,7 +184,8 @@ try {
       level: 'standard',
       check: `${JSON.stringify(globalThis.process.execPath)} -e "process.stdout.write('schema-parity-ok')"`,
       timeoutMs: 5_000,
-      fullOutput: true
+      fullOutput: true,
+      complete: false
     }
   });
   assert.equal(validationWithExplicitLevel.response.status, 200, JSON.stringify(validationWithExplicitLevel.body));

@@ -8,7 +8,7 @@ import { repoSnapshot, relaiReadAsync, workspaceTidyPlan, workspaceTidyRun, rela
 import { planEdit } from '../executionPlanner.js';
 import { relaiStatus } from './status.js';
 import { completeTask } from './completion.js';
-import { cancelTask } from './cancellation.js';
+import { cancelTask, stopTaskOperations } from './cancellation.js';
 import { relaiSearch } from '../bridge/search.js';
 import { relaiCodeInspect } from '../bridge/codeIntelligence.js';
 import { relaiExec } from '../bridge/exec.js';
@@ -30,20 +30,19 @@ import { discoverRepositoryTopology, packageForPath } from '../workflow/topology
 import { createReviewCheckpoint, replayReviewCheckpoint } from '../reviewCheckpoints.js';
 import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
-import { getToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
-import { normalizeTaskPlan } from '../taskObservability.js';
+import { getToolActivity } from '../toolActivity.js';
+import { applyTaskProgressPatch } from './taskProgress.js';
 const startTaskHandler = inWorkspace(async (workspace, _config, args, context) => {
   const task = startTask(workspace, args);
   const recovered = context?.requestTaskContext?.session;
   const activity = getToolActivity();
   const current = activity.tasks.find(item => String(item.id || item.taskId || '') === task.work_id);
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
-  const contextRequest = { action: 'context', work_id: task.work_id, bootstrap: args.bootstrap || 'compact', ...(args.instructionPath ? { instructionPath: args.instructionPath } : {}) };
   return {
     ...task,
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
     ...(recovered ? { bootstrap: { recoveredTask: compactSessionSummary(recovered) } } : {}),
-    nextAction: `Use work_id "${task.work_id}" on subsequent operations for this task. Fetch repository context when needed with relai_work ${JSON.stringify(contextRequest)}.`
+    nextAction: `Use work_id "${task.work_id}" on subsequent operations. Inspect directly with one batched relai_read, relai_search, or relai_snapshot call; use relai_work context only when deeper continuity or bootstrap context is materially useful.`
   };
 });
 
@@ -119,21 +118,16 @@ function scheduleIntelligenceWarmup(workspace, config) {
 
 const taskPlanHandler = inWorkspace((workspace, _config, args, context) => {
   const taskId = String(context?.taskId || args.work_id || '').trim();
-  const current = getToolActivity().tasks.find(item => String(item.id || item.taskId || '') === taskId) || null;
-  const currentPlan = current?.plan || { revision: 0, steps: [] };
-  const currentRevision = Math.max(0, Number(currentPlan.revision || 0));
-  const candidate = normalizeTaskPlan({ revision: currentRevision, steps: args.steps }) || { revision: currentRevision, steps: [] };
-  if (JSON.stringify(currentPlan.steps) === JSON.stringify(candidate.steps)) {
-    return { ok: true, workspace: workspace.alias, work_id: taskId, plan: currentPlan, message: 'Task plan is unchanged.' };
-  }
-  const plan = { ...candidate, revision: currentRevision + 1 };
-  updateCurrentToolActivity({ plan });
+  const result = applyTaskProgressPatch(taskId, { steps: args.steps });
+  const plan = result?.plan || { revision: 0, steps: [] };
   return {
     ok: true,
     workspace: workspace.alias,
     work_id: taskId,
     plan,
-    message: plan.steps.length ? `Task plan updated with ${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}.` : 'Task plan cleared.'
+    message: result?.changed
+      ? (plan.steps.length ? `Task plan updated with ${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}.` : 'Task plan cleared.')
+      : 'Task plan is unchanged.'
   };
 });
 
@@ -169,7 +163,7 @@ const HANDLERS = Object.freeze({
   tidyRun: inWorkspace((workspace, config, args) => workspaceTidyRun(workspace, config, args)),
   runChecks: inWorkspace((workspace, config, args, context) => relaiVerify(workspace, config, mapCheckArgs(args), context)),
   httpProbe: inWorkspace((workspace, config, args) => relaiHttpProbe(workspace, config, args)),
-  diff: inWorkspace((workspace, config, args, context) => relaiDiff(workspace, config, withTaskOwnedReviewContext(config, workspace, args, context))),
+  diff: inWorkspace((workspace, config, args, context) => relaiDiff(workspace, config, withTaskOwnedReviewContext(config, workspace, args, context), context)),
   reviewCheckpoint: inWorkspace(async (workspace, config, args, context) => {
     const scope = String(args.scope || '').trim();
     const taskId = String(context.taskId || args.work_id || '').trim();
@@ -195,6 +189,7 @@ const HANDLERS = Object.freeze({
   gitPush: inWorkspace((workspace, config, args) => relaiGitPush(workspace, config, args)),
   gitDraftPr: inWorkspace((workspace, config, args) => relaiGitDraftPr(workspace, config, args)),
   edit: inWorkspace((workspace, config, args, context) => planEdit(workspace, config, args, context)),
+  stopTaskOperations,
   cancelTask,
   completeTask
 });

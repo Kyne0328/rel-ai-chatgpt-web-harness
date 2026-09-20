@@ -7,6 +7,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 process.env.REL_AI_MCP_HEAVY_WORK_LIMIT = '2';
+process.env.REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS = '60';
 process.env.REL_AI_MCP_PERSISTENT_PROCESS_LIMIT = '2';
 
 const {
@@ -24,6 +25,7 @@ const {
 
 await verifyRoundRobinFairness();
 await verifyQueueCancellation();
+await verifyDefaultHeavyQueueTimeout();
 await verifyExecutionTimeoutExcludesQueueWait();
 await verifyRepositoryQueryTimeoutExcludesQueueWait();
 await verifyPersistentCapacityIncludesRestartOrphans();
@@ -62,6 +64,25 @@ async function verifyQueueCancellation() {
   assert.equal(scheduler.stats().heavy.queued, 0, 'cancelled tickets must leave no queue residue');
   first.release();
   assert.equal(scheduler.stats().heavy.active, 0);
+}
+
+async function verifyDefaultHeavyQueueTimeout() {
+  const blockerA = await acquireHostResource('heavy', 'default-timeout-a');
+  const blockerB = await acquireHostResource('heavy', 'default-timeout-b');
+  try {
+    const result = await runProcess(process.execPath, ['-e', 'process.exit(0)'], {
+      resourceClass: 'heavy',
+      resourceOwner: 'default-timeout-c',
+      timeout: 3000
+    });
+    assert.equal(result.queueTimedOut, true, 'heavy work must not wait indefinitely when host capacity is full');
+    assert.equal(result.cancelled, false);
+    assert.ok(result.queueWaitMs >= 40, `expected the default queue deadline to be observed, got ${result.queueWaitMs}ms`);
+  } finally {
+    blockerA.release();
+    blockerB.release();
+  }
+  assert.equal(hostResourceStats().heavy.queued, 0, 'timed-out host work must leave no queue residue');
 }
 
 async function verifyExecutionTimeoutExcludesQueueWait() {

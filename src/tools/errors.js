@@ -77,6 +77,11 @@ function serializeToolError(toolName, error) {
       ...(Array.isArray(error.configuredWorkspaceAliases) ? { configuredWorkspaceAliases: error.configuredWorkspaceAliases.map(String).slice(0, 100) } : {}),
       ...(Array.isArray(error.workspaceAliases) ? { workspaceAliases: error.workspaceAliases.map(String).slice(0, 100) } : {}),
       ...(Number.isFinite(error.workspaceCount) ? { workspaceCount: Number(error.workspaceCount) } : {}),
+      ...(error.blockingTaskId ? { blockingTaskId: String(error.blockingTaskId) } : {}),
+      ...(error.blockingOperationId ? { blockingOperationId: String(error.blockingOperationId) } : {}),
+      ...(error.blockingOperation ? { blockingOperation: String(error.blockingOperation) } : {}),
+      ...(error.blockingStartedAt ? { blockingStartedAt: String(error.blockingStartedAt) } : {}),
+      ...(Number.isFinite(error.queueTimeoutMs) ? { queueTimeoutMs: Number(error.queueTimeoutMs) } : {}),
       retryable: error.retryable === true,
       requiresUserConfirmation: error.requiresUserConfirmation === true,
       allowedAlternatives: Array.isArray(error.allowedAlternatives)

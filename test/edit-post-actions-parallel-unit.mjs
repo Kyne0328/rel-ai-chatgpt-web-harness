@@ -72,4 +72,28 @@ try {
   fs.rmSync(mutatingState, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
-console.log('Edit post-actions preserve parallel validation while capturing the final diff only after checks finish.');
+const cancelledRoot = createRepo({
+  lint: 'node -e "setInterval(() => {}, 1000)"'
+});
+const cancelledState = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-edit-post-state-'));
+try {
+  const controller = new AbortController();
+  const cancelTimer = setTimeout(() => controller.abort(new Error('cancel edit post-check')), 100);
+  const result = await planEdit(
+    { alias: 'cancelled', path: cancelledRoot, commands: {}, testCommands: {} },
+    { stateDir: cancelledState },
+    { path: 'app.js', oldText: 'value = 1', newText: 'value = 2', runChecks: true },
+    { signal: controller.signal }
+  );
+  clearTimeout(cancelTimer);
+  assert.equal(result.ok, false, 'cancelled post-edit validation must make the edit result non-successful');
+  assert.equal(result.checks.validationStatus, 'cancelled', 'edit post-actions must forward the mutation cancellation signal into validation');
+  assert.equal(result.checks.cancelled, true);
+  assert.equal(result.checks.executedUnits, 0, 'a cancelled in-flight post-check must not be counted as completed work');
+} finally {
+  await repositoryIntelligence.shutdown();
+  fs.rmSync(cancelledRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  fs.rmSync(cancelledState, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+console.log('Edit post-actions preserve validation/diff ordering and propagate cancellation into subprocess-backed checks.');

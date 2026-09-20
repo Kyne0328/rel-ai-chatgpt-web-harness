@@ -17,6 +17,7 @@ for (let index = 0; index < 5; index += 1) {
   assert.equal(observeRepeatCall({ connector: true, taskId: 'task-1', operationName: OP.WORK_STATUS, args: { work_id: 'task-1' } }), null, 'status polling must never warn');
   assert.equal(observeRepeatCall({ connector: true, taskId: 'task-1', operationName: OP.PROCESS_READ, args: { work_id: 'task-1', processId: 'proc-1' } }), null, 'process polling must never warn');
   assert.equal(observeRepeatCall({ connector: true, taskId: 'task-1', operationName: OP.WORK_FINISH, args: { work_id: 'task-1', summary: 'done' } }), null, 'idempotent terminal retries must never warn');
+  assert.equal(observeRepeatCall({ connector: true, taskId: 'task-1', operationName: OP.WORK_STOP, args: { work_id: 'task-1', operationId: 'op-1' } }), null, 'operation-stop retries must never warn');
   assert.equal(observeRepeatCall({ connector: true, taskId: 'task-1', operationName: OP.WORK_CANCEL, args: { work_id: 'task-1', reason: 'cancel' } }), null, 'idempotent cancellation retries must never warn');
 }
 assert.equal(observeRepeatCall({ ...base, connector: false }), null, 'non-connector internal calls must not participate in the MCP repeat guard');

@@ -37,15 +37,15 @@ async function relaiStatus(config, args = {}, context = {}) {
     : configuredWorkspaceAliases;
   const backgroundReference = String(args.operationId || args.work_id || '').trim();
   const backgroundOperation = backgroundReference ? fallbackExecutionStatus(backgroundReference, { config }) : null;
+  const compactConnectorStatus = context?.connector === true && args.detail !== 'full' && args.maxBytes == null;
   let selectedWorkspace = null;
   if (args.workspace) {
     try {
       const workspace = resolveWorkspace(config, args.workspace);
-      if (context.backgroundStatusMode === true) {
-        // The workspace may be actively mutating in the same logical task. For a
-        // running detached fallback, status is a control-plane query: return its
-        // task state immediately instead of waiting for or racing repository I/O.
-        selectedWorkspace = { alias: workspace.alias, root: workspace.path };
+      if (context.backgroundStatusMode === true || compactConnectorStatus) {
+        // Control-plane status must stay cheap and must not queue behind repository
+        // inspection. Full repository state remains available through detail:'full'.
+        selectedWorkspace = { alias: workspace.alias };
       } else {
         const discovered = discoverCommands(workspace.path);
         const discoveryWarnings = commandDiscoveryWarnings(workspace.path);
@@ -67,7 +67,7 @@ async function relaiStatus(config, args = {}, context = {}) {
   const taskSession = args.work_id ? readTaskHistorySessionRecord(config, args.work_id, { reconcileInactive: false }) : null;
   const activeRelatedWork = compactActiveRelatedWork(taskActivity, taskSession || {});
   const taskQuery = taskSession ? [taskSession.objective, taskSession.title].filter(Boolean).join(' ') : '';
-  const taskContinuity = taskSession && taskQuery
+  const taskContinuity = !compactConnectorStatus && taskSession && taskQuery
     ? buildTaskContinuity(config, {
         workspace: taskSession.workspace,
         query: taskQuery,

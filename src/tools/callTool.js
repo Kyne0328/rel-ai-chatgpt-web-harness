@@ -24,6 +24,7 @@ import { buildWorkflowEvidenceReceipt } from '../workflow/evidence.js';
 import { invalidateRepositoryTopology } from '../workflow/topology.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { observeRepeatCall } from './repeatCallGuard.js';
+import { applyTaskProgressPatch } from './taskProgress.js';
 import {
   measurePerformancePhaseSync,
   performanceBreakdownSnapshot,
@@ -53,6 +54,7 @@ async function callToolObserved(name, args = {}, context = {}) {
   let resolvedAction = '';
   let effectivePrincipal = null;
   let completedTaskAnalytics = null;
+  let taskProgressPatch = null;
   try {
     if (!isToolCallable(name, config)) {
       throw new Error(`Unknown tool '${name}'. Available tools: ${getToolNames(config).join(', ')}. Removed direct operation names are not callable; restart or reconnect if discovery is stale.`);
@@ -63,6 +65,11 @@ async function callToolObserved(name, args = {}, context = {}) {
     operationName = resolved.operationName;
     resolvedAction = resolved.action || '';
     effectiveArgs = resolved.operationArgs;
+    if (effectiveArgs?.taskProgress !== undefined) {
+      taskProgressPatch = effectiveArgs.taskProgress;
+      effectiveArgs = { ...effectiveArgs };
+      delete effectiveArgs.taskProgress;
+    }
     const taskScope = definition?.behavior?.taskScope || 'required';
     const taskScoped = taskScope === 'required';
     const taskAware = taskScoped || taskScope === 'optional';
@@ -70,6 +77,9 @@ async function callToolObserved(name, args = {}, context = {}) {
     requestedTaskId = normalizeTaskId(effectiveArgs?.work_id);
     if (requestedTaskId && effectiveArgs?.independent === true) {
       throw taskError('TASK_SCOPE_CONFLICT', 'Choose work_id for task work or independent:true for separate workspace work, not both.');
+    }
+    if (taskProgressPatch && !requestedTaskId) {
+      throw taskError('TASK_ID_REQUIRED', 'taskProgress requires the exact work_id of the durable task whose checklist should be updated.');
     }
     if (taskScoped && !requestedTaskId) {
       throw taskError('TASK_ID_REQUIRED', `${name} requires the work_id returned by relai_work action begin.`);
@@ -117,7 +127,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       // resolved alias without re-reading task history a second time.
       assertTaskWorkspaceOwnership(knownTask, effectiveArgs?.workspace);
       const integrity = readTaskIntegrity(config, requestedTaskId, effectiveArgs?.workspace);
-      const lifecycleWithoutIntegrity = operationName === OP.WORK_FINISH || operationName === OP.WORK_CANCEL;
+      const lifecycleWithoutIntegrity = operationName === OP.WORK_FINISH || operationName === OP.WORK_STOP || operationName === OP.WORK_CANCEL;
       if (!integrity && !lifecycleWithoutIntegrity && (taskScoped || taskAttributionRequiresIntegrity(operationName))) {
         throw taskError(
           'TASK_INTEGRITY_STATE_MISSING',
@@ -179,6 +189,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       input: publicArgs,
       principalFingerprint: principalFingerprint(effectivePrincipal)
     });
+    if (taskProgressPatch) applyTaskProgressPatch(requestedTaskId, taskProgressPatch, finishActivity?.update);
     const execution = await executeToolCall({
       config, name, executionName: operationName, effectiveArgs, context, requestTaskContext, finishActivity, definition, started
     });

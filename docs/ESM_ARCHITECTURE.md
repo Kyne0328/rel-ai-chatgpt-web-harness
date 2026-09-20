@@ -23,7 +23,7 @@ Root package (ESM)
 
 | File | Technical necessity | External constraint | Regression coverage | Removal condition |
 |---|---|---|---|---|
-| `electron/preload.cjs` | A sandboxed preload must expose constrained `contextBridge` APIs before renderer code runs. | Electron sandboxed preloads currently use a limited CommonJS environment and do not support ESM imports. | `test/esm-hard-cutover-unit.mjs`, `test/window-security-unit.mjs`, `test/dashboard-window-unit.mjs`, `test/recovery-window-unit.mjs`, and Electron smoke tests | Convert only when the supported Electron runtime can execute a sandboxed ESM preload without disabling sandboxing, context isolation, or existing IPC constraints. |
+| `electron/preload.cjs` | A sandboxed preload must expose constrained `contextBridge` APIs before renderer code runs. | Electron sandboxed preloads currently use a limited CommonJS environment and do not support ESM imports. | `test/esm-hard-cutover-unit.mjs`, `test/suite-desktop-runtime-unit.mjs`, `test/dashboard-window-unit.mjs`, `test/suite-runtime-core-unit.mjs`, and Electron smoke tests | Convert only when the supported Electron runtime can execute a sandboxed ESM preload without disabling sandboxing, context isolation, or existing IPC constraints. |
 
 This boundary may call `require('electron')` once. It does not import first-party CommonJS code, duplicate an ESM implementation, or provide a general compatibility loader. `--relai-preload-surface=dashboard|application` selects the minimum bridge for each window.
 
@@ -41,7 +41,7 @@ src/ui/colorTokens.mjs
 → docs/color-system-reference.svg
 ```
 
-Use `npm run verify:color-tokens` before generation, testing, release checks, or packaging. It runs the generator in non-mutating `--check` mode and fails when a committed generated asset is stale. Use `npm run generate:color-tokens` only to intentionally restore or update generated output after changing the manifest. `test/color-token-staleness-unit.mjs` proves the fail, restore, and pass sequence.
+Use `npm run verify:color-tokens` before generation, testing, release checks, or packaging. It runs the generator in non-mutating `--check` mode and fails when a committed generated asset is stale. Use `npm run generate:color-tokens` only to intentionally restore or update generated output after changing the manifest. `test/suite-dashboard-ui-unit.mjs` proves the fail, restore, and pass sequence.
 
 Runtime UI code must not import the manifest. The packaged application contains the generated CSS assets but not a CommonJS color bridge.
 

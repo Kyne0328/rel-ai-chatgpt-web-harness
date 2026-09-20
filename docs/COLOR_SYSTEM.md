@@ -27,7 +27,7 @@ The generator writes:
 - `electron/renderer/color-tokens.css` for setup and recovery renderers; and
 - `docs/color-system-reference.svg` as the reviewable palette reference.
 
-Generated files must not be edited directly. `test/color-token-staleness-unit.mjs` proves that a modified generated asset fails verification, regeneration restores the exact canonical file, and verification then passes.
+Generated files must not be edited directly. `test/suite-dashboard-ui-unit.mjs` proves that a modified generated asset fails verification, regeneration restores the exact canonical file, and verification then passes.
 
 ## Token layers
 

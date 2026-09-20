@@ -179,7 +179,9 @@ assert.doesNotMatch(main, /waitForLocalService|setTimeout\(poll,\s*20\)/, 'local
 assert.match(main, /const status = launchOptions\.background[\s\S]{0,80}\? await pendingStart[\s\S]{0,80}: await serviceRuntime\.waitUntilListening\(0\)/, 'foreground startup, including first run, must follow authoritative local readiness instead of opening Recovery on a shorter UI-only timeout');
 assert.doesNotMatch(main, /dashboard:\s*false/, 'tunnel state changes must reach the desktop dashboard without manual refresh');
 assert.match(main, /setImmediate\(\(\) => \{[\s\S]*appUpdater\.start\(\)[\s\S]*updateSupportPolicy\.start\(\)/, 'updater policy work should begin after the first useful desktop startup path is scheduled');
-assert.match(main, /browser-window-focus[\s\S]{0,220}appUpdater\?\.discoverUpdate\?\.\(\)/, 'focusing the desktop app must request throttled lightweight release discovery');
+assert.match(main, /browser-window-focus[\s\S]{0,260}appUpdater\?\.discoverUpdate\?\.\(\)/, 'focusing the desktop app must request throttled lightweight release discovery');
+assert.match(desktopHost, /browser-window-focus[\s\S]{0,240}dashboardWindowManager\.getWindow\(\)[\s\S]{0,120}pulseWindowManager\.setSuppressed\(true\)/, 'focusing the Rel.AI dashboard must suppress the always-on-top Pulse so it cannot cover custom chrome');
+assert.match(desktopHost, /browser-window-blur[\s\S]{0,220}dashboardWindowManager\.getWindow\(\)[\s\S]{0,120}pulseWindowManager\.setSuppressed\(false\)/, 'Pulse must resume when the Rel.AI dashboard loses focus');
 assert.match(desktopPower, /powerMonitor\.on\('resume', handleResume\)/, 'desktop power integration must own the Electron resume listener');
 assert.match(desktopHost, /onResume:\s*\(\)\s*=>\s*appUpdater\?\.discoverUpdate\?\.\(\{ force: true \}\)/, 'resuming from sleep must force a fresh lightweight release discovery check');
 assert.match(appUpdater, /RELEASE_DISCOVERY_INTERVAL_MS[\s\S]*discoverUpdate[\s\S]*fetchLatestReleaseVersion/, 'the updater must keep lightweight release discovery separate from full updater verification');

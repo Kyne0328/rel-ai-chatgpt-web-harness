@@ -15,6 +15,8 @@ const workspace = path.join(temp, 'workspace');
 const configPath = path.join(temp, 'config.json');
 const outputPath = path.join(temp, 'probe.json');
 const token = 'custom-chrome-token';
+const chromePlatform = String(process.env.RELAI_CHROME_PLATFORM || 'win32').trim();
+if (!['win32', 'darwin'].includes(chromePlatform)) throw new Error(`RELAI_CHROME_PLATFORM must be win32 or darwin, received ${chromePlatform}.`);
 const port = await availablePort();
 fs.mkdirSync(workspace, { recursive: true });
 fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ name: 'custom-chrome-fixture', version: '1.0.0' }));
@@ -34,7 +36,7 @@ try {
   child = spawn(electronBinary, ['--no-sandbox', `--user-data-dir=${path.join(temp, 'profile')}`, path.join(root, 'test', 'fixtures', 'electron-custom-chrome-probe')], {
     cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, RELAI_PROBE_TARGET_URL: `http://127.0.0.1:${port}/dashboard?token=${encodeURIComponent(token)}&surface=desktop&chrome=custom&platform=win32#usage`, RELAI_PROBE_OUTPUT_PATH: outputPath, RELAI_EXPECTED_TOOL_COUNT: String(activeToolNames.length), ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }
+    env: { ...process.env, RELAI_PROBE_TARGET_URL: `http://127.0.0.1:${port}/dashboard?token=${encodeURIComponent(token)}&surface=desktop&chrome=custom&platform=${encodeURIComponent(chromePlatform)}#usage`, RELAI_PROBE_OUTPUT_PATH: outputPath, RELAI_EXPECTED_TOOL_COUNT: String(activeToolNames.length), RELAI_PROBE_CHROME_PLATFORM: chromePlatform, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }
   });
   let stdout = ''; let stderr = '';
   child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); });
@@ -44,6 +46,8 @@ try {
   assert.equal(code, 0, `Custom chrome Electron probe failed. stdout=${stdout} stderr=${stderr}`);
   const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
   assert.equal(result.error, undefined, JSON.stringify(result));
+  assert.equal(result.chromePlatform, chromePlatform);
+  assert.equal(result.controls, chromePlatform === 'win32' ? 'custom' : 'native');
   assert.equal(result.measurements.length, 3);
   for (const measurement of result.measurements) {
     assert.equal(measurement.chrome, 'custom');
@@ -67,7 +71,7 @@ try {
       assert.equal(measurement.toolCategories.relai_changes, 'Review · Recover');
     }
   }
-  console.log('Electron custom-titlebar geometry is clear across Analytics, Tools, and Sessions.');
+  console.log(`Electron ${chromePlatform} dashboard chrome is clear across Analytics, Tools, and Sessions.`);
 } finally {
   if (child && child.exitCode == null) child.kill('SIGKILL');
   if (server.exitCode == null) server.kill('SIGKILL');

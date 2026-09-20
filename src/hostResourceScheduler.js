@@ -2,10 +2,12 @@ import os from 'node:os';
 import PQueue from 'p-queue';
 
 const availableParallelism = Math.max(1, Number(os.availableParallelism?.() || os.cpus().length || 1));
-const DEFAULT_HEAVY_WORK_LIMIT = Math.min(4, Math.max(2, availableParallelism - 1));
+const DEFAULT_HEAVY_WORK_LIMIT = Math.min(64, Math.max(2, availableParallelism - 1));
+const DEFAULT_HEAVY_QUEUE_TIMEOUT_MS = 30_000;
 const DEFAULT_PERSISTENT_PROCESS_LIMIT = Math.min(12, Math.max(4, availableParallelism * 2));
 
 const HOST_HEAVY_WORK_LIMIT = configuredLimit('REL_AI_MCP_HEAVY_WORK_LIMIT', DEFAULT_HEAVY_WORK_LIMIT);
+const HOST_HEAVY_QUEUE_TIMEOUT_MS = configuredTimeout('REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS', DEFAULT_HEAVY_QUEUE_TIMEOUT_MS);
 const HOST_REPOSITORY_QUERY_LIMIT = 4;
 const HOST_PERSISTENT_PROCESS_LIMIT = configuredLimit('REL_AI_MCP_PERSISTENT_PROCESS_LIMIT', DEFAULT_PERSISTENT_PROCESS_LIMIT);
 
@@ -41,7 +43,6 @@ function createFairResourceScheduler(limits = {}) {
       options.signal?.addEventListener?.('abort', onAbort, { once: true });
       if (timeoutMs > 0) {
         queueTimer = setTimeout(() => controller.abort(resourceQueueTimeoutError(laneName, timeoutMs)), timeoutMs);
-        queueTimer.unref?.();
       }
 
       const queuedTask = lane.queue.add(async () => {
@@ -210,6 +211,10 @@ function positiveTimeout(value, fallback) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
 }
 
+function configuredTimeout(name, fallback) {
+  return positiveTimeout(process.env[name], fallback);
+}
+
 const hostResourceScheduler = createFairResourceScheduler({
   heavy: HOST_HEAVY_WORK_LIMIT,
   repositoryQuery: HOST_REPOSITORY_QUERY_LIMIT,
@@ -217,7 +222,12 @@ const hostResourceScheduler = createFairResourceScheduler({
 });
 
 function acquireHostResource(resourceClass, owner, options = {}) {
-  return hostResourceScheduler.acquire(resourceClass, owner, options);
+  const resource = String(resourceClass || '').trim();
+  const timeoutMs = options.timeoutMs ?? (resource === 'heavy' ? HOST_HEAVY_QUEUE_TIMEOUT_MS : undefined);
+  return hostResourceScheduler.acquire(resource, owner, {
+    ...options,
+    ...(timeoutMs != null ? { timeoutMs } : {})
+  });
 }
 
 function hostResourceStats() {
@@ -225,6 +235,8 @@ function hostResourceStats() {
 }
 
 export {
+  HOST_HEAVY_QUEUE_TIMEOUT_MS,
+  HOST_HEAVY_WORK_LIMIT,
   HOST_PERSISTENT_PROCESS_LIMIT,
   acquireHostResource,
   createFairResourceScheduler,

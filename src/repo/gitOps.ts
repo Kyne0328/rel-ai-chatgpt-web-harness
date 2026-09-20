@@ -382,8 +382,12 @@ async function workspaceGitStatus(workspace: RepoWorkspace, config: RepoConfig, 
   let parsed: ParsedGitStatus;
   let statusError = '';
   try {
-    parsed = await readGitStatus(workspace.path, { timeoutMs: 30_000 });
+    parsed = await readGitStatus(workspace.path, { timeoutMs: 30_000, signal: args.signal });
   } catch (error) {
+    if (args.signal?.aborted) {
+      if (args.signal.reason instanceof Error) throw args.signal.reason;
+      throw error;
+    }
     parsed = parseGitStatus('');
     statusError = error instanceof Error ? error.message : String(error);
   }
@@ -617,7 +621,13 @@ async function resolveCommitHead(workspace: RepoWorkspace, config: RepoConfig): 
   return /^[a-f0-9]{40,64}$/i.test(head) ? head : '';
 }
 
-async function workspaceDirtyPaths(workspace: RepoWorkspace, config: RepoConfig, paths: readonly unknown[] = []): Promise<string[]> {
+async function workspaceDirtyPaths(
+  workspace: RepoWorkspace,
+  config: RepoConfig,
+  paths: readonly unknown[] = [],
+  options: { signal?: AbortSignal } = {}
+): Promise<string[]> {
+  options.signal?.throwIfAborted?.();
   const normalized = [...new Set((Array.isArray(paths) ? paths : [])
     .map(item => normalizeGitPath(item))
     .filter(Boolean))];
@@ -625,20 +635,25 @@ async function workspaceDirtyPaths(workspace: RepoWorkspace, config: RepoConfig,
   const workTree = await runProcess("git", ["rev-parse", "--is-inside-work-tree"], {
     cwd: workspace.path,
     timeout: 30000,
-    maxOutputBytes: DEFAULT_MAX_GIT_OUTPUT_BYTES
+    maxOutputBytes: DEFAULT_MAX_GIT_OUTPUT_BYTES,
+    ...(options.signal ? { signal: options.signal } : {})
   }, config);
+  options.signal?.throwIfAborted?.();
   if (workTree.exitCode !== 0 || !String(workTree.stdout || "").trim().startsWith("true")) {
     return normalized;
   }
   const dirty = new Set<string>();
   for (let index = 0; index < normalized.length; index += 100) {
+    options.signal?.throwIfAborted?.();
     const chunk = normalized.slice(index, index + 100);
     const status = await runProcess("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...chunk], {
       cwd: workspace.path,
       timeout: 60000,
       maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
-      preserveOutputWhitespace: true
+      preserveOutputWhitespace: true,
+      ...(options.signal ? { signal: options.signal } : {})
     }, config);
+    options.signal?.throwIfAborted?.();
     if (status.exitCode !== 0 || status.stdoutTruncated) {
       throw new Error(`Could not inspect task-owned residual workspace state: ${status.stderr || status.stdout || status.exitCode}`);
     }

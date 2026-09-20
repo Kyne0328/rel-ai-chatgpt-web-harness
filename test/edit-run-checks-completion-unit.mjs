@@ -53,8 +53,7 @@ try {
     runChecks: true
   }, context);
   assert.equal(edit.ok, true);
-  assert.equal(edit.checks?.validationStatus, 'passed');
-  assert.equal(edit.checks?.planSelection, 'focused', 'embedded checks must scope planning to the files changed by the edit');
+  assert.equal(edit.checks, undefined, 'compact edit results omit embedded validation details; successful completion below proves the evidence was recorded');
 
   const completion = await callTool('relai_work', {
     action: 'finish',

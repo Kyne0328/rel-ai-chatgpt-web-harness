@@ -4,9 +4,9 @@ import { createValidationFingerprint } from './validationPlan.js';
 async function noChecksValidationResult(workspace, config, details) {
   const {
     level, skippedChecks, aliasNormalizations, validationLevel,
-    validationLevelReason, changedFiles, policy, validationScope = []
+    validationLevelReason, changedFiles, policy, validationScope = [], signal
   } = details;
-  const fingerprint = await createValidationFingerprint(workspace, config, { paths: validationScope });
+  const fingerprint = await createValidationFingerprint(workspace, config, { paths: validationScope, signal });
   const validationFingerprint = fingerprint.fingerprint;
   updateCurrentToolActivity({
     status: 'validating',

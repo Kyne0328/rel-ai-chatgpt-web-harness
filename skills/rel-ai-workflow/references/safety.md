@@ -14,7 +14,7 @@ Prefer focused edits or `relai_changes` action `restore` for listed tracked path
 
 ## Command execution
 
-Use `relai_exec` for bounded one-shot development commands and `relai_process` for persistent or interactive commands. Do not use either as an unrestricted command router. Respect configured workspace, environment, timeout, output, cancellation, and process-tree limits. A successful command and a validation result are different evidence types. Use `relai_validate` when structured validation evidence is useful; neither is a universal permission prerequisite for completion.
+Use `relai_exec` for bounded one-shot development commands and `relai_process` for persistent or interactive commands. Do not use either as an unrestricted command router. Respect configured workspace, environment, timeout, output, cancellation, and process-tree limits. If a finite task operation stalls, prefer `relai_work` action `stop` for the specific `operationId` when known, or omit `operationId` to stop the task's current finite operations while leaving the task open. Use `cancel` only when the logical task itself should end; managed persistent processes are stopped separately with `relai_process`. A successful command and a validation result are different evidence types. Use `relai_validate` when structured validation evidence is useful; neither is a universal permission prerequisite for completion.
 
 ## Commit, push, and pull requests
 

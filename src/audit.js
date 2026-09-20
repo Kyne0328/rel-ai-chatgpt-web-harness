@@ -17,6 +17,7 @@ const AUDIT_RETRY_BASE_MS = 500;
 const AUDIT_RETRY_MAX_MS = 15_000;
 const MAX_PENDING_AUDIT_ENTRIES = 1000;
 const auditWriteStates = new Map();
+const pendingAuditOperations = new Set();
 
 async function logAudit(config, event) {
   const auditPath = getAuditPath(config);
@@ -38,14 +39,22 @@ async function logAudit(config, event) {
   return entry;
 }
 
-async function safeLogAudit(config, event, options = {}) {
-  try {
-    return await logAudit(config, event);
-  } catch (error) {
-    if (options.strictIntegrity === true && /^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
-    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] audit write:', error);
-    return null;
-  }
+function safeLogAudit(config, event, options = {}) {
+  const operation = (async () => {
+    try {
+      return await logAudit(config, event);
+    } catch (error) {
+      if (options.strictIntegrity === true && /^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
+      if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] audit write:', error);
+      return null;
+    }
+  })();
+  pendingAuditOperations.add(operation);
+  void operation.then(
+    () => pendingAuditOperations.delete(operation),
+    () => pendingAuditOperations.delete(operation)
+  );
+  return operation;
 }
 
 function enqueueAuditWrite(auditPath, entry) {
@@ -146,6 +155,9 @@ async function rotateIfNeededAsync(auditPath) {
 }
 
 async function flushAuditWrites(auditPath = '') {
+  while (pendingAuditOperations.size > 0) {
+    await Promise.allSettled([...pendingAuditOperations]);
+  }
   const targets = auditPath
     ? [[auditPath, auditWriteStates.get(auditPath)]]
     : [...auditWriteStates.entries()];

@@ -3,6 +3,7 @@ const OPERATION_IDS = Object.freeze({
   WORK_CONTEXT: 'work.context',
   WORK_PLAN: 'work.plan',
   WORK_STATUS: 'work.status',
+  WORK_STOP: 'work.stop',
   WORK_FINISH: 'work.finish',
   WORK_CANCEL: 'work.cancel',
   SNAPSHOT: 'snapshot',

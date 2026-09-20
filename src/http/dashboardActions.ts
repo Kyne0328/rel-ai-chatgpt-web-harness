@@ -1,4 +1,5 @@
 import {
+  controlDashboardTask,
   resolveWorkspaceFolder,
   runWorkspaceValidation,
   workspacePathPreflight
@@ -33,6 +34,20 @@ async function handleWorkspaceChecks(ctx: HttpRouteContext): Promise<void> {
   }
 }
 
+async function handleTaskControl(ctx: HttpRouteContext): Promise<void> {
+  try {
+    const payload = await readJsonBody(ctx.req, ctx.options.maxBodyBytes);
+    const action = String(payload.action || '').trim();
+    const workId = String(payload.work_id || payload.workId || '').trim();
+    const operationId = String(payload.operationId || '').trim();
+    if (action !== 'stop' && action !== 'cancel') throw new Error('action must be stop or cancel');
+    if (!workId) throw new Error('work_id is required');
+    sendJson(ctx.res, 200, await controlDashboardTask(action, workId, operationId));
+  } catch (error) {
+    sendJson(ctx.res, 200, { ok: false, error: errorMessage(error) });
+  }
+}
+
 async function handlePickFolder(ctx: HttpRouteContext): Promise<void> {
   if (typeof ctx.options.pickFolder !== 'function') {
     sendJson(ctx.res, 200, { ok: false, unsupported: true, error: 'Native folder picker is only available in the Rel.AI desktop launcher.' });
@@ -54,4 +69,4 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export { handleOpenFolder, handlePickFolder, handleWorkspaceChecks, workspacePathPreflight };
+export { handleOpenFolder, handlePickFolder, handleTaskControl, handleWorkspaceChecks, workspacePathPreflight };

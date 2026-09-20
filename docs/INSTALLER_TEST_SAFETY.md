@@ -45,4 +45,4 @@ If a previous test removed the application, reinstall the current published Rel.
 
 ## Regression enforcement
 
-`test/installer-test-entrypoints-unit.mjs` locks `deleteAppDataOnUninstall` to `false`, keeps installer execution out of ordinary package scripts, and requires the release-only lifecycle harness to retain its GitHub Actions and explicit opt-in guards. `test/installer-test-safety-unit.mjs` verifies production-install detection, path rejection, unique test identities, ownership markers, and cross-run cleanup isolation. The release workflow is the only automated path allowed to execute the production installer identity.
+`test/installer-test-entrypoints-unit.mjs` locks `deleteAppDataOnUninstall` to `false`, keeps installer execution out of ordinary package scripts, and requires the release-only lifecycle harness to retain its GitHub Actions and explicit opt-in guards. `test/suite-release-build-unit.mjs` verifies production-install detection, path rejection, unique test identities, ownership markers, and cross-run cleanup isolation. The release workflow is the only automated path allowed to execute the production installer identity.

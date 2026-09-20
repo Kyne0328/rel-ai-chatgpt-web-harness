@@ -107,6 +107,16 @@ function DiagnosticsView({ data = {} }) {
     return () => window.removeEventListener('relai:diagnostics-live', onLive);
   }, [live, scheduleRefresh]);
 
+  useEffect(() => {
+    if (!live) return undefined;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible' || !liveRef.current || !location.hash.startsWith('#diagnostics')) return;
+      void load({ silent: true });
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [live, load]);
+
   useEffect(() => () => window.clearTimeout(refreshTimerRef.current), []);
 
   useEffect(() => {

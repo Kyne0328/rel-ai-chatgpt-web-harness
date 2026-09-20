@@ -73,6 +73,38 @@ type PublicActionContract = Readonly<{
 const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 const OPERATION_REGISTRY = RAW_OPERATION_REGISTRY as unknown as readonly OperationRegistryRecord[];
 
+const TASK_PLAN_STEP_SCHEMA: JsonSchema = Object.freeze({
+  type: 'object',
+  properties: {
+    id: { type: 'string', minLength: 1, maxLength: 80 },
+    title: { type: 'string', minLength: 1, maxLength: 300 },
+    detail: { type: 'string', maxLength: 500 },
+    status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked', 'skipped'] }
+  },
+  required: ['title', 'status'],
+  additionalProperties: false
+});
+const TASK_PROGRESS_STEP_SCHEMA: JsonSchema = Object.freeze({
+  type: 'object',
+  properties: {
+    id: { type: 'string', minLength: 1, maxLength: 80 },
+    detail: { type: 'string', maxLength: 500 },
+    status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked', 'skipped'] }
+  },
+  required: ['id', 'status'],
+  additionalProperties: false
+});
+const TASK_PROGRESS_SCHEMA: JsonSchema = Object.freeze({
+  type: 'object',
+  properties: {
+    steps: { type: 'array', maxItems: 50, items: TASK_PLAN_STEP_SCHEMA },
+    step: TASK_PROGRESS_STEP_SCHEMA
+  },
+  additionalProperties: false
+});
+
+const TASK_PROGRESS_PUBLIC_TOOLS: ReadonlySet<string> = new Set(['relai_read', 'relai_edit']);
+
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_CONTEXT, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT, OP.INSPECT, OP.SEARCH_SEMANTIC,
   OP.PROCESS_READ, OP.PROCESS_LIST, OP.CHANGES_TIDY_PLAN, OP.VALIDATE_HTTP, OP.CHANGES_DIFF, OP.CHANGES_REPLAY,
@@ -85,7 +117,7 @@ const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   ...READ_ONLY_TOOLS, OP.PROCESS_STOP, OP.CHANGES_RESTORE, OP.CHANGES_RESET,
-  OP.WORK_PLAN, OP.WORK_CANCEL, OP.WORK_FINISH
+  OP.WORK_PLAN, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
 ]);
 const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
@@ -109,7 +141,7 @@ const PERSISTENT_PROCESS_TOOLS: ReadonlySet<string> = new Set([
 ]);
 const ALWAYS_IMMEDIATE_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_BEGIN, OP.WORK_PLAN, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT,
-  OP.WORK_STATUS, OP.WORK_CANCEL, OP.WORK_FINISH
+  OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
 ]);
 
 const DEFAULT_BEHAVIOR: Readonly<ToolBehavior> = Object.freeze({
@@ -177,7 +209,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Workspace Work',
-    description: 'Manages a durable workspace task. Use begin for substantial or multi-step repository work, including read-first investigations; it returns work_id promptly. context loads repository context, plan records or replaces the ordered checklist, and status, finish, and cancel manage lifecycle state. Carry work_id on subsequent task operations.',
+    description: 'Durable task lifecycle. Use begin once for substantial or multi-step work; it creates work_id, then inspect directly. context is optional continuity, plan is the compatibility path, and supported calls may carry taskProgress. status is recovery, not polling; stop, finish, and cancel manage lifecycle.',
     annotations: annotations(false, false, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
     dashboard: { category: 'Workflow', capabilities: ['workflow'] }
@@ -207,7 +239,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_exec', title: 'Run Command',
-    description: 'Runs bounded one-shot workspace commands through direct executable + argv or a command string; work_id is optional attribution.',
+    description: 'Runs one-shot workspace commands via direct executable + argv or a command string. Durable work runs until exit/cancel; taskless work keeps a safety timeout.',
     dashboard: { capabilities: ['execute'] }
   },
   {
@@ -238,7 +270,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_validate', title: 'Validate Repository',
-    description: 'Runs explicit repository checks, diagnostics, or local HTTP validation. Validation is factual repository evidence and may run directly against an authorized workspace; work_id optionally records task provenance.',
+    description: 'Runs repository checks, diagnostics, or local HTTP validation. Validation is factual evidence; work_id optionally records task provenance.',
     annotations: annotations(false, true, false, true), behavior: { longRunning: true, taskScope: 'optional' },
     dashboard: { capabilities: ['validate'] }
   },
@@ -273,6 +305,8 @@ function definePublicTool(value: PublicToolValue): CatalogToolDefinition {
   if (value.name === 'relai_edit') inputSchema = publicEditInputSchema(inputSchema, MAX_BATCH_EDITS) as ObjectJsonSchema;
   if (value.name === 'relai_exec') inputSchema = publicExecInputSchema(inputSchema) as ObjectJsonSchema;
   if (value.name === 'relai_process') inputSchema = publicProcessInputSchema(inputSchema) as ObjectJsonSchema;
+  if (value.name === 'relai_work') inputSchema = withWorkFinishTaskProgressInputSchema(inputSchema);
+  else if (TASK_PROGRESS_PUBLIC_TOOLS.has(value.name)) inputSchema = withTaskProgressInputSchema(inputSchema);
 
   const baseBehavior = source?.behavior || DEFAULT_BEHAVIOR;
   const baseDashboard = source?.dashboard || DEFAULT_DASHBOARD;
@@ -297,6 +331,29 @@ function definePublicTool(value: PublicToolValue): CatalogToolDefinition {
     behavior: Object.freeze({ ...DEFAULT_BEHAVIOR, ...baseBehavior, ...(value.behavior || {}) }),
     dashboard: Object.freeze({ ...dashboardMetadata, capabilities: Object.freeze(dashboardMetadata.capabilities) })
   }) as CatalogToolDefinition;
+}
+
+function withTaskProgressInputSchema(schema: ObjectJsonSchema): ObjectJsonSchema {
+  const properties = { ...(schema.properties || {}), taskProgress: TASK_PROGRESS_SCHEMA };
+  const oneOf = Array.isArray(schema.oneOf)
+    ? schema.oneOf.map(branch => ({
+        ...branch,
+        properties: { ...(branch.properties || {}), taskProgress: TASK_PROGRESS_SCHEMA }
+      }))
+    : schema.oneOf;
+  return { ...schema, properties, ...(oneOf ? { oneOf } : {}) };
+}
+
+function withWorkFinishTaskProgressInputSchema(schema: ObjectJsonSchema): ObjectJsonSchema {
+  if (!Array.isArray(schema.oneOf)) return schema;
+  const oneOf = schema.oneOf.map(branch => branch?.properties?.action?.const === 'finish'
+    ? { ...branch, properties: { ...(branch.properties || {}), taskProgress: TASK_PROGRESS_SCHEMA } }
+    : branch);
+  return {
+    ...schema,
+    properties: { ...(schema.properties || {}), taskProgress: { type: 'object' } },
+    oneOf
+  };
 }
 
 function actionInputSchema(_value: PublicToolValue, mappings: Readonly<Record<string, ActionMapping>>): ObjectJsonSchema {
@@ -354,6 +411,8 @@ function mergePropertySchema(left: JsonSchema, right: JsonSchema): JsonSchema {
   if (JSON.stringify(left) === JSON.stringify(right)) return left;
   if (isBoundedSchemaSubset(left, right)) return right;
   if (isBoundedSchemaSubset(right, left)) return left;
+  const boundedUnion = mergeBoundedSchemaUnion(left, right);
+  if (boundedUnion) return boundedUnion;
   const variants: JsonSchema[] = [];
   for (const candidate of [left, right]) {
     if (Array.isArray(candidate.anyOf) && Object.keys(candidate).length === 1) variants.push(...candidate.anyOf);
@@ -368,6 +427,28 @@ function mergePropertySchema(left: JsonSchema, right: JsonSchema): JsonSchema {
     unique.push(variant);
   }
   return { anyOf: unique };
+}
+
+function mergeBoundedSchemaUnion(left: JsonSchema | undefined, right: JsonSchema | undefined): JsonSchema | null {
+  if (!left || !right || left.type !== right.type) return null;
+  if (left.type === 'number' || left.type === 'integer') {
+    if (!hasOnlyKeys(left, ['type', 'minimum', 'maximum']) || !hasOnlyKeys(right, ['type', 'minimum', 'maximum'])) return null;
+    if (![left.minimum, left.maximum, right.minimum, right.maximum].every(Number.isFinite)) return null;
+    return { type: left.type, minimum: Math.min(Number(left.minimum), Number(right.minimum)), maximum: Math.max(Number(left.maximum), Number(right.maximum)) };
+  }
+  if (left.type === 'string') {
+    if (!hasOnlyKeys(left, ['type', 'minLength', 'maxLength']) || !hasOnlyKeys(right, ['type', 'minLength', 'maxLength'])) return null;
+    if (![left.minLength, left.maxLength, right.minLength, right.maxLength].every(Number.isFinite)) return null;
+    return { type: 'string', minLength: Math.min(Number(left.minLength), Number(right.minLength)), maxLength: Math.max(Number(left.maxLength), Number(right.maxLength)) };
+  }
+  if (left.type === 'array') {
+    if (!hasOnlyKeys(left, ['type', 'items', 'minItems', 'maxItems']) || !hasOnlyKeys(right, ['type', 'items', 'minItems', 'maxItems'])) return null;
+    if (![left.minItems, left.maxItems, right.minItems, right.maxItems].every(Number.isFinite)) return null;
+    const items = mergePropertySchema(left.items || {}, right.items || {});
+    if (Array.isArray(items.anyOf)) return null;
+    return { type: 'array', items, minItems: Math.min(Number(left.minItems), Number(right.minItems)), maxItems: Math.max(Number(left.maxItems), Number(right.maxItems)) };
+  }
+  return null;
 }
 
 function isBoundedSchemaSubset(candidate: JsonSchema | undefined, superset: JsonSchema | undefined): boolean {

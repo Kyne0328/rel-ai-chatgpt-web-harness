@@ -17,6 +17,7 @@ const INTEGRITY_SQLITE_TIMEOUT_MS = 250;
 const LEGACY_INTEGRITY_MIGRATION_KEY = 'task_integrity_legacy_migrated_v1';
 const AMBIENT_OWNER = '@ambient';
 const migratedIntegrityDatabases = new Set<string>();
+const pendingBaselineCaptures = new Map<string, Promise<IntegrityAuthority | null>>();
 const CODE_MUTATING_TOOLS = new Set<string>([
   OP.EDIT,
   OP.CHANGES_TIDY_RUN,
@@ -162,11 +163,36 @@ async function recordTaskIntegrityEvent(config: IntegrityConfig, event: Integrit
 
 // Capture the ownership baseline before the first operation can change files,
 // inside its workspace queue. Creating an identity must not wait on Git.
-async function ensureTaskBaseline(config: IntegrityConfig, taskId: string, workspaceAlias: string): Promise<IntegrityAuthority | null> {
+async function ensureTaskBaseline(
+  config: IntegrityConfig,
+  taskId: string,
+  workspaceAlias: string,
+  options: { signal?: AbortSignal } = {}
+): Promise<IntegrityAuthority | null> {
+  options.signal?.throwIfAborted?.();
   const initial = readTaskIntegrity(config, taskId, workspaceAlias);
   if (!initial?.baseline.pending) return initial;
+  const key = `${stateDatabasePath(config)}\0${workspaceAlias}\0${taskId}`;
+  const existing = pendingBaselineCaptures.get(key);
+  if (existing) return existing;
+  const capture = captureTaskBaseline(config, taskId, workspaceAlias, options);
+  pendingBaselineCaptures.set(key, capture);
+  try {
+    return await capture;
+  } finally {
+    if (pendingBaselineCaptures.get(key) === capture) pendingBaselineCaptures.delete(key);
+  }
+}
+
+async function captureTaskBaseline(
+  config: IntegrityConfig,
+  taskId: string,
+  workspaceAlias: string,
+  options: { signal?: AbortSignal } = {}
+): Promise<IntegrityAuthority | null> {
+  options.signal?.throwIfAborted?.();
   const workspace = resolveWorkspace(config, workspaceAlias);
-  const repository = await repositoryStateForEvent(workspace, config, { tool: OP.WORK_BEGIN });
+  const repository = await repositoryStateForEvent(workspace, config, { tool: OP.WORK_BEGIN }, options);
   return withIntegrityTransaction(config, db => {
     const authority = readTaskRow(db, taskId);
     if (!authority?.baseline.pending || !repository.baseline) return authority;
@@ -296,7 +322,9 @@ function applyIntegrityEvent(
     authority.finalCompletionGeneration = authority.mutationGeneration;
     authority.completedAt = timestamp;
   }
-  if (tool === OP.WORK_CANCEL && event.ok !== false) authority.cancelledAt = timestamp;
+  if (tool === OP.WORK_CANCEL && event.ok !== false && clean(event.taskCancellationStatus).toLowerCase() !== 'cancelling') {
+    authority.cancelledAt = timestamp;
+  }
   if (tool === OP.PUBLISH_COMMIT && event.ok !== false) {
     for (const file of exactCommittedFiles(event)) removeWorkspaceOwner(workspaceState, file, authority.taskId);
   }
@@ -433,7 +461,12 @@ function createWorkspaceState(workspace: unknown): WorkspaceIntegrityState {
   };
 }
 
-async function repositoryStateForEvent(workspace: Record<string, any>, config: IntegrityConfig, event: IntegrityEvent): Promise<RepositoryEventState> {
+async function repositoryStateForEvent(
+  workspace: Record<string, any>,
+  config: IntegrityConfig,
+  event: IntegrityEvent,
+  options: { signal?: AbortSignal } = {}
+): Promise<RepositoryEventState> {
   const tool = clean(event?.tool);
   if (tool === OP.WORK_BEGIN && event.deferBaseline === true) {
     return { baseline: { pending: true, branch: '', head: '', unborn: false, changedFiles: [] }, changedFiles: null };
@@ -442,11 +475,14 @@ async function repositoryStateForEvent(workspace: Record<string, any>, config: I
     || REPOSITORY_RECONCILE_TOOLS.has(tool)
     || Boolean(clean(event?.validationStatus));
   if (!needsChangedFiles) return { baseline: null, changedFiles: null };
+  options.signal?.throwIfAborted?.();
   const statusResult = await runProcess('git', gitStatusArgs(), {
     cwd: workspace.path,
     timeout: 30_000,
-    maxOutputBytes: 8 * 1024 * 1024
+    maxOutputBytes: 8 * 1024 * 1024,
+    ...(options.signal ? { signal: options.signal } : {})
   }, config);
+  options.signal?.throwIfAborted?.();
   const parsed = statusResult.exitCode === 0 && !statusResult.stdoutTruncated
     ? parseGitStatus(statusResult.stdout || '')
     : { branch: null, unborn: false, entries: [] };
@@ -456,8 +492,10 @@ async function repositoryStateForEvent(workspace: Record<string, any>, config: I
   const headResult = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: workspace.path,
     timeout: 30_000,
-    maxOutputBytes: 1024 * 1024
+    maxOutputBytes: 1024 * 1024,
+    ...(options.signal ? { signal: options.signal } : {})
   }, config);
+  options.signal?.throwIfAborted?.();
   const head = headResult.exitCode === 0 && !headResult.stdoutTruncated ? String(headResult.stdout || '').trim() : '';
   return {
     changedFiles,

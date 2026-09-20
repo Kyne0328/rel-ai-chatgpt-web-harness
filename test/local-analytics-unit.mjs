@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { LOCAL_ANALYTICS_RETENTION_DAYS, clearLocalAnalytics, flushLocalAnalytics, pruneLocalAnalytics, recordLocalTaskCompletion, recordLocalToolOutcome, recordLocalTransportEvent, readLocalUsageSnapshot, readLocalUsageSnapshotAsync } from '../src/localAnalytics.js';
 import { failureCategoryFromCode } from '../src/analyticsFailureCategory.js';
 import { stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
@@ -121,6 +122,27 @@ try {
   } finally {
     await new Promise(resolve => setImmediate(resolve));
     fs.rmSync(matureStateDir, { recursive: true, force: true });
+  }
+
+  const contentionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-analytics-contention-'));
+  try {
+    const contentionConfig = { stateDir: contentionRoot };
+    withStateDatabase(contentionConfig, db => db.prepare('INSERT OR REPLACE INTO state_meta(key,value) VALUES(?,?)').run('contention-ready', '1'), { transaction: true });
+    const lock = new DatabaseSync(stateDatabasePath(contentionConfig));
+    try {
+      lock.exec('BEGIN IMMEDIATE');
+      const startedAt = Date.now();
+      assert.equal(recordLocalToolOutcome(contentionConfig, { tool: 'relai_read', workspace: 'repo', ok: true, durationMs: 1 }), false);
+      assert.equal(recordLocalTransportEvent(contentionConfig, { event: 'request_started' }), false);
+      assert.equal(recordLocalTaskCompletion(contentionConfig, { workspace: 'repo', taskIntent: 'bugfix' }), false);
+      assert.ok(Date.now() - startedAt < 1000, 'analytics contention must fail fast instead of blocking the service thread');
+      lock.exec('ROLLBACK');
+    } finally {
+      if (lock.isTransaction) lock.exec('ROLLBACK');
+      lock.close();
+    }
+  } finally {
+    fs.rmSync(contentionRoot, { recursive: true, force: true });
   }
 
   const flushRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-analytics-flush-'));

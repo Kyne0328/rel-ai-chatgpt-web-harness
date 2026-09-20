@@ -23,6 +23,7 @@ import { normalizeBrowserProfileMode, preparePersistentBrowserProfile, type Brow
 import type { StructuredInteractionArgs } from './playwrightPrimitives.ts';
 
 const MAX_ACTIVE_BROWSER_SESSIONS = 8;
+const MAX_ACTIVE_BROWSER_TABS_PER_SESSION = 8;
 const BROWSER_SESSION_ID = /^browser_[A-Za-z0-9_-]{20,160}$/;
 const BROWSER_TAB_ID = /^tab_[A-Za-z0-9_-]{20,160}$/;
 
@@ -181,7 +182,13 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       sessions.set(sessionId, record);
       if (profileKey) activeProfiles.set(profileKey, sessionId);
       driver.onDisconnected(() => removeSession(record!));
-      driver.onPageCreated?.((page, active) => registerTab(record!, page, active));
+      driver.onPageCreated?.((page, active) => {
+        if (record!.tabs.size >= MAX_ACTIVE_BROWSER_TABS_PER_SESSION) {
+          void page.close().catch(() => {});
+          return;
+        }
+        registerTab(record!, page, active);
+      });
 
       const tab = await createTab(record, options.signal);
       const initial = args.url
@@ -353,6 +360,9 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
 
   async function createTab(record: BrowserSessionRecord, signal?: AbortSignal): Promise<BrowserTabRecord> {
     throwIfAborted(signal, browserCancellationError);
+    if (record.tabs.size >= MAX_ACTIVE_BROWSER_TABS_PER_SESSION) {
+      throw taskError('BROWSER_TAB_LIMIT', `Rel.AI supports at most ${MAX_ACTIVE_BROWSER_TABS_PER_SESSION} tabs in one local browser session.`);
+    }
     const page = await withAbortResource(record.driver.createPage(signal), signal, page => page.close(), browserCancellationError);
     return registerTab(record, page, true);
   }

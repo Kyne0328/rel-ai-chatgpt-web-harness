@@ -1,6 +1,7 @@
 
 import * as crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { combineAbortSignals } from './abortSignals.ts';
 import {
   buildToolActivityDetails,
   completeProgress,
@@ -66,7 +67,11 @@ function createToolActivityTracker(options = {}) {
 
     const connectorCall = details.connector !== false;
     const operationId = crypto.randomUUID();
+    const operationAbortController = new AbortController();
     const internalOperation = String(details.internalOperation || details.tool || '');
+    if (task.cancellationRequestedAt && !isCancellationControlOperation(internalOperation, details.input)) {
+      throw taskError('INVALID_TASK_STATE', `Task ${task.id} is cancelling and cannot start new work.`);
+    }
     const initialActivity = buildToolActivityDetails(
       internalOperation,
       details.input || {},
@@ -82,6 +87,7 @@ function createToolActivityTracker(options = {}) {
       detail: String(details.detail || initialActivity.summary || ''),
       workspace: String(details.workspace || task.workspace || ''),
       startedAt,
+      stopRequestedAt: null,
       activity: createActivityEvent({
         eventId: operationId,
         operationId,
@@ -92,6 +98,7 @@ function createToolActivityTracker(options = {}) {
         tool: { name: String(details.tool || ''), operation: String(details.operation || initialActivity.title || '') }
       })
     };
+    Object.defineProperty(operation, 'abortController', { value: operationAbortController, enumerable: false });
 
     if (task.titleSource === 'fallback' && operation.internalOperation !== OP.WORK_BEGIN) {
       task.title = deriveTaskTitle({
@@ -111,7 +118,7 @@ function createToolActivityTracker(options = {}) {
     task.calls += 1;
     task.lastActivityAt = startedAt;
     task.updatedAt = startedAt;
-    const controlCall = operation.internalOperation === OP.WORK_CANCEL;
+    const controlCall = operation.internalOperation === OP.WORK_CANCEL || operation.internalOperation === OP.WORK_STOP;
     if (!controlCall) {
       transitionTaskStatus(task, initialActivity.category === 'validation' ? 'validating' : 'running');
       task.currentStage = initialActivity.currentStage || operation.label;
@@ -134,12 +141,10 @@ function createToolActivityTracker(options = {}) {
     });
 
     let finish;
-    const requestCompletion = (completion = {}) => {
+    const assertCompletionAvailable = () => {
       if (finished) throw taskError('INVALID_TASK_STATE', 'Cannot complete a task after the tool call has finished.');
+      if (task.cancellationRequestedAt) throw taskError('INVALID_TASK_STATE', 'Cannot complete a task after cancellation has been requested.');
       if (isTerminalTaskStatus(task.status)) throw taskError('INVALID_TASK_STATE', 'Cannot complete a terminal task.');
-      if (task.completionRequest) {
-        return { taskId: task.id, scopeId: task.scopeId, duplicate: true };
-      }
       const conflicting = [...task.currentOperations.values()].filter(item =>
         item.id !== operationId
         && item.internalOperation !== OP.WORK_FINISH
@@ -152,6 +157,12 @@ function createToolActivityTracker(options = {}) {
           { retryable: true }
         );
       }
+    };
+    const requestCompletion = (completion = {}) => {
+      if (task.completionRequest) {
+        return { taskId: task.id, scopeId: task.scopeId, duplicate: true };
+      }
+      assertCompletionAvailable();
       task.completionRequest = {
         summary: sanitizeCompletionSummary(completion.summary, 2000),
         validationStatus: String(completion.validationStatus || 'passed'),
@@ -172,7 +183,7 @@ function createToolActivityTracker(options = {}) {
     const update = (patch = {}) => {
       if (finished) return;
       const current = task.currentOperations.get(operationId);
-      if (!current || isTerminalTaskStatus(task.status)) return;
+      if (!current || isTerminalTaskStatus(task.status) || task.cancellationRequestedAt) return;
       if (patch.operation != null) current.label = sanitizeDisplayText(patch.operation, 200);
       if (patch.detail != null) current.detail = sanitizeDisplayText(patch.detail, 500);
       if (patch.summary != null) current.detail = sanitizeDisplayText(patch.summary, 500);
@@ -263,7 +274,9 @@ function createToolActivityTracker(options = {}) {
       }
       if (!terminalBeforeFinish && task.activeCalls === 0 && !task.completionRequest) {
         const rejectedTaskStart = current.internalOperation === OP.WORK_BEGIN && result.ok === false && !blockedResult;
-        if (rejectedTaskStart) {
+        if (task.cancellationRequestedAt) {
+          if (task.cancellationExternalPending !== true) finalizeTaskCancellation(task, finishedAt);
+        } else if (rejectedTaskStart) {
           transitionTaskStatus(task, 'failed');
           task.endReason = 'task_start_rejected';
           task.terminalReason = task.errorSummary || 'The work session could not be started.';
@@ -319,7 +332,8 @@ function createToolActivityTracker(options = {}) {
     finish.operation = operation.label;
     finish.update = update;
     finish.requestCompletion = requestCompletion;
-    finish.signal = task.abortController.signal;
+    finish.assertCompletionAvailable = assertCompletionAvailable;
+    finish.signal = combineAbortSignals(task.abortController.signal, operationAbortController.signal);
     return finish;
   }
 
@@ -498,7 +512,10 @@ function createToolActivityTracker(options = {}) {
       terminalReason: '',
       endedAt: null,
       cancelledAt: null,
+      cancellationRequestedAt: null,
+      cancellationReason: '',
       cancellationInitiator: '',
+      cancellationExternalPending: false,
       createdAt: Number.isFinite(Date.parse(String(resumed?.createdAt || ''))) ? Date.parse(String(resumed.createdAt)) : timestamp,
       startedAt: Number.isFinite(resumedStartedAt) ? resumedStartedAt : timestamp,
       updatedAt: timestamp,
@@ -531,28 +548,63 @@ function createToolActivityTracker(options = {}) {
     if (isTerminalTaskStatus(task.status)) throw taskError('INVALID_TASK_STATE', `Task ${id} is already ${task.status}.`);
 
     cancelCompletion(task);
-    const endedAt = now();
+    const requestedAt = now();
     const reason = sanitizeDisplayText(details.reason || 'Task cancelled by request.', 500) || 'Task cancelled by request.';
+    const duplicate = Boolean(task.cancellationRequestedAt);
+    if (!duplicate) {
+      task.cancellationRequestedAt = requestedAt;
+      task.cancellationReason = reason;
+      task.cancellationInitiator = sanitizeDisplayText(details.initiator || 'client', 80) || 'client';
+      task.cancellationExternalPending = details.externalPending === true;
+      task.currentStage = 'Cancelling';
+      task.currentActivity = reason;
+      task.lastOutcome = 'cancelling';
+      task.lastActivityAt = requestedAt;
+      task.updatedAt = requestedAt;
+      task.completionRequest = null;
+      for (const operation of task.currentOperations.values()) {
+        if (operation.internalOperation === OP.WORK_CANCEL) continue;
+        operation.stopRequestedAt = requestedAt;
+        operation.activity.status = 'stopping';
+        operation.activity.summary = sanitizeDisplayText(`${operation.activity.summary || operation.label || 'Operation'} Cancellation requested: ${reason}`, 500);
+      }
+      if (!task.abortController.signal.aborted) task.abortController.abort(new Error(reason));
+      notify('cancellation_requested', task, {
+        task: taskSnapshot(task),
+        terminalReason: reason,
+        initiator: task.cancellationInitiator
+      });
+    }
+    const ownedOperationStillRunning = [...task.currentOperations.values()]
+      .some(operation => operation.internalOperation !== OP.WORK_CANCEL);
+    if (!ownedOperationStillRunning && task.cancellationExternalPending !== true) finalizeTaskCancellation(task, requestedAt);
+    return cancellationResult(task.status === 'cancelled' ? buildTerminalTaskSnapshot(task) : taskSnapshot(task), duplicate);
+  }
+
+  function releaseTaskCancellationHold(taskId) {
+    const id = normalizeTaskId(taskId);
+    const task = tasksById.get(id);
+    if (!task || !task.cancellationRequestedAt) return false;
+    task.cancellationExternalPending = false;
+    const ownedOperationStillRunning = [...task.currentOperations.values()]
+      .some(operation => operation.internalOperation !== OP.WORK_CANCEL);
+    if (!ownedOperationStillRunning) finalizeTaskCancellation(task, now());
+    return true;
+  }
+
+  function finalizeTaskCancellation(task, endedAt = now()) {
+    if (task.status === 'cancelled') return buildTerminalTaskSnapshot(task);
     transitionTaskStatus(task, 'cancelled');
+    const reason = task.cancellationReason || 'Task cancelled by request.';
     task.endReason = 'explicit_cancellation';
     task.terminalReason = reason;
     task.endedAt = endedAt;
     task.cancelledAt = endedAt;
-    task.cancellationInitiator = sanitizeDisplayText(details.initiator || 'client', 80) || 'client';
     task.currentStage = 'Cancelled';
     task.currentActivity = reason;
     task.lastOutcome = 'cancelled';
     task.lastActivityAt = endedAt;
     task.updatedAt = endedAt;
-    task.completionRequest = null;
-    for (const operation of task.currentOperations.values()) {
-      if (operation.internalOperation === OP.WORK_CANCEL) continue;
-      operation.activity.status = 'cancelled';
-      operation.activity.summary = sanitizeDisplayText(`${operation.activity.summary || operation.label || 'Operation'} Cancelled: ${reason}`, 500);
-      operation.activity.completedAt = new Date(endedAt).toISOString();
-      operation.activity.durationMs = Math.max(0, endedAt - operation.startedAt);
-    }
-    if (!task.abortController.signal.aborted) task.abortController.abort(new Error(reason));
     lastTask = buildTerminalTaskSnapshot(task);
     notify('cancelled', task, {
       task: lastTask,
@@ -561,19 +613,68 @@ function createToolActivityTracker(options = {}) {
       initiator: task.cancellationInitiator
     });
     if (task.activeCalls === 0) removeTask(task);
-    return cancellationResult(lastTask, false);
+    return lastTask;
+  }
+
+  function stopTaskOperations(taskId, details = {}) {
+    const id = normalizeTaskId(taskId);
+    const task = tasksById.get(id);
+    if (!task) throw taskError('TASK_NOT_FOUND', 'The supplied work_id is not an active task.');
+    if (isTerminalTaskStatus(task.status)) throw taskError('INVALID_TASK_STATE', `Task ${id} is already ${task.status}.`);
+
+    const requestedOperationId = sanitizeDisplayText(details.operationId, 200);
+    const excludeOperationId = sanitizeDisplayText(details.excludeOperationId, 200);
+    const reason = sanitizeDisplayText(details.reason || 'Running operation stopped by request.', 500) || 'Running operation stopped by request.';
+    const stoppedAt = now();
+    const candidates = [...task.currentOperations.values()].filter(operation => {
+      if (operation.id === excludeOperationId) return false;
+      if (operation.internalOperation === OP.WORK_STOP || operation.internalOperation === OP.WORK_CANCEL) return false;
+      return !requestedOperationId || operation.id === requestedOperationId;
+    });
+    const stoppedOperationIds = [];
+    for (const operation of candidates) {
+      const controller = operation.abortController;
+      if (!controller || controller.signal.aborted) continue;
+      operation.stopRequestedAt = stoppedAt;
+      operation.activity.status = 'stopping';
+      operation.activity.summary = sanitizeDisplayText(`${operation.activity.summary || operation.label || 'Operation'} Stop requested: ${reason}`, 500);
+      controller.abort(new Error(reason));
+      stoppedOperationIds.push(operation.id);
+    }
+    task.lastActivityAt = stoppedAt;
+    task.updatedAt = stoppedAt;
+    if (stoppedOperationIds.length) {
+      task.currentStage = 'Stopping operation';
+      task.currentActivity = requestedOperationId
+        ? 'Stopping the selected running operation.'
+        : `Stopping ${stoppedOperationIds.length} running operation${stoppedOperationIds.length === 1 ? '' : 's'}.`;
+      notify('progress', task, {
+        operation: 'Stop running operations',
+        operationId: excludeOperationId,
+        stoppedOperationIds: [...stoppedOperationIds]
+      });
+    }
+    return {
+      taskId: task.id,
+      status: task.status,
+      duplicate: stoppedOperationIds.length === 0,
+      requestedOperationId: requestedOperationId || undefined,
+      stoppedOperationIds,
+      stoppedOperationCount: stoppedOperationIds.length
+    };
   }
 
   function cancellationResult(task, duplicate) {
+    const terminal = task.status === 'cancelled';
     return {
       taskId: task.taskId || task.id,
-      status: 'cancelled',
+      status: terminal ? 'cancelled' : 'cancelling',
       duplicate,
-      endReason: task.endReason || 'explicit_cancellation',
-      terminalReason: task.terminalReason || task.currentActivity || 'Task cancelled.',
-      endedAt: task.endedAt || null,
-      cancelledAt: task.cancelledAt || task.endedAt || null,
-      progress: normalizeTaskProgress(task.progress, 'cancelled')
+      endReason: terminal ? (task.endReason || 'explicit_cancellation') : 'cancellation_requested',
+      terminalReason: task.terminalReason || task.cancellationReason || task.currentActivity || 'Task cancellation requested.',
+      endedAt: terminal ? (task.endedAt || null) : null,
+      cancelledAt: terminal ? (task.cancelledAt || task.endedAt || null) : null,
+      progress: normalizeTaskProgress(task.progress, terminal ? 'cancelled' : task.status)
     };
   }
 
@@ -884,6 +985,8 @@ function createToolActivityTracker(options = {}) {
   return {
     beginConnectorToolCall,
     cancelTask,
+    releaseTaskCancellationHold,
+    stopTaskOperations,
     onToolActivity,
     getToolActivity,
     reset,
@@ -958,6 +1061,21 @@ function requestCurrentTaskCancellation(details = {}) {
   return defaultTracker.cancelTask(activity.taskId, details);
 }
 
+function releaseTaskCancellationHold(taskId) {
+  return defaultTracker.releaseTaskCancellationHold(taskId);
+}
+
+function requestCurrentTaskOperationStop(details = {}) {
+  const activity = activityContext.getStore();
+  if (!activity?.taskId) {
+    throw taskError('CONNECTION_CONTEXT_UNAVAILABLE', 'Stopping task operations is only available inside an active task-scoped Rel.AI tool call.');
+  }
+  return defaultTracker.stopTaskOperations(activity.taskId, {
+    ...details,
+    excludeOperationId: activity.operationId
+  });
+}
+
 function getCurrentTaskAbortSignal() {
   return activityContext.getStore()?.signal;
 }
@@ -1011,6 +1129,14 @@ function normalizeTaskId(value) {
   return id;
 }
 
+function isCancellationControlOperation(operation, input = {}) {
+  if (new Set([OP.WORK_CANCEL, OP.WORK_STOP, OP.WORK_STATUS, OP.PROCESS_STOP, OP.PROCESS_READ, OP.PROCESS_LIST]).has(operation)) return true;
+  if (new Set([OP.UI, OP.BROWSER, OP.COMPUTER]).has(operation)) {
+    return new Set(['stop', 'status', 'tabs']).has(String(input?.action || '').trim().toLowerCase());
+  }
+  return false;
+}
+
 function defaultOperation(tool) {
   const value = String(tool || '').replace(/^relai_/, '').replaceAll('_', ' ');
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : 'Using Rel.AI';
@@ -1038,6 +1164,8 @@ export {
   resetToolActivity,  runWithToolActivity,
   updateCurrentToolActivity,
   requestCurrentTaskCancellation,
+  releaseTaskCancellationHold,
+  requestCurrentTaskOperationStop,
   requestCurrentTaskCompletion,
   getCurrentTaskAbortSignal,
   getCurrentToolActivityContext,

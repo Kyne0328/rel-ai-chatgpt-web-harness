@@ -234,12 +234,18 @@ manager.update({ serverRunning: true, tunnelStatus: 'running' });
 const idleWindow = manager.getWindow();
 assert.ok(idleWindow, 'Connected idle state must keep a persistent Pulse overlay');
 assert.equal(idleWindow.visible, true);
+assert.equal(idleWindow.showInactiveCount, 1, 'Pulse must appear without taking focus');
+assert.equal(idleWindow.showCount || 0, 0, 'showInactive must not fall through to a focusable show call');
+assert.equal(manager.setSuppressed(true), true, 'focused-dashboard suppression must be explicit and transient');
+assert.equal(idleWindow.visible, false, 'Pulse must not cover the focused Rel.AI dashboard chrome');
 manager.update({
   serverRunning: true, tunnelStatus: 'running',
   taskActivity: { state: 'working', activeCalls: 1, activeTaskCount: 0, tool: 'relai_read', tasks: [] }
 });
 assert.equal(manager.getWindow(), idleWindow, 'unlinked activity must reuse the persistent Pulse window');
-assert.equal(idleWindow.visible, true, 'unlinked activity must not hide an already-visible idle Pulse');
+assert.equal(idleWindow.visible, false, 'status updates must not re-show Pulse while dashboard suppression is active');
+assert.equal(manager.setSuppressed(false), false, 'dashboard blur must release only the transient suppression');
+assert.equal(idleWindow.visible, true, 'Pulse must resume when the Rel.AI dashboard loses focus');
 manager.update({
   serverRunning: true, tunnelStatus: 'running',
   taskActivity: { state: 'idle', activeCalls: 0, activeTaskCount: 0, tasks: [] }
@@ -266,8 +272,6 @@ assert.equal(window.options.webPreferences.nodeIntegration, false);
 assert.equal(window.options.webPreferences.contextIsolation, true);
 assert.equal(window.options.webPreferences.sandbox, true);
 assert.deepEqual(window.options.webPreferences.additionalArguments, ['--relai-preload-surface=pulse']);
-assert.equal(window.showInactiveCount, 1, 'Pulse must appear without taking focus');
-assert.equal(window.showCount || 0, 0, 'showInactive must not fall through to a focusable show call');
 assert.equal(window.permissionCheck(), false);
 assert.deepEqual(window.openHandler({ url: 'https://example.com' }), { action: 'deny' });
 manager.setThemePreference('dark');
@@ -328,6 +332,24 @@ manager.update({
   taskActivity: { state: 'working', activeCalls: 1, activeTaskCount: 0, tool: 'relai_exec', tasks: [] }
 });
 assert.equal(window.visible, true, 'unlinked activity must update the persistent Pulse in place');
+manager.update({
+  serverRunning: true, tunnelStatus: 'running',
+  taskActivity: { state: 'idle', activeCalls: 0, activeTaskCount: 0, tasks: [] }
+});
+let closePrevented = false;
+window.events.get('close')?.({ preventDefault: () => { closePrevented = true; } });
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(closePrevented, true, 'native close must be intercepted while Rel.AI is still running');
+assert.equal(window.visible, true, 'accidentally closing Pulse must restore the persistent overlay');
+const crashedWindow = manager.getWindow();
+const windowCountBeforeCrash = windows.length;
+crashedWindow.webContentsEvents.get('render-process-gone')?.({}, { reason: 'crashed' });
+await new Promise(resolve => setImmediate(resolve));
+const recoveredWindow = manager.getWindow();
+assert.ok(recoveredWindow, 'renderer crashes must recreate the Pulse window');
+assert.notEqual(recoveredWindow, crashedWindow, 'renderer crash recovery must replace the dead window');
+assert.equal(windows.length, windowCountBeforeCrash + 1, 'renderer crash recovery must create exactly one replacement window');
+assert.equal(recoveredWindow.visible, true, 'renderer crash recovery must restore the Pulse without waiting for another status change');
 assert.equal(manager.stop(), true);
 assert.equal(manager.stop(), false, 'Pulse shutdown must be idempotent');
 assert.equal(manager.getWindow(), null);

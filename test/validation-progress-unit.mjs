@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { flushAuditWrites } from '../src/audit.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
+import { flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-progress-'));
 const workspace = path.join(temp, 'workspace');
 const stateDir = path.join(temp, 'state');
@@ -65,7 +66,7 @@ try {
   const successTask = await startTask('Two successful checks');
   events.length = 0;
   const success = await callTool('relai_validate', { action: 'checks',
-    workspace: 'app', work_id: successTask.work_id, checks: [pass, 'node -e "console.log(\'second\')"']
+    workspace: 'app', work_id: successTask.work_id, checks: [pass, 'node -e "console.log(\'second\')"'], complete: false
   }, context);
   assert.equal(success.ok, true);
   assert.deepEqual(sequence(successTask.work_id), ['0/2', '1/2', '2/2']);
@@ -112,7 +113,7 @@ try {
   const duplicateTask = await startTask('Duplicate checks');
   events.length = 0;
   const deduplicated = await callTool('relai_validate', { action: 'checks',
-    workspace: 'app', work_id: duplicateTask.work_id, checks: [pass, pass]
+    workspace: 'app', work_id: duplicateTask.work_id, checks: [pass, pass], complete: false
   }, context);
   assert.equal(deduplicated.totalUnits, 1);
   assert.equal(deduplicated.skippedChecks.length, 1);
@@ -123,7 +124,7 @@ try {
   const planTask = await startTask('Dynamic validation plan');
   events.length = 0;
   const planned = await callTool('relai_validate', { action: 'checks',
-    workspace: 'app', work_id: planTask.work_id, level: 'standard'
+    workspace: 'app', work_id: planTask.work_id, level: 'standard', complete: false
   }, context);
   assert.ok(planned.totalUnits > 0);
   assert.equal(sequence(planTask.work_id).at(0), `0/${planned.totalUnits}`);
@@ -147,14 +148,34 @@ try {
   }, context);
   await waitFor(() => events.some(event => event.phase === 'progress' && event.taskId === cancelledTask.work_id && event.task?.progress?.totalUnits === 1));
   const cancellation = await cancel(cancelledTask.work_id, 'Cancel active validation');
+  assert.equal(cancellation.status, 'cancelling', 'active validation must settle before task cancellation becomes terminal');
+  assert.equal(cancellation.endedAt, undefined, 'nonterminal cancellation must not publish a terminal timestamp');
   const cancelledValidation = await runningCancellation;
-  assert.equal(cancellation.status, 'cancelled');
   assert.equal(cancelledValidation.validationStatus, 'cancelled');
   assert.equal(cancelledValidation.completedUnits, 0);
   assert.equal(cancelledValidation.totalUnits, 1);
+  const terminalCancellation = await cancel(cancelledTask.work_id, 'Confirm cancelled validation');
+  assert.equal(terminalCancellation.status, 'cancelled');
+  assert.ok(terminalCancellation.endedAt);
   const cancelledHistory = readTaskHistorySession(config, cancelledTask.work_id);
   assert.equal(cancelledHistory.status, 'cancelled');
   assert.notEqual(cancelledHistory.progress.percentage, 100);
+
+  const parallelReadTask = await startTask('Validation does not block same-task reads');
+  events.length = 0;
+  let parallelValidationSettled = false;
+  const parallelValidation = callTool('relai_validate', { action: 'checks',
+    workspace: 'app', work_id: parallelReadTask.work_id,
+    checks: ['node -e "setTimeout(() => process.exit(0), 1000)"'], complete: false
+  }, context).finally(() => { parallelValidationSettled = true; });
+  await waitFor(() => events.some(event => event.phase === 'progress' && event.taskId === parallelReadTask.work_id));
+  const parallelRead = await callTool('relai_read', {
+    workspace: 'app', work_id: parallelReadTask.work_id, paths: ['package.json'], guidanceMode: 'none'
+  }, context);
+  assert.equal(parallelRead.ok, true);
+  assert.equal(parallelValidationSettled, false, 'same-task observation must not wait behind a running validation');
+  assert.equal((await parallelValidation).validationStatus, 'passed');
+  await cancel(parallelReadTask.work_id);
 
   const atomicTask = await startTask('Atomic validation completion');
   events.length = 0;
@@ -170,7 +191,7 @@ try {
   events.length = 0;
   const reconnectValidation = await callTool('relai_validate', { action: 'checks',
     workspace: 'app', work_id: reconnectTask.work_id,
-    checks: [pass, pass]
+    checks: [pass, pass], complete: false
   }, context);
   assert.equal(reconnectValidation.validationStatus, 'passed');
   resetToolActivity();
@@ -188,6 +209,7 @@ try {
   console.log('Validation progress reports honest live, failure, timeout, cancellation, plan, persistence, and completion sequences.');
 } finally {
   await flushAuditWrites();
+  await flushTaskHistoryPersistence();
   await repositoryIntelligence.shutdown();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;

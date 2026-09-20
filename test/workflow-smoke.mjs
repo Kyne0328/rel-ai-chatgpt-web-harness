@@ -60,7 +60,7 @@ async function completedTaskCall(id, name, args) {
 
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const statusId = followupId++;
-    taskCall(statusId, 'relai_work', { action: 'status', workspace: 'smoke' });
+    taskCall(statusId, 'relai_work', { action: 'status', workspace: 'smoke', operationId: initial.operationId });
     const status = structuredContentOf(await client.waitFor(statusId));
     const operation = status.backgroundOperation;
     if (operation?.status && operation.status !== 'running') {
@@ -176,7 +176,7 @@ try {
   taskCall(18, 'relai_exec', { workspace: 'smoke', command: 'node create-artifact.js', timeoutMs: 5000 });
   const artifactExec = structuredContentOf(await client.waitFor(18));
   if (!artifactExec.changedFiles?.includes('session-artifact.txt')) throw new Error('Task-owned exec did not attribute its untracked artifact.');
-  taskCall(10, 'relai_work', { action: 'status', workspace: 'smoke' });
+  taskCall(10, 'relai_work', { action: 'status', workspace: 'smoke', detail: 'full' });
   const status = structuredContentOf(await client.waitFor(10));
   if (!status.workspace?.repository?.sessionChangedFiles?.includes('session-artifact.txt')) throw new Error('Session ownership missing task-owned untracked artifact.');
 
@@ -190,7 +190,8 @@ try {
   const checks = await completedTaskCall(13, 'relai_validate', {
     action: 'checks',
     workspace: 'smoke',
-    level: 'standard'
+    level: 'standard',
+    complete: false
   });
   if (!checks.ok || !checks.checks.includes('npm run check')) throw new Error('Validation failed.');
 

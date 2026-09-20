@@ -54,6 +54,11 @@ function createBrowserRoute() {
     }, [browser]);
 
     useEffect(() => {
+      if (!browser || typeof browser.setControl !== 'function') return undefined;
+      return () => { void releaseBrowserRouteControl(browser); };
+    }, [browser]);
+
+    useEffect(() => {
       if (!browser || !state.active) {
         if (browser) void Promise.resolve(browser.setBounds({ visible: false })).catch(() => {});
         return undefined;
@@ -445,8 +450,18 @@ function tabLabel(tab, index) {
   return `Tab ${index + 1}`;
 }
 
+async function releaseBrowserRouteControl(browser) {
+  if (typeof browser?.setControl !== 'function') return false;
+  try {
+    await browser.setControl('ai');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Embedded browser operation failed.');
 }
 
-export { clipBrowserSurfaceBounds, createBrowserRoute };
+export { clipBrowserSurfaceBounds, createBrowserRoute, releaseBrowserRouteControl };

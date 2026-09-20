@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { writeJsonAtomic } from '../durableState.ts';
+import { runProcess } from '../process.js';
 import { getStateDir } from '../statePaths.js';
 import { workspaceGitStatus } from '../repo/gitOps.js';
 import { relaiCodeInspect } from './codeIntelligence.js';
@@ -11,7 +12,7 @@ import { classifyWorkflowRisk } from '../workflow/risk.js';
 import { discoverRepositoryTopology, packageForPath } from '../workflow/topology.js';
 
 const PLAN_TTL_MS = 30 * 60 * 1000;
-const FINGERPRINT_VERSION = 2;
+const FINGERPRINT_VERSION = 3;
 const VALIDATION_CONFIG_PATHS = Object.freeze([
   'package.json',
   'package-lock.json',
@@ -36,7 +37,9 @@ const VALIDATION_CONFIG_PATHS = Object.freeze([
 ]);
 
 async function createValidationPlan(workspace, config, args = {}) {
-  const status = await workspaceGitStatus(workspace, config, { maxBytes: 256 * 1024 });
+  const signal = args.signal;
+  signal?.throwIfAborted?.();
+  const status = await workspaceGitStatus(workspace, config, { maxBytes: 256 * 1024, signal });
   const changedFiles = Array.isArray(args.changedFiles)
     ? normalizePaths(args.changedFiles)
     : normalizePaths(status.changedFiles || []);
@@ -47,9 +50,14 @@ async function createValidationPlan(workspace, config, args = {}) {
         workspace,
         config,
         { action: 'impact', paths: changedFiles, maxResults: 200, maxDepth: 3 },
-        { watch: false }
+        { watch: false, signal }
       );
-    } catch {}
+    } catch (error) {
+      if (signal?.aborted) {
+        if (signal.reason instanceof Error) throw signal.reason;
+        throw error;
+      }
+    }
   }
   const topology = discoverRepositoryTopology(workspace.path);
   const packageIds = [...new Set(changedFiles.map(file => packageForPath(topology, file)?.id).filter(Boolean))];
@@ -65,7 +73,7 @@ async function createValidationPlan(workspace, config, args = {}) {
   const impactedPaths = normalizePaths(impact.impactedPaths || []).slice(0, 200);
   const classification = classifyWorkflowRisk({ changedFiles, packageIds, affectedTests, impactedPaths });
   const requestedScope = normalizePaths([...changedFiles, ...affectedTests, ...impactedPaths]).slice(0, 1000);
-  const fingerprint = await createValidationFingerprint(workspace, config, { status, paths: requestedScope });
+  const fingerprint = await createValidationFingerprint(workspace, config, { status, paths: requestedScope, signal });
   const payload = {
     version: 2,
     workspace: workspace.alias,
@@ -88,18 +96,34 @@ async function createValidationPlan(workspace, config, args = {}) {
 }
 
 async function createValidationFingerprint(workspace, config, options = {}) {
+  const signal = options.signal;
+  signal?.throwIfAborted?.();
   const explicitPaths = Array.isArray(options.paths);
-  const status = options.status || (!explicitPaths
-    ? await workspaceGitStatus(workspace, config, { maxBytes: 256 * 1024 })
-    : null);
+  const status = options.status || await workspaceGitStatus(workspace, config, { maxBytes: 256 * 1024, signal });
+  const repositoryWide = options.repositoryWide === true;
   const changedFiles = explicitPaths
     ? normalizePaths(options.paths)
     : normalizePaths(status?.changedFiles || []);
+  const repositoryChangedFiles = normalizePaths(status?.changedFiles || []);
   const scopePaths = normalizePaths([
     ...changedFiles,
     ...validationConfigPaths(workspace.path, changedFiles)
   ]).slice(0, 1000);
-  const relevantFiles = scopePaths.map(file => fingerprintPath(workspace.path, file));
+  const fingerprintCache = new Map();
+  const fingerprint = async file => {
+    signal?.throwIfAborted?.();
+    if (!fingerprintCache.has(file)) {
+      fingerprintCache.set(file, await fingerprintPath(workspace.path, file, signal));
+    }
+    return fingerprintCache.get(file);
+  };
+  const relevantFiles = [];
+  for (const file of scopePaths) relevantFiles.push(await fingerprint(file));
+  const repositoryDirtyFiles = [];
+  if (repositoryWide) {
+    for (const file of repositoryChangedFiles) repositoryDirtyFiles.push(await fingerprint(file));
+  }
+  const repositoryHead = await readRepositoryHead(workspace, config, signal);
   const checks = {
     quick: detectVerifyChecks(workspace.path, 'quick'),
     standard: detectVerifyChecks(workspace.path, 'standard'),
@@ -110,6 +134,13 @@ async function createValidationFingerprint(workspace, config, options = {}) {
     workspace: workspace.alias,
     scopePaths,
     relevantFiles,
+    repository: {
+      head: repositoryHead,
+      branch: String(status?.branch || ''),
+      unborn: status?.unborn === true,
+      repositoryWide,
+      dirtyFiles: repositoryDirtyFiles
+    },
     checks
   };
   return {
@@ -118,6 +149,20 @@ async function createValidationFingerprint(workspace, config, options = {}) {
     changedFiles,
     scopePaths
   };
+}
+
+async function readRepositoryHead(workspace, config, signal) {
+  signal?.throwIfAborted?.();
+  const result = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], {
+    cwd: workspace.path,
+    timeout: 30_000,
+    maxOutputBytes: 1024 * 1024,
+    signal
+  }, config);
+  signal?.throwIfAborted?.();
+  return result.exitCode === 0 && !result.stdoutTruncated
+    ? String(result.stdout || '').trim()
+    : '';
 }
 
 function validationConfigPaths(root, scopePaths = []) {
@@ -141,27 +186,37 @@ function validationConfigPaths(root, scopePaths = []) {
   return normalizePaths(candidates);
 }
 
-function fingerprintPath(root, relativePath) {
+async function fingerprintPath(root, relativePath, signal) {
+  signal?.throwIfAborted?.();
   const normalized = normalizePath(relativePath);
   const absolute = path.resolve(root, normalized);
   const relative = path.relative(root, absolute);
   if (relative.startsWith('..') || path.isAbsolute(relative)) return { path: normalized, type: 'outside' };
   let stat;
   try {
-    stat = fs.lstatSync(absolute);
+    stat = await fs.promises.lstat(absolute);
   } catch (error) {
+    signal?.throwIfAborted?.();
     return { path: normalized, type: error?.code === 'ENOENT' ? 'missing' : 'unreadable', code: String(error?.code || '') };
   }
+  signal?.throwIfAborted?.();
   if (stat.isSymbolicLink()) {
-    return { path: normalized, type: 'symlink', target: fs.readlinkSync(absolute) };
+    return { path: normalized, type: 'symlink', target: await fs.promises.readlink(absolute) };
   }
   if (stat.isDirectory()) return { path: normalized, type: 'directory' };
   if (!stat.isFile()) return { path: normalized, type: 'other', size: stat.size };
+  const hash = crypto.createHash('sha256');
+  const stream = fs.createReadStream(absolute, signal ? { signal } : undefined);
+  for await (const chunk of stream) {
+    signal?.throwIfAborted?.();
+    hash.update(chunk);
+  }
+  signal?.throwIfAborted?.();
   return {
     path: normalized,
     type: 'file',
     size: stat.size,
-    sha256: crypto.createHash('sha256').update(fs.readFileSync(absolute)).digest('hex')
+    sha256: hash.digest('hex')
   };
 }
 
