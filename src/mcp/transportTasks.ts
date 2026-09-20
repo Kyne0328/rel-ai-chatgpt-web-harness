@@ -383,13 +383,13 @@ async function startNativeToolExecution(config: any, message: any, args: any, op
   const name = String(message.params?.name || '');
   // MCP taskId is the protocol identity. work_id stays in the tool arguments as
   // Rel.AI durable attribution and is never copied into the native task identity.
-  const operation = createNativeToolTask(config, {
+  const operation = await retryNativeTaskOperation(() => createNativeToolTask(config, {
     principal: options.principal,
     method: 'tools/call',
     name,
     workspace: String(args.workspace || ''),
     message: `${name} is running as a native MCP task.`
-  });
+  }));
   const taskId = operation.taskId;
   const signal = nativeToolTaskSignal(taskId);
   queueMicrotask(() => {

@@ -5,6 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  CLIENT_CAPABILITIES_META_KEY,
+  CLIENT_INFO_META_KEY,
+  PROTOCOL_VERSION_META_KEY
+} from '@modelcontextprotocol/server';
+
+import {
   MAX_RESULT_BYTES,
   NativeTaskRequestError,
   NativeTaskStoreError,
@@ -27,6 +33,12 @@ import {
   updateNativeTaskRecovery
 } from '../src/mcp/nativeTaskService.js';
 import { createNativeToolTask } from '../src/mcp/nativeToolTasks.js';
+import {
+  MCP_PROTOCOL_VERSION,
+  TASKS_EXTENSION_ID,
+  TASKS_EXTENSION_REVISION
+} from '../src/mcp/protocol.js';
+import { handleTransportTaskRequest } from '../src/mcp/transportTasks.js';
 import { openStateDatabase, stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-task-service-'));
@@ -143,6 +155,63 @@ try {
   assert.ok(Date.now() - contentionStartedAt < 1000, 'SQLite writer contention must return in under one second');
   contentionDb.exec('ROLLBACK');
   contentionDb.close();
+
+  const nativeTasksCapabilities = {
+    extensions: {
+      [TASKS_EXTENSION_ID]: { revision: TASKS_EXTENSION_REVISION }
+    }
+  };
+  let creationContentionDb = openStateDatabase(config, { timeoutMs: 0 });
+  creationContentionDb.exec('BEGIN IMMEDIATE');
+  const releaseCreationContention = setTimeout(() => {
+    const db = creationContentionDb;
+    creationContentionDb = null;
+    if (!db) return;
+    db.exec('ROLLBACK');
+    db.close();
+  }, 75);
+  const transportResponse = await handleTransportTaskRequest(config, {
+    jsonrpc: '2.0',
+    id: 1001,
+    method: 'tools/call',
+    params: {
+      name: 'relai_edit',
+      arguments: {
+        workspace: 'missing-for-creation-retry-test',
+        work_id: 'creation-retry-test',
+        path: 'acceptance.txt',
+        oldText: 'before',
+        newText: 'after'
+      },
+      _meta: {
+        [PROTOCOL_VERSION_META_KEY]: MCP_PROTOCOL_VERSION,
+        [CLIENT_INFO_META_KEY]: { name: 'native-task-creation-retry-test', version: '1.0.0' },
+        [CLIENT_CAPABILITIES_META_KEY]: nativeTasksCapabilities
+      }
+    }
+  }, {
+    principal: owner,
+    transportType: 'streamable-http'
+  });
+  clearTimeout(releaseCreationContention);
+  if (creationContentionDb) {
+    creationContentionDb.exec('ROLLBACK');
+    creationContentionDb.close();
+    creationContentionDb = null;
+  }
+  assert.equal(transportResponse?.body?.error, undefined,
+    'transient native-task store contention must not escape tools/call as a transport failure');
+  assert.equal(transportResponse?.body?.result?.resultType, 'task');
+  const retriedCreationTaskId = transportResponse?.body?.result?.taskId;
+  assert.match(retriedCreationTaskId || '', /^task_[A-Za-z0-9_-]{32,160}$/);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const current = getNativeTask(config, retriedCreationTaskId, { principal: owner });
+    if (['completed', 'failed', 'cancelled'].includes(current.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.notEqual(getNativeTask(config, retriedCreationTaskId, { principal: owner }).status, 'working',
+    'the test tool execution should settle before its temporary state is cleaned up');
+
   assert.equal(getNativeTask(config, owned.taskId, { principal: sameOwner }).status, 'working');
   const beforeNoopUpdate = getNativeTaskRecord(config, owned.taskId, { principal: owner });
   updateNativeTask(config, owned.taskId, { status: 'working' }, { principal: owner });
