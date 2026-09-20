@@ -33,6 +33,8 @@ assertSafeControllerOperation({ operation: 'package', targetPaths: safetyTargets
 assertSafeBuilderArgs(options.builderArgs);
 
 const generateColorTokens = path.join(root, 'scripts', 'generate-color-tokens.mjs');
+const generateUiContracts = path.join(root, 'scripts', 'generate-ui-contracts.mjs');
+const writeDashboardGeneratedManifest = path.join(root, 'scripts', 'write-dashboard-generated-manifest.mjs');
 const fetchTunnelClient = path.join(root, 'scripts', 'fetch-tunnel-client.mjs');
 const verifyTunnelClient = path.join(root, 'scripts', 'verify-tunnel-client.mjs');
 const verifyZoekt = path.join(root, 'scripts', 'verify-zoekt-seed.mjs');
@@ -43,8 +45,10 @@ const platformEnvironment = { ...process.env, REL_AI_TARGET_PLATFORM: platform, 
 if (mode === 'unpacked') {
   runNode('unpacked output cleanup', path.join(root, 'scripts', 'clean.mjs'), ['--electron']);
 }
-runNode('color-token verification', generateColorTokens, ['--check']);
+runNode('color-token generation', generateColorTokens);
+runNode('UI contract generation', generateUiContracts);
 runNode('dashboard Vite build', viteCli, ['build']);
+runNode('dashboard generated manifest', writeDashboardGeneratedManifest);
 ensureTunnelClient(platform, targetArch);
 runNode('OpenAI tunnel-client verification', verifyTunnelClient, [], { env: { ...platformEnvironment, TUNNEL_CLIENT_PLATFORMS: platform, REL_AI_TARGET_ARCH: targetArch } });
 ensureZoekt(platform, targetArch);

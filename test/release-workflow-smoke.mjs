@@ -209,6 +209,7 @@ function verifyPackageContracts() {
   const wrapper = fs.readFileSync(path.join(tmp, 'scripts', 'electron-package.mjs'), 'utf8');
   assert.doesNotMatch(wrapper, /npmCommand|npxCommand|npm\.cmd|npx\.cmd|shell:\s*true/i, 'packaging must remain shell-free');
   assert.doesNotMatch(wrapper, /quitAndInstall|Setup.*\.exe|uninstall/i, 'build orchestration must not execute installer lifecycle behavior');
+  assert.match(wrapper, /runNode\('UI contract generation', generateUiContracts\)[\s\S]*runNode\('dashboard Vite build', viteCli, \['build'\]\)[\s\S]*runNode\('dashboard generated manifest', writeDashboardGeneratedManifest\)/, 'packaging must use the canonical frontend generation sequence so release builds leave generated dashboard state current');
   assert.match(wrapper, /ensureTunnelClient\(platform, targetArch\)/, 'packaging must provision its pinned tunnel-client dependency');
   assert.match(wrapper, /ensureZoekt\(platform, targetArch\)/, 'packaging must provision its pinned Zoekt dependency');
   const windowsPrebuildReuse = wrapper.match(/--config\.npmRebuild=false/g) || [];
