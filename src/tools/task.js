@@ -29,7 +29,10 @@ function findReusableTask(config, workspace, args = {}, principal, conversationI
   const activity = getToolActivity();
   const live = activity.tasks.find(matches);
   if (live) return live;
+  const activeTaskIds = new Set(activity.tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean));
   const narrowed = findTaskReuseCandidates(config, workspaceAlias, conversation, 24)
+    .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: true, activeTaskIds }))
+    .filter(Boolean)
     .filter(session => !isTerminalTaskStatus(session?.status))
     .filter(session => String(session?.workspace || '') === workspaceAlias)
     .filter(session => String(session?.correlation?.conversationId || '') === conversation)
