@@ -31,7 +31,7 @@ server.stderr.on('data', chunk => { serverError += chunk.toString('utf8'); });
 let child;
 try {
   await waitForHealth(`http://127.0.0.1:${port}/health`);
-  const electronBinary = process.env.RELAI_ELECTRON_BINARY || path.resolve(root, 'electron', 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
+  const electronBinary = process.env.RELAI_ELECTRON_BINARY || path.resolve(root, 'electron', 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : process.platform === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron');
   assert.equal(fs.existsSync(electronBinary), true, `Electron binary not found at ${electronBinary}`);
   child = spawn(electronBinary, ['--no-sandbox', `--user-data-dir=${path.join(temp, 'profile')}`, path.join(root, 'test', 'fixtures', 'electron-custom-chrome-probe')], {
     cwd: root,
