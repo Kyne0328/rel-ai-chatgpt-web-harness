@@ -291,7 +291,11 @@ app.whenReady().then(async () => {
   await waitFor(win, `document.visibilityState === 'visible'`);
   await waitFor(win, `document.querySelector('[data-clock-elapsed-start]:not([data-clock-elapsed-end])')`);
   const clockBefore = await win.webContents.executeJavaScript(`document.querySelector('[data-clock-elapsed-start]:not([data-clock-elapsed-end])')?.textContent || ''`);
-  await delay(1250);
+  await waitFor(
+    win,
+    `document.querySelector('[data-clock-elapsed-start]:not([data-clock-elapsed-end])')?.textContent !== ${JSON.stringify(clockBefore)}`,
+    4000
+  );
   const clockAfter = await win.webContents.executeJavaScript(`document.querySelector('[data-clock-elapsed-start]:not([data-clock-elapsed-end])')?.textContent || ''`);
 
   fs.mkdirSync(screenshotDir, { recursive: true });
