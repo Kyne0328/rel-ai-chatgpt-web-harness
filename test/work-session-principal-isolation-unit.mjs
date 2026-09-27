@@ -230,12 +230,12 @@ try {
   assert.equal(Object.hasOwn(publicRecord, 'principalFingerprint'), false);
 } finally {
   if (repositoryIntelligenceModule) await repositoryIntelligenceModule.repositoryIntelligence.shutdown();
+  if (localAnalyticsModule) await localAnalyticsModule.flushLocalAnalytics();
   if (taskHistoryStore) {
     await taskHistoryStore.flushTaskHistoryPersistence();
     taskHistoryStore.clearTaskHistory({ stateDir, auditLogPath });
   }
   if (auditModule) await auditModule.clearAuditHistory({ stateDir, auditLogPath });
-  if (localAnalyticsModule) await localAnalyticsModule.flushLocalAnalytics();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
   if (previousState == null) delete process.env.REL_AI_MCP_STATE_DIR;

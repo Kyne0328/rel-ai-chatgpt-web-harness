@@ -103,6 +103,10 @@ app.whenReady().then(async () => {
 async function captureVisualRegressionScreenshot(win, targetPath) {
   if (win.isMaximized()) win.unmaximize();
   win.setContentSize(1280, 820);
+  await win.webContents.executeJavaScript(`(() => {
+    document.documentElement.dataset.themePreference = 'dark';
+    document.documentElement.dataset.theme = 'dark';
+  })()`);
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitForStableRoute(win, '#tasks', 'Tasks');
   // Recovery notices intentionally disappear after reconnect. Never baseline that transient state.
