@@ -149,6 +149,9 @@ try {
   const runningCancellation = callTool('relai_validate', { action: 'checks',
     workspace: 'app', work_id: cancelledTask.work_id, checks: [slow], timeoutMs: 10000
   }, context);
+  // Observe a fast cancellation rejection immediately so Node does not treat the
+  // expected concurrent promise as unhandled before the assertion below awaits it.
+  void runningCancellation.catch(() => {});
   await waitFor(() => events.some(event => event.phase === 'progress' && event.taskId === cancelledTask.work_id && event.task?.progress?.totalUnits === 1));
   const cancellation = await cancel(cancelledTask.work_id, 'Cancel active validation');
   assert.equal(cancellation.status, 'cancelling', 'active validation must settle before task cancellation becomes terminal');

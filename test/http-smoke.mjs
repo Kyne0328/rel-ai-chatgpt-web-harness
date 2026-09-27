@@ -36,6 +36,17 @@ async function retrySqliteBusy(operation, timeoutMs = 2000) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 }
+
+async function waitForTaskCorrelation(taskId, conversationId, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let session = null;
+  while (Date.now() < deadline) {
+    session = readTaskHistorySessionRecord(config, taskId, { reconcileInactive: false });
+    if (session?.correlation?.conversationId === conversationId) return session;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  return session;
+}
 const configPath = path.join(stateDir, 'config.json');
 const config = JSON.parse(fs.readFileSync(path.join(root, 'examples', 'config.example.json'), 'utf8'));
 config.stateDir = stateDir;
@@ -195,7 +206,7 @@ try {
   assert.equal(started.body.result?._meta?.relai, undefined, 'begin results must not request ChatGPT iframe hydration');
   const workId = started.body.result?.structuredContent?.work_id;
   assert.match(workId || '', /^[0-9a-f-]{36}$/i, 'HTTP Apps transport must start work from a configured workspace path');
-  const persistedTask = readTaskHistorySessionRecord(config, workId, { reconcileInactive: false });
+  const persistedTask = await waitForTaskCorrelation(workId, 'chat-session-regression');
   assert.equal(persistedTask?.correlation?.conversationId, 'chat-session-regression', 'ChatGPT session metadata must persist as internal task correlation without leaking into compact model-visible status');
   const validationWithExplicitLevel = await client.request('tools/call', {
     name: 'relai_validate',

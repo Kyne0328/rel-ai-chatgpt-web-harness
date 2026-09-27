@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.1.4] — 2026-09-25
+## [1.1.4] — 2026-09-27
 
 ### Plan-backed tasks and projectless Direct utilities
 - **Make every durable task plan-backed.** `work.begin` now establishes a non-empty ordered checklist atomically with task identity, using caller-supplied `steps` when available and a proportional single goal step otherwise. Compact `taskProgress` updates one existing step, while `work.plan` is reserved for structural plan changes; durable tasks no longer expose Direct versus Planned execution modes.
@@ -18,6 +18,10 @@
 - **Reduce false repository context and long-run cache growth.** Cross-workspace intelligence filters generic Node/Electron lifecycle events such as process exit and window/loading hooks, while workspace Git-state caching prunes obsolete task-scoped entries instead of retaining every historical task identity.
 - **Reclaim model-context headroom without weakening runtime validation.** Discovery schemas compact repeated batch-target and task-progress shapes, stop repeating optional `work_id` in every action grammar, and preserve high-impact action semantics such as explicit validation completion and inspect audit argument shapes.
 
+### Validation and heavy-execution concurrency
+- **Remove Rel.AI's application-level admission cap for one-shot heavy execution.** Heavy `relai_exec`, validation, and diagnostic subprocesses no longer wait behind a host-global Rel.AI concurrency queue or fail because that queue stayed full; the operating system and machine resources remain the practical capacity boundary.
+- **Let every policy-safe validation or diagnostic in a parallel stage run together.** Validation/diagnostic stages are no longer capped at three concurrent checks, and explicit execution-plan concurrency is no longer clamped to eight. Source mutations still keep one active repository writer and commit/reset/branch-switch/restore operations remain repository-exclusive so one visible working tree cannot race itself.
+
 ### Process management and restart safety
 - **Verify OS process creation identity before signaling or counting restored processes.** Rel.AI checks platform-specific process start ticks (via PowerShell on Windows, `/proc/<pid>/stat` on Linux, and `/bin/ps` on macOS) to prevent PID recycling issues after application restarts, refusing to signal or reserve capacity for recycled PIDs.
 - **Harden persistent process capacity reservation across restarts.** Orphaned processes from previous runtime sessions verify their OS identity before being admitted or signaled, preventing stale PID leaks from exhausting the host process limit.
@@ -34,10 +38,10 @@
 - **Harden desktop background updates and tunnel recovery.** Adds Windows background update status helper scripts, improves macOS manual updater resilience, and refines secure tunnel supervisor restart mechanisms during sustained connectivity issues.
 - **Automate release promotion and vendor dependency auditing.** Adds `scripts/promote-release.mjs` and workflow automation to promote candidate prereleases to stable channels, plus `scripts/check-vendor-updates.mjs` for upstream dependency tracking.
 - **Add visual regression and startup recovery test coverage.** Integrates dashboard visual regression tests with baseline image comparison and property-based boundary testing.
+- **Harden the final release gates against environment and timing-only failures.** Production/packaging npm audits ignore ambient user npm configuration that can change audit behavior, successful web-automation results retain required workspace identity, cross-process HTTP task-correlation coverage waits for the existing deferred history write instead of racing it, and active-validation cancellation coverage observes the concurrent promise immediately so a fast cancellation cannot become an unhandled-rejection flake.
 
 ### Release metadata
-- **Bump Rel.AI MCP from 1.1.3 to 1.1.4 across release surfaces.** Root, Electron, workspace packages, lockfiles, desktop status UI, and the release manifest report 1.1.4. Protocol version 2026-07-28, schema version 7, and the 15-tool public connector remain stable; the repository tool surface reports version 85 with manifest hash `uSGI7OZWHoEH-ryRO1-q3N-U`.
-- **Bump root/electron/status UI/lockfiles to 1.1.4.**
+- **Bump Rel.AI MCP from 1.1.3 to 1.1.4 across release surfaces.** Root, Electron, workspace packages, lockfiles, desktop status UI, and the release manifest report 1.1.4. Protocol version 2026-07-28, schema version 7, and the 15-tool public connector remain stable; the repository tool surface reports version 86 with manifest hash `l8Nl57_GoI7m8GqHucXbrGVC`.
 
 ## [1.1.3] — 2026-09-20
 
