@@ -9,18 +9,20 @@ import { localWindowWebPreferences } from './window-security.js';
 import { STARTUP_BACKGROUND_COLOR } from './startup-background.js';
 
 const dashboardPreloadPath = fileURLToPath(new URL('./preload.cjs', import.meta.url));
-import { dashboardWindowChrome, dashboardWindowChromeState } from "./window-chrome.js";
+import { dashboardTitleBarOverlay, dashboardWindowChrome, dashboardWindowChromeState } from "./window-chrome.js";
 
 function createDashboardWindowManager(deps) {
   const {
     BrowserWindow, shell, app, dialog, screen, getConnection,
+    nativeTheme,
     platform = process.platform,
     iconPath = '',
     canHideOnClose = () => true,
     canUserClose = () => true,
     isQuitting = () => false,
     onError = () => {},
-    onLoadError = onError
+    onLoadError = onError,
+    onRendererGone = () => {}
   } = deps;
   const userDataPath = typeof app.getPath === 'function' ? app.getPath('userData') : process.cwd();
   const statePath = path.join(userDataPath, 'dashboard-window-state.json');
@@ -31,6 +33,13 @@ function createDashboardWindowManager(deps) {
   let persistTimer = null;
   let persistPromise = null;
   let persistRevision = 0;
+  let themePreference = 'system';
+  let rendererRecoveryTimer = null;
+  let lastRendererCrashAt = 0;
+
+  nativeTheme?.on?.('updated', () => {
+    if (themePreference === 'system') applyTitleBarOverlay();
+  });
 
   async function open(routeHash = '', options = {}) {
     if (isQuitting()) throw new Error('Dashboard window is unavailable while Rel.AI is quitting.');
@@ -88,7 +97,7 @@ function createDashboardWindowManager(deps) {
     const bounds = await readBounds();
     if (isQuitting()) throw new Error('Dashboard window is unavailable while Rel.AI is quitting.');
     if (dashboardWindow && !dashboardWindow.isDestroyed()) return dashboardWindow;
-    const chrome = dashboardWindowChrome(platform);
+    const chrome = dashboardWindowChrome(platform, resolvedTheme());
     dashboardWindow = new BrowserWindow({
       ...bounds,
       ...chrome.windowOptions,
@@ -146,12 +155,38 @@ function createDashboardWindowManager(deps) {
     win.webContents.on('did-fail-load', (_event, code, description, url, isMainFrame) => {
       if (isMainFrame && code !== -3) onLoadError(new Error(`Dashboard failed to load ${url}: ${description}`));
     });
+    win.webContents.on('render-process-gone', (_event, details) => handleRendererGone(win, details));
     win.webContents.on('before-input-event', (event, input) => {
       const reload = input.key === 'F5' || ((input.control || input.meta) && input.key.toLowerCase() === 'r');
       if (!reload) return;
       event.preventDefault();
       win.webContents.reload();
     });
+  }
+
+  function handleRendererGone(win, details = {}) {
+    if (isQuitting() || win !== dashboardWindow) return;
+    const reason = String(details.reason || 'unknown');
+    const exitCode = Number.isInteger(details.exitCode) ? details.exitCode : null;
+    const current = safeUrl(win.webContents.getURL());
+    const routeHash = current?.hash || '';
+    onRendererGone(new Error(`Dashboard renderer exited (${reason}${exitCode == null ? '' : `, code ${exitCode}`}).`), {
+      reason,
+      exitCode
+    });
+    if (!win.isDestroyed()) win.destroy();
+    const now = Date.now();
+    if (now - lastRendererCrashAt < 5_000) {
+      onLoadError(new Error('Dashboard renderer failed repeatedly. Open Troubleshooting and review the local crash diagnostics.'));
+      return;
+    }
+    lastRendererCrashAt = now;
+    if (rendererRecoveryTimer) clearTimeout(rendererRecoveryTimer);
+    rendererRecoveryTimer = setTimeout(() => {
+      rendererRecoveryTimer = null;
+      void open(routeHash, { forceReload: true }).catch(onLoadError);
+    }, 100);
+    rendererRecoveryTimer.unref?.();
   }
 
   function isAbortedNavigationError(error) {
@@ -254,6 +289,23 @@ function createDashboardWindowManager(deps) {
     return dashboardWindowChromeState(getWindow(), platform);
   }
 
+  function setThemePreference(value) {
+    themePreference = ['dark', 'light'].includes(value) ? value : 'system';
+    applyTitleBarOverlay();
+    return themePreference;
+  }
+
+  function resolvedTheme() {
+    if (themePreference !== 'system') return themePreference;
+    return nativeTheme?.shouldUseDarkColors === false ? 'light' : 'dark';
+  }
+
+  function applyTitleBarOverlay() {
+    const win = getWindow();
+    if (platform !== 'win32' || !win || typeof win.setTitleBarOverlay !== 'function') return;
+    win.setTitleBarOverlay(dashboardTitleBarOverlay(resolvedTheme()));
+  }
+
   function requireWindow() {
     const win = getWindow();
     if (!win) throw new Error('Dashboard window is not available.');
@@ -291,6 +343,8 @@ function createDashboardWindowManager(deps) {
   }
 
   async function close() {
+    if (rendererRecoveryTimer) clearTimeout(rendererRecoveryTimer);
+    rendererRecoveryTimer = null;
     if (windowCreationPromise) {
       try { await windowCreationPromise; } catch {}
     }
@@ -303,7 +357,7 @@ function createDashboardWindowManager(deps) {
     return dashboardWindow && !dashboardWindow.isDestroyed() ? dashboardWindow : null;
   }
 
-  return { open, close, getWindow, pickFolder, openFolder, getState, minimize, toggleMaximize, requestClose };
+  return { open, close, getWindow, pickFolder, openFolder, getState, setThemePreference, minimize, toggleMaximize, requestClose };
 }
 
 export { createDashboardWindowManager, validateConnection, normalizeRouteHash };

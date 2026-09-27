@@ -36,6 +36,10 @@ const readySetup = desktopSetupSteps({ hasWorkspace: true, endpointReady: true, 
 assert.equal(readySetup.find(step => step.id === 'chatgpt').complete, true);
 assert.equal(readySetup.find(step => step.id === 'first-request').locked, false);
 assert.equal(readySetup.find(step => step.id === 'first-request').complete, false);
+const addProjectStep = desktopSetupSteps({ hasWorkspace: false }).find(step => step.id === 'workspace');
+assert.equal(addProjectStep.href, '#workspaces?create=1');
+assert.equal(addProjectStep.action, 'Add project');
+assert.equal(readySetup.find(step => step.id === 'workspace').action, 'Add project', 'Completed setup steps must not carry unreachable action copy');
 assert.equal(desktopSetupSteps({ hasWorkspace: true, endpointReady: true, chatgptReady: true, firstRequestObserved: true }).every(step => step.complete), true);
 
 const view = homeAnalyticsView(scope);

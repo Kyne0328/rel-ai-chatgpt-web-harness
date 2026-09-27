@@ -2,6 +2,7 @@ import { callTool as rawCallTool } from "../src/tools.js";
 import { getToolActivity, onToolActivity, resetToolActivity } from "../src/toolActivity.js";
 import { flushAuditWrites, readAudit } from "../src/audit.js";
 import { readConfig } from "../src/config.js";
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -47,6 +48,7 @@ try {
   assert.equal(event.status, 'failed', 'persisted Activity history must retain the failed command outcome');
 } finally {
   unsubscribeActivity();
+  await flushLocalAnalytics();
   if (previous == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previous;
   fs.rmSync(temp, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 2, retryDelay: 100 });

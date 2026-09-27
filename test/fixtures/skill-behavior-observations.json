@@ -1,0 +1,442 @@
+{
+  "provenance": "Maintainer-authored routing contracts, independently recorded for regression comparison; these are not live model traces.",
+  "observations": [
+    {
+      "id": "architecture-audit",
+      "prompt": "Audit the current repository architecture and prove how task routing works.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-investigation"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "package-investigation",
+      "prompt": "Investigate whether the packaged plugin contains its runtime dependencies.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-investigation"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "oauth-regression",
+      "prompt": "Fix the failing OAuth regression and verify the failing test.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-debugging",
+        "rel-ai-verification"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "startup-crash",
+      "prompt": "The app crashes during startup. Reproduce and repair it.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-debugging"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "release-verification",
+      "prompt": "Run the final release readiness checks and confirm this is complete.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-verification"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "persistent-dev-server",
+      "prompt": "Start the frontend development server and keep it running while I test it.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-dev-process"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "one-shot-test",
+      "prompt": "Run npm test and report the result.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-verification"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "non-repository-recursion",
+      "prompt": "Explain recursion without reading any repository.",
+      "skills": [],
+      "firstTool": null,
+      "firstAction": null,
+      "tools": []
+    },
+    {
+      "id": "non-repository-writing",
+      "prompt": "Draft a birthday message.",
+      "skills": [],
+      "firstTool": null,
+      "firstAction": null,
+      "tools": []
+    },
+    {
+      "id": "non-repository-ideation",
+      "prompt": "Discuss possible app ideas without inspecting or changing files.",
+      "skills": [],
+      "firstTool": null,
+      "firstAction": null,
+      "tools": []
+    },
+    {
+      "id": "oauth-migration",
+      "prompt": "Plan and implement a multi-stage OAuth migration that touches transport, persistence, and desktop configuration.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-planning"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ],
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "small-typo",
+      "prompt": "Change one typo in the README after reading that file.",
+      "skills": [
+        "rel-ai-workflow"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "repository-refactor",
+      "prompt": "Design a repository-wide refactor, then execute every task through final verification.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-planning",
+        "rel-ai-verification"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ],
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "read-only-routing",
+      "prompt": "Read only: prove how multi-workspace routing currently works.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-investigation"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "completed-ui-verification",
+      "prompt": "Verify a completed UI fix is ready to merge.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-verification"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "plan-only",
+      "prompt": "Plan a multi-stage migration only; do not implement it.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-planning"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ],
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "specialist-pressure",
+      "prompt": "Invoke every specialist before fixing one obvious typo.",
+      "skills": [
+        "rel-ai-workflow"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "one-shot-build",
+      "prompt": "Run one build and exit; do not keep a process alive.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-verification"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "repeated-failure",
+      "prompt": "The same unit test is still failing after three attempted fixes. Stop repeating edits, reinvestigate the root cause, and repair it.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-debugging"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "ui-evidence",
+      "prompt": "The UI fix is implemented. Use the browser screenshot and console output as evidence and verify it is ready.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-verification"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "missing-reproduction",
+      "prompt": "Fix this startup bug, but no reproduction steps were provided. Investigate the failure without inventing a reproduction.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-debugging"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ],
+      "calls": [
+        {
+          "tool": "relai_work",
+          "action": "begin"
+        },
+        {
+          "tool": "relai_work",
+          "action": "plan"
+        }
+      ]
+    },
+    {
+      "id": "read-only-module-explanation",
+      "prompt": "Explain how the authentication module currently works. Do not edit anything.",
+      "skills": [
+        "rel-ai-workflow",
+        "rel-ai-investigation"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "parallel-unrelated",
+      "prompt": "Another task is editing the API. Independently fix this README typo without touching that task.",
+      "skills": [
+        "rel-ai-workflow"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "parallel-overlap",
+      "prompt": "Two active tasks both need to change the same config file. Preserve the conflict instead of overwriting either task.",
+      "skills": [
+        "rel-ai-workflow"
+      ],
+      "firstTool": "relai_work",
+      "firstAction": "begin",
+      "tools": [
+        "relai_work"
+      ]
+    },
+    {
+      "id": "existing-task-continuation",
+      "prompt": "Continue the active repository task by reading its next known file.",
+      "skills": [
+        "rel-ai-workflow"
+      ],
+      "firstTool": "relai_read",
+      "firstAction": null,
+      "tools": [
+        "relai_read"
+      ]
+    }
+  ]
+}

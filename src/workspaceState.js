@@ -15,6 +15,7 @@ let workspaceStateVersion = 0;
 let refreshQueue = Promise.resolve();
 
 function buildWorkspaceStates(config, tasks = [], activity = {}) {
+  pruneWorkspaceGitStateCache(config, activity);
   const states = {};
   for (const [alias, workspace] of Object.entries(config.workspaces || {})) {
     states[alias] = workspaceState(alias, workspace, config, tasks, activity);
@@ -65,6 +66,32 @@ function workspaceGitState(alias, workspace, config, taskId = '') {
 
 function workspaceStateCacheKey(alias, workspacePath, taskId = '') {
   return [alias, workspacePath, taskId].join('\u0000');
+}
+
+function pruneWorkspaceGitStateCache(config, activity = {}) {
+  const configuredPaths = new Map(Object.entries(config.workspaces || {}).map(([alias, workspace]) => [alias, String(workspace?.path || '')]));
+  const activeTaskIds = new Map();
+  for (const task of resolveActiveTasks(activity)) {
+    const alias = String(task?.workspace || '').trim();
+    const taskId = String(task?.id || task?.taskId || '').trim();
+    if (!alias || !taskId) continue;
+    let ids = activeTaskIds.get(alias);
+    if (!ids) {
+      ids = new Set();
+      activeTaskIds.set(alias, ids);
+    }
+    ids.add(taskId);
+  }
+  for (const cacheKey of gitStateCache.keys()) {
+    const [alias = '', workspacePath = '', taskId = ''] = String(cacheKey).split('\u0000');
+    if (configuredPaths.get(alias) !== workspacePath || (taskId && !activeTaskIds.get(alias)?.has(taskId))) {
+      gitStateCache.delete(cacheKey);
+    }
+  }
+}
+
+function workspaceStateCacheSize() {
+  return gitStateCache.size;
 }
 
 function baseWorkspaceGitState(workspacePath) {
@@ -135,6 +162,7 @@ async function refreshWorkspaceGitState(cacheKey, cached, alias, workspace, conf
 }
 
 function commitWorkspaceGitState(cacheKey, cached, alias, next) {
+  if (gitStateCache.get(cacheKey) !== cached) return;
   const changed = JSON.stringify(cached.value) !== JSON.stringify(next);
   cached.value = next;
   cached.createdAt = Date.now();
@@ -164,4 +192,4 @@ function resolveActiveTasks(activity) {
 }
 
 
-export { buildWorkspaceStates, onWorkspaceStateChange, workspaceStateRevision, resolveGitExecutable };
+export { buildWorkspaceStates, onWorkspaceStateChange, workspaceStateRevision, workspaceStateCacheSize, resolveGitExecutable };

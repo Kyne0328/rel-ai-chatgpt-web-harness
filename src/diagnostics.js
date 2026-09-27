@@ -54,10 +54,17 @@ function buildDiagnosticReport(input = {}) {
     application,
     summary: countFindings(ordered),
     findings: ordered,
+    tunnelHealth: normalizeTunnelHealth(input.tunnelHealth),
     logs: { runtime, failedActivity }
   };
   report.reportText = formatDiagnosticReport(report);
   return report;
+}
+
+function normalizeTunnelHealth(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const sanitized = sanitizeDiagnosticValue(value);
+  return sanitized && typeof sanitized === 'object' && !Array.isArray(sanitized) ? sanitized : null;
 }
 
 function healthFindings(health, workspace) {
@@ -270,6 +277,13 @@ function formatDiagnosticReport(report) {
   ];
   if (report.application?.version) lines.push(`Version: ${report.application.version}`);
   if (report.application?.build) lines.push(`Build: ${report.application.build}`);
+  if (report.tunnelHealth) {
+    lines.push('Secure tunnel health:');
+    for (const [name, component] of [['control-plane', report.tunnelHealth.controlPlane], ['response-delivery', report.tunnelHealth.responseDelivery]]) {
+      if (!component) continue;
+      lines.push(`  ${name}: ${component.status || 'unknown'} / ${component.state || 'unknown'}${component.reasonCode ? ` (${component.reasonCode})` : ''}`);
+    }
+  }
   lines.push(`Findings: ${report.summary.blocking} blocking, ${report.summary.warnings} warnings, ${report.summary.recommendations} recommendations`);
   for (const finding of report.findings) {
     lines.push('', `[${finding.severity.toUpperCase()}] ${finding.code}`, finding.title, `Impact: ${finding.impact}`, `Action: ${finding.recommendation}`);

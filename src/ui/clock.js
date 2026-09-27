@@ -1,7 +1,10 @@
 import { formatDuration, timeAgo } from './utils.js';
 
 const CLOCK_SELECTOR = '[data-clock-elapsed-start], [data-clock-relative]';
-const RELATIVE_REFRESH_MS = 60_000;
+const CLOCK_ATTRIBUTE_FILTER = Object.freeze(['data-clock-elapsed-start', 'data-clock-elapsed-end', 'data-clock-relative']);
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 
 export function parseClockTime(value) {
   if (value == null || value === '') return Number.NaN;
@@ -18,6 +21,15 @@ export function elapsedAt(start, end, now = Date.now()) {
   return formatDuration(Math.max(0, boundary - started), { live: !Number.isFinite(completed) });
 }
 
+function relativeRefreshAt(value, currentTime) {
+  const timestamp = parseClockTime(value);
+  if (!Number.isFinite(timestamp)) return Number.POSITIVE_INFINITY;
+  const age = Math.max(0, currentTime - timestamp);
+  if (age < HOUR_MS) return timestamp + (Math.floor(age / MINUTE_MS) + 1) * MINUTE_MS;
+  if (age < DAY_MS) return timestamp + (Math.floor(age / HOUR_MS) + 1) * HOUR_MS;
+  return timestamp + (Math.floor(age / DAY_MS) + 1) * DAY_MS;
+}
+
 export function createDashboardClock(options = {}) {
   const documentRef = options.documentRef || document;
   const windowRef = options.windowRef || window;
@@ -32,7 +44,7 @@ export function createDashboardClock(options = {}) {
   let observer = null;
   let timer = null;
   let stopped = true;
-  let nextRelativeRefreshAt = 0;
+  let nextRelativeRefreshAt = Number.POSITIVE_INFINITY;
 
   function updateElapsedNode(node, currentTime) {
     const text = elapsedAt(
@@ -50,13 +62,21 @@ export function createDashboardClock(options = {}) {
 
   function registerNode(node, currentTime) {
     if (!node?.hasAttribute) return;
-    if (node.hasAttribute('data-clock-elapsed-start')) {
-      updateElapsedNode(node, currentTime);
-      if (!node.hasAttribute('data-clock-elapsed-end')) liveElapsedNodes.add(node);
-    }
+    const hasElapsed = node.hasAttribute('data-clock-elapsed-start');
+    const hasCompletedElapsed = hasElapsed && node.hasAttribute('data-clock-elapsed-end');
+    if (hasElapsed) updateElapsedNode(node, currentTime);
+    if (hasElapsed && !hasCompletedElapsed) liveElapsedNodes.add(node);
+    else liveElapsedNodes.delete(node);
+
     if (node.hasAttribute('data-clock-relative')) {
       relativeNodes.add(node);
       updateRelativeNode(node, currentTime);
+      nextRelativeRefreshAt = Math.min(
+        nextRelativeRefreshAt,
+        relativeRefreshAt(node.getAttribute('data-clock-relative'), currentTime)
+      );
+    } else {
+      relativeNodes.delete(node);
     }
   }
 
@@ -68,9 +88,9 @@ export function createDashboardClock(options = {}) {
     return api;
   }
 
-  function updateRegistered(nodes, updater, currentTime) {
+  function updateRegistered(nodes, updater, currentTime, valid) {
     for (const node of nodes) {
-      if (node?.isConnected === false) {
+      if (node?.isConnected === false || !valid(node)) {
         nodes.delete(node);
         continue;
       }
@@ -78,12 +98,30 @@ export function createDashboardClock(options = {}) {
     }
   }
 
+  function refreshRelativeSchedule(currentTime) {
+    let next = Number.POSITIVE_INFINITY;
+    for (const node of relativeNodes) {
+      if (node?.isConnected === false || !node?.hasAttribute?.('data-clock-relative')) {
+        relativeNodes.delete(node);
+        continue;
+      }
+      next = Math.min(next, relativeRefreshAt(node.getAttribute('data-clock-relative'), currentTime));
+    }
+    if (!Number.isFinite(next) && typeof MutationObserverRef !== 'function') next = currentTime + MINUTE_MS;
+    nextRelativeRefreshAt = next;
+  }
+
   function tick(forceRelative = false) {
     const currentTime = now();
-    updateRegistered(liveElapsedNodes, updateElapsedNode, currentTime);
+    updateRegistered(
+      liveElapsedNodes,
+      updateElapsedNode,
+      currentTime,
+      node => node.hasAttribute('data-clock-elapsed-start') && !node.hasAttribute('data-clock-elapsed-end')
+    );
     if (forceRelative || currentTime >= nextRelativeRefreshAt) {
-      updateRegistered(relativeNodes, updateRelativeNode, currentTime);
-      nextRelativeRefreshAt = currentTime + RELATIVE_REFRESH_MS;
+      updateRegistered(relativeNodes, updateRelativeNode, currentTime, node => node.hasAttribute('data-clock-relative'));
+      refreshRelativeSchedule(currentTime);
     }
     onTick?.(currentTime);
   }
@@ -95,13 +133,20 @@ export function createDashboardClock(options = {}) {
     observer = new MutationObserverRef(records => {
       const currentTime = now();
       for (const record of records) {
+        if (record.type === 'attributes') registerNode(record.target, currentTime);
         for (const node of record.addedNodes || []) {
           if (node?.matches?.(CLOCK_SELECTOR)) registerNode(node, currentTime);
           for (const child of node?.querySelectorAll?.(CLOCK_SELECTOR) || []) registerNode(child, currentTime);
         }
       }
+      refreshRelativeSchedule(currentTime);
     });
-    observer.observe(target, { childList: true, subtree: true });
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: CLOCK_ATTRIBUTE_FILTER
+    });
   }
 
   function stopObserver() {
@@ -126,7 +171,6 @@ export function createDashboardClock(options = {}) {
       stopTimer();
       return;
     }
-    observe(documentRef);
     tick(true);
     startTimer();
   }
@@ -135,9 +179,11 @@ export function createDashboardClock(options = {}) {
     if (!stopped) return api;
     stopped = false;
     documentRef.addEventListener?.('visibilitychange', handleVisibility);
+    nextRelativeRefreshAt = Number.POSITIVE_INFINITY;
+    const currentTime = now();
     observe(documentRef);
-    nextRelativeRefreshAt = now() + RELATIVE_REFRESH_MS;
-    onTick?.(now());
+    refreshRelativeSchedule(currentTime);
+    onTick?.(currentTime);
     startObserver();
     startTimer();
     return api;

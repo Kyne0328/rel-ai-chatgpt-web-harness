@@ -38,6 +38,7 @@ function releaseArtifactNames(version, options = {}) {
       ext: 'deb'
     }),
     linuxMetadata: 'latest-linux.yml',
+    macMetadata: 'latest-mac.yml',
     macDmgX64: renderBuilderArtifactName(requiredArtifactTemplate(build.dmg, 'DMG'), {
       version: normalizedVersion,
       arch: 'x64',

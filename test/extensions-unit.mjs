@@ -87,6 +87,37 @@ const cliManifest = {
   },
   files: [{ path: 'SKILL.md', sha256: cliSkillSha256 }]
 };
+const unsupportedPlatform = process.platform === 'win32' ? 'linux' : 'win32';
+const systemCommand = 'relai-system-cli-fixture';
+const missingCommand = 'relai-missing-cli-fixture';
+const systemManifestUrl = 'https://catalog.test/system-cli/relai-extension.json';
+const systemSkillUrl = 'https://catalog.test/system-cli/SKILL.md';
+const missingManifestUrl = 'https://catalog.test/missing-cli/relai-extension.json';
+const missingSkillUrl = 'https://catalog.test/missing-cli/SKILL.md';
+const systemManifest = {
+  ...cliManifest,
+  id: 'system-cli-extension',
+  name: 'System CLI extension',
+  description: 'CLI extension that uses an already available system command when no managed artifact matches this platform.',
+  requires: { commands: [systemCommand], platforms: [] },
+  entrypoints: { skill: 'SKILL.md', command: systemCommand },
+  install: {
+    type: 'binary',
+    artifacts: [{ platform: unsupportedPlatform, arch: 'x64', url: cliArtifactUrl, sha256: cliArtifactSha256 }]
+  }
+};
+const missingManifest = {
+  ...cliManifest,
+  id: 'missing-cli-extension',
+  name: 'Missing CLI extension',
+  description: 'CLI extension that remains installed but needs setup when no managed artifact matches this platform.',
+  requires: { commands: [missingCommand], platforms: [] },
+  entrypoints: { skill: 'SKILL.md', command: missingCommand },
+  install: {
+    type: 'binary',
+    artifacts: [{ platform: unsupportedPlatform, arch: 'x64', url: cliArtifactUrl, sha256: cliArtifactSha256 }]
+  }
+};
 const bundleManifest = {
   schemaVersion: 1,
   id: 'tool-bundle-extension',
@@ -122,6 +153,8 @@ const catalog = {
   extensions: [
     catalogEntry(manifest, manifestUrl, true),
     catalogEntry(cliManifest, cliManifestUrl, true),
+    catalogEntry(systemManifest, systemManifestUrl),
+    catalogEntry(missingManifest, missingManifestUrl),
     catalogEntry(bundleManifest, bundleManifestUrl, true)
   ]
 };
@@ -139,14 +172,16 @@ assert.throws(
   }),
   /command\.execute/i
 );
-assert.throws(
-  () => parseExtensionManifest({
-    ...cliManifest,
-    entrypoints: { skill: 'SKILL.md', command: 'node' },
-    requires: { commands: ['node'], platforms: [] }
-  }),
-  /reserved/i
-);
+for (const reservedCommand of ['node', 'relai-extension']) {
+  assert.throws(
+    () => parseExtensionManifest({
+      ...cliManifest,
+      entrypoints: { skill: 'SKILL.md', command: reservedCommand },
+      requires: { commands: [reservedCommand], platforms: [] }
+    }),
+    /reserved/i
+  );
+}
 assert.throws(
   () => parseExtensionManifest({
     ...bundleManifest,
@@ -181,6 +216,10 @@ globalThis.fetch = async url => {
   if (href === cliManifestUrl) return responseJson(cliManifest);
   if (href === cliSkillUrl) return new Response(cliSkill, { status: 200 });
   if (href === cliArtifactUrl) return new Response(cliArtifact, { status: 200 });
+  if (href === systemManifestUrl) return responseJson(systemManifest);
+  if (href === systemSkillUrl) return new Response(cliSkill, { status: 200 });
+  if (href === missingManifestUrl) return responseJson(missingManifest);
+  if (href === missingSkillUrl) return new Response(cliSkill, { status: 200 });
   if (href === bundleManifestUrl) return responseJson(bundleManifest);
   if (href === bundleSkillUrl) return new Response(bundleSkill, { status: 200 });
   if (href === bundleArtifactUrl) return new Response(bundleArtifact, { status: 200 });
@@ -231,6 +270,34 @@ try {
   assert.equal(listInstalledExtensions(config).some(item => item.id === badCliManifest.id), false);
   assert.equal(fs.existsSync(managedExtensionCommandPath(config, badCliManifest.entrypoints.command)), false);
   globalThis.fetch = originalFetchWithBadFixture;
+
+  const systemBin = path.join(root, 'system-bin');
+  fs.mkdirSync(systemBin, { recursive: true });
+  const systemExecutable = path.join(systemBin, process.platform === 'win32' ? `${systemCommand}.cmd` : systemCommand);
+  fs.writeFileSync(systemExecutable, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n', { mode: 0o755 });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${systemBin}${path.delimiter}${originalPath || ''}`;
+  const systemInstalled = await installExtension(config, systemManifest.id, { catalogUrl });
+  assert.equal(systemInstalled.ready, true);
+  assert.deepEqual(systemInstalled.missingCommands, []);
+  assert.equal(fs.existsSync(managedExtensionCommandPath(config, systemCommand)), false);
+  assert.equal(discoverSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') }).some(item => item.name === systemManifest.id), true);
+  process.env.PATH = originalPath;
+
+  const missingInstalled = await installExtension(config, missingManifest.id, { catalogUrl });
+  assert.equal(missingInstalled.status, 'needs_setup');
+  assert.equal(missingInstalled.ready, false);
+  assert.deepEqual(missingInstalled.missingCommands, [missingCommand]);
+  assert.match(missingInstalled.error, /missing required command/i);
+  assert.equal(fs.existsSync(managedExtensionCommandPath(config, missingCommand)), false);
+  assert.equal(discoverSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') }).some(item => item.name === missingManifest.id), false);
+
+  const removedSystem = removeExtension(config, systemManifest.id);
+  assert.equal(removedSystem.removed, true);
+  assert.deepEqual(removedSystem.removedCommands, []);
+  const removedMissing = removeExtension(config, missingManifest.id);
+  assert.equal(removedMissing.removed, true);
+  assert.deepEqual(removedMissing.removedCommands, []);
 
   const cliCatalogEntry = catalog.extensions.find(item => item.id === cliManifest.id);
   cliCatalogEntry.autoInstall = false;

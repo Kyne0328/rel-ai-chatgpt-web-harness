@@ -86,6 +86,9 @@ assert.match(homeReact, /loadAnalyticsData/, 'Overview React route must retain t
 assert.doesNotMatch(homeReact, /relai:clock-tick/, 'Overview must not duplicate the shared dashboard clock with per-second React state updates');
 assert.match(homeReact, /data-clock-elapsed-start/, 'Overview active elapsed time must remain owned by the shared dashboard clock');
 assert.match(homeReact, /data-clock-relative/, 'Overview relative time must remain owned by the shared dashboard clock');
+assert.match(workspaceModals, /data-clock-relative/, 'Project details relative times must be owned by the shared dashboard clock');
+assert.match(diagnostics, /data-clock-relative/, 'Troubleshooting relative times must be owned by the shared dashboard clock');
+assert.doesNotMatch(diagnostics, /function relativeTime\(/, 'Troubleshooting must not keep a private render-only relative-time formatter');
 assert.match(reactMain, /registerReactSection\('home'/, 'Overview must be registered as a canonical React route');
 const sessions = read('src/ui/features/sessions/index.js');
 const sessionsModel = read('src/ui/features/sessions/model.js');
@@ -120,6 +123,8 @@ assert.match(sessionsReact, /key: sessionIdentifier\(session\)/, 'task rows must
 assert.match(sessionsReact, /const TaskRow = memo\(/, 'unchanged task rows must retain their React instance and DOM identity');
 assert.match(sessionsReact, /data-clock-relative/, 'ended and inactive task rows must show relative age without second-level timers');
 assert.match(sessionsReact, /data-clock-elapsed-start/, 'active task rows and running operations must retain the shared live elapsed clock');
+assert.match(processesReact, /'Running for ', h\('span', \{ 'data-clock-elapsed-start': row\.startedAt \}/, 'running-process copy must stay outside the clock-owned elapsed text node');
+assert.match(processesReact, /data-clock-relative/, 'finished-process age must keep updating through the shared relative clock');
 assert.match(sessionsReact, /mergeSessionDetail\(hydrated\?\.id === selectedId[\s\S]*selectedSummary, data\)/, 'live snapshots must merge into the open inspector without clearing hydrated history');
 assert.match(sessionsReact, /const \[activeTab, setActiveTab\] = useState\('overview'\)/, 'inspector tab selection must be React-owned state');
 assert.match(sessionsReact, /if \(selectedIdRef\.current !== id\) \{[\s\S]*setActiveTab\('overview'\)/, 'inspector tab reset must be limited to selecting a different task, not passive live updates');
@@ -131,6 +136,10 @@ assert.match(sessionsReact, /h\('h3', null, 'Runtime'\)/, 'session diagnostics m
 assert.doesNotMatch(sessionsReact, /Request ID|Trace ID/, 'session diagnostics must not present per-call protocol identifiers as stable task identifiers');
 assert.match(sessionsReact, /toolCallCount/, 'session rows must keep the tool-call count visible in the scan-first list');
 assert.match(sessionsReact, /project file/, 'session rows must keep the project-file count visible in the scan-first list');
+assert.doesNotMatch(sessionsReact, /groupSessionsByConversation|task-conversation-group|task-conversation-head/, 'task list must stay flat instead of inserting per-chat grouping rows');
+assert.match(sessionsReact, /className: 'task-list-items'/, 'task list must render one continuous task list');
+assert.doesNotMatch(sessionsReact, /task-plan-collapsible|h\('details'.*data-task-plan/s, 'task plans must remain visible instead of using a disclosure control');
+assert.doesNotMatch(sessionsReact, /modeLabel.*Planned.*Direct/s, 'durable task rows must not expose obsolete Direct versus Planned mode labels');
 assert.match(sessionsReact, /label: 'Tool calls'/, 'task inspector must retain tool-call counts after list simplification');
 assert.match(sessionsReact, /label: 'Project files'/, 'task inspector must retain the Project files count');
 assert.match(sessionsReact, /title: 'Project files'/, 'task inspector must retain the primary Project files section');
@@ -140,7 +149,10 @@ assert.match(sessionsReact, /className: 'task-file-more-row'/, 'Show more must r
 assert.doesNotMatch(sessionsReact, /task-detail-overflow-content|More \$\{title\.toLowerCase\(\)\}/, 'expanded files must not render in a disconnected secondary block');
 assert.doesNotMatch(sessionsReact, /task-detail-current\$\{sessionNeedsAttention\(session\)/, 'task progress card must stay neutral when a separate attention callout is present');
 assert.doesNotMatch(sessionsReact, /taskProgressHtml|Key activity|workflowTechnicalHtml/, 'Tasks must not reintroduce misleading per-tool whole-task progress or obsolete workflow guidance');
-assert.match(sessionsReact, /h\(PlanSection, \{ plan: session\.plan \}\)/, 'task Overview must render the durable plan independently from activity history');
+assert.match(sessionsReact, /h\(PlanSection, \{ plan: session\.plan \}\)/, 'task Overview must render the durable plan directly');
+assert.doesNotMatch(sessionsReact, /label: 'Mode'.*Planned.*Direct/s, 'task inspector must not expose obsolete durable execution-mode labels');
+assert.match(sessionsReact, /data-task-plan-missing/, 'a legacy task missing its checklist must show the missing-plan state instead of hiding the Plan section');
+assert.match(sessionsReact, /Waiting for a plan before project work continues\./, 'missing-plan copy must explain why Planned work has not advanced');
 assert.match(sessionsReact, /data-plan-step-status/, 'durable plan steps must expose their explicit status for styling and regression coverage');
 assert.match(sessionsReact, /'aria-label': statusLabel/, 'each durable plan step must expose its state to assistive technology instead of relying on a visual glyph');
 assert.match(sessionsReact, /key: `\$\{String\(step\?\.id \|\| 'step'\)\}:\$\{index\}`/, 'plan rows must keep React keys unique even when optional external step IDs collide');
@@ -177,7 +189,7 @@ assert.match(reactMain, /registerReactSection\('workspaces'/, 'Projects must be 
 assert.match(workspacesReact, /data-workspaces-react/, 'Projects React route must own the rendered feature root');
 assert.match(workspacesReact, /useWorkspaceAnalytics/, 'Projects must retain per-project analytics in React ownership');
 assert.match(workspaceModals, /sourcePaths:\s*paths/, 'Project create and edit must preserve multi-source project folders');
-assert.match(workspaceModals, /markUnsaved\(formRef\.current, dirty\)/, 'Project forms must mark unsaved local React state for navigation protection');
+assert.match(workspaceModals, /const form = formRef\.current;[\s\S]*markUnsaved\(form, dirty\)/, 'Project forms must mark unsaved local React state for navigation protection without depending on a specific ref-expression spelling');
 assert.match(workspaceModals, /Forget stored activity for this project/, 'Project deletion must expose an explicit stored-activity cleanup choice');
 assert.match(workspaceModals, /forgetLocalData/, 'Project deletion must pass the cleanup choice to the workspace API');
 assert.doesNotMatch(diagnostics, /DiagnosticMaintenance|data-diagnostic-region': 'maintenance'/, 'Troubleshooting must not duplicate local-data cleanup controls owned by App settings');

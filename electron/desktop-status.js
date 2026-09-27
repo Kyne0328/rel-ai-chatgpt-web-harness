@@ -10,6 +10,8 @@ function initialDesktopStatus(version = '', buildStatus = {}) {
     tunnelStatus: 'stopped',
     tunnelId: '',
     tunnelHealthUrl: '',
+    tunnelRecoveryMode: '',
+    tunnelHealth: null,
     mcpUrl: '',
     localMcpUrl: '',
     error: '',

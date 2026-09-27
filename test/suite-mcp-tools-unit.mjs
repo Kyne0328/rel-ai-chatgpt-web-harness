@@ -528,7 +528,7 @@ async function case_connector_refresh_modal_unit() {
     prepareConnectorRefreshNotice } = __m1;
   
     const __m2 = await import("../src/ui/features/settings/connection-guidance.js");
-    const { CHATGPT_REFRESH_BUSINESS_NOTE, CHATGPT_REFRESH_STEPS } = __m2;
+    const { CHATGPT_REFRESH_BUSINESS_NOTE, CHATGPT_REFRESH_GROUPS } = __m2;
   
   function memoryStorage(initial = {}) {
     const values = new Map(Object.entries(initial));
@@ -560,10 +560,12 @@ async function case_connector_refresh_modal_unit() {
     connectorRefreshRequired: true
   }, updateStorage);
   assert.ok(updateNotice, '0.27.4 must require a connector refresh when its connector revision changed');
-  assert.deepEqual(updateNotice.steps, CHATGPT_REFRESH_STEPS);
+  assert.deepEqual(updateNotice.groups, CHATGPT_REFRESH_GROUPS);
   assert.equal(updateNotice.businessNote, CHATGPT_REFRESH_BUSINESS_NOTE);
-  assert.match(updateNotice.steps.join(' '), /Go\/Plus\/Pro.*Settings.*Plugins.*Rel\.AI MCP.*Information.*Refresh/i);
-  assert.match(updateNotice.steps.join(' '), /Enterprise\/Edu.*Workspace settings.*Apps.*Action control.*Refresh/i);
+  assert.equal(updateNotice.groups.length, 2, 'connector refresh instructions must use separate plan-specific lists');
+  assert.deepEqual(updateNotice.groups.map(group => group.label), ['Go / Plus / Pro', 'Enterprise / Edu']);
+  assert.match(updateNotice.groups[0].steps.join(' '), /Settings.*Plugins.*Rel\.AI MCP.*Information.*Refresh/i);
+  assert.match(updateNotice.groups[1].steps.join(' '), /Workspace settings.*Apps.*Action control.*Refresh/i);
   assert.match(updateNotice.businessNote, /Business.*recreate and republish/i);
   assert.equal('dismissDelayMs' in updateNotice, false, 'connector refresh notices must never impose a timed dismissal lockout');
   
@@ -597,7 +599,7 @@ async function case_connector_refresh_modal_unit() {
     connectorRefreshRequired: true
   }, futureStorage);
   assert.ok(futureNotice, 'future connector changes must not depend on a hand-maintained version allowlist');
-  assert.match(futureNotice.description, /9\.9\.9 changed its ChatGPT action definitions/i);
+  assert.match(futureNotice.description, /9\.9\.9 changed its ChatGPT actions/i);
   
   const sameVersionNotice = prepareConnectorRefreshNotice({
     currentVersion: '9.9.9',
@@ -774,6 +776,57 @@ async function case_connector_result_contract_unit() {
     const validation = await publicOutputValidators.get(item.publicTool).validate(external);
     assert.equal(validation.issues, undefined, `${item.name} serialized result must satisfy its advertised public output schema`);
   }
+
+  const routineScopedRead = serializeConnectorResult({
+    publicName: 'relai_read',
+    action: '',
+    operationName: OP.READ,
+    value: { ok: true, workspace: 'repo', items: [] },
+    args: { work_id: 'work_read', paths: ['README.md'] },
+    workId: 'work_read'
+  });
+  assert.equal(Object.hasOwn(routineScopedRead, 'work_id'), false,
+    'routine synchronous success must not echo a work_id that the caller already supplied');
+  const lifecycleIdentity = serializeConnectorResult({
+    publicName: 'relai_work',
+    action: 'status',
+    operationName: OP.WORK_STATUS,
+    value: { ok: true, work_id: 'work_read', task: { status: 'planning' } },
+    args: { work_id: 'work_read' },
+    workId: 'work_read'
+  });
+  assert.equal(lifecycleIdentity.work_id, 'work_read', 'work lifecycle and recovery results must retain explicit task identity');
+  const routineExec = serializeConnectorResult({
+    publicName: 'relai_exec',
+    action: '',
+    operationName: OP.EXEC,
+    value: {
+      ok: true, executed: true, commandSucceeded: true, workspace: 'repo', command: 'node --check src/index.js',
+      shell: 'Direct process', cwd: '.', exitCode: 0, durationMs: 12, stdout: '', stderr: ''
+    },
+    args: { workspace: 'repo', work_id: 'work_exec', command: 'node --check src/index.js' },
+    workId: 'work_exec'
+  });
+  assert.equal(routineExec.workspace, 'repo', 'routine success must retain workspace required by the public output schema');
+  assert.equal(routineExec.command, undefined, 'routine success must not echo the caller-owned command');
+  assert.equal(routineExec.work_id, undefined, 'routine success must not echo the caller-owned work_id');
+  assert.equal(routineExec.commandSucceeded, true, 'routine success must retain outcome data');
+  assert.equal(routineExec.exitCode, 0, 'routine success must retain command evidence');
+  assert.equal(routineExec.durationMs, 12, 'routine success must retain measured duration');
+  const failedExec = serializeConnectorResult({
+    publicName: 'relai_exec',
+    action: '',
+    operationName: OP.EXEC,
+    value: {
+      ok: false, executed: false, commandSucceeded: false, workspace: 'repo', command: 'node broken.js',
+      shell: 'Direct process', exitCode: 1, durationMs: 5, error: 'failed'
+    },
+    args: { workspace: 'repo', work_id: 'work_failed', command: 'node broken.js' },
+    workId: 'work_failed'
+  });
+  assert.equal(failedExec.workspace, 'repo', 'failed results must retain caller context for recovery');
+  assert.equal(failedExec.command, 'node broken.js', 'failed results must retain the failed command');
+  assert.equal(failedExec.work_id, 'work_failed', 'failed results must retain task identity');
   console.log(`${cases.length} internal-to-connector result contracts passed.`);
   
   function fixture(name, publicTool, action, operation, workId, internal, expected, args = {}) {
@@ -1809,12 +1862,13 @@ async function case_tool_action_catalog_parity_unit() {
     const { resolveExecutableToolCall } = __m4;
   
     const __m5 = await import("../src/tools/schema.js");
-    const { getToolDefinitions, getToolMetadata, getToolSchemas } = __m5;
+    const { getPublicToolSchemas, getToolDefinitions, getToolMetadata, getToolSchemas } = __m5;
   
   const catalog = getToolActionCatalog();
   const catalogTools = getCatalogTools();
   const currentDefinitions = getToolDefinitions();
   const currentSchemas = new Map(getToolSchemas().map(item => [item.name, item]));
+  const currentPublicSchemas = new Map(getPublicToolSchemas().map(item => [item.name, item]));
   const currentMetadata = new Map(getToolMetadata().map(item => [item.name, item]));
   
   assert.ok(catalogTools.length > 0, 'the canonical tool catalog must not be empty');
@@ -1895,7 +1949,20 @@ async function case_tool_action_catalog_parity_unit() {
     }
   }
   
+  for (const tool of ['relai_search', 'relai_process', 'relai_validate', 'relai_changes', 'relai_publish']) {
+    assert.equal(currentPublicSchemas.get(tool).inputSchema.required?.includes('action'), false, `${tool} discovery must allow runtime action inference`);
+  }
   assert.equal(getCatalogAction('unknown', {}), null);
+  assert.equal(getCatalogAction('relai_search', { pattern: 'needle' })?.action, 'text');
+  assert.equal(getCatalogAction('relai_search', { query: 'needle' })?.action, 'semantic');
+  assert.throws(() => getCatalogAction('relai_search', { queries: ['needle'] }), /Unsupported action '\(missing\)'/);
+  assert.equal(getCatalogAction('relai_validate', {})?.action, 'checks');
+  assert.equal(getCatalogAction('relai_validate', { command: 'node --version' })?.action, 'diagnostics');
+  assert.equal(getCatalogAction('relai_validate', { route: 'http://127.0.0.1/' })?.action, 'http');
+  assert.equal(getCatalogAction('relai_changes', {})?.action, 'diff');
+  assert.equal(getCatalogAction('relai_process', {})?.action, 'list');
+  assert.equal(getCatalogAction('relai_publish', { message: 'catalog inference' })?.action, 'commit');
+  assert.throws(() => getCatalogAction('relai_publish', {}), /Unsupported action '\(missing\)'/);
   assert.throws(() => getCatalogAction('relai_work', { action: 'unknown' }), /Unsupported action/);
   console.log(`Canonical ${catalogTools.length}-tool, ${catalog.length}-action catalog execution and policy parity passed.`);
   
@@ -2095,6 +2162,12 @@ async function case_tool_action_contract_unit() {
       const internalEditTransportField = entry.publicTool === 'relai_edit' && ['stage', 'writeId'].includes(field);
       if (internalEditTransportField) {
         assert.equal(advertisedSchema?.properties?.[field], undefined, `${entry.publicTool}:${entry.action} internal transport field ${field} must stay out of public discovery`);
+        continue;
+      }
+      const hiddenIndependent = field === 'independent'
+        && ['relai_work', 'relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect'].includes(entry.publicTool);
+      if (hiddenIndependent) {
+        assert.equal(advertisedSchema?.properties?.[field], undefined, `${entry.publicTool}:${entry.action} read/lifecycle discovery must hide optional independent`);
         continue;
       }
       assert.ok(advertisedSchema?.properties?.[field], `${entry.publicTool}:${entry.action} executable field ${field} must remain discoverable`);

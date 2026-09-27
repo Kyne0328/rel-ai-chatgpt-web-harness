@@ -35,9 +35,11 @@ const RETENTION_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const LEGACY_MIGRATION_KEY = 'local_analytics_legacy_migrated_v1';
 const retentionPruneTimes = new Map<string, number>();
 const retentionPruneTimers = new Map<string, { timer: NodeJS.Timeout; config: AnalyticsConfig }>();
+const ANALYTICS_WRITE_IDLE_CLOSE_MS = 5_000;
 const analyticsWriteDatabases = new Map<string, StateDatabase>();
-const analyticsWriteCloseScheduled = new Set<string>();
+const analyticsWriteCloseTimers = new Map<string, NodeJS.Timeout>();
 const analyticsCounterConfigs = new Map<string, AnalyticsConfig>();
+const pendingAnalyticsWrites = new Set<Promise<void>>();
 
 interface AnalyticsConfig extends TelemetryConfig {
   stateDir?: string;
@@ -144,24 +146,6 @@ interface AnalyticsDocument {
 
 type StateDatabase = DatabaseSync;
 
-const NORMALIZED_ANALYTICS_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS analytics_counter_state(
-  month TEXT PRIMARY KEY,
-  source_updated_at_ms INTEGER NOT NULL,
-  dirty INTEGER NOT NULL
-) STRICT;
-CREATE TABLE IF NOT EXISTS analytics_counter_rows(
-  month TEXT NOT NULL,
-  bucket TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  dimension_key TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  PRIMARY KEY(month,bucket,kind,dimension_key)
-) STRICT;
-CREATE INDEX IF NOT EXISTS analytics_counter_rows_month_idx
-  ON analytics_counter_rows(month,bucket,kind);
-`;
-
 interface PruneOptions {
   retentionDays?: unknown;
   now?: Date | string | number | null;
@@ -194,6 +178,43 @@ function recordLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOu
     return true;
   } catch {
     return false;
+  }
+}
+
+function scheduleLocalAnalyticsWrite(write: () => void): void {
+  let resolvePending: (() => void) | undefined;
+  const pending = new Promise<void>(resolve => { resolvePending = resolve; });
+  pendingAnalyticsWrites.add(pending);
+  setImmediate(() => {
+    try { write(); }
+    finally {
+      pendingAnalyticsWrites.delete(pending);
+      resolvePending?.();
+    }
+  });
+}
+
+function scheduleLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOutcomeEvent = {}): void {
+  scheduleLocalAnalyticsWrite(() => { recordLocalToolOutcome(config, event); });
+}
+
+function scheduleLocalTaskCompletion(
+  config: AnalyticsConfig = {},
+  event: { workspace?: unknown; taskIntent?: unknown; at?: unknown } = {}
+): void {
+  scheduleLocalAnalyticsWrite(() => { recordLocalTaskCompletion(config, event); });
+}
+
+function scheduleLocalTransportEvent(
+  config: AnalyticsConfig = {},
+  event: { event?: unknown; at?: unknown; count?: unknown } = {}
+): void {
+  scheduleLocalAnalyticsWrite(() => { recordLocalTransportEvent(config, event); });
+}
+
+async function drainScheduledAnalyticsWrites(): Promise<void> {
+  while (pendingAnalyticsWrites.size > 0) {
+    await Promise.allSettled([...pendingAnalyticsWrites]);
   }
 }
 
@@ -381,8 +402,7 @@ function readDocumentFromDatabase(db: StateDatabase, month: string): AnalyticsDo
   }
 }
 
-function ensureNormalizedAnalyticsSchema(db: StateDatabase, config?: AnalyticsConfig): void {
-  db.exec(NORMALIZED_ANALYTICS_SCHEMA_SQL);
+function ensureNormalizedAnalyticsSchema(_db: StateDatabase, config?: AnalyticsConfig): void {
   if (config) analyticsCounterConfigs.set(statePath(config, 'durable-state.sqlite'), { ...config });
 }
 
@@ -539,6 +559,7 @@ function migrateLegacyLocalAnalyticsInDatabase(db: StateDatabase, config: Analyt
 }
 
 async function flushLocalAnalytics(config?: AnalyticsConfig): Promise<{ ok: true; failed: 0; pending: 0 }> {
+  await drainScheduledAnalyticsWrites();
   closeAnalyticsWriteDatabases(config);
   materializeNormalizedAnalytics(config);
   const pending = [...retentionPruneTimers.values()];
@@ -601,15 +622,22 @@ function withAnalyticsWriteDatabase<TResult>(config: AnalyticsConfig, operation:
 }
 
 function scheduleAnalyticsWriteDatabaseClose(key: string): void {
-  if (analyticsWriteCloseScheduled.has(key)) return;
-  analyticsWriteCloseScheduled.add(key);
-  queueMicrotask(() => {
-    analyticsWriteCloseScheduled.delete(key);
+  const current = analyticsWriteCloseTimers.get(key);
+  if (current) clearTimeout(current);
+  const timer = setTimeout(() => {
+    analyticsWriteCloseTimers.delete(key);
     closeAnalyticsWriteDatabase(key);
-  });
+  }, ANALYTICS_WRITE_IDLE_CLOSE_MS);
+  timer.unref?.();
+  analyticsWriteCloseTimers.set(key, timer);
 }
 
 function closeAnalyticsWriteDatabase(key: string): void {
+  const timer = analyticsWriteCloseTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    analyticsWriteCloseTimers.delete(key);
+  }
   const db = analyticsWriteDatabases.get(key);
   if (!db) return;
   analyticsWriteDatabases.delete(key);
@@ -1309,6 +1337,9 @@ export {
   recordLocalTaskCompletion,
   recordLocalToolOutcome,
   recordLocalTransportEvent,
+  scheduleLocalTaskCompletion,
+  scheduleLocalToolOutcome,
+  scheduleLocalTransportEvent,
   removeWorkspaceLocalAnalytics,
   readLocalUsageSnapshot,
   readLocalUsageSnapshotAsync

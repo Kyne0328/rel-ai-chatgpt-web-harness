@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import axe from 'axe-core';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -17,6 +18,8 @@ const projectCreateWorkspace = path.join(temp, 'workspace-created');
 const configPath = path.join(temp, 'config.json');
 const outputPath = path.join(temp, 'probe.json');
 const screenshotDir = path.join(temp, 'screenshots');
+const axePath = path.join(temp, 'axe-core.js');
+fs.writeFileSync(axePath, axe.source, 'utf8');
 const token = 'browser-acceptance-token';
 const port = await availablePort();
 fs.mkdirSync(workspace, { recursive: true });
@@ -47,6 +50,7 @@ try {
   await waitForHealth(`http://127.0.0.1:${port}/health`);
   const electronBinary = process.env.RELAI_ELECTRON_BINARY || path.resolve(root, 'electron', 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron');
   assert.equal(fs.existsSync(electronBinary), true, `Electron binary not found at ${electronBinary}`);
+  assert.equal(fs.existsSync(axePath), true, `axe-core probe source not found at ${axePath}`);
   const probe = path.join(root, 'test', 'fixtures', 'electron-dashboard-probe');
   const target = `http://127.0.0.1:${port}/dashboard?token=${encodeURIComponent(token)}#home`;
   child = spawn(electronBinary, [
@@ -63,7 +67,8 @@ try {
       RELAI_PROBE_OUTPUT_PATH: outputPath,
       RELAI_PROBE_SCREENSHOT_DIR: screenshotDir,
       RELAI_PROBE_CREATE_WORKSPACE_PATH: projectCreateWorkspace,
-      RELAI_PROBE_DASHBOARD_DELAY_MS: '900'
+      RELAI_PROBE_DASHBOARD_DELAY_MS: '900',
+      RELAI_PROBE_AXE_PATH: axePath
     })
   });
   let stdout = '';
@@ -126,6 +131,10 @@ try {
   assert.equal(result.modalInteractions.routeChangeCancelPreserved, true, JSON.stringify(result.modalInteractions));
   assert.equal(result.modalInteractions.routeChangeConfirmNavigated, true, JSON.stringify(result.modalInteractions));
   assert.equal(result.modalInteractions.sharedCloseVisible, true, JSON.stringify(result.modalInteractions));
+  assert.ok(result.modalInteractions.modalGeometry, JSON.stringify(result.modalInteractions));
+  assert.ok(result.modalInteractions.modalGeometry.left >= 0 && result.modalInteractions.modalGeometry.top >= 0, `Modal must stay fully inside the viewport: ${JSON.stringify(result.modalInteractions.modalGeometry)}`);
+  assert.ok(result.modalInteractions.modalGeometry.right <= result.modalInteractions.modalGeometry.viewportWidth + 1 && result.modalInteractions.modalGeometry.bottom <= result.modalInteractions.modalGeometry.viewportHeight + 1, `Modal must stay fully inside the viewport: ${JSON.stringify(result.modalInteractions.modalGeometry)}`);
+  assert.ok(result.modalInteractions.modalGeometry.centerErrorX <= 2 && result.modalInteractions.modalGeometry.centerErrorY <= 2, `Modal must stay centered in the visual viewport: ${JSON.stringify(result.modalInteractions.modalGeometry)}`);
   assert.deepEqual(result.projectPersistence, {
     created: true,
     edited: true,
@@ -146,6 +155,7 @@ try {
   assert.ok(result.taskInteraction.detailText.length > 100);
   assert.equal(result.taskInteraction.workSessionId, true);
   assert.ok(result.taskInteraction.eventLinks > 0, JSON.stringify(result.taskInteraction));
+  assert.equal(result.clock.changed, true, `the live task clock did not advance without interaction: ${JSON.stringify(result.clock)}`);
   assert.notEqual(result.keyboard.afterFocus.tag, 'BODY');
   assert.equal(result.activityInteraction.expanded, true);
   assert.equal(result.activityInteraction.selectedRow, true);
@@ -209,6 +219,11 @@ try {
   assert.ok(result.responsive.find(item => item.name === 'css-320-zoom-200').viewportWidth <= 320);
   assert.ok(result.responsive.find(item => item.name === 'css-375-zoom-200').viewportWidth <= 375);
   assert.equal(result.responsive.find(item => item.name === 'zoom-400').zoomFactor, 4);
+  assert.equal(result.accessibility.length, 3, JSON.stringify(result.accessibility));
+  const seriousAccessibilityViolations = result.accessibility.flatMap(audit => audit.violations
+    .filter(violation => ['critical', 'serious'].includes(violation.impact))
+    .map(violation => ({ route: audit.route, ...violation })));
+  assert.deepEqual(seriousAccessibilityViolations, [], `Critical/serious axe violations: ${JSON.stringify(seriousAccessibilityViolations)}`);
   assert.equal(result.failures.length, 0, JSON.stringify(result.failures));
   await closePromise;
   console.log(`Real Electron Chromium dashboard acceptance passed across ${result.responsive.length} viewport scenarios; temporary screenshots were reviewed and removed.`);

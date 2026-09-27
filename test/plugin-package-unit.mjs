@@ -43,7 +43,7 @@ try {
     ...expectedSkills.flatMap(skill => [`skills/${skill}/SKILL.md`, `skills/${skill}/agents/openai.yaml`]),
     'skills/rel-ai-workflow/references/workflows.md', 'skills/rel-ai-workflow/references/safety.md',
     'src/mcp/appUi.js', 'src/mcp/localDeveloperMode.js',
-    'bin/rel-ai-mcp.js', 'package.json'
+    'bin/rel-ai-mcp.js', 'bin/relai-extension.js', 'package.json'
   ];
   const packedFiles = new Set(metadata.files.map(item => item.path.replaceAll('\\', '/')));
   for (const relative of expected) assert.ok(packedFiles.has(relative), `artifact missing ${relative}`);

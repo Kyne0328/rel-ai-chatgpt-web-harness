@@ -81,6 +81,9 @@ async function case_skill_behavior_evaluator_unit() {
     skills: [...item.skills],
     firstTool: item.firstTool,
     firstAction: item.firstAction,
+    calls: item.requiresPlan && item.firstTool
+      ? [{ tool: item.firstTool, action: item.firstAction }]
+      : [],
     tools: item.firstTool ? [item.firstTool] : []
   }));
   

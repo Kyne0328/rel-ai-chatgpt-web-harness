@@ -29,6 +29,8 @@ function handleStaticAsset(ctx: HttpRouteContext): void {
     filePath = resolvePackagePath('src', 'ui', safePath.slice(4));
   } else if (safePath.startsWith('/public/ui/')) {
     filePath = resolvePackagePath('src', 'ui', safePath.slice(11));
+  } else if (safePath.startsWith('/assets/')) {
+    filePath = resolvePackagePath('public', 'assets', safePath.slice('/assets/'.length));
   } else if (safePath.startsWith('/vendor/monaco/')) {
     filePath = resolvePackagePath('node_modules', 'monaco-editor', 'min', 'vs', safePath.slice('/vendor/monaco/'.length));
   } else {

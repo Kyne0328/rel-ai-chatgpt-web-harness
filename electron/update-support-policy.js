@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { importResourceModule } from './resource-path.js';
-import { compareVersions, isStableVersion } from './update-version.js';
+import { compareUpdateVersions, compareVersions, isStableVersion, isUpdateVersion } from './update-version.js';
 
 const { readJsonFile, readJsonFileAsync, writeJsonAtomicAsync } = await importResourceModule('src/durableState.ts');
 
@@ -8,19 +8,9 @@ const DEFAULT_SUPPORT_POLICY_URL = 'https://raw.githubusercontent.com/Kyne0328/r
 const SUPPORT_POLICY_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const SUPPORT_POLICY_SCHEMA_VERSION = 1;
 const CACHE_SCHEMA_VERSION = 1;
-const ALLOWED_POLICY_KEYS = new Set([
-  'schemaVersion',
-  'minimumSupportedVersion',
-  'minimumRecommendedVersion',
-  'enforceAfter',
-  'emergencyBlockedVersions',
-  'message',
-  'policyExpiresAt'
-]);
 
 function normalizeSupportPolicy(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  if (Object.keys(value).some(key => !ALLOWED_POLICY_KEYS.has(key))) return null;
   if (Number(value.schemaVersion) !== SUPPORT_POLICY_SCHEMA_VERSION) return null;
   const minimumSupportedVersion = cleanStableVersion(value.minimumSupportedVersion);
   const minimumRecommendedVersion = cleanStableVersion(value.minimumRecommendedVersion);
@@ -44,7 +34,7 @@ function normalizeSupportPolicy(value) {
 }
 
 function assessSupportPolicy(currentVersion, policy, now = Date.now()) {
-  const version = cleanStableVersion(currentVersion);
+  const version = cleanComparableVersion(currentVersion);
   const normalized = normalizeSupportPolicy(policy);
   const nowMs = Number(typeof now === 'function' ? now() : now);
   if (!version || !normalized || !Number.isFinite(nowMs)) return unavailableStatus(version);
@@ -54,10 +44,10 @@ function assessSupportPolicy(currentVersion, policy, now = Date.now()) {
   let state = 'current';
   if (normalized.emergencyBlockedVersions.includes(version)) {
     state = 'emergency_blocked';
-  } else if (compareVersions(version, normalized.minimumSupportedVersion) < 0) {
+  } else if (compareUpdateVersions(version, normalized.minimumSupportedVersion, { allowPrerelease: true }) < 0) {
     const enforceAt = normalized.enforceAfter ? Date.parse(normalized.enforceAfter) : Number.NaN;
     state = Number.isFinite(enforceAt) && nowMs >= enforceAt ? 'required' : 'deprecated';
-  } else if (compareVersions(version, normalized.minimumRecommendedVersion) < 0) {
+  } else if (compareUpdateVersions(version, normalized.minimumRecommendedVersion, { allowPrerelease: true }) < 0) {
     state = 'recommended';
   }
 
@@ -186,7 +176,7 @@ function normalizePolicyStatus(value = {}, currentVersion = '') {
   const requiresUpdate = state === 'required' || state === 'emergency_blocked';
   return {
     state,
-    currentVersion: cleanStableVersion(value.currentVersion || currentVersion) || '',
+    currentVersion: cleanComparableVersion(value.currentVersion || currentVersion) || '',
     source: ['remote', 'cache', 'none'].includes(value.source) ? value.source : 'none',
     minimumSupportedVersion: cleanStableVersion(value.minimumSupportedVersion) || '',
     minimumRecommendedVersion: cleanStableVersion(value.minimumRecommendedVersion) || '',
@@ -206,7 +196,7 @@ function normalizePolicyStatus(value = {}, currentVersion = '') {
 function unavailableStatus(currentVersion = '', policy = null) {
   return {
     state: 'unavailable',
-    currentVersion: cleanStableVersion(currentVersion) || '',
+    currentVersion: cleanComparableVersion(currentVersion) || '',
     minimumSupportedVersion: policy?.minimumSupportedVersion || '',
     minimumRecommendedVersion: policy?.minimumRecommendedVersion || '',
     enforceAfter: policy?.enforceAfter || null,
@@ -242,6 +232,11 @@ function normalizeBlockedVersions(value) {
 function cleanStableVersion(value) {
   const version = String(value || '').trim();
   return isStableVersion(version) ? version : '';
+}
+
+function cleanComparableVersion(value) {
+  const version = String(value || '').trim();
+  return isUpdateVersion(version, { allowPrerelease: true }) ? version : '';
 }
 
 function normalizeOptionalIso(value) {

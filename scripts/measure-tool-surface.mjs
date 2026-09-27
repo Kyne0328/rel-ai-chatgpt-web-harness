@@ -3,13 +3,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { connectorInstructions } from '../src/mcpServer.js';
-import { compactForConnector } from '../src/tools/connector.js';
+import { compactForConnector, serializeConnectorResult } from '../src/tools/connector.js';
+import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { getPublicToolSchemas } from '../src/tools/schema.js';
 import { slimCompactPublicResult } from '../src/tools/compactResult.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const baseline = Object.freeze({ publicTools: 30, discoverySchemaBytes: 30524, estimatedDiscoveryTokens: 7631, globalInstructionBytes: 1471 });
-const budget = Object.freeze({ discoverySchemaBytes: 32000, globalInstructionBytes: 1200 });
+const budget = Object.freeze({ discoverySchemaBytes: 30000, globalInstructionBytes: 1200 });
 
 function measure() {
   const config = { workspaces: {} };
@@ -35,14 +36,23 @@ const surface = measure();
 const representativeResult = {
   ok: true, workspace: 'repo', work_id: '00000000-0000-4000-8000-000000000000', status: 'planning',
   identity: 'work_session', workspaceBinding: { alias: 'repo' }, title: 'Unified plugin',
-  objective: 'Implement the unified MCP surface.', nextAction: 'Use the bootstrap context.',
+  objective: 'Implement the unified MCP surface.',
+  plan: { revision: 1, steps: [{ id: 'goal', title: 'Implement the unified MCP surface', status: 'in_progress' }] },
+  nextAction: 'Use the bootstrap context.',
   bootstrap: { mode: 'compact', files: ['README.md', 'src/index.js'], hints: [], skipped: [] }
 };
 const representativeCompactResult = slimCompactPublicResult('relai_work', 'begin', representativeResult);
-const execSuccess = compactForConnector('relai_exec', {
-  ok: true, workspace: 'repo', command: 'node --check src/index.js', cwd: '.', shell: 'PowerShell 7',
+const execArgs = {
+  workspace: 'repo', work_id: '00000000-0000-4000-8000-000000000000', command: 'node --check src/index.js'
+};
+const execInternal = {
+  ok: true, executed: true, commandSucceeded: true, workspace: 'repo', command: execArgs.command, cwd: '.', shell: 'PowerShell 7',
   exitCode: 0, durationMs: 50, stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0,
   stdoutTruncated: false, stderrTruncated: false, timedOut: false, changedFiles: [], changedFilesTruncated: false
+};
+const execBeforeEchoPruning = compactForConnector(OP.EXEC, execInternal, execArgs);
+const execSuccess = serializeConnectorResult({
+  publicName: 'relai_exec', action: '', operationName: OP.EXEC, value: execInternal, args: execArgs, workId: execArgs.work_id
 });
 const snapshot = compactForConnector('snapshot', {
   ok: true, workspace: 'repo', fileCount: 2000,
@@ -57,6 +67,7 @@ const report = {
   resultBudgets: {
     workBeginBefore: bytes(representativeResult),
     workBeginAfter: bytes(representativeCompactResult),
+    execBeforeEchoPruning: bytes(execBeforeEchoPruning),
     execSuccess: bytes(execSuccess),
     boundedSnapshot: bytes(snapshot)
   },
@@ -71,6 +82,7 @@ if (surface.publicTools <= 0) throw new Error('The public MCP surface must expos
 if (surface.discoverySchemaBytes <= 0) throw new Error('Discovery schema measurement must be non-empty.');
 if (surface.globalInstructionBytes <= 0) throw new Error('Global connector instructions must be non-empty.');
 if (report.resultBudgets.workBeginAfter >= report.resultBudgets.workBeginBefore) throw new Error('Compact work begin result did not shrink.');
+if (report.resultBudgets.execSuccess >= report.resultBudgets.execBeforeEchoPruning) throw new Error('Routine exec success still echoes caller-owned arguments.');
 
 console.log(JSON.stringify(report, null, 2));
 

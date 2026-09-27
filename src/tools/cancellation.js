@@ -71,7 +71,7 @@ async function cancelTask(config, args = {}) {
     : null;
 
   const session = readTaskHistorySession(config, taskId);
-  const workspace = String(args.workspace || session?.workspace || '').trim();
+  const workspace = String(session?.workspace || '').trim();
   if (session?.status === 'cancelled') {
     if (workspace) clearSessionPolicy(config, workspace, taskId);
     return {

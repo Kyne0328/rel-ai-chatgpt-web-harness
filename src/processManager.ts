@@ -8,7 +8,7 @@ import { createManagedProcessList, type ManagedProcessDto, type ProcessState } f
 import { readJsonFile, writeJsonAtomic, writeJsonAtomicAsync } from './durableState.ts';
 import { normalizeExecutionInvocation, resolveCommandCwd, normalizeCommandEnv } from './executionInvocation.ts';
 import { redactCommandForAudit } from './commandDisplay.ts';
-import { isProcessTreeAlive, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
+import { isProcessTreeAlive, readProcessCreationIdentity, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
 import { createHttpTaskPrincipal, principalFingerprint } from './mcp/principal.ts';
@@ -142,6 +142,8 @@ interface ManagedProcessRecord extends GenericRecord {
   signal: string;
   error?: string;
   pid?: number | null;
+  processCreationIdentity: string;
+  restartIdentityVerified: boolean;
   stdoutBytes: number;
   stderrBytes: number;
   stdoutDroppedBytes: number;
@@ -171,6 +173,9 @@ interface ManagedProcessRecord extends GenericRecord {
   discarded: boolean;
   hostResourceRelease: (() => void) | null;
   queueWaitMs: number;
+  lastPtyInputAtMs: number;
+  lastPtyOutputAtMs: number;
+  idleRetireTimer: NodeJS.Timeout | null;
 }
 
 interface ProcessSnapshotOptions {
@@ -225,7 +230,7 @@ interface LogRange {
   readonly base64?: string;
 }
 
-const PROCESS_SCHEMA_VERSION = 3;
+const PROCESS_SCHEMA_VERSION = 4;
 const RUNTIME_ID = crypto.randomUUID();
 const RECENT_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_LOG_BYTES = 16 * 1024 * 1024;
@@ -239,6 +244,8 @@ const LOG_FLUSH_DELAY_MS = 10;
 const LOG_FLUSH_MAX_BYTES = 64 * 1024;
 const LOG_PENDING_HIGH_WATER_BYTES = 1024 * 1024;
 const LOG_PENDING_LOW_WATER_BYTES = 256 * 1024;
+const DEFAULT_INTERACTIVE_PTY_IDLE_RETIRE_MS = 60_000;
+const CAPACITY_PRESSURE_PTY_IDLE_MS = 15_000;
 const ACTIVE_STATUSES = Object.freeze({ has: isActiveProcessStatus });
 const TERMINAL_STATUSES = Object.freeze({ has: isTerminalProcessStatus });
 const processes = new Map<string, ManagedProcessRecord>();
@@ -359,6 +366,8 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     stderrPath,
     environmentKeys,
     pid: null,
+    processCreationIdentity: '',
+    restartIdentityVerified: true,
     child: null,
     ptyProcess: null,
     pty,
@@ -378,7 +387,10 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     persistenceFailureHandled: false,
     discarded: false,
     hostResourceRelease: null,
-    queueWaitMs: 0
+    queueWaitMs: 0,
+    lastPtyInputAtMs: Date.now(),
+    lastPtyOutputAtMs: Date.now(),
+    idleRetireTimer: null
   };
 
   try {
@@ -411,10 +423,24 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     try {
       let resourceLease: HostResourceLease;
       try {
+        await retireIdleInteractivePtysForCapacity(config);
         resourceLease = await acquireHostResource('persistent', workspace.alias, { signal: startupSignal });
       } catch (error) {
         if (errorCode(error) === 'HOST_RESOURCE_ABORTED') {
           throw cancellationError('Managed process startup was cancelled while waiting for host capacity.');
+        }
+        if (errorCode(error) === 'HOST_RESOURCE_QUEUE_TIMEOUT') {
+          const stats = hostResourceStats().persistent;
+          throw Object.assign(
+            new Error(`Persistent process capacity remained full while starting '${workspace.alias}'. Stop a persistent process and retry.`),
+            {
+              code: 'HOST_PROCESS_CAPACITY_EXHAUSTED',
+              retryable: true,
+              active: Number(stats?.active || 0),
+              limit: Number(stats?.limit || HOST_PERSISTENT_PROCESS_LIMIT),
+              queued: Number(stats?.queued || 0)
+            }
+          );
         }
         throw error;
       }
@@ -436,7 +462,11 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         record.pid = ptyProcess.pid || null;
         record.status = 'running';
         record.ptyExitPromise = new Promise<PtyExitEvent>(resolve => { record.resolvePtyExit = resolve; });
-        ptyProcess.onData(data => appendLog(config, record, 'stdout', data));
+        ptyProcess.onData(data => {
+          record.lastPtyOutputAtMs = Date.now();
+          appendLog(config, record, 'stdout', data);
+          scheduleInteractivePtyRetirement(config, record);
+        });
         ptyProcess.onExit(event => {
           record.resolvePtyExit?.(event);
           finishRecord(config, record, {
@@ -517,6 +547,17 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     if (initial.type === 'closed') {
       await cleanupFailedStartup(config, record);
       throw new Error(`Managed process exited during startup with code ${initial.code ?? -1}.`);
+    }
+    if (record.pid) {
+      record.processCreationIdentity = await readProcessCreationIdentity(record.pid);
+      if (record.processCreationIdentity) {
+        try {
+          persistMetadata(config, record);
+        } catch (error) {
+          await cleanupFailedStartup(config, record);
+          throw new Error(`Could not persist managed process creation identity: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        }
+      }
     }
 
     if (invocation.input !== undefined) {
@@ -824,6 +865,8 @@ async function writeManagedProcess(config: ManagedProcessConfig, args: ManagedPr
     if (bytes > 1024 * 1024) throw new Error('Process input exceeds 1 MiB.');
     if (record.pty) {
       if (!record.ptyProcess) throw new Error(`Process ${record.processId} does not have writable PTY input.`);
+      record.lastPtyInputAtMs = Date.now();
+      scheduleInteractivePtyRetirement(config, record);
       record.ptyProcess.write(input);
     } else {
       const stream = record.child?.stdin;
@@ -848,8 +891,14 @@ async function writeManagedProcess(config: ManagedProcessConfig, args: ManagedPr
 async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedProcessArgs = {}, context: ManagedProcessContext = {}) {
   const record = requireProcess(config, args.processId);
   assertProcessAccess(config, record, args, context, { requireSession: false });
-  const duplicate = TERMINAL_STATUSES.has(record.status);
-  if (!duplicate) {
+  let duplicate = TERMINAL_STATUSES.has(record.status);
+  if (!duplicate && record.status === 'orphaned' && record.runtimeId !== RUNTIME_ID) {
+    const identity = await verifyRestoredProcessIdentity(config, record);
+    if (identity === 'mismatch') throw restoredProcessIdentityError(record, identity);
+    if (identity === 'unverified') throw restoredProcessIdentityError(record, identity);
+    if (identity === 'dead') duplicate = false;
+  }
+  if (!duplicate && !TERMINAL_STATUSES.has(record.status)) {
     await stopRecordInternal(config, record, {
       graceMs: clampNumber(args.graceMs, 0, 30000, DEFAULT_STOP_GRACE_MS)
     });
@@ -1142,6 +1191,7 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
 
 function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord, fields: Partial<ManagedProcessRecord>): void {
   if (TERMINAL_STATUSES.has(record.status) && record.endedAt) return;
+  clearInteractivePtyRetirement(record);
   clearScheduledPersist(record);
   resumeLogSources(record);
   releaseManagedProcessResource(record);
@@ -1158,6 +1208,83 @@ function releaseManagedProcessResource(record: ManagedProcessRecord): void {
   const release = record?.hostResourceRelease;
   record.hostResourceRelease = null;
   try { release?.(); } catch {}
+}
+
+function interactivePtyIdleRetireMs(): number {
+  const configured = Number(process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS);
+  if (Number.isFinite(configured) && configured >= 1000) return Math.floor(configured);
+  return DEFAULT_INTERACTIVE_PTY_IDLE_RETIRE_MS;
+}
+
+function clearInteractivePtyRetirement(record: ManagedProcessRecord): void {
+  if (!record.idleRetireTimer) return;
+  clearTimeout(record.idleRetireTimer);
+  record.idleRetireTimer = null;
+}
+
+function scheduleInteractivePtyRetirement(config: ManagedProcessConfig, record: ManagedProcessRecord): void {
+  clearInteractivePtyRetirement(record);
+  if (!isRetirableInteractivePty(record)) return;
+  const timeoutMs = interactivePtyIdleRetireMs();
+  record.idleRetireTimer = setTimeout(() => {
+    record.idleRetireTimer = null;
+    if (!isRetirableInteractivePty(record)) return;
+    const lastActivityAtMs = Math.max(record.lastPtyInputAtMs, record.lastPtyOutputAtMs);
+    const remainingMs = timeoutMs - Math.max(0, Date.now() - lastActivityAtMs);
+    if (remainingMs > 0) {
+      scheduleInteractivePtyRetirement(config, record);
+      return;
+    }
+    if (record.lastPtyOutputAtMs < record.lastPtyInputAtMs || !interactiveShellIsAtPrompt(record)) return;
+    void stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS }).catch(() => {});
+  }, timeoutMs);
+  record.idleRetireTimer.unref?.();
+}
+
+function isRetirableInteractivePty(record: ManagedProcessRecord): boolean {
+  return record.runtimeId === RUNTIME_ID
+    && record.kind === 'interactive'
+    && record.pty === true
+    && record.status === 'running'
+    && Boolean(record.ptyProcess);
+}
+
+function interactiveShellIsAtPrompt(record: ManagedProcessRecord): boolean {
+  const command = String(record.commandSummary || record.command || record.label || '');
+  const isPowerShell = /(?:^|[\\/\s"'])(?:powershell|pwsh)(?:\.exe)?(?:[\s"']|$)/i.test(command);
+  const isCmd = /(?:^|[\\/\s"'])cmd(?:\.exe)?(?:[\s"']|$)/i.test(command);
+  if (!isPowerShell && !isCmd) return false;
+  const tail = stripTerminalControls(readLogTail(record, 'stdout', 4096)).trimEnd();
+  const line = tail.split('\n').at(-1)?.trimEnd() || '';
+  if (isPowerShell) return /^PS\s+[^\r\n>]{1,300}>$/.test(line);
+  return /^(?:[A-Za-z]:\\|\\\\)[^\r\n>]{0,300}>$/.test(line);
+}
+
+function stripTerminalControls(value: unknown): string {
+  return String(value || '')
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r/g, '');
+}
+
+async function retireIdleInteractivePtysForCapacity(config: ManagedProcessConfig): Promise<number> {
+  const stats = hostResourceStats().persistent;
+  if (Number(stats?.active || 0) < Number(stats?.limit || HOST_PERSISTENT_PROCESS_LIMIT)) return 0;
+  const now = Date.now();
+  const candidates = [...processes.values()]
+    .filter(record => isRetirableInteractivePty(record)
+      && record.lastPtyOutputAtMs >= record.lastPtyInputAtMs
+      && now - Math.max(record.lastPtyInputAtMs, record.lastPtyOutputAtMs) >= CAPACITY_PRESSURE_PTY_IDLE_MS
+      && interactiveShellIsAtPrompt(record))
+    .sort((left, right) => Math.max(left.lastPtyInputAtMs, left.lastPtyOutputAtMs) - Math.max(right.lastPtyInputAtMs, right.lastPtyOutputAtMs));
+  let retired = 0;
+  for (const record of candidates) {
+    await stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS }).catch(() => null);
+    if (TERMINAL_STATUSES.has(record.status)) retired += 1;
+    const current = hostResourceStats().persistent;
+    if (Number(current?.active || 0) < Number(current?.limit || HOST_PERSISTENT_PROCESS_LIMIT)) break;
+  }
+  return retired;
 }
 
 function requireProcess(config: ManagedProcessConfig, processId: unknown): ManagedProcessRecord {
@@ -1225,6 +1352,7 @@ function metadataRecord(record: ManagedProcessRecord): GenericRecord {
     signal: record.signal || '',
     error: record.error || '',
     pid: record.pid || null,
+    processCreationIdentity: record.processCreationIdentity || '',
     stdoutBytes: Number(record.stdoutBytes || 0),
     stderrBytes: Number(record.stderrBytes || 0),
     stdoutDroppedBytes: Number(record.stdoutDroppedBytes || 0),
@@ -1321,6 +1449,8 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       signal: String(metadata.signal || ''),
       error: String(metadata.error || ''),
       pid: Number.isSafeInteger(Number(metadata.pid)) ? Number(metadata.pid) : null,
+      processCreationIdentity: String(metadata.processCreationIdentity || ''),
+      restartIdentityVerified: String(metadata.runtimeId || '') === RUNTIME_ID,
       stdoutBytes,
       stderrBytes,
       stdoutDroppedBytes: Number(metadata.stdoutDroppedBytes || 0),
@@ -1353,7 +1483,10 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       persistenceFailureHandled: false,
       discarded: false,
       hostResourceRelease: null,
-      queueWaitMs: 0
+      queueWaitMs: 0,
+      lastPtyInputAtMs: 0,
+      lastPtyOutputAtMs: 0,
+      idleRetireTimer: null
     };
   } catch {
     return null;
@@ -1371,15 +1504,11 @@ async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProc
   const restored = [...processes.values()].filter(record => record.status === 'orphaned' && record.runtimeId !== RUNTIME_ID);
   const live = [];
   for (const record of restored) {
-    if (record.pid && isProcessTreeAlive(record.pid)) {
+    const identity = await verifyRestoredProcessIdentity(config, record);
+    if (identity === 'verified') {
       live.push(record);
       continue;
     }
-    releaseManagedProcessResource(record);
-    record.status = 'stopped';
-    record.endedAt = record.endedAt || new Date().toISOString();
-    record.signal = record.signal || 'unobserved_restart';
-    try { persistMetadata(config, record); } catch {}
   }
 
   let available = Math.max(0, HOST_PERSISTENT_PROCESS_LIMIT - Number(hostResourceStats().persistent?.active || 0));
@@ -1397,7 +1526,12 @@ async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProc
   if (live.length >= HOST_PERSISTENT_PROCESS_LIMIT) {
     throw Object.assign(
       new Error(`Persistent process capacity is occupied by ${live.length} process(es) that survived a Rel.AI restart. Stop orphaned processes before starting another persistent process.`),
-      { code: 'HOST_PROCESS_CAPACITY_EXHAUSTED', retryable: true }
+      {
+        code: 'HOST_PROCESS_CAPACITY_EXHAUSTED',
+        retryable: true,
+        active: live.length,
+        limit: HOST_PERSISTENT_PROCESS_LIMIT
+      }
     );
   }
 }
@@ -1407,7 +1541,9 @@ function reconcileRestoredRecord(config: ManagedProcessConfig, record: ManagedPr
   if (!isActiveProcessStatus(record.status) && record.status !== 'orphaned') return record;
   if (record.pid && isProcessTreeAlive(record.pid)) {
     record.status = 'orphaned';
-    record.error = record.error || 'Process survived a Rel.AI restart; live pipes and stdin cannot be reattached.';
+    if (!record.restartIdentityVerified) {
+      record.error = 'Process PID is live after a Rel.AI restart; creation identity must be verified before recovery or termination.';
+    }
   } else {
     record.status = 'stopped';
     record.endedAt = record.endedAt || new Date().toISOString();
@@ -1415,6 +1551,64 @@ function reconcileRestoredRecord(config: ManagedProcessConfig, record: ManagedPr
   }
   try { persistMetadata(config, record); } catch {}
   return record;
+}
+
+async function verifyRestoredProcessIdentity(
+  config: ManagedProcessConfig,
+  record: ManagedProcessRecord
+): Promise<'verified' | 'dead' | 'unverified' | 'mismatch'> {
+  if (record.runtimeId === RUNTIME_ID) {
+    record.restartIdentityVerified = true;
+    return 'verified';
+  }
+  if (record.restartIdentityVerified) return 'verified';
+  if (!record.pid || !isProcessTreeAlive(record.pid)) {
+    releaseManagedProcessResource(record);
+    record.restartIdentityVerified = false;
+    record.status = 'stopped';
+    record.endedAt = record.endedAt || new Date().toISOString();
+    record.signal = record.signal || 'unobserved_restart';
+    try { persistMetadata(config, record); } catch {}
+    return 'dead';
+  }
+  const expected = String(record.processCreationIdentity || '').trim();
+  if (!expected) {
+    record.restartIdentityVerified = false;
+    record.error = 'Restarted process identity is unavailable; refusing to act on a PID that cannot be proven to belong to Rel.AI.';
+    try { persistMetadata(config, record); } catch {}
+    return 'unverified';
+  }
+  const observed = await readProcessCreationIdentity(record.pid);
+  if (!observed) {
+    record.restartIdentityVerified = false;
+    record.error = 'Restarted process creation identity could not be verified; refusing to signal the PID.';
+    try { persistMetadata(config, record); } catch {}
+    return 'unverified';
+  }
+  if (observed !== expected) {
+    releaseManagedProcessResource(record);
+    record.restartIdentityVerified = false;
+    record.error = 'Restarted process PID now belongs to a different OS process; Rel.AI will not signal it.';
+    try { persistMetadata(config, record); } catch {}
+    return 'mismatch';
+  }
+  record.restartIdentityVerified = true;
+  record.error = 'Process survived a Rel.AI restart; OS creation identity was verified, but live pipes and stdin cannot be reattached.';
+  try { persistMetadata(config, record); } catch {}
+  return 'verified';
+}
+
+function restoredProcessIdentityError(record: ManagedProcessRecord, state: 'unverified' | 'mismatch'): Error {
+  return Object.assign(
+    new Error(state === 'mismatch'
+      ? `Managed process ${record.processId} no longer matches its recorded OS process identity; refusing to terminate PID ${record.pid || 0}.`
+      : `Managed process ${record.processId} cannot prove that PID ${record.pid || 0} is the process Rel.AI started; refusing to terminate it.`),
+    {
+      code: state === 'mismatch' ? 'PROCESS_IDENTITY_MISMATCH' : 'PROCESS_IDENTITY_UNVERIFIED',
+      retryable: state === 'unverified',
+      processId: record.processId
+    }
+  );
 }
 
 function hydrateProcessMetadata(config: ManagedProcessConfig): void {
@@ -1504,6 +1698,9 @@ function activeProcessesForWorkSession(config: ManagedProcessConfig, workspaceAl
 
 async function stopAllManagedProcesses(config: ManagedProcessConfig): Promise<{ stopped: number; attempted: number; orphaned: number }> {
   hydrateProcessMetadata(config);
+  await Promise.all([...processes.values()]
+    .filter(record => record.status === 'orphaned' && record.runtimeId !== RUNTIME_ID)
+    .map(record => verifyRestoredProcessIdentity(config, record).catch(() => 'unverified')));
   const active = [...processes.values()].filter(processNeedsTermination);
   const results = await Promise.all(active.map(item => stopManagedProcess(config, {
     processId: item.processId,
@@ -1562,7 +1759,10 @@ async function cleanupFailedStartup(config: ManagedProcessConfig, record: Manage
 
 function processNeedsTermination(record: ManagedProcessRecord): boolean {
   if (ACTIVE_STATUSES.has(record.status)) return true;
-  if (record.status === 'orphaned') return isProcessTreeAlive(record.pid);
+  if (record.status === 'orphaned') {
+    if (record.runtimeId !== RUNTIME_ID && !record.restartIdentityVerified) return false;
+    return isProcessTreeAlive(record.pid);
+  }
   return false;
 }
 

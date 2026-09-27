@@ -8,6 +8,7 @@ import { defineConfig } from 'vite';
 const root = path.dirname(fileURLToPath(import.meta.url));
 const outputRoot = path.join(root, 'public');
 const dashboardEntry = path.join(root, 'src', 'ui', 'react', 'main.js');
+const dashboardCssEntry = path.join(root, 'src', 'ui', 'styles', 'app.css');
 const dashboardSource = path.join(root, 'public', 'dashboard.js');
 const uiRoot = path.join(root, 'src', 'ui');
 const backend = process.env.REL_AI_FRONTEND_BACKEND || 'http://127.0.0.1:3333';
@@ -44,7 +45,7 @@ export default defineConfig({
     target: 'chrome120',
     minify: true,
     sourcemap: false,
-    cssCodeSplit: false,
+    cssCodeSplit: true,
     chunkSizeWarningLimit: 300,
     rollupOptions: {
       input: {
@@ -53,13 +54,18 @@ export default defineConfig({
         // verification. Production HTML loads only dashboard-app.js; the
         // react entry shares chunks via the manifest, not a second script tag.
         dashboardApp: dashboardSource,
-        dashboardReact: dashboardEntry
+        dashboardReact: dashboardEntry,
+        dashboardCss: dashboardCssEntry
       },
       preserveEntrySignatures: 'strict',
       output: {
         entryFileNames: chunk => chunk.name === 'dashboardApp' ? 'dashboard-app.js' : 'dashboard-react.js',
         chunkFileNames: 'dashboard-chunks/[name]-[hash].js',
-        assetFileNames: assetInfo => assetInfo.name?.endsWith('.css') ? 'dashboard.css' : 'dashboard-assets/[name]-[hash][extname]'
+        assetFileNames: assetInfo => {
+          if (assetInfo.name === 'dashboardCss.css') return 'dashboard.css';
+          if (assetInfo.name?.endsWith('.css')) return 'dashboard-chunks/[name]-[hash][extname]';
+          return 'dashboard-assets/[name]-[hash][extname]';
+        }
       }
     }
   }

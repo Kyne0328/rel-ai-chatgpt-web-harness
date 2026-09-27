@@ -6,13 +6,13 @@ const COMPLEMENT = Object.freeze({
 });
 
 const GENERIC_PLATFORM_EVENT_NAMES = Object.freeze([
-  'abort', 'aborted', 'beforeunload', 'blur', 'change', 'click', 'close', 'connect',
-  'connection', 'data', 'domcontentloaded', 'drain', 'end', 'error', 'finish', 'focus',
-  'hashchange', 'input', 'keydown', 'keypress', 'keyup', 'load', 'message', 'mousedown',
-  'mouseenter', 'mouseleave', 'mousemove', 'mouseout', 'mouseover', 'mouseup', 'offline',
-  'online', 'open', 'pointerdown', 'pointermove', 'pointerup', 'popstate', 'ready', 'request',
-  'resize', 'response', 'scroll', 'storage', 'submit', 'timeout', 'touchend', 'touchmove',
-  'touchstart', 'unload', 'visibilitychange'
+  'abort', 'aborted', 'before-input-event', 'beforeunload', 'blur', 'change', 'click', 'close', 'connect',
+  'connection', 'data', 'destroyed', 'did-start-loading', 'did-stop-loading', 'domcontentloaded', 'drain',
+  'end', 'error', 'exit', 'finish', 'focus', 'hashchange', 'input', 'keydown', 'keypress', 'keyup', 'load',
+  'message', 'mousedown', 'mouseenter', 'mouseleave', 'mousemove', 'mouseout', 'mouseover', 'mouseup', 'offline',
+  'online', 'open', 'pointerdown', 'pointermove', 'pointerup', 'popstate', 'ready', 'ready-to-show', 'request',
+  'resize', 'response', 'scroll', 'storage', 'submit', 'timeout', 'touchend', 'touchmove', 'touchstart',
+  'uncaughtexception', 'unload', 'visibilitychange'
 ]);
 const GENERIC_PLATFORM_EVENTS = new Set(GENERIC_PLATFORM_EVENT_NAMES);
 

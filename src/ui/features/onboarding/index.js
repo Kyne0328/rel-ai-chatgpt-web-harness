@@ -16,7 +16,7 @@ export function desktopSetupSteps({
     {
       id: 'connection',
       title: 'Connect this computer',
-      description: 'In OpenAI Platform, copy the Secure MCP Tunnel ID and create a runtime API key. Save both values here.',
+      description: 'Copy the Secure MCP Tunnel ID in OpenAI Platform. Create a runtime API key. Save both values in Rel.AI.',
       href: routeMetadata('settings/connection').href,
       action: 'Set up connection',
       complete: endpointReady,
@@ -25,7 +25,7 @@ export function desktopSetupSteps({
     {
       id: 'chatgpt',
       title: 'Create the Rel.AI connector in ChatGPT',
-      description: 'Open the ChatGPT Plugins + connector form. Use Tunnel + No authentication. Scan the Rel.AI tools.',
+      description: 'Open ChatGPT connector setup. Use Tunnel + No authentication. Scan the Rel.AI tools.',
       action: 'Follow ChatGPT setup',
       actionType: 'guide',
       complete: endpointReady && chatgptReady,
@@ -35,15 +35,15 @@ export function desktopSetupSteps({
       id: 'workspace',
       title: 'Add a project',
       description: 'Choose a project folder and give it a short name.',
-      href: routeMetadata('workspaces').href,
-      action: hasWorkspace ? 'Project added' : 'Add project',
+      href: `${routeMetadata('workspaces').href}?create=1`,
+      action: 'Add project',
       complete: hasWorkspace,
       locked: false
     },
     {
       id: 'first-request',
       title: 'Send your first Rel.AI request',
-      description: 'Open ChatGPT, select Rel.AI MCP, and send the request below to make sure ChatGPT can reach your project.',
+      description: 'Open ChatGPT. Select Rel.AI MCP. Send the request below to confirm that ChatGPT can reach your project.',
       action: 'Copy first request',
       actionType: 'copy',
       complete: requestUnlocked && firstRequestObserved,
@@ -59,7 +59,12 @@ export function isDesktopSetupDismissed() {
 export async function dismissDesktopSetup() {
   setDesktopSetupDismissed(true);
   announceDesktopSetupState(false);
-  return persistDesktopSetup({ skipped: true, handoffPending: false, source: 'overview-checklist' });
+  const result = await persistDesktopSetup({ skipped: true, handoffPending: false, source: 'overview-checklist' });
+  if (!result?.ok) {
+    setDesktopSetupDismissed(false);
+    announceDesktopSetupState(true);
+  }
+  return result;
 }
 
 export async function completeDesktopSetup() {
@@ -67,7 +72,9 @@ export async function completeDesktopSetup() {
   announceDesktopSetupState(false);
   if (completionPersisted) return null;
   completionPersisted = true;
-  return persistDesktopSetup({ completed: true, handoffPending: false, source: 'overview-checklist' });
+  const result = await persistDesktopSetup({ completed: true, handoffPending: false, source: 'overview-checklist' });
+  if (!result?.ok) completionPersisted = false;
+  return result;
 }
 
 export function syncDesktopSetupState(status = {}) {
@@ -94,7 +101,7 @@ function persistPendingSetup() {
   if (pendingPersisted) return;
   pendingPersisted = true;
   void persistDesktopSetup({ completed: false, skipped: false, handoffPending: true, source: 'overview-checklist' })
-    .then(result => { if (!result) pendingPersisted = false; });
+    .then(result => { if (!result?.ok) pendingPersisted = false; });
 }
 
 async function persistDesktopSetup(payload) {

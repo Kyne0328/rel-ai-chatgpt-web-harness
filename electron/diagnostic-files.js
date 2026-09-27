@@ -16,6 +16,29 @@ function createDiagnosticFiles({ app, shell, now = () => new Date() } = {}) {
     return path.join(directory(), 'service.log');
   }
 
+  function crashDumpsPath() {
+    try {
+      const configured = String(app.getPath('crashDumps') || '').trim();
+      if (configured) return configured;
+    } catch {}
+    return path.join(directory(), 'crashes');
+  }
+
+  function listCrashDumps(limit = 20) {
+    let entries;
+    try { entries = fs.readdirSync(crashDumpsPath(), { withFileTypes: true }); }
+    catch { return []; }
+    return entries
+      .filter(entry => entry.isFile() && !entry.isSymbolicLink() && entry.name.toLowerCase().endsWith('.dmp'))
+      .map(entry => {
+        const file = path.join(crashDumpsPath(), entry.name);
+        const stat = fs.statSync(file);
+        return { name: entry.name, bytes: stat.size, modifiedAt: stat.mtime.toISOString() };
+      })
+      .sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt))
+      .slice(0, Math.max(0, Math.min(100, Number(limit) || 20)));
+  }
+
   async function openFolder() {
     const target = await ensureDirectory();
     const error = await shell.openPath(target);
@@ -25,7 +48,10 @@ function createDiagnosticFiles({ app, shell, now = () => new Date() } = {}) {
 
   async function exportReport(report) {
     const exportedAt = now();
-    const sanitized = sanitizeDiagnosticValue(report || {});
+    const sanitized = sanitizeDiagnosticValue({
+      ...(report || {}),
+      desktopCrashDumps: listCrashDumps()
+    });
     const payload = {
       schemaVersion: 1,
       exportedAt: exportedAt.toISOString(),
@@ -46,7 +72,7 @@ function createDiagnosticFiles({ app, shell, now = () => new Date() } = {}) {
     return target;
   }
 
-  return { directory, serviceLogPath, openFolder, exportReport };
+  return { directory, serviceLogPath, crashDumpsPath, listCrashDumps, openFolder, exportReport };
 }
 
 function fileTimestamp(value) {

@@ -20,7 +20,7 @@ const TUNNEL_TRANSITIONS = Object.freeze({
   stopped: Object.freeze(['stopped', 'starting']),
   starting: Object.freeze(['starting', 'locally_ready', 'authenticating', 'running', 'failed', 'stopped']),
   locally_ready: Object.freeze(['locally_ready', 'authenticating', 'running', 'failed', 'stopped']),
-  authenticating: Object.freeze(['authenticating', 'running', 'failed', 'stopped']),
+  authenticating: Object.freeze(['authenticating', 'running', 'degraded', 'failed', 'stopped']),
   running: Object.freeze(['running', 'degraded', 'failed', 'stopped']),
   degraded: Object.freeze(['degraded', 'running', 'failed', 'stopped']),
   failed: Object.freeze(['failed', 'starting', 'stopped'])

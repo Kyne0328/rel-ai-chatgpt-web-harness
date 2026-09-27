@@ -3,7 +3,7 @@ import { deltaFor } from './range-model.js';
 const METRIC_HELP = Object.freeze({
   toolCalls: 'Total Rel.AI tool actions recorded in this range. The change compares with the previous equivalent period.',
   recoverableFailures: 'Actions with a recoverable task or context problem. A retry or context refresh can usually resolve the problem.',
-  operationSuccessRate: 'Share of recorded actions where the requested command or check succeeded. Rate changes use percentage points (pp); 90% to 95% is +5 pp.',
+  operationSuccessRate: 'Share of recorded actions where the requested command or check succeeded. Rate changes use percentage points (pp). A change from 90% to 95% is +5 pp.',
   averageDuration: 'Average elapsed time per completed action in this range. The change compares with the previous equivalent period when available.',
   requestDeliveryRate: 'Share of MCP requests that finished delivering a response. Server-error responses can still be delivered, so this measures delivery rather than tool success.'
 });

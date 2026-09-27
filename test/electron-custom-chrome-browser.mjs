@@ -16,6 +16,8 @@ const configPath = path.join(temp, 'config.json');
 const outputPath = path.join(temp, 'probe.json');
 const token = 'custom-chrome-token';
 const chromePlatform = String(process.env.RELAI_CHROME_PLATFORM || 'win32').trim();
+const visualScreenshotPath = String(process.env.RELAI_VISUAL_SCREENSHOT_PATH || '').trim();
+const fixedVisualWindow = process.env.RELAI_VISUAL_FIXED_WINDOW === '1';
 if (!['win32', 'darwin'].includes(chromePlatform)) throw new Error(`RELAI_CHROME_PLATFORM must be win32 or darwin, received ${chromePlatform}.`);
 const port = await availablePort();
 fs.mkdirSync(workspace, { recursive: true });
@@ -36,7 +38,7 @@ try {
   child = spawn(electronBinary, ['--no-sandbox', `--user-data-dir=${path.join(temp, 'profile')}`, path.join(root, 'test', 'fixtures', 'electron-custom-chrome-probe')], {
     cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, RELAI_PROBE_TARGET_URL: `http://127.0.0.1:${port}/dashboard?token=${encodeURIComponent(token)}&surface=desktop&chrome=custom&platform=${encodeURIComponent(chromePlatform)}#usage`, RELAI_PROBE_OUTPUT_PATH: outputPath, RELAI_EXPECTED_TOOL_COUNT: String(activeToolNames.length), RELAI_PROBE_CHROME_PLATFORM: chromePlatform, ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }
+    env: { ...process.env, RELAI_PROBE_TARGET_URL: `http://127.0.0.1:${port}/dashboard?token=${encodeURIComponent(token)}&surface=desktop&chrome=custom&platform=${encodeURIComponent(chromePlatform)}#${visualScreenshotPath ? 'tasks' : 'usage'}`, RELAI_PROBE_OUTPUT_PATH: outputPath, RELAI_EXPECTED_TOOL_COUNT: String(activeToolNames.length), RELAI_PROBE_CHROME_PLATFORM: chromePlatform, RELAI_PROBE_VISUAL_SCREENSHOT_PATH: visualScreenshotPath, RELAI_PROBE_FIXED_VISUAL_WINDOW: fixedVisualWindow ? '1' : '0', ELECTRON_DISABLE_SECURITY_WARNINGS: 'true' }
   });
   let stdout = ''; let stderr = '';
   child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); });
@@ -47,8 +49,9 @@ try {
   const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
   assert.equal(result.error, undefined, JSON.stringify(result));
   assert.equal(result.chromePlatform, chromePlatform);
-  assert.equal(result.controls, chromePlatform === 'win32' ? 'custom' : 'native');
+  assert.equal(result.controls, 'native');
   assert.equal(result.measurements.length, 3);
+  if (visualScreenshotPath) assert.equal(fs.existsSync(visualScreenshotPath), true, 'Visual-regression screenshot was not produced.');
   for (const measurement of result.measurements) {
     assert.equal(measurement.chrome, 'custom');
     assert.equal(measurement.density, '', 'Legacy interface-density preferences must no longer affect the dashboard.');

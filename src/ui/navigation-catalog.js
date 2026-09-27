@@ -14,7 +14,7 @@ export const WORK_NAV_ITEMS = Object.freeze([
 export const SYSTEM_NAV_ITEMS = Object.freeze([
   route('processes', 'Running commands', 'processes', 'See and stop long-running commands started by Rel.AI.', 'System'),
   route('diagnostics', 'Troubleshooting', 'diagnostics', 'Find and fix problems, view logs, or export support information.', 'System'),
-  route('tools', 'ChatGPT tools', 'tools', 'See the actions ChatGPT can ask Rel.AI to perform.', 'System'),
+  route('tools', 'ChatGPT tools', 'tools', 'See actions ChatGPT can run through Rel.AI.', 'System'),
   route('usage', 'Analytics', 'usage', 'See activity trends, success rates, timing, and problem areas.', 'System')
 ]);
 
@@ -27,7 +27,7 @@ export const EXTENSIONS_NAV_ITEM = route(
   'extensions',
   'Extensions',
   'extensions',
-  'Browse Rel.AI extensions and resources for building integrations.',
+  'Browse and manage Rel.AI extensions. View developer templates and publishing guidance.',
   'Application'
 );
 

@@ -1,9 +1,9 @@
 
 
 import { assessUpdateSynchronization, cleanText, isoNow, progressPayload, updateCompatibilityMetadata } from './app-updater-status.js';
-import { compareVersions, isStableVersion } from "./update-version.js";
+import { compareUpdateVersions, isUpdateVersion } from "./update-version.js";
 
-function bindUpdaterEvents({ autoUpdater, handlers, status, emit, handleError, handleEventError = handleError, store, now, log, currentCompatibility = {} }) {
+function bindUpdaterEvents({ autoUpdater, handlers, status, emit, handleError, handleEventError = handleError, store, now, log, currentCompatibility = {}, allowPrerelease = () => false }) {
   const bind = (eventName, handler) => {
     autoUpdater.on(eventName, handler);
     handlers.push([eventName, handler]);
@@ -13,11 +13,12 @@ function bindUpdaterEvents({ autoUpdater, handlers, status, emit, handleError, h
   bind('update-available', info => {
     const availableVersion = String(info?.version || '').trim();
     void store.writeLastCheck(now());
-    if (!isStableVersion(availableVersion)) return handleError(new Error('Update metadata contains an invalid stable version.'));
-    if (!isStableVersion(status().currentVersion)) {
+    const versionOptions = { allowPrerelease: allowPrerelease() === true };
+    if (!isUpdateVersion(availableVersion, versionOptions)) return handleError(new Error('Update metadata contains an invalid version for the selected release channel.'));
+    if (!isUpdateVersion(status().currentVersion, { allowPrerelease: true })) {
       return handleError(new Error('The installed application version is invalid, so the update cannot be trusted.'));
     }
-    if (compareVersions(availableVersion, status().currentVersion) <= 0) {
+    if (compareUpdateVersions(availableVersion, status().currentVersion, { allowPrerelease: true }) <= 0) {
       return handleError(new Error(`Update metadata version ${availableVersion} is not newer than installed version ${status().currentVersion}.`));
     }
     const availableCompatibility = updateCompatibilityMetadata(info, availableVersion);
@@ -47,7 +48,7 @@ function bindUpdaterEvents({ autoUpdater, handlers, status, emit, handleError, h
   bind('download-progress', progress => emit({ state: 'downloading', progress: progressPayload(progress) }));
   bind('update-downloaded', info => {
     const downloadedVersion = String(info?.version || '').trim();
-    if (!isStableVersion(downloadedVersion) || downloadedVersion !== status().availableVersion) {
+    if (!isUpdateVersion(downloadedVersion, { allowPrerelease: allowPrerelease() === true }) || downloadedVersion !== status().availableVersion) {
       return handleError(new Error(`Downloaded update version ${downloadedVersion || 'unknown'} does not match expected version ${status().availableVersion || 'unknown'}.`));
     }
     log(`Application update ${downloadedVersion} passed release-metadata integrity verification and is ready to install.`);

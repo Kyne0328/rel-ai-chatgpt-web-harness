@@ -52,7 +52,7 @@ assert.deepEqual(
 );
 assert.ok(Buffer.byteLength(JSON.stringify(connectorInstructions(config)), 'utf8') > 0, 'connector instructions must serialize to a non-empty payload');
 assert.match(connectorInstructions(config), /work_id is durable task attribution/i, 'global instructions must define durable task identity without framing substantial work as optional');
-assert.match(connectorInstructions(config), /isolated reads\/inspection\/small one-shots may omit it for workspace\/resource work.*never infer one/i, 'global instructions must prohibit ambiguous implicit task attribution while allowing isolated work to stay taskless');
+assert.match(connectorInstructions(config), /Projectless one-shot utility\/control work runs taskless.*Taskless calls may also handle isolated resource\/recovery\/observation/i, 'global instructions must distinguish projectless utilities from durable goals while preserving low-level taskless recovery');
 assert.match(connectorInstructions(config), /approval/i, 'global instructions retain approval safety where defined');
 assert.match(connectorInstructions(config), /results are authoritative/i, 'global instructions must identify returned results as authoritative evidence');
 assert.match(connectorInstructions(config), /report (?:only )?checks (?:actually )?performed/i, 'global instructions must require reporting performed checks rather than unverified checks');
@@ -102,10 +102,11 @@ for (const schema of publicSchemas) {
   }
 }
 const publicWork = publicSchemas.find(item => item.name === 'relai_work');
-assert.match(publicWork?.description || '', /Use begin once for substantial or multi-step work/i, 'relai_work discovery must tell the agent when durable task creation is expected without requiring an extra setup round trip');
+assert.match(publicWork?.description || '', /durable Rel\.AI goal starts with a non-empty plan/i, 'relai_work discovery must state the canonical plan-backed task invariant');
+assert.match(publicWork?.description || '', /projectless one-shot utility\/control work runs directly without a durable task/i, 'relai_work discovery must distinguish taskless Direct utility work from durable tasks');
 assert.doesNotMatch(publicWork?.description || '', /one optional durable workspace task/i, 'relai_work discovery must not frame substantial task creation as merely optional');
 const publicWorkSchema = publicWork?.inputSchema;
-for (const field of ['workspace', 'title', 'objective', 'bootstrap', 'instructionPath', 'summary', 'reason', 'work_id']) {
+for (const field of ['workspace', 'title', 'objective', 'steps', 'bootstrap', 'instructionPath', 'summary', 'reason', 'work_id']) {
   assert.ok(publicWorkSchema?.properties?.[field], `relai_work connector schema must expose ${field}`);
 }
 assert.equal(publicWorkSchema?.allOf, undefined, 'relai_work discovery stays import-safe; action-specific validation belongs to the canonical runtime contract');
@@ -116,10 +117,10 @@ for (const field of ['queries', 'maxResults', 'maxFiles']) {
 assert.equal(publicSearchInputSchema?.properties?.queries?.maxItems, 8, 'flat discovery must advertise the widest supported batch without weakening action-specific runtime validation');
 assert.equal(publicSearchInputSchema?.properties?.pattern?.description, undefined, 'flat discovery must not repeat action ownership on individual fields');
 assert.equal(publicSearchInputSchema?.properties?.query?.description, undefined, 'flat discovery must not repeat action ownership on individual fields');
-assert.match(publicSearchInputSchema?.properties?.action?.description || '', /Fields: text\([^)]*pattern[^)]*\).*semantic\([^)]*query[^)]*\)/, 'flat discovery must summarize action-specific fields once on the action selector');
+assert.match(publicSearchInputSchema?.properties?.action?.description || '', /Actions: text(?:\(work_id\))?, semantic(?:\(work_id\))?/i, 'flat discovery must summarize available actions and optional task attribution once on the action selector');
 assert.match(publicSearchInputSchema?.properties?.action?.description || '', /text: pattern or queries.*semantic: queries or query|text: pattern or queries.*semantic: query or queries/, 'flat discovery must preserve canonical alternative input forms');
 assert.doesNotMatch(publicSearchInputSchema?.properties?.action?.description || '', /\[\d+-\d+\]/, 'validation-only numeric bounds must stay out of compact discovery; canonical runtime validation below remains authoritative');
-assert.match(publicWorkSchema?.properties?.action?.description || '', /status\([^)]*maxBytes[^)]*\)/, 'flat discovery must identify action-specific optional fields once on the action selector');
+assert.match(publicWorkSchema?.properties?.action?.description || '', /context\(work_id!\).*plan\([^)]*steps![^)]*work_id!|context\(work_id!\).*plan\([^)]*work_id![^)]*steps!/, 'flat discovery must retain task identity and plan requirements on the action selector');
 const publicValidateInputSchema = publicSchemas.find(item => item.name === 'relai_validate')?.inputSchema;
 assert.equal(publicValidateInputSchema?.properties?.timeoutMs?.anyOf, undefined, 'relai_validate root timeoutMs schema must collapse bounded action variants instead of advertising a redundant union');
 const publicReadSchema = publicSchemas.find(item => item.name === 'relai_read');
@@ -149,7 +150,7 @@ assert.equal(publicEditSchema?.inputSchema?.properties?.writeId, undefined, 'int
 const publicProcessSchema = publicSchemas.find(item => item.name === 'relai_process');
 assert.match(publicProcessSchema?.inputSchema?.properties?.command?.description || '', /shell syntax/i, 'public process discovery must retain shell guidance');
 assert.doesNotMatch(publicProcessSchema?.inputSchema?.properties?.command?.description || '', /Action usage:/i, 'public process fields must not repeat action-routing prose');
-assert.match(publicProcessSchema?.inputSchema?.properties?.action?.description || '', /start\([^)]*command[^)]*\).*read\([^)]*processId![^)]*\).*write\([^)]*processId![^)]*\).*stop\([^)]*processId![^)]*\)/, 'public process discovery must summarize action ownership and required fields once');
+assert.match(publicProcessSchema?.inputSchema?.properties?.action?.description || '', /processId! except start\/list.*start\([^)]*kind![^)]*purpose![^)]*\).*read.*write.*stop.*list/i, 'public process discovery must factor repeated process identity while preserving action requirements');
 assert.match(publicExecSchema?.description || '', /direct executable \+ argv.*command string/i, 'ChatGPT discovery must describe both execution forms declaratively');
 assert.match(publicExecSchema?.inputSchema?.description || '', /direct executable \+ argv, and shell command/i);
 assert.match(publicExecSchema?.inputSchema?.description || '', /Input form: command or executable\./i, 'flat discovery must preserve canonical executable-mode alternatives');
@@ -184,9 +185,12 @@ assert.match(editSchema.inputSchema.properties.updateText.description, /One logi
 assert.deepEqual(editSchema.inputSchema.properties.stage.enum, ['start', 'append', 'commit', 'abort'], 'canonical executable schema must retain the internal staged transport lifecycle');
 
 await valid('relai_work', { action: 'begin', workspace: 'repo' });
+await valid('relai_work', { action: 'begin', workspace: 'repo', steps: [{ id: 'goal', title: 'Complete goal', status: 'in_progress' }] });
+await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'planned' });
+await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'direct' });
 await valid('relai_work', { action: 'begin' });
 await valid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ id: 'inspect', title: 'Inspect implementation', status: 'in_progress' }] });
-await valid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [] });
+await invalid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [] });
 await valid('relai_work', { action: 'stop', workspace: 'repo', work_id: 'work', operationId: 'operation-1', reason: 'Stop the selected operation.' });
 await invalid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ title: 'Invalid state', status: 'working' }] });
 await valid('relai_work', { action: 'finish', work_id: 'work', summary: 'Done.' });
@@ -221,6 +225,7 @@ await valid('relai_validate', { action: 'diagnostics', workspace: 'repo', level:
 await valid('relai_exec', { workspace: 'repo', command: 'node -v' });
 await valid('relai_exec', { work_id: 'work', executable: 'node', argv: ['-v'] });
 await valid('relai_exec', { work_id: 'work', executable: 'node', argv: ['-'], input: 'process.stdout.write("ok")' });
+await valid('relai_desktop', { action: 'open_path', workspace: 'repo', path: 'README.md' });
 await valid('relai_computer', { action: 'status' });
 await valid('relai_computer', { action: 'observe', app: 'Notepad', maxElements: 120 });
 await valid('relai_computer', { action: 'observe', app: 'Notepad', perception: 'hybrid' });
@@ -267,12 +272,16 @@ await invalid('relai_edit', { work_id: 'work', path: 'README.md', content: '# Re
 // callable fields. Conditional requirements and cross-action ownership are
 // enforced once by the canonical executable/runtime contract below.
 await publicValid('relai_work', { action: 'begin', workspace: 'repo' });
+await publicValid('relai_work', { action: 'begin', workspace: 'repo', steps: [{ id: 'goal', title: 'Complete goal', status: 'in_progress' }] });
+await publicInvalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'planned' });
+await publicInvalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'direct' });
 await publicValid('relai_work', { action: 'begin' });
 await publicValid('relai_work', { action: 'status', title: 'runtime-rejects-sibling-field' });
 await valid('relai_work', { action: 'status', workspace: 'repo', operationId: 'fallback_12345678901234567890' });
 await publicValid('relai_read', { work_id: 'work', paths: ['README.md'] });
 await publicValid('relai_read', { work_id: 'work', ranges: [{ path: 'README.md', startLine: 1, endLine: 2 }] });
 await publicValid('relai_search', { action: 'text', work_id: 'work', queries: ['needle', 'haystack'], maxFiles: 200 });
+await publicValid('relai_search', { action: 'text', work_id: 'work', query: 'needle', taskProgress: { id: 'inspect', status: 'in_progress' } });
 await publicValid('relai_search', { action: 'text', work_id: 'work', query: 'runtime-rejects-sibling-field' });
 await publicValid('relai_search', { action: 'semantic', work_id: 'work', queries: ['needle', 'haystack'], maxResults: 100 });
 await publicValid('relai_process', { action: 'start', work_id: 'work', command: 'npm run dev' });

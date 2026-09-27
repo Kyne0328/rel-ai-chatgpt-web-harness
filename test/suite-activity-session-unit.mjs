@@ -42,15 +42,18 @@ async function case_activity_controller_contract_unit() {
   assert.match(activity, /selectedEventId/, 'selected Activity identity must be explicit React state');
   assert.match(activity, /selected:\s*Boolean\(selectedEventId && eventId === selectedEventId\)/, 'selection must follow canonical event identity across live merges');
   assert.match(activity, /activityActionLabel\(entry\)/, 'row actions must keep distinguishable accessible labels');
-  assert.match(activity, /className:\s*'activity-message-copy'\s*\},\s*message\)/, 'message text must remain the primary visible row content');
+  const primaryMessageIndex = activity.indexOf("className: 'activity-message-copy'");
+  const supportingMetadataIndex = activity.indexOf("className: 'activity-row-meta'", primaryMessageIndex);
+  assert.ok(primaryMessageIndex >= 0 && supportingMetadataIndex > primaryMessageIndex,
+    'message text must render before supporting task/project metadata regardless of JSX/object formatting');
   assert.match(activity, /className:\s*'activity-row-task'/, 'rows must retain task context as supporting metadata');
   assert.match(activity, /className:\s*'activity-row-project'/, 'rows must retain project context as supporting metadata');
   assert.match(activity, /focus\(\{ preventScroll: true \}\)/, 'stacked inspector selection must move focus without an intermediate browser scroll');
   assert.match(activity, /scrollIntoView\(\{ block: 'start', inline: 'nearest' \}\)/, 'stacked inspector selection must reveal the inspector predictably');
   assert.match(activity, /Copy event JSON/, 'technical details must preserve the copy action');
-  assert.match(activity, /rawDetail\('Raw target'/, 'technical details must preserve raw target information');
-  assert.match(activity, /rawDetail\('Raw result'/, 'technical details must preserve raw result information');
-  assert.match(activity, /rawDetail\('Raw error'/, 'technical details must preserve raw error information');
+  assert.match(activity, /h\(RawDetail, \{ title: 'Raw target'/, 'technical details must preserve raw target information');
+  assert.match(activity, /h\(RawDetail, \{ title: 'Raw result'/, 'technical details must preserve raw result information');
+  assert.match(activity, /h\(RawDetail, \{ title: 'Raw error'/, 'technical details must preserve raw error information');
   assert.match(activity, /ACTIVITY_STORE_KEYS = Object\.freeze\(\['auditTail', 'tasks'\]\)/, 'Activity must subscribe only to the dashboard slices it renders');
   assert.match(activity, /createActivityRoute\(useDashboardSlices\)[\s\S]*useDashboardSlices\(ACTIVITY_STORE_KEYS\)/, 'Activity must consume scoped canonical dashboard store slices');
   assert.match(reactMain, /registerReactSection\('activity'/, 'Activity must remain registered as a canonical React route');
@@ -110,7 +113,14 @@ async function case_activity_message_layout_unit() {
   
   assert.match(react, /h\('colgroup',[\s\S]{0,260}activity-col-time[\s\S]{0,180}activity-col-message/, 'React activity table must keep the canonical time + activity columns');
   assert.doesNotMatch(react, /activity-col-(?:tool|task|status|action)/, 'tool, task, status, and action belong in Activity metadata instead of duplicate table columns');
-  assert.match(react, /activity-row-meta[\s\S]{0,500}StatusPill[\s\S]{0,300}activity-row-action[\s\S]{0,300}activity-row-task[\s\S]{0,300}activity-row-project/, 'Activity metadata must retain status, action, task, and project context');
+  const metaIndex = react.indexOf("className: 'activity-row-meta'");
+  assert.ok(metaIndex >= 0, 'Activity rows must render a supporting metadata region');
+  for (const marker of ['ActivityRowStatus', 'activity-row-action', 'activity-row-task', 'activity-row-project']) {
+    assert.ok(react.indexOf(marker, metaIndex) > metaIndex, `Activity metadata must retain ${marker} context`);
+  }
+  assert.match(react, /ActivityRowStatus[\s\S]{0,180}return h\(StatusPill, \{ value \}\)/, 'Activity rows must use the shared status pill for succeeded and failed states');
+  assert.doesNotMatch(react, /group === 'succeeded'[\s\S]{0,220}activity-row-status is-succeeded/, 'Succeeded rows must not use a one-off icon-only status treatment');
+  assert.doesNotMatch(css, /activity-row-status\.is-succeeded/, 'Activity CSS must not retain the obsolete success-only status style');
   assert.match(css, /\.activity-table\s*\{[^}]*table-layout:\s*fixed/s, 'Activity table must use a stable fixed layout');
   assert.match(css, /\.activity-col-time\s*\{[^}]*width:\s*\d+px/s, 'Time must keep a bounded fixed-width column');
   assert.doesNotMatch(css, /^\.activity-time-column\s*\{[^}]*align-top/ms, 'the Time header must keep the table header vertical alignment');
@@ -197,7 +207,7 @@ async function case_activity_model_unit() {
       linked: true
     });
     assert.equal(activitySessionView(entry({ taskId: 'missing-session' }), sessions).title, 'Task missing-');
-    assert.equal(activitySessionView(entry({ taskId: '', sessionId: '' }), sessions).title, 'Unlinked activity');
+    assert.equal(activitySessionView(entry({ taskId: '', sessionId: '' }), sessions).title, 'Direct activity');
   });
   
   test('activity search can match a resolved work-session title', () => {
@@ -333,10 +343,12 @@ async function case_activity_scroll_unit() {
   const activityCardRule = activityCss.match(/\.activity-event-card\s*\{([^}]*)\}/)?.[1] || '';
   const activityCardBodyRule = activityCss.match(/\.activity-event-card \.card-body\s*\{([^}]*)\}/)?.[1] || '';
   const activityTableWrapRule = activityCss.match(/\.activity-event-card \.table-wrap\s*\{([^}]*)\}/)?.[1] || '';
+  const filterScrollResetBody = activity.match(/const resetListScroll = useCallback\(\(\) => \{([\s\S]*?)\n {2}\}, \[\]\);/)?.[1] || '';
   
   assert.match(activity, /className:\s*'table-wrap'/, 'React Activity must render its event log inside the shared table wrapper');
-  assert.match(activity, /tableWrapRef\.current\.scrollLeft = 0/, 'filter changes may reset horizontal table position');
-  assert.doesNotMatch(activity, /tableWrapRef\.current\.scrollTop\s*=|\.scrollTop\s*=\s*0/, 'Activity filter/live updates must not reset vertical reading position');
+  assert.match(filterScrollResetBody, /tableWrapRef\.current\.scrollLeft = 0/, 'filter changes may reset horizontal table position');
+  assert.doesNotMatch(filterScrollResetBody, /scrollTop/, 'Activity filter/live updates must not reset vertical reading position');
+  assert.match(activity, /const jumpToLatest = useCallback[\s\S]*listPaneRef\.current\.scrollTop = 0/, 'the explicit Jump to latest action may return the list to the top');
   assert.match(activity, /scrollIntoView\(\{ block: 'start', inline: 'nearest' \}\)/, 'only explicit stacked-inspector selection should scroll content into view');
   assert.match(css, /\.main\s*\{[^}]*@apply flex min-w-0 w-full flex-col/, 'the main dashboard column must expose remaining height to route content');
   assert.match(routeRootRule, /@apply flex min-w-0 flex-col/, 'route content must use a vertical flex layout');

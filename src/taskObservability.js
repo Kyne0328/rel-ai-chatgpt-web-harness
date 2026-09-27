@@ -38,7 +38,7 @@ function titleForTool(tool, details = {}) {
   const workspace = cleanText(details.workspace, 60);
   const suffix = path ? ` ${displayPath(path)}` : workspace ? ` ${workspace}` : '';
   const titles = {
-    [OP.WORK_BEGIN]: workspace ? `Work in ${workspace}` : 'Start workspace task',
+    [OP.WORK_BEGIN]: workspace ? `Work in ${workspace}` : 'Start logical task',
     [OP.WORK_PLAN]: 'Update task plan',
     [OP.SNAPSHOT]: `Inspect repository${suffix}`,
     [OP.READ]: path ? `Read ${displayPath(path)}` : 'Read repository files',
@@ -78,15 +78,18 @@ function buildToolActivityDetails(name, args = {}, value = null, error = null, o
     ? normalizeActivityError({ message: value.error || value.message || `${name} failed`, code: value.errorCode })
     : undefined;
   const result = resultForTool(name, args, value, operationOk);
+  const status = normalizedError ? errorStatus(normalizedError) : options.phase === 'running' ? 'running' : operationOk ? 'succeeded' : 'failed';
   const summary = summaryForTool(name, args, value, normalizedError, operation, result);
   const progress = progressForTool(name, args, value, operationOk, options.phase);
   const command = name === OP.EXEC ? commandDisplayForInvocation(args) : '';
-  const status = normalizedError ? errorStatus(normalizedError) : options.phase === 'running' ? 'running' : operationOk ? 'succeeded' : 'failed';
+  const title = options.phase === 'running'
+    ? operation || titleForTool(name, args) || 'Rel.AI tool operation'
+    : terminalTitleForTool(name, args, result, status);
   return {
     category,
     action: actionForTool(name),
     status,
-    title: operation || titleForTool(name, args) || 'Rel.AI tool operation',
+    title,
     summary,
     currentStage: stageForTool(name, status),
     currentActivity: summary,
@@ -316,6 +319,21 @@ function actionForTool(name) {
   return String(name || '').replace(/^relai_/, '').replaceAll('_', '.').slice(0, 100) || 'execute';
 }
 
+function terminalTitleForTool(name, args, result, status) {
+  if (status === 'blocked') return 'Action blocked';
+  if (status === 'cancelled') return 'Action cancelled';
+  if (status === 'failed') {
+    if (name === OP.EXEC) return 'Command failed';
+    if ([OP.SEARCH_TEXT, OP.SEARCH_SEMANTIC].includes(name)) return 'Search failed';
+    if (name === OP.READ) return 'Read failed';
+    if ([OP.VALIDATE_CHECKS, OP.VALIDATE_DIAGNOSTICS].includes(name)) return 'Validation failed';
+    if (name === OP.EDIT) return 'Update failed';
+    const base = titleForTool(name, args) || 'Rel.AI action';
+    return `${base} failed`;
+  }
+  return cleanText(result?.outcome, 160) || `${titleForTool(name, args) || 'Rel.AI action'} completed`;
+}
+
 function stageForTool(name, status) {
   if (status === 'blocked') return 'Blocked';
   if (status === 'failed') return 'Resolving failure';
@@ -355,25 +373,59 @@ function resultForTool(name, args, value, ok) {
   const affectedItemCount = affectedCount(value, args, changed);
   const warningCount = Number(value?.warningCount || value?.warnings?.length || 0);
   let outcome = ok ? 'Completed successfully' : 'Failed';
-  if (name === OP.READ && affectedItemCount) outcome = `Read ${affectedItemCount} item${affectedItemCount === 1 ? '' : 's'}`;
+  if (name === OP.READ && affectedItemCount) outcome = `Read ${affectedItemCount} file${affectedItemCount === 1 ? '' : 's'}`;
   else if ([OP.SEARCH_TEXT, OP.SEARCH_SEMANTIC].includes(name) && Number.isFinite(value?.matchCount)) outcome = `Found ${searchMatchCountText(value)}`;
   else if (changed.length) outcome = `Updated ${changed.length} file${changed.length === 1 ? '' : 's'}`;
   else if (/checks|diagnostics/.test(name) && value?.validationStatus) outcome = `Validation ${value.validationStatus}`;
   else if (name === OP.PUBLISH_COMMIT && value?.commit) outcome = `Created commit ${cleanText(value.commit, 20)}`;
+  else if (name === OP.CHANGES_DIFF) {
+    const reviewed = Array.isArray(value?.reviewedFiles) ? value.reviewedFiles : [];
+    outcome = reviewed.length ? `Reviewed ${reviewed.length} changed file${reviewed.length === 1 ? '' : 's'}` : 'Working tree clean';
+  } else if (name === OP.WORK_STATUS) {
+    if (value?.workspace?.repository) {
+      outcome = value.workspace.repository.clean ? 'Working tree clean' : 'Status inspected';
+    } else if (value?.task) {
+      outcome = `Task ${value.task.status || 'active'}`;
+    } else {
+      outcome = 'Status checked';
+    }
+  } else if (name === OP.SNAPSHOT) {
+    const count = Array.isArray(value?.files) ? value.files.length : Number(value?.entryCount || 0);
+    outcome = count ? `Overview of ${count} paths` : 'Repository overview';
+  } else if (name === OP.INSPECT) {
+    outcome = args?.action ? `Inspected ${args.action}` : 'Inspected code';
+  } else if (name === OP.EXEC && Number.isFinite(value?.exitCode)) {
+    outcome = value.exitCode === 0 ? 'Command succeeded' : `Exit code ${value.exitCode}`;
+  }
   return compactObject({ outcome, affectedItemCount, warningCount });
 }
 
 function summaryForTool(name, args, value, error, operation, result) {
-  if (error) return `${operation || titleForTool(name, args) || 'Tool execution'} failed: ${error.message}`;
+  if (error) {
+    const errMessage = String(error.message || 'Operation failed.').trim();
+    const failureTitle = terminalTitleForTool(name, args, result, errorStatus(error));
+    if (errMessage.toLowerCase().startsWith(failureTitle.toLowerCase())) return errMessage;
+    return `${failureTitle}: ${errMessage}`;
+  }
   if (name === OP.WORK_BEGIN) return args?.title
     ? `Started logical task “${sanitizeDisplayText(args.title, 120)}”.`
-    : 'Started a logical workspace task.';
-  if (name === OP.READ) return result.affectedItemCount
-    ? `Read ${result.affectedItemCount} repository item${result.affectedItemCount === 1 ? '' : 's'}.`
-    : 'Read repository content.';
-  if ([OP.SEARCH_TEXT, OP.SEARCH_SEMANTIC].includes(name)) return Number.isFinite(value?.matchCount)
-    ? `Searched the repository and found ${searchMatchCountText(value)}.`
-    : 'Searched repository content.';
+    : 'Started a logical task.';
+  if (name === OP.READ) {
+    const path = firstPath(args) || firstPath(value);
+    const count = result.affectedItemCount;
+    if (count === 1 && path) return `Read ${displayPath(path)}.`;
+    if (count) return `Read ${count} file${count === 1 ? '' : 's'}.`;
+    return 'Read repository content.';
+  }
+  if ([OP.SEARCH_TEXT, OP.SEARCH_SEMANTIC].includes(name)) {
+    if (Number.isFinite(value?.matchCount)) {
+      const matchText = searchMatchCountText(value);
+      const query = args?.pattern || args?.query || (Array.isArray(args?.queries) && args.queries.length === 1 ? args.queries[0] : '');
+      if (query) return `Found ${matchText} for "${cleanText(query, 60)}".`;
+      return `Searched the repository and found ${matchText}.`;
+    }
+    return 'Searched repository content.';
+  }
   if (name === OP.EDIT) {
     const count = changedFiles(value).length || pathCount(args);
     return count ? `Updated ${count} file${count === 1 ? '' : 's'}.` : 'Applied repository changes.';
@@ -389,6 +441,36 @@ function summaryForTool(name, args, value, error, operation, result) {
   }
   if (name === OP.PUBLISH_COMMIT) return value?.commit ? `Created Git commit ${cleanText(value.commit, 20)}.` : 'Created a Git commit.';
   if (name === OP.PUBLISH_PUSH) return 'Published the Git branch.';
+  if (name === OP.CHANGES_DIFF) {
+    const reviewed = Array.isArray(value?.reviewedFiles) ? value.reviewedFiles : [];
+    if (reviewed.length) return `Reviewed ${reviewed.length} changed file${reviewed.length === 1 ? '' : 's'}.`;
+    return 'Reviewed repository changes; working tree is clean.';
+  }
+  if (name === OP.WORK_STATUS) {
+    if (value?.workspace?.repository) {
+      const repo = value.workspace.repository;
+      const branch = repo.branch || 'current branch';
+      if (repo.clean) return `Repository is clean on ${branch}.`;
+      const changed = repo.statusEntries?.length || 0;
+      return `Repository has ${changed} modified path${changed === 1 ? '' : 's'} on ${branch}.`;
+    }
+    if (value?.task) {
+      const taskTitle = value.task.title ? `“${value.task.title}” ` : '';
+      return `Task ${taskTitle}status is ${value.task.status || 'active'}.`;
+    }
+    return 'Inspected repository and task status.';
+  }
+  if (name === OP.SNAPSHOT) {
+    const count = Array.isArray(value?.files) ? value.files.length : Number(value?.entryCount || 0);
+    return count ? `Cataloged ${count} repository paths.` : 'Inspected repository overview.';
+  }
+  if (name === OP.INSPECT) {
+    const action = cleanText(args?.action, 40);
+    const symbol = cleanText(args?.symbol || args?.query, 60);
+    if (symbol) return `Inspected ${action || 'code'} for "${symbol}".`;
+    if (action) return `Inspected code ${action}.`;
+    return 'Inspected code relationships.';
+  }
   if (name === OP.WORK_STOP) {
     const count = Math.max(0, Number(value?.stoppedOperationCount || 0));
     return count ? `Stop requested for ${count} running operation${count === 1 ? '' : 's'}.` : 'No matching running operation needed to be stopped.';
@@ -563,6 +645,8 @@ function sanitizeTaskRecord(record, options = {}) {
   if (!record || typeof record !== 'object') return record;
   const value = { ...record };
   value.status = normalizeHistoricalTaskStatus(value.status, value);
+  delete value.executionMode;
+  delete value.executionModeExplicit;
   for (const [key, limit] of Object.entries({
     title: MAX_TITLE_LENGTH,
     objective: MAX_OBJECTIVE_LENGTH,

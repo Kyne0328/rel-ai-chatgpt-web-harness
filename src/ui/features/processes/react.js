@@ -1,5 +1,7 @@
 import React, { memo, useMemo, useState } from 'react';
+import './styles.css';
 import { Icon } from '../../components/icons.js';
+import { StatusPill } from '../../components/pill.js';
 import { postJson, requestDashboardRefresh } from '../../api.js';
 import { processListView } from './index.js';
 
@@ -11,20 +13,16 @@ export function createProcessesRoute(useDashboardSlices) {
     const data = useDashboardSlices(PROCESS_STORE_KEYS);
     const model = useMemo(
       () => processListView(data),
-      [data.managedProcesses, data.nativeTasks]
+      [data]
     );
     const count = `${model.running} running${model.finished ? ` · ${model.finished} finished` : ''}`;
 
     return h('div', { className: 'settings-content system-content', 'data-processes-react': 'true' },
       h('div', { className: 'section processes-page runtime-observability-page' },
-        h('div', { className: 'feature-toolbar processes-toolbar' },
-          h('p', null, 'Long-running commands appear here until they finish or you stop them.'),
-          h('span', { className: 'feature-count' }, count)
-        ),
         h('section', { className: 'card processes-card' },
           h('div', { className: 'card-head' },
-            h('h3', null, 'Running commands'),
-            h('a', { className: 'section-action', href: '#activity' }, 'Activity', h('span', { 'aria-hidden': 'true' }, ' ›'))
+            h('span', { className: 'feature-count' }, count),
+            h('a', { className: 'section-action', href: '#activity' }, 'Activity', h(Icon, { name: 'chevronRight', size: 14 }))
           ),
           h('div', { className: 'card-body', 'data-process-list': true },
             model.rows.length
@@ -75,10 +73,15 @@ const ProcessRow = memo(function ProcessRow({ row }) {
         )
       ),
       h('div', { className: 'process-actions' },
-        h('span', {
-          className: 'process-elapsed',
-          ...(state.active && row.startedAt ? { 'data-clock-elapsed-start': row.startedAt } : {})
-        }, `${state.active ? 'Running for ' : ''}${row.elapsed}`),
+        h('span', { className: 'process-elapsed' },
+          state.active && row.startedAt
+            ? h(React.Fragment, null, 'Running for ', h('span', { 'data-clock-elapsed-start': row.startedAt }, row.elapsed))
+            : h(React.Fragment, null,
+                row.elapsed,
+                row.endedAt ? ' · ' : null,
+                row.endedAt ? h('span', { 'data-clock-relative': row.endedAt }, row.endedAgo) : null
+              )
+        ),
         state.canStop ? h('button', {
           className: 'secondary danger',
           type: 'button',
@@ -125,9 +128,6 @@ function OutputBlock({ stream, value }) {
   );
 }
 
-function StatusPill({ label, tone = '' }) {
-  return h('span', { className: `status-pill ${tone}`.trim() }, label);
-}
 
 function EmptyProcesses() {
   return h('div', { className: 'empty-state' },

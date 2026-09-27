@@ -44,8 +44,8 @@ const unsupported = clientCapabilityViews({
 })[0];
 assert.equal(unsupported.capabilityState, 'not_advertised');
 assert.equal(unsupported.capabilityLabel, 'Native MCP Tasks: Not advertised by client');
-assert.equal(unsupported.executionLabel, 'Eligible long work: Work-session continuation');
-assert.match(unsupported.description, /continue in the same work session/i);
+assert.equal(unsupported.executionLabel, 'Eligible long work: Same Rel.AI task');
+assert.match(unsupported.description, /continue in the same Rel\.AI task/i);
 
 const unknown = clientCapabilityViews({ mcpConnection: { recentEvents: [] } })[0];
 assert.equal(unknown.capabilityState, 'unknown');
@@ -144,7 +144,7 @@ assert.equal(stoppingProcess.active, true);
 const restartedProcess = processStateView({ status: 'orphaned', pid: 123 });
 assert.equal(restartedProcess.label, 'Unknown after restart');
 assert.equal(restartedProcess.canStop, true);
-assert.match(restartedProcess.recovery, /Stop the process explicitly/i);
+assert.match(restartedProcess.recovery, /Stop the process if it is still running/i);
 const processSummary = processListView({
   managedProcesses: [
     { processId: 'orphaned-process', status: 'orphaned', pid: 123 },
@@ -153,6 +153,17 @@ const processSummary = processListView({
 });
 assert.equal(processSummary.running, 0);
 assert.equal(processSummary.finished, 1, 'orphaned processes must not be counted as finished');
+const finishedTiming = processListView({
+  managedProcesses: [{
+    processId: 'timed-finished-process',
+    status: 'exited',
+    startedAt: '2026-09-07T10:00:00.000Z',
+    endedAt: '2026-09-07T10:00:30.000Z'
+  }]
+}, Date.parse('2026-09-07T10:01:30.000Z')).rows[0];
+assert.equal(finishedTiming.elapsed, '30s', 'terminal process duration must remain static instead of embedding a stale relative age');
+assert.equal(finishedTiming.endedAt, '2026-09-07T10:00:30.000Z');
+assert.equal(finishedTiming.endedAgo, '1m ago', 'terminal process age must be exposed separately for the shared clock');
 const stoppedProcess = processStateView({ status: 'stopped' });
 assert.equal(stoppedProcess.terminal, true);
 assert.equal(stoppedProcess.canStop, false);
@@ -220,12 +231,14 @@ const cssSource = fs.readFileSync(path.join(root, 'src/ui/styles/app.css'), 'utf
 const sessionCssSource = fs.readFileSync(path.join(root, 'src/ui/features/sessions/styles.css'), 'utf8');
 
 assert.match(sessionsSource, /Recent (?:sessions|tasks)/, 'Tasks surface must use a compact user-facing heading');
-assert.match(sessionsSource, /Work session ID/);
+assert.match(sessionsSource, /Rel\.AI task ID/);
 assert.match(sessionsSource, /Process ID/);
 assert.match(sessionsSource, /'aria-label': `Copy \$\{label\} \$\{value\}`/);
 assert.doesNotMatch(sessionsSource, /Client task capability|Native MCP tasks|Native task ID/);
 assert.doesNotMatch(sessionsSource, /nativeTasksCard|nativeTaskRow|data-cancel-native-task|bindNativeTaskActions/);
 assert.match(sessionsSource, /data-stop-task-operation/);
+assert.match(sessionsSource, /className: 'task-plan-active-dot'/, 'the active plan step must use one simple status dot instead of nesting another circular glyph inside its pulse');
+assert.doesNotMatch(sessionsSource, /status === 'in_progress' \? 'circleDot'/, 'the active plan step must not stack a circle-dot icon inside the animated marker');
 assert.match(sessionsSource, /data-stop-task-operations/);
 assert.match(sessionsSource, /data-cancel-task/);
 assert.match(sessionsSource, /Task cancellation requested\./, 'task cancellation UI must distinguish requested cancellation from confirmed terminal cancellation');
@@ -240,6 +253,9 @@ const connectionPageSource = settingsSource.match(/function ConnectionPage[\s\S]
 assert.doesNotMatch(connectionPageSource, /Native MCP Tasks|Execution mode|connector-technical-details/);
 assert.doesNotMatch(cssSource, /\.native-task-row|\.runtime-activity-spinner|\.runtime-capability-row/);
 assert.match(sessionCssSource, /\.task-progress\.static\.terminal\.cancelled[\s\S]*--ui-status-neutral-background/);
+assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress\s*\{[^}]*box-shadow:\s*inset 2px 0 0 var\(--ui-action-primary\)/s, 'active plan cards must use a restrained edge accent instead of a bright full-card outline');
+assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{[^}]*opacity:\s*0[^}]*animation:\s*task-plan-heartbeat/s, 'active plan heartbeat must have an invisible resting state');
+assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{\s*display:\s*none;/, 'reduced-motion users must not receive the active plan heartbeat');
 assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)/);
 
 console.log('Dashboard capability, work-session, native-task, process, accessibility, and missing-field observability contracts passed.');

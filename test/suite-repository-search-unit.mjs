@@ -217,7 +217,7 @@ async function case_search_context_unit() {
     assert.equal(automatic.maxFiles, 20);
     assert.equal(automatic.maxRangesPerFile, 20);
     assert.equal(automatic.maxRangeLines, 80);
-    assert.equal(automatic.maxBytes, 96 * 1024);
+    assert.equal(automatic.maxBytes, 16 * 1024);
     assert.equal(automatic.files[0].path, 'src/alphaThing.js', 'auto mode should prioritize a path that directly matches the query');
     assert.match(automatic.next, /Adaptive context is included/);
   
@@ -264,7 +264,7 @@ async function case_search_context_unit() {
     assert.equal(moderate.maxFiles, 10);
     assert.equal(moderate.maxRangesPerFile, 8);
     assert.equal(moderate.maxRangeLines, 80);
-    assert.equal(moderate.maxBytes, 96 * 1024);
+    assert.equal(moderate.maxBytes, 16 * 1024);
   
     const broad = await relaiSearch(workspace, {}, { pattern: 'broadMarker', fixed: true });
     assert.equal(broad.mode, 'auto');
@@ -272,7 +272,7 @@ async function case_search_context_unit() {
     assert.equal(broad.maxFiles, 5);
     assert.equal(broad.maxRangesPerFile, 4);
     assert.equal(broad.maxRangeLines, 60);
-    assert.equal(broad.maxBytes, 64 * 1024);
+    assert.equal(broad.maxBytes, 12 * 1024);
     assert.ok(broad.returnedRangeCount <= 4, 'broad auto mode should stay inside its range budget');
     assert.ok(broad.files[0].ranges.every(range => range.endLine - range.startLine + 1 <= 60));
   

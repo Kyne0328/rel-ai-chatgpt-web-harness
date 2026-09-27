@@ -5,7 +5,7 @@ const AUTO_CONTEXT_TIERS = {
     maxFiles: 20,
     maxRangesPerFile: 20,
     maxRangeLines: 80,
-    maxBytes: 96 * 1024
+    maxBytes: 16 * 1024
   },
   moderate: {
     contextBefore: 3,
@@ -13,7 +13,7 @@ const AUTO_CONTEXT_TIERS = {
     maxFiles: 10,
     maxRangesPerFile: 8,
     maxRangeLines: 80,
-    maxBytes: 96 * 1024
+    maxBytes: 16 * 1024
   },
   broad: {
     contextBefore: 2,
@@ -21,7 +21,7 @@ const AUTO_CONTEXT_TIERS = {
     maxFiles: 5,
     maxRangesPerFile: 4,
     maxRangeLines: 60,
-    maxBytes: 64 * 1024
+    maxBytes: 12 * 1024
   }
 };
 

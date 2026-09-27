@@ -37,7 +37,7 @@ export function resolveBridgeState({ findings = [], connectionState }) {
       tone: 'bad',
       kicker: 'Needs attention',
       title: 'Rel.AI is connected, but a problem needs attention.',
-      description: 'Rel.AI can connect to ChatGPT, but one or more issues should be resolved before automated changes.'
+      description: 'Resolve the problem before Rel.AI makes project changes.'
     };
   }
   if (findings.some(item => item?.severity === 'warning')) {
@@ -45,14 +45,14 @@ export function resolveBridgeState({ findings = [], connectionState }) {
       tone: 'warn',
       kicker: 'Connected with warning',
       title: 'Rel.AI is connected and ready.',
-      description: 'Automated changes are available. Review the warning when convenient.'
+      description: 'Review the warning before you start another task.'
     };
   }
   return {
     tone: 'good',
-    kicker: 'Connection ready',
+    kicker: '',
     title: 'ChatGPT can work on your projects.',
-    description: 'Rel.AI is connected and ready for ChatGPT to use on your projects.'
+    description: ''
   };
 }
 

@@ -1,6 +1,6 @@
 import React from 'react';
 import { openModal } from './components/modal.js';
-import { CHATGPT_REFRESH_BUSINESS_NOTE, CHATGPT_REFRESH_STEPS } from './features/settings/connection-guidance.js';
+import { CHATGPT_REFRESH_BUSINESS_NOTE, CHATGPT_REFRESH_GROUPS } from './features/settings/connection-guidance.js';
 
 const h = React.createElement;
 const STORAGE_PREFIX = 'relai_connector_refresh';
@@ -30,8 +30,8 @@ function prepareConnectorRefreshNotice(lifecycle = {}, storage) {
     acknowledgedKey,
     pendingKey,
     title: 'Refresh Rel.AI MCP in ChatGPT',
-    description: `Rel.AI MCP ${currentVersion} changed its ChatGPT action definitions. ChatGPT keeps an approved snapshot, so review the updated actions before using the new tool surface.`,
-    steps: CHATGPT_REFRESH_STEPS,
+    description: `Rel.AI MCP ${currentVersion} changed its ChatGPT actions. Review the updated actions in ChatGPT before you use them.`,
+    groups: CHATGPT_REFRESH_GROUPS,
     businessNote: CHATGPT_REFRESH_BUSINESS_NOTE
   };
 }
@@ -64,10 +64,13 @@ function initConnectorRefreshModal(options = {}) {
       h('p', null, view.description),
       h('div', { className: 'confirm-dialog-copy' },
         h('strong', null, 'In ChatGPT:'),
-        h('ol', { className: 'modal-step-list' }, view.steps.map(step => h('li', { key: step }, step)))
+        view.groups.map(group => h('div', { className: 'connector-refresh-group', key: group.label },
+          h('strong', null, group.label),
+          h('ol', { className: 'modal-step-list' }, group.steps.map(step => h('li', { key: step }, step)))
+        ))
       ),
       h('p', { className: 'muted' }, view.businessNote),
-      h('p', { className: 'muted' }, 'You can dismiss this notice now. It will not appear again for this Rel.AI action revision.'),
+      h('p', { className: 'muted' }, 'This notice will not appear again for this connector update.'),
       h('div', { className: 'modal-actions' },
         h('button', { type: 'button', className: 'primary', onClick: () => modal?.close() }, 'Done')
       )

@@ -35,7 +35,7 @@ jobs:
       - name: Enforce MCP startup performance budget
         run: npm run benchmark:mcp-startup
       - name: Enforce Repository Intelligence performance budget
-        run: node scripts/repository-intelligence-benchmark.mjs --files 5000 --mutations 50 --json --max-full-ms 30000 --max-incremental-ms 5000
+        run: node scripts/repository-intelligence-benchmark.mjs --files 5000 --mutations 50 --json --max-full-ms 30000 --max-incremental-ms 5000 --max-restart-reuse-ms 5000
       - name: Test frontend browser experience
         run: xvfb-run --auto-servernum npm run test:frontend
       - name: Enforce dashboard observability performance budget
@@ -80,6 +80,8 @@ jobs:
           node test/installer-test-entrypoints-unit.mjs
       - name: Smoke-test native Windows dashboard chrome
         run: npm run test:custom-chrome-browser
+      - name: Verify Windows dashboard visual baseline
+        run: npm run test:visual-regression
       - name: Build unpacked Windows application
         run: npm run electron:build:windows
       - name: Resolve current unpacked application

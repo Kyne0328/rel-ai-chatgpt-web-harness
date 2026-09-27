@@ -7,7 +7,7 @@ export const DEVELOPER_FEATURES = Object.freeze({
   extensions: Object.freeze({
     id: 'extensions',
     label: 'Enable Extensions',
-    help: 'Show the experimental Extensions page in the main menu and quick navigation.',
+    help: 'Show Extensions in the main menu and quick navigation. This feature is experimental.',
     storageKey: 'relai_developer_feature_extensions_enabled'
   })
 });

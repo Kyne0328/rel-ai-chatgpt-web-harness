@@ -90,6 +90,7 @@ class FakeWindow {
   minimize() { this.minimized = true; this.emit('minimize'); }
   maximize() { this.maximized = true; this.minimized = false; this.emit('maximize'); }
   unmaximize() { this.maximized = false; this.emit('unmaximize'); }
+  setTitleBarOverlay(options) { this.titleBarOverlay = options; }
   close() {
     let prevented = false;
     this.emit('close', { preventDefault() { prevented = true; } });
@@ -163,6 +164,11 @@ try {
   assert.equal(win.options.frame, false);
   assert.equal(win.options.thickFrame, true);
   assert.equal(win.options.titleBarStyle, 'hidden');
+  assert.deepEqual(win.options.titleBarOverlay, { color: '#111613', symbolColor: '#f2f6f2', height: 40 }, 'Windows dashboard must use a dark native Window Controls Overlay so Snap Layouts do not create a bright system-colored caption strip.');
+  manager.setThemePreference('light');
+  assert.deepEqual(win.titleBarOverlay, { color: '#ffffff', symbolColor: '#172033', height: 40 }, 'native caption controls must follow the dashboard light theme');
+  manager.setThemePreference('dark');
+  assert.deepEqual(win.titleBarOverlay, { color: '#111613', symbolColor: '#f2f6f2', height: 40 }, 'native caption controls must return to the dashboard dark theme');
   assert.equal(win.options.icon, 'app-icon.png', 'desktop windows must carry the application icon on Linux and Windows');
   assert.equal(win.options.webPreferences.nodeIntegration, false);
   assert.equal(win.options.webPreferences.contextIsolation, true);
@@ -227,7 +233,7 @@ try {
   assert.equal(win.webContents.url.endsWith('#settings/connection'), true, 'session reauthentication must preserve the active dashboard route');
 
   assert.deepEqual(manager.getState(), {
-    platform: 'win32', customTitleBar: true, controls: 'custom',
+    platform: 'win32', customTitleBar: true, controls: 'native',
     maximized: false, minimized: false, fullScreen: false
   });
   assert.equal(manager.minimize().minimized, true);
@@ -295,6 +301,27 @@ try {
     width: 1020,
     height: 610
   }, 'a stale debounced bounds write must not overwrite the final close-time window state');
+
+  let rendererGone = null;
+  let rendererRecoveryError = null;
+  const crashRecoveryManager = createDashboardWindowManager({
+    ...dependencies,
+    onRendererGone: (error, details) => { rendererGone = { error, details }; },
+    onLoadError: error => { rendererRecoveryError = error; }
+  });
+  const crashedWindow = await crashRecoveryManager.open('#tasks');
+  const renderProcessGone = webContentsEvents.get('render-process-gone');
+  assert.equal(typeof renderProcessGone, 'function', 'dashboard must observe renderer exits');
+  renderProcessGone({}, { reason: 'crashed', exitCode: 11 });
+  assert.equal(crashedWindow.destroyed, true, 'a crashed dashboard renderer must be discarded before recovery');
+  assert.match(rendererGone?.error?.message || '', /Dashboard renderer exited \(crashed, code 11\)/);
+  assert.deepEqual(rendererGone?.details, { reason: 'crashed', exitCode: 11 });
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const recoveredWindow = crashRecoveryManager.getWindow();
+  assert.ok(recoveredWindow && recoveredWindow !== crashedWindow, 'dashboard renderer crash must recreate the dashboard window');
+  assert.equal(recoveredWindow.webContents.url.endsWith('#tasks'), true, 'renderer recovery must preserve the active dashboard route');
+  assert.equal(rendererRecoveryError, null, 'one renderer crash must recover without escalating to the recovery window');
+  await crashRecoveryManager.close();
 
   let updateCloseAllowed = false;
   const updateLockedManager = createDashboardWindowManager({

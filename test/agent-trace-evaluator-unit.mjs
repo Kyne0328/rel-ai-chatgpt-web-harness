@@ -7,6 +7,9 @@ const expectations = [{
   taskMode: 'required',
   requiredTools: ['relai_edit', 'relai_validate'],
   forbiddenTools: ['relai_process'],
+  expectedSkills: ['rel-ai-workflow', 'rel-ai-debugging'],
+  forbiddenSkills: ['rel-ai-dev-process'],
+  requireLiveTrace: true,
   maxCalls: 6,
   maxDuplicateCalls: 0,
   minPollIntervalMs: 30_000,
@@ -15,7 +18,8 @@ const expectations = [{
 }];
 const trace = {
   id: 'focused-fix',
-  metadata: { model: 'recorded-model-version', instructionVersion: 'instruction-hash', toolSurfaceVersion: 'surface-version' },
+  metadata: { model: 'recorded-model-version', instructionVersion: 'instruction-hash', toolSurfaceVersion: 'surface-version', source: 'live-agent-trace', capturedAt: '2026-09-26T00:00:00.000Z' },
+  skills: ['rel-ai-workflow', 'rel-ai-debugging'],
   completed: true,
   durationMs: 60_000,
   calls: [
@@ -32,10 +36,12 @@ const wasteful = structuredClone(trace);
 wasteful.calls.splice(2, 0, { ...wasteful.calls[1], startedAtMs: 2_100 });
 wasteful.calls.at(-1).startedAtMs = 10_000;
 wasteful.metadata.model = '';
+wasteful.metadata.source = 'maintainer-fixture';
+wasteful.skills = ['rel-ai-workflow', 'rel-ai-dev-process'];
 wasteful.completed = false;
 const report = evaluateAgentTraces(expectations, [wasteful]);
 assert.equal(report.ok, false);
-for (const kind of ['missing_version', 'incomplete', 'duplicate_calls', 'poll_interval']) {
+for (const kind of ['missing_version', 'trace_provenance', 'skills', 'forbidden_skill', 'incomplete', 'duplicate_calls', 'poll_interval']) {
   assert.ok(report.failures.some(item => item.kind === kind), `recorded-trace evaluator must catch ${kind}`);
 }
 

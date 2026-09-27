@@ -1,3 +1,5 @@
+@reference "tailwindcss";
+
 .browser-route {
   flex: 1 1 auto;
   min-height: 520px;
@@ -15,6 +17,24 @@
 .browser-chrome:focus-within {
   border-color: var(--ui-border-default);
 }
+
+.browser-takeover-banner {
+  position: sticky;
+  top: 8px;
+  z-index: calc(var(--z-sticky) + 1);
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid var(--ui-status-warning-border);
+  border-radius: var(--radius-lg);
+  background: var(--ui-status-warning-background);
+  color: var(--ui-status-warning-foreground);
+  box-shadow: 0 8px 22px -18px color-mix(in srgb, var(--ui-status-warning-foreground) 48%, transparent);
+}
+.browser-takeover-banner > span { min-width: 0; flex: 1; font-size: 12px; font-weight: 650; }
+.browser-takeover-banner > button { flex: 0 0 auto; }
 
 .browser-sessions {
   display: flex;
@@ -498,6 +518,15 @@
   white-space: nowrap;
   opacity: .85;
 }
+
+.browser-remote { overflow: hidden; }
+.browser-remote-head { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 12px; border-bottom: 1px solid var(--ui-border-subtle); }
+.browser-remote-copy { min-width: 0; display: grid; gap: 2px; }
+.browser-remote-copy strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.browser-remote-copy span { overflow: hidden; color: var(--ui-text-tertiary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.browser-remote-frame { display: grid; min-height: 360px; place-items: center; overflow: auto; background: var(--ui-canvas); }
+.browser-remote-frame img { display: block; width: 100%; height: auto; max-height: calc(100dvh - 260px); object-fit: contain; }
+.browser-remote-note { margin: 0; padding: 8px 12px; border-top: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-size: 11px; }
 
 .browser-empty {
   display: grid;

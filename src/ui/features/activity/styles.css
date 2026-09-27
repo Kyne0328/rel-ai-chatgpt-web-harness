@@ -1,12 +1,16 @@
+@reference "tailwindcss";
+
 @layer components {
 .activity-page { @apply min-w-0; min-height: 0; flex: 1 1 0; }
 .activity-event-card { @apply flex min-w-0 flex-col; min-height: 0; flex: 1 1 0; }
 .activity-master-detail { display: grid; grid-template-columns: minmax(560px, 66%) minmax(320px, 1fr); min-height: 0; flex: 1 1 0; }
-.activity-list-pane { min-width: 0; min-height: 0; overflow-y: auto; border-right: 1px solid var(--ui-border-default); }
+.activity-list-pane { position: relative; min-width: 0; min-height: 0; overflow-y: auto; border-right: 1px solid var(--ui-border-default); }
+.activity-live-tail { position: sticky; top: 8px; z-index: calc(var(--z-sticky) + 1); display: flex; justify-content: center; height: 0; pointer-events: none; }
+.activity-live-tail > button { pointer-events: auto; box-shadow: 0 8px 22px -18px color-mix(in srgb, var(--ui-text-primary) 38%, transparent); }
 .activity-event-card .card-body { @apply p-0; flex: 1 0 auto; }
 .activity-event-card .table-wrap { width: 100%; min-width: 0; flex: 1 0 auto; overflow-x: auto; }
 .activity-inspector { min-width: 0; min-height: 0; overflow-y: auto; padding: 18px; scroll-margin-top: 78px; background: var(--ui-surface-primary); }
-.activity-inspector-head { display: grid; gap: 2px; margin-bottom: 14px; }
+.activity-inspector-head { display: grid; gap: 2px; margin-bottom: 8px; }
 .activity-inspector-head h2 { font-size: 17px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; scroll-margin-top: 84px; }
 .activity-inspector .inspector-empty { display: grid; min-height: 280px; place-content: center; gap: 6px; padding: 24px; text-align: center; color: var(--ui-text-secondary); }
 .activity-inspector .inspector-empty strong { color: var(--ui-text-primary); font-size: 13px; }
@@ -18,49 +22,75 @@
 .activity-time-column { @apply whitespace-nowrap; }
 .activity-table tbody .activity-time-column { @apply align-top; }
 .activity-message-column { min-width: 0; overflow: hidden; }
-.activity-message-cell { @apply min-w-0 py-2; }
-.activity-row-trigger { @apply grid min-h-11 w-full min-w-0 gap-1 rounded-md text-left; justify-content: stretch; justify-items: stretch; padding: 0; border: 0; background: transparent; color: inherit; }
+.activity-message-cell { @apply min-w-0 py-1.5; }
+.activity-row-trigger { @apply grid min-h-10 w-full min-w-0 gap-0.5 rounded-md text-left; justify-content: stretch; justify-items: stretch; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
 .activity-row-trigger:hover .activity-message-copy { color: var(--ui-text-primary); }
-.activity-message-copy { display: -webkit-box; width: 100%; max-width: 65ch; min-width: 12ch; overflow: hidden; color: var(--ui-text-primary); font-size: 13px; font-weight: 600; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.activity-row-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--ui-text-secondary); font-size: 12px; line-height: 1.5; }
-.activity-row-meta .status-pill { @apply min-h-9 px-2 text-[12px]; }
-.activity-row-action { @apply font-semibold; color: var(--ui-text-secondary); }
-.activity-row-task, .activity-row-project { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-message-copy { width: 100%; max-width: 72ch; min-width: 12ch; overflow: hidden; color: var(--ui-text-primary); font-size: 13px; font-weight: 600; line-height: 1.45; white-space: nowrap; text-overflow: ellipsis; }
+.activity-row-meta { display: flex; min-width: 0; flex-wrap: nowrap; align-items: center; gap: 6px; overflow: hidden; color: var(--ui-text-secondary); font-size: 11px; line-height: 1.45; white-space: nowrap; }
+.activity-row-meta .status-pill { @apply min-h-6 px-1.5 text-[11px]; }
+.activity-row-action { @apply shrink-0 font-semibold; color: var(--ui-text-secondary); }
+.activity-row-task, .activity-row-project { min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-row-task { color: var(--ui-text-secondary); }
 .activity-row-project { color: var(--ui-text-tertiary); }
 .activity-page .data-table th, .activity-page .data-table td { padding-inline: 10px; }
 .activity-requested-row td { background: var(--ui-status-info-background); }
-.activity-data-row { cursor: pointer; }
+.activity-data-row.is-new-event td { position: relative; }
+.activity-data-row.is-new-event td:first-child { border-left: 3px solid var(--ui-action-primary); }
+.activity-data-row.is-new-event td::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: color-mix(in srgb, var(--ui-action-primary) 14%, transparent); animation: activity-event-arrive 1.4s var(--ease-out) both; }
 .activity-data-row:hover td { background: var(--ui-surface-secondary); }
 .activity-data-row:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: -2px; }
-.activity-data-row:hover td { background: var(--ui-surface-secondary); }
 .activity-table tbody tr.is-selected td { background: var(--ui-selection-background); }
 .activity-table tbody tr.is-selected td:first-child { box-shadow: inset 3px 0 0 var(--ui-action-primary); }
+.activity-table .activity-virtual-spacer td { height: auto; padding: 0; border: 0; background: transparent; }
 .activity-skeleton-row { pointer-events: none; }
 .activity-skeleton { display: block; height: 14px; max-width: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--ui-surface-secondary), var(--ui-surface-raised), var(--ui-surface-secondary)); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
 .activity-skeleton-time { width: 52px; height: 14px; }
-.activity-skeleton-status { width: 72px; height: 36px; border-radius: 999px; }
+.activity-skeleton-status { width: 20px; height: 20px; border-radius: 999px; }
 .activity-skeleton-message { width: 88%; }
 .activity-skeleton-message-short { width: 64%; }
 .activity-skeleton-meta { @apply mt-2 flex items-center gap-2; }
 .activity-skeleton-context { width: 180px; }
-.activity-detail { @apply gap-4; }
+.activity-detail { @apply gap-3; }
 .activity-detail-head { @apply flex items-center justify-between gap-3; }
-.activity-detail-section { @apply grid gap-2; }
+.activity-detail-time { @apply text-[12px]; }
+.activity-detail-summary { @apply m-0 border-b pb-3 text-[13px] leading-5; border-color: var(--ui-border-default); color: var(--ui-text-primary); }
+.activity-detail-section { @apply grid gap-1.5; }
 .activity-detail-section > h3 { @apply text-[11px] font-bold; color: var(--ui-text-secondary); }
 .activity-detail-section > p { @apply m-0 text-[13px] leading-5; color: var(--ui-text-primary); }
-.activity-session-context { @apply rounded-lg p-3; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
-.activity-session-context > strong { @apply min-w-0 truncate text-[13px] font-semibold; }
-.activity-session-context > span { @apply text-[12px]; color: var(--ui-text-tertiary); }
-.activity-session-actions { @apply mt-1 flex flex-wrap gap-2; }
+.activity-session-context { @apply flex flex-wrap items-center justify-between gap-2 border-y py-2.5; border-color: var(--ui-border-default); }
+.activity-session-copy { @apply grid min-w-0 gap-0.5; }
+.activity-session-copy > strong { @apply min-w-0 truncate text-[12px] font-semibold; }
+.activity-session-copy > span { @apply truncate text-[11px]; color: var(--ui-text-tertiary); }
+.activity-session-actions { @apply flex shrink-0 flex-wrap items-center gap-3; }
 .activity-detail-error { @apply rounded-lg p-3; background: var(--ui-status-danger-background); border: 1px solid var(--ui-status-danger-border); }
 .activity-detail-error > h3, .activity-detail-error > p { color: var(--ui-status-danger-foreground); }
 .activity-detail-technical { @apply border-t pt-3; border-color: var(--ui-border-default); }
 .activity-detail-technical > summary { @apply flex min-h-11 cursor-pointer items-center text-[12px] font-semibold; color: var(--ui-text-secondary); }
 .activity-detail-fields { @apply mt-2; }
-.activity-detail-raw { @apply mt-3 grid gap-1.5; }
+.activity-detail-raw { @apply mt-3 grid gap-2; }
 .activity-detail-raw h4 { @apply text-[11px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
+.activity-detail-raw-head { @apply flex flex-wrap items-center justify-between gap-2; }
+.activity-detail-raw-actions { @apply flex flex-wrap items-center gap-1; }
+.activity-detail-raw-actions button { min-height: 36px; }
+.activity-json-search { @apply flex min-h-10 items-center gap-2 rounded-md px-2.5; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); color: var(--ui-text-tertiary); }
+.activity-json-search input { min-height: 36px; min-width: 0; flex: 1; border: 0; padding: 0; background: transparent; box-shadow: none; }
+.activity-json-search input:focus { box-shadow: none; }
+.activity-json-tree { max-height: 360px; overflow: auto; padding: 8px; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-secondary); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 11px; line-height: 1.6; }
+.activity-json-branch { margin: 0; }
+.activity-json-branch > summary { display: flex; min-height: 28px; align-items: center; gap: 6px; cursor: pointer; color: var(--ui-text-secondary); }
+.activity-json-branch.is-root > summary { color: var(--ui-text-primary); }
+.activity-json-children { margin-left: 13px; padding-left: 10px; border-left: 1px solid var(--ui-border-subtle); }
+.activity-json-leaf { display: flex; min-height: 26px; min-width: 0; align-items: baseline; gap: 6px; padding-left: 4px; }
+.activity-json-key { color: var(--ui-action-primary); overflow-wrap: anywhere; }
+.activity-json-type { color: var(--ui-text-tertiary); font-size: 11px; }
+.activity-json-leaf code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ui-text-primary); }
+.activity-json-empty { @apply rounded-md px-3 py-2 text-[12px]; color: var(--ui-text-tertiary); background: var(--ui-surface-secondary); border: 1px dashed var(--ui-border-default); }
 .activity-detail-technical > button { @apply mt-3; }
+}
+
+@keyframes activity-event-arrive {
+  from { opacity: 1; }
+  to { opacity: 0; }
 }
 
 @media (max-width: 1140px) {
@@ -79,8 +109,10 @@
 @media (max-width: 520px) {
   .activity-page .data-table th, .activity-page .data-table td { @apply px-2; }
   .activity-message-copy { font-size: 12px; }
-  .activity-row-task, .activity-row-project { max-width: 20ch; }
-  .activity-session-actions { @apply grid; grid-template-columns: minmax(0,1fr); }
+  .activity-row-task, .activity-row-project { max-width: 18ch; }
+  .activity-row-project { display: none; }
+  .activity-session-context { align-items: flex-start; }
+  .activity-session-actions { @apply w-full justify-start; }
 }
 
 @media (max-width: 420px) {

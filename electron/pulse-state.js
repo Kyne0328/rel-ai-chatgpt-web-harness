@@ -35,9 +35,9 @@ function projectPulseStatus(status = {}) {
     return {
       visible: true,
       tone: 'waiting',
-      badge: taskCount === 1 ? '1 open' : `${Math.max(1, taskCount)} open`,
-      title: taskCount > 1 ? `${taskCount} tasks are open` : cleanText(primary?.title || 'Waiting for the next local action', 96),
-      detail: taskDetail(primary, taskCount, 'ChatGPT may still be working. Rel.AI is ready for the next local action.'),
+      badge: taskCount === 1 ? '1 waiting' : `${Math.max(1, taskCount)} waiting`,
+      title: taskCount > 1 ? `${taskCount} tasks are waiting` : cleanText(primary?.title || 'Waiting for the next action', 96),
+      detail: taskDetail(primary, taskCount, 'ChatGPT may still be working. Rel.AI is ready for the next action.'),
       activityLine: cleanText(activityLineFor(primary, activity), 140),
       startedAt: startedAtFor(primary, activity),
       workspacesLabel: workspacesLabel(tasks),
@@ -65,7 +65,7 @@ function projectPulseStatus(status = {}) {
     tone: 'idle',
     badge: 'Idle',
     title: 'Rel.AI is idle',
-    detail: 'No local task is active.',
+    detail: '',
     route: '#home',
     taskCount: 0,
     actionRequired: false
@@ -78,11 +78,11 @@ function attentionModel(task, taskCount, route, tasks) {
     ? 'Approval required'
     : status === 'validation_failed'
       ? 'Checks need attention'
-      : 'Resolve the blocker to continue';
+      : 'Resolve the problem to continue';
   const fallback = status === 'waiting_for_approval'
-    ? 'The task is paused until the required approval is handled in the AI host.'
+    ? 'The task is paused and waits for your approval in ChatGPT.'
     : status === 'validation_failed'
-      ? 'Review the failed checks, fix the issue, then validate again.'
+      ? 'Review the failed checks. Fix the issue. Validate again.'
       : 'Open the task to see what is blocking progress.';
   return {
     visible: true,

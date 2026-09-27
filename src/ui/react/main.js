@@ -1,4 +1,3 @@
-import '../styles/app.css';
 import React, {
   createContext,
   lazy,
@@ -18,6 +17,7 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { HashRouter, useLocation } from 'react-router-dom';
 import { Icon } from '../components/icons.js';
+import { StatusPill } from '../components/pill.js';
 import { connectionLayerViews, connectionSummary } from '../connection-state.js';
 import { DEVELOPER_FEATURE_CHANGE_EVENT, DEVELOPER_FEATURES, readDeveloperFeatureEnabled } from '../developer-mode.js';
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
@@ -34,12 +34,16 @@ import {
   routeMetadata
 } from '../navigation-catalog.js';
 import { getOverlaySnapshot, removeToastOverlay, subscribeOverlay } from '../overlay-store.js';
+import { getUiPreferences, setThemePreference } from '../preferences.js';
 import { normalizeRouteKey } from '../route-policy.js';
 export { initConnectorRefreshModal } from '../connector-refresh-modal.js';
 export { initUpdateAvailableModal } from '../update-available-modal.js';
 export { applyLiveEvent, getSnapshot, init, patchLocalConnection, subscribe } from '../store.js';
 
+if (import.meta.env.DEV) void import('../styles/app.css');
+
 const h = React.createElement;
+const SHELL_STORE_KEYS = Object.freeze(['ok', 'config', 'connectionState', 'taskActivity', 'live']);
 const DashboardStoreContext = createContext(null);
 const reactRouteComponents = new Map();
 const reactRoutePreloads = new Map();
@@ -50,10 +54,46 @@ let sequence = 0;
 let uiSnapshot = Object.freeze({
   connectionOverride: null,
   lastEventAt: 0,
-  now: Date.now(),
   recovery: null,
   routeState: null
 });
+
+function UpdateStatusPill() {
+  const bridge = window.relaiDesktop;
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    if (!bridge?.getUpdateStatus) return undefined;
+    let active = true;
+    void bridge.getUpdateStatus().then(next => { if (active) setStatus(next); }).catch(() => {});
+    const remove = typeof bridge.onUpdateStatus === 'function'
+      ? bridge.onUpdateStatus(next => { if (active) setStatus(next); })
+      : null;
+    return () => {
+      active = false;
+      if (typeof remove === 'function') remove();
+    };
+  }, [bridge]);
+
+  const state = String(status?.state || '');
+  if (!['downloading', 'downloaded', 'installing'].includes(state) && status?.installDeferred !== true) return null;
+  const percent = Math.max(0, Math.min(100, Number(status?.progress?.percent || 0)));
+  const label = status?.installDeferred === true
+    ? 'Update queued'
+    : state === 'downloading'
+      ? `Update ${Math.round(percent)}%`
+      : state === 'downloaded'
+        ? 'Update ready'
+        : 'Updating';
+  const tone = state === 'downloaded' && status?.installDeferred !== true ? 'ok' : 'working';
+  return h(StatusPill, {
+    className: 'connection-status-link',
+    href: '#settings/about',
+    tone,
+    label,
+    'aria-label': `Open App updates; ${label}`
+  });
+}
 
 function useDashboardStore() {
   const store = useContext(DashboardStoreContext);
@@ -131,11 +171,6 @@ export function mountReactFoundation(element, store, options = {}) {
     ));
   });
   return foundationRoot;
-}
-
-export function setShellNow(now) {
-  const value = Number(now);
-  updateUi({ now: Number.isFinite(value) ? value : Date.now() });
 }
 
 export function setShellLastEventAt(timestamp) {
@@ -234,7 +269,7 @@ function useRoutePresentation() {
 }
 
 function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
-  const data = useDashboardStore();
+  const data = useDashboardSlices(SHELL_STORE_KEYS);
   const ui = useSyncExternalStore(subscribeUi, () => uiSnapshot, () => uiSnapshot);
   const overlays = useSyncExternalStore(subscribeOverlay, getOverlaySnapshot, getOverlaySnapshot);
   const route = useRoutePresentation();
@@ -304,7 +339,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     setPaletteOpen(true);
   };
   const connection = ui.connectionOverride || connectionPresentation(data);
-  const lastUpdated = lastUpdatedText(ui.lastEventAt, ui.now);
   const shortcut = /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘ K' : 'Ctrl K';
   const revisionKey = JSON.stringify(data?.live?.revisions || {});
 
@@ -352,13 +386,16 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
               h('span', { className: 'command-trigger-label' }, 'Quick navigation'),
               h('kbd', null, shortcut)
             ),
-            h('a', {
-              className: `status-pill ${connection.tone} connection-status-link`,
+            h(UpdateStatusPill),
+            h(StatusPill, {
               id: 'connectionStatus',
+              className: 'connection-status-link',
               href: '#settings/connection',
+              tone: connection.tone,
+              label: connection.label,
               'aria-label': `Open Connection settings; current status ${connection.label}`
-            }, connection.label),
-            h('span', { className: 'section-action', id: 'lastUpdated' }, lastUpdated)
+            }),
+            h(LastUpdatedClock, { lastEventAt: ui.lastEventAt })
           )
         ),
         h(RecoveryNotice, { recovery: ui.recovery }),
@@ -367,6 +404,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     ),
     h(CommandPalette, {
       data,
+      desktop,
       extensionsEnabled,
       onAddWorkspace,
       onClose: closePalette,
@@ -523,7 +561,7 @@ function WindowTitlebar({ desktop, title }) {
   const [state, setState] = useState(() => normalizeWindowState({
     platform: document.documentElement.dataset.platform || 'other',
     customTitleBar: document.documentElement.dataset.windowChrome === 'custom',
-    controls: document.documentElement.dataset.windowChrome === 'custom' ? 'custom' : 'native',
+    controls: 'native',
     maximized: document.documentElement.dataset.windowMaximized === 'true'
   }));
 
@@ -704,9 +742,6 @@ function DashboardState({ kind = 'loading', title, description, primaryLabel = '
   ));
 }
 
-function StatusPill({ label, tone = '' }) {
-  return h('span', { className: `status-pill ${tone}`.trim() }, label);
-}
 
 function connectionPresentation(data = {}) {
   if (data?.ok === false) return { label: 'Error', tone: 'bad' };
@@ -720,6 +755,21 @@ function connectionPresentation(data = {}) {
   if (dashboardLayer) return { label: dashboardLayer.label, tone: dashboardLayer.tone };
   return { label: 'Available', tone: 'ok', callCount: task.activeCalls };
 }
+
+const LastUpdatedClock = memo(function LastUpdatedClock({ lastEventAt }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    if (!lastEventAt) return undefined;
+    const onTick = event => {
+      const value = Number(event?.detail?.now);
+      setNow(Number.isFinite(value) ? value : Date.now());
+    };
+    window.addEventListener('relai:clock-tick', onTick);
+    return () => window.removeEventListener('relai:clock-tick', onTick);
+  }, [lastEventAt]);
+  return h('span', { className: 'section-action', id: 'lastUpdated' }, lastUpdatedText(lastEventAt, now));
+});
 
 function lastUpdatedText(lastEventAt, now) {
   if (!lastEventAt) return '';
@@ -770,11 +820,12 @@ function RecoveryNotice({ recovery }) {
   );
 }
 
-function CommandPalette({ data, extensionsEnabled, onAddWorkspace, onClose, open, opener }) {
+function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onClose, open, opener }) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
+  const [resultAnnouncement, setResultAnnouncement] = useState('');
   const inputRef = useRef(null);
-  const commands = useMemo(() => buildCommands(data, extensionsEnabled, onAddWorkspace, onClose), [data?.config?.workspaces, extensionsEnabled, onAddWorkspace, onClose]);
+  const commands = useMemo(() => buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, onClose), [data, desktop, extensionsEnabled, onAddWorkspace, onClose]);
   const visible = useMemo(() => {
     const normalized = normalizeSearch(query);
     return commands.filter(command => !normalized || command.searchText.includes(normalized)).slice(0, 14);
@@ -794,6 +845,17 @@ function CommandPalette({ data, extensionsEnabled, onAddWorkspace, onClose, open
     if (!open || !visible.length) return;
     document.getElementById(`command-option-${safeIndex}`)?.scrollIntoView({ block: 'nearest' });
   }, [open, safeIndex, visible.length]);
+  useEffect(() => {
+    if (!open) {
+      setResultAnnouncement('');
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      const count = visible.length;
+      setResultAnnouncement(`${count} ${count === 1 ? 'result' : 'results'} available.`);
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [open, query, visible.length]);
 
   const execute = command => {
     if (!command) return;
@@ -855,6 +917,7 @@ function CommandPalette({ data, extensionsEnabled, onAddWorkspace, onClose, open
                 h('kbd', null, 'Esc')
               ),
               h(Dialog.Description, { asChild: true }, h('div', { className: 'command-help' }, h('span', { id: 'commandPaletteHelp' }, 'Use ↑ and ↓ to move, then press Enter.'))),
+              h('span', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, resultAnnouncement),
               h('div', { className: 'command-list', id: 'commandPaletteList', role: 'listbox', 'aria-label': 'Quick navigation results' },
                 visible.length
                   ? visible.map((command, index) => h('div', {
@@ -881,7 +944,7 @@ function CommandPalette({ data, extensionsEnabled, onAddWorkspace, onClose, open
   ));
 }
 
-function buildCommands(data, extensionsEnabled, onAddWorkspace, closePalette) {
+function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePalette) {
   const commands = navigationCommands({ includeExtensions: extensionsEnabled }).map(item => ({
     id: item.path.replaceAll('/', '-'),
     label: item.group === 'Settings' ? `Settings · ${item.label}` : item.label,
@@ -890,6 +953,28 @@ function buildCommands(data, extensionsEnabled, onAddWorkspace, closePalette) {
     href: item.href,
     run: () => { closePalette(); location.hash = item.href; }
   }));
+  commands.push({
+    id: 'toggle-theme',
+    label: 'Toggle light / dark theme',
+    description: 'Switch the dashboard between light and dark appearance.',
+    group: 'Action',
+    searchAliases: 'theme dark light appearance color',
+    run: () => {
+      const current = document.documentElement.dataset.theme || getUiPreferences().theme;
+      setThemePreference(current === 'light' ? 'dark' : 'light');
+      closePalette();
+    }
+  });
+  if (typeof desktop?.restartConnection === 'function') {
+    commands.push({
+      id: 'restart-connection',
+      label: 'Restart connection service',
+      description: 'Restart the local Rel.AI connection service.',
+      group: 'Action',
+      searchAliases: 'connection reconnect restart service',
+      run: async () => { closePalette(); await desktop.restartConnection(); }
+    });
+  }
   if (typeof onAddWorkspace === 'function') {
     commands.push({
       id: 'add-workspace',
@@ -915,7 +1000,7 @@ function buildCommands(data, extensionsEnabled, onAddWorkspace, closePalette) {
   }
   return commands.map(command => ({
     ...command,
-    searchText: normalizeSearch([command.label, command.description, command.group].join(' '))
+    searchText: normalizeSearch([command.label, command.description, command.group, command.searchAliases].join(' '))
   }));
 }
 
@@ -1094,17 +1179,17 @@ function ToastItem({ toast }) {
   const remainingRef = useRef(Math.max(0, Number(toast.duration || 0)));
   const pausedRef = useRef(false);
 
-  const clearTimer = () => {
+  const clearTimer = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = null;
     startedAtRef.current = 0;
-  };
-  const schedule = () => {
+  }, []);
+  const schedule = useCallback(() => {
     clearTimer();
     if (pausedRef.current || remainingRef.current <= 0) return;
     startedAtRef.current = Date.now();
     timerRef.current = window.setTimeout(() => removeToastOverlay(toast.id), remainingRef.current);
-  };
+  }, [clearTimer, toast.id]);
   const pause = () => {
     if (pausedRef.current) return;
     pausedRef.current = true;
@@ -1124,7 +1209,7 @@ function ToastItem({ toast }) {
     pausedRef.current = false;
     schedule();
     return clearTimer;
-  }, [toast.duration, toast.id, toast.revision]);
+  }, [clearTimer, schedule, toast.duration, toast.id, toast.revision]);
 
   return h('div', {
     className: `toast toast-${toast.tone}`,

@@ -69,11 +69,12 @@ for (const file of walk(ciDir)) {
 }
 
 const allowedSynchronousProcessDiscovery = new Set([
-  'src/executionInvocation.js',
+  'src/browser/playwrightPrimitives.ts',
+  'src/executionInvocation.ts',
+  'src/process.ts',
   'src/release.js',
-  'src/webAutomationManager.js'
 ]);
-for (const file of collectJavaScript(path.join(root, 'src'))) {
+for (const file of collectRuntimeSource(path.join(root, 'src'))) {
   const relativePath = path.relative(root, file).replaceAll('\\', '/');
   const source = fs.readFileSync(file, 'utf8');
   if (/Atomics\.wait\s*\(/.test(source)) failures.push(`${relativePath} blocks the Node event loop with Atomics.wait.`);
@@ -83,13 +84,13 @@ for (const file of collectJavaScript(path.join(root, 'src'))) {
   }
 }
 
-function collectJavaScript(directory) {
+function collectRuntimeSource(directory) {
   if (!fs.existsSync(directory)) return [];
   const files = [];
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const target = path.join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...collectJavaScript(target));
-    else if (entry.name.endsWith('.js')) files.push(target);
+    if (entry.isDirectory()) files.push(...collectRuntimeSource(target));
+    else if (/\.(?:[cm]?[jt]s)$/i.test(entry.name)) files.push(target);
   }
   return files;
 }

@@ -47,6 +47,9 @@ const FIELD_SCHEMAS = Object.freeze({
   uri: STRING,
   application: STRING,
   text: STRING,
+  present: BOOLEAN,
+  percent: NUMBER,
+  charging: BOOLEAN,
   origin: STRING,
   browserEngine: STRING,
   browserProduct: STRING,
@@ -433,7 +436,7 @@ const FIELD_SCHEMAS = Object.freeze({
 const TOOL_FIELDS = Object.freeze({
   [OP.WORK_CONTEXT]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
   [OP.WORK_PLAN]: ['ok', 'workspace', 'work_id', 'plan', 'message'],
-  [OP.WORK_BEGIN]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
+  [OP.WORK_BEGIN]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'plan', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
   [OP.SNAPSHOT]: ['ok', 'workspace', 'work_id', 'root', 'manifests', 'manifestContents', 'discoveredCommands', 'projectInstructions', 'skills', 'fileCount', 'effectiveMaxEntries', 'budgetMultiplied', 'files', 'returnedFileCount', 'omittedFiles', 'skipped', 'skippedCount', 'truncated', 'hints', 'git', 'recommendedFlow', 'writeGuidance', 'operationJournal', 'repository', 'changedFiles', 'next'],
   [OP.READ]: ['ok', 'workspace', 'work_id', 'items', 'resourceLink', 'skipped', 'requestedCount', 'returnedCount', 'partial', 'truncated', 'error'],
   [OP.SEARCH_TEXT]: ['ok', 'workspace', 'work_id', 'pattern', 'queries', 'queryCount', 'uniqueFileCount', 'execution', 'glob', 'fixed', 'ignoreCase', 'matches', 'matchCount', 'mode', 'effectiveMode', 'autoTier', 'selectionStrategy', 'contextBefore', 'contextAfter', 'groupByFile', 'mergeOverlaps', 'maxFiles', 'maxRangesPerFile', 'maxRangeLines', 'files', 'results', 'resultCount', 'returnedFileCount', 'returnedRangeCount', 'contextMatchCount', 'returnedBytes', 'maxBytes', 'omittedFiles', 'omittedRanges', 'truncated', 'contextTruncated', 'next'],
@@ -446,7 +449,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.PROCESS_LIST]: ['ok', 'work_id', 'processes', 'count'],
   [OP.UI]: ['ok', 'workspace', 'work_id', 'action', 'sessionId', 'url', 'origin', 'statusCode', 'title', 'viewport', 'browserEngine', 'browserProduct', 'allowedPorts', 'createdAt', 'snapshot', 'truncated', 'interaction', 'target', 'image', 'consoleEntries', 'networkEntries', 'count', 'cleared', 'status', 'error'],
   [OP.BROWSER]: ['ok', 'workspace', 'work_id', 'action', 'sessionId', 'tabId', 'activeTabId', 'activeSessionCount', 'sessions', 'tabs', 'count', 'url', 'statusCode', 'title', 'viewport', 'browserEngine', 'browserProduct', 'profile', 'createdAt', 'detail', 'snapshot', 'truncated', 'interaction', 'target', 'image', 'path', 'bytes', 'sha256', 'suggestedFilename', 'changed', 'status', 'error'],
-  [OP.DESKTOP]: ['ok', 'workspace', 'work_id', 'action', 'platform', 'path', 'kind', 'uri', 'application', 'text', 'textLength', 'message', 'error'],
+  [OP.DESKTOP]: ['ok', 'workspace', 'work_id', 'action', 'platform', 'path', 'kind', 'uri', 'application', 'text', 'textLength', 'present', 'percent', 'charging', 'state', 'message', 'error'],
   [OP.COMPUTER]: ['ok', 'workspace', 'work_id', 'action', 'platform', 'enabled', 'available', 'engine', 'displayId', 'screen', 'display', 'displays', 'count', 'image', 'observationId', 'previousObservationId', 'semanticObservationId', 'targetId', 'perception', 'semanticAvailable', 'semanticReason', 'ocrAvailable', 'ocrReason', 'window', 'elements', 'method', 'changed', 'stable', 'stableMs', 'profile', 'durationMs', 'executed', 'x', 'y', 'toX', 'toY', 'direction', 'distance', 'textLength', 'key', 'keys', 'message', 'error', 'app', 'tier', 'warning', 'approved', 'approvedApps', 'controlling', 'lockedBy', 'lockSince', 'banner', 'released', 'failed', 'results', 'skipped'],
   [OP.SEARCH_SEMANTIC]: ['ok', 'workspace', 'work_id', 'query', 'queries', 'queryCount', 'uniqueFileCount', 'execution', 'strategy', 'privacy', 'fingerprint', 'cacheHit', 'neuralEmbeddings', 'retrieval', 'results', 'resultCount', 'matchCount', 'returnedBytes', 'maxBytes', 'truncated', 'next'],
   [OP.VALIDATE_DIAGNOSTICS]: ['ok', 'workspace', 'work_id', 'commands', 'results', 'diagnostics', 'diagnosticCount', 'completedUnits', 'totalUnits', 'execution', 'cancelled', 'truncated', 'message'],
@@ -471,11 +474,11 @@ const TOOL_FIELDS = Object.freeze({
 
 const SUCCESS_REQUIRED_FIELDS = Object.freeze({
   [OP.EXEC]: ['workspace', 'executed', 'commandSucceeded', 'exitCode', 'durationMs'],
-  [OP.VALIDATE_DIAGNOSTICS]: ['workspace', 'work_id', 'diagnostics', 'diagnosticCount'],
-  [OP.VALIDATE_CHECKS]: ['workspace', 'work_id', 'results', 'validationStatus'],
-  [OP.PROCESS_START]: ['work_id', 'processId', 'status', 'lifecycle'],
+  [OP.VALIDATE_DIAGNOSTICS]: ['workspace', 'diagnostics', 'diagnosticCount'],
+  [OP.VALIDATE_CHECKS]: ['workspace', 'results', 'validationStatus'],
+  [OP.PROCESS_START]: ['processId', 'status', 'lifecycle'],
   [OP.PROCESS_READ]: ['processId', 'status', 'stdout', 'stderr'],
-  [OP.PROCESS_WRITE]: ['work_id', 'processId', 'acceptedBytes', 'status'],
+  [OP.PROCESS_WRITE]: ['processId', 'acceptedBytes', 'status'],
   [OP.PROCESS_STOP]: ['processId', 'status', 'duplicate'],
   [OP.PROCESS_LIST]: ['processes', 'count'],
   [OP.WORK_PLAN]: ['work_id', 'plan'],
@@ -485,6 +488,7 @@ const SUCCESS_REQUIRED_FIELDS = Object.freeze({
 });
 
 const CLOSED_SUCCESS_TOOLS = new Set(Object.keys(TOOL_FIELDS));
+const NON_EXCEPTION_FAILURE_TOOLS = new Set([OP.VALIDATE_DIAGNOSTICS, OP.VALIDATE_CHECKS]);
 const COMPACT_RESULT_FIELDS = Object.freeze([
   'ok', 'truncated', 'originalBytes', 'workspace', 'work_id', 'processId', 'status', 'duplicate',
   'mode', 'check', 'exitCode', 'durationMs', 'diagnosticCount', 'validationStatus', 'completionKnown',
@@ -498,6 +502,7 @@ function outputSchemaFor(name) {
   ])];
   const properties = Object.fromEntries(fields.map(field => [field, FIELD_SCHEMAS[field] || OBJECT]));
   const successRequired = ['ok', ...(SUCCESS_REQUIRED_FIELDS[name] || [])];
+  const failureRequired = NON_EXCEPTION_FAILURE_TOOLS.has(name) ? ['ok'] : ['ok', 'error'];
   return {
     type: 'object',
     properties,
@@ -522,7 +527,7 @@ function outputSchemaFor(name) {
           title: FIELD_SCHEMAS.title,
           recovery: FIELD_SCHEMAS.recovery
         },
-        required: ['ok', 'error'],
+        required: failureRequired,
         additionalProperties: true
       }
     ]

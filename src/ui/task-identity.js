@@ -63,8 +63,8 @@ function clientCapabilityView(value = {}) {
       capabilityState: support,
       capabilityLabel: 'Native MCP Tasks: Not advertised by client',
       executionMode: mode,
-      executionLabel: 'Eligible long work: Work-session continuation',
-      description: 'Short operations complete directly. Longer eligible operations continue in the same work session. Keep doing independent work; later Rel.AI calls can surface completion automatically, or check by work_id when the result is needed.',
+      executionLabel: 'Eligible long work: Same Rel.AI task',
+      description: 'Short operations complete directly. Longer operations continue in the same Rel.AI task. You can continue other work. Later Rel.AI actions can show completion, or you can check by work_id.',
       pill: 'not advertised',
       pillClass: 'warn'
     };
@@ -215,7 +215,7 @@ export function workSessionStateView(value = {}) {
     running: ['Running', false, true, 'working'],
     working: ['Working', false, true, 'working'],
     validating: ['Validating', false, true, 'working'],
-    waiting: ['Open', false, false, 'working'],
+    waiting: ['Waiting', false, false, 'working'],
     settling: ['Settling', false, true, 'working'],
     waiting_for_approval: ['Blocked', false, false, 'warn'],
     blocked: ['Blocked', false, false, 'bad'],
@@ -256,12 +256,12 @@ export function processStateView(process = {}, nativeTasks = []) {
   const states = {
     starting: ['Starting', false, true, true, 'working', 'Wait for readiness or stop the process if startup does not complete.'],
     running: [independent ? 'Running independently' : 'Running', false, true, true, 'working', 'Use Stop process when this operating-system process is no longer needed.'],
-    stopping: ['Stopping', false, true, false, 'working', 'Rel.AI is waiting for confirmed process-tree exit.'],
+    stopping: ['Stopping', false, true, false, 'working', 'Rel.AI is waiting for the process to stop.'],
     exited: ['Exited', true, false, false, 'ok', 'Review the exit code and recent output before restarting if needed.'],
     stopped: ['Stopped', true, false, false, '', 'Start a new process when the command is needed again.'],
     failed: ['Failed', true, false, false, 'bad', 'Review recent stderr, correct the command or environment, and start it again.'],
-    orphaned: ['Unknown after restart', false, false, true, 'warn', 'Live pipes cannot be reattached. Stop the process explicitly if it is still running, then start it again.'],
-    unknown: ['Unknown', false, false, false, '', 'Refresh the dashboard. If the state remains unknown, inspect Diagnostics.']
+    orphaned: ['Unknown after restart', false, false, true, 'warn', 'Rel.AI cannot reconnect to this process output after a restart. Stop the process if it is still running. Then start it again.'],
+    unknown: ['Unknown', false, false, false, '', 'Refresh the dashboard. If the state remains unknown, open Troubleshooting.']
   };
   const [label, terminal, active, canStop, pillClass, recovery] = states[rawStatus] || states.unknown;
   return {

@@ -53,7 +53,7 @@ async function waitFor(condition, message, timeoutMs = 2000) {
   }
 }
 
-function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, platform = 'win32', manualMacUpdater = null, activeCalls = 0, activeTaskCount = 0, taskState = 'idle', tasks = [], checkFailures = [], downloadFailures = [], currentCompatibility = null, lastCheckAt = 0, fetchImpl = globalThis.fetch, now = () => Date.parse('2026-07-25T00:00:00.000Z'), autoDownloadUpdates = false, beforeInstallError = null } = {}) {
+function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, platform = 'win32', manualMacUpdater = null, activeCalls = 0, activeTaskCount = 0, taskState = 'idle', tasks = [], checkFailures = [], downloadFailures = [], currentCompatibility = null, lastCheckAt = 0, fetchImpl = globalThis.fetch, now = () => Date.parse('2026-07-25T00:00:00.000Z'), autoDownloadUpdates = false, updateChannel = 'stable', beforeInstallError = null } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-updater-'));
   roots.push(temp);
   if (lastCheckAt > 0) fs.writeFileSync(path.join(temp, 'update-state.json'), `${JSON.stringify({ lastCheckAt })}\n`);
@@ -64,6 +64,7 @@ function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, p
   const activity = { activeCalls, activeTaskCount, state: taskState, tasks };
   let beforeInstall = 0;
   let installCommit = 0;
+  let installerLaunch = 0;
   let installRecovery = 0;
   const updater = createAppUpdater({
     app: {
@@ -90,8 +91,10 @@ function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, p
       if (beforeInstallError) throw beforeInstallError;
     },
     onInstallCommit: () => { installCommit += 1; },
+    onInstallerLaunch: () => { installerLaunch += 1; },
     onInstallFailed: () => { installRecovery += 1; },
     shouldAutoDownload: () => autoDownloadUpdates,
+    getUpdateChannel: () => updateChannel,
     retryDelay: async () => {},
     onLog: (message, options) => logs.push({ message, options }),
     currentCompatibility: currentCompatibility || {
@@ -112,6 +115,7 @@ function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, p
     updater, fake, statuses, logs, timers, activity,
     beforeInstall: () => beforeInstall,
     installCommit: () => installCommit,
+    installerLaunch: () => installerLaunch,
     installRecovery: () => installRecovery
   };
 }
@@ -357,6 +361,12 @@ await waitFor(() => automaticDownload.fake.downloadCalls === 1, 'opted-in update
 assert.equal(automaticDownload.updater.getStatus().state, 'downloading');
 assert.equal(automaticDownload.fake.autoDownload, false, 'Rel.AI must keep electron-updater autoDownload disabled so its own verified policy remains authoritative');
 
+const beta = createHarness({ updateChannel: 'beta' });
+beta.updater.start();
+beta.fake.emit('update-available', { version: '0.21.0-beta.1' });
+assert.equal(beta.updater.getStatus().state, 'available', 'beta channel must accept prerelease updater metadata');
+assert.equal(beta.fake.allowPrerelease, true, 'electron-updater prerelease discovery must follow the selected beta channel');
+
 const downloadPromise = valid.updater.downloadUpdate();
 assert.equal(valid.updater.getStatus().state, 'downloading');
 await downloadPromise;
@@ -394,14 +404,21 @@ assert.equal(waitingBlocked.ok, false, 'an open task must block install even bet
 assert.match(waitingBlocked.error, /active Rel\.AI task/);
 assert.equal(valid.updater.getStatus().state, 'downloaded');
 
+const deferred = await valid.updater.installUpdate({ deferIfBusy: true });
+assert.equal(deferred.ok, true);
+assert.equal(deferred.deferred, true);
+assert.equal(valid.updater.getStatus().installDeferred, true);
+
 valid.activity.activeTaskCount = 0;
 valid.activity.state = 'idle';
 valid.activity.tasks = [];
-const install = await valid.updater.installUpdate();
+const install = await valid.updater.resumeDeferredInstall();
 assert.equal(install.ok, true);
+assert.equal(valid.updater.getStatus().installDeferred, false);
 assert.equal(valid.updater.getStatus().state, 'installing');
 assert.equal(valid.beforeInstall(), 1);
 assert.equal(valid.installCommit(), 1);
+assert.equal(valid.installerLaunch(), 1);
 assert.equal(valid.installRecovery(), 0);
 assert.deepEqual(valid.fake.installCalls, [{ silent: true, forceRunAfter: true }]);
 assert.ok(valid.logs.some(entry => entry.options.source === 'updater'));
@@ -418,6 +435,7 @@ assert.equal(preparationFailure.updater.getStatus().state, 'downloaded', 'failed
 assert.equal(preparationFailure.updater.getStatus().integrityVerified, true);
 assert.match(preparationFailure.updater.getStatus().error, /current version was not replaced/i);
 assert.equal(preparationFailure.installCommit(), 0);
+assert.equal(preparationFailure.installerLaunch(), 0);
 assert.equal(preparationFailure.installRecovery(), 1);
 assert.deepEqual(preparationFailure.fake.installCalls, [], 'NSIS must not launch after failed in-app preparation');
 

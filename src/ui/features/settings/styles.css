@@ -37,6 +37,8 @@
 .toggle[aria-checked="true"]::after { transform: translateX(20px); background: var(--ui-action-primary); }
 
 .settings-loading, .connection-loading { @apply py-3 text-[12px]; color: var(--ui-text-secondary); }
+.connection-settings-load-error { display: grid; justify-items: center; gap: 12px; }
+.connection-settings-load-error p { margin: 0; }
 .settings-header { @apply flex flex-col gap-1; }
 .settings-header h2 { @apply text-[16px] font-bold; }
 .settings-header p { @apply max-w-4xl text-[12px] leading-5; color: var(--ui-text-secondary); }
@@ -97,6 +99,10 @@
 
 .application-update-panel .settings-panel-body { @apply gap-3; }
 .application-update-summary { @apply flex items-center justify-between gap-4; }
+.application-update-beta-warning { @apply grid max-w-3xl gap-3 rounded-lg px-3 py-3; grid-template-columns: auto minmax(0,1fr); background: var(--ui-status-warning-background); border: 1px solid var(--ui-status-warning-border); box-shadow: inset 3px 0 0 var(--ui-status-warning-foreground); color: var(--ui-status-warning-foreground); }
+.application-update-beta-warning-icon { @apply mt-0.5 grid size-7 place-items-center rounded-full; border: 1px solid color-mix(in srgb, var(--ui-status-warning-foreground) 36%, transparent); }
+.application-update-beta-warning strong { @apply block text-[12px] font-bold; }
+.application-update-beta-warning p { @apply mt-1 text-[12px] leading-5; color: var(--ui-status-warning-foreground); }
 .application-update-summary > div { @apply grid min-w-0 gap-1; }
 .application-update-label { @apply text-[11px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
 .application-update-build { @apply font-mono text-[12px]; color: var(--ui-text-secondary); }

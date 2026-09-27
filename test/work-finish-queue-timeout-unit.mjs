@@ -5,7 +5,9 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { callTool as rawCallTool } from '../src/tools.js';
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
+import { flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-finish-queue-'));
 const workspace = path.join(temp, 'workspace');
@@ -77,10 +79,12 @@ try {
     reason: 'Queue deadline regression coverage complete.'
   });
 } finally {
-  repositoryIntelligence.shutdown();
+  await flushTaskHistoryPersistence();
+  await repositoryIntelligence.shutdown();
+  await flushLocalAnalytics();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  fs.rmSync(temp, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 });
 }
 
 console.log('work.finish fails retryably instead of stalling behind an unrelated long mutation.');

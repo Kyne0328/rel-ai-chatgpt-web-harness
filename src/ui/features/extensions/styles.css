@@ -1,0 +1,637 @@
+@reference "tailwindcss";
+
+@layer components {
+  /* Extensions Page Layout */
+  .extensions-page {
+    @apply flex flex-col gap-5;
+  }
+
+  .extensions-header-copy h2 {
+    @apply text-xl font-bold tracking-tight;
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-header-copy p {
+    @apply mt-1 text-[13px] leading-relaxed max-w-2xl;
+    color: var(--ui-text-secondary);
+  }
+
+  /* KPI Summary Strip */
+  .extensions-kpi-strip {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  }
+
+  .extensions-kpi-card {
+    @apply flex items-center gap-3.5 rounded-xl border p-3.5 transition-all text-left;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+    box-shadow: var(--ui-electron-elevation1);
+  }
+
+  .extensions-kpi-card:hover {
+    border-color: var(--ui-border-default);
+  }
+
+  button.extensions-kpi-card {
+    cursor: pointer;
+    font: inherit;
+  }
+
+  button.extensions-kpi-card:focus-visible {
+    outline: 2px solid var(--ui-focus-ring);
+    outline-offset: 1px;
+  }
+
+  .extensions-kpi-copy-btn {
+    @apply flex items-center gap-1.5 p-0 border-0 bg-transparent text-left cursor-pointer;
+    color: var(--ui-text-primary);
+    font: inherit;
+  }
+
+  .extensions-kpi-copy-btn:hover {
+    color: var(--ui-action-primary);
+  }
+
+  .extensions-kpi-copy-btn:focus-visible {
+    outline: 2px solid var(--ui-focus-ring);
+    outline-offset: 1px;
+  }
+
+  .extensions-kpi-path {
+    @apply text-xs font-mono truncate max-w-[140px];
+  }
+
+  .extensions-kpi-icon {
+    @apply flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-kpi-icon.accent {
+    color: var(--ui-action-primary);
+    border-color: color-mix(in srgb, var(--ui-action-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--ui-action-primary) 8%, var(--ui-surface-secondary));
+  }
+
+  .extensions-kpi-icon.warn {
+    color: var(--ui-status-warning-foreground);
+    border-color: var(--ui-status-warning-border);
+    background: var(--ui-status-warning-background);
+  }
+
+  .extensions-kpi-icon.ok {
+    color: var(--ui-status-success-foreground);
+    border-color: var(--ui-status-success-border);
+    background: var(--ui-status-success-background);
+  }
+
+  .extensions-kpi-content {
+    @apply flex min-w-0 flex-col;
+  }
+
+  .extensions-kpi-value {
+    @apply text-lg font-bold leading-tight;
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-kpi-label {
+    @apply truncate text-[11px] font-semibold uppercase tracking-wider mt-0.5;
+    color: var(--ui-text-tertiary);
+  }
+
+  /* Extensions Navigation Tabs */
+  .extensions-tabs-row {
+    @apply flex flex-wrap items-center justify-between gap-3;
+  }
+
+  .extensions-tabs {
+    @apply flex w-fit gap-1 rounded-xl border p-1;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+  }
+
+  .extensions-tab {
+    @apply flex min-h-9 items-center gap-2 rounded-lg px-3.5 text-[13px] font-semibold transition-all cursor-pointer;
+    color: var(--ui-text-secondary);
+    border: none;
+    background: transparent;
+  }
+
+  .extensions-tab:hover {
+    color: var(--ui-text-primary);
+    background: color-mix(in srgb, var(--ui-surface-primary) 70%, transparent);
+  }
+
+  .extensions-tab:focus-visible {
+    outline: 2px solid var(--ui-focus-ring);
+    outline-offset: 1px;
+  }
+
+  .extensions-tab.is-active {
+    color: var(--ui-text-primary);
+    background: var(--ui-surface-primary);
+    box-shadow: var(--ui-electron-elevation1);
+  }
+
+  .extensions-tab-badge {
+    @apply rounded-full px-2 py-0.5 text-[11px] font-bold leading-none;
+    background: var(--ui-surface-raised);
+    color: var(--ui-text-secondary);
+  }
+
+  .extensions-tab.is-active .extensions-tab-badge {
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-tab-badge.highlight {
+    background: var(--ui-status-warning-background);
+    color: var(--ui-status-warning-foreground);
+    border: 1px solid var(--ui-status-warning-border);
+  }
+
+  /* Search & Filter Toolbar */
+  .extensions-filter-toolbar {
+    @apply flex flex-col gap-2.5 rounded-xl border p-3;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+  }
+
+  .extensions-filter-top {
+    @apply flex flex-wrap items-center justify-between gap-3;
+  }
+
+  .extensions-search-box {
+    @apply relative flex-1 min-w-[240px];
+  }
+
+  .extensions-search-icon {
+    @apply pointer-events-none absolute left-3 top-1/2 -translate-y-1/2;
+    color: var(--ui-text-tertiary);
+  }
+
+  .extensions-search-input {
+    @apply w-full rounded-lg border py-2 pl-9 pr-8 text-[13px] transition-all;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-input);
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-search-input::placeholder {
+    color: var(--ui-text-tertiary);
+  }
+
+  .extensions-search-input:focus {
+    border-color: var(--ui-border-control);
+    outline: 2px solid var(--ui-focus-ring);
+    outline-offset: 1px;
+  }
+
+  .extensions-search-clear {
+    @apply absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-xs cursor-pointer rounded-md border-0 bg-transparent;
+    color: var(--ui-text-tertiary);
+  }
+
+  .extensions-search-clear:hover {
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-filter-pills {
+    @apply flex flex-wrap items-center gap-1.5;
+  }
+
+  .extensions-filter-pill {
+    @apply rounded-lg border px-2.5 py-1 text-[12px] font-medium transition-all cursor-pointer;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-secondary);
+  }
+
+  .extensions-filter-pill:hover {
+    color: var(--ui-text-primary);
+    border-color: var(--ui-border-default);
+  }
+
+  .extensions-filter-pill.is-active {
+    color: var(--ui-text-primary);
+    border-color: var(--ui-border-control);
+    background: var(--ui-surface-raised);
+    font-weight: 600;
+  }
+
+  .extensions-filter-summary {
+    @apply flex items-center justify-between text-[12px] pt-1 border-t;
+    border-color: var(--ui-border-subtle);
+    color: var(--ui-text-tertiary);
+  }
+
+  .extensions-filter-reset {
+    @apply text-xs cursor-pointer border-0 bg-transparent p-0;
+    color: var(--ui-action-primary);
+    font: inherit;
+  }
+
+  .extensions-filter-reset:hover {
+    text-decoration: underline;
+  }
+
+  .extensions-source-repo-link {
+    @apply flex items-center gap-1;
+    color: var(--ui-action-primary);
+  }
+
+  .extensions-source-repo-link:hover {
+    text-decoration: underline;
+  }
+
+  /* Extensions Grid */
+  .extensions-list-grid {
+    @apply grid gap-4;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  }
+
+  /* Extension Card */
+  .extension-pro-card {
+    @apply flex flex-col rounded-xl border transition-all relative overflow-hidden;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+    box-shadow: var(--ui-electron-elevation1);
+  }
+
+  .extension-pro-card:hover {
+    border-color: var(--ui-border-default);
+    box-shadow: var(--ui-electron-elevation2);
+    transform: translateY(-1px);
+  }
+
+  .extension-card-kind-accent {
+    @apply absolute top-0 left-0 right-0 h-1;
+    background: transparent;
+  }
+
+  .extension-pro-card.kind-skill .extension-card-kind-accent {
+    background: linear-gradient(90deg, var(--ui-status-info-foreground), var(--ui-action-primary));
+  }
+
+  .extension-pro-card.kind-cli .extension-card-kind-accent {
+    background: linear-gradient(90deg, var(--ui-action-primary), var(--ui-status-success-foreground));
+  }
+
+  .extension-card-inner {
+    @apply flex flex-col flex-1 p-4 gap-3.5;
+  }
+
+  .extension-card-header {
+    @apply flex items-start justify-between gap-3;
+  }
+
+  .extension-card-identity {
+    @apply flex items-start gap-3 min-w-0;
+  }
+
+  .extension-card-icon-box {
+    @apply flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border mt-0.5;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+  }
+
+  .extension-pro-card.kind-skill .extension-card-icon-box {
+    color: var(--ui-status-info-foreground);
+    background: var(--ui-status-info-background);
+    border-color: var(--ui-status-info-border);
+  }
+
+  .extension-pro-card.kind-cli .extension-card-icon-box {
+    color: var(--ui-action-primary);
+    background: color-mix(in srgb, var(--ui-action-primary) 10%, var(--ui-surface-secondary));
+    border-color: color-mix(in srgb, var(--ui-action-primary) 25%, transparent);
+  }
+
+  .extension-title-block {
+    @apply min-w-0;
+  }
+
+  .extension-title-row {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .extension-title-text {
+    @apply text-[15px] font-bold truncate leading-tight;
+    color: var(--ui-text-primary);
+  }
+
+  .extension-version-tag {
+    @apply rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-medium leading-none;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-raised);
+    color: var(--ui-text-secondary);
+  }
+
+  .extension-id-badge {
+    @apply mt-1 block truncate font-mono text-[11px];
+    color: var(--ui-text-tertiary);
+  }
+
+  /* Status Badges */
+  .extension-status-chip {
+    @apply flex items-center gap-1.5 shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold leading-none;
+  }
+
+  .extension-status-chip.ok {
+    border-color: var(--ui-status-success-border);
+    background: var(--ui-status-success-background);
+    color: var(--ui-status-success-foreground);
+  }
+
+  .extension-status-chip.warn {
+    border-color: var(--ui-status-warning-border);
+    background: var(--ui-status-warning-background);
+    color: var(--ui-status-warning-foreground);
+  }
+
+  .extension-status-chip.bad {
+    border-color: var(--ui-status-danger-border);
+    background: var(--ui-status-danger-background);
+    color: var(--ui-status-danger-foreground);
+  }
+
+  .extension-status-chip.info {
+    border-color: var(--ui-status-info-border);
+    background: var(--ui-status-info-background);
+    color: var(--ui-status-info-foreground);
+  }
+
+  .extension-status-chip.neutral {
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-secondary);
+  }
+
+  /* Description */
+  .extension-card-desc {
+    @apply text-[13px] leading-relaxed line-clamp-2;
+    color: var(--ui-text-secondary);
+  }
+
+  /* Tags & Properties */
+  .extension-tags-row {
+    @apply flex flex-wrap items-center gap-1.5 text-[11px];
+  }
+
+  .extension-type-pill {
+    @apply flex items-center gap-1 rounded-md border px-2 py-0.5 font-medium;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-secondary);
+  }
+
+  .extension-auto-install-pill {
+    @apply flex items-center gap-1 rounded-md border px-2 py-0.5 font-medium;
+    border-color: color-mix(in srgb, var(--ui-action-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--ui-action-primary) 8%, var(--ui-surface-secondary));
+    color: var(--ui-text-primary);
+  }
+
+  .extension-publisher-pill {
+    @apply flex items-center gap-1 text-[11px];
+    color: var(--ui-text-tertiary);
+  }
+
+  .extension-publisher-pill strong {
+    color: var(--ui-text-secondary);
+  }
+
+  /* Permissions Section */
+  .extension-permissions-box {
+    @apply flex flex-col gap-1.5 rounded-lg border p-2.5;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+  }
+
+  .extension-permissions-header {
+    @apply flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider;
+    color: var(--ui-text-tertiary);
+  }
+
+  .extension-permissions-chips {
+    @apply flex flex-wrap items-center gap-1.5 pt-0.5;
+  }
+
+  .extension-permission-item {
+    @apply flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-all;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-raised);
+    color: var(--ui-text-secondary);
+  }
+
+  .extension-permission-item.highlight {
+    border-color: color-mix(in srgb, var(--ui-status-warning-border) 40%, transparent);
+    color: var(--ui-text-primary);
+  }
+
+  /* Warning / Notice Box */
+  .extension-alert-box {
+    @apply flex items-start gap-2.5 rounded-lg border p-2.5 text-[12px] leading-relaxed;
+    border-color: var(--ui-status-warning-border);
+    background: var(--ui-status-warning-background);
+    color: var(--ui-status-warning-foreground);
+  }
+
+  .extension-alert-box.danger {
+    border-color: var(--ui-status-danger-border);
+    background: var(--ui-status-danger-background);
+    color: var(--ui-status-danger-foreground);
+  }
+
+  /* Card Footer Actions */
+  .extension-card-footer {
+    @apply mt-auto flex flex-wrap items-center justify-between gap-2 border-t pt-3;
+    border-color: var(--ui-border-subtle);
+  }
+
+  .extension-footer-actions-left {
+    @apply flex items-center gap-2;
+  }
+
+  .extension-footer-actions-right {
+    @apply flex items-center gap-2;
+  }
+
+  /* Skeleton Loading State */
+  .extension-skeleton-card {
+    @apply flex flex-col gap-3 rounded-xl border p-4;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+  }
+
+  .skeleton-shimmer {
+    @apply animate-pulse rounded bg-current opacity-10;
+  }
+
+  /* Detail Inspector Drawer / Modal Content */
+  .extension-modal-content {
+    @apply flex flex-col gap-4 text-[13px] leading-relaxed max-w-2xl;
+  }
+
+  .extension-modal-header {
+    @apply flex items-start gap-3.5 pb-2 border-b;
+    border-color: var(--ui-border-subtle);
+  }
+
+  .extension-modal-icon {
+    @apply flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-action-primary);
+  }
+
+  .extension-modal-details-grid {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  }
+
+  .extension-detail-cell {
+    @apply flex flex-col gap-0.5 rounded-lg border p-2.5;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+  }
+
+  .extension-detail-cell-label {
+    @apply text-[11px] font-semibold uppercase tracking-wider;
+    color: var(--ui-text-tertiary);
+  }
+
+  .extension-detail-cell-value {
+    @apply text-[13px] font-medium break-words;
+    color: var(--ui-text-primary);
+  }
+
+  .extension-files-table-wrapper {
+    @apply overflow-x-auto rounded-lg border mt-1;
+    border-color: var(--ui-border-subtle);
+  }
+
+  .extension-files-table {
+    @apply w-full text-left text-[12px];
+    border-collapse: collapse;
+  }
+
+  .extension-files-table th {
+    @apply px-3 py-2 font-semibold uppercase tracking-wider text-[10px];
+    background: var(--ui-surface-raised);
+    color: var(--ui-text-tertiary);
+    border-bottom: 1px solid var(--ui-border-subtle);
+  }
+
+  .extension-files-table td {
+    @apply px-3 py-2 border-b font-mono text-[11px];
+    border-color: var(--ui-border-subtle);
+    color: var(--ui-text-secondary);
+  }
+
+  .extension-files-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  /* Developer Tab Elements */
+  .extensions-developer-grid {
+    @apply grid gap-4;
+  }
+
+  .developer-interactive-block {
+    @apply flex flex-col gap-3 rounded-xl border p-4;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+  }
+
+  .developer-template-selector {
+    @apply flex flex-wrap gap-1 rounded-lg border p-1;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+  }
+
+  .developer-template-button {
+    @apply rounded-md px-3 py-1 text-[12px] font-semibold transition-all cursor-pointer border-0 bg-transparent;
+    color: var(--ui-text-secondary);
+  }
+
+  .developer-template-button.is-active {
+    background: var(--ui-surface-primary);
+    color: var(--ui-text-primary);
+    box-shadow: var(--ui-electron-elevation1);
+  }
+
+  .developer-code-snippet {
+    @apply relative overflow-hidden rounded-lg border;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-canvas);
+  }
+
+  .developer-code-header {
+    @apply flex items-center justify-between border-b px-3 py-1.5 text-[11px] font-mono;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-tertiary);
+  }
+
+  .developer-code-snippet pre {
+    @apply m-0 overflow-x-auto p-3 text-[12px] font-mono leading-relaxed;
+    color: var(--ui-text-primary);
+  }
+
+  .developer-copy-code-btn {
+    @apply flex items-center gap-1.5 rounded border px-2 py-0.5 text-[11px] font-medium transition-all cursor-pointer;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+    color: var(--ui-text-secondary);
+  }
+
+  .developer-copy-code-btn:hover {
+    color: var(--ui-text-primary);
+    border-color: var(--ui-border-default);
+  }
+
+  .developer-flow-steps {
+    @apply grid gap-3;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+
+  .developer-step-card {
+    @apply flex flex-col gap-1.5 rounded-lg border p-3;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+  }
+
+  .developer-step-number {
+    @apply flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold;
+    background: var(--ui-action-primary);
+    color: var(--ui-action-primary-foreground);
+  }
+
+  .developer-step-title {
+    @apply text-[13px] font-bold;
+    color: var(--ui-text-primary);
+  }
+
+  .developer-step-desc {
+    @apply text-[12px] leading-relaxed;
+    color: var(--ui-text-secondary);
+  }
+
+  .developer-path-banner {
+    @apply flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+  }
+}
+
+@media (max-width: 768px) {
+  .extensions-list-grid {
+    grid-template-columns: 1fr;
+  }
+  .extensions-kpi-strip {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

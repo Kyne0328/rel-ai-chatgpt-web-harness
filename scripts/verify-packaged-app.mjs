@@ -80,6 +80,7 @@ const requiredFiles = [
   resourcePath('node_modules', 'web-tree-sitter', 'web-tree-sitter.wasm'),
   resourcePath('vendor', 'tree-sitter', 'manifest.json'),
   resourcePath('bin', 'rel-ai-mcp-http.js'),
+  resourcePath('bin', 'relai-extension.js'),
   resourcePath('public', 'dashboard.js'),
   resourcePath('public', 'dashboard-app.js'),
   resourcePath('public', 'dashboard-react.js'),

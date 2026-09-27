@@ -22,6 +22,12 @@ import { OPERATION_IDS as OP } from './operationIds.js';
 const UNSAFE_READ_ONLY_GIT_OPTIONS = new Set([
   '--ext-diff', '--textconv', '--filters', '--open-files-in-pager'
 ]);
+const READ_ONLY_INSPECTION_EXECUTABLES = new Set([
+  'cat', 'dir', 'grep', 'head', 'ls', 'pwd', 'tail', 'wc', 'where', 'which'
+]);
+const READ_ONLY_FIND_UNSAFE_OPTIONS = new Set([
+  '-delete', '-exec', '-execdir', '-ok', '-okdir', '-fls', '-fprint', '-fprint0', '-fprintf'
+]);
 const BACKGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 10_000;
 const DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 30_000;
 const WORK_FINISH_QUEUE_TIMEOUT_MS = 2_000;
@@ -265,17 +271,41 @@ function queueScopeFor(executionName, definition, branchChange, readOnlyExec) {
 }
 
 function isClearlyReadOnlyExec(args = {}) {
-  if (String(args.command || '').trim()) return false;
   if (String(args.input || '').length > 0) return false;
   if (args.env && typeof args.env === 'object' && Object.keys(args.env).length > 0) return false;
-  const executable = path.basename(String(args.executable || '')).toLowerCase();
-  const argv = Array.isArray(args.argv) ? args.argv.map(value => String(value || '')) : [];
+  const command = String(args.command || '').trim();
+  if (command) {
+    const tokens = simpleShellCommandTokens(command);
+    if (!tokens) return false;
+    return isClearlyReadOnlyDirectExec(tokens[0], tokens.slice(1));
+  }
+  return isClearlyReadOnlyDirectExec(args.executable, args.argv);
+}
+
+function isClearlyReadOnlyDirectExec(executableValue, argvValue) {
+  const executable = path.basename(String(executableValue || '')).toLowerCase();
+  const argv = Array.isArray(argvValue) ? argvValue.map(value => String(value || '')) : [];
   if (!argv.length) return false;
-  if (isClearlyWorkspaceReadOnlyAdb(args.executable, argv)) return true;
+  if (isClearlyWorkspaceReadOnlyAdb(executableValue, argv)) return true;
   if (executable === 'node' || executable === 'node.exe') {
     const first = argv[0].toLowerCase();
     if (['--version', '-v', '--help', '-h'].includes(first)) return argv.length === 1;
     return ['--check', '-c'].includes(first) && argv.length === 2 && !argv[1].startsWith('-');
+  }
+  const inspectionExecutable = executable.replace(/\.exe$/i, '');
+  if (READ_ONLY_INSPECTION_EXECUTABLES.has(inspectionExecutable)) return true;
+  if (inspectionExecutable === 'find' || inspectionExecutable === 'findstr') {
+    return !argv.some(value => READ_ONLY_FIND_UNSAFE_OPTIONS.has(value.toLowerCase()));
+  }
+  if (inspectionExecutable === 'diff') {
+    const options = argv.map(value => value.toLowerCase());
+    return !options.some((value, index) => value === '--output'
+      || value.startsWith('--output=')
+      || (index > 0 && options[index - 1] === '--output'));
+  }
+  if (inspectionExecutable === 'rg') {
+    const options = argv.map(value => value.toLowerCase());
+    return !options.some(value => value === '--pre' || value.startsWith('--pre='));
   }
   if (executable !== 'git' && executable !== 'git.exe') return false;
   if (argv[0].startsWith('-')) return false;
@@ -299,6 +329,14 @@ function isClearlyReadOnlyExec(args = {}) {
     return argv.slice(2).every(value => !String(value).startsWith('-'));
   }
   return false;
+}
+
+function simpleShellCommandTokens(command) {
+  const text = String(command || '').trim();
+  if (!text || /[\r\n;&|<>`"'$()^]/.test(text)) return null;
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+  return tokens;
 }
 
 function gitSubcommandIndex(argv = []) {

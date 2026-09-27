@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { fetchJson } from '../../api.js';
 import { filterRadioField, openFilterDrawer } from '../../components/filter-drawer.js';
@@ -81,10 +82,6 @@ export function createToolsRoute() {
     return h('div', { className: 'settings-content system-content', 'data-tools-react': 'true' },
       h('div', { className: 'section tools-section' },
         h('div', { className: 'section-head' },
-          h('div', null,
-            h('h2', null, 'ChatGPT tools'),
-            h('p', null, 'See the actions ChatGPT can ask Rel.AI to use for reading files, making changes, running checks, using Git, and fixing problems.')
-          ),
           h('span', { className: 'section-action', id: 'toolsCount' }, count)
         ),
         h(ToolsFilterBar, {
@@ -134,7 +131,7 @@ function ToolsFilterBar({ search, capability, summary, onSearch, onCapabilityCle
         h('button', {
           type: 'button',
           className: `secondary filter-open-button${filters.length ? ' active' : ''}`,
-          'aria-label': filters.length ? `Open filters; ${filters.length} active` : 'Open filters',
+          'aria-label': filters.length ? `Open filters. ${filters.length} active` : 'Open filters',
           onClick: onOpenFilters
         }, filters.length ? `Filters (${filters.length})` : 'Filters')
       ),

@@ -9,7 +9,7 @@ import {
 import type { ActionMapping, ActionRegistry, CatalogToolDefinition, PublicActionContract } from './actionDefinitions.ts';
 import { ACTION_REGISTRY as RAW_ACTION_REGISTRY } from './actionRegistry.js';
 
-const TOOL_SURFACE_VERSION = 85;
+const TOOL_SURFACE_VERSION = 86;
 const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 
 type ToolActionCatalogEntry = Readonly<{
@@ -114,13 +114,59 @@ function getCatalogTools(): readonly CatalogTool[] {
 function getCatalogAction(publicTool: string, args: Record<string, unknown> = {}): ToolActionCatalogEntry | null {
   const actions = ACTION_REGISTRY[String(publicTool || '')];
   if (!actions) return null;
-  const action = Object.hasOwn(actions, 'default') ? 'default' : String(args.action || '').trim();
+  const action = inferCatalogAction(publicTool, args, actions);
   const entry = ACTION_BY_KEY.get(catalogKey(publicTool, action));
   if (!entry) {
     const choices = Object.keys(actions).filter(value => value !== 'default');
     throw new Error(`Unsupported action '${action || '(missing)'}' for ${publicTool}. Supported actions: ${choices.join(', ')}.`);
   }
   return entry;
+}
+
+function inferCatalogAction(publicTool: string, args: Record<string, unknown>, actions: Record<string, unknown>): string {
+  const explicit = String(args.action || '').trim();
+  if (explicit) return explicit;
+  if (Object.hasOwn(actions, 'default')) return 'default';
+
+  switch (publicTool) {
+    case 'relai_search':
+      if (nonEmptyArg(args, 'pattern')) return 'text';
+      if (nonEmptyArg(args, 'query')) return 'semantic';
+      return '';
+    case 'relai_validate':
+      if (nonEmptyArg(args, 'route')) return 'http';
+      if (nonEmptyArg(args, 'command') || Array.isArray(args.commands) || Object.hasOwn(args, 'maxResults')) return 'diagnostics';
+      return 'checks';
+    case 'relai_changes':
+      if (nonEmptyArg(args, 'checkpointId')) return 'replay';
+      if (Array.isArray(args.paths)) return 'restore';
+      if (nonEmptyArg(args, 'planId')) return 'tidy_run';
+      if (Object.hasOwn(args, 'maxCandidates') || Object.hasOwn(args, 'mode')) return 'tidy_plan';
+      if (Object.hasOwn(args, 'removeUntracked')) return 'reset';
+      return 'diff';
+    case 'relai_process':
+      if (['kind', 'purpose', 'command', 'executable', 'argv', 'reuseExisting', 'pty', 'startupWaitMs', 'maxLogBytes']
+        .some(key => Object.hasOwn(args, key))) return 'start';
+      if (nonEmptyArg(args, 'processId')) {
+        if (['input', 'columns', 'rows'].some(key => Object.hasOwn(args, key))) return 'write';
+        if (Object.hasOwn(args, 'graceMs')) return 'stop';
+        return 'read';
+      }
+      return 'list';
+    case 'relai_publish':
+      if (['title', 'body', 'base', 'head'].some(key => Object.hasOwn(args, key))) return 'draft_pr';
+      if (['message', 'addAll', 'paths', 'sensitiveAuthorization'].some(key => Object.hasOwn(args, key))) return 'commit';
+      if (['remote', 'branch', 'setUpstream'].some(key => Object.hasOwn(args, key))) return 'push';
+      return '';
+    default:
+      return '';
+  }
+}
+
+function nonEmptyArg(args: Record<string, unknown>, key: string): boolean {
+  if (!Object.hasOwn(args, key)) return false;
+  const value = args[key];
+  return value != null && String(value).trim() !== '';
 }
 
 function resolveToolOperation(name: string, args: Record<string, unknown> = {}): ResolvedToolOperation | null {

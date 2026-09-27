@@ -122,7 +122,9 @@ try {
   assert.equal(recoveredBegin.bootstrap?.recoveredTask?.goal, 'Idle task must remain resumable');
   assert.equal(recoveredBegin.bootstrap?.recoveredTask?.status, 'inactive');
   const resumedIdle = await rawCallTool('relai_read', { workspace: 'app', work_id: recoveredBegin.work_id, paths: ['src/index.js'] }, context);
-  assert.equal(resumedIdle.work_id, idleTask, 'the recovered task must continue under its original identity');
+  assert.equal(resumedIdle.work_id, undefined, 'routine reads must not echo the caller-supplied work_id');
+  const resumedStatus = await rawCallTool('relai_work', { action: 'status', work_id: idleTask }, context);
+  assert.equal(resumedStatus.work_id, idleTask, 'the recovered task must remain addressable under its original identity');
   await rawCallTool('relai_work', { action: 'cancel', workspace: 'app', work_id: idleTask, reason: 'Idle recovery regression complete.' }, context);
 
   resetToolActivity();

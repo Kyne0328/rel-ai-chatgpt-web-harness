@@ -173,7 +173,7 @@ async function case_task_completion_notifier_unit() {
   finishFailed({ ok: false, error: 'internal diagnostic detail' });
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].options.title, 'Project action failed');
-  assert.match(notifications[0].options.body, /Running validation 1\/2: npm run check failed in repo/);
+  assert.match(notifications[0].options.body, /Validation failed in repo/);
   assert.match(notifications[0].options.body, /Open Rel\.AI for details and recovery options\./);
   assert.doesNotMatch(notifications[0].options.body, /internal diagnostic detail/, 'native notifications should keep technical error detail in Activity and Diagnostics');
   assert.equal(notifications[0].category, 'errors');
@@ -538,6 +538,7 @@ async function case_task_history_storage_unit() {
     assert.ok(lock, 'task-history async-write test requires the state database');
     lock.exec('BEGIN IMMEDIATE');
     try {
+      assert.equal(readSession(directory, id)?.summary, 'after!', 'task-history reads must remain available while another connection holds the SQLite write slot');
       const pendingWrite = writeSessionAsync(directory, { id: 'worker-write', workspace: 'repo', summary: 'worker' });
       const firstSettled = await Promise.race([
         pendingWrite.then(() => 'write'),
@@ -1420,8 +1421,21 @@ async function case_task_observability_unit() {
   const readCompleted = buildToolActivityDetails('read', { paths: ['src/a.js', 'src/b.js', 'src/c.js'] }, { items: [{}, {}, {}] }, null, { phase: 'complete' });
   assert.equal(readCompleted.progress.percentage, 100);
   assert.equal(readCompleted.result.affectedItemCount, 3);
-  assert.match(readCompleted.summary, /Read 3 repository items/);
-  
+  assert.match(readCompleted.summary, /Read 3 files/);
+
+  const runningSearch = buildToolActivityDetails('search.text', { queries: ['alpha', 'beta', 'gamma'] }, null, null, {
+    phase: 'running',
+    operation: 'Searching for 3 queries: "alpha", "beta" (+1 more)'
+  });
+  assert.match(runningSearch.title, /^Searching for 3 queries/);
+  const completedSearch = buildToolActivityDetails('search.text', { queries: ['alpha', 'beta', 'gamma'] }, { matchCount: 3 }, null, {
+    phase: 'complete',
+    operation: runningSearch.title
+  });
+  assert.equal(completedSearch.title, 'Found 3 matches');
+  assert.doesNotMatch(completedSearch.title, /Searching/i);
+  assert.match(completedSearch.summary, /^Searched the repository and found 3 matches\./);
+
   const exactCommand = 'Write-Host "one  two"\nGet-ChildItem';
   const execCompleted = buildToolActivityDetails('exec', { command: exactCommand }, { exitCode: 0 }, null, { phase: 'complete' });
   assert.equal(execCompleted.command, exactCommand, 'exec activity must retain the command text shown to the user');
@@ -1438,12 +1452,18 @@ async function case_task_observability_unit() {
   assert.match(secretCommand.command, /\[REDACTED\]/);
   
   const directCommand = buildToolActivityDetails('exec', { executable: 'pwsh', argv: ['-Command', 'Write-Host "a b"'] }, { exitCode: 0 }, null, { phase: 'complete' });
-  assert.equal(directCommand.command, '"pwsh" "-Command" "Write-Host \\"a b\\""');
+  assert.equal(directCommand.command, 'pwsh -Command "Write-Host \\"a b\\""');
   
-  const failed = buildToolActivityDetails('exec', { command: 'npm test' }, null, { code: 'WORKSPACE_UNAVAILABLE', message: 'Workspace path was unavailable.', retryable: true }, { phase: 'complete' });
+  const failed = buildToolActivityDetails('exec', { command: 'npm test' }, null, { code: 'WORKSPACE_UNAVAILABLE', message: 'Workspace path was unavailable.', retryable: true }, { phase: 'complete', operation: 'Running npm test' });
   assert.equal(failed.status, 'failed');
+  assert.equal(failed.title, 'Command failed');
   assert.equal(failed.error.retryable, true);
-  assert.match(failed.summary, /Workspace path was unavailable/);
+  assert.match(failed.summary, /^Command failed: Workspace path was unavailable\./);
+  assert.doesNotMatch(failed.summary, /Running npm test/);
+  const exitedFailed = buildToolActivityDetails('exec', { command: '$tests' }, { commandSucceeded: false, exitCode: 1 }, null, { phase: 'complete', operation: 'Running $tests' });
+  assert.equal(exitedFailed.status, 'failed');
+  assert.equal(exitedFailed.title, 'Command failed');
+  assert.doesNotMatch(exitedFailed.title, /Running/i);
   const blocked = buildToolActivityDetails('edit', {}, null, { code: 'APPROVAL_REQUIRED', message: 'Authorization: Bearer abc.def is required.' }, { phase: 'complete' });
   assert.equal(blocked.status, 'blocked');
   assert.equal(blocked.currentStage, 'Blocked');
@@ -2072,7 +2092,7 @@ async function case_task_state_unit() {
       { status: 'completed', activeCalls: 0 },
       { status: 'cancelled', activeCalls: 0 }
     ]),
-    '1 active · 1 open · 1 inactive · 1 completed · 1 cancelled',
+    '1 active · 1 waiting · 1 inactive · 1 completed · 1 cancelled',
     'session counts must keep running, open idle, inactive, completed, and cancelled work distinct'
   );
   

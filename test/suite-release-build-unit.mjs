@@ -825,6 +825,7 @@ async function case_release_distribution_unit() {
     assert.equal(names.linuxAppImage, 'Linux-9.8.7.AppImage');
     assert.equal(names.linuxDeb, 'Debian-9.8.7.deb');
     assert.equal(names.macDmgArm64, 'Mac-9.8.7-arm64.dmg');
+    assert.equal(names.macMetadata, 'latest-mac.yml');
     assert.deepEqual(platformReleaseArtifactNames('9.8.7', 'win32', 'x64', { electronPackage: customPackage }), [
       names.installer, names.portable, names.blockmap, names.metadata, names.sbom
     ]);
@@ -976,12 +977,15 @@ async function case_update_install_marker_unit() {
     const path = __m3.default;
   
     const __m4 = await import("../electron/update-install-marker.js");
-    const { STALE_UPDATE_MARKER_MS,
+    const { INSTALLING_STALE_UPDATE_MARKER_MS,
+    STALE_UPDATE_MARKER_MS,
     clearUpdateInstallMarker,
     createUpdateInstallMarker,
+    markUpdateInstallPhase,
     readUpdateInstallMarker,
     updateInstallLaunchGuard,
-    updateInstallMarkerPath } = __m4;
+    updateInstallMarkerPath,
+    updateInstallTiming } = __m4;
   
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-update-marker-'));
   const app = { getPath: name => {
@@ -993,11 +997,19 @@ async function case_update_install_marker_unit() {
     assert.equal(readUpdateInstallMarker(app), null);
     assert.equal(updateInstallLaunchGuard(app, { platform: 'win32', packaged: true, argv: [] }).blocked, false);
   
-    const created = await createUpdateInstallMarker(app, { targetVersion: 'v1.1.0' });
+    const created = await createUpdateInstallMarker(app, { targetVersion: 'v1.1.0', now: '2026-09-24T12:00:00.000Z' });
     assert.equal(created.targetVersion, '1.1.0');
+    assert.equal(created.phase, 'preparing');
+    assert.equal(created.events.preparing, '2026-09-24T12:00:00.000Z');
     assert.equal(fs.existsSync(updateInstallMarkerPath(app)), true);
   
-    const blocked = updateInstallLaunchGuard(app, { platform: 'win32', packaged: true, argv: [] });
+    const blocked = updateInstallLaunchGuard(app, {
+      platform: 'win32',
+      packaged: true,
+      argv: [],
+      nowMs: Date.parse('2026-09-24T12:00:30.000Z'),
+      isProcessAlive: () => true
+    });
     assert.equal(blocked.blocked, true);
     assert.equal(blocked.reason, 'update_in_progress');
     assert.equal(blocked.marker.targetVersion, '1.1.0');
@@ -1009,8 +1021,36 @@ async function case_update_install_marker_unit() {
     const updatedLaunch = updateInstallLaunchGuard(app, { platform: 'win32', packaged: true, argv: ['--updated'] });
     assert.equal(updatedLaunch.blocked, false);
     assert.equal(updatedLaunch.reason, 'updated_launch');
-    assert.equal(fs.existsSync(updateInstallMarkerPath(app)), false, 'the installer-launched replacement app must clear the marker');
-  
+    assert.equal(updatedLaunch.marker.phase, 'starting');
+    assert.equal(fs.existsSync(updateInstallMarkerPath(app)), true, 'the marker must remain until the replacement app finishes startup');
+    await markUpdateInstallPhase(app, 'complete', { now: '2026-09-24T12:00:12.000Z' });
+    const timing = updateInstallTiming(readUpdateInstallMarker(app));
+    assert.equal(timing.totalMs, 12_000);
+    const completedLaunch = updateInstallLaunchGuard(app, { platform: 'win32', packaged: true, argv: [] });
+    assert.equal(completedLaunch.blocked, false);
+    assert.equal(completedLaunch.reason, 'terminal_complete');
+    assert.equal(fs.existsSync(updateInstallMarkerPath(app)), false, 'completed update state must fail open on later launches');
+
+    await createUpdateInstallMarker(app, { targetVersion: '1.1.0-long', now: '2026-09-24T12:10:00.000Z' });
+    await markUpdateInstallPhase(app, 'installing', { now: '2026-09-24T12:10:10.000Z' });
+    const longInstall = updateInstallLaunchGuard(app, {
+      platform: 'win32',
+      packaged: true,
+      argv: [],
+      nowMs: Date.parse('2026-09-24T12:20:00.000Z'),
+      isProcessAlive: () => false
+    });
+    assert.equal(longInstall.blocked, true, 'installer-owned handoff must remain blocked after the original app process exits');
+    const longInstallStale = updateInstallLaunchGuard(app, {
+      platform: 'win32',
+      packaged: true,
+      argv: [],
+      nowMs: Date.parse('2026-09-24T12:10:00.000Z') + INSTALLING_STALE_UPDATE_MARKER_MS + 1,
+      isProcessAlive: () => false
+    });
+    assert.equal(longInstallStale.blocked, false);
+    assert.equal(longInstallStale.reason, 'stale_marker');
+
     await createUpdateInstallMarker(app, { targetVersion: '1.1.1' });
     const marker = readUpdateInstallMarker(app);
     const staleNow = Date.parse(marker.startedAt) + STALE_UPDATE_MARKER_MS + 1;
@@ -1024,6 +1064,13 @@ async function case_update_install_marker_unit() {
     assert.equal(fs.existsSync(updateInstallMarkerPath(app)), false, 'corrupt update state must fail open after being discarded');
   
     await createUpdateInstallMarker(app, { targetVersion: '1.1.2' });
+    await markUpdateInstallPhase(app, 'failed', { message: 'startup failed' });
+    const failed = updateInstallLaunchGuard(app, { platform: 'win32', packaged: true, argv: [] });
+    assert.equal(failed.blocked, false);
+    assert.equal(failed.reason, 'terminal_failed');
+    assert.equal(fs.existsSync(updateInstallMarkerPath(app)), false, 'failed update state must not lock out the next normal launch');
+
+    await createUpdateInstallMarker(app, { targetVersion: '1.1.3' });
     assert.equal(await clearUpdateInstallMarker(app), true);
     assert.equal(await clearUpdateInstallMarker(app), false);
   } finally {
@@ -1033,6 +1080,75 @@ async function case_update_install_marker_unit() {
   console.log('Windows update-install marker guard tests passed.');
 }
 await case_update_install_marker_unit();
+
+// Detached update-status helper launcher.
+async function case_update_status_helper_unit() {
+  const __m0 = await import("node:assert/strict");
+  const assert = __m0.default;
+  const __m1 = await import("node:events");
+  const { EventEmitter } = __m1;
+  const __m2 = await import("node:fs");
+  const fs = __m2.default;
+  const __m3 = await import("node:os");
+  const os = __m3.default;
+  const __m4 = await import("node:path");
+  const path = __m4.default;
+  const __m5 = await import("../electron/update-status-helper.js");
+  const { launchUpdateStatusHelper } = __m5;
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-update-helper-'));
+  const sourcePath = path.join(root, 'source.ps1');
+  const targetPath = path.join(root, 'persistent', 'update-status-helper.ps1');
+  const markerPath = path.join(root, 'update-installing.json');
+  const app = { getPath: name => {
+    assert.equal(name, 'userData');
+    return root;
+  } };
+  fs.writeFileSync(sourcePath, 'Write-Output "Rel.AI update helper"\n', 'utf8');
+
+  let spawnCall = null;
+  let unrefCalled = false;
+  const spawn = (executable, argv, options) => {
+    spawnCall = { executable, argv, options };
+    const child = new EventEmitter();
+    child.pid = 4242;
+    child.unref = () => { unrefCalled = true; };
+    queueMicrotask(() => child.emit('spawn'));
+    return child;
+  };
+
+  try {
+    const result = await launchUpdateStatusHelper(app, {
+      platform: 'win32',
+      sourcePath,
+      targetPath,
+      markerPath,
+      executable: 'powershell.exe',
+      spawn
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.pid, 4242);
+    assert.equal(fs.readFileSync(targetPath, 'utf8'), fs.readFileSync(sourcePath, 'utf8'));
+    assert.equal(spawnCall.executable, 'powershell.exe');
+    assert.ok(spawnCall.argv.includes('-STA'));
+    assert.ok(spawnCall.argv.includes('-File'));
+    assert.ok(spawnCall.argv.includes(targetPath));
+    assert.ok(spawnCall.argv.includes(markerPath));
+    assert.equal(spawnCall.options.shell, false);
+    assert.equal(spawnCall.options.detached, true);
+    assert.equal(spawnCall.options.stdio, 'ignore');
+    assert.equal(spawnCall.options.windowsHide, true);
+    assert.equal(unrefCalled, true);
+
+    const skipped = await launchUpdateStatusHelper(app, { platform: 'linux', spawn: () => assert.fail('non-Windows helper must not spawn') });
+    assert.equal(skipped.skipped, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  console.log('Windows update-status helper launcher tests passed.');
+}
+await case_update_status_helper_unit();
 
 // Formerly updater-artifact-contract-unit.mjs
 async function case_updater_artifact_contract_unit() {

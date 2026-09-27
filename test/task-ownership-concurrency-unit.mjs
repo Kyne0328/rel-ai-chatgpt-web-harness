@@ -92,7 +92,7 @@ try {
     action: 'commit', workspace: 'app', work_id: taskA.work_id, message: 'commit explicitly selected earlier task path', paths: ['src/task-b.js']
   });
   assert.equal(foreignPublish.ok, true, 'explicit paths must cross logical-task ownership without widening beyond the selected files');
-  assert.deepEqual(foreignPublish.paths, ['src/task-b.js']);
+  assert.equal(foreignPublish.paths, undefined, 'publish success must not echo caller-owned explicit paths');
   assert.equal(git('show', '--name-only', '--format=', 'HEAD').trim(), 'src/task-b.js', 'cross-task explicit commit must contain only the selected path');
   assert.ok(git('status', '--porcelain=v1', '--', 'src/task-a.js').trim(), 'unselected task A work must remain dirty');
   assert.ok(git('status', '--porcelain=v1', '--', 'src/shared.js').trim(), 'unselected shared work must remain dirty');
@@ -102,15 +102,16 @@ try {
     action: 'commit', workspace: 'app', message: 'commit explicit workspace path without resurrecting a task', paths: ['src/taskless.js']
   });
   assert.equal(tasklessPublish.ok, true, 'an explicitly scoped commit must not require a live work_id');
-  assert.deepEqual(tasklessPublish.paths, ['src/taskless.js']);
+  assert.equal(tasklessPublish.paths, undefined, 'taskless publish success must not echo caller-owned explicit paths');
   assert.equal(git('show', '--name-only', '--format=', 'HEAD').trim(), 'src/taskless.js');
 
   const addAllPublish = await callTool('relai_publish', {
     action: 'commit', workspace: 'app', work_id: taskA.work_id, message: 'aggregate reviewed workspace changes', addAll: true
   });
   assert.equal(addAllPublish.ok, true, 'explicit addAll must aggregate the remaining visible workspace even from a logical task');
-  assert.equal(addAllPublish.addAll, true);
-  assert.deepEqual(new Set(addAllPublish.paths), new Set(['src/shared.js', 'src/task-a.js']));
+  assert.equal(addAllPublish.addAll, undefined, 'publish success must not echo caller-owned addAll');
+  assert.deepEqual(new Set(addAllPublish.paths), new Set(['src/shared.js', 'src/task-a.js']), 'addAll must report the derived files it actually committed');
+  assert.deepEqual(new Set(git('show', '--name-only', '--format=', 'HEAD').trim().split(/\r?\n/).filter(Boolean)), new Set(['src/shared.js', 'src/task-a.js']), 'workspace aggregation must commit exactly the remaining visible files');
   assert.equal(git('status', '--porcelain=v1').trim(), '', 'workspace aggregation must leave the committed repository clean');
   assert.deepEqual(taskCommitOwnership(readConfig(), taskA.work_id, 'app').ownedFiles, [], 'workspace aggregation must reconcile task A ownership');
   assert.deepEqual(taskCommitOwnership(readConfig(), taskB.work_id, 'app').ownedFiles, [], 'workspace aggregation must reconcile task B ownership');
@@ -135,7 +136,7 @@ try {
     action: 'commit', workspace: 'app', message: 'commit after old task ended', paths: ['src/stale-task.js']
   });
   assert.equal(staleOptionalPublish.ok, true, 'omitting work_id must allow the explicitly scoped workspace commit');
-  assert.deepEqual(staleOptionalPublish.paths, ['src/stale-task.js']);
+  assert.equal(staleOptionalPublish.paths, undefined, 'taskless explicit publish must not echo caller-owned paths');
   assert.equal(git('show', '--name-only', '--format=', 'HEAD').trim(), 'src/stale-task.js');
 
   fs.writeFileSync(path.join(workspacePath, 'src', 'stale-add-all.js'), 'export const staleAddAll = true;\n');
@@ -150,7 +151,7 @@ try {
     action: 'commit', workspace: 'app', message: 'commit all requested workspace changes after old task ended', addAll: true
   });
   assert.equal(staleAddAllPublish.ok, true, 'taskless addAll must execute from explicit workspace scope without a dashboard approval');
-  assert.equal(staleAddAllPublish.addAll, true);
+  assert.equal(staleAddAllPublish.addAll, undefined, 'taskless addAll publish must not echo caller-owned addAll');
   assert.deepEqual(staleAddAllPublish.paths, ['src/stale-add-all.js']);
   assert.equal(git('show', '--name-only', '--format=', 'HEAD').trim(), 'src/stale-add-all.js');
 

@@ -184,7 +184,26 @@ try {
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
   if (previousReducedBackgroundWork == null) delete process.env.REL_AI_REDUCED_BACKGROUND_WORK;
   else process.env.REL_AI_REDUCED_BACKGROUND_WORK = previousReducedBackgroundWork;
-  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  await removeDirectoryWithRetry(temp);
+}
+
+async function removeDirectoryWithRetry(directory, attempts = 40) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      fs.rmSync(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error?.code)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  }
+  if (process.platform === 'win32' && lastError?.code === 'EPERM') {
+    process.once('exit', () => { try { fs.rmSync(directory, { recursive: true, force: true }); } catch {} });
+    return;
+  }
+  throw lastError;
 }
 
 // Nested raw tool calls can leave Windows piped stdio referenced after app resources close.

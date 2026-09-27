@@ -18,6 +18,14 @@ function assertTunnelClientManifest(value) {
   if (value.releaseTag !== `v${value.version}`) throw new Error('Tunnel-client manifest releaseTag must match version.');
   if (value.distribution !== 'full') throw new Error('Rel.AI requires the full OpenAI tunnel-client distribution.');
   if (!String(value.baseUrl || '').endsWith(`/v${value.version}`)) throw new Error('Tunnel-client manifest baseUrl must be pinned to its release version.');
+  const evidence = value.releaseEvidence;
+  if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) throw new Error('Tunnel-client manifest releaseEvidence is required.');
+  for (const key of ['provenance', 'vulnerabilityReport', 'openVex', 'enterpriseEvidence']) {
+    const item = evidence[key];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(`Tunnel-client manifest releaseEvidence.${key} is required.`);
+    if (!String(item.file || '').includes(`v${value.version}`)) throw new Error(`Tunnel-client manifest releaseEvidence.${key}.file must match the pinned release.`);
+    if (!/^[a-f0-9]{64}$/.test(String(item.sha256 || ''))) throw new Error(`Tunnel-client manifest releaseEvidence.${key}.sha256 is invalid.`);
+  }
 }
 
 export { assertTunnelClientManifest, normalizeTunnelClientArch, resolveTunnelClientPlatformSpec };

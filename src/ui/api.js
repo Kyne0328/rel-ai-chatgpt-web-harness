@@ -29,10 +29,10 @@ function cacheKeyFor(url, fetchOpts) {
   return isGet && !bypassCache ? [QUERY_NAMESPACE, url] : null;
 }
 
-function cachedValue(cacheKey) {
-  if (!cacheKey) return null;
+function cachedValue(cacheKey, maxAgeMs = 1000) {
+  if (!cacheKey || !(maxAgeMs > 0)) return null;
   const state = queryClient.getQueryState(cacheKey);
-  if (!state || Date.now() - Number(state.dataUpdatedAt || 0) >= 1000) return null;
+  if (!state || Date.now() - Number(state.dataUpdatedAt || 0) >= maxAgeMs) return null;
   return queryClient.getQueryData(cacheKey) || null;
 }
 
@@ -139,9 +139,9 @@ export async function fetchJson(url, opts = {}) {
   // entirely. The native folder picker blocks on user input and must not be killed
   // mid-prompt, so it passes timeout: 0. Most requests pause timeout accounting while
   // hidden; callers that must not remain pending in the background can opt out.
-  const { timeout, pauseTimeoutWhenHidden = true, ...fetchOpts } = opts;
+  const { timeout, pauseTimeoutWhenHidden = true, cacheTtlMs = 1000, ...fetchOpts } = opts;
   const cacheKey = cacheKeyFor(url, fetchOpts);
-  const cached = cachedValue(cacheKey);
+  const cached = cachedValue(cacheKey, cacheTtlMs);
   if (cached) return cached;
   const cacheGeneration = _cacheGeneration;
 

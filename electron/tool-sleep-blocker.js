@@ -18,9 +18,10 @@ function buildFailureNotification(event = {}) {
   const operation = truncateNotificationText(event.operation || event.tool || 'Project action', 80);
   const workspace = truncateNotificationText(event.workspace, 64);
   const location = workspace ? ` in ${workspace}` : '';
+  const failureLabel = /\b(?:failed|blocked|cancelled)$/i.test(operation) ? operation : `${operation} failed`;
   return {
     title: 'Project action failed',
-    body: truncateNotificationText(`${operation} failed${location}. Open Rel.AI for details and recovery options.`, NOTIFICATION_BODY_LIMIT)
+    body: truncateNotificationText(`${failureLabel}${location}. Open Rel.AI for details and recovery options.`, NOTIFICATION_BODY_LIMIT)
   };
 }
 

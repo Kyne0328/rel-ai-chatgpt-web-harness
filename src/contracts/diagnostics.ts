@@ -23,6 +23,7 @@ export interface DiagnosticReportDto {
   application: { version: string; build: string };
   summary: Record<string, number>;
   findings: DiagnosticFindingDto[];
+  tunnelHealth?: Record<string, unknown> | null;
   logs: Record<string, unknown>;
   reportText: string;
 }

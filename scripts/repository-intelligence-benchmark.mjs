@@ -9,6 +9,7 @@ const fileCount = integerArg('--files', 100000, 1, 500000);
 const mutationCount = Math.min(fileCount, integerArg('--mutations', 100, 1, 10000));
 const maxFullMs = optionalPositiveNumberArg('--max-full-ms');
 const maxIncrementalMs = optionalPositiveNumberArg('--max-incremental-ms');
+const maxRestartReuseMs = optionalPositiveNumberArg('--max-restart-reuse-ms');
 const json = process.argv.includes('--json');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-repository-index-benchmark-'));
 const workspaceRoot = path.join(root, 'workspace');
@@ -31,6 +32,11 @@ try {
   const incrementalRefreshMs = performance.now() - incrementalStarted;
   const afterIncremental = process.memoryUsage().rss;
 
+  await repositoryIntelligence.shutdown();
+  const restartStarted = performance.now();
+  const restarted = await repositoryIntelligence.ensure(workspace, config, { watch: false, maxFiles: fileCount });
+  const restartReuseMs = performance.now() - restartStarted;
+
   if (full.sourceFileCount !== fileCount) {
     throw new Error(`Expected ${fileCount} indexed files, got ${full.sourceFileCount}.`);
   }
@@ -40,12 +46,16 @@ try {
   if (incremental.scanMode !== 'incremental') {
     throw new Error(`Expected the mutation benchmark to remain incremental, got ${incremental.scanMode}.`);
   }
+  if (restarted.generation !== incremental.generation || restarted.cacheHit !== true || restarted.changedPathCount !== 0) {
+    throw new Error('Expected restart reuse to load the unchanged persisted Repository Intelligence generation without rebuilding.');
+  }
 
   const report = {
     files: fileCount,
     mutations: mutationCount,
     fullBuildMs: rounded(fullBuildMs),
     incrementalRefreshMs: rounded(incrementalRefreshMs),
+    restartReuseMs: rounded(restartReuseMs),
     fullFilesPerSecond: rounded(fileCount / Math.max(fullBuildMs / 1000, 0.001)),
     incrementalFilesPerSecond: rounded(mutationCount / Math.max(incrementalRefreshMs / 1000, 0.001)),
     rssBeforeBytes: before,
@@ -55,28 +65,33 @@ try {
     watcherDisabled: true,
     fullScanMode: full.scanMode,
     incrementalScanMode: incremental.scanMode,
+    restartCacheHit: restarted.cacheHit === true,
     incrementalCoalescedPassCount: Number(incremental.coalescedPassCount || 1),
     thresholds: {
       ...(maxFullMs == null ? {} : { maxFullBuildMs: maxFullMs, fullBuildPassed: fullBuildMs <= maxFullMs }),
-      ...(maxIncrementalMs == null ? {} : { maxIncrementalRefreshMs: maxIncrementalMs, incrementalRefreshPassed: incrementalRefreshMs <= maxIncrementalMs })
+      ...(maxIncrementalMs == null ? {} : { maxIncrementalRefreshMs: maxIncrementalMs, incrementalRefreshPassed: incrementalRefreshMs <= maxIncrementalMs }),
+      ...(maxRestartReuseMs == null ? {} : { maxRestartReuseMs, restartReusePassed: restartReuseMs <= maxRestartReuseMs })
     }
   };
   const thresholdsPassed = (maxFullMs == null || fullBuildMs <= maxFullMs)
-    && (maxIncrementalMs == null || incrementalRefreshMs <= maxIncrementalMs);
+    && (maxIncrementalMs == null || incrementalRefreshMs <= maxIncrementalMs)
+    && (maxRestartReuseMs == null || restartReuseMs <= maxRestartReuseMs);
 
   if (json) process.stdout.write(`${JSON.stringify({ ...report, thresholdsPassed })}\n`);
   else {
     console.log(`Repository Intelligence benchmark (${fileCount.toLocaleString()} files)`);
     console.log(`  Full build:          ${report.fullBuildMs} ms (${report.fullFilesPerSecond} files/s)`);
     console.log(`  Incremental refresh: ${report.incrementalRefreshMs} ms for ${mutationCount} files (${report.incrementalFilesPerSecond} files/s)`);
+    console.log(`  Restart reuse:       ${report.restartReuseMs} ms (cache hit=${report.restartCacheHit})`);
     console.log(`  Worker isolated:     ${report.workerIsolated}`);
     console.log('  Watcher:             disabled (engine benchmark)');
     if (maxFullMs != null) console.log(`  Full-build budget:   ${maxFullMs} ms (${fullBuildMs <= maxFullMs ? 'pass' : 'fail'})`);
     if (maxIncrementalMs != null) console.log(`  Incremental budget:  ${maxIncrementalMs} ms (${incrementalRefreshMs <= maxIncrementalMs ? 'pass' : 'fail'})`);
+    if (maxRestartReuseMs != null) console.log(`  Restart-reuse budget:${maxRestartReuseMs} ms (${restartReuseMs <= maxRestartReuseMs ? 'pass' : 'fail'})`);
   }
   if (!thresholdsPassed) process.exitCode = 1;
 } finally {
-  repositoryIntelligence.shutdown();
+  await repositoryIntelligence.shutdown();
   if (process.env.REL_AI_MCP_BENCHMARK_KEEP !== '1') fs.rmSync(root, { recursive: true, force: true });
   else console.error(`Benchmark fixture kept at ${root}`);
 }

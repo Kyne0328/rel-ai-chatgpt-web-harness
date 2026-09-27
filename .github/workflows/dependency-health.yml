@@ -39,3 +39,7 @@ jobs:
       - name: Report available Electron updates
         continue-on-error: true
         run: npm outdated --prefix electron --long
+      - name: Check vendored runtime upstreams
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: npm run check:vendor-updates

@@ -54,7 +54,7 @@ try {
     cancelPreserved: true,
     fixedChoicesVisible: true
   });
-  assert.deepEqual(result.activityApplied.chipText.sort(), ['Status: failed ×', 'Time: 24h ×']);
+  assert.deepEqual(result.activityApplied.chipText.sort(), ['Status: failed', 'Time: 24h']);
   assert.deepEqual(result.activityApplied.chipLabels.sort(), ['Remove Status filter: failed', 'Remove Time filter: 24h']);
   assert.equal(result.activityApplied.badge, 'Filters (2)');
   assert.match(result.activityApplied.route, /time=24h/);
@@ -80,7 +80,7 @@ try {
   assert.equal(result.diagnostics.searchEmpty, true);
   assert.equal(result.diagnostics.technicalFindingCodesGated, true);
   assert.equal(result.diagnostics.findingSeveritiesReadable, true);
-  assert.deepEqual(result.diagnostics.applied.chips.sort(), ['Scope: Failed activity ×', 'Severity: Blocking ×']);
+  assert.deepEqual(result.diagnostics.applied.chips.sort(), ['Scope: Failed activity', 'Severity: Blocking']);
   assert.equal(result.diagnostics.applied.badge, 'Filters (2)');
   assert.match(result.diagnostics.applied.summary, /findings.*log entries shown/);
   assert.equal(result.diagnostics.applied.liveTailPressed, 'false');

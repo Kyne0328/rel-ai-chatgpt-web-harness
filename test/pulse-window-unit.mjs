@@ -27,7 +27,7 @@ const blocked = projectPulseStatus({
   }
 });
 assert.equal(blocked.actionRequired, true);
-assert.equal(blocked.title, 'Resolve the blocker to continue');
+assert.equal(blocked.title, 'Resolve the problem to continue');
 assert.match(blocked.detail, /deployment target/i);
 
 const validationFailed = projectPulseStatus({
@@ -95,7 +95,7 @@ assert.doesNotMatch(ordinaryWaiting.detail, /waiting on you/i, 'ordinary remote 
 const connectedIdle = projectPulseStatus({ serverRunning: true, tunnelStatus: 'running' });
 assert.equal(connectedIdle.visible, true, 'Pulse must remain available while Rel.AI is idle');
 assert.equal(connectedIdle.tone, 'idle');
-assert.equal(connectedIdle.detail, 'No local task is active.');
+assert.equal(connectedIdle.detail, '');
 assert.equal(projectPulseStatus({ serverRunning: false }).visible, true);
 
 const pulseHtml = readFileSync(new URL('../electron/renderer/pulse.html', import.meta.url), 'utf8');
@@ -114,6 +114,10 @@ assert.match(pulseCss, /body\.pulse-page\s*\{[^}]*padding:\s*0/s, 'Pulse surface
 assert.match(pulseCss, /\.pulse-shell\s*\{[^}]*width:\s*100%[^}]*height:\s*100%/s, 'compact and expanded Pulse geometry must use the exact native window bounds'); // rigidity-ok: the shell must exactly fill the transparent native window to avoid exposed rectangular gutters.
 assert.doesNotMatch(pulseCss, /backdrop-filter|box-shadow:\s*var\(--ui-shadow-(?:window|popover)\)/, 'Pulse must not paint clipped glass or external shadows that reveal the rectangular native window');
 assert.doesNotMatch(pulseCss, /pulseActivity|animation:\s*[^;]*infinite/, 'working state must not keep the transparent overlay continuously compositing');
+assert.match(pulseCss, /\.pulse-shell\[data-tone="working"\] \.pulse-state-dot::after\s*\{[^}]*opacity:\s*0[^}]*transform:\s*scale\(1\.85\)/s, 'working Pulse ring must rest invisibly after each finite pulse instead of freezing onscreen');
+assert.match(pulseCss, /\.pulse-shell\[data-tone="working"\]\.is-heartbeating \.pulse-state-dot::after\s*\{[^}]*animation:\s*pulse-breathe[^;]*\s1;/s, 'working Pulse heartbeat must remain a finite one-shot triggered by renderer state');
+assert.match(pulseRenderer, /WORKING_HEARTBEAT_GAP_MS\s*=\s*3600/, 'working Pulse must leave a resting gap between finite heartbeats');
+assert.match(pulseRenderer, /document\.visibilityState === 'hidden'[\s\S]{0,180}stopWorkingHeartbeat\(\)/, 'hidden Pulse windows must stop the heartbeat instead of animating offscreen');
 assert.doesNotMatch(pulseCss, /\.pulse-island\s*\{[^}]*(?:transform:|transition:)/s, 'Pulse details must share the shell motion instead of running a second geometry transition');
 assert.doesNotMatch(pulseCss, /data-collapsing="true"\][^{]*\{[^}]*(?:opacity|visibility|border-radius):/s, 'collapse state must not visually detach the contents or corners from the final expanded structure');
 assert.doesNotMatch(pulseCss, /will-change:\s*transform, opacity/, 'Pulse must not permanently reserve a compositor layer between transitions');
@@ -138,6 +142,8 @@ assert.match(pulseRenderer, /querySelector\('\.pulse-bar'\)[\s\S]{0,160}!expande
 assert.match(pulseRenderer, /event\.key === 'Escape' && expanded/, 'Escape must collapse an expanded Pulse');
 assert.match(pulseRenderer, /taskNames\.join\(' · '\)/, 'expanded Pulse must render active task names');
 assert.match(pulseRenderer, /relaiPulse\?\.openDashboard\?\.\(\)/, 'Pulse must use the same no-route dashboard opener as the tray');
+assert.match(pulseRenderer, /document\.addEventListener\('visibilitychange', handleVisibilityChange\)/, 'Pulse elapsed-time updates must react to renderer visibility changes');
+assert.match(pulseRenderer, /document\.visibilityState === 'hidden'[\s\S]{0,120}stopElapsedTimer\(\)/, 'hidden Pulse windows must stop the one-second elapsed timer');
 assert.doesNotMatch(pulseRenderer, /openDashboard\?\.\(currentModel\.route/, 'Pulse must not turn a dashboard open into a deep-link navigation requirement');
 assert.match(preloadSource, /openDashboard:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('url:open-dashboard'\)/, 'Pulse preload must expose the canonical no-route dashboard open action');
 

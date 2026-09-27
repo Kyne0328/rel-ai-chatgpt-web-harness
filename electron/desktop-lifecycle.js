@@ -71,7 +71,8 @@ function createDesktopLifecycleManager(options = {}) {
       keepRunningOnClose: previous.keepRunningOnClose !== false,
       pulseEnabled: previous.pulseEnabled !== false,
       themePreference: normalizeThemePreference(previous.themePreference),
-      autoDownloadUpdates: previous.autoDownloadUpdates === true,
+      autoDownloadUpdates: previous.autoDownloadUpdates !== false,
+      updateChannel: normalizeUpdateChannel(previous.updateChannel),
       reducedBackgroundWork: previous.reducedBackgroundWork === true,
       openedAtLogin: argv.includes('--background') || launchAtLogin.openedAtLogin === true
     };
@@ -157,7 +158,8 @@ function createDesktopLifecycleManager(options = {}) {
     const fields = ['keepRunningOnClose', 'pulseEnabled', 'autoDownloadUpdates', 'reducedBackgroundWork'];
     const previous = {
       ...Object.fromEntries(fields.map(field => [field, status[field] === true])),
-      themePreference: normalizeThemePreference(status.themePreference)
+      themePreference: normalizeThemePreference(status.themePreference),
+      updateChannel: normalizeUpdateChannel(status.updateChannel)
     };
     const next = { ...previous };
     let changed = false;
@@ -175,6 +177,13 @@ function createDesktopLifecycleManager(options = {}) {
       }
       next.themePreference = patch.themePreference;
       if (next.themePreference !== previous.themePreference) changed = true;
+    }
+    if (Object.hasOwn(patch, 'updateChannel')) {
+      if (!['stable', 'beta'].includes(patch.updateChannel)) {
+        return { ok: false, errorCode: codes.state, error: 'Update channel is invalid.', status: snapshot() };
+      }
+      next.updateChannel = patch.updateChannel;
+      if (next.updateChannel !== previous.updateChannel) changed = true;
     }
     if (!changed) return { ok: true, status: snapshot() };
     status = { ...status, ...next };
@@ -240,7 +249,8 @@ function createDesktopLifecycleManager(options = {}) {
       keepRunningOnClose: status.keepRunningOnClose !== false,
       pulseEnabled: status.pulseEnabled !== false,
       themePreference: normalizeThemePreference(status.themePreference),
-      autoDownloadUpdates: status.autoDownloadUpdates === true,
+      autoDownloadUpdates: status.autoDownloadUpdates !== false,
+      updateChannel: normalizeUpdateChannel(status.updateChannel),
       reducedBackgroundWork: status.reducedBackgroundWork === true
     };
   }
@@ -285,7 +295,8 @@ function baseStatus(app, support, connectorRevision = '') {
     keepRunningOnClose: true,
     pulseEnabled: true,
     themePreference: 'system',
-    autoDownloadUpdates: false,
+    autoDownloadUpdates: true,
+    updateChannel: 'stable',
     reducedBackgroundWork: false,
     openedAtLogin: false
   };
@@ -339,6 +350,10 @@ function cleanVersion(value) {
 
 function normalizeThemePreference(value) {
   return ['dark', 'light'].includes(value) ? value : 'system';
+}
+
+function normalizeUpdateChannel(value) {
+  return value === 'beta' ? 'beta' : 'stable';
 }
 
 function cleanText(value, limit) {

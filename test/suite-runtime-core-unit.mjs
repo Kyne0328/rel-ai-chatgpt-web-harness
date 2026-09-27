@@ -566,8 +566,15 @@ async function case_diagnostic_files_unit() {
   try {
     assert.equal(files.directory(), path.join(root, 'diagnostics'));
     assert.equal(files.serviceLogPath(), path.join(root, 'diagnostics', 'service.log'));
+    assert.equal(files.crashDumpsPath(), path.join(root, 'diagnostics', 'crashes'));
     assert.equal(fileTimestamp(new Date('2026-07-25T07:30:45.123Z')), '20260725-073045Z');
   
+    fs.mkdirSync(files.crashDumpsPath(), { recursive: true });
+    fs.writeFileSync(path.join(files.crashDumpsPath(), 'renderer-test.dmp'), Buffer.from('synthetic crash dump'));
+    const crashDumps = files.listCrashDumps();
+    assert.equal(crashDumps.length, 1);
+    assert.equal(crashDumps[0].name, 'renderer-test.dmp');
+
     const exported = await files.exportReport({ ok: true, token: 'secret', nested: { password: 'hidden', safe: 'visible' } });
     assert.equal(exported.filename, 'relai-diagnostic-state-20260725-073045Z.json');
     assert.equal(fs.existsSync(exported.path), true);
@@ -576,6 +583,7 @@ async function case_diagnostic_files_unit() {
     assert.equal(payload.report.token, '[redacted]');
     assert.equal(payload.report.nested.password, '[redacted]');
     assert.equal(payload.report.nested.safe, 'visible');
+    assert.equal(payload.report.desktopCrashDumps[0].name, 'renderer-test.dmp');
   
     const openedResult = await files.openFolder();
     assert.equal(openedResult.ok, true);
@@ -624,6 +632,10 @@ async function case_diagnostics_unit() {
     cautionData: { windowHours: 24, workspaces: [{ alias: 'example', count: 1, recent: [{ tool: 'relai_edit', ts: '2026-07-25T00:00:00.000Z', reason: `Bearer ${secret}` }] }] },
     connection: { tunnelId: 'tunnel_12345678', token: 'set' },
     connectionState: { publicEndpoint: { status: 'available' }, error: { code: 'local_port_in_use', message: `password=${secret}` } },
+    tunnelHealth: {
+      controlPlane: { status: 'degraded', state: 'backoff', reasonCode: 'http_error', details: { authorization: secret, consecutiveFailures: 2 } },
+      responseDelivery: { status: 'ok', state: 'accepted', details: { accepted: 4 } }
+    },
     runtimeLogs: {
       available: true,
       persistent: true,
@@ -655,6 +667,9 @@ async function case_diagnostics_unit() {
   assert.equal(report.logs.runtime.persistent, true);
   assert.equal(report.logs.runtime.revision, 7, 'diagnostic snapshots must preserve the runtime-log revision for live replay ordering');
   assert.equal(report.logs.runtime.persistence.healthy, true);
+  assert.equal(report.tunnelHealth.controlPlane.status, 'degraded');
+  assert.equal(report.tunnelHealth.controlPlane.details.authorization, '[redacted]');
+  assert.match(report.reportText, /control-plane: degraded \/ backoff \(http_error\)/);
   assert.deepEqual(report.logs.runtime.entries.map(item => item.ts), ['2026-07-25T00:01:00.000Z','2026-07-25T00:02:00.000Z','2026-07-25T00:03:00.000Z']);
   assert.equal(report.logs.runtime.entries.at(-1).code, 'activity_listener_failed', 'technical log codes must not collapse to a generic UI error code');
   assert.equal(report.logs.runtime.entries.at(-1).taskId, 'task-runtime-7');
@@ -1704,6 +1719,7 @@ async function case_runtime_lifecycle_unit() {
   assert.equal(canTransitionTunnelLifecycle('starting', 'locally_ready'), true);
   assert.equal(canTransitionTunnelLifecycle('locally_ready', 'authenticating'), true);
   assert.equal(canTransitionTunnelLifecycle('authenticating', 'running'), true);
+  assert.equal(canTransitionTunnelLifecycle('authenticating', 'degraded'), true);
   assert.equal(canTransitionTunnelLifecycle('running', 'degraded'), true);
   assert.equal(canTransitionTunnelLifecycle('degraded', 'running'), true);
   assert.equal(canTransitionTunnelLifecycle('failed', 'running'), false);
@@ -2337,9 +2353,21 @@ async function case_usage_ui_contract_unit() {
   const usageData = read('src/ui/features/usage/data.js');
   const usageCss = read('src/ui/features/usage/styles.css');
   const charts = read('src/ui/components/charts.js');
+  const sparkline = read('src/ui/components/sparkline.js');
+  const activityReact = read('src/ui/features/activity/react.js');
+  const browserReact = read('src/ui/features/browser/react.js');
+  const extensionsReact = read('src/ui/features/extensions/react.js');
+  const processesReact = read('src/ui/features/processes/react.js');
+  const toolsReact = read('src/ui/features/tools/react.js');
+  const sessionsReact = read('src/ui/features/sessions/react.js');
+  const codeReact = read('src/ui/features/code/react.js');
+  const httpRoutes = read('src/http/routes.ts');
+  const dashboardHttp = read('src/http/dashboard.ts');
   const homeReact = read('src/ui/features/home/react.js');
   const workspacesReact = read('src/ui/features/workspaces/react.js');
   const uiPackage = JSON.parse(read('src/ui/package.json'));
+  const appCssSource = read('src/ui/styles/app.css');
+  const viteConfigSource = read('vite.config.mjs');
   const usageCombined = `${usageSource}\n${usageReact}\n${usageRender}\n${usageRange}\n${usageData}`;
   
   assert.match(navigationCatalog, /route\(['"]usage['"], ['"]Analytics['"]/);
@@ -2355,11 +2383,11 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageData, /desktop\.getLocalUsage/);
   assert.doesNotMatch(`${usageSource}\n${usageData}`, /getGatewayUsage|connectionMode|pairing_required|cloudUsageAvailability/i);
   assert.doesNotMatch(`${usageSource}\n${usageData}`, /fetch\(|DASHBOARD_DATA_URL|auditTail|taskActivity/);
-  assert.match(usageReact, /Analytics are stored on this computer\. Rel\.AI records aggregate action categories and work-type labels, not prompts, file paths, command output, or action results/i);
+  assert.match(usageSource, /Rel\.AI stores aggregate action categories and work-type labels locally/i, 'Analytics privacy copy must state what stays local');
   assert.match(usageReact, /data-usage-privacy/, 'Analytics must disclose local retention and external telemetry state');
   assert.match(usageSource, /External developer telemetry is off/, 'Analytics must make the default external-telemetry state explicit');
-  assert.match(usageSource, /OTLP endpoint is configured, but the telemetry switch is disabled/, 'Analytics must distinguish a configured endpoint from an enabled exporter');
-  assert.match(usageSource, /raw exception messages are not exported/, 'Analytics must disclose the external trace redaction boundary');
+  assert.match(usageSource, /OTLP endpoint is configured, but Rel\.AI does not export traces while telemetry is off/, 'Analytics must distinguish a configured endpoint from an enabled exporter');
+  assert.match(usageSource, /raw error messages/, 'Analytics must disclose the external trace redaction boundary');
   assert.doesNotMatch(usageReact, /target: 'analytics', confirm: true/, 'Analytics page must not expose the destructive local-history clear action');
   assert.match(settingsReact, /target: 'analytics', confirm: true/, 'Settings must retain an explicit local-history clear action');
   assert.doesNotMatch(`${usageSource}\n${usageRender}`, /innerHTML|replaceChildren|insertAdjacentHTML/, 'Analytics model/view helpers must not retain the legacy DOM renderer');
@@ -2391,7 +2419,10 @@ async function case_usage_ui_contract_unit() {
   assert.doesNotMatch(charts, /BubbleController|import\s*\{\s*Bubble(?:\s*,|\s*\})/, 'The categorical matrix must not retain the generic Chart.js bubble plot implementation');
   assert.match(charts, /AccessibleMatrixTable/, 'The work-type matrix must provide an accessible data-table alternative');
   assert.doesNotMatch(charts, /\bBar(?:Element)?\b/, 'Temporal analytics must use line charts consistently');
-  assert.match(charts, /export function SparkChart[\s\S]{0,1500}spanGaps: true/, 'Compact analytics sparklines must stay visually continuous across missing samples');
+  assert.match(sparkline, /export function SparkChart/, 'Compact analytics sparklines must use the lightweight shared SVG renderer');
+  assert.doesNotMatch(sparkline, /chart\.js|react-chartjs-2/, 'Compact sparklines must not load the Chart.js runtime');
+  assert.match(sparkline, /map\(\(value, index\) => \(\{ value: finiteNonNegative\(value\), index \}\)\)/, 'Compact sparklines must preserve source positions so missing samples remain visually continuous');
+  assert.doesNotMatch(`${homeReact}\n${workspacesReact}`, /components\/charts\.js/, 'Overview and Projects must not load the detailed Chart.js bundle for compact sparklines');
   assert.match(charts, /spanGaps: false/, 'Missing rate and duration samples must remain visible as gaps in the detailed timeline');
   assert.match(charts, /trailingGapContinuation/, 'Trailing idle buckets must keep the timeline visually connected to the range end');
   assert.match(charts, /borderDash: \[4, 4\]/, 'Trailing idle continuation must be visually distinct from measured samples');
@@ -2399,7 +2430,24 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageCss, /\.usage-metrics \{[^}]*display:\s*grid/, 'Primary Analytics metrics must stay in the responsive metrics grid');
   assert.ok(uiPackage.dependencies['chart.js'], 'Chart.js must be owned by the UI workspace');
   assert.ok(uiPackage.dependencies['react-chartjs-2'], 'The React Chart.js wrapper must be owned by the UI workspace');
-  assert.doesNotMatch(`${usageReact}\n${homeReact}\n${workspacesReact}`, /h\(['"]svg['"]/, 'Analytics feature renderers must not retain first-party SVG chart markup');
+  assert.ok(uiPackage.dependencies['@tanstack/react-virtual'], 'The UI workspace must own the Activity virtualization dependency');
+  assert.match(activityReact, /useVirtualizer\(/, 'Activity must virtualize retained history instead of mounting the full event tail');
+  assert.match(activityReact, /aria-live': 'polite'/, 'Activity must batch live-event announcements for assistive technology');
+  assert.match(viteConfigSource, /cssCodeSplit:\s*true/, 'production dashboard CSS must keep route-level code splitting enabled');
+  assert.match(viteConfigSource, /dashboardCss:\s*dashboardCssEntry/, 'the base dashboard stylesheet must retain a stable production entry');
+  assert.doesNotMatch(appCssSource, /features\/(?:activity|browser|code|extensions|processes|tools|usage|workspaces)\/styles\.css/, 'lazy-route styles must not be folded back into the render-blocking dashboard stylesheet');
+  for (const [routeName, source] of Object.entries({ activity: activityReact, browser: browserReact, code: codeReact, extensions: extensionsReact, processes: processesReact, tools: toolsReact, usage: usageReact, workspaces: workspacesReact })) {
+    assert.match(source, /import ['"]\.\/styles\.css['"];/, `${routeName} must load its route-owned stylesheet with the lazy route chunk`);
+  }
+  assert.match(sessionsReact, /placeholder: 'Search tasks'/, 'Tasks must provide local text search');
+  assert.match(sessionsReact, /'Task status filter'/, 'Tasks must provide a status filter');
+  assert.doesNotMatch(sessionsReact, /cache: 'no-store'/, 'Completed task detail hydration must be allowed to reuse the shared query cache');
+  assert.match(codeReact, /HTTP_CODE_BRIDGE/, 'Changes must provide an authenticated browser fallback when the Electron bridge is unavailable');
+  assert.match(httpRoutes, /'\/api\/tasks\/files'.*handleTaskCodeWorkspace/, 'The dashboard must expose authenticated task file metadata to browser Changes');
+  assert.match(httpRoutes, /'\/api\/tasks\/diff'.*handleTaskCodeDiff/, 'The dashboard must expose authenticated task diffs to browser Changes');
+  assert.match(dashboardHttp, /dashboardTaskCodeWorkspace/, 'Browser Changes must delegate to the canonical task-code workspace implementation');
+  assert.match(dashboardHttp, /dashboardTaskCodeDiff/, 'Browser diff reads must delegate to the canonical task-code workspace implementation');
+  assert.doesNotMatch(`${usageReact}\n${homeReact}\n${workspacesReact}`, /h\(['"]svg['"]/, 'Analytics feature renderers must not inline ad hoc SVG chart markup');
   assert.doesNotMatch(usageRender, /coordinates|polyline|area:\s*`/, 'Analytics view models must not retain first-party chart geometry');
   assert.match(usageReact, /'aria-valuetext': valueText/, 'Analytics breakdown progress must expose readable values');
   assert.match(usageCss, /\.usage-privacy-body/, 'Analytics privacy disclosure must use a stable responsive layout');

@@ -26,6 +26,8 @@ function processRowView(process = {}, nativeTasks = [], now = Date.now()) {
     commandSummary: process.commandSummary || 'Unavailable',
     startedAt: process.startedAt || '',
     startedAgo: process.startedAt ? (timeAgo(process.startedAt, now) || 'now') : '',
+    endedAt: process.endedAt || '',
+    endedAgo: process.endedAt ? (timeAgo(process.endedAt, now) || 'now') : '',
     elapsed: durationFor(process, state.active, now),
     exitCode: process.exitCode,
     error: process.error || '',
@@ -38,11 +40,8 @@ function durationFor(process = {}, active = false, now = Date.now()) {
   const start = Date.parse(process.startedAt || '');
   const parsedEnd = Date.parse(process.endedAt || '');
   const end = Number.isFinite(parsedEnd) ? parsedEnd : now;
-  if (Number.isFinite(start)) {
-    const duration = formatDuration(Math.max(0, end - start), active ? { live: true } : {});
-    return active ? duration : `${duration}${process.endedAt ? ` · ${timeAgo(process.endedAt, now)}` : ''}`;
-  }
-  return process.endedAt ? timeAgo(process.endedAt, now) : 'Unavailable';
+  if (Number.isFinite(start)) return formatDuration(Math.max(0, end - start), active ? { live: true } : {});
+  return 'Unavailable';
 }
 
 function orderProcesses(items = [], nativeTasks = []) {

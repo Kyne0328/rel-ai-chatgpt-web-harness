@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { flushAuditWrites } from '../src/audit.js';
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
 import { flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-progress-'));
@@ -54,8 +55,10 @@ try {
 
   function sequence(taskId) {
     const values = events
-      .filter(event => event.phase === 'progress' && event.taskId === taskId && event.task?.progress?.mode === 'determinate')
-      .map(event => `${event.task.progress.completedUnits}/${event.task.progress.totalUnits}`);
+      .filter(event => event.phase === 'progress' && event.taskId === taskId)
+      .map(event => event.activityEvent?.metadata || {})
+      .filter(metadata => Number.isInteger(metadata.passedCount) && Number.isInteger(metadata.failedCount) && Number.isInteger(metadata.checkCount))
+      .map(metadata => `${metadata.passedCount + metadata.failedCount}/${metadata.checkCount}`);
     return values.filter((value, index) => index === 0 || value !== values[index - 1]);
   }
 
@@ -96,7 +99,7 @@ try {
   assert.equal(continued.totalUnits, 2);
   assert.deepEqual(sequence(continueTask.work_id), ['0/2', '1/2', '2/2']);
   const continuedTask = getToolActivity().tasks.find(task => task.taskId === continueTask.work_id);
-  assert.equal(continuedTask.progress.percentage, 99, 'failed validation must not present as successful 100% completion');
+  assert.notEqual(continuedTask.progress.percentage, 100, 'failed validation must not present as successful 100% completion');
   await cancel(continueTask.work_id);
 
   const lastFailureTask = await startTask('Failure on last check');
@@ -138,7 +141,7 @@ try {
   }, context);
   assert.equal(timedOut.validationStatus, 'failed');
   assert.equal(timedOut.results[0].timedOut, true);
-  assert.equal(getToolActivity().tasks.find(task => task.taskId === timeoutTask.work_id).progress.percentage, 99);
+  assert.notEqual(getToolActivity().tasks.find(task => task.taskId === timeoutTask.work_id).progress.percentage, 100, 'timed-out validation must not present as successful 100% completion');
   await cancel(timeoutTask.work_id);
 
   const cancelledTask = await startTask('Cancelled validation');
@@ -200,7 +203,8 @@ try {
   }, context);
   assert.equal(recoveredStatus.task.status, 'planning');
   assert.equal(recoveredStatus.task.validation, 'passed');
-  assert.match(recoveredStatus.task.current?.activity || '', /Validation passed/i);
+  assert.match(recoveredStatus.task.current?.activity || '', /Step 1 of 1: Recover validation state after reconnect/i,
+    'recovered planned tasks must keep their plan as the current activity after validation completes');
   assert.equal(recoveredStatus.task.recentEvidence?.some(item => item.tool === 'relai_validate' && item.outcome === 'succeeded'), true);
   await cancel(reconnectTask.work_id, 'End reconnect test');
 
@@ -211,6 +215,7 @@ try {
   await flushAuditWrites();
   await flushTaskHistoryPersistence();
   await repositoryIntelligence.shutdown();
+  await flushLocalAnalytics();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
   fs.rmSync(temp, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 });

@@ -136,9 +136,26 @@ button { font: inherit; }
 .pulse-toggle svg { transition: transform 150ms ease; }
 .pulse-shell[data-expanded="true"] .pulse-toggle svg { transform: rotate(90deg); }
 
+.pulse-shell[data-tone="working"] {
+  box-shadow: 0 10px 32px -24px color-mix(in srgb, var(--ui-action-primary) 42%, transparent), inset 0 1px 0 color-mix(in srgb, var(--ui-text-primary) 4%, transparent);
+}
 .pulse-shell[data-tone="working"] .pulse-state-dot {
+  position: relative;
   background: var(--ui-action-primary);
   box-shadow: 0 0 0 3px var(--ui-pulse-ring);
+}
+.pulse-shell[data-tone="working"] .pulse-state-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border: 1px solid var(--ui-action-primary);
+  border-radius: 999px;
+  opacity: 0;
+  transform: scale(1.85);
+  pointer-events: none;
+}
+.pulse-shell[data-tone="working"].is-heartbeating .pulse-state-dot::after {
+  animation: pulse-breathe 1.6s cubic-bezier(.16, 1, .3, 1) 1;
 }
 .pulse-shell[data-tone="waiting"] .pulse-state-dot {
   background: var(--ui-status-info-foreground);
@@ -151,6 +168,7 @@ button { font: inherit; }
 .pulse-shell[data-tone="attention"] .pulse-state-dot {
   background: var(--ui-status-warning-foreground);
   box-shadow: 0 0 0 3px var(--ui-status-warning-background);
+  animation: pulse-attention 720ms cubic-bezier(.16, 1, .3, 1) 1;
 }
 .pulse-shell[data-tone="attention"] .pulse-state-label,
 .pulse-shell[data-tone="attention"] .pulse-expanded-state { color: var(--ui-status-warning-foreground); }
@@ -471,8 +489,19 @@ button { font: inherit; }
   border-color: var(--ui-status-warning-border);
 }
 
+@keyframes pulse-breathe {
+  0% { opacity: .72; transform: scale(.82); }
+  55%, 100% { opacity: 0; transform: scale(1.85); }
+}
+
+@keyframes pulse-attention {
+  0% { transform: scale(.72); box-shadow: 0 0 0 0 var(--ui-status-warning-background); }
+  55% { transform: scale(1.12); box-shadow: 0 0 0 6px var(--ui-status-warning-background); }
+  100% { transform: scale(1); box-shadow: 0 0 0 3px var(--ui-status-warning-background); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .pulse-shell, .pulse-toggle, .pulse-toggle svg, .pulse-open, .pulse-compact-copy, .pulse-state-dot, .pulse-progress-track span, .pulse-compact-progress span {
+  .pulse-shell, .pulse-toggle, .pulse-toggle svg, .pulse-open, .pulse-compact-copy, .pulse-state-dot, .pulse-state-dot::after, .pulse-progress-track span, .pulse-compact-progress span {
     transition: none !important;
     animation: none !important;
   }

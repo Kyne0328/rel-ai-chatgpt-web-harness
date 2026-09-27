@@ -81,6 +81,7 @@ try {
   assert.equal(item.truncated, true);
   assert.equal(result.structuredContent.message, undefined, 'result must not collapse to the generic outer truncation summary');
   assert.match(result.content[0].text, /Rel\.AI operation succeeded\./, 'text content must provide a concise human-readable summary');
+  assert.match(result.content[0].text, /Read big\.txt:/, 'standard MCP text content must expose a bounded useful read excerpt');
   assert.doesNotMatch(result.content[0].text, /"items"/, 'large structured results must not be duplicated into text content');
 
   const ranged = await callTool('relai_read', {

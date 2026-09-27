@@ -52,4 +52,4 @@ function getOnboardingStatus() {
   };
 }
 
-export { getOnboardingStatus, writeOnboardingState };
+export { getOnboardingStatus, readOnboardingState, writeOnboardingState };

@@ -111,7 +111,7 @@ try {
   assert.equal(fallback.body.result?.taskId, undefined);
   assert.equal(fallback.body.result?.isError, false, JSON.stringify(fallback.body));
   assert.equal(fallback.body.result?.structuredContent?.exitCode, 0);
-  assert.equal(fallback.body.result?.structuredContent?.work_id, logicalTaskId);
+  assert.equal(fallback.body.result?.structuredContent?.work_id, undefined, 'routine synchronous success must not echo the caller-supplied work_id');
 
   const releaseFile = path.join(workspaceDir, 'release-taskless-fallback');
   const tasklessFallback = await callTool(client, 40, eligibleTool, {
@@ -174,7 +174,7 @@ try {
   assert.equal(completedTask.status, 'completed', JSON.stringify(completedTask));
   assert.equal(completedTask.result?.isError, false, JSON.stringify(completedTask));
   assert.equal(completedTask.result?.structuredContent?.exitCode, 0);
-  assert.equal(completedTask.result?.structuredContent?.work_id, logicalTaskId);
+  assert.equal(completedTask.result?.structuredContent?.work_id, undefined, 'native task completion must not redundantly echo the caller-supplied work_id');
   const invalid = await taskRequest(client, 250, 'tasks/get', 'task_invalid');
   assert.equal(invalid.body.error?.code, -32602);
   assert.match(invalid.body.error?.message || '', /not available to this client/);

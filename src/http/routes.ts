@@ -80,6 +80,9 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/onboarding/status': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleOnboardingStatus') },
   '/api/connection': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleConnection') },
   '/api/dashboard/v10': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleDashboardV10') },
+  '/api/browser/preview': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleBrowserPreview') },
+  '/api/tasks/files': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskCodeWorkspace') },
+  '/api/tasks/diff': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskCodeDiff') },
   '/api/tasks/session': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskSession') },
   '/api/logs': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiLogs') },
   '/api/diagnostics': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnostics') },
@@ -128,7 +131,7 @@ function createHttpApp(options: ResolvedHttpServerOptions) {
     app.post(route, c => dispatchRoute(c, options, definition));
   }
 
-  for (const route of ['/ui/*', '/public/*', '/vendor/monaco/*']) {
+  for (const route of ['/ui/*', '/public/*', '/assets/*', '/vendor/monaco/*']) {
     app.get(route, c => dispatchDirect(c, options, handleStaticAsset));
   }
 

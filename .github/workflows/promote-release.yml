@@ -1,0 +1,49 @@
+name: Promote release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable semantic version to promote (for example 1.1.3)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-relai-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote tested candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must be a stable semantic version such as 1.1.3" >&2
+            exit 2
+          fi
+      - name: Verify candidate assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          assets="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease,assets)"
+          test "$(jq -r '.isDraft' <<<"$assets")" = "false"
+          test "$(jq -r '.isPrerelease' <<<"$assets")" = "true"
+          for required in "latest.yml" "latest-linux.yml" "latest-mac.yml" "SHA256SUMS.txt"; do
+            jq -e --arg name "$required" '.assets[] | select(.name == $name)' <<<"$assets" >/dev/null
+          done
+      - name: Promote stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

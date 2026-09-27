@@ -57,53 +57,6 @@ function initialChartTheme() {
 
 const DEFAULT_THEME = initialChartTheme();
 
-export function SparkChart({ values = [], className = '', tone = '', ariaLabel = '', decorative = true }) {
-  const data = safeValues(values);
-  const theme = useChartTheme();
-  const accent = toneColor(theme, tone);
-  const toneLabel = tone === 'good' ? 'positive trend' : tone === 'bad' ? 'negative trend' : 'trend';
-  const chartData = useMemo(() => ({
-    labels: data.map((_, index) => String(index + 1)),
-    datasets: [{
-      data,
-      borderColor: accent,
-      backgroundColor: withAlpha(accent, 0.08),
-      borderWidth: 1.5,
-      cubicInterpolationMode: 'monotone',
-      tension: 0.32,
-      fill: true,
-      spanGaps: true,
-      pointRadius: 0,
-      pointHoverRadius: 0
-    }]
-  }), [accent, data]);
-  const options = useMemo(() => ({
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    events: [],
-    layout: { padding: 0 },
-    plugins: { tooltip: { enabled: false } },
-    scales: {
-      x: { display: false },
-      y: { display: false, beginAtZero: true }
-    }
-  }), []);
-  if (!data.some(value => value !== null)) return null;
-  if (decorative && !ariaLabel) {
-    return h('div', { className, 'aria-hidden': 'true' }, h(Line, {
-      data: chartData,
-      options
-    }));
-  }
-  return h('div', { className }, h(Line, {
-    data: chartData,
-    options,
-    role: 'img',
-    'aria-label': ariaLabel || `Sparkline showing ${toneLabel}`
-  }));
-}
-
 export function AnalyticsTimelineChart({
   values = [],
   labels = [],
@@ -118,15 +71,15 @@ export function AnalyticsTimelineChart({
   activeIndex = 0,
   onActiveIndexChange = () => {}
 }) {
-  const data = safeValues(values);
+  const data = useMemo(() => safeValues(values), [values]);
   const theme = useChartTheme();
   const chartRef = useRef(null);
   const latestIndex = Math.max(0, lastDefinedIndex(data));
   const firstMeasuredIndex = data.findIndex(value => value !== null);
   const hasLeadingGap = firstMeasuredIndex > 0;
   const accent = theme.action;
-  const trailingData = trailingGapContinuation(data);
-  const missingRanges = missingValueLabel ? missingValueRanges(data) : [];
+  const trailingData = useMemo(() => trailingGapContinuation(data), [data]);
+  const missingRanges = useMemo(() => missingValueLabel ? missingValueRanges(data) : [], [data, missingValueLabel]);
   const chartData = useMemo(() => ({
     labels,
     datasets: [{
@@ -456,7 +409,10 @@ function chartThemeSnapshot() {
 
 function useChartTheme() {
   const revision = useSyncExternalStore(subscribeChartTheme, chartThemeSnapshot, chartThemeSnapshot);
-  return useMemo(() => readChartTheme(), [revision]);
+  return useMemo(() => {
+    void revision;
+    return readChartTheme();
+  }, [revision]);
 }
 
 function readChartTheme() {
@@ -476,12 +432,6 @@ function readChartTheme() {
     warning: token('--ui-status-warning-foreground', DEFAULT_THEME.warning),
     reducedMotion: typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
   };
-}
-
-function toneColor(theme, tone) {
-  if (tone === 'good') return theme.success;
-  if (tone === 'bad') return theme.danger;
-  return theme.action;
 }
 
 function safeValues(values) {

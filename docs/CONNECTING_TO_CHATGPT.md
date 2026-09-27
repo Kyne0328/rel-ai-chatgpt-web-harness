@@ -25,7 +25,7 @@ After enabling Rel.AI MCP in a chat, start with a read-only request:
 Use Rel.AI MCP with workspace "myapp". Start one work session, read the project, and explain how the relevant parts work before changing anything.
 ```
 
-For substantial or multi-step local project goals, ChatGPT should start one Rel.AI work session before meaningful mutation and keep its `work_id` across edits, checks, review, recovery, and completion. Isolated reads, inspection, and genuinely small one-shot actions may use the authorized workspace directly without creating a durable task.
+For each meaningful durable project goal that ChatGPT handles through Rel.AI, it should start or reuse one work session and keep its `work_id` across the goal. Every new durable task starts with a non-empty `steps` plan on `relai_work begin`, and ChatGPT keeps that plan current as evidence changes. Projectless one-shot utility or control work should use an already-supported taskless operation without creating a durable task or inventing a workspace. Taskless calls also remain available for isolated control, recovery, observation, and resource operations.
 
 ## Why Rel.AI uses ChatGPT
 

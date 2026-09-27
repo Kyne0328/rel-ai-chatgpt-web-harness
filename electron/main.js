@@ -1,6 +1,10 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import {
   app,
   BrowserWindow,
+  crashReporter,
   WebContentsView,
   ipcMain,
   Tray,
@@ -8,6 +12,7 @@ import {
   clipboard,
   shell,
   nativeImage,
+  nativeTheme,
   powerMonitor,
   powerSaveBlocker,
   Notification,
@@ -19,7 +24,8 @@ import {
   utilityProcess
 } from 'electron';
 import { configureApplicationIdentity } from './app-identity.js';
-import { updateInstallLaunchGuard } from './update-install-marker.js';
+import { clearUpdateInstallMarkerSync, markUpdateInstallPhase, updateInstallLaunchGuard } from './update-install-marker.js';
+import { launchUpdateStatusHelper } from './update-status-helper.js';
 import { normalizeWizardConfig, saveLauncherConfig } from './launcher-config.js';
 
 // Application identity must be set before any app.getPath('userData') call.
@@ -27,6 +33,10 @@ import { normalizeWizardConfig, saveLauncherConfig } from './launcher-config.js'
 // (rel-ai-mcp-launcher) instead of the canonical profile (Rel.AI MCP), and
 // Electron safeStorage then decrypts with the wrong profile key.
 configureApplicationIdentity(app);
+const crashDumpsPath = path.join(app.getPath('userData'), 'diagnostics', 'crashes');
+fs.mkdirSync(crashDumpsPath, { recursive: true, mode: 0o700 });
+app.setPath('crashDumps', crashDumpsPath);
+crashReporter.start({ uploadToServer: false, compress: false });
 
 const updateLaunchGuard = updateInstallLaunchGuard(app, {
   platform: process.platform,
@@ -34,20 +44,41 @@ const updateLaunchGuard = updateInstallLaunchGuard(app, {
   argv: process.argv
 });
 
+let shouldStartDesktop = !updateLaunchGuard.blocked;
 if (updateLaunchGuard.blocked) {
   await app.whenReady();
   const targetVersion = updateLaunchGuard.marker?.targetVersion;
-  await dialog.showMessageBox({
+  const { response } = await dialog.showMessageBox({
     type: 'info',
     title: 'Rel.AI MCP is updating',
     message: 'Rel.AI MCP is still updating.',
-    detail: `${targetVersion ? `Version ${targetVersion} is` : 'The update is'} being installed. Keep the update window open; Rel.AI will restart automatically when it finishes.`,
-    buttons: ['OK'],
+    detail: `${targetVersion ? `Version ${targetVersion} is` : 'The update is'} being installed. Show the update status window, or discard the lock only if the installer has stopped or failed.`,
+    buttons: ['Show update status', 'Discard update lock and start'],
     defaultId: 0,
+    cancelId: 0,
     noLink: true
   });
-  app.exit(0);
-} else {
+  if (response === 1) {
+    clearUpdateInstallMarkerSync(app);
+    shouldStartDesktop = true;
+  } else {
+    const helper = await launchUpdateStatusHelper(app, { markerPath: updateLaunchGuard.marker?.path });
+    if (!helper.ok) {
+      await dialog.showMessageBox({
+        type: 'warning',
+        title: 'Update status unavailable',
+        message: 'Rel.AI MCP is still updating.',
+        detail: 'The update status window could not be opened. The update will continue in the background.',
+        buttons: ['OK'],
+        defaultId: 0,
+        noLink: true
+      });
+    }
+    app.exit(0);
+  }
+}
+
+if (shouldStartDesktop) {
   const [{ default: electronUpdater }, { createDesktopHost }] = await Promise.all([
     import('electron-updater'),
     import('./desktop-host.js')
@@ -63,6 +94,7 @@ if (updateLaunchGuard.blocked) {
   clipboard,
   shell,
   nativeImage,
+  nativeTheme,
   powerMonitor,
   powerSaveBlocker,
   Notification,
@@ -78,7 +110,18 @@ if (updateLaunchGuard.blocked) {
 
 // Electron waits for ESM evaluation before emitting ready. Do not await a
 // startup promise that itself waits for app.whenReady() at module scope.
-  void desktop.start().catch(error => {
+  void desktop.start().then(result => {
+    if (result?.ok && updateLaunchGuard.reason === 'updated_launch') {
+      void desktop.completeApplicationUpdate(updateLaunchGuard.marker).catch(error => {
+        console.error('[rel-ai-mcp] Update completion recording failed:', error);
+      });
+    }
+  }).catch(async error => {
+    if (updateLaunchGuard.reason === 'updated_launch') {
+      await markUpdateInstallPhase(app, 'failed', {
+        message: 'The updated files were installed, but Rel.AI could not start. Try opening Rel.AI again.'
+      }).catch(() => {});
+    }
     console.error('[rel-ai-mcp] Desktop startup failed:', error);
     app.exit(1);
   });

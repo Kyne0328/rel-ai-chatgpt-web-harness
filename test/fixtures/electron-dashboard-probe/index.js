@@ -6,8 +6,9 @@ const targetUrl = process.env.RELAI_PROBE_TARGET_URL;
 const outputPath = process.env.RELAI_PROBE_OUTPUT_PATH;
 const screenshotDir = process.env.RELAI_PROBE_SCREENSHOT_DIR;
 const createWorkspacePath = process.env.RELAI_PROBE_CREATE_WORKSPACE_PATH;
+const axePath = process.env.RELAI_PROBE_AXE_PATH;
 const dashboardDelayMs = Math.max(0, Number(process.env.RELAI_PROBE_DASHBOARD_DELAY_MS || 0));
-if (!targetUrl || !outputPath || !screenshotDir || !createWorkspacePath) throw new Error('Electron dashboard probe environment is incomplete.');
+if (!targetUrl || !outputPath || !screenshotDir || !createWorkspacePath || !axePath) throw new Error('Electron dashboard probe environment is incomplete.');
 fs.writeFileSync(outputPath, JSON.stringify({ stage: 'script_started', argv: process.argv }, null, 2));
 
 let app;
@@ -73,6 +74,8 @@ app.whenReady().then(async () => {
   const initialHydration = { before: hydrationBefore, during: hydrationDuring, after: hydrationAfter, delayedDashboardRequest };
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
+
+  const accessibility = [await auditAccessibility(win, axePath, 'tasks')];
 
   const initial = await win.webContents.executeJavaScript(`(() => {
     const rows = [...document.querySelectorAll('.task-row')];
@@ -145,6 +148,7 @@ app.whenReady().then(async () => {
   await win.webContents.executeJavaScript(`localStorage.setItem('relai_debug', '1')`);
   const navigationInteractions = await exerciseNavigationControls(win, failures);
   const modalInteractions = await exerciseModalInteractions(win);
+  accessibility.push(await auditAccessibility(win, axePath, 'workspaces'));
   const projectPersistence = await exerciseProjectPersistence(win, createWorkspacePath);
 
   const parsedTarget = new URL(targetUrl);
@@ -179,7 +183,7 @@ app.whenReady().then(async () => {
       selectedRow: Boolean(document.querySelector('.task-row.is-selected')),
       tabs: detail?.querySelectorAll('[data-session-tab]').length || 0,
       detailText: detail?.textContent || '',
-      workSessionId: /Work session ID/.test(detail?.textContent || ''),
+      workSessionId: /Rel[.]AI task ID/.test(detail?.textContent || ''),
       processId: /Process ID/.test(detail?.textContent || ''),
       eventLinks: detail?.querySelectorAll('.task-event-link').length || 0
     };
@@ -271,25 +275,29 @@ app.whenReady().then(async () => {
   const activityInteraction = await win.webContents.executeJavaScript(`(() => {
     const inspector = document.querySelector('[data-activity-inspector]');
     const detail = inspector?.querySelector('.activity-detail-head');
-    const pre = inspector?.querySelector('.detail-pre');
+    const errorValue = inspector?.querySelector('.detail-pre, .activity-json-leaf code');
     return {
       expanded: Boolean(detail),
       selectedRow: Boolean(document.querySelector('.activity-table tbody tr.is-selected')),
       copyButton: Boolean([...inspector.querySelectorAll('button')].find(button => /copy event json/i.test(button.textContent))),
-      errorWrapped: pre ? getComputedStyle(pre).overflowWrap !== 'normal' : false
+      errorWrapped: errorValue ? getComputedStyle(errorValue).overflowWrap !== 'normal' : false
     };
   })()`);
   await waitFor(win, `!document.querySelector('#__relai-drawer-backdrop')`);
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
-  const clockBefore = await win.webContents.executeJavaScript(`document.querySelector('[data-clock-relative], [data-clock-elapsed-start]')?.textContent || ''`);
-  await delay(1250);
-  const clockAfter = await win.webContents.executeJavaScript(`document.querySelector('[data-clock-relative], [data-clock-elapsed-start]')?.textContent || ''`);
-
-  fs.mkdirSync(screenshotDir, { recursive: true });
   win.show();
   win.focus();
+  await waitFor(win, `document.visibilityState === 'visible'`);
+  await waitFor(win, `document.querySelector('[data-clock-elapsed-start]:not([data-clock-elapsed-end])')`);
+  const clockBefore = await win.webContents.executeJavaScript(`document.querySelector('[data-clock-elapsed-start]:not([data-clock-elapsed-end])')?.textContent || ''`);
+  await delay(1250);
+  const clockAfter = await win.webContents.executeJavaScript(`document.querySelector('[data-clock-elapsed-start]:not([data-clock-elapsed-end])')?.textContent || ''`);
+
+  fs.mkdirSync(screenshotDir, { recursive: true });
   await delay(200);
+  accessibility.push(await auditAccessibility(win, axePath, 'activity'));
+
   const responsive = [];
   for (const scenario of [
     { name: 'window-1024x768', width: 1024, height: 768, zoom: 1, theme: 'dark' },
@@ -443,6 +451,7 @@ app.whenReady().then(async () => {
     keyboard: { beforeFocus, afterFocus },
     clock: { before: clockBefore, after: clockAfter, changed: clockBefore !== clockAfter },
     responsive,
+    accessibility,
     failures
   };
   fs.writeFileSync(outputPath, JSON.stringify(result, null, 2));
@@ -452,6 +461,25 @@ app.whenReady().then(async () => {
   fs.writeFileSync(outputPath, JSON.stringify({ error: error?.stack || String(error) }, null, 2));
   app.exit(1);
 });
+
+async function auditAccessibility(win, runtimePath, route) {
+  if (!await win.webContents.executeJavaScript(`Boolean(window.axe?.run)`)) {
+    const source = fs.readFileSync(runtimePath, 'utf8');
+    await win.webContents.executeJavaScript(`${source}\n//# sourceURL=relai-axe-core.js`);
+  }
+  return await win.webContents.executeJavaScript(`axe.run(document, {
+    runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] },
+    resultTypes: ['violations']
+  }).then(result => ({
+    route: ${JSON.stringify(route)},
+    violations: result.violations.map(item => ({
+      id: item.id,
+      impact: item.impact || '',
+      help: item.help,
+      nodes: item.nodes.length
+    }))
+  }))`);
+}
 
 async function readHydrationState(win) {
   return win.webContents.executeJavaScript(`(() => ({
@@ -515,6 +543,25 @@ async function exerciseModalInteractions(win) {
   await waitFor(win, `document.querySelector('.modal-title')?.textContent === 'Edit project'`);
   const editDetailsConsolidated = await win.webContents.executeJavaScript(`Boolean(document.querySelector('.modal-panel .ws-project-details-section .workspace-operational'))`);
   const sharedCloseVisible = await win.webContents.executeJavaScript(`Boolean(document.querySelector('.modal-panel .modal-close'))`);
+  const modalGeometry = await win.webContents.executeJavaScript(`(() => {
+    const panel = document.querySelector('.modal-panel');
+    if (!panel) return null;
+    const rect = panel.getBoundingClientRect();
+    const viewportWidth = window.visualViewport?.width || window.innerWidth;
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    return {
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      width: rect.width,
+      height: rect.height,
+      viewportWidth,
+      viewportHeight,
+      centerErrorX: Math.abs((rect.left + rect.right) / 2 - viewportWidth / 2),
+      centerErrorY: Math.abs((rect.top + rect.bottom) / 2 - viewportHeight / 2)
+    };
+  })()`);
   const editedAlias = await win.webContents.executeJavaScript(`(() => {
     const input = document.querySelector('.modal-panel input[name="alias"]');
     if (!input) return '';
@@ -570,7 +617,8 @@ async function exerciseModalInteractions(win) {
     editDetailsConsolidated,
     routeChangeCancelPreserved,
     routeChangeConfirmNavigated,
-    sharedCloseVisible
+    sharedCloseVisible,
+    modalGeometry
   };
 }
 

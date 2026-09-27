@@ -9,7 +9,7 @@ import '@opentelemetry/sdk-trace-node';
 import '@opentelemetry/semantic-conventions';
 
 export const packagedRuntimeDependencyModel = Object.freeze({
-  cli: ['bin/rel-ai-mcp.js', 'bin/rel-ai-mcp-http.js', 'bin/relai-mcp-config.js'],
+  cli: ['bin/rel-ai-mcp.js', 'bin/rel-ai-mcp-http.js', 'bin/relai-mcp-config.js', 'bin/relai-extension.js'],
   backend: ['src/server.js', 'src/httpServer.ts', 'src/mcpServer.js', 'src/http/mcpTransport.ts', 'src/telemetry.js'],
   electronExtraResources: ['src/**/*.js', 'public/**/*', 'node_modules/@modelcontextprotocol/**', 'node_modules/@opentelemetry/**']
 });

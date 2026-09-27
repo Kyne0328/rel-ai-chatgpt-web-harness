@@ -98,6 +98,7 @@ function conciseToolResultText(payload, options = {}) {
   if (success) {
     const lines = ['Rel.AI operation succeeded.'];
     appendCompletionNotices(lines, payload.completedOperations);
+    appendSuccessSummary(lines, payload);
     if (options.structuredTruncated) {
       lines.push(`Structured result compacted from ${Number(options.originalBytes || 0)} bytes. Re-call with narrower limits for complete bounded data.`);
     }
@@ -127,6 +128,51 @@ function appendCompletionNotices(lines, notices) {
     const summary = displayText(notice?.summary, 500);
     if (summary) lines.push(`Background completion: ${summary}`);
   }
+}
+
+function appendSuccessSummary(lines, payload) {
+  appendField(lines, 'Workspace', scalarText(payload.workspace));
+  appendField(lines, 'Work session', scalarText(payload.work_id));
+  appendField(lines, 'Process', scalarText(payload.processId));
+  appendField(lines, 'Status', scalarText(payload.status || payload.validationStatus));
+  appendField(lines, 'Summary', displayText(payload.summary, 1000));
+  appendField(lines, 'Message', displayText(payload.message, 1000));
+  if (payload.exitCode != null) appendField(lines, 'Exit code', scalarText(payload.exitCode));
+  appendField(lines, 'Stdout tail', tailText(payload.stdout, 1600));
+  appendField(lines, 'Stderr tail', tailText(payload.stderr, 1200));
+
+  if (Array.isArray(payload.items)) {
+    for (const item of payload.items.slice(0, 2)) {
+      const path = scalarText(item?.path || item?.name || item?.type);
+      const content = displayText(item?.content, 1200);
+      if (content) lines.push(`${path ? `Read ${path}` : 'Read result'}: ${content}`);
+    }
+  }
+
+  const matches = collectSearchPreview(payload).slice(0, 5);
+  for (const match of matches) {
+    const path = scalarText(match?.path);
+    const line = Number.isFinite(Number(match?.line)) ? `:${Number(match.line)}` : '';
+    const preview = displayText(match?.text || match?.content || match?.snippet || match?.name, 500);
+    if (path && preview) lines.push(`Match ${path}${line}: ${preview}`);
+    else if (path) lines.push(`Match: ${path}${line}`);
+  }
+  if (Array.isArray(payload.changedFiles) && payload.changedFiles.length) {
+    lines.push(`Changed files: ${payload.changedFiles.slice(0, 8).map(String).join(', ')}${payload.changedFiles.length > 8 ? ', …' : ''}`);
+  }
+  appendField(lines, 'Next action', displayText(payload.nextAction, 1000));
+}
+
+function collectSearchPreview(payload) {
+  const direct = Array.isArray(payload?.matches) ? payload.matches : [];
+  const ranked = Array.isArray(payload?.results)
+    ? payload.results.flatMap(result => {
+        if (Array.isArray(result?.matches)) return result.matches;
+        if (Array.isArray(result?.results)) return result.results;
+        return result?.path ? [result] : [];
+      })
+    : [];
+  return [...direct, ...ranked].filter(item => item && typeof item === 'object' && item.path);
 }
 
 function appendField(lines, label, value) {

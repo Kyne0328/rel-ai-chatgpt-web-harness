@@ -6,6 +6,8 @@ let morphCompletionTimer = null;
 
 const PULSE_TRANSITION_MS = 180;
 const PULSE_EASING = 'cubic-bezier(.16,1,.3,1)';
+const WORKING_HEARTBEAT_DURATION_MS = 1600;
+const WORKING_HEARTBEAT_GAP_MS = 3600;
 
 const shell = document.getElementById('pulseShell');
 const toggle = document.getElementById('pulseToggle');
@@ -39,6 +41,7 @@ const liveRegion = document.getElementById('pulseLive');
 let renderScheduled = false;
 let lastProgressBucket = -1;
 let lastLiveAnnouncement = '';
+let workingHeartbeatTimer = null;
 
 function setText(element, value) {
   if (element && element.textContent !== value) element.textContent = value;
@@ -59,7 +62,7 @@ function announceStatus(message) {
 function stateLabel(model) {
   if (model.actionRequired) return 'Action required';
   if (model.tone === 'working') return 'Working';
-  if (model.tone === 'waiting') return 'Open';
+  if (model.tone === 'waiting') return 'Waiting';
   if (model.tone === 'attention') return 'Needs attention';
   return 'Rel.AI';
 }
@@ -164,10 +167,10 @@ function renderPulse() {
     setTextWithTitle(activityText, activityLine);
   }
 
-  const summary = contextTitle && contextTitle !== title ? contextTitle : (detail || 'Local activity is in progress.');
+  const summary = contextTitle && contextTitle !== title ? contextTitle : (detail || (currentModel.tone === 'idle' ? '' : 'Local activity is in progress.'));
   const hideSummaryForDensity = multiTask && items.length > 0;
   if (summaryEl) {
-    summaryEl.hidden = hideSummaryForDensity && !hasProgress ? true : false;
+    summaryEl.hidden = !summary || (hideSummaryForDensity && !hasProgress);
     if (!summaryEl.hidden) setTextWithTitle(summaryEl, summary);
   }
 
@@ -201,7 +204,55 @@ function renderPulse() {
   const openLabel = `${currentModel.actionRequired ? 'Review' : 'Open'} ${title}`;
   if (openButton.getAttribute('aria-label') !== openLabel) openButton.setAttribute('aria-label', openLabel);
   tickElapsed();
-  announceStatus(`${label}. ${title}. ${summary}`);
+  syncWorkingHeartbeat();
+  announceStatus(`${[label, title, summary].filter(Boolean).join('. ')}.`);
+}
+
+function shouldRunWorkingHeartbeat() {
+  return currentModel.tone === 'working'
+    && document.visibilityState !== 'hidden'
+    && !prefersReducedMotion();
+}
+
+function clearWorkingHeartbeatTimer() {
+  if (workingHeartbeatTimer === null) return;
+  window.clearTimeout(workingHeartbeatTimer);
+  workingHeartbeatTimer = null;
+}
+
+function stopWorkingHeartbeat() {
+  clearWorkingHeartbeatTimer();
+  shell.classList.remove('is-heartbeating');
+}
+
+function scheduleWorkingHeartbeat(delay = 0) {
+  clearWorkingHeartbeatTimer();
+  if (!shouldRunWorkingHeartbeat()) {
+    stopWorkingHeartbeat();
+    return;
+  }
+  workingHeartbeatTimer = window.setTimeout(() => {
+    workingHeartbeatTimer = null;
+    if (!shouldRunWorkingHeartbeat()) {
+      stopWorkingHeartbeat();
+      return;
+    }
+    shell.classList.add('is-heartbeating');
+    workingHeartbeatTimer = window.setTimeout(() => {
+      workingHeartbeatTimer = null;
+      shell.classList.remove('is-heartbeating');
+      scheduleWorkingHeartbeat(WORKING_HEARTBEAT_GAP_MS);
+    }, WORKING_HEARTBEAT_DURATION_MS);
+  }, delay);
+}
+
+function syncWorkingHeartbeat() {
+  if (!shouldRunWorkingHeartbeat()) {
+    stopWorkingHeartbeat();
+    return;
+  }
+  if (workingHeartbeatTimer !== null || shell.classList.contains('is-heartbeating')) return;
+  scheduleWorkingHeartbeat();
 }
 
 function renderTaskList(items, taskCount, workspacesLabel, taskNames) {
@@ -441,5 +492,26 @@ document.addEventListener('keydown', event => {
 openButton.addEventListener('click', () => {
   Promise.resolve(window.relaiPulse?.openDashboard?.()).catch(() => {});
 });
-window.setInterval(tickElapsed, 1000);
+let elapsedTimer = null;
+function startElapsedTimer() {
+  if (elapsedTimer != null || document.visibilityState === 'hidden') return;
+  tickElapsed();
+  elapsedTimer = window.setInterval(tickElapsed, 1000);
+}
+function stopElapsedTimer() {
+  if (elapsedTimer == null) return;
+  window.clearInterval(elapsedTimer);
+  elapsedTimer = null;
+}
+function handleVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    stopElapsedTimer();
+    stopWorkingHeartbeat();
+    return;
+  }
+  startElapsedTimer();
+  syncWorkingHeartbeat();
+}
+document.addEventListener('visibilitychange', handleVisibilityChange);
+startElapsedTimer();
 window.relaiPulse?.onState?.(updatePulse);

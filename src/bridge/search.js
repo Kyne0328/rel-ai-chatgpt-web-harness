@@ -278,7 +278,7 @@ async function relaiSearch(workspace, config, args = {}, context = {}) {
     singleField: 'pattern',
     label: 'relai_search',
     maxLength: 1000,
-    maxItems: 4
+    maxItems: 8
   });
   if (!batched) return relaiSearchOne(workspace, config, args, context);
 

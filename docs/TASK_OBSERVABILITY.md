@@ -241,6 +241,9 @@ Determinate progress uses native `progress[value]` with a valid accessible label
 | Snapshot size | canonical current task | 133,348 bytes | ≤512 KiB |
 | Snapshot serialization | current task | 0.342 ms | ≤25 ms |
 | Sanitization | 10,000 credential-like summaries | 43.588 ms | ≤250 ms |
+| Logical task begin | fresh meaningful goal, median of five | 0.350 ms | ≤25 ms |
+| Logical task progress | 200 retained task events, median of five | 0.520 ms | ≤25 ms |
+| Logical task finish | 200 retained task events, median of five | 7.252 ms | ≤25 ms |
 | Reconnect snapshot | warm median of five | 9.799 ms | ≤150 ms |
 | Shared clock node updates | quiet 60 seconds | 60 | ≤60 |
 | Quiet full dashboard renders | 60 direct clock updates | 0 | 0 |

@@ -85,6 +85,40 @@ try {
   addMetric('task_history_payload_bytes_written', 'same workload; serialized payload bytes accepted by SQLite upserts', null, storageMetrics.bytes, 0, 2 * 1024 * 1024, '<=');
   addMetric('task_history_write_duration_ms', 'same workload; cumulative storage-worker SQLite transaction duration', null, round(storageMetrics.durationMs), 0, 2_000, '<=');
 
+  const lifecycleDepths = [0, 100, 200];
+  for (const retainedEvents of lifecycleDepths) {
+    const samples = Array.from({ length: 5 }, () => measureLogicalTaskLifecycle(retainedEvents));
+    if (retainedEvents === 0) {
+      addMetric(
+        'logical_task_begin_ms',
+        'local durable-task bookkeeping for a fresh meaningful goal; median of 5',
+        null,
+        round(median(samples.map(sample => sample.beginMs))),
+        round(range(samples.map(sample => sample.beginMs))),
+        25,
+        '<='
+      );
+    }
+    addMetric(
+      `logical_task_progress_${retainedEvents}_events_ms`,
+      `one progress update with ${retainedEvents} retained task event${retainedEvents === 1 ? '' : 's'}; median of 5`,
+      null,
+      round(median(samples.map(sample => sample.progressMs))),
+      round(range(samples.map(sample => sample.progressMs))),
+      25,
+      '<='
+    );
+    addMetric(
+      `logical_task_finish_${retainedEvents}_events_ms`,
+      `local explicit completion bookkeeping with ${retainedEvents} retained task event${retainedEvents === 1 ? '' : 's'}; median of 5`,
+      null,
+      round(median(samples.map(sample => sample.finishMs))),
+      round(range(samples.map(sample => sample.finishMs))),
+      25,
+      '<='
+    );
+  }
+
   global.gc?.();
   const heapBefore = process.memoryUsage().heapUsed;
   for (let index = 0; index < 1000; index += 1) {
@@ -226,6 +260,63 @@ try {
 function addMetric(metric, workload, baseline, result, variance, threshold, comparator, forcedStatus, note = '') {
   const status = forcedStatus || (result == null ? 'incomplete' : comparator === '<=' ? (result <= threshold ? 'pass' : 'fail') : (result >= threshold ? 'pass' : 'fail'));
   metrics.push({ metric, workload, baseline, result, variance, threshold, comparator, status, note });
+}
+
+function measureLogicalTaskLifecycle(retainedEvents) {
+  const local = createToolActivityTracker({ idleMs: 60_000 });
+  const beginStarted = performance.now();
+  const begin = local.beginConnectorToolCall({
+    tool: 'relai_work',
+    internalOperation: 'work.begin',
+    workspace: 'app',
+    createTask: true,
+    title: 'Lifecycle benchmark task'
+  });
+  const taskId = begin.taskId;
+  begin({ ok: true });
+  const beginMs = performance.now() - beginStarted;
+
+  for (let index = 0; index < retainedEvents; index += 1) {
+    const seed = local.beginConnectorToolCall({
+      tool: 'relai_read',
+      internalOperation: 'read',
+      workspace: 'app',
+      taskId,
+      operation: `Seed event ${index + 1}`
+    });
+    seed({ ok: true });
+  }
+
+  const progress = local.beginConnectorToolCall({
+    tool: 'relai_read',
+    internalOperation: 'read',
+    workspace: 'app',
+    taskId,
+    operation: 'Measure progress update'
+  });
+  const progressStarted = performance.now();
+  progress.update({ currentStage: 'Benchmarking', currentActivity: 'Measuring task progress bookkeeping.' });
+  const progressMs = performance.now() - progressStarted;
+  progress({ ok: true });
+
+  const finish = local.beginConnectorToolCall({
+    tool: 'relai_work',
+    internalOperation: 'work.finish',
+    workspace: 'app',
+    taskId,
+    operation: 'Finish lifecycle benchmark task'
+  });
+  const finishStarted = performance.now();
+  finish.requestCompletion({
+    summary: 'Lifecycle benchmark complete.',
+    validationStatus: 'not_required',
+    changedFiles: [],
+    residualChangedFiles: [],
+    residualState: 'clean'
+  });
+  finish({ ok: true });
+  const finishMs = performance.now() - finishStarted;
+  return { beginMs, progressMs, finishMs };
 }
 
 function runDashboardClockBenchmark() {

@@ -36,6 +36,10 @@ function createTunnelRecoverySupervisor({
       return snapshot();
     }
     if (tunnelStatus === 'degraded') {
+      if (String(status.recoveryMode || status.tunnelRecoveryMode || '') === 'in_place') {
+        reset(true);
+        return snapshot();
+      }
       scheduleInitial(status.error || 'The Secure MCP Tunnel is degraded.');
       return snapshot();
     }
@@ -92,7 +96,8 @@ function createTunnelRecoverySupervisor({
       if (runGeneration !== recoveryGeneration) return status;
       const tunnelStatus = String(status?.tunnelStatus || status?.state || '');
       const errorCode = String(status?.errorCode || '');
-      if (tunnelStatus === 'running' || isTerminalTunnelCode(errorCode) || status?.serverRunning === false) return status;
+      const recoveryMode = String(status?.tunnelRecoveryMode || status?.recoveryMode || '');
+      if (tunnelStatus === 'running' || (tunnelStatus === 'degraded' && recoveryMode === 'in_place') || isTerminalTunnelCode(errorCode) || status?.serverRunning === false) return status;
       throw new RetryableTunnelStatus(status);
     }, {
       retries: Infinity,

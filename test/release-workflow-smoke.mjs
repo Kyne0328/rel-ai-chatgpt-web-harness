@@ -30,6 +30,8 @@ function copyFixture() {
     'electron/package-lock.json',
     'electron/build/installer-icon.ico',
     'electron/build/installer.nsh',
+    'electron/build/update-status-helper.ps1',
+    'electron/update-status-helper.js',
     'electron/renderer/status.html',
     'electron/scripts/verify-fuses.js',
     'src/contracts/package.json',
@@ -54,7 +56,8 @@ function copyFixture() {
     'scripts/current-unpacked.mjs',
     'scripts/active-controller-guard.mjs',
     '.github/workflows/ci.yml',
-    '.github/workflows/release.yml'
+    '.github/workflows/release.yml',
+    '.github/workflows/promote-release.yml'
   ]) {
     const source = path.join(root, relativePath);
     const destination = path.join(tmp, relativePath);
@@ -180,14 +183,20 @@ function verifyPackageContracts() {
   assert.equal(electronPackage.build.nsis.installerIcon, 'build/installer-icon.ico');
   assert.equal(electronPackage.build.nsis.include, 'build/installer.nsh');
   assert.ok(electronPackage.build.files.includes('update-install-marker.js'), 'packaged desktop builds must include the update-install launch guard');
+  assert.ok(electronPackage.build.files.includes('update-status-helper.js'), 'packaged desktop builds must include the detached update-status launcher');
+  assert.ok(electronPackage.build.files.includes('build/update-status-helper.ps1'), 'packaged Windows builds must include the detached update-status UI');
   const installerIcon = fs.readFileSync(path.join(tmp, 'electron', electronPackage.build.nsis.installerIcon));
   assert.deepEqual([...installerIcon.subarray(0, 4)], [0, 0, 1, 0], 'the dedicated Windows installer icon must remain a valid ICO asset');
   const installerInclude = fs.readFileSync(path.join(tmp, 'electron', electronPackage.build.nsis.include), 'utf8');
   assert.doesNotMatch(installerInclude, /SpiderBanner::Show/, 'silent in-app Windows updates must not create SpiderBanner UI before electron-builder reaches its install section');
   assert.match(installerInclude, /customWelcomePage[\s\S]*Update Rel\.AI MCP[\s\S]*already installed[\s\S]*update the existing installation/, 'manual Windows installers must clearly present an existing installation as an update');
   assert.match(installerInclude, /customInstallMode[\s\S]*hasPerUserInstallation[\s\S]*isForceCurrentInstall[\s\S]*hasPerMachineInstallation[\s\S]*isForceMachineInstall/, 'manual Windows updates must keep the existing installation scope instead of presenting a fresh-install scope choice');
-  assert.match(installerInclude, /customInstall[\s\S]*update-installing\.json/, 'successful Windows updates must clear the update-in-progress marker before relaunch');
+  assert.doesNotMatch(installerInclude, /^!macro customInstall\r?$/m, 'successful Windows file replacement must keep the marker until the replacement app finishes startup');
   assert.match(installerInclude, /\.onInstFailed[\s\S]*update-installing\.json/, 'failed Windows updates must clear the update-in-progress marker so the shortcut is not left blocked');
+  const updateStatusHelper = fs.readFileSync(path.join(tmp, 'electron', 'build', 'update-status-helper.ps1'), 'utf8');
+  assert.match(updateStatusHelper, /ProgressBarStyle\]::Marquee/, 'the detached update-status UI must show active indeterminate progress during replacement');
+  assert.match(updateStatusHelper, /Elapsed:/, 'the detached update-status UI must show elapsed time for long updates');
+  assert.match(updateStatusHelper, /RelAiMcpUpdateStatus/, 'the detached update-status UI must enforce one visible helper window at a time');
   assert.deepEqual(electronPackage.build.linux.target, ['AppImage', 'deb']);
   assert.deepEqual(electronPackage.build.mac.target, ['dmg']);
   assert.equal(electronPackage.build.mac.identity, null);
@@ -225,7 +234,11 @@ function verifyPackageContracts() {
 function verifyWorkflowContracts() {
   const ciWorkflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'ci.yml'), 'utf8');
   const workflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'release.yml'), 'utf8');
+  const promotionWorkflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'promote-release.yml'), 'utf8');
   const installedReleaseValidator = fs.readFileSync(path.join(tmp, 'scripts', 'validate-installed-release.mjs'), 'utf8');
+  const prepareReleaseAssets = fs.readFileSync(path.join(tmp, 'scripts', 'prepare-release-assets.mjs'), 'utf8');
+  assert.match(prepareReleaseAssets, /names\.macMetadata/, 'release preparation must publish latest-mac.yml');
+  assert.match(prepareReleaseAssets, /verification:\s*\{\s*windows:\s*windowsVerification,\s*linux:\s*linuxVerification,\s*mac:\s*macVerification\s*\}/, 'release preparation must verify macOS updater metadata before publishing');
   assert.match(installedReleaseValidator, /\['--updated', '\/S'\]/, 'Windows release validation must exercise the updater-specific silent upgrade path');
   const windowsCiStart = ciWorkflow.indexOf('packaged-windows:');
   const windowsCiEnd = ciWorkflow.indexOf('\n  packaged-linux:', windowsCiStart);
@@ -370,7 +383,10 @@ function verifyWorkflowContracts() {
   assert.match(workflow, /release edit[^\n]*--draft=false[^\n]*--prerelease/,
     'draft recovery must replace partial assets and publish the recovered release as a prerelease');
   assert.match(workflow, /release create[^\n]*--prerelease/,
-    'new automated GitHub releases must start as prereleases until manually promoted');
+    'new automated GitHub releases must start as prereleases until promoted');
+  assert.match(promotionWorkflow, /workflow_dispatch:[\s\S]*version:/, 'stable promotion must be an explicit versioned manual action');
+  assert.match(promotionWorkflow, /latest-mac\.yml/, 'promotion must verify macOS stable-channel metadata before exposing a candidate');
+  assert.match(promotionWorkflow, /release edit[^\n]*--prerelease=false[^\n]*--latest/, 'promotion must atomically expose the tested candidate to stable updater discovery');
   assert.match(
     workflow,
     /linux-install-upgrade:[\s\S]*apt-get install --yes --no-install-recommends xvfb xauth[\s\S]*Validate fresh install and in-place upgrade/,

@@ -44,7 +44,7 @@ The default loopback service commonly uses `http://127.0.0.1:3333`. Health and d
 The routine dashboard is built through one Vite pipeline:
 
 - the production `public/dashboard.js` entry and its `src/ui/` dependency graph are bundled to `public/dashboard-app.js`; `src/ui/react/main.js` is also retained as `public/dashboard-react.js` for focused runtime probes, with lazy chunks under `public/dashboard-chunks/`;
-- Tailwind runs through `@tailwindcss/vite` from `src/ui/styles/app.css` and emits `public/dashboard.css`.
+- Tailwind runs through `@tailwindcss/vite`; the shared `src/ui/styles/app.css` entry emits `public/dashboard.css`, while route-owned feature styles imported by lazy React routes emit hashed CSS under `public/dashboard-chunks/`.
 
 Build the production assets with:
 

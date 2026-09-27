@@ -7,14 +7,19 @@ const rootPackage = JSON.parse(fs.readFileSync(new URL('../package.json', import
 const electronPackager = fs.readFileSync(new URL('../scripts/electron-package.mjs', import.meta.url), 'utf8');
 const tunnelManifest = JSON.parse(fs.readFileSync(new URL('../vendor/tunnel-client/manifest.json', import.meta.url), 'utf8'));
 
-assert.equal(tunnelManifest.version, '0.0.14');
-assert.equal(tunnelManifest.releaseTag, 'v0.0.14');
+assert.equal(tunnelManifest.version, '0.0.15');
+assert.equal(tunnelManifest.releaseTag, 'v0.0.15');
 assert.equal(tunnelManifest.distribution, 'full');
-assert.equal(tunnelManifest.baseUrl.endsWith('/v0.0.14'), true);
+assert.equal(tunnelManifest.baseUrl.endsWith('/v0.0.15'), true);
+for (const item of Object.values(tunnelManifest.releaseEvidence || {})) {
+  assert.match(item.file, /v0\.0\.15/);
+  assert.match(item.sha256, /^[a-f0-9]{64}$/);
+}
+assert.equal(Object.keys(tunnelManifest.releaseEvidence || {}).length, 4);
 for (const spec of tunnelSpecs(tunnelManifest)) {
-  assert.match(spec.archive, /^tunnel-client-v0\.0\.14-/);
+  assert.match(spec.archive, /^tunnel-client-v0\.0\.15-/);
   assert.doesNotMatch(spec.archive, /runtime|cloudflared/i);
-  assert.equal(spec.archiveEntry, spec.file, 'v0.0.14 full artifacts must use the reviewed root-level executable entry');
+  assert.equal(spec.archiveEntry, spec.file, 'v0.0.15 full artifacts must use the reviewed root-level executable entry');
   assert.equal(Number.isInteger(spec.archiveSize) && spec.archiveSize > 0, true);
   assert.match(spec.archiveSha256, /^[a-f0-9]{64}$/);
   assert.equal(Number.isInteger(spec.size) && spec.size > 0, true);

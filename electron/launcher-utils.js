@@ -60,15 +60,16 @@ function hasPriorConfigEvidence() {
 function isReturningUserLifecycle(status = {}) {
   if (!status || typeof status !== 'object') return false;
   if (status.updated === true) return true;
-  if (String(status.previousVersion || '').trim()) return true;
-  if (status.firstLaunch === false) return true;
-  if (Number(status.launchCount || 0) > 1) return true;
+  const prev = String(status.previousVersion || '').trim();
+  const curr = String(status.currentVersion || '').trim();
+  if (prev && curr && prev !== curr) return true;
+  if (prev && !curr) return true;
   return false;
 }
 
 function isManualUpdateInstall({ lifecycleStatus = {}, hasConfig = false } = {}) {
   if (hasConfig) return false;
-  return isReturningUserLifecycle(lifecycleStatus) || hasPriorConfigEvidence();
+  return isReturningUserLifecycle(lifecycleStatus) || (Boolean(lifecycleStatus?.updated) && hasPriorConfigEvidence());
 }
 
 function readGuiConfig() {

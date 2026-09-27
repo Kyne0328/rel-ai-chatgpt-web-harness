@@ -1,3 +1,5 @@
+@reference "tailwindcss";
+
 @layer components {
 .tools-grid { @apply grid gap-2; grid-template-columns: repeat(auto-fit,minmax(340px,1fr)); }
 .tool-card { @apply flex min-h-0 flex-col gap-2 p-3; border-color: var(--ui-border-default); }

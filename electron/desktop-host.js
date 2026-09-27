@@ -26,7 +26,8 @@ import { createDesktopServiceRuntime } from './service-runtime.js';
 import { createServiceProcessClient } from './service-process-client.js';
 import { createSetupWindowManager } from './setup-window.js';
 import { createShutdownCoordinator } from './shutdown-coordinator.js';
-import { clearUpdateInstallMarker, createUpdateInstallMarker } from './update-install-marker.js';
+import { clearUpdateInstallMarker, createUpdateInstallMarker, markUpdateInstallPhase, updateInstallTiming } from './update-install-marker.js';
+import { launchUpdateStatusHelper } from './update-status-helper.js';
 import { createTaskCodeIdeLauncher } from './task-code-ide.js';
 import { createTaskbarCompletionBadge } from './taskbar-completion-badge.js';
 import { taskActivityBlockReason } from './tool-sleep-blocker.js';
@@ -52,6 +53,7 @@ async function createDesktopHost(options = {}) {
     clipboard,
     shell,
     nativeImage,
+    nativeTheme,
     powerMonitor,
     powerSaveBlocker,
     Notification,
@@ -171,6 +173,7 @@ async function createDesktopHost(options = {}) {
     app,
     dialog,
     screen,
+    nativeTheme,
     iconPath,
     canHideOnClose: () => desktopTray?.isAvailable() === true && desktopLifecycle.getStatus().keepRunningOnClose !== false,
     canUserClose: () => allowUpdaterQuit || appUpdater?.getStatus()?.state !== 'installing',
@@ -180,7 +183,12 @@ async function createDesktopHost(options = {}) {
     onLoadError: error => {
       setStatus({ error: formatError(error), errorCode: ERROR_CODES.DASHBOARD_UNAVAILABLE });
       recoveryWindowManager.show();
-    }
+    },
+    onRendererGone: (error, details) => runtimeLogs.append(formatError(error), {
+      level: 'warning',
+      source: 'dashboard-renderer',
+      details
+    })
   });
   const browserSurfaceHost = createBrowserSurfaceHost({
     WebContentsView,
@@ -210,6 +218,29 @@ async function createDesktopHost(options = {}) {
       openFolder: payload => dashboardWindowManager.openFolder(payload.path),
       clearRuntimeLogs: () => runtimeLogs.clear(),
       desktopOperation: payload => desktopOsOperations.run(payload),
+      browserPreview: async (_payload, operationOptions) => {
+        const state = browserSurfaceHost.getState();
+        if (!state.active || !state.nativeSessionId || !state.nativePageId) {
+          return { ok: true, available: true, active: false };
+        }
+        const preview = await browserSurfaceHost.run({
+          action: 'screenshot',
+          nativeSessionId: state.nativeSessionId,
+          nativePageId: state.nativePageId,
+          timeoutMs: 5_000
+        }, operationOptions);
+        return {
+          ok: true,
+          available: true,
+          active: true,
+          control: state.control,
+          url: state.url,
+          title: state.title,
+          loading: state.loading,
+          viewport: preview.viewport,
+          image: preview.image
+        };
+      },
       browserOperation: (payload, operationOptions) => browserSurfaceHost.run(payload, operationOptions)
     },
     onLog: (message, logOptions) => publicConnectionLog(logOptions.source || 'local-service', message, logOptions),
@@ -329,9 +360,12 @@ async function createDesktopHost(options = {}) {
     onLog: (message, logOptions) => runtimeLogs.append(message, logOptions),
     onBeforeInstall: prepareApplicationUpdate,
     onInstallCommit: commitApplicationUpdate,
+    onInstallerLaunch: () => markUpdateInstallPhase(app, 'installing'),
     onInstallFailed: recoverApplicationUpdate,
     openUpdateFile: file => shell.openPath(file),
-    shouldAutoDownload: () => desktopLifecycle.getStatus().autoDownloadUpdates === true,
+    shouldAutoDownload: () => desktopLifecycle.getStatus().autoDownloadUpdates !== false,
+    getUpdateChannel: () => desktopLifecycle.getStatus().updateChannel,
+    onMacInstallerOpened: closeForManualMacUpdate,
     errorCodes: ERROR_CODES
   });
   updateSupportPolicy = createUpdateSupportPolicy({
@@ -439,6 +473,7 @@ async function createDesktopHost(options = {}) {
       writeControllerRuntimeMarker(app),
       desktopLifecycle.start()
     ]);
+    dashboardWindowManager.setThemePreference(lifecycleStatus.themePreference);
     desktopPower.setKeepAwakeEnabled(lifecycleStatus.keepAwake === true);
     pulseWindowManager.setEnabled(lifecycleStatus.pulseEnabled !== false);
     pulseWindowManager.setThemePreference(lifecycleStatus.themePreference);
@@ -535,10 +570,14 @@ async function createDesktopHost(options = {}) {
       pulseWindowManager.setEnabled(result.status?.pulseEnabled !== false);
     }
     if (Object.hasOwn(patch, 'themePreference')) {
+      dashboardWindowManager.setThemePreference(result.status?.themePreference);
       pulseWindowManager.setThemePreference(result.status?.themePreference);
     }
     if (patch.autoDownloadUpdates === true && appUpdater?.getStatus()?.state === 'available') {
       void downloadApplicationUpdate();
+    }
+    if (Object.hasOwn(patch, 'updateChannel')) {
+      void checkApplicationUpdates();
     }
     return result;
   }
@@ -572,6 +611,17 @@ async function createDesktopHost(options = {}) {
       recoveryWindowManager.show();
       return;
     }
+    const setupWindow = setupWindowManager.getWindow();
+    if (setupWindow) {
+      setupWindow.show();
+      setupWindow.focus();
+      return;
+    }
+    const isConfigured = hasExistingConfig() && tunnelCredentials.status().apiKeyConfigured;
+    if (!isConfigured) {
+      setupWindowManager.create();
+      return;
+    }
     void openDashboardWindow().catch(() => recoveryWindowManager.show());
   }
 
@@ -597,13 +647,16 @@ async function createDesktopHost(options = {}) {
     currentStatus = normalizeDesktopStatus({ ...currentStatus, taskActivity });
     pulseWindowManager.update(currentStatus);
     recoveryWindowManager.sendStatus(currentStatus);
+    void appUpdater?.resumeDeferredInstall?.();
   }
 
   function handleTunnelStatus(status) {
     const common = {
       tunnelStatus: status.state,
       tunnelId: status.tunnelId,
-      tunnelHealthUrl: status.healthUrl || ''
+      tunnelHealthUrl: status.healthUrl || '',
+      tunnelRecoveryMode: status.recoveryMode || '',
+      tunnelHealth: status.tunnelHealth || null
     };
     if (status.state === 'running') {
       setStatus({ ...common, tunnelRetryAttempt: 0, tunnelNextRetryAt: null, error: '', errorCode: '' });
@@ -617,6 +670,7 @@ async function createDesktopHost(options = {}) {
     if (status.state === 'degraded') {
       setStatus({
         ...common,
+        ...(status.recoveryMode === 'in_place' ? { tunnelRetryAttempt: 0, tunnelNextRetryAt: null } : {}),
         error: status.error,
         errorCode: status.errorCode || ERROR_CODES.TUNNEL_CONNECTION_INTERRUPTED
       });
@@ -659,8 +713,14 @@ async function createDesktopHost(options = {}) {
     return combineUpdateActionResult(await appUpdater?.downloadUpdate());
   }
 
-  async function installApplicationUpdate() {
-    return combineUpdateActionResult(await appUpdater?.installUpdate());
+  async function installApplicationUpdate(options = {}) {
+    return combineUpdateActionResult(await appUpdater?.installUpdate(options));
+  }
+
+  async function closeForManualMacUpdate() {
+    isQuitting = true;
+    await shutdownCoordinator.prepare('update');
+    app.exit(0);
   }
 
   async function prepareApplicationUpdate() {
@@ -668,7 +728,16 @@ async function createDesktopHost(options = {}) {
     const taskBlock = taskActivityBlockReason(desktopPower.getStatus(), 'installing the update');
     if (taskBlock) throw new Error(taskBlock);
     if (process.platform === 'win32') {
-      await createUpdateInstallMarker(app, { targetVersion: appUpdater?.getStatus()?.availableVersion });
+      const marker = await createUpdateInstallMarker(app, { targetVersion: appUpdater?.getStatus()?.availableVersion });
+      const helper = await launchUpdateStatusHelper(app, { markerPath: marker.path });
+      if (!helper.ok) {
+        runtimeLogs.append(helper.error || 'Update status window could not be opened.', {
+          level: 'warning',
+          source: 'updater',
+          code: 'update_status_helper_failed'
+        });
+      }
+      await markUpdateInstallPhase(app, 'stopping');
     }
     const stopped = await stopServer({ silent: true, preserveDashboard: true });
     if (stopped?.cleanup?.clean === false) {
@@ -683,13 +752,18 @@ async function createDesktopHost(options = {}) {
     // Close the app first so the installer never fights locked files or visible
     // windows: shut down windows, tray, and background work, record a clean
     // exit, then let electron-updater quit + relaunch into the installer.
+    if (process.platform === 'win32') await markUpdateInstallPhase(app, 'closing');
     isQuitting = true;
     await shutdownCoordinator.prepare('update');
     allowUpdaterQuit = true;
   }
 
   async function recoverApplicationUpdate() {
-    await clearUpdateInstallMarker(app).catch(() => {});
+    if (process.platform === 'win32') {
+      await markUpdateInstallPhase(app, 'failed', {
+        message: 'The update could not be completed. Rel.AI recovered the current version.'
+      }).catch(() => {});
+    }
     allowUpdaterQuit = false;
     isQuitting = false;
     updateInstallPrepared = false;
@@ -800,6 +874,11 @@ async function createDesktopHost(options = {}) {
   }
 
   async function openDashboardWindow(routeHash = '', windowOptions = {}) {
+    const isConfigured = hasExistingConfig() && tunnelCredentials.status().apiKeyConfigured;
+    if (!isConfigured) {
+      setupWindowManager.create();
+      return { ok: false, reason: 'unconfigured' };
+    }
     if (!serviceRuntime.isListening()) {
       void startServer();
       await serviceRuntime.waitUntilListening(0);
@@ -830,7 +909,7 @@ async function createDesktopHost(options = {}) {
   }
 
   function routeInitialWindow(lifecycleStatus = {}) {
-    const hasConfig = hasExistingConfig();
+    const hasConfig = hasExistingConfig() && tunnelCredentials.status().apiKeyConfigured;
     if (hasConfig) {
       if (lifecycleStatus.updated === true && lifecycleStatus.previousVersion) {
         runtimeLogs.append(`Rel.AI MCP updated from ${lifecycleStatus.previousVersion} to ${lifecycleStatus.currentVersion}. Existing connection restored.`, { source: 'desktop-lifecycle' });
@@ -918,7 +997,8 @@ async function createDesktopHost(options = {}) {
       tunnelCredentials.clear();
       connection.clearConnectionState();
     }
-    app.relaunch();
+    const cleanArgs = process.argv.slice(1).filter(arg => arg !== '--background' && arg !== '--hidden');
+    app.relaunch({ args: cleanArgs });
     app.exit(0);
     return { ok: true, clearData, clean: shutdown.clean !== false };
   }
@@ -930,7 +1010,29 @@ async function createDesktopHost(options = {}) {
     app.exit(0);
   }
 
-  return Object.freeze({ start });
+  async function completeApplicationUpdate(marker) {
+    if (process.platform !== 'win32' || !marker) return { ok: true, skipped: true };
+    const completed = await markUpdateInstallPhase(app, 'complete');
+    const effectiveMarker = completed || marker;
+    const timing = updateInstallTiming(effectiveMarker);
+    const version = effectiveMarker.targetVersion || app.getVersion();
+    runtimeLogs.append(`Application update ${version || 'completed'} finished in ${Math.round(timing.totalMs / 100) / 10}s.`, {
+      source: 'updater',
+      details: { targetVersion: version, updateTiming: timing }
+    });
+    desktopNotifications.show('applicationUpdates', {
+      title: 'Rel.AI MCP updated',
+      body: version ? `Updated successfully to v${version}.` : 'The application update completed successfully.'
+    }, { version });
+    await runtimeLogs.flush();
+    const cleanupTimer = setTimeout(() => {
+      void clearUpdateInstallMarker(app).catch(() => {});
+    }, 5_000);
+    cleanupTimer.unref?.();
+    return { ok: true, timing };
+  }
+
+  return Object.freeze({ start, completeApplicationUpdate });
 }
 
 function requireDesktopDependencies(options) {

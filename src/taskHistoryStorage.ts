@@ -13,7 +13,6 @@ const MAX_SESSIONS = 500;
 const TASK_HISTORY_VERSION = 3;
 const HISTORY_FORMAT_MARKER = '.task-history-v3';
 const LEGACY_MIGRATION_KEY = 'task_history_legacy_migrated_v1';
-const EVENT_INDEX_MIGRATION_KEY = 'task_history_event_index_v1';
 const migratedStateDirs = new Set<string>();
 let writeWorker: Worker | null = null;
 let writeRequestSequence = 0;
@@ -128,7 +127,6 @@ function listRecentSessionEvents(directory: string, limit = MAX_SESSIONS): Recor
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
-    ensureTaskHistoryEventIndex(db);
     const rows = db.prepare(`
       SELECT
         task_id AS id,
@@ -185,7 +183,7 @@ function readSession(directory: string, id: unknown): StoredTaskSession | null {
     if (session) return session;
     db.prepare('DELETE FROM task_history WHERE id=?').run(String(id || ''));
     return null;
-  }, { transaction: true }) as StoredTaskSession | null;
+  }, { transaction: false }) as StoredTaskSession | null;
 }
 
 function removeSession(directory: string, id: unknown): void {
@@ -358,7 +356,6 @@ function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
   if (stateKey && migratedStateDirs.has(stateKey)) return;
   let migrated = false;
   withStateDatabase(config, (db: DatabaseSync) => {
-    ensureTaskHistoryEventIndex(db);
     if (stateMetaValue(db, LEGACY_MIGRATION_KEY, '') === '1') return;
     const directory = getTaskHistoryDir(config);
     let entries: fs.Dirent[] = [];
@@ -393,155 +390,6 @@ function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
  * the newest rows. Triggers keep the projection in sync for both the service
  * process and the task-history storage worker.
  */
-function ensureTaskHistoryEventIndex(db: DatabaseSync): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS task_history_events(
-      task_id TEXT NOT NULL,
-      event_key TEXT NOT NULL,
-      event_index INTEGER NOT NULL,
-      task_updated_at_ms INTEGER NOT NULL,
-      event_timestamp TEXT NOT NULL,
-      workspace TEXT NOT NULL,
-      session_id TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      PRIMARY KEY(task_id,event_key)
-    ) STRICT;
-    CREATE INDEX IF NOT EXISTS task_history_events_recent_idx
-      ON task_history_events(event_timestamp DESC,task_updated_at_ms DESC,task_id ASC,event_index DESC);
-    CREATE TRIGGER IF NOT EXISTS task_history_events_after_insert
-    AFTER INSERT ON task_history
-    BEGIN
-      DELETE FROM task_history_events WHERE task_id=NEW.id;
-      INSERT OR REPLACE INTO task_history_events(
-        task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
-      )
-      SELECT
-        NEW.id,
-        COALESCE(
-          NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
-          NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
-          NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
-          'index'
-        ) || ':index:' || CAST(event.key AS TEXT),
-        CAST(event.key AS INTEGER),
-        NEW.updated_at_ms,
-        COALESCE(
-          CAST(json_extract(event.value,'$.timestamp') AS TEXT),
-          CAST(json_extract(event.value,'$.ts') AS TEXT),
-          CAST(json_extract(event.value,'$.at') AS TEXT),
-          CAST(json_extract(event.value,'$.createdAt') AS TEXT),
-          CAST(json_extract(event.value,'$.startedAt') AS TEXT),
-          ''
-        ),
-        COALESCE(
-          CAST(json_extract(event.value,'$.workspace') AS TEXT),
-          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
-          ''
-        ),
-        COALESCE(
-          CAST(json_extract(event.value,'$.sessionId') AS TEXT),
-          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
-          NEW.id
-        ),
-        event.value
-      FROM json_each(
-        CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
-        '$.events'
-      ) AS event
-      WHERE event.type='object';
-    END;
-    CREATE TRIGGER IF NOT EXISTS task_history_events_after_update
-    AFTER UPDATE OF updated_at_ms,payload ON task_history
-    BEGIN
-      DELETE FROM task_history_events WHERE task_id=NEW.id;
-      INSERT OR REPLACE INTO task_history_events(
-        task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
-      )
-      SELECT
-        NEW.id,
-        COALESCE(
-          NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
-          NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
-          NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
-          'index'
-        ) || ':index:' || CAST(event.key AS TEXT),
-        CAST(event.key AS INTEGER),
-        NEW.updated_at_ms,
-        COALESCE(
-          CAST(json_extract(event.value,'$.timestamp') AS TEXT),
-          CAST(json_extract(event.value,'$.ts') AS TEXT),
-          CAST(json_extract(event.value,'$.at') AS TEXT),
-          CAST(json_extract(event.value,'$.createdAt') AS TEXT),
-          CAST(json_extract(event.value,'$.startedAt') AS TEXT),
-          ''
-        ),
-        COALESCE(
-          CAST(json_extract(event.value,'$.workspace') AS TEXT),
-          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
-          ''
-        ),
-        COALESCE(
-          CAST(json_extract(event.value,'$.sessionId') AS TEXT),
-          CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
-          NEW.id
-        ),
-        event.value
-      FROM json_each(
-        CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
-        '$.events'
-      ) AS event
-      WHERE event.type='object';
-    END;
-    CREATE TRIGGER IF NOT EXISTS task_history_events_after_delete
-    AFTER DELETE ON task_history
-    BEGIN
-      DELETE FROM task_history_events WHERE task_id=OLD.id;
-    END;
-  `);
-  if (stateMetaValue(db, EVENT_INDEX_MIGRATION_KEY, '') === '1') return;
-  db.exec(`
-    INSERT OR REPLACE INTO task_history_events(
-      task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
-    )
-    SELECT
-      task.id,
-      COALESCE(
-        NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
-        NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
-        NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
-        'index'
-      ) || ':index:' || CAST(event.key AS TEXT),
-      CAST(event.key AS INTEGER),
-      task.updated_at_ms,
-      COALESCE(
-        CAST(json_extract(event.value,'$.timestamp') AS TEXT),
-        CAST(json_extract(event.value,'$.ts') AS TEXT),
-        CAST(json_extract(event.value,'$.at') AS TEXT),
-        CAST(json_extract(event.value,'$.createdAt') AS TEXT),
-        CAST(json_extract(event.value,'$.startedAt') AS TEXT),
-        ''
-      ),
-      COALESCE(
-        CAST(json_extract(event.value,'$.workspace') AS TEXT),
-        CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.workspace') AS TEXT) END,
-        ''
-      ),
-      COALESCE(
-        CAST(json_extract(event.value,'$.sessionId') AS TEXT),
-        CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.sessionId') AS TEXT) END,
-        task.id
-      ),
-      event.value
-    FROM task_history AS task
-    CROSS JOIN json_each(
-      CASE WHEN json_valid(task.payload) THEN task.payload ELSE '{"events":[]}' END,
-      '$.events'
-    ) AS event
-    WHERE event.type='object';
-  `);
-  setStateMeta(db, EVENT_INDEX_MIGRATION_KEY, '1');
-}
-
 function removeLegacyHistoryFiles(config: TaskHistoryConfig = {}): void {
   const directory = getTaskHistoryDir(config);
   try {

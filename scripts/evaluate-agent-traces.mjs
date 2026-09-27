@@ -17,6 +17,16 @@ function evaluateAgentTraces(expectations, traces) {
     for (const field of ['model', 'instructionVersion', 'toolSurfaceVersion']) {
       if (!trace.metadata[field]) failures.push(failure(item.id, 'missing_version', `Recorded trace is missing ${field}.`));
     }
+    if (item.requireLiveTrace) {
+      if (trace.metadata.source !== 'live-agent-trace') failures.push(failure(item.id, 'trace_provenance', 'Scenario requires a live-agent-trace provenance marker.'));
+      if (!Number.isFinite(Date.parse(trace.metadata.capturedAt))) failures.push(failure(item.id, 'trace_provenance', 'Scenario requires a valid live trace capturedAt timestamp.'));
+    }
+    if (item.expectedSkills.length && !sameStringSet(item.expectedSkills, trace.skills)) {
+      failures.push(failure(item.id, 'skills', `Expected skills ${JSON.stringify(item.expectedSkills)} but observed ${JSON.stringify(trace.skills)}.`));
+    }
+    for (const skill of item.forbiddenSkills) {
+      if (trace.skills.includes(skill)) failures.push(failure(item.id, 'forbidden_skill', `Recorded trace used forbidden skill ${skill}.`));
+    }
     if (trace.completed !== true) failures.push(failure(item.id, 'incomplete', 'Recorded task did not complete successfully.'));
     if (item.maxCalls != null && trace.calls.length > item.maxCalls) {
       failures.push(failure(item.id, 'excessive_calls', `Observed ${trace.calls.length} calls; scenario limit is ${item.maxCalls}.`));
@@ -60,6 +70,9 @@ function normalizeExpectation(raw) {
     taskMode,
     requiredTools: stringArray(raw.requiredTools),
     forbiddenTools: stringArray(raw.forbiddenTools),
+    expectedSkills: stringArray(raw.expectedSkills),
+    forbiddenSkills: stringArray(raw.forbiddenSkills),
+    requireLiveTrace: raw.requireLiveTrace === true,
     maxCalls: optionalLimit(raw.maxCalls, `${id} maxCalls`),
     maxDuplicateCalls: optionalLimit(raw.maxDuplicateCalls, `${id} maxDuplicateCalls`),
     minPollIntervalMs: optionalLimit(raw.minPollIntervalMs, `${id} minPollIntervalMs`),
@@ -81,8 +94,11 @@ function normalizeTrace(raw) {
     metadata: {
       model: String(raw?.metadata?.model || '').trim(),
       instructionVersion: String(raw?.metadata?.instructionVersion || '').trim(),
-      toolSurfaceVersion: String(raw?.metadata?.toolSurfaceVersion || '').trim()
+      toolSurfaceVersion: String(raw?.metadata?.toolSurfaceVersion || '').trim(),
+      source: String(raw?.metadata?.source || '').trim(),
+      capturedAt: String(raw?.metadata?.capturedAt || '').trim()
     },
+    skills: stringArray(raw?.skills),
     completed: raw?.completed === true,
     durationMs: Math.max(0, Number(raw?.durationMs || 0)),
     calls
@@ -120,6 +136,10 @@ function optionalLimit(value, label) {
 
 function stringArray(value) {
   return Array.isArray(value) ? [...new Set(value.map(item => String(item || '').trim()).filter(Boolean))] : [];
+}
+
+function sameStringSet(left, right) {
+  return left.length === right.length && left.every(value => right.includes(value));
 }
 
 function failure(id, kind, message) { return { id, kind, message }; }

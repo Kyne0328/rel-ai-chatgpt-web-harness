@@ -165,6 +165,72 @@ function isProcessTreeAlive(target: ProcessTarget): boolean {
   return isProcessGroupAlive(rootPid);
 }
 
+async function readProcessCreationIdentity(pidValue: unknown): Promise<string> {
+  const pid = Number(pidValue);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return '';
+  try {
+    if (process.platform === 'linux') {
+      const stat = await fs.promises.readFile(`/proc/${pid}/stat`, 'utf8');
+      const closeParen = stat.lastIndexOf(')');
+      if (closeParen < 0) return '';
+      const fields = stat.slice(closeParen + 1).trim().split(/\s+/);
+      const startTicks = String(fields[19] || '');
+      return /^\d+$/.test(startTicks) ? `linux:${startTicks}` : '';
+    }
+    if (process.platform === 'win32') {
+      const systemRoot = String(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows');
+      const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const ticks = await readBoundedCommandOutput(powershell, [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$p = Get-Process -Id ${pid} -ErrorAction Stop; [Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks)`
+      ]);
+      return /^\d+$/.test(ticks) ? `win32:${ticks}` : '';
+    }
+    const started = await readBoundedCommandOutput('/bin/ps', ['-p', String(pid), '-o', 'lstart=']);
+    const normalized = started.replace(/\s+/g, ' ').trim();
+    return normalized ? `${process.platform}:${normalized}` : '';
+  } catch {
+    return '';
+  }
+}
+
+function readBoundedCommandOutput(executable: string, args: readonly string[], timeoutMs = 2000): Promise<string> {
+  return new Promise(resolve => {
+    let output = '';
+    let settled = false;
+    let child: ReturnType<typeof spawn> | undefined;
+    const finish = (value: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try { child?.kill(); } catch {}
+      finish('');
+    }, Math.max(1, timeoutMs));
+    timer.unref?.();
+    try {
+      child = spawn(executable, [...args], {
+        shell: false,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore']
+      });
+      child.stdout?.on('data', chunk => {
+        if (output.length >= 4096) return;
+        output += String(chunk).slice(0, 4096 - output.length);
+      });
+      child.once('error', () => finish(''));
+      child.once('close', code => finish(code === 0 ? output.trim() : ''));
+    } catch {
+      finish('');
+    }
+  });
+}
+
 function signalProcessTree(target: ProcessTarget, options: ProcessTreeTerminationOptions = {}): boolean {
   const pid = processPid(target);
   if (!pid) return false;
@@ -816,6 +882,7 @@ export {
   appendLimited,
   isProcessTreeAlive,
   killProcessTree,
+  readProcessCreationIdentity,
   runProcess,
   summarizeCommand,
   terminateProcessTree

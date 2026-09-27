@@ -27,12 +27,14 @@ process.env.REL_AI_UPDATE_POLICY_URL = 'https://example.test/unofficial-policy.j
 assert.equal(resolveSupportPolicyUrl({ isPackaged: true }, ''), DEFAULT_SUPPORT_POLICY_URL);
 assert.equal(resolveSupportPolicyUrl({ isPackaged: false }, ''), 'https://example.test/unofficial-policy.json');
 delete process.env.REL_AI_UPDATE_POLICY_URL;
+assert.ok(normalizeSupportPolicy({ ...policy, futureOptionalField: 'ignored by older clients' }), 'unknown policy keys must be ignored for forward compatibility');
 assert.equal(normalizeSupportPolicy({ ...policy, minimumRecommendedVersion: '0.24.0' }), null);
 assert.equal(normalizeSupportPolicy({ ...policy, minimumSupportedVersion: 'v0.25.0' }), null);
 
 const beforeDeadline = Date.parse('2026-08-20T00:00:00.000Z');
 const afterDeadline = Date.parse('2026-09-02T00:00:00.000Z');
 assert.equal(assessSupportPolicy('0.26.0', policy, beforeDeadline).state, 'current');
+assert.equal(assessSupportPolicy('0.27.0-beta.1', policy, beforeDeadline).state, 'current', 'beta-channel clients must still receive support-policy assessment');
 assert.equal(assessSupportPolicy('0.25.5', policy, beforeDeadline).state, 'recommended');
 assert.equal(assessSupportPolicy('0.24.9', policy, beforeDeadline).state, 'deprecated');
 assert.equal(assessSupportPolicy('0.24.9', policy, afterDeadline).state, 'required');

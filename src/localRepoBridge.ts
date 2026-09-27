@@ -61,7 +61,7 @@ async function repoSnapshot(workspace: BridgeWorkspace, config: BridgeConfig, ar
   const configuredDefault = clampNumber(workspace.context?.snapshotMaxFiles, 1, 20000, DEFAULT_MAX_SNAPSHOT_FILES);
   const effectiveDefault = resolveBudget(configuredDefault, policy, config || {});
   const maxEntries = clampNumber(args.maxEntries, 1, 20000, effectiveDefault);
-  const includeFiles = args.includeFiles !== false;
+  const includeFiles = args.includeFiles === true;
   // The git summary is a child process; start it before the synchronous tree walk and
   // manifest reads so the spawn overlaps them instead of adding to them.
   const gitSummary = snapshotGitSummary(workspace, config);

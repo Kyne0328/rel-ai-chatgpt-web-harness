@@ -1,10 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { compareUpdateVersions, isUpdateVersion } from './update-version.js';
 
-const RELEASES_API_URL = 'https://api.github.com/repos/Kyne0328/rel-ai-chatgpt-web-harness/releases/latest';
+const RELEASE_BASE_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
+const LATEST_MAC_URL = `${RELEASE_BASE_URL}/latest/download/latest-mac.yml`;
+const RELEASES_FEED_URL = `${RELEASE_BASE_URL}.atom`;
 const RELEASE_DOWNLOAD_PREFIX = '/Kyne0328/rel-ai-chatgpt-web-harness/releases/download/';
 const CHECKSUM_ASSET_NAME = 'SHA256SUMS.txt';
+const MAX_METADATA_BYTES = 1024 * 1024;
 const MAX_CHECKSUM_BYTES = 1024 * 1024;
 
 function createMacManualUpdater(options = {}) {
@@ -24,15 +28,23 @@ function createMacManualUpdater(options = {}) {
   let release = null;
   let downloadedPath = '';
 
-  async function checkForUpdates() {
-    const response = await fetchTrusted(RELEASES_API_URL, 'GitHub release metadata', fetchImpl, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': 'Rel.AI-MCP-Updater'
-      }
-    });
-    const payload = await response.json();
-    release = parseRelease(payload, arch);
+  async function checkForUpdates({ channel = 'stable' } = {}) {
+    if (channel === 'beta') {
+      const feedResponse = await fetchTrusted(RELEASES_FEED_URL, 'GitHub release feed', fetchImpl, {
+        headers: { 'User-Agent': 'Rel.AI-MCP-Updater' }
+      });
+      const tag = latestReleaseTagFromFeed(await boundedText(feedResponse, MAX_METADATA_BYTES));
+      const metadataUrl = `${RELEASE_BASE_URL}/download/${encodeURIComponent(tag)}/latest-mac.yml`;
+      const metadataResponse = await fetchTrusted(metadataUrl, 'macOS beta release metadata', fetchImpl, {
+        headers: { 'User-Agent': 'Rel.AI-MCP-Updater' }
+      });
+      release = parseMacMetadata(await boundedText(metadataResponse, MAX_METADATA_BYTES), arch, { allowPrerelease: true, tag });
+    } else {
+      const response = await fetchTrusted(LATEST_MAC_URL, 'macOS release metadata', fetchImpl, {
+        headers: { 'User-Agent': 'Rel.AI-MCP-Updater' }
+      });
+      release = parseMacMetadata(await boundedText(response, MAX_METADATA_BYTES), arch);
+    }
     downloadedPath = '';
     return publicRelease(release);
   }
@@ -52,6 +64,7 @@ function createMacManualUpdater(options = {}) {
 
     const updateDirectory = path.join(app.getPath('userData'), 'updates');
     const target = path.join(updateDirectory, release.assetName);
+    const temporary = `${target}.part`;
     fs.mkdirSync(updateDirectory, { recursive: true, mode: 0o700 });
 
     if (fs.existsSync(target) && await sha256File(target) === expectedSha256) {
@@ -61,34 +74,62 @@ function createMacManualUpdater(options = {}) {
       onLog(`Reusing verified macOS update ${release.assetName}.`);
       return { ...publicRelease(release), assetName: release.assetName };
     }
+    fs.rmSync(target, { force: true });
 
-    const response = await fetchTrusted(release.assetUrl, 'macOS update DMG', fetchImpl, {
-      headers: { 'User-Agent': 'Rel.AI-MCP-Updater' }
-    });
+    let resumeOffset = partialSize(temporary, release.assetSize);
+    let response = await requestDmg(release.assetUrl, resumeOffset);
+    if (resumeOffset > 0 && response.status === 416) {
+      fs.rmSync(temporary, { force: true });
+      resumeOffset = 0;
+      response = await requestDmg(release.assetUrl, 0);
+    }
+    if (resumeOffset > 0 && response.status !== 206) {
+      fs.rmSync(temporary, { force: true });
+      resumeOffset = 0;
+    } else if (resumeOffset > 0) {
+      const contentRange = String(response.headers.get('content-range') || '');
+      if (!contentRange.startsWith(`bytes ${resumeOffset}-`)) {
+        fs.rmSync(temporary, { force: true });
+        resumeOffset = 0;
+        response = await requestDmg(release.assetUrl, 0);
+      }
+    }
+    if (!response.ok) throw new Error(`macOS update DMG request failed with HTTP ${response.status || 'unknown'}.`);
     if (!response.body?.getReader) throw new Error('The macOS update download did not provide a readable response body.');
 
-    const temporary = `${target}.${process.pid}.part`;
-    fs.rmSync(temporary, { force: true });
-    const handle = await fs.promises.open(temporary, 'w', 0o600);
-    const hash = crypto.createHash('sha256');
+    const append = resumeOffset > 0 && response.status === 206;
+    const handle = await fs.promises.open(temporary, append ? 'a' : 'w', 0o600);
     const reader = response.body.getReader();
-    const total = positiveInteger(response.headers.get('content-length')) || release.assetSize;
-    let transferred = 0;
+    const responseBytes = positiveInteger(response.headers.get('content-length'));
+    const total = contentRangeTotal(response.headers.get('content-range'))
+      || release.assetSize
+      || (append ? resumeOffset + responseBytes : responseBytes);
+    let transferred = append ? resumeOffset : 0;
+    let downloadedThisRun = 0;
     const startedAt = now();
+    if (transferred > 0) {
+      onProgress({
+        percent: total > 0 ? (transferred / total) * 100 : 0,
+        transferred,
+        total,
+        bytesPerSecond: 0
+      });
+      onLog(`Resuming macOS update ${release.assetName} from byte ${transferred}.`);
+    }
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         if (!value?.byteLength) continue;
         await writeAll(handle, value);
-        hash.update(value);
         transferred += value.byteLength;
+        downloadedThisRun += value.byteLength;
         const elapsedMs = Math.max(1, now() - startedAt);
         onProgress({
           percent: total > 0 ? (transferred / total) * 100 : 0,
           transferred,
           total,
-          bytesPerSecond: Math.round((transferred * 1000) / elapsedMs)
+          bytesPerSecond: Math.round((downloadedThisRun * 1000) / elapsedMs)
         });
       }
     } catch (error) {
@@ -98,17 +139,32 @@ function createMacManualUpdater(options = {}) {
       await handle.close();
     }
 
-    const actualSha256 = hash.digest('hex');
+    if (release.assetSize > 0 && transferred < release.assetSize) {
+      throw new Error(`macOS update download ended early at ${transferred} of ${release.assetSize} bytes.`);
+    }
+    if (release.assetSize > 0 && transferred > release.assetSize) {
+      fs.rmSync(temporary, { force: true });
+      throw new Error(`macOS update download exceeded the expected size for ${release.assetName}.`);
+    }
+    const actualSha256 = await sha256File(temporary);
     if (actualSha256 !== expectedSha256) {
       fs.rmSync(temporary, { force: true });
       throw new Error(`Downloaded macOS update failed SHA-256 verification for ${release.assetName}.`);
     }
-    fs.rmSync(target, { force: true });
     fs.renameSync(temporary, target);
     downloadedPath = target;
     onProgress({ percent: 100, transferred, total: total || transferred, bytesPerSecond: 0 });
     onLog(`Verified macOS update ${release.assetName}.`);
     return { ...publicRelease(release), assetName: release.assetName };
+  }
+
+  async function requestDmg(url, offset) {
+    const headers = { 'User-Agent': 'Rel.AI-MCP-Updater' };
+    if (offset > 0) headers.Range = `bytes=${offset}-`;
+    return fetchTrusted(url, 'macOS update DMG', fetchImpl, {
+      headers,
+      allowedErrorStatuses: offset > 0 ? [416] : []
+    });
   }
 
   async function openDownloaded(version) {
@@ -124,12 +180,37 @@ function createMacManualUpdater(options = {}) {
   return { checkForUpdates, downloadUpdate, openDownloaded };
 }
 
-function parseRelease(payload, arch) {
-  if (!payload || typeof payload !== 'object' || payload.draft === true || payload.prerelease === true) {
-    throw new Error('GitHub did not return a stable Rel.AI release.');
+function parseMacMetadata(source, arch, options = {}) {
+  const lines = String(source || '').split(/\r?\n/);
+  const versionLine = lines.find(line => /^version:\s*/.test(line));
+  const version = cleanVersion(versionLine?.replace(/^version:\s*/, ''), options.allowPrerelease === true);
+  if (!version) throw new Error('macOS release metadata contains an invalid stable version.');
+  const assetName = `Rel.AI-MCP-${version}-mac-${arch}.dmg`;
+  let currentName = '';
+  let assetSize = 0;
+  for (const rawLine of lines) {
+    const file = rawLine.match(/^\s*-\s+(?:url|path):\s*(.+?)\s*$/);
+    if (file) {
+      currentName = yamlScalar(file[1]);
+      continue;
+    }
+    const size = rawLine.match(/^\s+size:\s*(\d+)\s*$/);
+    if (size && currentName === assetName) assetSize = positiveInteger(size[1]);
   }
-  const version = stableVersion(payload.tag_name);
-  if (!version) throw new Error('GitHub release metadata contains an invalid stable version.');
+  if (!lines.some(line => line.includes(assetName))) {
+    throw new Error(`macOS release metadata does not contain ${assetName}.`);
+  }
+  return releaseFromVersion(version, arch, assetSize, options.tag || version);
+}
+
+function parseRelease(payload, arch, options = {}) {
+  if (!payload || typeof payload !== 'object' || payload.draft === true) {
+    throw new Error('GitHub did not return a usable Rel.AI release.');
+  }
+  const allowPrerelease = options.allowPrerelease === true;
+  if (payload.prerelease === true && !allowPrerelease) throw new Error('GitHub did not return a stable Rel.AI release.');
+  const version = cleanVersion(payload.tag_name, allowPrerelease);
+  if (!version) throw new Error('GitHub release metadata contains an invalid version.');
   const assetName = `Rel.AI-MCP-${version}-mac-${arch}.dmg`;
   const assets = Array.isArray(payload.assets) ? payload.assets : [];
   const asset = assets.find(candidate => String(candidate?.name || '') === assetName);
@@ -149,27 +230,61 @@ function parseRelease(payload, arch) {
   };
 }
 
-function publicRelease(release) {
+function latestReleaseTagFromFeed(source) {
+  const tags = [];
+  const pattern = /href="https:\/\/github\.com\/Kyne0328\/rel-ai-chatgpt-web-harness\/releases\/tag\/([^"?#]+)"/g;
+  for (const match of String(source || '').matchAll(pattern)) {
+    let tag;
+    try { tag = decodeURIComponent(match[1]); } catch { continue; }
+    const version = tag.replace(/^v/i, '');
+    if (isUpdateVersion(version, { allowPrerelease: true })) tags.push({ tag, version });
+  }
+  if (!tags.length) throw new Error('GitHub release feed did not contain a valid Rel.AI release tag.');
+  tags.sort((left, right) => compareUpdateVersions(right.version, left.version, { allowPrerelease: true }));
+  return tags[0].tag;
+}
+
+function releaseFromVersion(version, arch, assetSize = 0, tag = version) {
+  const assetName = `Rel.AI-MCP-${version}-mac-${arch}.dmg`;
+  const releaseRoot = `${RELEASE_BASE_URL}/download/${encodeURIComponent(tag)}`;
   return {
-    version: release.version,
-    releaseDate: release.releaseDate,
-    releaseNotes: release.releaseNotes,
-    assetName: release.assetName
+    version,
+    releaseDate: '',
+    releaseNotes: '',
+    assetName,
+    assetUrl: `${releaseRoot}/${encodeURIComponent(assetName)}`,
+    assetSize,
+    checksumUrl: `${releaseRoot}/${CHECKSUM_ASSET_NAME}`
+  };
+}
+
+function publicRelease(value) {
+  return {
+    version: value.version,
+    releaseDate: value.releaseDate,
+    releaseNotes: value.releaseNotes,
+    assetName: value.assetName
   };
 }
 
 async function fetchTrusted(url, label, fetchImpl, options = {}) {
   assertTrustedUrl(url);
-  const response = await fetchImpl(url, { redirect: 'follow', ...options });
-  if (!response?.ok) throw new Error(`${label} request failed with HTTP ${response?.status || 'unknown'}.`);
+  const { allowedErrorStatuses = [], ...fetchOptions } = options;
+  const response = await fetchImpl(url, { redirect: 'follow', ...fetchOptions });
+  if (!response?.ok && !allowedErrorStatuses.includes(Number(response?.status))) {
+    throw new Error(`${label} request failed with HTTP ${response?.status || 'unknown'}.`);
+  }
   return response;
 }
 
 function assertTrustedUrl(value) {
   const url = new URL(String(value || ''));
   if (url.protocol !== 'https:') throw new Error('Update URLs must use HTTPS.');
-  if (url.hostname === 'api.github.com' && url.pathname === '/repos/Kyne0328/rel-ai-chatgpt-web-harness/releases/latest') return;
-  if (url.hostname === 'github.com' && url.pathname.startsWith(RELEASE_DOWNLOAD_PREFIX)) return;
+  if (url.hostname === 'github.com' && (
+    url.pathname === '/Kyne0328/rel-ai-chatgpt-web-harness/releases.atom'
+    || url.pathname === '/Kyne0328/rel-ai-chatgpt-web-harness/releases/latest/download/latest-mac.yml'
+    || url.pathname.startsWith(RELEASE_DOWNLOAD_PREFIX)
+  )) return;
   throw new Error(`Untrusted update URL: ${url.hostname}${url.pathname}`);
 }
 
@@ -182,7 +297,7 @@ function assertTrustedDownloadUrl(value) {
 
 async function boundedText(response, limit) {
   const text = await response.text();
-  if (Buffer.byteLength(text, 'utf8') > limit) throw new Error('Release checksum metadata is unexpectedly large.');
+  if (Buffer.byteLength(text, 'utf8') > limit) throw new Error('Release metadata is unexpectedly large.');
   return text;
 }
 
@@ -210,14 +325,50 @@ async function writeAll(handle, value) {
   }
 }
 
+function partialSize(file, expectedSize) {
+  try {
+    const size = fs.statSync(file).size;
+    if (size <= 0 || (expectedSize > 0 && size >= expectedSize)) {
+      fs.rmSync(file, { force: true });
+      return 0;
+    }
+    return size;
+  } catch {
+    return 0;
+  }
+}
+
+function contentRangeTotal(value) {
+  const match = String(value || '').match(/^bytes\s+\d+-\d+\/(\d+)$/i);
+  return match ? positiveInteger(match[1]) : 0;
+}
+
 function positiveInteger(value) {
   const number = Number(value || 0);
   return Number.isSafeInteger(number) && number > 0 ? number : 0;
 }
 
-function stableVersion(value) {
-  const version = String(value || '').trim().replace(/^v/i, '');
-  return /^\d+\.\d+\.\d+$/.test(version) ? version : '';
+function cleanVersion(value, allowPrerelease) {
+  const version = yamlScalar(value).replace(/^v/i, '');
+  return isUpdateVersion(version, { allowPrerelease }) ? version : '';
 }
 
-export { CHECKSUM_ASSET_NAME, RELEASES_API_URL, checksumFor, createMacManualUpdater, parseRelease };
+function yamlScalar(value) {
+  const text = String(value || '').trim();
+  if (text.startsWith('"') && text.endsWith('"')) {
+    try { return JSON.parse(text); } catch {}
+  }
+  if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1).replaceAll("''", "'");
+  return text;
+}
+
+export {
+  CHECKSUM_ASSET_NAME,
+  LATEST_MAC_URL,
+  RELEASES_FEED_URL,
+  checksumFor,
+  createMacManualUpdater,
+  latestReleaseTagFromFeed,
+  parseMacMetadata,
+  parseRelease
+};

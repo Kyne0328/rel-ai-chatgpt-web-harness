@@ -1,3 +1,12 @@
+const INFERRED_ACTION_TOOLS = new Set(['relai_search', 'relai_process', 'relai_validate', 'relai_changes', 'relai_publish']);
+const HIDDEN_INDEPENDENT_DISCOVERY_TOOLS = new Set(['relai_work', 'relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect']);
+const SHARED_ACTION_REQUIRED_FIELDS = Object.freeze({
+  relai_process: 'processId',
+  relai_ui: 'sessionId',
+  relai_browser: 'sessionId',
+  relai_computer: 'app'
+});
+
 const PUBLIC_INPUT_DESCRIPTIONS = Object.freeze({
   relai_read: new Set([
     'properties.asResource.description'
@@ -23,18 +32,24 @@ const PUBLIC_INPUT_DESCRIPTIONS = Object.freeze({
 });
 
 function compactPublicInputSchema(name, inputSchema, catalogTool) {
-  // Discovery is an ergonomic projection, not a second validator. Keep every
-  // callable field visible to MCP clients, but leave action/form exclusivity and
-  // conditional requirements to the canonical runtime contract. Some clients
+  // Discovery is an ergonomic projection, not a second validator. Keep ordinary
+  // callable fields visible, while rare runtime escape hatches may be hidden when
+  // they do not help model selection. Leave action/form exclusivity and conditional
+  // requirements to the canonical runtime contract. Some clients
   // simplify nested oneOf/anyOf/if schemas during import and can otherwise hide
   // valid fields (for example batched search queries) or collapse a tool to an
   // untyped argument object.
   const schema = importSafeInputSchema(inputSchema || {});
-  const discoverySchema = name === 'relai_edit' ? hideInternalEditTransportFields(schema) : schema;
-  const compact = stripDiscoveryValidationNoise(stripPublicDescriptions(discoverySchema, PUBLIC_INPUT_DESCRIPTIONS[name] || new Set()));
+  let discoverySchema = name === 'relai_edit' ? hideInternalEditTransportFields(schema) : schema;
+  if (INFERRED_ACTION_TOOLS.has(name) && Array.isArray(discoverySchema.required)) {
+    discoverySchema = { ...discoverySchema, required: discoverySchema.required.filter(field => field !== 'action') };
+  }
+  const compact = compactRepeatedDiscoveryStructures(
+    name,
+    stripDiscoveryValidationNoise(stripPublicDescriptions(discoverySchema, PUBLIC_INPUT_DESCRIPTIONS[name] || new Set()))
+  );
   const withInputForm = annotateInputForm(compact, inputSchema);
-  if (name === 'relai_computer') return compactComputerInputSchema(withInputForm);
-  return annotateActionGrammar(withInputForm, catalogTool);
+  return annotateActionGrammar(withInputForm, catalogTool, name);
 }
 
 function hideInternalEditTransportFields(schema) {
@@ -43,18 +58,23 @@ function hideInternalEditTransportFields(schema) {
   return { ...schema, properties };
 }
 
-function compactComputerInputSchema(schema) {
-  if (!schema?.properties?.action) return schema;
-  return {
-    ...schema,
-    properties: {
-      ...schema.properties,
-      action: {
-        ...schema.properties.action,
-        description: 'Fields: observe(app!,perception,maxElements); activate(app!,semanticObservationId!,targetId!); set_value(app!,semanticObservationId!,targetId!,value!); screenshot(app!,displayId); wait_for_change/wait_for_stable(app!,timeoutMs,pollMs,stableMs); move/click/double_click/right_click(app!,x!,y!,displayId); drag(app!,x!,y!,toX!,toY!,displayId); scroll(app!,direction!,distance,x,y,displayId); type(app!,text!); key(app!,key!); hotkey(app!,keys!); batch(app!,actions!,perception); approve_app/revoke_app(app!). Browsers view-only; terminals/IDEs click-only.'
-      }
-    }
-  };
+function compactRepeatedDiscoveryStructures(name, schema) {
+  if (!schema?.properties) return schema;
+  const properties = { ...schema.properties };
+  if (HIDDEN_INDEPENDENT_DISCOVERY_TOOLS.has(name)) delete properties.independent;
+  if (properties.taskProgress) {
+    properties.taskProgress = { type: 'object', description: 'Plan step patch: id + status; optional detail.' };
+  }
+  if (name === 'relai_edit' && properties.edits?.items) {
+    properties.edits = {
+      ...properties.edits,
+      items: { type: 'object', description: 'Batch item: path plus replacements, oldText/newText, content, or expectedSha256.' }
+    };
+  }
+  if (['relai_ui', 'relai_browser'].includes(name) && properties.target) {
+    properties.target = { type: 'object', description: 'Target: by + value; optional name, exact, index.' };
+  }
+  return { ...schema, properties };
 }
 
 function importSafeInputSchema(inputSchema) {
@@ -95,12 +115,12 @@ function stripDiscoveryValidationNoise(value) {
   return compact;
 }
 
-function annotateActionGrammar(schema, catalogTool) {
+function annotateActionGrammar(schema, catalogTool, name) {
   const actions = (catalogTool?.actions || []).filter(entry => entry.action !== 'default');
   if (!actions.length || !schema?.properties?.action) return schema;
 
   const formHints = actions.map(actionInputFormHint).filter(Boolean);
-  const actionGrammar = compactActionGrammar(actions);
+  const actionGrammar = compactActionGrammar(actions, name);
   return {
     ...schema,
     properties: {
@@ -141,22 +161,31 @@ function inputFormAlternatives(schema) {
   return labels.join(' or ');
 }
 
-function compactActionGrammar(actions) {
-  const fields = [...new Set(actions.flatMap(entry => entry.fields || []))].filter(field => field !== 'action');
-  const actionSpecific = new Set(fields.filter(field => {
-    const owners = actions.filter(entry => entry.fields?.includes(field));
-    const requirements = owners.map(entry => entry.required?.includes(field) === true);
-    return owners.length !== actions.length || new Set(requirements).size > 1;
-  }));
-
+function compactActionGrammar(actions, name) {
+  const shared = sharedActionRequiredFieldHint(name, actions);
   const parts = actions.map(entry => {
-    const fieldsForAction = (entry.fields || [])
-      .filter(field => actionSpecific.has(field))
-      .map(field => `${field}${entry.required?.includes(field) ? '!' : ''}`);
-    return fieldsForAction.length ? `${entry.action}(${fieldsForAction.join(',')})` : '';
-  }).filter(Boolean);
+    const required = new Set(entry.required || []);
+    const fields = [...new Set([
+      ...(entry.required || []),
+      ...((entry.fields || []).filter(field => field === 'operationId'))
+    ])]
+      .filter(field => !['workspace', 'action', shared.field].includes(field))
+      .map(field => `${field}${required.has(field) ? '!' : ''}`);
+    return fields.length ? `${entry.action}(${fields.join(',')})` : entry.action;
+  });
+  const grammar = parts.length ? `Actions: ${parts.join(', ')}. ! required.` : '';
+  return [shared.hint, grammar].filter(Boolean).join(' ');
+}
 
-  return parts.length ? `Fields: ${parts.join('; ')}. ! required.` : '';
+function sharedActionRequiredFieldHint(name, actions) {
+  const field = SHARED_ACTION_REQUIRED_FIELDS[name];
+  if (!field) return { field: '', hint: '' };
+  const requiring = actions.filter(entry => (entry.required || []).includes(field)).map(entry => entry.action);
+  if (requiring.length < 2) return { field: '', hint: '' };
+  const exceptions = actions.filter(entry => !(entry.required || []).includes(field)).map(entry => entry.action);
+  const forHint = `${field}! for ${requiring.join('/')}.`;
+  const exceptHint = exceptions.length ? `${field}! except ${exceptions.join('/')}.` : `${field}! for every action.`;
+  return { field, hint: forHint.length <= exceptHint.length ? forHint : exceptHint };
 }
 
 export { compactPublicInputSchema };

@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 function prepareReleaseAssets(directory = path.join(root, 'dist')) {
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
   const names = releaseArtifactNames(version);
-  const publicAssets = [
+  const builtAssets = [
     names.installer,
     names.portable,
     names.blockmap,
@@ -22,8 +22,10 @@ function prepareReleaseAssets(directory = path.join(root, 'dist')) {
     names.macDmgArm64,
     names.sbom
   ];
-  for (const name of publicAssets) requireFile(path.join(directory, name), `Required release output ${name}`);
+  for (const name of builtAssets) requireFile(path.join(directory, name), `Required release output ${name}`);
 
+  writeMacUpdaterMetadata(directory, names, version);
+  const publicAssets = [...builtAssets, names.macMetadata];
   const checksums = publicAssets.slice().sort().map(name => {
     const digest = crypto.createHash('sha256').update(fs.readFileSync(path.join(directory, name))).digest('hex');
     return `${digest}  ${name}`;
@@ -47,7 +49,43 @@ function prepareReleaseAssets(directory = path.join(root, 'dist')) {
     checksums: names.checksums,
     requireBlockmaps: false
   });
-  return { version, assets: listed, verification: { windows: windowsVerification, linux: linuxVerification } };
+  const macVerification = verifyUpdaterArtifacts({
+    directory,
+    assetList,
+    metadata: names.macMetadata,
+    checksums: names.checksums,
+    requireBlockmaps: false
+  });
+  return {
+    version,
+    assets: listed,
+    verification: { windows: windowsVerification, linux: linuxVerification, mac: macVerification }
+  };
+}
+
+function writeMacUpdaterMetadata(directory, names, version) {
+  const records = [names.macDmgX64, names.macDmgArm64].map(name => {
+    const file = path.join(directory, name);
+    return {
+      name,
+      size: fs.statSync(file).size,
+      sha512: crypto.createHash('sha512').update(fs.readFileSync(file)).digest('base64')
+    };
+  });
+  const primary = records[0];
+  const lines = [
+    `version: ${version}`,
+    'files:',
+    ...records.flatMap(record => [
+      `  - url: ${record.name}`,
+      `    sha512: ${record.sha512}`,
+      `    size: ${record.size}`
+    ]),
+    `path: ${primary.name}`,
+    `sha512: ${primary.sha512}`,
+    ''
+  ];
+  fs.writeFileSync(path.join(directory, names.macMetadata), lines.join('\n'), 'utf8');
 }
 
 function requireFile(file, label) {
@@ -66,4 +104,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
 }
 
-export { prepareReleaseAssets };
+export { prepareReleaseAssets, writeMacUpdaterMetadata };

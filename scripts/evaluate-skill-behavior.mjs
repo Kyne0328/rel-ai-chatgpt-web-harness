@@ -25,6 +25,9 @@ function evaluateSkillBehavior(expectations, observations) {
     if ((item.firstAction ?? null) !== (observed.firstAction ?? null)) {
       failures.push(failure(item, 'first_action', `Expected first action ${JSON.stringify(item.firstAction ?? null)} but observed ${JSON.stringify(observed.firstAction ?? null)}.`));
     }
+    if (item.requiresPlan && !establishesDurablePlan(observed.calls)) {
+      failures.push(failure(item, 'missing_plan', 'Expected the recorded behavior to establish a durable plan.'));
+    }
     if (item.forbiddenTool) {
       const usedTools = new Set([observed.firstTool, ...(observed.tools || [])].filter(Boolean));
       if (usedTools.has(item.forbiddenTool)) {
@@ -63,7 +66,9 @@ function normalizeCases(value, label, options = {}) {
     const firstTool = nullableString(raw.firstTool);
     const firstAction = nullableString(raw.firstAction);
     const tools = Array.isArray(raw.tools) ? raw.tools.map(value => String(value || '').trim()).filter(Boolean) : [];
+    const calls = normalizeCalls(raw.calls);
     const taskMode = normalizeTaskMode(raw.taskMode, skills.length ? 'required' : 'none', `${label} ${key}`);
+    const requiresPlan = raw.requiresPlan === true;
     if (options.requireExpectations !== false) {
       if (skills.length === 0 && taskMode !== 'none') throw new Error(`${label} ${key} without repository skills must use taskMode "none".`);
       if (skills.length === 0 && (firstTool !== null || firstAction !== null)) throw new Error(`${label} ${key} without repository skills must not expect a repository tool call.`);
@@ -82,7 +87,9 @@ function normalizeCases(value, label, options = {}) {
       firstTool,
       firstAction,
       taskMode,
+      requiresPlan,
       tools,
+      calls,
       forbiddenTool: nullableString(raw.forbiddenTool)
     };
   });
@@ -94,6 +101,21 @@ function normalizeTaskMode(value, fallback, label) {
     throw new Error(`${label} has invalid taskMode ${JSON.stringify(value)}.`);
   }
   return mode;
+}
+
+function normalizeCalls(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(call => ({
+    tool: String(call?.tool || '').trim(),
+    action: String(call?.action || '').trim(),
+    taskProgress: call?.taskProgress === true
+  })).filter(call => call.tool);
+}
+
+function establishesDurablePlan(calls) {
+  return (Array.isArray(calls) ? calls : []).some(call =>
+    (call.tool === 'relai_work' && ['begin', 'plan'].includes(call.action)) || call.taskProgress === true
+  );
 }
 
 function normalizeSkills(value, label) {

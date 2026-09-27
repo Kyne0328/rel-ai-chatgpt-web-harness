@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import './styles.css';
 import { Icon } from '../../components/icons.js';
-import { pillClass } from '../../components/pill.js';
-import { statusTone } from '../../status-tone.js';
+import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { postJson } from '../../api.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref } from '../../router.js';
@@ -18,7 +18,7 @@ import {
 import { DeleteProjectModal, ProjectFormModal, RepairProjectModal } from './react-modals.js';
 
 const h = React.createElement;
-const SparkChart = lazy(() => import('../../components/charts.js').then(module => ({ default: module.SparkChart })));
+const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
 const WORKSPACE_STORE_KEYS = Object.freeze(['config', 'health', 'live']);
 
 export function createWorkspacesRoute(useDashboardSlices) {
@@ -28,10 +28,14 @@ export function createWorkspacesRoute(useDashboardSlices) {
 }
 
 function WorkspacesView({ data = {} }) {
-  const allWorkspaces = Array.isArray(data.config?.workspaces) ? data.config.workspaces : [];
+  const allWorkspaces = useMemo(
+    () => Array.isArray(data.config?.workspaces) ? data.config.workspaces : [],
+    [data.config?.workspaces]
+  );
   const workspaceFilter = getWorkspaceFilter();
   const routeParams = getRouteParams();
   const focusRequest = routeParams.get('focus') || '';
+  const focusAlias = routeParams.get('workspace') || '';
   const createRequest = routeParams.get('create') === '1';
   const workspaces = useMemo(
     () => orderedWorkspaces(allWorkspaces, workspaceFilter),
@@ -41,7 +45,7 @@ function WorkspacesView({ data = {} }) {
     () => new Map(allWorkspaces.map(workspace => [workspace.alias, workspace])),
     [allWorkspaces]
   );
-  const health = data.health || {};
+  const health = useMemo(() => data.health || {}, [data.health]);
   const healthByAlias = useMemo(
     () => new Map((Array.isArray(health.workspaces) ? health.workspaces : []).map(item => [item.alias, item])),
     [health.workspaces]
@@ -57,9 +61,8 @@ function WorkspacesView({ data = {} }) {
   const analyticsState = useWorkspaceAnalytics(analyticsAliases, Number(data.live?.revisions?.task || 0));
 
   useLayoutEffect(() => {
-    const alias = routeParams.get('workspace') || '';
-    if (!alias || focusRequest !== '1') return;
-    const card = document.querySelector(`[data-workspace-card="${cssEscape(alias)}"]`);
+    if (!focusAlias || focusRequest !== '1') return;
+    const card = document.querySelector(`[data-workspace-card="${cssEscape(focusAlias)}"]`);
     if (!(card instanceof HTMLElement)) return;
     card.tabIndex = -1;
     card.classList.add('workspace-card-focused');
@@ -68,7 +71,7 @@ function WorkspacesView({ data = {} }) {
     replaceRouteParams({ focus: null });
     const timer = window.setTimeout(() => card.classList.remove('workspace-card-focused'), 1800);
     return () => window.clearTimeout(timer);
-  }, [workspaceFilter, focusRequest]);
+  }, [focusAlias, focusRequest]);
 
   useEffect(() => {
     if (!createRequest) return;
@@ -83,7 +86,6 @@ function WorkspacesView({ data = {} }) {
 
   return h('div', { className: 'section', 'data-workspaces-react': '' },
     h('div', { className: 'feature-toolbar workspace-toolbar' },
-      h('p', null, 'See each project’s status and common actions.'),
       h('div', { className: 'section-head-actions' },
         workspaceFilter ? h('a', {
           className: 'buttonlike secondary compact-button workspace-focus-chip',
@@ -147,6 +149,7 @@ function WorkspacesView({ data = {} }) {
 const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, view, workspace, onEdit, onRepair }) {
   const [folderBusy, setFolderBusy] = useState(false);
   const repository = repositorySummary(view.operational);
+  const pathParts = splitWorkspacePath(view.path);
   const notices = [];
   if (view.sessionActive) notices.push(view.taskHint ? `Active session: ${view.taskHint}` : 'Active editing session');
   if (view.cautionCount > 0) notices.push(`${view.cautionCount} protected configuration change${view.cautionCount === 1 ? '' : 's'} recorded`);
@@ -162,7 +165,10 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
     h('header', { className: 'workspace-card-head' },
       h('div', { className: 'workspace-identity' },
         h('strong', null, view.alias),
-        h('div', { className: 'workspace-path', title: view.path }, view.path)
+        h('div', { className: 'workspace-path', title: view.path },
+          h('span', { className: 'workspace-path-prefix' }, pathParts.prefix),
+          h('span', { className: 'workspace-path-tail' }, pathParts.tail)
+        )
       ),
       h(StatusPill, { label: view.statusLabel })
     ),
@@ -182,19 +188,25 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
     h('footer', { className: 'workspace-actions workspace-primary-actions' },
       document.documentElement.dataset.surface === 'desktop' ? h('button', {
         className: 'secondary', type: 'button', disabled: folderBusy, onClick: event => { void openFolder(event); }
-      }, h(CanonicalIcon, { name: 'folder' }), h('span', null, folderBusy ? 'Opening…' : 'Project folder')) : null,
-      h('button', { type: 'button', onClick: event => onEdit('edit', workspace, event.currentTarget) }, 'Edit project'),
+      }, h(Icon, { name: 'folder', size: 14 }), h('span', null, folderBusy ? 'Opening…' : 'Project folder')) : null,
+      h('button', { className: 'secondary', type: 'button', onClick: event => onEdit('edit', workspace, event.currentTarget) }, 'Edit project'),
       h('a', { className: 'buttonlike secondary', href: routeHref('usage', { workspace: view.alias }) }, 'Analytics')
     )
   );
 });
+
+function splitWorkspacePath(value) {
+  const path = String(value || '');
+  const separator = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  if (separator < 0) return { prefix: '', tail: path };
+  return { prefix: path.slice(0, separator + 1), tail: path.slice(separator + 1) };
+}
 
 function WorkspaceReadiness({ available, repository }) {
   return h('section', { className: `workspace-readiness${available ? ' compact good' : ' bad'}`, 'aria-label': 'Project status' },
     available ? null : h('div', { className: 'workspace-access-summary' },
       h('span', { className: 'workspace-readiness-icon', 'aria-hidden': 'true' }, h(Icon, { name: 'warning', size: 16 })),
       h('div', { className: 'workspace-readiness-copy' },
-        h('span', { className: 'workspace-readiness-kicker' }, 'Project access'),
         h('strong', null, 'Project folder unavailable'),
         h('p', null, 'Fix the project folder before using this project.')
       )
@@ -242,7 +254,7 @@ function EmptyWorkspaceState({ onAdd }) {
   return h('section', { className: 'workspace-empty-state' },
     h('div', { className: 'workspace-empty-mark', 'aria-hidden': 'true' }, h(Icon, { name: 'add', size: 24 })),
     h('strong', null, 'Add your first project'),
-    h('p', null, 'Select a local folder and give it a short name. Rel.AI detects Git features and available checks when they are present.'),
+    h('p', null, 'Select a local folder and give it a short name.'),
     h('button', { className: 'primary', type: 'button', onClick: onAdd }, 'Add project')
   );
 }
@@ -251,10 +263,6 @@ function Metric({ label, value, meta, tone }) {
   return h('div', { className: `metric ${tone}` }, h('div', { className: 'metric-label' }, label), h('div', { className: 'metric-value' }, value), h('div', { className: 'metric-meta' }, meta));
 }
 
-function StatusPill({ label, tone = '' }) {
-  const cls = tone || pillClass(label);
-  return h('span', { className: `status-pill ${cls}`.trim() }, label, h('span', { className: 'sr-only' }, ` (${statusTone(label)})`));
-}
 
 function WorkspaceAnalytics({ scope }) {
   const completed = Number(scope?.completed || 0);
@@ -331,13 +339,10 @@ function useWorkspaceAnalytics(aliases, taskRevision = 0) {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [key, taskRevision]);
+  }, [aliases, key, taskRevision]);
   return state;
 }
 
-function CanonicalIcon({ name }) {
-  return h(Icon, { name });
-}
 function findingDotClass(severity) { return severity === 'error' ? 'bad' : severity === 'warning' ? 'warn' : ''; }
 function cssEscape(value) { return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : String(value).replace(/[^a-zA-Z0-9_-]/g, character => `\\${character}`); }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; }

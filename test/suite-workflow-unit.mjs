@@ -125,7 +125,7 @@ async function case_workflow_context_ranking_unit() {
     const assert = __m0.default;
   
     const __m1 = await import("../src/bridge/searchPlanner.js");
-    const { rankMatchGroups } = __m1;
+    const { rankMatchGroups, resolveSearchPlan } = __m1;
   
   const groups = [
     { path: 'back-end/src/user.js', matches: [{ line: 1 }] },
@@ -139,6 +139,8 @@ async function case_workflow_context_ranking_unit() {
   });
   assert.equal(ranked[0].path, 'front-end/src/user-card.js', 'task-owned/current-package matches should receive a ranking boost');
   assert.deepEqual(new Set(ranked.map(item => item.path)), new Set(groups.map(item => item.path)), 'workflow ranking must not hard-filter search results');
+  assert.equal(resolveSearchPlan({}, { matchCount: 1 }).contextArgs.maxBytes, 16 * 1024, 'focused auto-context must stay within the agent context budget');
+  assert.equal(resolveSearchPlan({}, { matchCount: 101 }).contextArgs.maxBytes, 12 * 1024, 'broad auto-context must use the tighter budget');
   
   console.log('Workflow-aware context ranking tests passed.');
 }
@@ -438,7 +440,7 @@ async function case_workflow_skill_guidance_unit() {
   const text = Object.fromEntries(files.map(file => [file, fs.readFileSync(file, 'utf8')]));
   const workflow = text['skills/rel-ai-workflow/SKILL.md'];
   assert.doesNotMatch(workflow, /^## Standard workflow$/m, 'routing skill must not present one mandatory numbered workflow');
-  assert.match(workflow, /agent chooses|agent.*next action/i, 'routing skill must leave next-action judgment with the agent');
+  assert.match(workflow, /choose the next action from current evidence/i, 'routing skill must leave next-action judgment with the agent');
   for (const label of ['documentation', 'bugfix', 'feature', 'investigation', 'release']) {
     assert.match(workflow.toLowerCase(), new RegExp(label), `routing skill must include a shortest-path ${label} example`);
   }

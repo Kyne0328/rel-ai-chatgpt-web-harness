@@ -40,12 +40,13 @@
   install_mode_done:
 !macroend
 
-!macro customInstall
-  ; Safe for manual installs too: deleting a missing update marker is a no-op.
-  Delete "$APPDATA\Rel.AI MCP\update-installing.json"
-!macroend
+; In-app updates keep update-installing.json through file replacement so the
+; detached status window can distinguish "files installed" from "updated app
+; started successfully". The replacement app clears it only after startup.
 
 Function .onInstFailed
-  ; Safe for manual installs too: deleting a missing update marker is a no-op.
+  ; Installer failure must fail open: clearing the marker lets the existing
+  ; shortcut start normally, while the detached status helper treats the
+  ; pre-start disappearance as an interrupted update.
   Delete "$APPDATA\Rel.AI MCP\update-installing.json"
 FunctionEnd

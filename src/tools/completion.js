@@ -13,7 +13,6 @@ const WORK_FINISH_SOURCE = 'relai_work:finish';
 const VALIDATE_CHECKS_SOURCE = 'relai_validate:checks';
 
 async function completeTask(config, args = {}, handlerContext = {}) {
-  const workspace = resolveWorkspace(config, args.workspace);
   const requestedTaskId = normalizeTaskId(args.work_id);
   if (!requestedTaskId) {
     throw taskError('TASK_ID_REQUIRED', 'relai_work with action "finish" requires the work_id returned by relai_work with action "begin".');
@@ -22,6 +21,8 @@ async function completeTask(config, args = {}, handlerContext = {}) {
   const signal = handlerContext.signal || getCurrentTaskAbortSignal();
   signal?.throwIfAborted?.();
   const previous = readTaskHistorySession(config, requestedTaskId);
+  const workspaceAlias = String(previous?.workspace || '').trim();
+  const workspace = workspaceAlias ? resolveWorkspace(config, workspaceAlias) : null;
   if (previous?.completionKnown === true || previous?.status === 'completed') {
     return finalizeDuplicateCompletion(config, workspace, context, previous);
   }
@@ -34,6 +35,7 @@ async function completeTask(config, args = {}, handlerContext = {}) {
   }
 
   const summary = normalizeCompletionSummary(args.summary);
+  if (!workspace) return finalizeProjectlessTask(summary);
   const authority = readTaskIntegrity(config, requestedTaskId, workspace.alias);
   const validation = await factualValidationState(config, workspace, authority, { signal });
   return finalizeValidatedTask(config, workspace, {
@@ -46,6 +48,35 @@ async function completeTask(config, args = {}, handlerContext = {}) {
     completionSource: WORK_FINISH_SOURCE,
     signal
   });
+}
+
+function finalizeProjectlessTask(summary) {
+  const completion = requestCurrentTaskCompletion({
+    summary,
+    validationStatus: 'not_required',
+    validationLevel: '',
+    validationAt: '',
+    changedFiles: [],
+    residualChangedFiles: [],
+    residualState: 'clean'
+  });
+  return {
+    ok: true,
+    work_id: completion.taskId,
+    duplicate: completion.duplicate === true,
+    completionKnown: true,
+    endReason: 'explicit_completion',
+    completionSource: WORK_FINISH_SOURCE,
+    summary,
+    validationStatus: 'not_required',
+    validationLevel: '',
+    validationAt: '',
+    validationFingerprint: '',
+    changedFiles: [],
+    residualChangedFiles: [],
+    residualState: 'clean',
+    message: completionMessage(WORK_FINISH_SOURCE, completion.duplicate === true, [])
+  };
 }
 
 async function finalizeValidatedTask(config, workspace, options = {}) {
@@ -141,10 +172,10 @@ function finalizeDuplicateCompletion(config, workspace, context, previous) {
     residualChangedFiles: Array.isArray(previous.residualChangedFiles) ? previous.residualChangedFiles : [],
     residualState: String(previous.residualState || (Array.isArray(previous.residualChangedFiles) && previous.residualChangedFiles.length ? 'preserved_uncommitted' : 'clean'))
   });
-  clearSessionPolicy(config, workspace.alias, context.taskId);
+  if (workspace) clearSessionPolicy(config, workspace.alias, context.taskId);
   return {
     ok: true,
-    workspace: workspace.alias,
+    ...(workspace ? { workspace: workspace.alias } : {}),
     work_id: context.taskId,
     duplicate: true,
     completionKnown: true,

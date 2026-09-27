@@ -1,0 +1,154 @@
+[
+  {
+    "id": "architecture-audit",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow",
+      "rel-ai-investigation"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-debugging",
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 10,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "oauth-regression",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow",
+      "rel-ai-debugging",
+      "rel-ai-verification"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 12,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "persistent-dev-server",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow",
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 8,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "one-shot-build",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow",
+      "rel-ai-verification"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-dev-process"
+    ],
+    "forbiddenTools": [
+      "relai_process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 7,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "small-typo",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-planning",
+      "rel-ai-investigation",
+      "rel-ai-debugging",
+      "rel-ai-verification",
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 6,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "specialist-pressure",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-planning",
+      "rel-ai-investigation",
+      "rel-ai-debugging",
+      "rel-ai-verification",
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 6,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "read-only-module-explanation",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow",
+      "rel-ai-investigation"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-debugging",
+      "rel-ai-verification",
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 8,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "non-repository-writing",
+    "taskMode": "forbidden",
+    "expectedSkills": [],
+    "forbiddenSkills": [
+      "rel-ai-workflow",
+      "rel-ai-planning",
+      "rel-ai-investigation",
+      "rel-ai-debugging",
+      "rel-ai-verification",
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 0,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "officecli-word-document",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow",
+      "officecli"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 10,
+    "maxDuplicateCalls": 0
+  },
+  {
+    "id": "officecli-deck",
+    "taskMode": "required",
+    "expectedSkills": [
+      "rel-ai-workflow",
+      "officecli"
+    ],
+    "forbiddenSkills": [
+      "rel-ai-dev-process"
+    ],
+    "requireLiveTrace": true,
+    "maxCalls": 10,
+    "maxDuplicateCalls": 0
+  }
+]

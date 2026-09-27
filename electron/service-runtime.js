@@ -2,7 +2,7 @@ import { normalizePort, normalizeTunnelId, readGuiConfig } from './launcher-util
 import { desktopStatusFailure, initialDesktopStatus } from './desktop-status.js';
 import { createPerformanceBreakdown } from '../src/performanceObservability.js';
 
-const LOCAL_READY_TIMEOUT_MS = 5_000;
+const LOCAL_READY_TIMEOUT_MS = 25_000;
 const LOCAL_READY_POLL_MS = 100;
 const LOCAL_READY_REQUEST_TIMEOUT_MS = 750;
 const STOP_STARTUP_WAIT_TIMEOUT_MS = 16_000;
@@ -263,16 +263,19 @@ function createDesktopServiceRuntime(deps) {
     if (runToken !== lifecycleToken || result.cancelled) return getCurrentStatus();
 
     recordDesktopTiming(runtimeLogs, 'connection_start', timing?.snapshot(), true);
+    const degraded = result.state === 'degraded';
     setStatus({
       serverRunning: true,
-      tunnelStatus: 'running',
+      tunnelStatus: degraded ? 'degraded' : 'running',
       tunnelId: guiConfig.tunnelId,
       tunnelHealthUrl: result.healthUrl || '',
+      tunnelRecoveryMode: result.recoveryMode || '',
+      tunnelHealth: result.tunnelHealth || null,
       mcpUrl: '',
       localMcpUrl: `${localUrl}/mcp`,
       authenticationRequired: false,
-      error: '',
-      errorCode: '',
+      error: degraded ? (result.error || 'OpenAI tunnel-client is recovering the secure tunnel in place.') : '',
+      errorCode: degraded ? (result.errorCode || 'tunnel_connection_interrupted') : '',
       localUrl
     });
     return getCurrentStatus();
@@ -433,7 +436,8 @@ async function waitForPromise(promise, timeoutMs) {
 }
 
 function isRetryableLocalStartupError(error) {
-  return String(error?.code || '') === 'REL_AI_SERVICE_SPAWN_TIMEOUT';
+  const code = String(error?.code || '');
+  return code === 'REL_AI_SERVICE_SPAWN_TIMEOUT' || code === 'EADDRINUSE';
 }
 
 function tunnelErrorCode(error, errorCodes) {

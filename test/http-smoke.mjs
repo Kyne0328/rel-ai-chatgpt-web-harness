@@ -22,6 +22,20 @@ const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-http-smoke-'));
 const profile = path.join(stateDir, 'connection.json');
 const originalProfile = `${JSON.stringify({ host: 'sentinel.invalid', port: 65535 }, null, 2)}\n`;
 fs.writeFileSync(profile, originalProfile);
+
+async function retrySqliteBusy(operation, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      const result = operation();
+      if (result !== false) return result;
+    } catch (error) {
+      if (error?.errcode !== 5 && error?.code !== 'SQLITE_BUSY') throw error;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
 const configPath = path.join(stateDir, 'config.json');
 const config = JSON.parse(fs.readFileSync(path.join(root, 'examples', 'config.example.json'), 'utf8'));
 config.stateDir = stateDir;
@@ -88,9 +102,10 @@ try {
   assert.equal(discovery.body.result?._meta?.[SERVER_INFO_META_KEY]?.version, expectedVersion, 'HTTP discovery must report the canonical package version');
   const serverInstructions = discovery.body.result?.instructions || '';
   assert.match(serverInstructions, /work_id is durable task attribution/i);
-  assert.match(serverInstructions, /substantial or multi-step repository work/i);
-  assert.match(serverInstructions, /start relai_work begin/i);
+  assert.match(serverInstructions, /meaningful project goal/i);
+  assert.match(serverInstructions, /begin relai_work.*non-empty steps/i);
   assert.match(serverInstructions, /carry work_id/i);
+  assert.match(serverInstructions, /Projectless one-shot utility\/control work runs taskless/i);
   assert.match(serverInstructions, /approval/i);
   assert.match(serverInstructions, /authoritative evidence/i);
   assert.match(serverInstructions, /validation is factual evidence, not execution permission/i);
@@ -156,13 +171,19 @@ try {
   assert.equal(status.body.result?.structuredContent?.ok, true);
   assert.equal(status.body.result?._meta?.relai, undefined, 'native status results must not carry Rel.AI component hydration metadata');
 
-  const missingWorkspace = await client.request('tools/call', {
+  const projectless = await client.request('tools/call', {
     name: 'relai_work',
-    arguments: { action: 'begin' }
+    arguments: { action: 'begin', title: 'Projectless HTTP smoke goal' }
   });
-  assert.equal(missingWorkspace.response.status, 200, JSON.stringify(missingWorkspace.body));
-  assert.equal(missingWorkspace.body.result?.isError, true, JSON.stringify(missingWorkspace.body));
-  assert.match(JSON.stringify(missingWorkspace.body.result || {}), /workspace/i, 'public schema validation must reject missing begin workspace before runtime dispatch');
+  assert.equal(projectless.response.status, 200, JSON.stringify(projectless.body));
+  assert.equal(projectless.body.result?.isError, false, JSON.stringify(projectless.body));
+  assert.equal(projectless.body.result?.structuredContent?.workspace, undefined, 'work.begin must support a durable goal before a project is selected');
+  assert.ok(projectless.body.result?.structuredContent?.work_id);
+  const projectlessCancelled = await client.request('tools/call', {
+    name: 'relai_work',
+    arguments: { action: 'cancel', work_id: projectless.body.result.structuredContent.work_id, reason: 'HTTP smoke cleanup' }
+  });
+  assert.equal(projectlessCancelled.body.result?.isError, false, JSON.stringify(projectlessCancelled.body));
 
   const started = await client.request('tools/call', {
     name: 'relai_work',
@@ -279,32 +300,32 @@ try {
   assert.equal(synchronizedDashboard.mcpConnection.toolManifestVersion, liveDashboard.mcpConnection.toolManifestVersion);
 
   const workspaceStateConfig = { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') };
-  writeSession(getTaskHistoryDir(workspaceStateConfig), {
+  assert.notEqual(await retrySqliteBusy(() => writeSession(getTaskHistoryDir(workspaceStateConfig), {
     id: 'secondary-history', workspace: 'secondary', status: 'completed', title: 'Secondary workspace history'
-  });
-  assert.equal(recordLocalToolOutcome(workspaceStateConfig, {
+  })), false);
+  assert.equal(await retrySqliteBusy(() => recordLocalToolOutcome(workspaceStateConfig, {
     tool: 'relai_read', operationName: 'read', taskIntent: 'review', workspace: 'secondary', ok: true, durationMs: 7, at: new Date().toISOString()
-  }), true);
-  assert.equal(recordLocalTaskCompletion(workspaceStateConfig, {
+  })), true);
+  assert.equal(await retrySqliteBusy(() => recordLocalTaskCompletion(workspaceStateConfig, {
     workspace: 'secondary', taskIntent: 'review', at: new Date().toISOString()
-  }), true);
+  })), true);
   const analyticsMonth = new Date().toISOString().slice(0, 7);
-  const analyticsBeforeDelete = readLocalUsageSnapshot(workspaceStateConfig, analyticsMonth);
+  const analyticsBeforeDelete = await retrySqliteBusy(() => readLocalUsageSnapshot(workspaceStateConfig, analyticsMonth));
   const secondaryAnalyticsCalls = Number(analyticsBeforeDelete.workspaces.find(row => row.workspace === 'secondary')?.toolCalls || 0);
   const secondaryCompletedTasks = Number(analyticsBeforeDelete.workspaceTaskIntents.filter(row => row.workspace === 'secondary').reduce((sum, row) => sum + Number(row.tasks || 0), 0));
   assert.ok(secondaryAnalyticsCalls > 0, 'workspace deletion regression must seed workspace-scoped analytics');
   assert.ok(analyticsBeforeDelete.workspaceActivityMatrix.some(row => row.workspace === 'secondary' && row.useCase === 'explore'), 'workspace deletion regression must seed workspace use-case analytics');
   assert.ok(secondaryCompletedTasks > 0, 'workspace deletion regression must seed workspace work-type analytics');
-  withStateDatabase(workspaceStateConfig, db => {
+  assert.notEqual(await retrySqliteBusy(() => withStateDatabase(workspaceStateConfig, db => {
     db.prepare('INSERT OR REPLACE INTO task_integrity_tasks(task_id,updated_at_ms,payload) VALUES(?,?,?)')
       .run('secondary-history', Date.now(), JSON.stringify({ version: 1, taskId: 'secondary-history', workspace: 'secondary' }));
     db.prepare('INSERT OR REPLACE INTO workspace_integrity(workspace,updated_at_ms,payload) VALUES(?,?,?)')
       .run('secondary', Date.now(), JSON.stringify({ version: 1, workspace: 'secondary', files: {} }));
-  }, { transaction: true });
-  assert.equal(recordTaskValidationAffinity(workspaceStateConfig, 'secondary', {
+  }, { transaction: true })), false);
+  assert.equal((await retrySqliteBusy(() => recordTaskValidationAffinity(workspaceStateConfig, 'secondary', {
     workflowEvidence: [{ kind: 'check', command: 'npm test' }]
-  }, { validationStatus: 'passed', changedFiles: ['src/secondary.js'] })?.ok, true);
-  assert.ok(learnedValidationChecks(workspaceStateConfig, 'secondary', ['src/secondary.js']).length > 0,
+  }, { validationStatus: 'passed', changedFiles: ['src/secondary.js'] })))?.ok, true);
+  assert.ok((await retrySqliteBusy(() => learnedValidationChecks(workspaceStateConfig, 'secondary', ['src/secondary.js']))).length > 0,
     'workspace deletion regression must seed workspace validation affinity');
 
   const secondaryIndexDirectory = path.dirname(repositoryIndexPath({ stateDir }, { alias: 'secondary', path: secondaryPath }));

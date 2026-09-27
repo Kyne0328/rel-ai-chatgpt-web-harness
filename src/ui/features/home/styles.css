@@ -44,19 +44,28 @@
 .task-overview { @apply grid items-center gap-4 p-4; grid-template-columns: 42px minmax(0,1fr) auto; }
 .task-overview-mark { @apply grid size-10 place-items-center rounded-xl text-lg font-bold; background: var(--ui-selection-background); color: var(--ui-action-primary); border: 1px solid color-mix(in srgb, var(--ui-action-primary) 30%, transparent); }
 .task-overview-spinner {
+  position: relative;
   display: block;
-  width: 18px;
-  height: 18px;
-  border: 2px solid color-mix(in srgb, var(--ui-action-primary) 28%, transparent);
-  border-top-color: currentColor;
+  width: 10px;
+  height: 10px;
   border-radius: 999px;
-  animation: spin .8s linear infinite;
+  background: var(--ui-action-primary);
+}
+.task-overview-spinner::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border: 1.5px solid var(--ui-action-primary);
+  border-radius: inherit;
+  animation: agent-heartbeat 2s var(--ease-out) infinite;
 }
 .task-overview.attention .task-overview-mark { background: var(--ui-status-danger-background); color: var(--ui-status-danger-foreground); border-color: color-mix(in srgb, var(--ui-status-danger-foreground) 30%, transparent); }
 .task-overview-copy h3 { @apply text-[15px]; }
 .task-overview-copy p { @apply mt-1 text-[13px] leading-6; color: var(--ui-text-secondary); }
+.task-overview-summary { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .task-overview-meta { @apply flex flex-col items-end gap-1 text-[12px]; color: var(--ui-text-secondary); }
 .task-overview-meta strong { @apply text-[14px]; color: var(--ui-text-primary); }
+.task-overview-link { @apply inline-flex min-h-11 items-center text-[12px] font-semibold; color: var(--ui-action-primary); }
 .attention-list { @apply p-0; }
 .attention-item { @apply grid min-h-16 items-center gap-3 border-b px-4 py-3 last:border-b-0; grid-template-columns: auto minmax(0,1fr) auto; border-color: var(--ui-border-subtle); }
 .attention-icon { @apply size-2 rounded-full; background: var(--ui-status-warning-foreground); }
@@ -120,6 +129,8 @@
 
 @media (max-width: 520px) {
   .overview-title { font-size: 28px; }
+  .task-overview-copy p { font-size: 0.875rem; line-height: 1.5; }
+  .activity-name { font-size: 0.8125rem; }
   .home-analytics-head, .home-analytics-pulse-head { @apply items-stretch flex-col; }
   .home-analytics-head .compact-button { @apply w-full; }
   .home-analytics-pulse-head small { @apply self-start; }

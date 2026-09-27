@@ -379,23 +379,37 @@ async function case_dashboard_clock_unit() {
     constructor(attributes = {}) {
       this.attributes = new Map(Object.entries(attributes));
       this.textContent = '';
+      this.isConnected = true;
     }
     hasAttribute(name) { return this.attributes.has(name); }
     getAttribute(name) { return this.attributes.get(name) ?? null; }
+    setAttribute(name, value) { this.attributes.set(name, String(value)); }
+    removeAttribute(name) { this.attributes.delete(name); }
+    matches() { return this.hasAttribute('data-clock-elapsed-start') || this.hasAttribute('data-clock-relative'); }
+    querySelectorAll() { return []; }
   }
   
   class FakeDocument {
     constructor(nodes) {
       this.nodes = nodes;
+      this.body = this;
       this.visibilityState = 'visible';
       this.listeners = new Map();
     }
-    querySelectorAll() { this.queryCount = (this.queryCount || 0) + 1; return this.nodes; }
+    querySelectorAll() { this.queryCount = (this.queryCount || 0) + 1; return this.nodes.filter(node => node.matches()); }
     addEventListener(name, listener) { this.listeners.set(name, listener); }
     removeEventListener(name, listener) {
       if (this.listeners.get(name) === listener) this.listeners.delete(name);
     }
     emit(name) { this.listeners.get(name)?.(); }
+  }
+
+  let mutationObserver = null;
+  class FakeMutationObserver {
+    constructor(callback) { this.callback = callback; mutationObserver = this; }
+    observe(target, options) { this.target = target; this.options = options; }
+    disconnect() { this.disconnected = true; }
+    emit(records) { this.callback(records); }
   }
   
   assert.equal(parseClockTime('2026-07-28T10:00:00.000Z'), Date.parse('2026-07-28T10:00:00.000Z'));
@@ -418,11 +432,13 @@ async function case_dashboard_clock_unit() {
   const cleared = [];
   const elapsedNode = new FakeNode({ 'data-clock-elapsed-start': '2026-07-28T10:00:00.000Z' });
   const relativeNode = new FakeNode({ 'data-clock-relative': '2026-07-28T09:59:00.000Z' });
+  const boundaryNode = new FakeNode({ 'data-clock-relative': '2026-07-28T09:59:06.000Z' });
+  const roleNode = new FakeNode({ 'data-clock-elapsed-start': '2026-07-28T10:00:02.000Z' });
   const completedNode = new FakeNode({
     'data-clock-elapsed-start': '2026-07-28T09:00:00.000Z',
     'data-clock-elapsed-end': '2026-07-28T09:00:30.000Z'
   });
-  const documentRef = new FakeDocument([elapsedNode, relativeNode, completedNode]);
+  const documentRef = new FakeDocument([elapsedNode, relativeNode, boundaryNode, roleNode, completedNode]);
   let ticks = 0;
   const clock = createDashboardClock({
     documentRef,
@@ -437,6 +453,7 @@ async function case_dashboard_clock_unit() {
       cleared.push(id);
       timers.delete(id);
     },
+    MutationObserverRef: FakeMutationObserver,
     onTick() { ticks += 1; }
   });
   
@@ -446,15 +463,37 @@ async function case_dashboard_clock_unit() {
   assert.equal([...timers.values()][0].delay, 1000);
   assert.equal(elapsedNode.textContent, '5s');
   assert.equal(relativeNode.textContent, '1m ago');
+  assert.equal(boundaryNode.textContent, 'now');
+  assert.equal(roleNode.textContent, '3s');
   assert.equal(completedNode.textContent, '30s');
+  assert.equal(mutationObserver?.options?.attributes, true, 'clock must observe clock-role attribute changes on reused React nodes');
+  assert.deepEqual(mutationObserver?.options?.attributeFilter, ['data-clock-elapsed-start', 'data-clock-elapsed-end', 'data-clock-relative']);
   const queriesAfterStart = documentRef.queryCount;
-  
+
+  now = Date.parse('2026-07-28T10:00:07.000Z');
+  [...timers.values()][0].callback();
+  assert.equal(boundaryNode.textContent, '1m ago', 'relative labels must change at their own display boundary instead of an unrelated global minute tick');
+  assert.equal(documentRef.queryCount, queriesAfterStart, 'relative refresh must update registered nodes without rescanning the document');
+  const queriesAfterBoundary = documentRef.queryCount;
+
+  const lateRelativeNode = new FakeNode({ 'data-clock-relative': '2026-07-28T09:55:00.000Z' });
+  documentRef.nodes.push(lateRelativeNode);
+  mutationObserver.emit([{ type: 'childList', target: documentRef, addedNodes: [lateRelativeNode] }]);
   now = Date.parse('2026-07-28T10:01:10.000Z');
   [...timers.values()][0].callback();
   assert.equal(elapsedNode.textContent, '1m 10s');
   assert.equal(relativeNode.textContent, '2m ago');
+  assert.equal(lateRelativeNode.textContent, '6m ago', 'late-mounted task times must refresh without selecting a task');
   assert.equal(completedNode.textContent, '30s', 'completed durations must remain anchored to completion time');
-  assert.equal(documentRef.queryCount, queriesAfterStart, 'clock ticks must not rescan the whole document');
+  assert.equal(documentRef.queryCount, queriesAfterBoundary, 'clock must rely on registered nodes and mutation observation instead of periodic document rescans');
+
+  roleNode.removeAttribute('data-clock-elapsed-start');
+  roleNode.setAttribute('data-clock-relative', '2026-07-28T10:01:10.000Z');
+  mutationObserver.emit([{ type: 'attributes', target: roleNode, addedNodes: [] }]);
+  assert.equal(roleNode.textContent, 'now', 'a reused task node must switch immediately from elapsed time to relative time');
+  now = Date.parse('2026-07-28T10:02:11.000Z');
+  [...timers.values()][0].callback();
+  assert.equal(roleNode.textContent, '1m ago', 'a reused task node must keep updating after its clock role changes');
   
   const ticksBeforeHidden = ticks;
   documentRef.visibilityState = 'hidden';
@@ -463,11 +502,11 @@ async function case_dashboard_clock_unit() {
   assert.equal(timers.size, 0);
   assert.equal(cleared.length, 1);
   
-  now = Date.parse('2026-07-28T10:02:10.000Z');
+  now = Date.parse('2026-07-28T10:03:10.000Z');
   documentRef.visibilityState = 'visible';
   documentRef.emit('visibilitychange');
   assert.equal(clock.isRunning(), true);
-  assert.equal(elapsedNode.textContent, '2m 10s', 'resume must recompute from timestamps instead of increment counters');
+  assert.equal(elapsedNode.textContent, '3m 10s', 'resume must recompute from timestamps instead of increment counters');
   assert.ok(ticks > ticksBeforeHidden);
   assert.equal(timers.size, 1);
   

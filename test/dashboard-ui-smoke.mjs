@@ -17,6 +17,11 @@ const router = read('src/ui/router.js');
 const settingsReact = read('src/ui/features/settings/react.js');
 assert.match(settingsReact, /runtimeCompatibilityNotice/, 'About must surface repository/runtime skew only when compatibility metadata reports a mismatch');
 assert.match(settingsReact, /about-runtime-mismatch/, 'Runtime/source skew needs a bounded developer-facing notice instead of staying invisible');
+assert.match(settingsReact, /Beta \/ pre-release \(developers & testers\)/, 'the beta release option must identify its developer/tester audience before selection');
+assert.match(settingsReact, /updateChannel === 'beta' \? h\('div', \{[\s\S]*className: 'application-update-beta-warning'[\s\S]*role: 'alert'/, 'selecting beta must show a prominent accessible warning');
+assert.match(settingsReact, /serious bugs or incomplete changes/i, 'the beta warning must state the risk of severe breakage plainly');
+assert.match(settingsReact, /reinstall if a beta build fails/i, 'the beta warning must preserve the recovery consequence');
+assert.match(settingsReact, /Use Stable for normal work/, 'the beta warning must clearly recommend Stable for normal use');
 assert.equal(runtimeCompatibilityNotice(
   { applicationVersion: '1.1.3' },
   { applicationVersion: '1.1.3' },
@@ -79,6 +84,8 @@ assert.match(extensionsReact, /Installed/);
 assert.match(extensionsReact, /Discover/);
 assert.match(extensionsReact, /Developer/);
 assert.match(extensionsReact, /confirmPermissions: true/, 'Extension installation must require permission review confirmation');
+assert.match(extensionsReact, /manifest includes a managed artifact for this computer/, 'Managed extension copy must explain platform-specific artifact fallback');
+assert.match(extensionsReact, /setup is still needed/, 'Extension installation must surface successful installs that still need a required command');
 assert.match(reactShell, /registerReactSection\('settings'/, 'Settings must remain a canonical React route');
 assert.match(reactShell, /registerReactSection\('diagnostics'/, 'Troubleshooting must remain a canonical React route');
 assert.match(settingsReact, /h\('h2', null, title\)/, 'Settings pages must continue the shell H1 with an H2');
@@ -116,8 +123,9 @@ assert.deepEqual(repositorySummary({ exists: true, isGit: false }), {
 }, 'ordinary authorized folders must not be presented as broken repositories');
 assert.equal(repositorySummary({ exists: true, isGit: true, branch: 'main' }).kindLabel, 'Repository');
 assert.match(workspacesReact, /repository\.kindLabel/, 'workspace cards must label Folder vs Repository from canonical workspace state');
-assert.match(workspaceModalsReact, /primary local working folder/, 'workspace setup must describe generic local folders before Git-specific capabilities');
-assert.match(activityReact, /readableSection\('File location', activityFileLocation\(entry\)\)/, 'Activity details must expose successful local file destinations without requiring Technical details');
+assert.match(workspaceModalsReact, /primary project folder/, 'workspace setup must describe the primary project folder before Git-specific capabilities');
+assert.match(activityReact, /const fileLocation = activityFileLocation\(entry\)/, 'Activity details must derive the successful local file destination');
+assert.match(activityReact, /readableSection\('File location', fileLocationText\)/, 'Activity details must expose successful local file destinations without requiring Technical details');
 assert.match(modal, /openModalOverlay\(\{/, 'shared modals must render through the React overlay store');
 assert.match(drawer, /openDrawerOverlay\(\{/, 'shared drawers must render through the React overlay store');
 assert.doesNotMatch(modal, /innerHTML|insertAdjacentHTML/, 'shared modals must not render content through imperative HTML injection');

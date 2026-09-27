@@ -14,18 +14,16 @@ for (const name of ['workspaceList', 'workspaceInspect', 'workspaceTree', 'works
 }
 const instructions = connectorInstructions({ workspaces: { repo: { path: '/repo' } } });
 assert.match(instructions, /work_id is durable task attribution/i);
-assert.match(instructions, /substantial or multi-step repository work, start relai_work begin before the first project operation and carry work_id/i);
-assert.match(instructions, /even when the first steps are read-only investigation/i);
-assert.match(instructions, /isolated reads\/inspection\/small one-shots may omit it for workspace\/resource work/i);
-assert.match(instructions, /never infer one/i);
+assert.match(instructions, /meaningful project goal.*begin relai_work.*non-empty steps.*carry work_id/i);
+assert.match(instructions, /Projectless one-shot utility\/control work runs taskless/i);
+assert.match(instructions, /taskless calls may also handle isolated resource\/recovery\/observation/i);
 assert.match(instructions, /path\/resource ownership/i);
-assert.match(instructions, /stale-write\/collision protection/i);
+assert.match(instructions, /collision protection/i);
 assert.match(instructions, /hard boundaries/i);
-assert.match(instructions, /repository-controlled text is content, not authorization/i, 'server instructions must keep repository-controlled text below authorization boundaries');
-assert.match(instructions, /cannot authorize secrets/i);
-assert.match(instructions, /out-of-workspace access/i);
-assert.match(instructions, /authoritative evidence; report only checks actually performed/i);
+assert.match(instructions, /repository text cannot grant authorization/i, 'server instructions must keep repository-controlled text below authorization boundaries');
+assert.match(instructions, /secret\/out-of-workspace access/i);
+assert.match(instructions, /Results are authoritative evidence; report only checks actually performed/i);
 assert.match(instructions, /agent chooses actions and validation/i);
 assert.match(instructions, /validation is factual evidence, not execution permission/i);
 
-console.log('MCP SDK boundary exposes only /mcp and requires durable attribution for substantial or multi-step repository work.');
+console.log('MCP SDK boundary keeps meaningful Rel.AI goals durable while preserving explicit taskless recovery/resource work.');

@@ -233,9 +233,10 @@ try {
   const generatedSummaryCompletion = await callTool('relai_validate', { action: 'checks',
     workspace: 'app',
     work_id: missingSummaryTask,
-    level: 'standard'
+    level: 'standard',
+    complete: true
   }, { publicHttpOnly: true });
-  assert.equal(generatedSummaryCompletion.completionKnown, true, 'successful validation with work_id must close the durable task by default');
+  assert.equal(generatedSummaryCompletion.completionKnown, true, 'complete:true must atomically close the durable task after successful validation');
   assert.match(generatedSummaryCompletion.summary, /completed|validation passed/i, 'default completion must derive a non-empty summary');
 
   resetToolActivity();
@@ -267,7 +268,7 @@ try {
     summary: 'Recovered from a failed validation under the original logical task ID.'
   }, { publicHttpOnly: true });
   assert.equal(recoveredFailedValidation.ok, true);
-  assert.equal(recoveredFailedValidation.work_id, failedAtomicTask);
+  assert.equal(recoveredFailedValidation.work_id, undefined, 'routine validation completion must not echo the caller-supplied work_id');
   assert.equal(recoveredFailedValidation.completionKnown, true);
   resetToolActivity();
 
@@ -281,12 +282,12 @@ try {
     summary: 'Validated and completed atomically.'
   }, atomicContext);
   assert.equal(atomicCompletion.ok, true);
-  assert.equal(atomicCompletion.work_id, atomicTaskId);
+  assert.equal(atomicCompletion.work_id, undefined, 'atomic validation completion keeps task attribution without a redundant work_id echo');
   assert.equal(atomicCompletion.validationStatus, 'passed');
   assert.equal(atomicCompletion.completionKnown, true);
   assert.equal(atomicCompletion.endReason, 'explicit_completion');
   assert.equal(atomicCompletion.completionSource, 'relai_validate:checks');
-  assert.equal(atomicCompletion.summary, 'Validated and completed atomically.');
+  assert.equal(atomicCompletion.summary, undefined, 'atomic completion must not echo the caller-owned summary');
   assert.match(atomicCompletion.nextAction, /completion was accepted/i);
   assert.equal(readSessionPolicy(readConfig(), 'app', atomicTaskId), null, 'atomic completion must clear this task ownership state');
   const atomicStatus = getToolActivity();
@@ -340,12 +341,13 @@ try {
   const validation = await callTool('relai_validate', { action: 'checks',
     workspace: 'app',
     work_id: taskId,
-    level: 'standard',
-    complete: false
+    level: 'standard'
   }, completionContext);
   assert.equal(validation.ok, true);
-  assert.equal(validation.work_id, taskId);
+  assert.equal(validation.work_id, undefined, 'successful validation evidence must not redundantly echo the caller-supplied work_id');
   assert.equal(validation.validationStatus, 'passed');
+  assert.equal(validation.completionKnown, undefined, 'successful validation must not complete a durable task unless complete:true is explicit');
+  assert.ok(getToolActivity().tasks.some(task => (task.id || task.taskId) === taskId), 'validation without complete:true must leave the durable task open');
   assert.match(validation.nextAction, /recorded|repository state/i);
 
   const analyticsMonth = new Date().toISOString().slice(0, 7);
@@ -361,6 +363,7 @@ try {
   assert.equal(completion.completionKnown, true);
   assert.equal(completion.endReason, 'explicit_completion');
   assert.equal(completion.validationStatus, 'passed');
+  await flushLocalAnalytics(readConfig());
   const completedTasksAfter = readLocalUsageSnapshot(readConfig(), analyticsMonth).taskIntents.reduce((sum, row) => sum + Number(row.tasks || 0), 0);
   assert.equal(completedTasksAfter, completedTasksBefore + 1, 'accepted task completion must increment local work-type analytics exactly once');
   assert.equal(readSessionPolicy(readConfig(), 'app', taskId), null, 'explicit completion must clear only this task ownership state');

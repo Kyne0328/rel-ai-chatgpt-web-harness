@@ -1,13 +1,23 @@
-function dashboardWindowChrome(platform = process.platform) {
+const WINDOWS_TITLEBAR_OVERLAYS = Object.freeze({
+  dark: Object.freeze({ color: '#111613', symbolColor: '#f2f6f2', height: 40 }),
+  light: Object.freeze({ color: '#ffffff', symbolColor: '#172033', height: 40 })
+});
+
+function dashboardTitleBarOverlay(theme = 'dark') {
+  return WINDOWS_TITLEBAR_OVERLAYS[theme === 'light' ? 'light' : 'dark'];
+}
+
+function dashboardWindowChrome(platform = process.platform, theme = 'dark') {
   if (platform === 'win32') {
     return Object.freeze({
       platform: 'win32',
       customTitleBar: true,
-      controls: 'custom',
+      controls: 'native',
       windowOptions: Object.freeze({
         frame: false,
         thickFrame: true,
         titleBarStyle: 'hidden',
+        titleBarOverlay: dashboardTitleBarOverlay(theme),
         hasShadow: true,
         roundedCorners: true
       })
@@ -52,4 +62,4 @@ function readWindowFlag(win, method) {
   }
 }
 
-export { dashboardWindowChrome, dashboardWindowChromeState };
+export { dashboardTitleBarOverlay, dashboardWindowChrome, dashboardWindowChromeState };

@@ -1,3 +1,5 @@
+@reference "tailwindcss";
+
 @layer components {
 /* Managed process runtime */
 .processes-card .card-head p { margin: .35rem 0 0; color: var(--ui-text-secondary); }
@@ -17,7 +19,7 @@
 .process-output summary { display: flex; min-height: 44px; align-items: center; cursor: pointer; color: var(--ui-text-secondary); font-size: .82rem; }
 .process-output-block { margin-top: .65rem; }
 .process-output-block > span { display: block; margin-bottom: .25rem; color: var(--ui-text-secondary); font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; }
-.process-output-block pre { max-height: 14rem; min-height: 8rem; overflow: auto; margin: 0; padding: .75rem; border: 1px solid var(--ui-border-subtle); border-radius: .55rem; background: var(--ui-surface-secondary); white-space: pre-wrap; word-break: break-word; font-size: .76rem; }
+.process-output-block pre { max-height: 14rem; min-height: 8rem; overflow: auto; margin: 0; padding: .75rem; border: 1px solid var(--ui-border-subtle); border-radius: .55rem; background: var(--ui-surface-secondary); white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.6; }
 @media (max-width: 720px) {
 .process-row-head { gap: .8rem; }
 .process-actions { flex-direction: column; align-items: flex-end; }

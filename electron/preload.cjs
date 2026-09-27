@@ -1,6 +1,6 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const surfaceArgument = process.argv.find(argument => argument.startsWith('--relai-preload-surface='));
 const surface = surfaceArgument?.slice('--relai-preload-surface='.length) || 'application';
@@ -30,6 +30,7 @@ if (surface === 'dashboard') {
       onState: callback => subscribe('desktop:browser-state', callback, 'Browser-state')
     },
     copyText: text => ipcRenderer.invoke('url:copy', text),
+    getPathForFile: file => webUtils.getPathForFile(file),
     openSettings: () => ipcRenderer.invoke('desktop:open-settings'),
     getSettings: () => ipcRenderer.invoke('desktop:settings:get'),
     saveSettings: settings => ipcRenderer.invoke('desktop:settings:save', settings),
@@ -37,7 +38,7 @@ if (surface === 'dashboard') {
     getUpdateStatus: () => ipcRenderer.invoke('desktop:update:get'),
     checkForUpdates: () => ipcRenderer.invoke('desktop:update:check'),
     downloadUpdate: () => ipcRenderer.invoke('desktop:update:download'),
-    installUpdate: () => ipcRenderer.invoke('desktop:update:install'),
+    installUpdate: options => ipcRenderer.invoke('desktop:update:install', options),
     getLifecycleStatus: () => ipcRenderer.invoke('desktop:lifecycle:get'),
     acknowledgeConnectorRefresh: () => ipcRenderer.invoke('desktop:lifecycle:acknowledge-connector-refresh'),
     setLaunchAtLogin: enabled => ipcRenderer.invoke('desktop:startup:set', enabled === true),

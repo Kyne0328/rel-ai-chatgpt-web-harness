@@ -49,14 +49,15 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
   const dirty = alias !== initialAlias || pathsText !== initialPathsText;
 
   useEffect(() => {
-    if (!formRef.current) return undefined;
-    markUnsaved(formRef.current, dirty);
-    return () => markUnsaved(formRef.current, false);
+    const form = formRef.current;
+    if (!form) return undefined;
+    markUnsaved(form, dirty);
+    return () => markUnsaved(form, false);
   }, [dirty]);
   useEffect(() => {
     if (aliasEdited.current) return;
     setAlias(deriveWorkspaceAlias(paths[0] || ''));
-  }, [pathsText]);
+  }, [paths]);
   useEffect(() => {
     let active = true;
     const current = [...paths];
@@ -69,7 +70,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
       if (active) setPathInfos(infos);
     }, 350);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [pathsText]);
+  }, [paths]);
 
   const aliasError = !alias.trim()
     ? (submitted ? 'Enter a project name.' : '')
@@ -177,7 +178,8 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     requestDashboardRefresh();
     toast(`${isEdit ? 'Project updated' : 'Project added'}: ${cleanAlias}`, { variant: 'success' });
     onClose?.();
-    if (getWorkspaceFilter() === originalAlias && originalAlias !== cleanAlias) setWorkspaceFilter(cleanAlias);
+    if (!isEdit && configuredWorkspaces.length === 0) navigate('home');
+    else if (getWorkspaceFilter() === originalAlias && originalAlias !== cleanAlias) setWorkspaceFilter(cleanAlias);
     else if (isEdit) navigate('workspaces', { workspace: cleanAlias, focus: '1' });
   };
 
@@ -198,7 +200,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     h('section', { className: 'ws-project-name-section' },
       h('label', { className: 'ws-form-label', htmlFor: 'workspaceAliasInput' }, 'Project name'),
       h('div', { className: 'ws-project-name-field' },
-        h(CanonicalIcon, { name: 'folder', className: 'ws-folder-icon' }),
+        h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }),
         h('input', {
           id: 'workspaceAliasInput', name: 'alias', type: 'text', value: alias, placeholder: 'Project name', autoComplete: 'off', ref: aliasRef,
           'aria-describedby': 'workspaceAliasHelp workspaceAliasError workspaceConflictError', 'aria-invalid': Boolean(aliasError),
@@ -224,8 +226,12 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
   ));
 }
 
-export function RepairProjectModal({ configuredWorkspaces = [], onClose, opener = null, workspace }) {
-  if (!workspace?.alias) return null;
+export function RepairProjectModal(props) {
+  if (!props.workspace?.alias) return null;
+  return h(RepairProjectModalContent, props);
+}
+
+function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener = null, workspace }) {
   const initialPath = String(workspace.path || '');
   const isDesktop = document.documentElement.dataset.surface === 'desktop';
   const [path, setPath] = useState(initialPath);
@@ -233,6 +239,7 @@ export function RepairProjectModal({ configuredWorkspaces = [], onClose, opener 
   const [pathInfo, setPathInfo] = useState(null);
   const [busy, setBusy] = useState(false);
   const [pickerBusy, setPickerBusy] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
   const [serverError, setServerError] = useState('');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const formRef = useRef(null);
@@ -242,9 +249,10 @@ export function RepairProjectModal({ configuredWorkspaces = [], onClose, opener 
   const duplicate = duplicateWorkspaceForPath(configuredWorkspaces, path, workspace.alias);
 
   useEffect(() => {
-    if (!formRef.current) return undefined;
-    markUnsaved(formRef.current, dirty);
-    return () => markUnsaved(formRef.current, false);
+    const form = formRef.current;
+    if (!form) return undefined;
+    markUnsaved(form, dirty);
+    return () => markUnsaved(form, false);
   }, [dirty]);
   useEffect(() => {
     let active = true;
@@ -271,6 +279,15 @@ export function RepairProjectModal({ configuredWorkspaces = [], onClose, opener 
     }
     if (result?.ok && result.path) setPath(String(result.path));
     else if (result?.error && !result?.canceled) toast(`Could not open folder picker: ${result.error}`, { variant: 'error' });
+  };
+  const onRepairDrop = async event => {
+    if (typeof window.relaiDesktop?.getPathForFile !== 'function') return;
+    event.preventDefault();
+    setDropActive(false);
+    const dropped = await resolveDroppedFolders(event.dataTransfer);
+    if (!dropped.length) return;
+    setPath(dropped[0]);
+    if (dropped.length > 1) toast('Using the first dropped folder for this repair.', { variant: 'info' });
   };
   const submit = async event => {
     event.preventDefault();
@@ -308,9 +325,15 @@ export function RepairProjectModal({ configuredWorkspaces = [], onClose, opener 
     h('div', { className: 'workspace-repair-identity' }, h('span', null, 'Project'), h('strong', null, workspace.alias), h('small', null, workspace.path || 'No source folder configured')),
     h('section', { className: 'ws-source-section', 'aria-labelledby': 'workspaceRepairSourceHeading' },
       h('h3', { className: 'ws-source-heading', id: 'workspaceRepairSourceHeading' }, 'Replacement source folder'),
-      h('div', { className: 'ws-source-folder-box' },
+      h('div', {
+        className: `ws-source-folder-box${dropActive ? ' is-drop-active' : ''}`,
+        onDragEnter: event => { if (typeof window.relaiDesktop?.getPathForFile === 'function') { event.preventDefault(); setDropActive(true); } },
+        onDragOver: event => { if (typeof window.relaiDesktop?.getPathForFile === 'function') { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } },
+        onDragLeave: event => { if (!event.currentTarget.contains(event.relatedTarget)) setDropActive(false); },
+        onDrop: event => { void onRepairDrop(event); }
+      },
         !manualMode ? h('div', { className: 'ws-source-folder-row' },
-          h(CanonicalIcon, { name: 'folder', className: 'ws-folder-icon' }),
+          h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }),
           h('span', { className: 'ws-source-folder-copy' }, h('strong', null, folderDisplayName(path) || 'Choose a folder'), h('small', null, path)),
           h('button', { type: 'button', className: 'ws-source-folder-change', disabled: pickerBusy || busy, ref: browseRef, onClick: () => { void browse(); } }, pickerBusy ? 'Opening…' : 'Change')
         ) : h('div', { className: 'ws-source-manual ws-source-manual-only' },
@@ -345,12 +368,31 @@ export function DeleteProjectModal({ alias = '', onClose, opener = null }) {
 }
 
 function SourceFolders({ browse, emptySourceRef, manualMode, pathStatus, paths, pathsRef, pathsText, pickerBusy, setPathsText, setSourcePaths, sourceError }) {
+  const [dropActive, setDropActive] = useState(false);
+  const canDropFolders = typeof window.relaiDesktop?.getPathForFile === 'function';
+  const onDrop = async event => {
+    if (!canDropFolders) return;
+    event.preventDefault();
+    setDropActive(false);
+    const dropped = await resolveDroppedFolders(event.dataTransfer);
+    if (!dropped.length) return;
+    const next = normalizeSourcePaths([...paths, ...dropped]);
+    const added = next.length - paths.length;
+    setSourcePaths(next);
+    if (added < dropped.length) toast('Duplicate source folders were skipped.', { variant: 'info' });
+  };
   return h('section', { className: 'ws-source-section', 'aria-labelledby': 'wsSourceFolderHeading' },
     h('h3', { className: 'ws-source-heading', id: 'wsSourceFolderHeading' }, 'Source folders'),
-    h('div', { className: 'ws-source-folder-box' },
+    h('div', {
+      className: `ws-source-folder-box${dropActive ? ' is-drop-active' : ''}`,
+      onDragEnter: event => { if (canDropFolders) { event.preventDefault(); setDropActive(true); } },
+      onDragOver: event => { if (canDropFolders) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } },
+      onDragLeave: event => { if (!event.currentTarget.contains(event.relatedTarget)) setDropActive(false); },
+      onDrop: event => { void onDrop(event); }
+    },
       !manualMode ? h(React.Fragment, null,
         paths.length ? h('ul', { className: 'ws-source-folder-list' }, paths.map((value, index) => h('li', { className: 'ws-source-folder-row', key: `${normalizeWorkspacePath(value)}-${index}` },
-          h(CanonicalIcon, { name: 'folder', className: 'ws-folder-icon' }),
+          h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }),
           h('span', { className: 'ws-source-folder-copy' }, h('span', { className: 'ws-source-folder-title' }, h('strong', null, folderDisplayName(value)), index === 0 ? h('small', { className: 'ws-source-primary' }, 'Primary') : null), h('small', null, value)),
           h('span', { className: 'ws-source-folder-actions' },
             h('button', { type: 'button', className: 'ws-source-folder-change', disabled: Boolean(pickerBusy), 'aria-label': `Change source folder ${value}`, onClick: () => { void browse(index); } }, pickerBusy === `replace-${index}` ? 'Opening…' : 'Change'),
@@ -358,23 +400,47 @@ function SourceFolders({ browse, emptySourceRef, manualMode, pathStatus, paths, 
           )
         ))) : null,
         paths.length ? h('button', { type: 'button', className: 'ws-source-folder-add', disabled: Boolean(pickerBusy), onClick: () => { void browse(); } }, pickerBusy === 'add' ? 'Opening folder picker…' : '+ Add source folder')
-          : h('button', { type: 'button', className: 'ws-source-folder-empty', disabled: Boolean(pickerBusy), ref: emptySourceRef, 'aria-describedby': 'workspaceSourceError', 'aria-invalid': Boolean(sourceError), onClick: () => { void browse(); } }, h(CanonicalIcon, { name: 'folder', className: 'ws-folder-icon' }), h('span', null, pickerBusy === 'add' ? 'Opening folder picker…' : 'Choose a source folder'))
+          : h('button', { type: 'button', className: 'ws-source-folder-empty', disabled: Boolean(pickerBusy), ref: emptySourceRef, 'aria-describedby': 'workspaceSourceError', 'aria-invalid': Boolean(sourceError), onClick: () => { void browse(); } }, h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }), h('span', null, pickerBusy === 'add' ? 'Opening folder picker…' : 'Choose a source folder'))
       ) : h('div', { className: 'ws-source-manual ws-source-manual-only' },
         h('label', { htmlFor: 'workspacePathsInput' }, 'Folder paths'),
         h('textarea', { className: 'ws-form-path', id: 'workspacePathsInput', name: 'paths', rows: 4, value: pathsText, placeholder: 'One absolute folder path per line', autoComplete: 'off', ref: pathsRef, 'aria-describedby': 'workspacePathsHelp workspaceSourceError', 'aria-invalid': Boolean(sourceError), onChange: event => setPathsText(event.target.value) }),
         h('span', { className: 'ws-form-help', id: 'workspacePathsHelp' }, 'Enter one absolute source-folder path per line.')
-      )
+      ),
+      canDropFolders ? h('div', { className: 'ws-source-drop-hint', 'aria-hidden': 'true' }, h(Icon, { name: 'folder', size: 14 }), 'Drop folders here') : null
     ),
-    h('div', { className: 'ws-form-help' }, 'The first folder is the primary local working folder. Rel.AI uses it for file and command actions; Git actions are available when it is a Git repository.'),
+    h('div', { className: 'ws-form-help' }, 'The first folder is the primary project folder. Rel.AI uses it for file and command actions. Git actions are available for Git repositories.'),
     sourceError ? h('div', { className: 'ws-form-conflict', id: 'workspaceSourceError', role: 'alert' }, sourceError) : null,
     h('div', { className: `ws-form-status${pathStatus.tone ? ` ${pathStatus.tone}` : ''}`, 'aria-live': 'polite' }, pathStatus.text)
   );
 }
 
+async function resolveDroppedFolders(dataTransfer) {
+  const getPathForFile = window.relaiDesktop?.getPathForFile;
+  if (typeof getPathForFile !== 'function') return [];
+  const candidates = [...new Set([...dataTransfer.files]
+    .map(file => String(getPathForFile(file) || '').trim())
+    .filter(Boolean))];
+  if (!candidates.length) return [];
+  const checked = await Promise.all(candidates.map(async candidate => {
+    const result = await fetchJson(`/api/workspace/preflight?path=${encodeURIComponent(candidate)}`, { cache: 'no-store' }).catch(() => null);
+    return result?.ok && result?.isDirectory ? String(result.path || candidate) : '';
+  }));
+  const valid = checked.filter(Boolean);
+  if (valid.length < candidates.length) toast('Only local folders can be added. Files or unavailable paths were skipped.', { variant: 'info' });
+  return valid;
+}
+
 function ProjectDetails({ alias, onNavigate, workspace }) {
   const operational = workspace?.operational || {};
-  const validation = operational.lastValidation ? `${operational.lastValidation.status} · ${timeAgo(operational.lastValidation.completedAt)}` : 'Not run yet';
-  const activity = operational.lastTask ? `${workSessionStateView(operational.lastTask).label.toLowerCase()} · ${timeAgo(operational.lastTask.completedAt || operational.lastTask.startedAt)}` : 'No task history';
+  const validation = operational.lastValidation
+    ? relativeOperationalValue(operational.lastValidation.status, operational.lastValidation.completedAt)
+    : 'Not run yet';
+  const activity = operational.lastTask
+    ? relativeOperationalValue(
+        workSessionStateView(operational.lastTask).label.toLowerCase(),
+        operational.lastTask.completedAt || operational.lastTask.startedAt
+      )
+    : 'No task history';
   const rows = operational.isGit
     ? [['Branch', branchSummary(operational)], ['File changes', operational.dirty ? `${Number(operational.changedFileCount || 0)} changed · ${Number(operational.sessionChangedFileCount || 0)} from current session` : 'Clean'], ['Last checks', validation], ['Last activity', activity]]
     : [['Git', 'Not initialized'], ['Last checks', validation], ['Last activity', activity]];
@@ -383,12 +449,20 @@ function ProjectDetails({ alias, onNavigate, workspace }) {
   return h('section', { className: 'ws-project-details-section', 'aria-labelledby': 'wsProjectDetailsHeading' },
     h('h3', { className: 'ws-source-heading', id: 'wsProjectDetailsHeading' }, 'Project details'),
     h('div', { className: 'ws-project-details-box' },
-      h('div', { className: 'workspace-operational' }, rows.map(([label, value]) => h('div', { key: label }, h('span', null, label), h('strong', { title: value }, value)))),
+      h('div', { className: 'workspace-operational' }, rows.map(([label, value]) => h('div', { key: label }, h('span', null, label), h('strong', typeof value === 'string' ? { title: value } : null, value)))),
       h('div', { className: 'workspace-secondary-actions' },
         h('a', { className: 'buttonlike secondary', href: tasksHref, onClick: event => { event.preventDefault(); onNavigate(tasksHref); } }, 'View tasks'),
         h('a', { className: 'buttonlike secondary', href: activityHref, onClick: event => { event.preventDefault(); onNavigate(activityHref); } }, 'View activity')
       )
     )
+  );
+}
+
+function relativeOperationalValue(label, timestamp) {
+  const relative = timeAgo(timestamp) || '—';
+  return h(React.Fragment, null,
+    `${label} · `,
+    h('span', timestamp ? { 'data-clock-relative': timestamp } : null, relative)
   );
 }
 
@@ -427,7 +501,7 @@ function ProjectModal({ children, confirmation = null, initialFocus, onDismiss, 
         }, h('div', { className: `modal-panel modal-${size}` },
           h('header', { className: 'modal-head', inert: confirmation ? true : undefined },
             h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, title)),
-            showClose ? h('button', { type: 'button', className: 'modal-close', 'aria-label': `Close ${title}`, onClick: onDismiss }, h(CanonicalIcon, { name: 'close' })) : null
+            showClose ? h('button', { type: 'button', className: 'modal-close', 'aria-label': `Close ${title}`, onClick: onDismiss }, h(Icon, { name: 'close', size: 16 })) : null
           ),
           h('div', { className: 'modal-body', inert: confirmation ? true : undefined }, children),
           confirmation ? h(AlertDialog.Root, { open: true },
@@ -464,7 +538,6 @@ function ProjectModal({ children, confirmation = null, initialFocus, onDismiss, 
   ));
 }
 
-function CanonicalIcon({ className = '', name }) { return h(Icon, { className, name }); }
 function projectPathStatus(paths, infos) {
   if (!paths.length || !infos.length) return { text: '', tone: '' };
   if (paths.length === 1) return genericPathStatus(infos[0], false);

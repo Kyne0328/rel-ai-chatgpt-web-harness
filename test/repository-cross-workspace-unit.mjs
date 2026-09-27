@@ -18,7 +18,12 @@ fs.writeFileSync(path.join(clientRoot, 'package.json'), JSON.stringify({
   name: '@acme/client',
   dependencies: { '@acme/api': 'workspace:*' }
 }, null, 2));
-const genericEventNoise = Array.from({ length: 60 }, (_, index) => `export function noise${index}() { bus.emit('message', { index: ${index} }); }`).join('\n');
+const genericEvents = ['message', 'exit', 'uncaughtException', 'did-start-loading', 'did-stop-loading', 'before-input-event', 'ready-to-show', 'destroyed'];
+const genericEventNoise = Array.from({ length: 60 }, (_, index) => {
+  const eventName = genericEvents[index % genericEvents.length];
+  return `export function noise${index}() { bus.emit('${eventName}', { index: ${index} }); }`;
+}).join('\n');
+const genericEventListeners = genericEvents.map((eventName, index) => `export function onGeneric${index}() { return true; }\nbus.on('${eventName}', onGeneric${index});`).join('\n');
 fs.writeFileSync(path.join(clientRoot, 'src', 'client.js'), `
 export async function loadAccounts() {
   return fetch('https://api.example.test/api/accounts');
@@ -35,6 +40,7 @@ export function getAccounts() { return ['a']; }
 router.get('/api/accounts', getAccounts);
 `);
 fs.writeFileSync(path.join(apiRoot, 'src', 'events.js'), `
+${genericEventListeners}
 export function onAccountSaved() { return true; }
 bus.on('account:saved', onAccountSaved);
 `);
@@ -76,6 +82,9 @@ try {
   assert.equal(cross.indexedPeerCount, 1);
   assert.ok(cross.skipped.some(item => item.workspace === 'cold'));
   assert.equal(fs.existsSync(coldGraph), false, 'cross-workspace inspection must not index cold peer repositories');
+  const genericEventKeys = new Set(genericEvents.map(name => `event:${name}`.toLowerCase()));
+  assert.equal(cross.relationships.some(item => genericEventKeys.has(String(item.key || '').toLowerCase())), false,
+    'generic Node/Electron/browser lifecycle events must not create cross-workspace relationships');
 
   const http = cross.relationships.find(item => item.type === 'CROSS_HTTP_CALLS');
   assert.ok(http);

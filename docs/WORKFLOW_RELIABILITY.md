@@ -4,7 +4,7 @@ Rel.AI exposes one canonical public tool surface and supplies repository facts, 
 
 ## Runtime authority
 
-Use tools directly against an authorized workspace for isolated reads, inspection, and genuinely small one-shot actions. Before substantial or multi-step local project work, start `relai_work` with `action:"begin"` and carry that `work_id` through the objective. This includes implementation, bug fixing, refactors, migrations, audit-and-fix work, multi-file changes, and work expected to need several mutation or validation calls. Omitted task identity is never guessed, and the runtime still permits taskless workspace/resource operations where the caller intentionally does not create a durable task. Rel.AI records factual evidence such as tool outcomes, validation fingerprints, workspace/task mutations, and process state. It does not return advisory `recommendedActions`, `avoidActions`, or synthetic workflow stages.
+Start or reuse one durable `relai_work` session for each meaningful project goal handled through Rel.AI and carry that `work_id` through the objective. Every new durable task begins with a non-empty ordered plan supplied on `relai_work begin`; compact `taskProgress` patches update individual step status/details, while `relai_work plan` replaces the full plan only when its structure changes. Projectless one-shot utility/control requests run taskless through an already-supported operation and do not invent a workspace or durable task. Taskless calls also remain available for isolated control, recovery, observation, or resource operations. Rel.AI records factual evidence such as tool outcomes, validation fingerprints, workspace/task mutations, and process state. It does not return advisory `recommendedActions`, `avoidActions`, or synthetic workflow stages.
 
 Authorization, workspace containment, sensitive-file policy, stale-write checks, workspace/task mutation generations, resource ownership, workspace conflicts, Git safety, and defined destructive approvals remain authoritative.
 
@@ -23,31 +23,31 @@ These are shapes, not required sequences. Skip any stage that current evidence a
 
 ### Docs-only
 
-For one isolated documentation correction, `targeted read -> edit -> review if useful` may stay taskless. For substantial or multi-file documentation work, start `begin ... finish` before mutation.
+For one isolated documentation correction, start a durable task with a compact proportional plan such as `targeted read -> edit -> review if useful`. Direct/taskless execution is reserved for projectless utility or control operations, not repository edits.
 
 Documentation-only work normally does not justify package builds, repository-wide tests, Knip, security scans, or release checks unless repository policy or the changed documentation specifically requires them.
 
 ### Local bug fix
 
-`begin -> reproduce or inspect -> coherent fix -> directly affected check -> review -> finish` for substantive bug fixes. A genuinely small one-shot correction may stay taskless.
+A localized correction still uses a compact durable plan. A bugfix that requires reproduction, diagnosis, mutation, and verification follows the shortest evidence-backed plan such as `reproduce or inspect -> coherent fix -> directly affected check -> review`.
 
 Prefer the smallest check that proves the defect is fixed. Broaden only when the affected boundary or risk justifies it.
 
 ### Feature slice
 
-`begin -> inspect/design only as needed -> implement coherent slice -> package-relevant checks -> review -> finish`; feature implementation is substantial project work and should keep one durable work_id through the objective.
+Feature implementation is durable project work. Establish a proportional plan at task start, then follow the shortest evidence-backed shape such as `inspect/design only as needed -> implement coherent slice -> package-relevant checks -> review`, keeping one work_id through the objective.
 
 Do not validate after every tiny edit. Validate at a meaningful implementation boundary and reuse exact fresh evidence when nothing relevant has changed.
 
 ### Investigation
 
-`search/inspect -> targeted reads or measurements -> report` may stay taskless when the investigation is isolated and genuinely small. Substantial or multi-step investigation starts or reuses a durable work session before the first repository operation, including when the first steps are read-only.
+A repository investigation is still a durable task and carries a proportional plan, even when it is read-only. Direct/taskless execution is reserved for projectless utility or control operations.
 
 Investigation does not imply mutation or validation. Read and inspection evidence can be sufficient when the objective is explanatory.
 
 ### Risky release
 
-`begin -> inspect release boundary -> focused regression proof -> required release/build/package checks -> review/publish -> finish`; release work should keep one durable work_id so ownership and publication scope remain attributable.
+Release work uses a durable plan. Use the shortest required shape such as `inspect release boundary -> focused regression proof -> required release/build/package checks -> review/publish`, keeping one durable work_id so ownership and publication scope remain attributable.
 
 Release-wide validation is reserved for release, repository, cross-package, migration, dependency, contract, or other genuinely high-risk boundaries. It is not the default conclusion of a local source edit.
 
@@ -120,9 +120,9 @@ Historical records that used `inactivity_window` as cancellation/failure are nor
 
 ## Completion and validation evidence
 
-Validation evidence does not decide whether the agent may consider its objective complete. `src/taskIntegrity.ts` remains the factual authority for task/workspace mutations, ownership/conflicts, and whether recorded validation is current for the repository state.
+Validation evidence does not decide whether the agent may consider its objective complete. `src/taskIntegrity.ts` remains the factual authority for task/workspace mutations, ownership/conflicts, and whether recorded validation is current for the repository state. The workflow that owns the objective is responsible for closing its durable session; a verification specialist reports evidence and returns control to that workflow.
 
-Use current structured validation when it helps prove the objective. Do not rerun an unchanged exact check merely to create ceremonial "final" verification. If a durable work session exists, `relai_validate` with `complete:true` remains an optional convenience to validate and close that exact session atomically; `relai_work` with `action:"finish"` may also close it while truthfully reporting validation as passed, failed, stale, not run, or not required.
+Use current structured validation when it helps prove the objective. Do not rerun an unchanged exact check merely to create ceremonial "final" verification. A successful `relai_validate` call records validation evidence and leaves the durable session open by default, including when `work_id` is supplied. `complete:true` explicitly requests atomic close after successful current validation. After remaining work is done, the owning workflow can use a final successful validation with `complete:true` to validate and close atomically. If validation fails, is cancelled, or becomes stale, it does not close the session; the owner can continue/revalidate or use `relai_work` with `action:"finish"` when the objective is considered complete despite the evidence, accurately reporting validation as failed, stale, not run, or not required.
 
 A completed plan checklist or model statement cannot falsify Rel.AI's recorded evidence. Conversely, missing/stale/failed validation is evidence for the agent to evaluate, not a generic harness veto on completion.
 
@@ -136,4 +136,4 @@ Ordinary evidence collection consumes existing authority facts and cached topolo
 
 Use `relai_changes` restore/reset/tidy actions only for the requested recovery scope. Publishing remains explicit through `relai_publish`; no evidence or planning helper commits or pushes automatically, and push targets are validated from the repository's actual Git remotes at execution time.
 
-When executing an approved multi-step implementation plan, start a durable work session before mutation and keep that work_id for the objective. Verify each completion condition and update checklists only when evidence proves it. Consolidate accumulated implementation as the plan advances instead of layering duplicate owners or compatibility paths.
+When executing an approved multi-step implementation plan, start a durable work session before the first project operation, including read-only planning or inspection, and keep that work_id through implementation and verification. Verify each completion condition and update checklists only when evidence proves it. Consolidate accumulated implementation as the plan advances instead of layering duplicate owners or compatibility paths.

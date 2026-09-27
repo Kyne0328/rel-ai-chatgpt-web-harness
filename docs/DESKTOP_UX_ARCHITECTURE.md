@@ -152,9 +152,9 @@ Overview prioritizes:
 
 ## Styling ownership
 
-`src/ui/styles/app.css` is the shared style entry. Feature styles live with their owning feature under `src/ui/features/`; genuinely shared component styles live under `src/ui/components/`. Tailwind scans the dashboard JavaScript sources declared by that entry. `public/dashboard.css` is generated and must be rebuilt after source style changes.
+`src/ui/styles/app.css` is the shared style entry. Feature styles live with their owning feature under `src/ui/features/`; genuinely shared component styles live under `src/ui/components/`. Styles needed across the shell or multiple routes remain in the shared entry, while clearly route-owned feature styles are imported by their lazy React route and use `@reference "tailwindcss"` for Tailwind utilities. `public/dashboard.css` is the generated shared stylesheet and must be rebuilt after source style changes.
 
-Vite bundles the production `public/dashboard.js` entry and its `src/ui/` dependency graph to generated `public/dashboard-app.js`, retains `src/ui/react/main.js` as generated `public/dashboard-react.js` for focused runtime probes, and emits Tailwind CSS as `public/dashboard.css`. These generated dashboard assets are not hand-edit surfaces.
+Vite bundles the production `public/dashboard.js` entry and its `src/ui/` dependency graph to generated `public/dashboard-app.js`, retains `src/ui/react/main.js` as generated `public/dashboard-react.js` for focused runtime probes, emits the shared Tailwind CSS as `public/dashboard.css`, and emits lazy route CSS under `public/dashboard-chunks/`. These generated dashboard assets are not hand-edit surfaces.
 
 ## Responsive and accessibility behavior
 

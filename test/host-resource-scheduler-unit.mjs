@@ -9,13 +9,14 @@ import { performance } from 'node:perf_hooks';
 process.env.REL_AI_MCP_HEAVY_WORK_LIMIT = '2';
 process.env.REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS = '60';
 process.env.REL_AI_MCP_PERSISTENT_PROCESS_LIMIT = '2';
+process.env.REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS = '1000';
 
 const {
   acquireHostResource,
   createFairResourceScheduler,
   hostResourceStats
 } = await import('../src/hostResourceScheduler.js');
-const { runProcess } = await import('../src/process.js');
+const { readProcessCreationIdentity, runProcess } = await import('../src/process.js');
 const { repositoryIntelligence } = await import('../src/repository/intelligence/service.js');
 const {
   startManagedProcess,
@@ -26,6 +27,7 @@ const {
 await verifyRoundRobinFairness();
 await verifyQueueCancellation();
 await verifyDefaultHeavyQueueTimeout();
+await verifyDefaultPersistentQueueTimeout();
 await verifyExecutionTimeoutExcludesQueueWait();
 await verifyRepositoryQueryTimeoutExcludesQueueWait();
 await verifyPersistentCapacityIncludesRestartOrphans();
@@ -83,6 +85,38 @@ async function verifyDefaultHeavyQueueTimeout() {
     blockerB.release();
   }
   assert.equal(hostResourceStats().heavy.queued, 0, 'timed-out host work must leave no queue residue');
+}
+
+async function verifyDefaultPersistentQueueTimeout() {
+  const blockerA = await acquireHostResource('persistent', 'persistent-timeout-a');
+  const blockerB = await acquireHostResource('persistent', 'persistent-timeout-b');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-host-persistent-timeout-'));
+  const workspace = { alias: 'persistent-timeout-c', path: root };
+  try {
+    await assert.rejects(
+      startManagedProcess(workspace, { stateDir: path.join(root, 'state') }, {
+        executable: process.execPath,
+        argv: ['-e', 'setInterval(() => {}, 1000)'],
+        startupWaitMs: 0,
+        kind: 'service',
+        purpose: 'Verify bounded persistent-process admission.'
+      }, {
+        taskId: 'persistent-timeout-task',
+        principal: { clientId: 'persistent-timeout-test', authMode: 'local' },
+        workspace: workspace.alias
+      }),
+      error => error?.code === 'HOST_PROCESS_CAPACITY_EXHAUSTED'
+        && error.retryable === true
+        && error.active === 2
+        && error.limit === 2
+    );
+    assert.equal(hostResourceStats().persistent.queued, 0,
+      'timed-out persistent-process admission must leave no queue residue');
+  } finally {
+    blockerA.release();
+    blockerB.release();
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 }
 
 async function verifyExecutionTimeoutExcludesQueueWait() {
@@ -177,13 +211,15 @@ async function verifyPersistentCapacityIncludesRestartOrphans() {
       stdio: ['ignore', 'ignore', 'ignore']
     });
     await once(externalChild, 'spawn');
+    const externalCreationIdentity = await readProcessCreationIdentity(externalChild.pid);
+    assert.ok(externalCreationIdentity, 'restart-capacity fixture requires a verifiable OS process creation identity');
     const staleProcessId = `proc_${'q'.repeat(24)}`;
     const staleDirectory = path.join(stateDir, 'processes', staleProcessId);
     fs.mkdirSync(staleDirectory, { recursive: true });
     fs.writeFileSync(path.join(staleDirectory, 'stdout.log'), '');
     fs.writeFileSync(path.join(staleDirectory, 'stderr.log'), '');
     fs.writeFileSync(path.join(staleDirectory, 'metadata.json'), JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 4,
       runtimeId: 'previous-runtime',
       processId: staleProcessId,
       workspaceId: 'stale-repo',
@@ -200,6 +236,7 @@ async function verifyPersistentCapacityIncludesRestartOrphans() {
       exitCode: null,
       signal: '',
       pid: externalChild.pid,
+      processCreationIdentity: externalCreationIdentity,
       stdoutBytes: 0,
       stderrBytes: 0,
       stdoutStartOffset: 0,

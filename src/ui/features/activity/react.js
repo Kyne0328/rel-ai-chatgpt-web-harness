@@ -6,12 +6,13 @@ import React, {
   useRef,
   useState
 } from 'react';
+import './styles.css';
 import { flushSync } from 'react-dom';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { fetchJson } from '../../api.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
-import { pillClass } from '../../components/pill.js';
-import { statusTone } from '../../status-tone.js';
+import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { copyText } from '../../clipboard.js';
 import { getRouteParams, getWorkspaceFilter, navigate, replaceRouteParams, routeHref } from '../../router.js';
@@ -73,6 +74,9 @@ function ActivityView({ data = {} }) {
   const [selectedEventId, setSelectedEventId] = useState(initialRoute.eventId);
   const [now, setNow] = useState(() => Date.now());
   const [copyState, setCopyState] = useState('idle');
+  const [liveAnnouncement, setLiveAnnouncement] = useState('');
+  const [unseenLiveCount, setUnseenLiveCount] = useState(0);
+  const [highlightedEventIds, setHighlightedEventIds] = useState(() => new Set());
   const allEntriesRef = useRef(allEntries);
   const pausedRef = useRef(paused);
   const pausedEntriesRef = useRef([]);
@@ -84,8 +88,14 @@ function ActivityView({ data = {} }) {
   const searchTimerRef = useRef(0);
   const copyTimerRef = useRef(0);
   const inspectorHeadingRef = useRef(null);
+  const listPaneRef = useRef(null);
+  const listAtTopRef = useRef(true);
   const tableWrapRef = useRef(null);
   const selectionFocusRef = useRef(false);
+  const liveAnnouncementReadyRef = useRef(false);
+  const liveAnnouncementTimerRef = useRef(0);
+  const pendingLiveAnnouncementRef = useRef(0);
+  const highlightTimersRef = useRef(new Set());
 
   useEffect(() => { allEntriesRef.current = allEntries; }, [allEntries]);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
@@ -100,6 +110,17 @@ function ActivityView({ data = {} }) {
     sorted: true,
     sessionTitle: entry => activitySessionView(entry, sessionIndex).title
   }), [allEntries, filterState, now, sessionIndex]);
+  const rowVirtualizer = useVirtualizer({
+    count: filteredEntries.length,
+    getScrollElement: () => listPaneRef.current,
+    estimateSize: () => 54,
+    overscan: 8,
+    getItemKey: index => activityEventId(filteredEntries[index]) || index
+  });
+  const filteredEntriesRef = useRef(filteredEntries);
+  const rowVirtualizerRef = useRef(rowVirtualizer);
+  filteredEntriesRef.current = filteredEntries;
+  rowVirtualizerRef.current = rowVirtualizer;
   const selectedEntry = useMemo(
     () => allEntries.find(entry => activityEventId(entry) === selectedEventId) || null,
     [allEntries, selectedEventId]
@@ -164,17 +185,35 @@ function ActivityView({ data = {} }) {
   }, [mergeIntoVisibleEntries]);
 
   useEffect(() => {
+    const highlightTimers = highlightTimersRef.current;
     void loadHistory('replace');
     return () => {
       historyRequestRef.current += 1;
       window.clearTimeout(searchTimerRef.current);
       window.clearTimeout(copyTimerRef.current);
+      window.clearTimeout(liveAnnouncementTimerRef.current);
+      for (const timer of highlightTimers) window.clearTimeout(timer);
+      highlightTimers.clear();
     };
   }, [loadHistory]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { liveAnnouncementReadyRef.current = true; }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   const liveEntries = data.auditTail?.entries;
   useEffect(() => {
     if (!Array.isArray(liveEntries) || liveEntries.length === 0) return;
+    const knownIds = new Set(allEntriesRef.current.map(activityEventId));
+    const newEventIds = [];
+    for (const entry of liveEntries) {
+      const id = activityEventId(entry);
+      if (!id || knownIds.has(id)) continue;
+      knownIds.add(id);
+      newEventIds.push(id);
+    }
+    const newCount = newEventIds.length;
     if (historyLoadingRef.current) {
       liveEntriesSinceLoadRef.current = mergeActivityEntries(liveEntriesSinceLoadRef.current, liveEntries).entries;
     }
@@ -183,6 +222,36 @@ function ActivityView({ data = {} }) {
       return;
     }
     mergeIntoVisibleEntries(liveEntries);
+    if (!liveAnnouncementReadyRef.current) {
+      liveAnnouncementReadyRef.current = true;
+      return;
+    }
+    if (newCount > 0) {
+      if (!listAtTopRef.current) setUnseenLiveCount(count => count + newCount);
+      setHighlightedEventIds(current => {
+        const next = new Set(current);
+        for (const id of newEventIds) next.add(id);
+        return next;
+      });
+      let highlightTimer = 0;
+      highlightTimer = window.setTimeout(() => {
+        highlightTimersRef.current.delete(highlightTimer);
+        setHighlightedEventIds(current => {
+          if (!newEventIds.some(id => current.has(id))) return current;
+          const next = new Set(current);
+          for (const id of newEventIds) next.delete(id);
+          return next;
+        });
+      }, 1400);
+      highlightTimersRef.current.add(highlightTimer);
+      pendingLiveAnnouncementRef.current += newCount;
+      window.clearTimeout(liveAnnouncementTimerRef.current);
+      liveAnnouncementTimerRef.current = window.setTimeout(() => {
+        const count = pendingLiveAnnouncementRef.current;
+        pendingLiveAnnouncementRef.current = 0;
+        setLiveAnnouncement(`${count} new activity ${count === 1 ? 'event' : 'events'} received.`);
+      }, 700);
+    }
   }, [liveEntries, mergeIntoVisibleEntries]);
 
   useEffect(() => {
@@ -220,6 +289,12 @@ function ActivityView({ data = {} }) {
   }, [allEntries, requestedEventId]);
 
   useEffect(() => {
+    if (!selectedEventId) return;
+    const index = filteredEntriesRef.current.findIndex(entry => activityEventId(entry) === selectedEventId);
+    if (index >= 0) rowVirtualizerRef.current?.scrollToIndex(index, { align: 'auto' });
+  }, [selectedEventId]);
+
+  useEffect(() => {
     if (!selectionFocusRef.current || !selectedEventId) return;
     selectionFocusRef.current = false;
     if (!window.matchMedia('(max-width: 1140px)').matches) return;
@@ -233,6 +308,11 @@ function ActivityView({ data = {} }) {
     replaceRouteParams({ ...activityRouteParams(next), event: null });
   }, []);
 
+  const resetListScroll = useCallback(() => {
+    if (tableWrapRef.current) tableWrapRef.current.scrollLeft = 0;
+    setUnseenLiveCount(0);
+  }, []);
+
   const applyFilters = useCallback(draft => {
     setFilterState(current => {
       const transition = activityFilterTransition(current, draft);
@@ -241,8 +321,8 @@ function ActivityView({ data = {} }) {
       else syncRoute(next);
       return next;
     });
-    if (tableWrapRef.current) tableWrapRef.current.scrollLeft = 0;
-  }, [syncRoute]);
+    resetListScroll();
+  }, [resetListScroll, syncRoute]);
 
   const removeFilter = useCallback(key => {
     setFilterState(current => {
@@ -253,8 +333,8 @@ function ActivityView({ data = {} }) {
       else syncRoute(next);
       return next;
     });
-    if (tableWrapRef.current) tableWrapRef.current.scrollLeft = 0;
-  }, [syncRoute]);
+    resetListScroll();
+  }, [resetListScroll, syncRoute]);
 
   const clearFilters = useCallback(() => {
     setFilterState(current => {
@@ -263,8 +343,8 @@ function ActivityView({ data = {} }) {
       else syncRoute(next);
       return next;
     });
-    if (tableWrapRef.current) tableWrapRef.current.scrollLeft = 0;
-  }, [syncRoute]);
+    resetListScroll();
+  }, [resetListScroll, syncRoute]);
 
   const onSearch = useCallback(value => {
     window.clearTimeout(searchTimerRef.current);
@@ -274,8 +354,9 @@ function ActivityView({ data = {} }) {
         syncRoute(next);
         return next;
       });
+      resetListScroll();
     }, 160);
-  }, [syncRoute]);
+  }, [resetListScroll, syncRoute]);
 
   const openFilters = useCallback(() => {
     openActivityFilters({ filterState, filterOptions, onApply: applyFilters });
@@ -304,6 +385,19 @@ function ActivityView({ data = {} }) {
     setSelectedEventId(eventId);
   }, []);
 
+  const onListScroll = useCallback(event => {
+    const atTop = event.currentTarget.scrollTop <= 24;
+    listAtTopRef.current = atTop;
+    if (atTop) setUnseenLiveCount(0);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    listAtTopRef.current = true;
+    setUnseenLiveCount(0);
+    rowVirtualizerRef.current?.scrollToIndex?.(0, { align: 'start' });
+    if (listPaneRef.current) listPaneRef.current.scrollTop = 0;
+  }, []);
+
   const copySelected = useCallback(async () => {
     if (!selectedEntry) return;
     try {
@@ -328,6 +422,7 @@ function ActivityView({ data = {} }) {
       : `${filteredEntries.length} event${filteredEntries.length === 1 ? '' : 's'}`;
 
   return h('div', { className: 'section activity-page' },
+    h('div', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, liveAnnouncement),
     h(ActivityFilterBar, {
       filterState,
       filters: activeFilters,
@@ -345,7 +440,13 @@ function ActivityView({ data = {} }) {
         h('span', { className: 'section-action', id: '__activity-count' }, count)
       ),
       h('div', { className: 'activity-master-detail' },
-        h('div', { className: 'activity-list-pane' },
+        h('div', { className: 'activity-list-pane', ref: listPaneRef, onScroll: onListScroll },
+          unseenLiveCount > 0 ? h('div', { className: 'activity-live-tail' },
+            h('button', { className: 'secondary compact-button', type: 'button', onClick: jumpToLatest },
+              h(Icon, { name: 'activity', size: 14 }),
+              `${unseenLiveCount} new ${unseenLiveCount === 1 ? 'event' : 'events'} · Jump to latest`
+            )
+          ) : null,
           h('div', { className: 'card-body' },
             h('div', { className: 'table-wrap', ref: tableWrapRef },
               h('table', { className: 'data-table activity-table' },
@@ -366,7 +467,9 @@ function ActivityView({ data = {} }) {
                     requestedEventId,
                     selectedEventId,
                     sessionIndex,
-                    onSelect: selectEntry
+                    highlightedEventIds,
+                    onSelect: selectEntry,
+                    virtualizer: rowVirtualizer
                   })
                 )
               )
@@ -404,7 +507,7 @@ const ActivityFilterBar = memo(function ActivityFilterBar({
           h('input', {
             type: 'search',
             className: 'filter-search-input',
-            placeholder: 'Search task, activity, action, project, or file',
+            placeholder: 'Search activity',
             defaultValue: filterState.search,
             autoComplete: 'off',
             onInput: event => onSearch(event.currentTarget.value)
@@ -413,7 +516,7 @@ const ActivityFilterBar = memo(function ActivityFilterBar({
         h('button', {
           type: 'button',
           className: `secondary filter-open-button${filters.length ? ' active' : ''}`,
-          'aria-label': filters.length ? `Open filters; ${filters.length} active` : 'Open filters',
+          'aria-label': filters.length ? `Open filters. ${filters.length} active` : 'Open filters',
           onClick: onOpenFilters
         }, filters.length ? `Filters (${filters.length})` : 'Filters'),
         h('div', { className: 'filter-bar-action' },
@@ -435,31 +538,25 @@ const ActivityFilterBar = memo(function ActivityFilterBar({
           className: 'secondary filter-chip',
           'aria-label': `Remove ${filter.label} filter: ${filter.value}`,
           onClick: () => onRemoveFilter(filter.key)
-        }, `${filter.label}: ${filter.value} ×`))
+        }, h('span', null, `${filter.label}: ${filter.value}`), h(Icon, { name: 'close', size: 12 })))
       ) : null,
-      h('div', { className: 'filter-bar-footer' },
-        h('span', { className: 'filter-summary', role: 'status', 'aria-live': 'polite' }, summary),
+      h('span', { className: 'filter-summary sr-only', role: 'status', 'aria-live': 'polite' }, summary),
+      hasActiveFilters(filterState) ? h('div', { className: 'filter-bar-footer activity-filter-footer' },
         h('button', {
           type: 'button',
           className: 'secondary filter-clear-button',
-          hidden: !hasActiveFilters(filterState),
           onClick: onClearAll
         }, 'Clear all')
-      )
+      ) : null
     )
   );
 });
 
-const StatusPill = memo(function StatusPill({ value }) {
-  const tone = statusTone(value);
-  const cls = pillClass(value);
-  return h('span', { className: `status-pill${cls ? ` ${cls}` : ''}` },
-    String(value || 'unknown'),
-    h('span', { className: 'sr-only' }, ` (${tone})`)
-  );
+const ActivityRowStatus = memo(function ActivityRowStatus({ value }) {
+  return h(StatusPill, { value });
 });
 
-const ActivityRow = memo(function ActivityRow({ entry, requested, selected, taskTitle, project, onSelect }) {
+const ActivityRow = memo(function ActivityRow({ entry, requested, selected, isNew, taskTitle, project, onSelect, measureElement, virtualIndex }) {
   const group = activityStatusGroup(entry);
   const status = entry.status || (group === 'other' ? 'unknown' : group);
   const message = activityMessage(entry);
@@ -470,16 +567,15 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, task
   const className = [
     'activity-data-row',
     requested ? 'activity-requested-row' : '',
-    selected ? 'is-selected' : ''
+    selected ? 'is-selected' : '',
+    isNew ? 'is-new-event' : ''
   ].filter(Boolean).join(' ');
   const activate = () => onSelect(entry);
   return h('tr', {
     className,
-    'data-activity-event-id': eventId,
-    onClick: event => {
-      if (event.target.closest('button, a')) return;
-      activate();
-    }
+    ref: measureElement,
+    'data-index': virtualIndex,
+    'data-activity-event-id': eventId
   },
     h('td', {
       className: 'activity-time-column nowrap small',
@@ -494,9 +590,9 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, task
         'aria-label': activityActionLabel(entry),
         onClick: activate
       },
-        h('span', { className: 'activity-message-copy' }, message),
+        h('span', { className: 'activity-message-copy', title: message }, message),
         h('span', { className: 'activity-row-meta' },
-          h(StatusPill, { value: status }),
+          h(ActivityRowStatus, { value: status }),
           h('span', { className: 'activity-row-action' }, action),
           h('span', { className: 'activity-row-task', title: taskTitle }, taskTitle),
           h('span', { className: 'activity-row-project', title: project }, project)
@@ -506,21 +602,33 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, task
   );
 });
 
-function renderActivityRows({ entries, historyLoading, loadError, requestedEventId, selectedEventId, sessionIndex, onSelect }) {
+function renderActivityRows({ entries, historyLoading, loadError, requestedEventId, selectedEventId, sessionIndex, highlightedEventIds, onSelect, virtualizer }) {
   if (entries.length) {
-    return entries.map(entry => {
-      const eventId = activityEventId(entry);
-      const session = activitySessionView(entry, sessionIndex);
-      return h(ActivityRow, {
-        key: eventId,
-        entry,
-        requested: Boolean(requestedEventId && eventId === requestedEventId),
-        selected: Boolean(selectedEventId && eventId === selectedEventId),
-        taskTitle: session.title || 'Task',
-        project: session.workspace || entry.workspace || 'project',
-        onSelect
-      });
-    });
+    const virtualRows = virtualizer.getVirtualItems();
+    const totalSize = virtualizer.getTotalSize();
+    const paddingTop = virtualRows.length ? virtualRows[0].start : 0;
+    const paddingBottom = virtualRows.length ? Math.max(0, totalSize - virtualRows.at(-1).end) : 0;
+    return [
+      paddingTop ? h(ActivitySpacerRow, { key: 'virtual-top', height: paddingTop }) : null,
+      ...virtualRows.map(row => {
+        const entry = entries[row.index];
+        const eventId = activityEventId(entry);
+        const session = activitySessionView(entry, sessionIndex);
+        return h(ActivityRow, {
+          key: eventId,
+          entry,
+          requested: Boolean(requestedEventId && eventId === requestedEventId),
+          selected: Boolean(selectedEventId && eventId === selectedEventId),
+          isNew: highlightedEventIds?.has(eventId) === true,
+          taskTitle: session.title || 'Task',
+          project: session.workspace || entry.workspace || 'No project',
+          onSelect,
+          measureElement: virtualizer.measureElement,
+          virtualIndex: row.index
+        });
+      }),
+      paddingBottom ? h(ActivitySpacerRow, { key: 'virtual-bottom', height: paddingBottom }) : null
+    ];
   }
   if (historyLoading) {
     return Array.from({ length: 6 }, (_, index) => h('tr', { className: 'activity-skeleton-row', 'aria-hidden': 'true', key: `skeleton-${index}` },
@@ -540,56 +648,73 @@ function renderActivityRows({ entries, historyLoading, loadError, requestedEvent
   return h('tr', null, h('td', { colSpan: 2 }, h('div', { className: 'empty' }, message)));
 }
 
+function ActivitySpacerRow({ height }) {
+  return h('tr', { className: 'activity-virtual-spacer', 'aria-hidden': 'true' },
+    h('td', { colSpan: 2, style: { height: `${Math.max(0, height)}px` } })
+  );
+}
+
 function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
       h('div', { className: 'inspector-empty' },
         h('strong', null, 'Select an activity'),
-        h('span', null, 'Choose an event to inspect its result, task context, and technical details without leaving the activity stream.')
+        h('span', null, 'Choose an event.')
       )
     );
   }
   const group = activityStatusGroup(entry);
   const displayStatus = entry.status || (group === 'other' ? 'unknown' : group);
   const session = activitySessionView(entry, sessionIndex);
+  const heading = activityDisplayAction(entry) || 'Activity detail';
+  const message = activityMessage(entry);
+  const target = activityTargetLabel(entry);
+  const result = activityResultText(entry);
+  const fileLocation = activityFileLocation(entry);
+  const error = activityErrorText(entry);
+  const summaryText = distinctActivityText(message, heading) ? message : '';
+  const targetText = distinctActivityText(target, fileLocation) ? target : '';
+  const resultText = distinctActivityText(result, message, heading) ? result : '';
+  const fileLocationText = distinctActivityText(fileLocation, target) ? fileLocation : '';
+  const errorText = distinctActivityText(error, message, result) ? error : '';
   const fields = [
     ['Tool', toolName(entry)],
     ['Action', entry.action || entry.operation || 'execute'],
     ['Category', entry.category || 'tool'],
     ['Event ID', entry.eventId || entry.id || '—'],
-    ['Work session ID', entry.taskId || entry.sessionId || '—'],
+    ['Rel.AI task ID', entry.taskId || entry.sessionId || '—'],
     ...(entry.sequence != null ? [['Sequence', entry.sequence]] : [])
   ];
   return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
     h('div', { className: 'activity-inspector-head' },
-      h('span', { className: 'overview-kicker' }, 'Activity'),
-      h('h2', { tabIndex: -1, ref: headingRef }, entry.title || entry.operation || toolName(entry) || 'Activity detail')
+      h('h2', { tabIndex: -1, ref: headingRef }, heading)
     ),
     h('div', { className: 'detail-stack activity-detail' },
       h('div', { className: 'activity-detail-head' },
         h(StatusPill, { value: displayStatus }),
-        h('span', { className: 'muted' }, activityAbsoluteTime(entry))
+        h('span', { className: 'activity-detail-time muted' }, activityAbsoluteTime(entry))
       ),
-      session.id ? h('section', { className: 'activity-detail-section activity-session-context' },
-        h('h3', null, 'Task'),
-        h('strong', null, session.title),
-        h('span', null, [session.workspace, session.shortId].filter(Boolean).join(' · ')),
+      summaryText ? h('p', { className: 'activity-detail-summary' }, summaryText) : null,
+      session.id ? h('section', { className: 'activity-session-context' },
+        h('div', { className: 'activity-session-copy' },
+          h('strong', null, session.title),
+          h('span', null, [session.workspace, session.shortId].filter(Boolean).join(' · '))
+        ),
         h('div', { className: 'activity-session-actions' },
           h('a', {
-            className: 'buttonlike secondary',
+            className: 'section-action',
             href: routeHref('tasks', { workspace: session.workspace || entry.workspace, task: session.id })
-          }, 'Task ', h(Icon, { name: 'chevronRight', size: 16 })),
+          }, 'Open task'),
           h('a', {
-            className: 'buttonlike secondary',
+            className: 'section-action',
             href: routeHref('activity', { workspace: session.workspace || entry.workspace, task: session.id, time: 'all' })
-          }, 'Show only this task')
+          }, 'Task activity')
         )
       ) : null,
-      readableSection('What happened', activityMessage(entry)),
-      readableSection('Target', activityTargetLabel(entry)),
-      readableSection('Result', activityResultText(entry)),
-      readableSection('File location', activityFileLocation(entry)),
-      readableSection('Error', activityErrorText(entry), 'activity-detail-error'),
+      readableSection('Target', targetText),
+      readableSection('Result', resultText),
+      readableSection('File location', fileLocationText),
+      readableSection('Error', errorText, 'activity-detail-error'),
       h('details', { className: 'activity-detail-technical' },
         h('summary', null, 'Technical details'),
         h('div', { className: 'activity-detail-fields' },
@@ -598,10 +723,10 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
             h('span', null, String(value))
           ))
         ),
-        rawDetail('Raw target', entry.target),
-        rawDetail('Raw result', entry.result),
-        rawDetail('Safe metadata', entry.metadata),
-        rawDetail('Raw error', entry.error),
+        h(RawDetail, { title: 'Raw target', value: entry.target, key: 'raw-target' }),
+        h(RawDetail, { title: 'Raw result', value: entry.result, key: 'raw-result' }),
+        h(RawDetail, { title: 'Safe metadata', value: entry.metadata, key: 'safe-metadata' }),
+        h(RawDetail, { title: 'Raw error', value: entry.error, key: 'raw-error' }),
         h('button', {
           type: 'button',
           className: 'secondary',
@@ -621,13 +746,116 @@ function readableSection(title, value, className = '') {
   );
 }
 
-function rawDetail(title, value) {
-  if (value === undefined || value === null || value === '') return null;
-  if (typeof value === 'object' && Object.keys(value).length === 0) return null;
-  return h('section', { className: 'activity-detail-raw', key: title },
-    h('h4', null, title),
-    h('pre', { className: 'detail-pre' }, typeof value === 'string' ? value : JSON.stringify(value, null, 2))
+function distinctActivityText(value, ...others) {
+  const normalized = normalizeActivityText(value);
+  if (!normalized) return false;
+  return !others.some(other => normalizeActivityText(other) === normalized);
+}
+
+function normalizeActivityText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+const JSON_NO_MATCH = Symbol('json-no-match');
+
+function RawDetail({ title, value }) {
+  const [query, setQuery] = useState('');
+  const [treeRevision, setTreeRevision] = useState({ id: 0, open: true });
+  const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef(0);
+  const empty = value === undefined || value === null || value === '' || (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0);
+  const objectValue = value && typeof value === 'object';
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredValue = useMemo(() => objectValue ? filterJsonValue(value, normalizedQuery) : value, [normalizedQuery, objectValue, value]);
+
+  useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
+  if (empty) return null;
+
+  const copyValue = async () => {
+    const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+    try {
+      const ok = await copyText(text);
+      if (ok === false) throw new Error('Clipboard write failed.');
+      setCopied(true);
+      window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      toast('Clipboard access failed.', { variant: 'error' });
+    }
+  };
+
+  return h('section', { className: 'activity-detail-raw' },
+    h('div', { className: 'activity-detail-raw-head' },
+      h('h4', null, title),
+      h('div', { className: 'activity-detail-raw-actions' },
+        objectValue ? h(React.Fragment, null,
+          h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setTreeRevision(current => ({ id: current.id + 1, open: true })) }, 'Expand all'),
+          h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setTreeRevision(current => ({ id: current.id + 1, open: false })) }, 'Collapse all')
+        ) : null,
+        h('button', { type: 'button', className: 'secondary compact-button', onClick: () => { void copyValue(); } }, copied ? 'Copied' : 'Copy value')
+      )
+    ),
+    objectValue ? h('label', { className: 'activity-json-search' },
+      h('span', { className: 'sr-only' }, `Search ${title}`),
+      h(Icon, { name: 'search', size: 14 }),
+      h('input', { type: 'search', value: query, placeholder: 'Search keys or values', onChange: event => setQuery(event.target.value) })
+    ) : null,
+    objectValue
+      ? filteredValue === JSON_NO_MATCH
+        ? h('div', { className: 'activity-json-empty' }, 'No matching keys or values.')
+        : h('div', { className: 'activity-json-tree' }, h(JsonTreeNode, { value: filteredValue, treeRevision, root: true }))
+      : h('pre', { className: 'detail-pre' }, String(value))
   );
+}
+
+function JsonTreeNode({ label = '', value, treeRevision, root = false }) {
+  const branch = value && typeof value === 'object';
+  const [open, setOpen] = useState(true);
+  useEffect(() => { setOpen(treeRevision.open); }, [treeRevision]);
+  if (!branch) {
+    return h('div', { className: 'activity-json-leaf' },
+      label !== '' ? h('span', { className: 'activity-json-key' }, label) : null,
+      label !== '' ? h('span', { 'aria-hidden': 'true' }, ':') : null,
+      h('code', null, jsonPrimitive(value))
+    );
+  }
+  const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value);
+  const typeLabel = Array.isArray(value) ? `Array · ${entries.length}` : `Object · ${entries.length}`;
+  return h('details', { className: `activity-json-branch${root ? ' is-root' : ''}`, open, onToggle: event => setOpen(event.currentTarget.open) },
+    h('summary', null,
+      label !== '' ? h('span', { className: 'activity-json-key' }, label) : null,
+      h('span', { className: 'activity-json-type' }, typeLabel)
+    ),
+    h('div', { className: 'activity-json-children' },
+      entries.map(([key, child]) => h(JsonTreeNode, { key, label: key, value: child, treeRevision }))
+    )
+  );
+}
+
+function filterJsonValue(value, query, key = '') {
+  if (!query) return value;
+  if (String(key).toLowerCase().includes(query)) return value;
+  if (!value || typeof value !== 'object') return String(value).toLowerCase().includes(query) ? value : JSON_NO_MATCH;
+  if (Array.isArray(value)) {
+    const filtered = [];
+    value.forEach((item, index) => {
+      const match = filterJsonValue(item, query, index);
+      if (match !== JSON_NO_MATCH) filtered.push(match);
+    });
+    return filtered.length ? filtered : JSON_NO_MATCH;
+  }
+  const filtered = {};
+  for (const [childKey, childValue] of Object.entries(value)) {
+    const match = filterJsonValue(childValue, query, childKey);
+    if (match !== JSON_NO_MATCH) filtered[childKey] = match;
+  }
+  return Object.keys(filtered).length ? filtered : JSON_NO_MATCH;
+}
+
+function jsonPrimitive(value) {
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (value === null) return 'null';
+  return String(value);
 }
 
 function openActivityFilters({ filterState, filterOptions, onApply }) {

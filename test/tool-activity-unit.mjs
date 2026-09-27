@@ -80,6 +80,54 @@ const queuedEvent = queueTracker.getToolActivity().tasks[0]?.events[0];
 assert.equal(queuedEvent?.metadata?.waitMs, 1800);
 assert.match(queuedEvent?.summary || '', /Waited 1\.8 seconds for the workspace execution queue/);
 
+const terminalTracker = createToolActivityTracker({ idleMs: 60_000 });
+const terminalEvents = [];
+terminalTracker.onToolActivity(event => terminalEvents.push(event));
+const finishTerminalSearch = terminalTracker.beginConnectorToolCall({
+  trackTask: false,
+  tool: 'relai_search',
+  internalOperation: 'search.text',
+  workspace: 'repo',
+  scopeId: 'terminal-search',
+  operation: 'Searching for 3 queries: "alpha", "beta" (+1 more)'
+});
+finishTerminalSearch({
+  ok: true,
+  activity: {
+    status: 'succeeded',
+    title: 'Found 3 matches',
+    summary: 'Searched the repository and found 3 matches.'
+  }
+});
+const terminalSearchFinished = terminalEvents.find(event => event.phase === 'finished');
+assert.equal(terminalSearchFinished?.operation, 'Found 3 matches');
+assert.equal(terminalSearchFinished?.activityEvent?.title, 'Found 3 matches');
+assert.equal(terminalSearchFinished?.activityEvent?.tool?.operation, 'Found 3 matches');
+assert.doesNotMatch(terminalSearchFinished?.operation || '', /Searching/i);
+terminalEvents.length = 0;
+const finishTerminalExec = terminalTracker.beginConnectorToolCall({
+  trackTask: false,
+  tool: 'relai_exec',
+  internalOperation: 'exec',
+  workspace: 'repo',
+  scopeId: 'terminal-exec',
+  operation: 'Running $tests'
+});
+finishTerminalExec({
+  ok: false,
+  error: 'Tests failed.',
+  activity: {
+    status: 'failed',
+    title: 'Command failed',
+    summary: 'Command failed: Tests failed.'
+  }
+});
+const terminalExecFinished = terminalEvents.find(event => event.phase === 'finished');
+assert.equal(terminalExecFinished?.operation, 'Command failed');
+assert.equal(terminalExecFinished?.activityEvent?.tool?.operation, 'Command failed');
+assert.doesNotMatch(terminalExecFinished?.operation || '', /Running/i);
+terminalTracker.reset();
+
 const fileTracker = createToolActivityTracker({ idleMs: 60_000 });
 const finishFileStart = fileTracker.beginConnectorToolCall({
   tool: 'relai_work', internalOperation: 'work.begin', workspace: 'repo', scopeId: 'files-live', createTask: true

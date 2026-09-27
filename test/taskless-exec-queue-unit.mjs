@@ -5,6 +5,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { callTool as rawCallTool } from '../src/tools.js';
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-taskless-queue-'));
@@ -87,6 +88,7 @@ try {
   assert.equal(holderResult.commandSucceeded, true);
 } finally {
   await repositoryIntelligence.shutdown();
+  await flushLocalAnalytics();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
   if (previousQueueTimeout == null) delete process.env.REL_AI_MCP_WORKSPACE_QUEUE_TIMEOUT_MS;

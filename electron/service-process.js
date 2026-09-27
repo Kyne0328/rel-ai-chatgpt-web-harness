@@ -114,6 +114,7 @@ async function startService(payload = {}) {
       writeProfile: false,
       pickFolder: () => callNative('pickFolder'),
       openFolder: folderPath => callNative('openFolder', { path: folderPath }),
+      getBrowserPreview: () => callNative('browserPreview'),
       getTaskActivity: () => toolActivity.getToolActivity(),
       getDesktopStatus: () => desktopContext.status,
       onDesktopStatusChange: listener => {

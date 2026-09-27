@@ -23,6 +23,7 @@ export interface HttpServerOptions {
   stopManagedProcessesOnClose?: boolean;
   pickFolder?: () => string | null | Promise<string | null>;
   openFolder?: (folderPath: string) => unknown | Promise<unknown>;
+  getBrowserPreview?: () => JsonRecord | Promise<JsonRecord>;
   getTaskActivity?: () => JsonRecord;
   getDesktopStatus?: () => JsonRecord;
   onDesktopStatusChange?: (listener: (status: JsonRecord) => void) => Unsubscribe;

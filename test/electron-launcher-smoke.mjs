@@ -94,7 +94,7 @@ const serviceProcess = fs.readFileSync(path.join(root, 'electron', 'service-proc
 const serviceRuntime = fs.readFileSync(path.join(root, 'electron', 'service-runtime.js'), 'utf8');
 assert.match(main, /createDesktopHost/);
 assert.doesNotMatch(main, /await desktop\.start\(\)/, 'Awaiting startup at module scope deadlocks Electron readiness');
-assert.match(main, /desktop\.start\(\)\.catch\(/, 'Desktop startup failures must be handled');
+assert.match(main, /desktop\.start\(\)\.then\([\s\S]*\)\.catch\(/, 'Desktop startup failures must be handled after successful-start update completion work');
 assert.doesNotMatch(main, /createSecureTunnelRuntime|createTunnelCredentialStore|createServiceProcessClient|registerIpcHandlers/, 'Electron main must remain a composition root rather than a behavioral module');
 assert.match(desktopHost, /createSecureTunnelRuntime/);
 assert.match(desktopHost, /createTunnelCredentialStore/);

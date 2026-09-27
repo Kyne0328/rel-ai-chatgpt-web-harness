@@ -5,6 +5,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { relaiExec } from '../src/bridge/exec.js';
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import { runProcess } from '../src/process.js';
 import { gitStatusArgs, INTERNAL_STATUS_MAX_BYTES } from '../src/repo/gitStatus.js';
 import { callTool as rawCallTool } from '../src/tools.js';
@@ -114,6 +115,7 @@ try {
   };
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } finally {
+  await flushLocalAnalytics();
   resetToolActivity();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;

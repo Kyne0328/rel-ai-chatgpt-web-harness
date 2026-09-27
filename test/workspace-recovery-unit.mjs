@@ -43,12 +43,11 @@ async function invoke(name, args, context = {}) {
 }
 
 try {
-  const localMissing = await invoke('relai_work', { action: 'begin' }, { publicHttpOnly: true });
-  assert.equal(localMissing.isError, true);
-  assert.equal(localMissing.structuredContent.errorCode, 'WORKSPACE_INPUT_OMITTED');
-  assert.deepEqual(localMissing.structuredContent.errorDetails.configuredWorkspaceAliases, ['other', 'repo']);
-  assert.deepEqual(localMissing.structuredContent.errorDetails.workspaceAliases, ['other', 'repo']);
-  assert.equal(localMissing.structuredContent.errorDetails.workspaceCount, 2);
+  const localMissing = await invoke('relai_work', { action: 'begin', title: 'Projectless local recovery goal' }, { publicHttpOnly: true });
+  assert.equal(localMissing.isError, false);
+  assert.equal(localMissing.structuredContent.workspace, undefined, 'work.begin must not require selecting a configured workspace');
+  assert.ok(localMissing.structuredContent.work_id);
+  await invoke('relai_work', { action: 'cancel', work_id: localMissing.structuredContent.work_id, reason: 'recovery test cleanup' }, { publicHttpOnly: true });
 
   const restrictedPrincipal = {
     authorizationPolicy: createConsentPolicy({
@@ -58,25 +57,26 @@ try {
     })
   };
 
-  const restrictedMissing = await invoke('relai_work', { action: 'begin' }, {
+  const restrictedMissing = await invoke('relai_work', { action: 'begin', title: 'Restricted projectless recovery goal' }, {
     publicHttpOnly: true,
     principal: restrictedPrincipal
   });
-  assert.equal(restrictedMissing.isError, true);
-  assert.equal(restrictedMissing.structuredContent.errorCode, 'WORKSPACE_INPUT_OMITTED');
-  assert.deepEqual(restrictedMissing.structuredContent.errorDetails.configuredWorkspaceAliases, ['repo']);
-  assert.deepEqual(restrictedMissing.structuredContent.errorDetails.workspaceAliases, ['repo']);
-  assert.equal(restrictedMissing.structuredContent.errorDetails.workspaceCount, 1);
-  assert.ok(restrictedMissing.structuredContent.errorDetails.allowedAlternatives.every(item => !item.includes('other')));
+  assert.equal(restrictedMissing.isError, false);
+  assert.equal(restrictedMissing.structuredContent.workspace, undefined);
+  assert.ok(restrictedMissing.structuredContent.work_id);
+  await invoke('relai_work', {
+    action: 'cancel',
+    work_id: restrictedMissing.structuredContent.work_id,
+    reason: 'restricted recovery test cleanup'
+  }, { publicHttpOnly: true, principal: restrictedPrincipal });
 
   const restrictedUnknown = await invoke('relai_work', { action: 'begin', workspace: 'typo-repo' }, {
     publicHttpOnly: true,
     principal: restrictedPrincipal
   });
   assert.equal(restrictedUnknown.isError, true);
-  assert.equal(restrictedUnknown.structuredContent.errorCode, 'WORKSPACE_NOT_CONFIGURED');
-  assert.deepEqual(restrictedUnknown.structuredContent.errorDetails.workspaceAliases, ['repo']);
-  assert.ok(restrictedUnknown.structuredContent.errorDetails.allowedAlternatives.every(item => !item.includes('other')));
+  assert.equal(restrictedUnknown.structuredContent.errorCode, 'AUTHORIZATION_DENIED', 'restricted clients must not learn whether an unauthorized workspace alias exists');
+  assert.equal(restrictedUnknown.structuredContent.errorDetails.workspaceAliases, undefined, 'authorization errors must not expose configured workspace aliases');
 
   const snapshotMissing = await invoke('relai_snapshot', {}, {
     publicHttpOnly: true,

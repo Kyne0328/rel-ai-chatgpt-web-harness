@@ -25,7 +25,7 @@ assert.match(terms, /Third-party services/i);
 const settings = fs.readFileSync(path.join(root, 'src', 'ui', 'features', 'settings', 'react.js'), 'utf8');
 for (const file of requiredDocuments) assert.match(settings, new RegExp(file.replaceAll('.', '\\.')));
 assert.match(settings, /Legal & privacy/);
-assert.match(settings, /shares bounded tool results through your configured ChatGPT connection/i);
+assert.doesNotMatch(settings, /bounded tool results/i, 'About must not restore the removed implementation-focused privacy summary');
 
 const rootPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 for (const file of requiredDocuments) assert.ok(rootPackage.files.includes(file), `${file} must ship in the npm/package allowlist`);

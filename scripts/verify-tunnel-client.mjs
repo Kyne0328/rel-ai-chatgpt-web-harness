@@ -39,6 +39,7 @@ function verifyNativeCli(file) {
     '--mcp.discovery-extra-headers',
     '--health.listen-addr',
     '--health.url-file',
+    '--health.show-details',
     '--log.format',
     '--log.level'
   ]) {

@@ -42,13 +42,19 @@ function publishValidationProgress({
         : `${completed} of ${total} checks completed`;
   updateCurrentToolActivity({
     status: 'validating',
-    operation: active > 1
-      ? `Running ${active} validation checks in parallel`
-      : active === 1
-        ? `Running validation: ${running[0]}`
-        : currentIndex > 0
-          ? `Validation ${currentIndex}/${total}: ${current || 'check'}`
-          : `Preparing ${total} validation checks`,
+    operation: final
+      ? (resultStatus === 'passed'
+          ? `Validation passed (${completed}/${total} checks)`
+          : resultStatus === 'cancelled'
+            ? 'Validation cancelled'
+            : `Validation failed on ${current || 'check'}`)
+      : active > 1
+        ? `Running ${active} validation checks in parallel`
+        : active === 1
+          ? `Running validation: ${running[0]}`
+          : currentIndex > 0
+            ? `Validation ${currentIndex}/${total}: ${current || 'check'}`
+            : `Preparing ${total} validation checks`,
     detail: activity,
     currentStage: stage,
     currentActivity: activity,

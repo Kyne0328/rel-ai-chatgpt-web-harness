@@ -178,7 +178,7 @@ try {
   const completion = await completionPromise;
   assert.equal(completion.ok, true, 'atomic validation must complete against one stable visible workspace state');
   assert.equal(completion.completionKnown, true);
-  assert.equal(completion.work_id, validatingTask);
+  assert.equal(completion.work_id, undefined, 'routine validation success must not echo the caller-supplied work_id');
   assert.equal(completion.completionSource, 'relai_validate:checks');
   assert.equal(concurrentEditCompleted, true, 'the overlapping edit completed before validation was released');
 
@@ -225,7 +225,7 @@ try {
   const scopedCompletion = await scopedCompletionPromise;
   assert.equal(scopedCompletion.ok, true, 'task-scoped validation must remain current despite an unrelated concurrent mutation');
   assert.equal(scopedCompletion.completionKnown, true);
-  assert.equal(scopedCompletion.work_id, scopedTask);
+  assert.equal(scopedCompletion.work_id, undefined, 'task-scoped validation keeps attribution internally without echoing work_id');
   assert.equal(unrelatedEditCompleted, true);
 
   await callTool('relai_work', {

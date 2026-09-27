@@ -32,30 +32,51 @@ import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
 import { getToolActivity } from '../toolActivity.js';
 import { applyTaskProgressPatch } from './taskProgress.js';
-const startTaskHandler = inWorkspace(async (workspace, _config, args, context) => {
+function resolveOptionalWorkspace(config, args = {}) {
+  const reference = String(args.workspace || '').trim();
+  return reference ? resolveWorkspace(config, reference) : null;
+}
+
+const startTaskHandler = async (config, args = {}, context = {}) => {
+  const workspace = resolveOptionalWorkspace(config, args);
   const task = startTask(workspace, args);
   const recovered = context?.requestTaskContext?.session;
   const activity = getToolActivity();
   const current = activity.tasks.find(item => String(item.id || item.taskId || '') === task.work_id);
+  const hasPlan = Array.isArray(current?.plan?.steps) && current.plan.steps.length > 0;
+  const initialSteps = Array.isArray(args.steps) && args.steps.length ? args.steps : defaultTaskSteps(args);
+  const progress = hasPlan ? null : applyTaskProgressPatch(task.work_id, { steps: initialSteps });
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
   return {
     ...task,
+    plan: progress?.plan || current?.plan,
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
-    ...(recovered ? { bootstrap: { recoveredTask: compactSessionSummary(recovered) } } : {}),
-    nextAction: `Use work_id "${task.work_id}" on subsequent operations. Inspect directly with one batched relai_read, relai_search, or relai_snapshot call; use relai_work context only when deeper continuity or bootstrap context is materially useful.`
+    ...(recovered ? { bootstrap: { recoveredTask: compactSessionSummary(recovered) } } : {})
   };
-});
+};
 
-const taskContextHandler = inWorkspace(async (workspace, config, args, context) => {
-  args = { ...context?.requestTaskContext?.session, ...args };
+function defaultTaskSteps(args = {}) {
+  const title = String(args.title || args.objective || 'Complete requested work').trim().slice(0, 300) || 'Complete requested work';
+  const objective = String(args.objective || '').trim();
+  return [{
+    id: 'goal',
+    title,
+    ...(objective && objective !== title ? { detail: objective.slice(0, 500) } : {}),
+    status: 'in_progress'
+  }];
+}
+
+const taskContextHandler = async (config, inputArgs = {}, context = {}) => {
+  const args = { ...context?.requestTaskContext?.session, ...inputArgs };
+  const workspace = resolveOptionalWorkspace(config, args);
   const task = startTask(workspace, args);
   const taskActivity = getToolActivity();
   const currentTask = taskActivity.tasks.find(item => String(item.id || item.taskId || '') === task.work_id) || null;
   const activeRelatedWork = compactActiveRelatedWork(taskActivity, currentTask || {});
   const taskResult = activeRelatedWork.length ? { ...task, activeRelatedWork } : task;
   const bootstrapMode = String(args.bootstrap || 'compact').toLowerCase();
-  if (bootstrapMode === 'none') {
-    scheduleIntelligenceWarmup(workspace, config);
+  if (!workspace || bootstrapMode === 'none') {
+    if (workspace) scheduleIntelligenceWarmup(workspace, config);
     return taskResult;
   }
   const snapshot = await repoSnapshot(workspace, config, {
@@ -98,15 +119,10 @@ const taskContextHandler = inWorkspace(async (workspace, config, args, context) 
     ...(hostContextSummary ? { hostContextSummary } : {}),
     ...(cachedIntelligence ? { repositoryIntelligence: cachedIntelligence } : {})
   };
-  if (bootstrapMode === 'full') {
-    const result = { ...taskResult, bootstrap };
-    scheduleIntelligenceWarmup(workspace, config);
-    return result;
-  }
   const result = { ...taskResult, bootstrap };
   scheduleIntelligenceWarmup(workspace, config);
   return result;
-});
+};
 
 function scheduleIntelligenceWarmup(workspace, config) {
   if (process.env.REL_AI_REDUCED_BACKGROUND_WORK === '1') return;
@@ -116,20 +132,21 @@ function scheduleIntelligenceWarmup(workspace, config) {
   timer.unref();
 }
 
-const taskPlanHandler = inWorkspace((workspace, _config, args, context) => {
+const taskPlanHandler = (_config, args, context) => {
   const taskId = String(context?.taskId || args.work_id || '').trim();
+  const workspace = String(context?.requestTaskContext?.session?.workspace || '').trim();
   const result = applyTaskProgressPatch(taskId, { steps: args.steps });
   const plan = result?.plan || { revision: 0, steps: [] };
   return {
     ok: true,
-    workspace: workspace.alias,
+    ...(workspace ? { workspace } : {}),
     work_id: taskId,
     plan,
     message: result?.changed
-      ? (plan.steps.length ? `Task plan updated with ${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}.` : 'Task plan cleared.')
+      ? `Task plan updated with ${plan.steps.length} step${plan.steps.length === 1 ? '' : 's'}.`
       : 'Task plan is unchanged.'
   };
-});
+};
 
 const HANDLERS = Object.freeze({
   startTask: startTaskHandler,

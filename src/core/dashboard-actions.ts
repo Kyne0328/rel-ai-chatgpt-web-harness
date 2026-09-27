@@ -30,6 +30,7 @@ export async function controlDashboardTask(action: 'stop' | 'cancel', workId: st
   const taskId = String(workId || '').trim();
   if (!taskId) throw new Error('work_id is required');
   if (!['stop', 'cancel'].includes(action)) throw new Error('action must be stop or cancel');
+  // The authenticated local dashboard may control tasks created by MCP clients.
   return callTool('relai_work', {
     action,
     work_id: taskId,
@@ -37,7 +38,7 @@ export async function controlDashboardTask(action: 'stop' | 'cancel', workId: st
     reason: action === 'cancel'
       ? 'Task cancelled from the Rel.AI dashboard.'
       : 'Running operation stopped from the Rel.AI dashboard.'
-  }, { publicHttpOnly: false });
+  }, { publicHttpOnly: false, trustedLocalTaskControl: true });
 }
 
 export async function runWorkspaceValidation(workspace: string): Promise<Record<string, unknown>> {

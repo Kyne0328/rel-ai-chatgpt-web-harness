@@ -11,6 +11,8 @@ export interface DesktopStatusDto {
   tunnelStatus?: string;
   tunnelId?: string;
   tunnelHealthUrl?: string;
+  tunnelRecoveryMode?: string;
+  tunnelHealth?: Record<string, unknown> | null;
   mcpUrl?: string;
   localMcpUrl?: string;
   localUrl?: string;
@@ -106,7 +108,7 @@ export interface DesktopIpcRequestMap {
   'desktop:update:get': [];
   'desktop:update:check': [];
   'desktop:update:download': [];
-  'desktop:update:install': [];
+  'desktop:update:install': [options?: { deferIfBusy?: boolean }];
   'desktop:diagnostics:export': [report: DiagnosticReportDto];
   'desktop:diagnostics:open-folder': [];
   'desktop:diagnostics:tunnel-doctor': [];

@@ -85,11 +85,8 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     ? validationPlan.validationScope
     : validationScope;
   const level = String(planSelection === 'focused' ? 'quick' : (args.level || planSelection || 'standard')).toLowerCase();
-  const explicitWorkId = String(args.work_id || '').trim();
-  const complete = args.complete === true
-    ? Boolean(currentTaskId)
-    : Boolean(explicitWorkId) && args.complete !== false;
-  if (args.complete === true && !currentTaskId) throw new Error('relai_validate complete:true requires work_id because it closes a durable work session.');
+  const complete = args.complete === true;
+  if (complete && !currentTaskId) throw new Error('relai_validate complete:true requires work_id because it closes a durable work session.');
   const completionSummary = complete ? normalizeCompletionSummary(resolveCompletionSummary(args, context)) : '';
   const normalized = normalizeVerifyChecks(effectiveArgs, workspace.path, level);
   const { checks, checkUnits, skippedChecks, aliasNormalizations } = normalized;

@@ -36,9 +36,16 @@ function redactCommandForAudit(value: unknown): string {
   return clipped;
 }
 
+function formatCliArg(value: unknown): string {
+  const str = String(value == null ? '' : value);
+  if (!str) return '""';
+  if (/^[a-zA-Z0-9_./:@%+-]+$/.test(str)) return str;
+  return JSON.stringify(str);
+}
+
 function directCommandDisplay(executable: unknown, argv: unknown = []): string {
   const items = Array.isArray(argv) ? argv : [];
-  return [executable, ...items].map(value => JSON.stringify(String(value))).join(' ');
+  return [executable, ...items].map(formatCliArg).join(' ');
 }
 
 function commandDisplayForInvocation(args: CommandDisplayInvocation = {}): string {

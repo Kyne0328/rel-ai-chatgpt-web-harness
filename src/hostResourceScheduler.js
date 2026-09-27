@@ -5,11 +5,13 @@ const availableParallelism = Math.max(1, Number(os.availableParallelism?.() || o
 const DEFAULT_HEAVY_WORK_LIMIT = Math.min(64, Math.max(2, availableParallelism - 1));
 const DEFAULT_HEAVY_QUEUE_TIMEOUT_MS = 30_000;
 const DEFAULT_PERSISTENT_PROCESS_LIMIT = Math.min(12, Math.max(4, availableParallelism * 2));
+const DEFAULT_PERSISTENT_QUEUE_TIMEOUT_MS = 30_000;
 
 const HOST_HEAVY_WORK_LIMIT = configuredLimit('REL_AI_MCP_HEAVY_WORK_LIMIT', DEFAULT_HEAVY_WORK_LIMIT);
 const HOST_HEAVY_QUEUE_TIMEOUT_MS = configuredTimeout('REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS', DEFAULT_HEAVY_QUEUE_TIMEOUT_MS);
 const HOST_REPOSITORY_QUERY_LIMIT = 4;
 const HOST_PERSISTENT_PROCESS_LIMIT = configuredLimit('REL_AI_MCP_PERSISTENT_PROCESS_LIMIT', DEFAULT_PERSISTENT_PROCESS_LIMIT);
+const HOST_PERSISTENT_QUEUE_TIMEOUT_MS = configuredTimeout('REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS', DEFAULT_PERSISTENT_QUEUE_TIMEOUT_MS);
 
 let ticketSequence = 0;
 
@@ -223,7 +225,13 @@ const hostResourceScheduler = createFairResourceScheduler({
 
 function acquireHostResource(resourceClass, owner, options = {}) {
   const resource = String(resourceClass || '').trim();
-  const timeoutMs = options.timeoutMs ?? (resource === 'heavy' ? HOST_HEAVY_QUEUE_TIMEOUT_MS : undefined);
+  const timeoutMs = options.timeoutMs ?? (
+    resource === 'heavy'
+      ? HOST_HEAVY_QUEUE_TIMEOUT_MS
+      : resource === 'persistent'
+        ? HOST_PERSISTENT_QUEUE_TIMEOUT_MS
+        : undefined
+  );
   return hostResourceScheduler.acquire(resource, owner, {
     ...options,
     ...(timeoutMs != null ? { timeoutMs } : {})
@@ -237,6 +245,7 @@ function hostResourceStats() {
 export {
   HOST_HEAVY_QUEUE_TIMEOUT_MS,
   HOST_HEAVY_WORK_LIMIT,
+  HOST_PERSISTENT_QUEUE_TIMEOUT_MS,
   HOST_PERSISTENT_PROCESS_LIMIT,
   acquireHostResource,
   createFairResourceScheduler,

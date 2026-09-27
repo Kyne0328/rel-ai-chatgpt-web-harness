@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { callTool as rawCallTool } from '../src/tools.js';
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
 import { resetToolActivity } from '../src/toolActivity.js';
 
@@ -100,6 +101,7 @@ try {
 } finally {
   resetToolActivity();
   await repositoryIntelligence.shutdown();
+  await flushLocalAnalytics();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

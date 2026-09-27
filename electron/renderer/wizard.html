@@ -15,7 +15,7 @@
       <div class="wizard-cloud-card wizard-update-card" id="updateBanner" hidden>
         <div class="wizard-cloud-status">
           <strong id="updateBannerTitle">Welcome back — Rel.AI was updated</strong>
-          <span id="updateBannerDetail">This looks like an update installed from a full download instead of the in-app updater. Your previous connection was not found on this launch, so reconnect once and you will be back where you left off.</span>
+          <span id="updateBannerDetail">Rel.AI was updated with a full download. This launch did not find the saved connection. Reconnect once to continue.</span>
         </div>
       </div>
       <div class="wizard-cloud-hero">
@@ -24,25 +24,18 @@
         <p id="wizardSubtitle">Create an OpenAI Secure MCP Tunnel. After it connects, Rel.AI will show the ChatGPT connector setup step.</p>
       </div>
 
-      <div class="wizard-cloud-card wizard-prerequisite-card">
-        <div class="wizard-cloud-status">
-          <strong>Before you start</strong>
-          <span>Use the OpenAI organization and ChatGPT workspace where you will use Rel.AI. You need access to create or use a Secure MCP Tunnel in that organization.</span>
-        </div>
-      </div>
-
-      <div class="wizard-cloud-card wizard-security-card">
+      <form class="wizard-cloud-card wizard-security-card" id="connectionForm">
         <section class="wizard-value-step" aria-labelledby="tunnelStepTitle">
           <div class="wizard-value-step-head">
             <span class="wizard-step-number" aria-hidden="true">1</span>
             <div>
               <strong id="tunnelStepTitle">Create your Secure MCP Tunnel</strong>
-              <p>Set the tunnel to the OpenAI organization and ChatGPT workspace where you will use Rel.AI.</p>
+              <p>Create the tunnel in the OpenAI organization and ChatGPT workspace where you use Rel.AI.</p>
             </div>
           </div>
           <button class="secondary wizard-open-button" type="button" data-open-openai="tunnels">Open OpenAI Tunnels</button>
           <div class="wizard-field-group">
-            <p class="wizard-field-help"><strong>In OpenAI, complete all tunnel fields:</strong> Name, Description, Organizations, and ChatGPT workspaces. Select each organization and ChatGPT workspace where you will use Rel.AI.</p>
+            <p class="wizard-field-help"><strong>In OpenAI, complete these tunnel fields:</strong> Name, Description, Organizations, and ChatGPT workspaces.</p>
           </div>
           <div class="wizard-field-group">
             <label for="tunnelIdInput"><span>Paste Tunnel ID here</span></label>
@@ -53,7 +46,7 @@
           <details class="wizard-help-details">
             <summary>Having trouble?</summary>
             <div>
-              <p>Make sure the tunnel belongs to the OpenAI organization you intend to use and is associated with the ChatGPT workspace where you use Rel.AI.</p>
+              <p>Confirm that the tunnel uses the same OpenAI organization and ChatGPT workspace as Rel.AI.</p>
               <p>If you cannot create or edit tunnels, your OpenAI organization owner may need to grant you tunnel access.</p>
             </div>
           </details>
@@ -64,7 +57,7 @@
             <span class="wizard-step-number" aria-hidden="true">2</span>
             <div>
               <strong id="runtimeKeyStepTitle">Create a runtime API key</strong>
-              <p>Create it in the same OpenAI organization as your tunnel, then copy it while OpenAI still shows it.</p>
+              <p>Create it in the same OpenAI organization as your tunnel. Copy the key before OpenAI hides it.</p>
             </div>
           </div>
           <button class="secondary wizard-open-button" type="button" data-open-openai="apiKeys">Open OpenAI API Keys</button>
@@ -96,8 +89,8 @@
           </div>
         </details>
         <p class="wizard-inline-error" id="setupError" role="alert" aria-live="polite"></p>
-        <button class="primary wizard-main-action" id="connectBtn" type="button">Connect this computer</button>
-      </div>
+        <button class="primary wizard-main-action" id="connectBtn" type="submit">Connect this computer</button>
+      </form>
       <div class="wizard-actions"><button class="secondary" id="cancelWizardBtn" type="button">Cancel</button></div>
     </section>
   </main>

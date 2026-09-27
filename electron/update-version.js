@@ -1,9 +1,27 @@
 import semver from 'semver';
 
-function parseStableVersion(value) {
+function parseUpdateVersion(value, options = {}) {
   const version = String(value || '').trim();
   const parsed = semver.parse(version);
-  if (!parsed || parsed.version !== version || parsed.prerelease.length > 0) return null;
+  if (!parsed || parsed.version !== version) return null;
+  if (options.allowPrerelease !== true && parsed.prerelease.length > 0) return null;
+  return parsed;
+}
+
+function isUpdateVersion(value, options = {}) {
+  return Boolean(parseUpdateVersion(value, options));
+}
+
+function compareUpdateVersions(left, right, options = {}) {
+  const leftVersion = parseUpdateVersion(left, options);
+  const rightVersion = parseUpdateVersion(right, options);
+  if (!leftVersion || !rightVersion) return Number.NaN;
+  return semver.compare(leftVersion, rightVersion);
+}
+
+function parseStableVersion(value) {
+  const parsed = parseUpdateVersion(value);
+  if (!parsed) return null;
   return [parsed.major, parsed.minor, parsed.patch];
 }
 
@@ -12,10 +30,14 @@ function isStableVersion(value) {
 }
 
 function compareVersions(left, right) {
-  const leftParts = parseStableVersion(left);
-  const rightParts = parseStableVersion(right);
-  if (!leftParts || !rightParts) return Number.NaN;
-  return semver.compare(leftParts.join('.'), rightParts.join('.'));
+  return compareUpdateVersions(left, right);
 }
 
-export { compareVersions, isStableVersion, parseStableVersion };
+export {
+  compareUpdateVersions,
+  compareVersions,
+  isStableVersion,
+  isUpdateVersion,
+  parseStableVersion,
+  parseUpdateVersion
+};

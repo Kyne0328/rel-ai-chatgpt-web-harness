@@ -15,6 +15,7 @@ import { buildWorkspaceStates } from '../workspaceState.js';
 import { runtimeCompatibility } from '../runtimeCompatibility.js';
 import { mcpConnectionManager } from '../mcp/connectionManager.js';
 import { readMcpAuthenticationStatus } from '../mcp/authenticationStatus.js';
+import { getOnboardingStatus } from '../onboardingState.js';
 type JsonRecord = Record<string, unknown>;
 interface DashboardTaskActivity extends JsonRecord {
   revision?: number;
@@ -84,6 +85,7 @@ function buildDashboardPayload(
     repositoryRuntime: runtimeState.repository,
     runtimeCompatibility: runtimeState.compatibility,
     readiness: release.releaseReadiness(config, { requireHttpToken }),
+    onboarding: getOnboardingStatus(),
     ...connectionProjection,
     ...(options.live ? { live: options.live } : {}),
     taskActivity: sanitizeTaskActivity(taskActivity),

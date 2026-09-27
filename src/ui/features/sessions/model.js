@@ -22,7 +22,7 @@ export function sessionSummary(sessions = []) {
     return summary;
   }, { active: 0, open: 0, attention: 0, inactive: 0, completed: 0, cancelled: 0, failed: 0, other: 0 });
 
-  const parts = [`${counts.active} active`, `${counts.open} open`];
+  const parts = [`${counts.active} active`, `${counts.open} waiting`];
   if (counts.attention) parts.push(`${counts.attention} need attention`);
   if (counts.inactive) parts.push(`${counts.inactive} inactive`);
   parts.push(`${counts.completed} completed`);
@@ -97,7 +97,7 @@ function sessionChangedFileCount(session = {}) {
 }
 
 export function sessionDescription(session = {}, live = isOngoingSession(session), operation = '', semantic = semanticProgressFor(session)) {
-  if (live) return semantic.currentActivity || semantic.currentStage || operation || 'Task is open';
+  if (live) return semantic.currentActivity || semantic.currentStage || operation || 'Task is waiting';
   if (session.summary) return session.summary;
   if (session.status === 'validation_failed') return 'Checks failed';
   if (session.status === 'blocked') return session.endReason || workSessionStateView(session).label;

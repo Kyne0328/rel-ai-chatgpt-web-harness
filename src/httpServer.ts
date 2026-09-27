@@ -43,6 +43,7 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
   // reports unsupported and the dashboard falls back to manual path entry.
   const pickFolder = typeof options.pickFolder === "function" ? options.pickFolder : null;
   const openFolder = typeof options.openFolder === "function" ? options.openFolder : null;
+  const getBrowserPreview = typeof options.getBrowserPreview === "function" ? options.getBrowserPreview : null;
   const getTaskActivity = typeof options.getTaskActivity === "function" ? options.getTaskActivity : null;
   const getDesktopStatus = typeof options.getDesktopStatus === "function" ? options.getDesktopStatus : null;
   const onDesktopStatusChange = typeof options.onDesktopStatusChange === "function" ? options.onDesktopStatusChange : null;
@@ -89,6 +90,7 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     maxBodyBytes,
     ...(pickFolder ? { pickFolder } : {}),
     ...(openFolder ? { openFolder } : {}),
+    ...(getBrowserPreview ? { getBrowserPreview } : {}),
     ...(getTaskActivity ? { getTaskActivity } : {}),
     ...(getDesktopStatus ? { getDesktopStatus } : {}),
     ...(onDesktopStatusChange ? { onDesktopStatusChange } : {}),

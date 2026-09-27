@@ -1,5 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import './styles.css';
+import { fetchJson } from '../../api.js';
 import { Icon } from '../../components/icons.js';
+import { StatusPill } from '../../components/pill.js';
+import { clipBrowserSurfaceBounds, releaseBrowserRouteControl } from './behavior.js';
 
 const h = React.createElement;
 
@@ -138,15 +142,7 @@ function createBrowserRoute() {
       }
     }, [focusTab]);
 
-    if (!browser) {
-      return h('section', { className: 'section browser-route' },
-        h('div', { className: 'browser-empty card' },
-          h(Icon, { name: 'browser', className: 'browser-empty-icon', size: 28 }),
-          h('h2', null, 'Embedded browser lives in the Rel.AI desktop app.'),
-          h('p', null, 'Browser sessions that need this computer appear here when Rel.AI is running as the desktop app.')
-        )
-      );
-    }
+    if (!browser) return h(RemoteBrowserPreview);
 
     if (!state.active) {
       return h('section', { className: 'section browser-route' },
@@ -155,8 +151,7 @@ function createBrowserRoute() {
           h('h2', null, 'No local browser session is active.'),
           h('p', null, 'When ChatGPT uses Rel.AI for a local browser task, the live page will open here automatically.'),
           h('div', { className: 'browser-empty-hint' },
-            h('span', { className: 'status-pill' }, 'Waiting for AI'),
-            h('span', null, 'Tabs, sessions, and page preview appear in one place.')
+            h(StatusPill, { label: 'Waiting for AI', tone: 'neutral' })
           )
         ),
         error ? h('div', { className: 'connection-notice bad', role: 'alert' }, error) : null
@@ -170,6 +165,11 @@ function createBrowserRoute() {
     const pageHost = hostOf(state.url);
     const viewportLabel = formatViewport(state.viewport);
     return h('section', { className: 'section browser-route', 'data-browser-control': userControl ? 'user' : 'ai' },
+      userControl ? h('div', { className: 'browser-takeover-banner', role: 'status' },
+        h(Icon, { name: 'warning', size: 16 }),
+        h('span', null, 'Manual control is active. Return control to resume AI interaction.'),
+        h('button', { className: 'secondary compact-button', type: 'button', disabled: busy === 'control' || busy === 'stop', onClick: () => { void run('control', () => browser.setControl('ai')); } }, busy === 'control' ? 'Returning…' : 'Return to AI')
+      ) : null,
       h('div', { className: 'browser-chrome card' },
         sessions.length > 1
           ? h('div', { className: 'browser-sessions' },
@@ -266,7 +266,7 @@ function createBrowserRoute() {
                 )
               : h('div', { className: 'browser-tabs-empty', role: 'status' },
                   h(Icon, { name: 'add', size: 14 }),
-                  h('span', null, 'No tabs open — new pages from the agent appear here.')
+                  h('span', null, 'No tabs open.')
                 )
           ),
           tabs.length > 1
@@ -300,7 +300,7 @@ function createBrowserRoute() {
             h('span', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, copyStatus)
           ),
           state.loading ? h('div', { className: 'browser-loading-bar', 'aria-hidden': 'true' }, h('i', null)) : null,
-          h('span', { className: `status-pill ${userControl ? 'warn' : 'working'}` }, userControl ? 'Your control' : 'AI control · Read-only'),
+          h(StatusPill, { label: userControl ? 'Your control' : 'AI control', tone: userControl ? 'warn' : 'working' }),
           viewportLabel ? h('span', { className: 'browser-viewport-pill mono', title: 'AI browser viewport' }, viewportLabel) : null,
           h('div', { className: 'browser-toolbar-actions' },
             h('button', {
@@ -329,7 +329,7 @@ function createBrowserRoute() {
       },
         h('div', { className: 'browser-surface-placeholder', 'aria-hidden': 'true' },
           h(Icon, { name: userControl ? 'play' : 'browser', size: 20, className: 'browser-surface-icon' }),
-          h('span', null, userControl ? 'You control this page — interact directly.' : 'Watch live — take control to interact.'),
+          h('span', null, userControl ? 'You control this page.' : 'Take control to interact.'),
           h('span', { className: 'browser-surface-sub' }, pageHost ? pageHost : 'Live view renders here')
         )
       )
@@ -337,28 +337,80 @@ function createBrowserRoute() {
   };
 }
 
-function clipBrowserSurfaceBounds(rect, viewportWidth, viewportHeight) {
-  const width = Math.max(0, Math.round(Number(viewportWidth) || 0));
-  const height = Math.max(0, Math.round(Number(viewportHeight) || 0));
-  const left = Number(rect?.left);
-  const top = Number(rect?.top);
-  const right = Number(rect?.right);
-  const bottom = Number(rect?.bottom);
-  if (![left, top, right, bottom].every(Number.isFinite) || width < 1 || height < 1) return { visible: false };
+function RemoteBrowserPreview() {
+  const [preview, setPreview] = useState({ ok: true, available: true, active: false });
+  const [error, setError] = useState('');
 
-  const x = Math.max(0, Math.round(left));
-  const y = Math.max(0, Math.round(top));
-  const clippedRight = Math.min(width, Math.round(right));
-  const clippedBottom = Math.min(height, Math.round(bottom));
-  if (clippedRight <= x || clippedBottom <= y) return { visible: false };
+  useEffect(() => {
+    let disposed = false;
+    let timer = 0;
+    const refresh = async () => {
+      if (disposed) return;
+      if (document.visibilityState === 'hidden') {
+        timer = window.setTimeout(refresh, 2500);
+        return;
+      }
+      try {
+        const next = await fetchJson('/api/browser/preview', { cache: 'no-store', timeout: 10_000, pauseTimeoutWhenHidden: true });
+        if (!disposed) {
+          setPreview(next && typeof next === 'object' ? next : { ok: false, available: false, active: false });
+          setError(next?.ok === false ? String(next.error || 'Browser preview is unavailable.') : '');
+        }
+      } catch (nextError) {
+        if (!disposed) setError(errorMessage(nextError));
+      } finally {
+        if (!disposed) timer = window.setTimeout(refresh, 2500);
+      }
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
 
-  return {
-    visible: true,
-    x,
-    y,
-    width: clippedRight - x,
-    height: clippedBottom - y
-  };
+  const image = preview?.image;
+  const imageSrc = image?.mimeType && image?.data ? `data:${image.mimeType};base64,${image.data}` : '';
+  if (!preview?.available) {
+    return h('section', { className: 'section browser-route' },
+      h('div', { className: 'browser-empty card' },
+        h(Icon, { name: 'browser', className: 'browser-empty-icon', size: 28 }),
+        h('h2', null, 'Browser preview requires the Rel.AI desktop app.'),
+        h('p', null, 'Open this dashboard in the desktop app to view local browser sessions.')
+      )
+    );
+  }
+  if (!preview?.active || !imageSrc) {
+    return h('section', { className: 'section browser-route' },
+      h('div', { className: 'browser-empty card' },
+        h(Icon, { name: 'browser', className: 'browser-empty-icon', size: 28 }),
+        h('h2', null, 'No local browser session is active.'),
+        h('p', null, 'This remote dashboard will show periodic read-only viewport previews when Rel.AI opens a browser session.'),
+        error ? h('div', { className: 'connection-notice bad', role: 'alert' }, error) : null
+      )
+    );
+  }
+  return h('section', { className: 'section browser-route' },
+    h('div', { className: 'browser-remote card' },
+      h('div', { className: 'browser-remote-head' },
+        h('div', { className: 'browser-remote-copy' },
+          h('strong', null, preview.title || 'Remote browser preview'),
+          h('span', { className: 'mono', title: preview.url || '' }, preview.url || 'about:blank')
+        ),
+        h(StatusPill, { label: preview.control === 'user' ? 'User control' : 'AI control · Preview', tone: preview.control === 'user' ? 'warn' : 'working' })
+      ),
+      h('div', { className: 'browser-remote-frame' },
+        h('img', {
+          src: imageSrc,
+          alt: `Read-only preview of ${preview.title || preview.url || 'the active Rel.AI browser page'}`,
+          width: image.width || undefined,
+          height: image.height || undefined
+        })
+      ),
+      h('p', { className: 'browser-remote-note' }, 'Read-only snapshot · refreshes about every 2.5 seconds. Use the desktop app for live interaction.'),
+      error ? h('div', { className: 'connection-notice bad', role: 'alert' }, error) : null
+    )
+  );
 }
 
 function emptyState(available) {
@@ -450,18 +502,8 @@ function tabLabel(tab, index) {
   return `Tab ${index + 1}`;
 }
 
-async function releaseBrowserRouteControl(browser) {
-  if (typeof browser?.setControl !== 'function') return false;
-  try {
-    await browser.setControl('ai');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error || 'Embedded browser operation failed.');
+  return error instanceof Error ? error.message : String(error || 'Browser action failed.');
 }
 
 export { clipBrowserSurfaceBounds, createBrowserRoute, releaseBrowserRouteControl };

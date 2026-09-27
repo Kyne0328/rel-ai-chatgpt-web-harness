@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import './styles.css';
 import {
   ANALYTICS_USE_CASES,
   analyticsTaskIntentLabel,
@@ -14,7 +15,7 @@ import { analyticsPrivacyCopy, customDateDefaults, rangeButtonLabel } from './in
 import { analyticsMetrics, failureCategoryLabel, formatChartValue, integer, pointMetric, timelineModel } from './render.js';
 
 const h = React.createElement;
-const SparkChart = lazy(() => import('../../components/charts.js').then(module => ({ default: module.SparkChart })));
+const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
 const AnalyticsTimelineChart = lazy(() => import('../../components/charts.js').then(module => ({ default: module.AnalyticsTimelineChart })));
 const AnalyticsBubbleMatrixChart = lazy(() => import('../../components/charts.js').then(module => ({ default: module.AnalyticsBubbleMatrixChart })));
 const USAGE_STORE_KEYS = Object.freeze(['live']);
@@ -100,7 +101,7 @@ export function createUsageRoute(useDashboardSlices) {
       }
       const timer = window.setTimeout(() => { void load({ silent: true }); }, 180);
       return () => window.clearTimeout(timer);
-    }, [taskRevision]);
+    }, [load, taskRevision]);
 
     useEffect(() => {
       const syncFromRoute = () => {
@@ -164,10 +165,6 @@ export function createUsageRoute(useDashboardSlices) {
 
 function AnalyticsToolbar({ end, loading, onDateChange, onRangeChange, onRefresh, onWorkspaceChange, options, range, selectedWorkspace, start }) {
   return h('div', { className: 'feature-toolbar usage-toolbar' },
-    h('div', { className: 'usage-toolbar-heading' },
-      h('div', { className: 'usage-title-row' }, h(Icon, { name: 'usage', size: 20 }), h('h2', null, 'Analytics')),
-      h('p', null, 'Analytics are stored on this computer. Rel.AI records aggregate action categories and work-type labels, not prompts, file paths, command output, or action results.')
-    ),
     h('div', { className: 'usage-toolbar-controls' },
       h('label', { className: 'usage-workspace-control' },
         h('span', null, 'Project'),
@@ -235,8 +232,7 @@ function UsageContent({ bounds, current, previous }) {
       infrastructureFailures
         ? h('div', { className: 'connection-notice bad usage-infrastructure-alert', role: 'status' },
             h(Icon, { name: 'warning', size: 16 }),
-            h('strong', null, `${integer(infrastructureFailures)} Rel.AI internal ${infrastructureFailures === 1 ? 'error' : 'errors'}`),
-            h('span', null, `Confirmed infrastructure ${infrastructureFailures === 1 ? 'failure' : 'failures'} in this range.`),
+            h('strong', null, `${integer(infrastructureFailures)} internal Rel.AI ${infrastructureFailures === 1 ? 'error' : 'errors'} in this range`),
             h('a', { href: routeHref('diagnostics') }, 'Open Troubleshooting')
           )
         : null,
@@ -273,15 +269,15 @@ function UsageContent({ bounds, current, previous }) {
       }),
       h(DistributionCard, {
         title: 'Work types',
-        description: `${integer(current.completedTasks)} completed work ${Number(current.completedTasks) === 1 ? 'session' : 'sessions'}`,
+        description: `${integer(current.completedTasks)} completed ${Number(current.completedTasks) === 1 ? 'task' : 'tasks'}`,
         rows: current.taskTypes,
         valueKey: 'tasks',
         total: current.completedTasks,
         labelFor: row => analyticsTaskIntentLabel(row.intent),
         unit: 'task',
         empty: Number(current.toolCalls || 0) > 0
-          ? 'No classified completed work sessions in this range. Work-type counts begin with tasks completed after this update.'
-          : 'No completed work sessions in this range.'
+          ? 'No classified completed tasks in this range. Work-type counts begin with tasks completed after this update.'
+          : 'No completed tasks in this range.'
       })
     ),
     h(ActivityMatrix, { current }),
@@ -339,7 +335,7 @@ function ActivityMatrix({ current }) {
     share: Number(rowTotals.get(row.intent) || 0) > 0 ? Number(row.toolCalls || 0) / Number(rowTotals.get(row.intent)) * 100 : 0
   })).filter(cell => cell.x >= 0 && cell.y >= 0 && cell.value > 0);
   const untrackedNote = Number(current.untrackedActions || 0) > 0
-    ? `${integer(current.untrackedActions)} ${Number(current.untrackedActions) === 1 ? 'action was' : 'actions were'} not linked to a work session and ${Number(current.untrackedActions) === 1 ? 'is' : 'are'} excluded from this matrix.`
+    ? `${integer(current.untrackedActions)} ${Number(current.untrackedActions) === 1 ? 'action was' : 'actions were'} not linked to a task and ${Number(current.untrackedActions) === 1 ? 'is' : 'are'} excluded from this matrix.`
     : '';
   return h('section', { className: 'card usage-breakdown usage-matrix-card', 'data-usage-matrix': true },
     h('div', { className: 'card-head' },
@@ -447,11 +443,11 @@ function Timeline({ bounds, points = [], metricKey, label }) {
   const detailedLabels = points.map(item => formatPointTime(item, bounds, true));
   const firstMeasuredIndex = values.findIndex(value => value !== null);
   const leadingGapNote = sparseMetric && firstMeasuredIndex > 0
-    ? ` No completed-action samples exist before ${detailedLabels[firstMeasuredIndex]}; the solid line begins at the first measured sample.`
+    ? ` No completed-action samples exist before ${detailedLabels[firstMeasuredIndex]}. The solid line begins at the first measured sample.`
     : '';
   const formatValue = value => formatChartValue(value, label);
   const gapHint = sparseMetric
-    ? ' Hourly data uses UTC buckets; shaded gaps mean no completed actions were recorded in those buckets.'
+    ? ' Hourly data uses UTC buckets. Shaded gaps mean no completed actions were recorded in those buckets.'
     : ' Hourly data uses UTC buckets.';
 
   return h('div', { className: 'usage-timeline-plot' },
@@ -486,7 +482,7 @@ function FailureCategories({ rows = [], totalFailures = 0 }) {
   const max = Math.max(1, ...visible.map(row => row.failures));
   return h('section', { className: 'card usage-breakdown usage-bar-card' },
     h('div', { className: 'card-head' },
-      h('div', null, h('h3', null, 'Unsuccessful actions by reason'), h('p', null, 'Grouped by cause. Recent details are available in Troubleshooting.'))
+      h('div', null, h('h3', null, 'Unsuccessful actions by reason'), h('p', null, 'Recent details are available in Troubleshooting.'))
     ),
     h('div', { className: 'card-body' }, visible.length
       ? h('div', { className: 'usage-bar-list' }, visible.map(row => h(BarRow, {

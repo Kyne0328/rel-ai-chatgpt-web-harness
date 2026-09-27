@@ -92,6 +92,11 @@ try {
   const live = await describeTaskCodeWorkspace(config, { taskId });
   assert.deepEqual(new Set(live.changedFiles), new Set(['alpha.txt', 'beta.txt', 'café.txt']));
   assert.equal(live.changedFileStatuses?.['alpha.txt']?.code, 'M');
+  assert.deepEqual(
+    { additions: live.changedFileStatuses?.['alpha.txt']?.additions, deletions: live.changedFileStatuses?.['alpha.txt']?.deletions },
+    { additions: 1, deletions: 1 },
+    'live task changes should expose line-impact stats without reading every diff in the UI'
+  );
   assert.equal(live.changedFiles.includes('ambient.txt'), false, 'unrelated dirty files must stay out of the task changes list');
   assert.equal(live.readOnly, true);
   assert.equal(live.writable, false);
@@ -165,6 +170,11 @@ try {
   assert.equal(committedView.commitHead, committed.head);
   assert.deepEqual(new Set(committedView.changedFiles), new Set(['alpha.txt', 'beta.txt', 'café.txt']), 'historical task changes must preserve non-ASCII filenames');
   assert.equal(committedView.changedFileStatuses?.['alpha.txt']?.code, 'M');
+  assert.deepEqual(
+    { additions: committedView.changedFileStatuses?.['alpha.txt']?.additions, deletions: committedView.changedFileStatuses?.['alpha.txt']?.deletions },
+    { additions: 1, deletions: 1 },
+    'historical task changes should retain line-impact stats'
+  );
 
   const committedDiff = await readTaskCodeDiff(config, { taskId, path: 'alpha.txt' });
   assert.equal(committedDiff.baseContent.replaceAll('\r\n', '\n'), 'alpha baseline\n');

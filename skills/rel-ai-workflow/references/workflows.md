@@ -2,7 +2,7 @@
 
 ## Context economy
 
-For substantial or multi-step repository work, begin a durable work session before the first project operation and carry its work_id on subsequent task operations, including when the first steps are read-only. Begin returns the durable identity before repository scanning; fetch bootstrap with relai_work action context using that ID when needed, and reuse that context. If a mutation reports TASK_ATTRIBUTION_REQUIRED, retry with the matching work_id; use independent:true only for intentionally separate workspace work. Isolated reads, inspections, and small one-shot operations can start directly with the smallest workspace-scoped evidence needed. Escalate context only when the current decision requires it: search or inspect before broad reads, batch related reads, and reuse evidence that is still current. A handoff should carry conclusions and evidence locations so the next specialist does not restart the same investigation.
+For each meaningful project goal handled through Rel.AI, begin or reuse one durable work session before the first project operation and carry its work_id through that goal, including read-only investigation. New durable work supplies a non-empty ordered steps plan on begin. Update individual steps through compact taskProgress patches and replace the full plan only when its structure changes. Projectless one-shot utility/control work is taskless; do not create an empty durable task or invent a workspace for it. If a mutation reports TASK_ATTRIBUTION_REQUIRED, retry with the matching work_id; use independent:true only for intentionally separate workspace/resource work. Escalate context only when the current decision requires it: search or inspect before broad reads, batch related reads, and reuse evidence that is still current. A handoff should carry conclusions and evidence locations so the next specialist does not restart the same investigation.
 
 ## Read -> edit -> validate
 
@@ -13,6 +13,12 @@ Read the current source and applicable repository instructions. Inspect impact w
 For an approved durable plan, keep its checkboxes current. A task is complete only when its stated completion condition is satisfied. After Task N, review Tasks 1..N together and consolidate duplicated helpers, redundant layers, repeated tests, or temporary structures before moving on. Replan only when new evidence invalidates architecture, sequencing, dependencies, or completion conditions.
 
 Do not stop after ordinary task boundaries merely to ask whether to continue. Stop only when blocked, when a material decision belongs to the user, when an external/manual step cannot be performed, or when final verification is complete.
+
+## Fallback completion and validation lifecycle
+
+When a bounded operation continues after a response, keep doing independent work and consume its later `completedOperations` notice instead of polling `relai_work status` unless the result blocks useful progress.
+
+`relai_validate` records evidence and leaves durable work open by default. Use `complete:true` only for the final successful validation when closure should be atomic. Failed, cancelled, or stale validation never closes the goal; continue and revalidate, or explicitly finish with truthful residual risk when the objective is complete despite that evidence.
 
 ## Managed processes
 

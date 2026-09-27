@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-structured-error-'));
 const workspaceRoot = path.join(tmp, 'repo');
 const stateDir = path.join(tmp, 'state');
@@ -68,11 +69,16 @@ try {
   assert.equal(unknownPathResponse.isError, true);
   assert.equal(unknownPathResponse.structuredContent.errorCode, 'WORKSPACE_PATH_NOT_CONFIGURED');
 
-  const omittedWorkspaceResponse = await invoke('relai_work', { action: 'begin' }, { publicHttpOnly: true });
-  assert.equal(omittedWorkspaceResponse.isError, true);
-  assert.equal(omittedWorkspaceResponse.structuredContent.errorCode, 'WORKSPACE_INPUT_OMITTED');
-  assert.deepEqual(omittedWorkspaceResponse.structuredContent.errorDetails.workspaceAliases, ['repo']);
-  assert.equal(omittedWorkspaceResponse.structuredContent.errorDetails.workspaceCount, 1);
+  const omittedWorkspaceResponse = await invoke('relai_work', { action: 'begin', title: 'Projectless structured error probe' }, { publicHttpOnly: true });
+  assert.equal(omittedWorkspaceResponse.isError, false);
+  assert.equal(omittedWorkspaceResponse.structuredContent.workspace, undefined, 'logical work may begin before a project is selected');
+  assert.ok(omittedWorkspaceResponse.structuredContent.work_id);
+  const omittedWorkspaceCancelled = await invoke('relai_work', {
+    action: 'cancel',
+    work_id: omittedWorkspaceResponse.structuredContent.work_id,
+    reason: 'structured error probe cleanup'
+  }, { publicHttpOnly: true });
+  assert.equal(omittedWorkspaceCancelled.isError, false);
 
   const writeResponse = await invoke('relai_edit', { workspace: 'repo', work_id: taskId, path: '.env', content: 'API_KEY=replacement\n' }, { publicHttpOnly: true });
 
@@ -108,6 +114,7 @@ try {
 
   console.log('Structured tool errors preserve actionable diagnostics, including truncated failures.');
 } finally {
+  await flushLocalAnalytics();
   delete process.env.REL_AI_MCP_CONFIG;
   delete process.env.REL_AI_MCP_MAX_TOOL_RESULT_BYTES;
   fs.rmSync(tmp, { recursive: true, force: true });

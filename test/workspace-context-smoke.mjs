@@ -62,7 +62,7 @@ assert.equal(Object.hasOwn(config.workspaces.app.context, 'skipIndexForSmallTask
 assert.equal(Object.hasOwn(config.workspaces.app.context, 'preferChangedFiles'), false);
 
 const workspace = { alias: 'app', ...config.workspaces.app };
-const snapshot = await repoSnapshot(workspace, config);
+const snapshot = await repoSnapshot(workspace, config, { includeFiles: true });
 assert.equal(snapshot.effectiveMaxEntries, 1, 'workspace snapshot limit must control the initial repository map');
 assert.deepEqual(snapshot.files, ['src/app.js']);
 

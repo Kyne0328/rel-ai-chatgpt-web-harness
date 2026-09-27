@@ -49,7 +49,12 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
   if (typeof restartDesktop !== 'function') throw new TypeError('restartDesktop is required.');
   if (typeof setTunnelApiKey !== 'function') throw new TypeError('setTunnelApiKey is required.');
 
-  const current = readGuiConfig();
+  let current;
+  try {
+    current = readGuiConfig();
+  } catch {
+    current = { port: 3333, token: '', tunnelId: '' };
+  }
   const next = normalizeWizardConfig({
     port: settings.port ?? current.port,
     tunnelId: settings.tunnelId ?? current.tunnelId,
@@ -100,7 +105,9 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
     return { ok: true, status };
   } catch (error) {
     const rollbackErrors = [];
-    try { saveLauncherConfig(current); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+    try {
+      if (current?.tunnelId && current?.port) saveLauncherConfig(current);
+    } catch (rollbackError) { rollbackErrors.push(rollbackError); }
     if (replacementApiKey) {
       try {
         if (previousApiKey) setTunnelApiKey(previousApiKey);

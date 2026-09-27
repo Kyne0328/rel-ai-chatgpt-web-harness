@@ -44,7 +44,7 @@ function registerUpdaterIpc({ ipc, channels, getUpdateStatus, checkForUpdates, d
   ipc.handle(channels.DESKTOP_UPDATE_GET, 'Update status', () => getUpdateStatus());
   ipc.handle(channels.DESKTOP_UPDATE_CHECK, 'Update check', () => checkForUpdates());
   ipc.handle(channels.DESKTOP_UPDATE_DOWNLOAD, 'Update download', () => downloadUpdate());
-  ipc.handle(channels.DESKTOP_UPDATE_INSTALL, 'Update install', () => installUpdate());
+  ipc.handle(channels.DESKTOP_UPDATE_INSTALL, 'Update install', (_event, options) => installUpdate(options));
 }
 
 function registerDiagnosticsIpc({ ipc, channels, exportDiagnosticState, openDiagnosticsFolder, runTunnelDoctor }) {

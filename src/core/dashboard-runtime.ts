@@ -12,7 +12,7 @@ import { removeWorkspaceLocalAnalytics } from '../localAnalytics.js';
 import { readMcpAuthenticationStatus } from '../mcp/authenticationStatus.js';
 import { mcpConnectionManager } from '../mcp/connectionManager.js';
 import { buildToolManifest } from '../mcp/toolManifest.js';
-import { getOnboardingStatus, writeOnboardingState } from '../onboardingState.js';
+import { getOnboardingStatus, readOnboardingState, writeOnboardingState } from '../onboardingState.js';
 import { resolvePolicy } from '../policyResolver.js';
 import * as productUx from '../productUx.js';
 import * as release from '../release.js';
@@ -20,6 +20,7 @@ import { getReleaseNotes } from '../releaseNotes.js';
 import { repositoryIntelligence } from '../repository/intelligence/service.js';
 import { withStateDatabase } from '../stateDatabase.ts';
 import { clearWorkspaceTaskHistory, readTaskHistory, readTaskHistorySession } from '../taskHistoryStore.ts';
+import { describeTaskCodeWorkspace, readTaskCodeDiff } from '../taskCodeWorkspace.js';
 import { getToolActivity, onToolActivity } from '../toolActivity.js';
 import { getToolMetadata } from '../tools.js';
 import { listManagedProcesses, managedProcessStateRevision, onManagedProcessChange } from '../processManager.js';
@@ -116,7 +117,9 @@ export async function dashboardWorkspacePreflight(details: {
 
 export function completeDashboardOnboarding(payload: JsonRecord): JsonRecord {
   ensureConfig();
+  const current = readOnboardingState() || {};
   writeOnboardingState({
+    ...current,
     completed: Boolean(payload.completed),
     skipped: Boolean(payload.skipped),
     source: String(payload.source || ''),
@@ -188,6 +191,14 @@ async function clearDashboardWorkspaceLocalData(config: JsonRecord, workspace: s
   }, { transaction: true });
   removeWorkspaceLocalAnalytics(config, workspace);
   clearWorkspaceValidationAffinity(config, workspace);
+}
+
+export async function dashboardTaskCodeWorkspace(taskId: string): Promise<JsonRecord> {
+  return await describeTaskCodeWorkspace(readConfig(), { taskId }) as JsonRecord;
+}
+
+export async function dashboardTaskCodeDiff(taskId: string, path: string): Promise<JsonRecord> {
+  return await readTaskCodeDiff(readConfig(), { taskId, path }) as JsonRecord;
 }
 
 export function dashboardTaskSession(taskId: string): JsonRecord | null {

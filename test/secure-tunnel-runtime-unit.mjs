@@ -10,6 +10,9 @@ const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-secure-tunnel-'));
 let spawned = null;
 let primaryChild;
 let operational = true;
+let localAlive = true;
+let controlPlaneDegraded = false;
+let deliveryDegraded = false;
 const statuses = [];
 const logs = [];
 
@@ -30,12 +33,48 @@ function fakeSpawn(executable, args, options) {
 }
 
 function fetchTunnel(url) {
-  if (url === 'http://127.0.0.1:49001/healthz') return Promise.resolve(response(200));
+  if (url === 'http://127.0.0.1:49001/healthz') return Promise.resolve(response(localAlive ? 200 : 503));
   if (url === 'http://127.0.0.1:49001/readyz') return Promise.resolve(response(operational ? 200 : 503));
   if (url === 'http://127.0.0.1:49001/api/status') {
-    return Promise.resolve(response(operational ? 200 : 503, {
+    return Promise.resolve(response(200, {
       tunnel_metadata: { id: 'tunnel_example123456' },
-      mcp_probe: { status: 'ok' }
+      mcp_probe: { status: operational ? 'ok' : 'pending' }
+    }));
+  }
+  if (url === 'http://127.0.0.1:49001/health/control-plane') {
+    return Promise.resolve(response(200, {
+      schema_version: 1,
+      component: 'control-plane',
+      status: controlPlaneDegraded ? 'degraded' : 'ok',
+      state: controlPlaneDegraded ? 'backoff' : 'idle',
+      reason_code: controlPlaneDegraded ? 'http_error' : '',
+      limited: false,
+      details: {
+        consecutive_failures: controlPlaneDegraded ? 2 : 0,
+        next_retry: controlPlaneDegraded ? '2026-09-25T09:30:00Z' : '',
+        http_status: controlPlaneDegraded ? 409 : 0
+      }
+    }));
+  }
+  if (url === 'http://127.0.0.1:49001/health/response-delivery') {
+    return Promise.resolve(response(200, {
+      schema_version: 1,
+      component: 'response-delivery',
+      status: deliveryDegraded ? 'degraded' : 'ok',
+      state: deliveryDegraded ? 'failed' : 'accepted',
+      reason_code: deliveryDegraded ? 'http_error' : '',
+      limited: false,
+      details: {
+        in_progress: 0,
+        disposition: deliveryDegraded ? 'failed' : 'accepted',
+        failure_category: deliveryDegraded ? 'http_error' : '',
+        http_status: deliveryDegraded ? 502 : 200,
+        attempts: 4,
+        retries: deliveryDegraded ? 2 : 0,
+        accepted: deliveryDegraded ? 2 : 4,
+        completed: 4,
+        terminal_failures: deliveryDegraded ? 1 : 0
+      }
     }));
   }
   return Promise.resolve(response(404));
@@ -73,24 +112,55 @@ try {
 
   primaryChild.stdout.emit('data', '{"level":"WARN","msg":"command response deadline reached; dropping without posting a response","component":"dispatcher"}\n');
   primaryChild.stdout.emit('data', '{"level":"ERROR","msg":"dispatcher received MCP upstream error; posted error response to control plane","component":"dispatcher","status_code":502}\n');
+  await waitFor(() => runtime.snapshot().transportFailureStreak === 2);
+  assert.equal(runtime.snapshot().state, 'running', 'log wording must remain diagnostic and must not drive tunnel lifecycle state');
+
+  deliveryDegraded = true;
   await waitFor(() => runtime.snapshot().state === 'degraded' && runtime.snapshot().errorCode === 'tunnel_command_delivery_degraded');
-  assert.equal(runtime.snapshot().transportFailureStreak, 2);
-  assert.equal(typeof runtime.observeTransportEvent, 'undefined', 'local HTTP response completion must not be able to clear control-plane delivery degradation');
-  assert.equal(runtime.snapshot().state, 'degraded', 'delivery degradation must remain authoritative until the recovery path restarts the tunnel');
+  assert.equal(runtime.snapshot().recoveryMode, 'in_place');
+  assert.equal(primaryChild.exitCode, null, 'structured delivery degradation must preserve the live tunnel-client process');
+  assert.equal(runtime.snapshot().tunnelHealth.responseDelivery.status, 'degraded');
+  deliveryDegraded = false;
+  await waitFor(() => runtime.snapshot().state === 'running');
+  assert.equal(runtime.snapshot().transportFailureStreak, 0, 'a structured healthy observation must clear the diagnostic log streak');
 
   operational = false;
-  await waitFor(() => runtime.snapshot().consecutiveFailures >= 2);
-  assert.equal(runtime.snapshot().errorCode, 'tunnel_command_delivery_degraded', 'a transient readiness outage must not mask command-delivery degradation');
+  controlPlaneDegraded = true;
+  await waitFor(() => runtime.snapshot().state === 'degraded' && runtime.snapshot().recoveryMode === 'in_place');
+  assert.equal(primaryChild.exitCode, null, 'control-plane backoff must recover in place without an outer restart');
   operational = true;
-  await waitFor(() => runtime.snapshot().consecutiveFailures === 0);
-  assert.equal(runtime.snapshot().state, 'degraded', 'readiness recovery must not clear command-delivery degradation without restarting the tunnel');
-  assert.equal(runtime.snapshot().errorCode, 'tunnel_command_delivery_degraded');
+  controlPlaneDegraded = false;
+  await waitFor(() => runtime.snapshot().state === 'running');
   await runtime.stop();
   assert.equal(primaryChild.exitCode, 0, 'manual stop must terminate the original tunnel child');
   assert.equal(runtime.snapshot().state, 'stopped');
+  assert.equal(runtime.snapshot().recoveryMode, '', 'stopped tunnel state must not retain stale recovery ownership');
+  assert.equal(runtime.snapshot().tunnelHealth, null, 'stopped tunnel state must not retain stale structured health');
   assert.ok(logs.some(entry => entry.source === 'openai-tunnel'));
 
-  const persistentRuntime = createSecureTunnelRuntime({
+  operational = false;
+  controlPlaneDegraded = true;
+  const degradedStartupRuntime = createSecureTunnelRuntime({
+    spawnImpl: fakeSpawn,
+    fetchImpl: fetchTunnel,
+    stopProcess: async child => { child.exitCode = 0; return { exited: true, forced: false }; },
+    resolveExecutable: () => process.execPath,
+    makeEnvironment: makeTunnelProcessEnvironment,
+    stateDir,
+    monitorIntervalMs: 10,
+    degradedFailureThreshold: 2
+  });
+  const degradedStartup = await degradedStartupRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333, localToken: 'local-secret', apiKey: 'sk-runtime-degraded-startup-123456', timeoutMs: 1000 });
+  const degradedStartupChild = spawned.child;
+  assert.equal(degradedStartup.state, 'degraded', 'a live client still in remote routing/backoff after the startup window must stay owned instead of being killed');
+  assert.equal(degradedStartup.recoveryMode, 'in_place');
+  assert.equal(degradedStartupChild.exitCode, null);
+  operational = true;
+  controlPlaneDegraded = false;
+  await waitFor(() => degradedStartupRuntime.snapshot().state === 'running');
+  await degradedStartupRuntime.stop();
+
+  const inPlaceRuntime = createSecureTunnelRuntime({
     spawnImpl: fakeSpawn,
     fetchImpl: fetchTunnel,
     stopProcess: async child => { child.exitCode = 0; return { exited: true, forced: false }; },
@@ -99,17 +169,23 @@ try {
     stateDir,
     monitorIntervalMs: 10,
     degradedFailureThreshold: 2,
-    failedFailureThreshold: 4
+    failedFailureThreshold: 4,
+    failedOutageTimeoutMs: 50
   });
-  await persistentRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333, localToken: 'local-secret', apiKey: 'sk-runtime-persistent-outage-123456', timeoutMs: 1000 });
+  await inPlaceRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333, localToken: 'local-secret', apiKey: 'sk-runtime-in-place-123456', timeoutMs: 1000 });
+  const inPlaceChild = spawned.child;
   operational = false;
-  await waitFor(() => persistentRuntime.snapshot().state === 'failed');
-  assert.equal(persistentRuntime.snapshot().errorCode, 'tunnel_connection_interrupted');
-  assert.ok(persistentRuntime.snapshot().consecutiveFailures >= 4, 'persistent outage must escalate only after the second failure threshold');
-
+  controlPlaneDegraded = true;
+  await waitFor(() => inPlaceRuntime.snapshot().state === 'degraded' && inPlaceRuntime.snapshot().recoveryMode === 'in_place');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(inPlaceRuntime.snapshot().state, 'degraded', 'remote routing/backoff may outlive the old outage timeout without forcing a restart');
+  assert.equal(inPlaceChild.exitCode, null, 'remote degradation must preserve tunnel-client in-memory routing state');
   operational = true;
+  controlPlaneDegraded = false;
+  await waitFor(() => inPlaceRuntime.snapshot().state === 'running');
+  await inPlaceRuntime.stop();
 
-  const elapsedOutageRuntime = createSecureTunnelRuntime({
+  const localFailureRuntime = createSecureTunnelRuntime({
     spawnImpl: fakeSpawn,
     fetchImpl: fetchTunnel,
     stopProcess: async child => { child.exitCode = 0; return { exited: true, forced: false }; },
@@ -121,12 +197,16 @@ try {
     failedFailureThreshold: 1000,
     failedOutageTimeoutMs: 50
   });
-  await elapsedOutageRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333, localToken: 'local-secret', apiKey: 'sk-runtime-elapsed-outage-123456', timeoutMs: 1000 });
-  operational = false;
-  await waitFor(() => elapsedOutageRuntime.snapshot().state === 'failed');
-  assert.ok(elapsedOutageRuntime.snapshot().consecutiveFailures < 1000,
-    'persistent outage escalation must be bounded by elapsed outage time instead of waiting only for a large probe-count threshold');
-  operational = true;
+  await localFailureRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333, localToken: 'local-secret', apiKey: 'sk-runtime-local-failure-123456', timeoutMs: 1000 });
+  const localFailureChild = spawned.child;
+  localAlive = false;
+  await waitFor(() => localFailureRuntime.snapshot().state === 'failed');
+  assert.equal(localFailureRuntime.snapshot().errorCode, 'tunnel_connection_interrupted');
+  assert.equal(localFailureRuntime.snapshot().recoveryMode, 'restart');
+  assert.equal(localFailureChild.exitCode, 0, 'failed local liveness must still terminate the child for canonical restart recovery');
+  assert.ok(localFailureRuntime.snapshot().consecutiveFailures < 1000,
+    'local liveness failure escalation must remain bounded by elapsed outage time');
+  localAlive = true;
 
   const boundedStopRuntime = createSecureTunnelRuntime({
     spawnImpl: fakeSpawn,

@@ -1161,7 +1161,7 @@ async function case_workspace_state_unit() {
     const { spawnSync } = __m4;
   
     const __m5 = await import("../src/workspaceState.js");
-    const { buildWorkspaceStates, onWorkspaceStateChange, resolveGitExecutable } = __m5;
+    const { buildWorkspaceStates, onWorkspaceStateChange, workspaceStateCacheSize, resolveGitExecutable } = __m5;
   
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-workspace-state-'));
   const repo = path.join(sandbox, 'repo');
@@ -1219,6 +1219,16 @@ async function case_workspace_state_unit() {
   
     const refreshed = buildWorkspaceStates(config, tasks, { state: 'working', workspace: 'repo', tool: 'relai_edit', startedAt: Date.now() });
     assert.equal(refreshed.repo.currentActivity.tool, 'relai_edit', 'dynamic activity must not be frozen by the Git-state cache');
+
+    const plain = path.join(sandbox, 'plain');
+    fs.mkdirSync(plain);
+    const turnoverConfig = { workspaces: { plain: { path: plain } } };
+    for (let index = 0; index < 250; index += 1) {
+      buildWorkspaceStates(turnoverConfig, [], { tasks: [{ id: `task-${index}`, workspace: 'plain', state: 'working' }] });
+      assert.equal(workspaceStateCacheSize(), 1, 'completed task identities must not accumulate workspace Git-state cache entries');
+    }
+    buildWorkspaceStates(turnoverConfig, [], { state: 'idle' });
+    assert.equal(workspaceStateCacheSize(), 1, 'task turnover must leave only the current taskless workspace cache entry');
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

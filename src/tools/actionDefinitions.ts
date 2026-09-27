@@ -73,17 +73,6 @@ type PublicActionContract = Readonly<{
 const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 const OPERATION_REGISTRY = RAW_OPERATION_REGISTRY as unknown as readonly OperationRegistryRecord[];
 
-const TASK_PLAN_STEP_SCHEMA: JsonSchema = Object.freeze({
-  type: 'object',
-  properties: {
-    id: { type: 'string', minLength: 1, maxLength: 80 },
-    title: { type: 'string', minLength: 1, maxLength: 300 },
-    detail: { type: 'string', maxLength: 500 },
-    status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked', 'skipped'] }
-  },
-  required: ['title', 'status'],
-  additionalProperties: false
-});
 const TASK_PROGRESS_STEP_SCHEMA: JsonSchema = Object.freeze({
   type: 'object',
   properties: {
@@ -94,16 +83,11 @@ const TASK_PROGRESS_STEP_SCHEMA: JsonSchema = Object.freeze({
   required: ['id', 'status'],
   additionalProperties: false
 });
-const TASK_PROGRESS_SCHEMA: JsonSchema = Object.freeze({
-  type: 'object',
-  properties: {
-    steps: { type: 'array', maxItems: 50, items: TASK_PLAN_STEP_SCHEMA },
-    step: TASK_PROGRESS_STEP_SCHEMA
-  },
-  additionalProperties: false
-});
+const TASK_PROGRESS_SCHEMA: JsonSchema = TASK_PROGRESS_STEP_SCHEMA;
 
-const TASK_PROGRESS_PUBLIC_TOOLS: ReadonlySet<string> = new Set(['relai_read', 'relai_edit']);
+const TASK_PROGRESS_PUBLIC_TOOLS: ReadonlySet<string> = new Set([
+  'relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect', 'relai_edit', 'relai_exec', 'relai_validate'
+]);
 
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_CONTEXT, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT, OP.INSPECT, OP.SEARCH_SEMANTIC,
@@ -208,8 +192,8 @@ function getOperationDefinitions(): readonly CatalogToolDefinition[] {
 const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
-    title: 'Manage Workspace Work',
-    description: 'Durable task lifecycle. Use begin once for substantial or multi-step work; it creates work_id, then inspect directly. context is optional continuity, plan is the compatibility path, and supported calls may carry taskProgress. status is recovery, not polling; stop, finish, and cancel manage lifecycle.',
+    title: 'Manage Goal Work',
+    description: 'Durable goal lifecycle. Every meaningful durable Rel.AI goal starts with a non-empty plan on begin and keeps that plan updated. Projectless one-shot utility/control work runs directly without a durable task. context is optional continuity/bootstrap; status is recovery rather than polling; stop/finish/cancel manage lifecycle.',
     annotations: annotations(false, false, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
     dashboard: { category: 'Workflow', capabilities: ['workflow'] }
@@ -220,16 +204,16 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_read', title: 'Read Local Workspace',
-    description: 'Reads exact local workspace files, ranges, directories, discovered skills, or execution output. Host-uploaded files stay host-owned; asResource:true returns one exact local file as a private resource_link for transfer or download.'
+    description: 'Reads exact local workspace files, ranges, directories, discovered skills, or execution output. Batch related paths or ranges in one call. Host-uploaded files stay host-owned; asResource:true returns one exact local file as a private resource_link for transfer or download.'
   },
   {
     name: 'relai_search', title: 'Search Repository',
-    description: 'Provides lexical or semantic discovery across repository content.',
+    description: 'Provides lexical or semantic discovery across repository content. Batch same-mode searches with queries[].',
     annotations: annotations(true, false, true, false), behavior: { taskScope: 'optional' }
   },
   {
     name: 'relai_inspect', title: 'Inspect Code Relationships',
-    description: 'Provides read-only symbol, reference, impact, trace, diagnostic, and architecture analysis.',
+    description: 'Read-only code intelligence. audit/architecture/diagnostics need no symbol or query; use related for query discovery and impact for symbol/paths.',
     annotations: annotations(true, false, true, false), groups: ['audit'], behavior: { taskScope: 'optional' }
   },
   {
@@ -270,7 +254,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_validate', title: 'Validate Repository',
-    description: 'Runs repository checks, diagnostics, or local HTTP validation. Validation is factual evidence; work_id optionally records task provenance.',
+    description: 'Runs repository checks, diagnostics, or local HTTP validation. work_id records task provenance; checks stay open by default and close only when complete:true succeeds.',
     annotations: annotations(false, true, false, true), behavior: { longRunning: true, taskScope: 'optional' },
     dashboard: { capabilities: ['validate'] }
   },

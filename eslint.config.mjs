@@ -1,5 +1,6 @@
 import js from "@eslint/js";
 import globals from "globals";
+import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
   {
@@ -47,6 +48,17 @@ export default [
       globals: {
         ...globals.browser
       }
+    }
+  },
+
+  {
+    files: ["src/ui/**/*.{js,mjs}"],
+    plugins: {
+      "react-hooks": reactHooks
+    },
+    rules: {
+      "react-hooks/rules-of-hooks": "error",
+      "react-hooks/exhaustive-deps": "error"
     }
   },
 

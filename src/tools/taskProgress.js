@@ -10,18 +10,21 @@ function applyTaskProgressPatch(taskId, patch = {}, update = updateCurrentToolAc
   const currentRevision = Math.max(0, Number(currentPlan.revision || 0));
 
   const hasSteps = Array.isArray(patch.steps);
-  const hasStep = Boolean(patch.step && typeof patch.step === 'object' && !Array.isArray(patch.step));
-  if (hasSteps === hasStep) throw new Error('taskProgress requires exactly one of steps or step.');
+  const inlineStep = patch.step && typeof patch.step === 'object' && !Array.isArray(patch.step)
+    ? patch.step
+    : (!hasSteps && patch.id ? patch : null);
+  if (hasSteps && inlineStep) throw new Error('taskProgress accepts either a complete steps list or one step update, not both.');
 
   let candidate;
   if (hasSteps) {
+    if (patch.steps.length === 0) throw new Error('Durable task plans cannot be empty.');
     candidate = normalizeTaskPlan({ revision: currentRevision, steps: patch.steps }) || { revision: currentRevision, steps: [] };
-  } else if (patch.step && typeof patch.step === 'object') {
-    const stepId = String(patch.step.id || '').trim();
+  } else if (inlineStep) {
+    const stepId = String(inlineStep.id || '').trim();
     const index = currentPlan.steps.findIndex(step => String(step?.id || '') === stepId);
-    if (index < 0) throw new Error(`taskProgress references unknown plan step '${stepId}'. Send taskProgress.steps once to establish the ordered plan first.`);
+    if (index < 0) throw new Error(`taskProgress references unknown plan step '${stepId}'. Update the durable plan with relai_work action "plan" when its structure changes.`);
     const steps = currentPlan.steps.map((step, stepIndex) => stepIndex === index
-      ? { ...step, status: patch.step.status, ...(patch.step.detail !== undefined ? { detail: patch.step.detail } : {}) }
+      ? { ...step, status: inlineStep.status, ...(inlineStep.detail !== undefined ? { detail: inlineStep.detail } : {}) }
       : step);
     candidate = normalizeTaskPlan({ revision: currentRevision, steps }) || { revision: currentRevision, steps: [] };
   } else {

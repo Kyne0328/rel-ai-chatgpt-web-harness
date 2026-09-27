@@ -47,9 +47,20 @@ try {
   const writerExited = once(writer, 'exit');
   try {
     await once(writer, 'message');
-    assert.throws(() => openStateDatabase(contendedConfig, { timeoutMs: 0 }), /database is locked/,
-      'a zero timeout must still report journal-mode lock contention');
+    let timerFired = false;
+    const serviceTimer = new Promise(resolve => setTimeout(() => {
+      timerFired = true;
+      resolve();
+    }, 25));
+    const contentionStarted = Date.now();
+    assert.throws(() => openStateDatabase(contendedConfig), /database is locked/,
+      'service-thread durable-state access must fail fast under write contention');
+    assert.ok(Date.now() - contentionStarted < 250,
+      'default durable-state contention must not synchronously stall the service event loop');
+    await serviceTimer;
+    assert.equal(timerFired, true, 'service timers must continue after fail-fast SQLite contention');
     writer.postMessage('release');
+    await writerExited;
     const opened = openStateDatabase(contendedConfig, { timeoutMs: 5000 });
     try {
       assert.equal(opened.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
@@ -58,7 +69,6 @@ try {
     } finally {
       opened.close();
     }
-    await writerExited;
   } finally {
     await writer.terminate();
   }
@@ -76,11 +86,18 @@ try {
   const policyWriterExited = once(policyWriter, 'exit');
   try {
     await once(policyWriter, 'message');
+    const startedAt = Date.now();
+    await assert.rejects(
+      writeSessionPolicy(contendedConfig, 'app', { taskId: 'lock-wait' }),
+      /database is locked/,
+      'main-thread session-policy persistence must fail fast instead of waiting on SQLite'
+    );
+    assert.ok(Date.now() - startedAt < 250, 'session-policy contention must not block the service thread');
     policyWriter.postMessage('release');
+    await policyWriterExited;
     await writeSessionPolicy(contendedConfig, 'app', { taskId: 'lock-wait' });
     assert.equal(readSessionPolicy(contendedConfig, 'app', 'lock-wait')?.taskId, 'lock-wait',
-      'session policy persistence must tolerate bounded contention from another durable-state writer');
-    await policyWriterExited;
+      'session policy persistence must succeed when retried after contention clears');
   } finally {
     await policyWriter.terminate();
   }
@@ -93,16 +110,22 @@ try {
     CREATE TABLE state_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
     CREATE TABLE task_history(id TEXT PRIMARY KEY, updated_at_ms INTEGER NOT NULL, payload TEXT NOT NULL) STRICT;
     INSERT INTO state_meta(key,value) VALUES('schema_version','1');
-    INSERT INTO task_history(id,updated_at_ms,payload) VALUES('task-old',1,'{"id":"task-old"}');
+    INSERT INTO task_history(id,updated_at_ms,payload) VALUES('task-old',1,'{"id":"task-old","workspace":"app","events":[{"eventId":"event-old","timestamp":"2026-01-01T00:00:00Z","workspace":"app"}]}');
   `);
   legacyDb.close();
 
   const migratedDb = openStateDatabase(migrationConfig);
   try {
-    assert.equal(migratedDb.prepare("SELECT value FROM state_meta WHERE key='schema_version'").get().value, '2');
+    assert.equal(migratedDb.prepare("SELECT value FROM state_meta WHERE key='schema_version'").get().value, '3');
     assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM task_history WHERE id='task-old'").get().count, 1);
     assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_integrity_tasks'").get());
     assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_integrity'").get());
+    assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='analytics_counter_rows'").get());
+    assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='analytics_counter_state'").get());
+    assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM task_history_events WHERE task_id='task-old'").get().count, 1,
+      'schema v3 must backfill the indexed event projection for existing task history');
+    assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger' AND name LIKE 'task_history_events_after_%'").get().count, 3,
+      'schema v3 must install task-history projection triggers once during migration');
   } finally {
     migratedDb.close();
   }

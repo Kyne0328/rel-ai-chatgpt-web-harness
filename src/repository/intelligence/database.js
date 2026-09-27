@@ -392,25 +392,80 @@ function refreshRelationshipResolutionCache(db, workspaceRoot, resolutionCache, 
   }
 }
 
-function relationshipSourceIdsForImportResolutionChanges(db, workspaceRoot, resolutionCache) {
+function relationshipSourceIdsForImportResolutionChanges(db, workspaceRoot, resolutionCache, changedPaths = []) {
+  const paths = [...new Set(changedPaths.map(value => String(value || '')).filter(Boolean))];
+  if (!paths.length) return [];
   const cachedContext = resolutionCache?.context;
   const context = cachedContext || loadResolutionContext(db, workspaceRoot);
   if (resolutionCache && !cachedContext) resolutionCache.context = context;
-  const rows = db.prepare(`
-    SELECT i.source_file_id, i.specifier, i.target_file_id, f.path, f.language, f.is_test
-    FROM imports i
-    JOIN files f ON f.id=i.source_file_id
-  `).all();
-  const sourceFileIds = new Set();
-  for (const row of rows) {
-    const source = { id: Number(row.source_file_id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1 };
-    const targetPath = resolveImportPath(source.path, String(row.specifier), context.pathToId, context.suffixIndex,
-      context.directoryIndex, context.ecosystem, source.language);
-    const nextTargetId = targetPath ? Number(context.pathToId.get(targetPath) || 0) : 0;
-    const currentTargetId = Number(row.target_file_id || 0);
-    if (nextTargetId !== currentTargetId) sourceFileIds.add(source.id);
+
+  const candidateLeaves = new Set();
+  const candidateTargetIds = new Set();
+  for (const relativePath of paths) {
+    for (const key of importSuffixKeys(relativePath)) {
+      const leaf = path.posix.basename(key);
+      if (leaf) candidateLeaves.add(leaf);
+      for (const member of context.suffixMembers?.get(key) || []) {
+        const id = Number(context.pathToId.get(member) || 0);
+        if (id > 0) candidateTargetIds.add(id);
+      }
+    }
+    const directory = path.posix.dirname(relativePath);
+    if (directory && directory !== '.') {
+      const leaf = path.posix.basename(directory);
+      if (leaf) candidateLeaves.add(leaf);
+      for (const member of context.directoryMembers?.get(directory) || []) {
+        const id = Number(context.pathToId.get(member) || 0);
+        if (id > 0) candidateTargetIds.add(id);
+      }
+    }
   }
+
+  const sourceFileIds = new Set();
+  const seenImports = new Set();
+  const inspectRows = rows => {
+    for (const row of rows) {
+      const key = `${row.source_file_id}\0${row.specifier}`;
+      if (seenImports.has(key)) continue;
+      seenImports.add(key);
+      const source = { id: Number(row.source_file_id), path: String(row.path), language: String(row.language), test: Number(row.is_test) === 1 };
+      const targetPath = resolveImportPath(source.path, String(row.specifier), context.pathToId, context.suffixIndex,
+        context.directoryIndex, context.ecosystem, source.language);
+      const nextTargetId = targetPath ? Number(context.pathToId.get(targetPath) || 0) : 0;
+      const currentTargetId = Number(row.target_file_id || 0);
+      if (nextTargetId !== currentTargetId) sourceFileIds.add(source.id);
+    }
+  };
+
+  forEachChunk([...candidateTargetIds], 200, chunk => {
+    const placeholders = sqlPlaceholders(chunk.length);
+    inspectRows(db.prepare(`
+      SELECT i.source_file_id, i.specifier, i.target_file_id, f.path, f.language, f.is_test
+      FROM imports i
+      JOIN files f ON f.id=i.source_file_id
+      WHERE i.target_file_id IN (${placeholders})
+    `).all(...chunk));
+  });
+
+  forEachChunk([...candidateLeaves], 100, chunk => {
+    const clauses = chunk.map(() => "(i.specifier=? OR i.specifier LIKE ? ESCAPE '\\' OR i.specifier LIKE ? ESCAPE '\\' OR i.specifier LIKE ? ESCAPE '\\')").join(' OR ');
+    const parameters = [];
+    for (const leaf of chunk) {
+      const escaped = escapeSqlLike(leaf);
+      parameters.push(leaf, `%/${escaped}`, `%.${escaped}`, `%::${escaped}`);
+    }
+    inspectRows(db.prepare(`
+      SELECT i.source_file_id, i.specifier, i.target_file_id, f.path, f.language, f.is_test
+      FROM imports i
+      JOIN files f ON f.id=i.source_file_id
+      WHERE i.target_file_id IS NULL AND (${clauses})
+    `).all(...parameters));
+  });
   return [...sourceFileIds];
+}
+
+function escapeSqlLike(value) {
+  return String(value || '').replace(/[\\%_]/g, character => `\\${character}`);
 }
 
 function loadResolutionContext(db, workspaceRoot = null) {

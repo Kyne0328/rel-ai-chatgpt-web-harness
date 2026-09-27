@@ -100,7 +100,7 @@ try {
   if (!taskId || startedTask.identity !== 'work_session') throw new Error('Work-session bootstrap failed.');
   if (repositoryGraphFiles().length) throw new Error('Work-session bootstrap must not build Repository Intelligence on a cold workspace.');
 
-  taskCall(3, 'relai_snapshot', { workspace: 'smoke', maxEntries: 100 });
+  taskCall(3, 'relai_snapshot', { workspace: 'smoke', maxEntries: 100, includeFiles: true });
   const snapshot = structuredContentOf(await client.waitFor(3));
   if (!snapshot.files.includes('README.md')) throw new Error('Snapshot missing README.md.');
   for (const mode of ['exact-replace', 'direct-write', 'apply-update', 'workspace-tidy']) {

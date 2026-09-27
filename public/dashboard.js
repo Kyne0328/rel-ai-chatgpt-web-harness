@@ -1,5 +1,5 @@
 import { fetchJson, invalidateCache, DASHBOARD_DATA_URL } from './ui/api.js';
-import { applyLiveEvent, clearShellDashboardState, clearShellRecoveryNotice, getSnapshot as getStore, init as initStore, initConnectorRefreshModal, initUpdateAvailableModal, mountReactFoundation, patchLocalConnection, preloadReactRoute, preloadReactRoutes, setShellConnectionOverride, setShellLastEventAt, setShellNow, showShellDashboardState, showShellRecoveryNotice, subscribe as subscribeStore } from './dashboard-react.js';
+import { applyLiveEvent, clearShellDashboardState, clearShellRecoveryNotice, getSnapshot as getStore, init as initStore, initConnectorRefreshModal, initUpdateAvailableModal, mountReactFoundation, patchLocalConnection, preloadReactRoute, preloadReactRoutes, setShellConnectionOverride, setShellLastEventAt, showShellDashboardState, showShellRecoveryNotice, subscribe as subscribeStore } from './dashboard-react.js';
 import { initRouter } from './ui/router.js';
 import { initEvents, startSSE } from './ui/events.js';
 import { initUiPreferences } from './ui/preferences.js';
@@ -7,6 +7,7 @@ import { withConnectionState } from './ui/connection-state.js';
 import { normalizeRouteKey } from './ui/route-policy.js';
 import { closeDrawer } from './ui/components/drawer.js';
 import { createDashboardClock } from './ui/clock.js';
+import { syncDesktopSetupState } from './ui/features/onboarding/index.js';
 
 initUiPreferences();
 
@@ -65,7 +66,6 @@ function ensureDashboardRoot() {
 async function boot() {
   _dashboardClock = createDashboardClock({
     onTick: currentTime => {
-      setShellNow(currentTime);
       window.dispatchEvent(new CustomEvent('relai:clock-tick', { detail: { now: currentTime } }));
     }
   }).start();
@@ -76,6 +76,7 @@ async function boot() {
     : initialPayload.ok !== false
       ? withConnectionState(initialPayload, _liveState)
       : initialPayload;
+  if (initial?.onboarding) syncDesktopSetupState(initial.onboarding);
   initStore(initial?.ok !== false ? initial || {} : {});
   if (!initial) {
     showShellDashboardState({
@@ -109,7 +110,6 @@ async function boot() {
   document.addEventListener('visibilitychange', () => { void handleDashboardVisibility(); });
   initEvents(liveOnEvent, liveStateChange);
   startSSE();
-  checkOnboarding();
 }
 
 function activateRouter() {
@@ -175,6 +175,7 @@ async function performRefresh(options = {}) {
     const data = await fetchJson(DASHBOARD_DATA_URL, { cache: 'no-store' });
     if (data && data.ok !== false) {
       const hydrated = withConnectionState(data, _liveState);
+      if (hydrated.onboarding) syncDesktopSetupState(hydrated.onboarding);
       initStore(hydrated);
       replayLiveEventsDuringRefresh();
       const projected = withConnectionState(getStore(), _liveState);
@@ -419,14 +420,6 @@ function updateShell(data) {
   setShellConnectionOverride(null);
   _lastEventAt ||= Date.parse(data?.generatedAt || '') || Date.now();
   setShellLastEventAt(_lastEventAt);
-}
-
-async function checkOnboarding() {
-  try {
-    const status = await fetchJson('/api/onboarding/status');
-    const onboarding = await import('./ui/features/onboarding/index.js');
-    onboarding.syncDesktopSetupState(status || {});
-  } catch (error) { debugError(error); }
 }
 
 function debugError(error) {

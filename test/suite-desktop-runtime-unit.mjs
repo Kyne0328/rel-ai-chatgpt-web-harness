@@ -58,7 +58,8 @@ async function case_desktop_lifecycle_unit() {
   assert.equal(firstStatus.keepRunningOnClose, true, 'closing the dashboard must keep tray mode by default');
   assert.equal(firstStatus.pulseEnabled, true, 'ambient Pulse status must be enabled by default');
   assert.equal(firstStatus.themePreference, 'system', 'Pulse follows system appearance until the dashboard theme is explicitly selected');
-  assert.equal(firstStatus.autoDownloadUpdates, false, 'updates must keep manual download as the safe default');
+  assert.equal(firstStatus.autoDownloadUpdates, true, 'verified update downloads must be automatic by default');
+  assert.equal(firstStatus.updateChannel, 'stable', 'stable releases must remain the default update channel');
   assert.equal(firstStatus.reducedBackgroundWork, false, 'normal background preparation must remain the default');
   assert.equal(first.setLaunchAtLogin(true).ok, true);
   assert.equal(first.getStatus().launchAtLogin.enabled, true);
@@ -74,17 +75,20 @@ async function case_desktop_lifecycle_unit() {
     keepRunningOnClose: false,
     pulseEnabled: false,
     themePreference: 'dark',
-    autoDownloadUpdates: true,
+    autoDownloadUpdates: false,
+    updateChannel: 'beta',
     reducedBackgroundWork: true
   });
   assert.equal(preferenceUpdate.ok, true);
   assert.equal(preferenceUpdate.status.keepRunningOnClose, false);
   assert.equal(preferenceUpdate.status.pulseEnabled, false);
   assert.equal(preferenceUpdate.status.themePreference, 'dark');
-  assert.equal(preferenceUpdate.status.autoDownloadUpdates, true);
+  assert.equal(preferenceUpdate.status.autoDownloadUpdates, false);
+  assert.equal(preferenceUpdate.status.updateChannel, 'beta');
   assert.equal(preferenceUpdate.status.reducedBackgroundWork, true);
   assert.equal((await first.setPreferences({ autoDownloadUpdates: 'yes' })).ok, false, 'app preferences must reject non-boolean values');
   assert.equal((await first.setPreferences({ themePreference: 'sepia' })).ok, false, 'app preferences must reject unknown themes');
+  assert.equal((await first.setPreferences({ updateChannel: 'nightly' })).ok, false, 'app preferences must reject unknown update channels');
   const cleanStatus = await first.markCleanShutdown();
   assert.equal((await first.markCleanShutdown()).lastCleanExitAt, cleanStatus.lastCleanExitAt);
   
@@ -99,7 +103,8 @@ async function case_desktop_lifecycle_unit() {
   assert.equal(secondStatus.keepRunningOnClose, false, 'close behavior must persist across desktop restarts');
   assert.equal(secondStatus.pulseEnabled, false, 'Pulse preference must persist across desktop restarts');
   assert.equal(secondStatus.themePreference, 'dark', 'Pulse theme preference must persist across desktop restarts');
-  assert.equal(secondStatus.autoDownloadUpdates, true, 'automatic download preference must persist across desktop restarts');
+  assert.equal(secondStatus.autoDownloadUpdates, false, 'automatic download preference must persist across desktop restarts');
+  assert.equal(secondStatus.updateChannel, 'beta', 'update channel preference must persist across desktop restarts');
   assert.equal(secondStatus.reducedBackgroundWork, true, 'reduced background work must persist across desktop restarts');
   assert.equal((await second.setKeepAwake(false)).status.keepAwake, false);
   await second.markCleanShutdown();
@@ -464,7 +469,10 @@ async function case_desktop_updates_policy_unit() {
   
   const downloaded = updateView({ state: 'downloaded', availableVersion: '0.25.3', installMode: 'open_dmg' }, false);
   assert.equal(downloaded.action.id, 'install');
-  assert.equal(downloaded.action.label, 'DMG');
+  assert.equal(downloaded.action.label, 'Open DMG and close Rel.AI');
+  const deferred = updateView({ state: 'downloaded', availableVersion: '0.25.3', canDeferInstall: true }, false);
+  assert.equal(deferred.action.id, 'defer');
+  assert.match(deferred.action.label, /task finishes/i);
   
   const htmlNote = normalizeReleaseNoteText('<h3>Linux desktop and update reliability</h3><ul><li><strong>Restore close-to-tray behavior</strong></li><li>Fix &amp; verify updates</li></ul>');
   assert.match(htmlNote, /Linux desktop and update reliability/);
@@ -949,10 +957,11 @@ async function case_window_chrome_unit() {
   const windows = dashboardWindowChrome('win32');
   assert.equal(windows.platform, 'win32');
   assert.equal(windows.customTitleBar, true);
-  assert.equal(windows.controls, 'custom');
+  assert.equal(windows.controls, 'native');
   assert.equal(windows.windowOptions.frame, false);
   assert.equal(windows.windowOptions.thickFrame, true);
   assert.equal(windows.windowOptions.titleBarStyle, 'hidden');
+  assert.deepEqual(windows.windowOptions.titleBarOverlay, { color: '#111613', symbolColor: '#f2f6f2', height: 40 });
   assert.equal(windows.windowOptions.hasShadow, true);
   assert.equal(windows.windowOptions.roundedCorners, true);
   
@@ -978,7 +987,7 @@ async function case_window_chrome_unit() {
   assert.deepEqual(state, {
     platform: 'win32',
     customTitleBar: true,
-    controls: 'custom',
+    controls: 'native',
     maximized: true,
     minimized: false,
     fullScreen: true

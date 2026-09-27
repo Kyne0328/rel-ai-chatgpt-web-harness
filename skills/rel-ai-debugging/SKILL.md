@@ -5,7 +5,7 @@ description: Use when repository behavior is reproducibly wrong and needs causal
 
 # Rel.AI Debugging
 
-Reuse an active `work_id` when the objective already has a durable work session. Otherwise debug directly at workspace/resource scope; do not create a work session merely to unlock tools.
+Reuse an active `work_id` for the current meaningful user goal. If this skill is entered directly for a new debugging goal, start `relai_work` with action `begin` before the first project operation; do not create a second task merely to unlock a tool.
 Choose the next repository action from the observed failure, current repository evidence, and hard runtime constraints. Rel.AI supplies facts and enforcement; the agent retains debugging judgment and should stop when the demonstrated root cause is fixed and verified.
 
 Use this causal sequence: `observable failure -> smallest reproduction -> causal path -> root cause -> coherent fix -> targeted regression -> broader checks only when the changed boundary requires them`.
@@ -17,4 +17,4 @@ Use this causal sequence: `observable failure -> smallest reproduction -> causal
 5. Apply the smallest coherent fix through `relai_edit`. Do not bundle unrelated cleanup into the repair.
 6. Run the targeted regression first. Add broader checks only when the changed boundary creates additional meaningful risk.
 7. Never claim an executable defect is fixed from static inspection alone when bounded executable proof is available.
-8. Hand the reproduced failure, root cause, changed behavior, targeted regression, and touched boundaries to `rel-ai-verification` or back to `rel-ai-workflow`.
+8. Hand the reproduced failure, root cause, changed behavior, targeted regression, and touched boundaries to `rel-ai-verification` or back to `rel-ai-workflow`. Targeted `relai_validate` checks leave the durable session open by default, so the owning workflow can review or run broader checks before explicitly closing with final `complete:true` validation or `relai_work finish`. Failed, cancelled, or stale checks also leave the session open for accurate follow-up.

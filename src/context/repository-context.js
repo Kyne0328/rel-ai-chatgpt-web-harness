@@ -2,7 +2,6 @@ function compactRepositoryContext(snapshot = {}) {
   const manifests = strings(snapshot.manifests);
   const hints = strings(snapshot.hints);
   const projectInstructions = compactProjectInstructions(snapshot.projectInstructions);
-  const skills = compactSkills(snapshot.skills);
   const git = compactGit(snapshot.git);
   return prune({
     mode: 'compact',
@@ -11,19 +10,8 @@ function compactRepositoryContext(snapshot = {}) {
     truncated: snapshot.truncated === true ? true : undefined,
     hints: hints.length ? hints : undefined,
     git,
-    projectInstructions,
-    skills: skills.length ? skills : undefined
+    projectInstructions
   });
-}
-
-function compactSkills(value) {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, 50).map(item => prune({
-    name: String(item?.name || '').trim() || undefined,
-    description: String(item?.description || '').trim() || undefined,
-    source: String(item?.source || '').trim() || undefined,
-    path: String(item?.path || '').trim() || undefined
-  })).filter(item => item.name);
 }
 
 function compactProjectInstructions(value) {

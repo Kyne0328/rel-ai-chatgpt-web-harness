@@ -15,7 +15,7 @@ function findReusableTask(config, workspace, args = {}, principal, conversationI
   const workspaceAlias = String(workspace || '').trim();
   const objective = normalizeTaskGoal(args.objective);
   const title = normalizeTaskGoal(args.title);
-  if (!conversation || !workspaceAlias || (!objective && !title)) return null;
+  if (!conversation || (!objective && !title)) return null;
   const expectedPrincipal = principalFingerprint(principal || 'anonymous');
   const matches = session => {
     if (!session || isTerminalTaskStatus(session.status)) return false;
@@ -30,7 +30,7 @@ function findReusableTask(config, workspace, args = {}, principal, conversationI
   const live = activity.tasks.find(matches);
   if (live) return live;
   const activeTaskIds = new Set(activity.tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean));
-  const narrowed = findTaskReuseCandidates(config, workspaceAlias, conversation, 24)
+  const narrowed = (workspaceAlias ? findTaskReuseCandidates(config, workspaceAlias, conversation, 24) : [])
     .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: true, activeTaskIds }))
     .filter(Boolean)
     .filter(session => !isTerminalTaskStatus(session?.status))
@@ -59,7 +59,7 @@ function reuseResult(candidates) {
   if (candidates.length > 1) {
     throw taskError(
       'TASK_RECOVERY_AMBIGUOUS',
-      'Multiple unfinished Rel.AI work sessions match this ChatGPT conversation, project, and goal. Rel.AI will not create another duplicate task automatically.',
+      'Multiple unfinished Rel.AI work sessions match this ChatGPT conversation, scope, and goal. Rel.AI will not create another duplicate task automatically.',
       {
         retryable: false,
         candidateCount: candidates.length,
@@ -96,7 +96,7 @@ function taskAttributionHint(config, workspace, principal, conversationId) {
     && safeEqual(String(session.principalFingerprint || ''), fingerprint)
   ).map(session => String(session.id || session.taskId || '')).filter(Boolean))];
   if (!ids.length) return '';
-  return `Unfinished work in this conversation: ${ids.slice(0, 5).join(', ')}. Retry with the appropriate work_id to continue that task, or independent:true for intentionally separate workspace work. No task has been selected automatically.`;
+  return `Unfinished work in this conversation: ${ids.slice(0, 5).join(', ')}. Choose one: pass work_id to continue a task, OR pass independent:true to work outside tasks. Do not pass both. No task has been selected automatically.`;
 }
 
 function startTask(workspace, args = {}) {
@@ -104,17 +104,20 @@ function startTask(workspace, args = {}) {
   if (!context?.taskId) {
     throw taskError('CONNECTION_CONTEXT_UNAVAILABLE', 'Rel.AI could not create a work session for this request.');
   }
+  const workspaceAlias = String(workspace?.alias || args.workspace || '').trim();
+  const objective = String(args.objective || context.objective || '').trim();
   return {
     ok: true,
-    workspace: workspace.alias,
+    ...(workspaceAlias ? { workspace: workspaceAlias, workspaceBinding: { alias: workspaceAlias } } : {}),
     work_id: context.taskId,
     status: 'planning',
     identity: 'work_session',
-    workspaceBinding: { alias: workspace.alias },
     title: String(args.title || context.title || '').trim() || undefined,
-    objective: String(args.objective || context.objective || '').trim() || undefined,
-    intent: classifyTaskIntent(args.objective || context.objective),
-    nextAction: 'Use this work_id on task operations and inspect directly with batched read/search/snapshot calls. relai_work context is optional deeper continuity retrieval, and relai_work status is for reconnect/recovery rather than routine polling.'
+    objective: objective || undefined,
+    intent: classifyTaskIntent(objective),
+    nextAction: workspaceAlias
+      ? `Use work_id "${context.taskId}" for this goal and keep its durable plan updated for multi-step tracking as the work advances.`
+      : `Use work_id "${context.taskId}" for this goal. No project is bound yet; keep the durable plan updated and name an authorized workspace on the first project operation if one becomes necessary.`
   };
 }
 
@@ -122,7 +125,7 @@ function taskBootstrapFromSnapshot(snapshot, mode = 'compact') {
   return buildTaskBootstrap(snapshot, mode);
 }
 
-function assertKnownTask(config, taskId, workspace, toolName, principal, args = {}) {
+function assertKnownTask(config, taskId, workspace, toolName, principal, args = {}, options = {}) {
   const activeTaskIds = new Set(getToolActivity().tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean));
   const session = readTaskHistorySessionRecord(config, taskId, {
     reconcileInactive: true,
@@ -133,7 +136,7 @@ function assertKnownTask(config, taskId, workspace, toolName, principal, args = 
   }
   const expectedPrincipal = String(session.principalFingerprint || '');
   const actualPrincipal = principalFingerprint(principal || 'anonymous');
-  if (!expectedPrincipal || !safeEqual(expectedPrincipal, actualPrincipal)) {
+  if (!expectedPrincipal || (options.trustedLocalTaskControl !== true && !safeEqual(expectedPrincipal, actualPrincipal))) {
     throw taskError('TASK_NOT_FOUND', 'The supplied work_id is unknown or expired. Start a new work session with relai_work action "begin".');
   }
   assertTaskWorkspaceOwnership(session, workspace);

@@ -5,7 +5,7 @@ description: Use for read-only repository questions that need evidence, includin
 
 # Rel.AI Investigation
 
-Reuse an active `work_id` if the investigation already belongs to a durable work session. For substantial or multi-step repository investigations, start `relai_work` with action `begin` before gathering evidence, even though the work is read-only. Only isolated read or inspection questions should stay directly at workspace scope without a task.
+Reuse an active `work_id` for the current meaningful user goal. If this skill is entered directly for a new repository investigation, start `relai_work` with action `begin` before gathering evidence, even when the investigation is small or read-only. Taskless reads remain available for low-level recovery, observation, or resource operations that are not themselves the user's investigation goal.
 Decide whether another search, read, measurement, or broader boundary is useful from the investigation question and current evidence. Rel.AI supplies repository facts; the agent owns sufficiency judgment and should stop when the required proof exists.
 
 1. State the question and define what would count as sufficient proof before gathering more context.

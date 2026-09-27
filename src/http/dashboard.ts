@@ -9,6 +9,8 @@ import {
   dashboardReleaseNotes,
   dashboardRequiresHttpToken,
   dashboardSnapshot,
+  dashboardTaskCodeDiff,
+  dashboardTaskCodeWorkspace,
   dashboardTaskSession,
   dashboardTools,
   dashboardWorkspacePreflight,
@@ -40,6 +42,18 @@ function handleDashboardV10(ctx: HttpRouteContext): void {
     limit: Number(ctx.parsed.searchParams.get('limit') || 100),
     requireHttpToken: dashboardRequiresHttpToken(ctx.parsed.searchParams.get('requireHttpToken'))
   }));
+}
+
+async function handleBrowserPreview(ctx: HttpRouteContext): Promise<void> {
+  if (typeof ctx.options.getBrowserPreview !== 'function') {
+    sendJson(ctx.res, 200, { ok: true, available: false, active: false });
+    return;
+  }
+  try {
+    sendJson(ctx.res, 200, await ctx.options.getBrowserPreview());
+  } catch (error) {
+    sendJson(ctx.res, 200, { ok: false, available: true, active: false, error: errorMessage(error) });
+  }
 }
 
 async function handleWorkspacePreflight(ctx: HttpRouteContext): Promise<void> {
@@ -113,6 +127,33 @@ function sendDashboardStreamError(
   else sendSse(res, 'dashboard.error', payload);
 }
 
+const handleTaskCodeWorkspace = async (ctx: HttpRouteContext): Promise<void> => {
+  const taskId = String(ctx.parsed.searchParams.get('task') || '').trim();
+  if (!taskId) {
+    sendJson(ctx.res, 400, { ok: false, error: 'task is required.' });
+    return;
+  }
+  try {
+    sendJson(ctx.res, 200, await dashboardTaskCodeWorkspace(taskId));
+  } catch (error) {
+    sendJson(ctx.res, 400, { ok: false, error: errorMessage(error) });
+  }
+};
+
+const handleTaskCodeDiff = async (ctx: HttpRouteContext): Promise<void> => {
+  const taskId = String(ctx.parsed.searchParams.get('task') || '').trim();
+  const file = String(ctx.parsed.searchParams.get('file') || '').trim();
+  if (!taskId || !file) {
+    sendJson(ctx.res, 400, { ok: false, error: 'task and file are required.' });
+    return;
+  }
+  try {
+    sendJson(ctx.res, 200, await dashboardTaskCodeDiff(taskId, file));
+  } catch (error) {
+    sendJson(ctx.res, 400, { ok: false, error: errorMessage(error) });
+  }
+};
+
 const handleTaskSession = (ctx: HttpRouteContext): void => {
   const taskId = String(ctx.parsed.searchParams.get('task') || '').trim();
   if (!taskId) {
@@ -143,6 +184,9 @@ export {
   handleOnboardingStatus,
   handleConnection,
   handleDashboardV10,
+  handleBrowserPreview,
+  handleTaskCodeWorkspace,
+  handleTaskCodeDiff,
   handleTaskSession,
   handleApiLogs,
   handleReleaseNotes,

@@ -108,9 +108,10 @@ async function listLiveTaskChanges(config, context) {
     .filter(entry => isSelectableChangeEntry(context.executionPath, entry))
     .slice(0, MAX_CHANGED_FILES);
   const changedFiles = changedEntries.map(entry => entry.path);
+  const lineStats = await gitLineStats(config, context.executionPath, ['diff', '--no-ext-diff', '--numstat', 'HEAD'], changedFiles);
   return {
     changedFiles,
-    changedFileStatuses: Object.fromEntries(changedEntries.map(entry => [entry.path, changeStatus(entry)])),
+    changedFileStatuses: Object.fromEntries(changedEntries.map(entry => [entry.path, { ...changeStatus(entry), ...lineStats[entry.path] }])),
     historyMode: 'live',
     historyAvailable: true,
     commitHeads: [],
@@ -141,9 +142,10 @@ async function listHistoricalTaskChanges(config, context) {
   const entryByPath = new Map(entries.map(entry => [entry.path, entry]));
   const changedFiles = taskFiles.filter(file => entryByPath.has(file));
   if (!changedFiles.length) return null;
+  const lineStats = await historicalLineStats(config, context, historical.commitHeads, changedFiles);
   return {
     changedFiles,
-    changedFileStatuses: Object.fromEntries(changedFiles.map(file => [file, changeStatus(entryByPath.get(file))])),
+    changedFileStatuses: Object.fromEntries(changedFiles.map(file => [file, { ...changeStatus(entryByPath.get(file)), ...lineStats[file] }])),
     historyMode: 'committed',
     historyAvailable: true,
     commitHeads: historical.commitHeads,
@@ -377,6 +379,59 @@ function isSelectableChangeEntry(root, entry = {}) {
     if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') return false;
     return entry.indexStatus === 'D' || entry.worktreeStatus === 'D';
   }
+}
+
+async function historicalLineStats(config, context, commitHeads, files) {
+  const totals = {};
+  for (const head of commitHeads) {
+    const stats = await gitLineStats(config, context.executionPath, [
+      'diff-tree', '--root', '--no-commit-id', '--numstat', '-r', '-M', head
+    ], files);
+    for (const [file, stat] of Object.entries(stats)) {
+      const current = totals[file] || { additions: 0, deletions: 0 };
+      totals[file] = {
+        additions: current.additions + stat.additions,
+        deletions: current.deletions + stat.deletions
+      };
+    }
+  }
+  return totals;
+}
+
+async function gitLineStats(config, cwd, args, files) {
+  const wanted = new Set(files.map(normalizePath).filter(Boolean));
+  if (!wanted.size) return {};
+  const result = await runProcess('git', [...args, '--', ...wanted], {
+    cwd,
+    timeout: GIT_TIMEOUT_MS,
+    maxOutputBytes: MAX_GIT_OUTPUT_BYTES,
+    preserveOutputWhitespace: true
+  }, config).catch(() => null);
+  if (!result || result.exitCode !== 0 || result.stdoutTruncated) return {};
+  const stats = {};
+  for (const line of String(result.stdout || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [addedRaw = '', deletedRaw = '', ...pathParts] = line.split('\t');
+    if (!/^\d+$/.test(addedRaw) || !/^\d+$/.test(deletedRaw)) continue;
+    const file = matchNumstatPath(pathParts.join('\t'), wanted);
+    if (!file) continue;
+    const current = stats[file] || { additions: 0, deletions: 0 };
+    stats[file] = {
+      additions: current.additions + Number(addedRaw),
+      deletions: current.deletions + Number(deletedRaw)
+    };
+  }
+  return stats;
+}
+
+function matchNumstatPath(value, wanted) {
+  const direct = normalizePath(value);
+  if (wanted.has(direct)) return direct;
+  let renamed = String(value || '');
+  renamed = renamed.replace(/\{([^{}]*) => ([^{}]*)\}/g, '$2');
+  if (renamed.includes(' => ')) renamed = renamed.slice(renamed.lastIndexOf(' => ') + 4);
+  const normalized = normalizePath(renamed);
+  return wanted.has(normalized) ? normalized : '';
 }
 
 function changeStatus(entry = {}) {

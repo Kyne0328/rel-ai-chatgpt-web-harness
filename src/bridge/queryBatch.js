@@ -12,7 +12,7 @@ function resolveQueryTerms(args = {}, options = {}) {
   if (batch && single.trim()) throw new Error(`Provide ${singleField} or queries, not both.`);
   if (!batch) return { batched: false, terms: [single] };
   if (batch.length < 1 || batch.length > maxItems) {
-    throw new Error(`${label} queries must contain between 1 and ${maxItems} items.`);
+    throw new Error(`${label} queries must contain between 1 and ${maxItems} items. Received ${batch.length}.`);
   }
 
   const terms = [];

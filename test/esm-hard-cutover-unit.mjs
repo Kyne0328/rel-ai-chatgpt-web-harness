@@ -49,7 +49,7 @@ for (const file of productionFiles.filter(file => /\.(?:js|mjs|cjs)$/.test(file)
   const relative = path.relative(root, file).replaceAll('\\', '/');
   const source = fs.readFileSync(file, 'utf8');
   if (relative === 'electron/preload.cjs') {
-    assert.match(source, /const \{ contextBridge, ipcRenderer \} = require\('electron'\);/);
+    assert.match(source, /const \{ contextBridge, ipcRenderer, webUtils \} = require\('electron'\);/);
     assert.equal((source.match(/\brequire\s*\(/g) || []).length, 1, 'preload.cjs may require only Electron');
     assert.match(source, /--relai-preload-surface=/);
     continue;

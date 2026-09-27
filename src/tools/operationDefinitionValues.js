@@ -11,8 +11,8 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.WORK_BEGIN,
     title: "Start Logical Task",
-    description: "Create a durable workspace-bound work session and promptly return its work_id plus cheap cached task context. Carry this ID on subsequent task operations and inspect the repository directly with batched read/search/snapshot calls. action context is optional for deeper continuity/bootstrap retrieval; begin never scans the repository.",
-    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"title":{"type":"string","minLength":1,"maxLength":100},"objective":{"type":"string","minLength":1,"maxLength":500},"contextSummary":{"type":"string","maxLength":3000,"description":"Optional compact host-provided context that Rel.AI may preserve with this work session. Do not include chain-of-thought, secrets, or a full conversation transcript."},"bootstrap":{"type":"string","enum":["compact","full","none"],"description":"Preferred mode if a later context call is used. Begin never scans the repository."},"instructionPath":{"type":"string","maxLength":1000,"description":"Optional workspace-relative file or directory used to discover applicable nested AGENTS.md instructions."}},"required":["workspace"],"additionalProperties":false},
+    description: "Create or reuse one durable logical work session for a meaningful Rel.AI user goal. Every durable task starts with a non-empty ordered plan and keeps it updated as evidence changes. Supply steps for a proportional multi-step plan; when omitted, Rel.AI atomically seeds one goal step so the task is never planless. Projectless one-shot utility/control requests should run taskless. action context is optional for deeper continuity/bootstrap retrieval; begin never scans the repository.",
+    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"title":{"type":"string","minLength":1,"maxLength":100},"objective":{"type":"string","minLength":1,"maxLength":500},"steps":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":80},"title":{"type":"string","minLength":1,"maxLength":300},"detail":{"type":"string","maxLength":500},"status":{"type":"string","enum":["pending","in_progress","completed","blocked","skipped"]}},"required":["title","status"],"additionalProperties":false}},"contextSummary":{"type":"string","maxLength":3000,"description":"Optional compact host-provided context that Rel.AI may preserve with this work session. Do not include chain-of-thought, secrets, or a full conversation transcript."},"bootstrap":{"type":"string","enum":["compact","full","none"],"description":"Preferred mode if a later context call is used. Begin never scans the repository."},"instructionPath":{"type":"string","maxLength":1000,"description":"Optional workspace-relative file or directory used to discover applicable nested AGENTS.md instructions when a project is bound."}},"required":[],"additionalProperties":false},
     handlerName: 'startTask',
     behavior: {"taskScope":"none"},
     dashboard: {"category":"Workflow"}
@@ -21,7 +21,7 @@ const OPERATION_DEFINITION_VALUES = [
     name: OP.WORK_CONTEXT,
     title: 'Load Task Context',
     description: 'Optionally load deeper repository bootstrap and continuity context for an existing work_id. Routine work should inspect directly after begin; use this only when historical continuity, skill suggestions, or a broader bootstrap would materially help.',
-    inputSchema: { type: 'object', properties: { workspace: { type: 'string' }, bootstrap: { type: 'string', enum: ['compact', 'full', 'none'] }, instructionPath: { type: 'string', maxLength: 1000 } }, required: ['workspace'], additionalProperties: false },
+    inputSchema: { type: 'object', properties: { workspace: { type: 'string' }, bootstrap: { type: 'string', enum: ['compact', 'full', 'none'] }, instructionPath: { type: 'string', maxLength: 1000 } }, required: [], additionalProperties: false },
     handlerName: 'taskContext',
     behavior: { taskScope: 'required', longRunning: true },
     dashboard: { category: 'Workflow' }
@@ -29,8 +29,8 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.WORK_PLAN,
     title: 'Set Task Plan',
-    description: 'Replace the durable ordered checklist for the exact work_id. Use explicit step states rather than inferring whole-task progress from tool calls. Re-send the complete ordered list when the plan or a step status changes; steps:[] clears the checklist.',
-    inputSchema: { type: 'object', properties: { workspace: { type: 'string' }, steps: { type: 'array', maxItems: 50, items: { type: 'object', properties: { id: { type: 'string', minLength: 1, maxLength: 80 }, title: { type: 'string', minLength: 1, maxLength: 300 }, detail: { type: 'string', maxLength: 500 }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked', 'skipped'] } }, required: ['title', 'status'], additionalProperties: false } } }, required: ['workspace', 'steps'], additionalProperties: false },
+    description: 'Replace the durable ordered checklist for the exact work_id. Durable tasks always keep a non-empty plan. Use explicit step states rather than inferring whole-task progress from tool calls, and re-send the complete ordered list only when the plan structure needs to change.',
+    inputSchema: { type: 'object', properties: { workspace: { type: 'string' }, steps: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: { id: { type: 'string', minLength: 1, maxLength: 80 }, title: { type: 'string', minLength: 1, maxLength: 300 }, detail: { type: 'string', maxLength: 500 }, status: { type: 'string', enum: ['pending', 'in_progress', 'completed', 'blocked', 'skipped'] } }, required: ['title', 'status'], additionalProperties: false } } }, required: ['steps'], additionalProperties: false },
     handlerName: 'taskPlan',
     behavior: { taskScope: 'required' },
     dashboard: { category: 'Workflow' }
@@ -184,7 +184,7 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.VALIDATE_CHECKS,
     title: "Workspace Checks",
-    description: "Run workspace validation checks (tests, linters, analyzers, build). Use level quick, standard, or release. Output is bounded to each step's tail where failures appear; pass fullOutput:true for a larger tail. With a durable work_id or native MCP Task, omitted timeoutMs means each check runs until it exits or the task is explicitly cancelled; taskless validation retains a bounded safety timeout. An explicit timeoutMs is always honored. Validation records factual evidence about the repository state. When work_id is explicitly supplied, successful checks close that durable task atomically by default; pass complete:false only for deliberately intermediate validation.",
+    description: "Run workspace validation checks (tests, linters, analyzers, build). Use level quick, standard, or release. Output is bounded to each step's tail where failures appear; pass fullOutput:true for a larger tail. With a durable work_id or native MCP Task, omitted timeoutMs means each check runs until it exits or the task is explicitly cancelled; taskless validation retains a bounded safety timeout. An explicit timeoutMs is always honored. Validation records factual evidence about the repository state and leaves durable work open by default; pass complete:true only when successful current checks should atomically close the task.",
     inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"level":{"type":"string","enum":["quick","standard","release"]},"check":{"type":"string","minLength":1,"maxLength":20000},"checks":{"type":"array","items":{"type":"string","minLength":1,"maxLength":20000},"minItems":1,"maxItems":50},"checksText":{"type":"string","minLength":1,"maxLength":100000},"timeoutMs":{"type":"number","minimum":1000,"maximum":86400000},"stopOnFailure":{"type":"boolean"},"fullOutput":{"type":"boolean"},"complete":{"type":"boolean"},"summary":{"type":"string","minLength":1,"maxLength":2000}},"required":["workspace"],"additionalProperties":false},
     handlerName: 'runChecks',
     behavior: {"audit":"checks","summary":"checks","longRunning":true,"taskScope":"optional"}
@@ -308,7 +308,7 @@ const OPERATION_DEFINITION_VALUES = [
     name: OP.WORK_FINISH,
     title: "Report Task Completion",
     description: "Explicitly close the durable work session identified by work_id. Completion records the session's actual validation state (passed, failed, stale, not_run, or not_required) but does not require validation as permission to finish. Rel.AI never falls back to another task in the workspace.",
-    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"summary":{"type":"string","minLength":1,"maxLength":2000}},"required":["workspace","summary"],"additionalProperties":false},
+    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"summary":{"type":"string","minLength":1,"maxLength":2000}},"required":["summary"],"additionalProperties":false},
     handlerName: 'completeTask',
     behavior: {"audit":"completion","summary":"completion","concurrencyScope":"mutation"},
     dashboard: {"category":"Workflow"}

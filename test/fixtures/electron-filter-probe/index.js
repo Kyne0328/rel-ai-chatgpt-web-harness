@@ -343,7 +343,7 @@ app.whenReady().then(async () => {
       await delay(80);
       const result = {
         overviewVisible: Boolean(document.querySelector('.usage-overview')),
-        localAggregate: /Analytics are stored on this computer/.test(document.querySelector('[data-usage-page]')?.textContent || ''),
+        localAggregate: /Aggregate local analytics are retained/i.test(document.querySelector('[data-usage-page]')?.textContent || ''),
         modalVisible: Boolean(document.querySelector('[role="dialog"] .modal-title')),
         inlineUnavailable: Boolean(document.querySelector('.usage-unavailable')),
         rangeLabels: [...document.querySelectorAll('[data-usage-range-option]')].map(button => button.textContent.trim()),

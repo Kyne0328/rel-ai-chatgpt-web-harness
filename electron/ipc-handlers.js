@@ -136,8 +136,10 @@ function registerSetupIpc({ ipc, channels, shell, closeWizard, getRecoveryConfig
     const apiKey = String(config.tunnelApiKey || '').trim();
     if (apiKey) setTunnelApiKey(apiKey);
     saveLauncherConfig(config);
-    closeWizard({ returnToFallback: false });
     const status = await launchConfiguredDesktop({ restart: config?.restart === true, firstRun: config?.restart !== true });
+    if (status?.serverRunning === true) {
+      closeWizard({ returnToFallback: false });
+    }
     return { ok: status?.serverRunning === true, status };
   });
   ipc.handle(channels.WIZARD_CANCEL, 'Setup cancellation', () => {

@@ -245,6 +245,12 @@ function createToolActivityTracker(options = {}) {
             phase: 'complete'
           });
       applyActivityPatch(current.activity, completionActivity);
+      const terminalLabel = sanitizeDisplayText(completionActivity.title || current.activity?.title, 200);
+      if (terminalLabel) {
+        current.label = terminalLabel;
+        task.lastOperation = terminalLabel;
+        if (current.activity?.tool) current.activity.tool.operation = terminalLabel;
+      }
       task.changedFiles = mergeTaskChangedFiles(task.changedFiles, current.activity?.metadata?.changedFiles);
       current.activity.status = terminalBeforeFinish && task.status === 'cancelled' && current.internalOperation !== OP.WORK_CANCEL
         ? 'cancelled'
@@ -426,6 +432,11 @@ function createToolActivityTracker(options = {}) {
             phase: 'complete'
           });
       applyActivityPatch(operation.activity, completionActivity);
+      const terminalLabel = sanitizeDisplayText(completionActivity.title || operation.activity?.title, 200);
+      if (terminalLabel) {
+        operation.label = terminalLabel;
+        if (operation.activity?.tool) operation.activity.tool.operation = terminalLabel;
+      }
       operation.activity.status = completedActivityStatus(result, completionActivity);
       operation.activity.completedAt = new Date(finishedAt).toISOString();
       operation.activity.durationMs = Math.max(0, finishedAt - startedAt);
@@ -1109,8 +1120,8 @@ function taskError(code, message, details = {}) {
   error.allowedAlternatives = Array.isArray(details.allowedAlternatives)
     ? details.allowedAlternatives.map(String).filter(Boolean)
     : [
-        'Omit work_id for supported workspace- or resource-scoped operations.',
-        'Start a durable work session only when task attribution, ownership, recovery, or task-scoped review/publication is useful.'
+        'Use the work_id for the current meaningful Rel.AI user goal when one exists.',
+        'Omit work_id only for an intentionally taskless control, recovery, observation, or resource operation.'
       ];
   if (Number.isFinite(details.candidateCount)) error.candidateCount = Number(details.candidateCount);
   return error;

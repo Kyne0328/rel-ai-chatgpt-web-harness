@@ -60,7 +60,10 @@ assert.deepEqual(result.content[1], { type: 'image', data: png, mimeType: 'image
 assert.equal(result.structuredContent.image.data, undefined);
 assert.equal(result.structuredContent.image.mimeType, 'image/png');
 assert.equal(result.structuredContent.image.bytes, 32);
-assert.equal(result.structuredContent.work_id, 'work_contract');
+assert.equal(result.structuredContent.work_id, undefined, 'routine screenshot success must not echo caller-owned task identity');
+assert.equal(result.structuredContent.workspace, undefined, 'routine screenshot success must not echo caller-owned workspace');
+assert.equal(result.structuredContent.action, 'screenshot', 'routine success must retain action identity');
+assert.equal(result.structuredContent.sessionId, screenshotArgs.sessionId, 'routine success must retain resource identity');
 
 const nestedPng = Buffer.from('nested-image-contract').toString('base64');
 const batchResult = toolResult({

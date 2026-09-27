@@ -3,6 +3,7 @@ import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { openModal } from '../../components/modal.js';
+import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection } from '../../connection-state.js';
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
@@ -56,17 +57,17 @@ export function SettingsView({ data = {}, subPage = '' }) {
   return h('div', { id: '__settings-content', className: 'settings-content', 'data-settings-react': page }, content);
 }
 
-function SettingsHeader({ title, description }) {
-  return h('div', { className: 'settings-header' },
-    h('h2', null, title),
-    description ? h('p', null, description) : null
-  );
-}
-
 function Card({ title, className = '', children }) {
   return h('section', { className: ['card', className].filter(Boolean).join(' ') },
     h('div', { className: 'card-head' }, h('h3', null, title)),
     h('div', { className: 'card-body settings-panel-body' }, children)
+  );
+}
+
+function SettingsHeader({ title, description }) {
+  return h('div', { className: 'settings-header' },
+    h('h2', null, title),
+    description ? h('p', null, description) : null
   );
 }
 
@@ -113,9 +114,6 @@ function SettingsField({ label, help = '', error = '', children, inputId }) {
   );
 }
 
-function StatusPill({ label, tone = '' }) {
-  return h('span', { className: `status-pill ${tone}`.trim() }, label);
-}
 
 function ConnectionPage({ data }) {
   const controlsRef = useRef(null);
@@ -154,7 +152,7 @@ function ConnectionPage({ data }) {
 
   return h('div', { className: 'section connection-page', 'data-connection-react': '' },
     h('section', { className: `card connection-summary-card ${summary.tone}` },
-      h('div', { className: 'card-head' }, h('h3', null, 'ChatGPT connection'), h(StatusPill, { label: summary.label, tone: summary.tone })),
+      h('div', { className: 'card-head' }, h(StatusPill, { label: summary.label, tone: summary.tone })),
       h('div', { className: 'card-body connection-status-body' },
         h('div', { className: 'connection-status-copy' }, h('h2', null, summary.title), h('p', null, summary.message)),
         action.kind !== 'none' ? h('div', { className: 'connection-primary-action' }, connectionActionElement(action, { openSetup, openSettings, retry })) : null
@@ -242,8 +240,7 @@ function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
       h('div', { className: 'card-body' },
         h('div', { className: 'chatgpt-setup-guide compact' },
           h('div', { className: 'chatgpt-guide-heading' },
-            h('strong', null, mode === 'reconnect' ? 'Reconnect ChatGPT' : 'Finish ChatGPT setup'),
-            h('span', null, 'Use Tunnel + No authentication. Rel.AI keeps the local connection private.')
+            h('span', null, 'Use Tunnel + No authentication.')
           ),
           mode === 'create' ? h('section', { className: 'chatgpt-connector-handoff', 'aria-label': 'ChatGPT connector setup' },
             h('dl', { className: 'chatgpt-connector-values' },
@@ -256,7 +253,7 @@ function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
               h('button', { className: 'primary', type: 'button', onClick: () => window.open(CHATGPT_CONNECTOR_CREATE_URL, '_blank', 'noopener,noreferrer') }, 'ChatGPT setup'),
               h('button', { className: 'secondary', type: 'button', onClick: saveIcon }, iconSaved ? `Optional icon saved · ${RELAI_CONNECTOR_ICON_FILENAME}` : h(React.Fragment, null, 'Save optional Rel.AI icon ', h('span', null, 'PNG · under 10 KB')))
             ),
-            h('p', { className: 'chatgpt-connector-note' }, iconSaved ? 'The icon is optional. Open ChatGPT setup when you are ready.' : 'Open ChatGPT now. You can add the Rel.AI icon after the connector works.')
+            iconSaved ? null : h('p', { className: 'chatgpt-connector-note' }, 'You can add the optional Rel.AI icon after the connector works.')
           ) : null,
           h('ol', null, steps.map((step, index) => h('li', { key: index }, step))),
           h('div', { className: 'chatgpt-first-prompt' }, h('span', null, 'First test request'), h('code', null, chatGptFirstPrompt(workspaceAlias)))
@@ -269,6 +266,7 @@ function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
 function DesktopConnectionSettings({ expanded = false }) {
   const [form, setForm] = useState(null);
   const [saved, setSaved] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [open, setOpen] = useState(expanded);
   const [showSecret, setShowSecret] = useState(false);
   const [validation, setValidation] = useState(null);
@@ -296,7 +294,7 @@ function DesktopConnectionSettings({ expanded = false }) {
       if (active) setForm({ loadError: messageOf(error) });
     });
     return () => { active = false; };
-  }, [desktop]);
+  }, [desktop, loadAttempt]);
 
   useEffect(() => {
     const handler = event => {
@@ -309,7 +307,17 @@ function DesktopConnectionSettings({ expanded = false }) {
 
   if (!desktop?.getSettings || !desktop?.saveSettings) return h('div', { className: 'empty' }, 'Connection settings are available inside the installed Rel.AI desktop app.');
   if (!form) return h('div', { className: 'settings-loading', role: 'status' }, 'Loading connection settings…');
-  if (form.loadError) return h('div', { className: 'empty' }, `Connection settings could not be loaded: ${form.loadError}`);
+  if (form.loadError) return h('div', { className: 'empty connection-settings-load-error' },
+    h('p', { role: 'alert' }, `Connection settings could not be loaded: ${form.loadError}`),
+    h('button', {
+      className: 'secondary',
+      type: 'button',
+      onClick: () => {
+        setForm(null);
+        setLoadAttempt(attempt => attempt + 1);
+      }
+    }, 'Try again')
+  );
 
   const dirty = connectionSnapshot(form) !== saved;
   const credentialError = tunnelCredentialError(form);
@@ -649,19 +657,19 @@ function StartupSettings({ initial }) {
     h(ToggleRow, {
       label: 'Launch Rel.AI at sign-in', checked: launch.enabled === true, disabled: busy === 'launchAtLogin' || !launch.supported, busy: busy === 'launchAtLogin',
       enabledLabel: 'Launch at sign-in on', disabledLabel: 'Launch at sign-in off',
-      help: launch.supported ? 'Starts Rel.AI in the background after you sign in so it is ready when you need it.' : launch.reason || 'This build cannot register itself for sign-in.',
+      help: launch.supported ? 'Start Rel.AI after you sign in.' : launch.reason || 'This build cannot register itself for sign-in.',
       onChange: value => void update('launchAtLogin', value)
     }),
     h(ToggleRow, {
       label: 'Keep Rel.AI running when I close the window', checked: state.keepRunningOnClose !== false, disabled: busy === 'keepRunningOnClose', busy: busy === 'keepRunningOnClose',
       enabledLabel: 'Keep running on close', disabledLabel: 'Quit on close',
-      help: 'Keeps the local ChatGPT connection available in the system tray. Turn this off if closing the dashboard should quit Rel.AI completely.',
+      help: 'Keep the local ChatGPT connection available after you close the dashboard.',
       onChange: value => void update('keepRunningOnClose', value)
     }),
     h(ToggleRow, {
       label: 'Show Rel.AI Pulse', checked: state.pulseEnabled !== false, disabled: busy === 'pulseEnabled', busy: busy === 'pulseEnabled',
       enabledLabel: 'Pulse on', disabledLabel: 'Pulse off',
-      help: 'Shows a small local status card while Rel.AI is running. It highlights local work and action-required states; approvals still happen in ChatGPT.',
+      help: 'Show a small status card for Rel.AI activity. Approvals still happen in ChatGPT.',
       onChange: value => void update('pulseEnabled', value)
     }),
     h(ToggleRow, {
@@ -673,7 +681,7 @@ function StartupSettings({ initial }) {
     h(ToggleRow, {
       label: 'Reduced background work', checked: state.reducedBackgroundWork === true, disabled: busy === 'reducedBackgroundWork', busy: busy === 'reducedBackgroundWork',
       enabledLabel: 'Reduced background work on', disabledLabel: 'Reduced background work off',
-      help: 'Skips optional repository pre-warming to reduce idle CPU and memory use. Repository analysis still runs normally when a task needs it.',
+      help: 'Skip optional repository preparation to reduce idle CPU and memory use. Repository analysis still runs when a task needs it.',
       onChange: value => void update('reducedBackgroundWork', value)
     }),
     state.updated ? h(LifecycleNotice, { tone: 'ok', title: 'Update completed', text: `Rel.AI started successfully after updating from v${state.previousVersion || 'an earlier version'} to v${state.currentVersion || 'the current version'}.` }) : null,
@@ -689,7 +697,7 @@ function ComputerControlSettings({ initial = {} }) {
   const [enabled, setEnabled] = useState(initial?.enabled === true);
   const [busy, setBusy] = useState(false);
   useEffect(() => setEnabled(initial?.enabled === true), [initial?.enabled]);
-  const help = 'Allow ChatGPT connected through Rel.AI to perform local desktop actions when a task needs them. Rel.AI uses direct file and app actions where possible and full pointer or keyboard control only when necessary. Operating-system permissions and privilege boundaries still apply.';
+  const help = 'Allow ChatGPT to use local desktop actions through Rel.AI. Rel.AI uses direct file and app actions when possible. Full pointer or keyboard control is used only when necessary. Operating-system permissions still apply.';
   const update = async value => {
     setBusy(true);
     const result = await postJson('/api/computer', { enabled: value }, { cache: 'no-store' }).catch(error => ({ ok: false, error: messageOf(error) }));
@@ -709,7 +717,8 @@ function ApplicationUpdates({ lifecycle, buildStatus }) {
   const supported = Boolean(bridge?.getUpdateStatus && bridge?.checkForUpdates && bridge?.downloadUpdate && bridge?.installUpdate);
   const [status, setStatus] = useState(null);
   const [releaseNotes, setReleaseNotes] = useState(null);
-  const [autoDownload, setAutoDownload] = useState(lifecycle?.autoDownloadUpdates === true);
+  const [autoDownload, setAutoDownload] = useState(lifecycle?.autoDownloadUpdates !== false);
+  const [updateChannel, setUpdateChannel] = useState(lifecycle?.updateChannel === 'beta' ? 'beta' : 'stable');
   const [busy, setBusy] = useState('');
 
   useEffect(() => {
@@ -740,12 +749,24 @@ function ApplicationUpdates({ lifecycle, buildStatus }) {
     } catch (error) { toast(messageOf(error), { variant: 'error' }); }
     finally { setBusy(''); }
   };
+  const updateReleaseChannel = async value => {
+    if (typeof bridge.setAppPreferences !== 'function') return;
+    setBusy('channel');
+    try {
+      const result = await bridge.setAppPreferences({ updateChannel: value });
+      const actual = result?.status?.updateChannel === 'beta' ? 'beta' : 'stable';
+      setUpdateChannel(actual);
+      if (result?.ok === false) toast(result.error || 'The update channel could not be changed.', { variant: 'error' });
+    } catch (error) { toast(messageOf(error), { variant: 'error' }); }
+    finally { setBusy(''); }
+  };
   const run = async action => {
-    const method = { check: 'checkForUpdates', download: 'downloadUpdate', install: 'installUpdate' }[action];
+    const method = { check: 'checkForUpdates', download: 'downloadUpdate', install: 'installUpdate', defer: 'installUpdate' }[action];
     if (!method) return;
     setBusy(action);
     try {
-      const result = await bridge[method]();
+      const args = action === 'defer' ? [{ deferIfBusy: true }] : [];
+      const result = await bridge[method](...args);
       if (result?.status) setStatus(result.status);
       if (result?.ok === false) toast(result.error || 'The update action failed.', { variant: 'error' });
     } catch (error) {
@@ -758,13 +779,37 @@ function ApplicationUpdates({ lifecycle, buildStatus }) {
   const buildId = buildIdOf(buildStatus);
   const view = updateView(current, autoDownload);
   return h(Card, { title: 'App updates', className: 'application-update-panel' },
+    h(SettingsField, { label: 'Release channel', inputId: 'updateReleaseChannel', help: 'Stable is recommended for normal use. Beta receives pre-release builds intended mainly for developers and testers.' },
+      h('select', {
+        id: 'updateReleaseChannel',
+        value: updateChannel,
+        disabled: busy === 'channel',
+        'aria-describedby': updateChannel === 'beta' ? 'updateReleaseChannelHelp updateReleaseChannelWarning' : 'updateReleaseChannelHelp',
+        onChange: event => void updateReleaseChannel(event.currentTarget.value)
+      },
+        h('option', { value: 'stable' }, 'Stable'),
+        h('option', { value: 'beta' }, 'Beta / pre-release (developers & testers)')
+      )
+    ),
+    updateChannel === 'beta' ? h('div', {
+      className: 'application-update-beta-warning',
+      id: 'updateReleaseChannelWarning',
+      role: 'alert',
+      'aria-atomic': 'true'
+    },
+      h('span', { className: 'application-update-beta-warning-icon', 'aria-hidden': 'true' }, h(Icon, { name: 'warning', size: 16 })),
+      h('div', null,
+        h('strong', null, 'Beta builds are mainly for developers and testers'),
+        h('p', null, 'Beta builds can contain serious bugs or incomplete changes. Use Stable for normal work. You may need to reinstall if a beta build fails.')
+      )
+    ) : null,
     h(ToggleRow, {
       label: 'Download verified updates automatically', checked: autoDownload, disabled: busy === 'auto', busy: busy === 'auto',
       enabledLabel: 'Automatic downloads on', disabledLabel: 'Ask before downloading',
       help: 'Downloads a verified update in the background when one is found. Rel.AI still asks before installing it or opening the macOS installer.',
       onChange: value => void updateAuto(value)
     }),
-    h('div', { className: 'application-update-status', 'data-auto-download-updates': String(autoDownload) },
+    h('div', { className: 'application-update-status', 'data-auto-download-updates': String(autoDownload), 'data-update-channel': updateChannel },
       h('div', { className: 'application-update-summary' },
         h('div', null,
           h('span', { className: 'application-update-label' }, 'Installed version'),
@@ -776,6 +821,7 @@ function ApplicationUpdates({ lifecycle, buildStatus }) {
       ),
       h('p', { className: 'muted application-update-copy' }, view.description),
       h(UpdateSupportPolicy, { policy: current.supportPolicy }),
+      h(UpdateSynchronizationNotice, { synchronization: current.updateSynchronization }),
       h(UpdateReleaseNotes, { status: current, releaseNotes }),
       current.state === 'downloading' ? h(UpdateProgress, { progress: current.progress }) : null,
       current.errorCode ? h('code', { className: 'application-update-code' }, `Error code: ${current.errorCode}`) : null,
@@ -802,10 +848,31 @@ function updateView(status = {}, autoDownload = false) {
   if (state === 'up_to_date') return { label: 'Up to date', tone: 'ok', description: `${currentVersion} is the latest available version. Rel.AI checks again once per day.`, action: { id: 'check', label: 'Check again', className: 'secondary' } };
   if (state === 'available') return { label: 'Update available', tone: 'warn', description: autoDownload ? `${availableVersion || 'A newer version'} is available. Rel.AI will download it automatically without restarting.` : `${availableVersion || 'A newer version'} is available. Downloading does not restart Rel.AI.`, action: { id: 'download', label: `Download ${availableVersion || 'update'}`, className: 'primary' }, secondary: { id: 'check', label: 'Check again' } };
   if (state === 'downloading') return { label: 'Downloading', tone: 'working', description: `Downloading ${availableVersion || 'the update'}. You can keep using Rel.AI while it downloads.` };
-  if (state === 'downloaded') { const opensDmg = status.installMode === 'open_dmg'; return { label: 'Ready to install', tone: status.error ? 'warn' : 'ok', description: opensDmg ? `${availableVersion || 'The update'} is verified and downloaded. Open the DMG, then replace Rel.AI MCP in Applications.` : (status.error || `${availableVersion || 'The update'} is ready. Rel.AI stays open while it prepares the update, then restarts automatically for the final swap.`), action: { id: 'install', label: opensDmg ? 'DMG' : 'Install update', className: 'primary' } }; }
-  if (state === 'installing') return { label: 'Installing', tone: 'working', description: 'Rel.AI is temporarily paused while it prepares the update. It will restart automatically when the final swap is ready.' };
+  if (state === 'downloaded') {
+    const opensDmg = status.installMode === 'open_dmg';
+    if (status.installDeferred === true) return { label: 'Install queued', tone: 'working', description: `${availableVersion || 'The update'} is verified and will install automatically when active Rel.AI work finishes.` };
+    if (status.canDeferInstall === true) return { label: 'Task in progress', tone: 'warn', description: `${availableVersion || 'The update'} is verified. Finish the active task, or queue installation for as soon as Rel.AI becomes idle.`, action: { id: 'defer', label: 'Install when task finishes', className: 'primary' } };
+    return { label: 'Ready to install', tone: status.error ? 'warn' : 'ok', description: opensDmg ? `${availableVersion || 'The update'} is verified and downloaded. Opening the DMG will close Rel.AI so you can replace it in Applications.` : (status.error || `${availableVersion || 'The update'} is ready. Rel.AI stays open while it prepares the update, then restarts automatically to finish installation.`), action: { id: 'install', label: opensDmg ? 'Open DMG and close Rel.AI' : 'Install update', className: 'primary' } };
+  }
+  if (state === 'installing') return { label: 'Installing', tone: 'working', description: 'Rel.AI is temporarily paused while it prepares the update. It restarts automatically to finish installation.' };
   if (state === 'error') return { label: 'Update failed', tone: 'bad', description: status.error || 'The update could not be completed. The installed version is still available.', action: { id: 'check', label: 'Try again', className: 'primary' } };
-  return { label: 'Updates enabled', tone: 'ok', description: autoDownload ? (status.installMode === 'open_dmg' ? 'Rel.AI watches for newly published releases and downloads verified updates automatically. It still asks before opening the macOS installer.' : 'Rel.AI watches for newly published releases and downloads verified updates automatically. It still asks before restarting to install.') : (status.installMode === 'open_dmg' ? 'Rel.AI watches for newly published releases while it is running and fully verifies updates at least once per day. Rel.AI asks before it downloads an update or opens the macOS installer.' : 'Rel.AI watches for newly published releases while it is running and fully verifies updates at least once per day. Rel.AI asks before it downloads an update or restarts.'), action: { id: 'check', label: 'Check for updates', className: 'secondary' } };
+  return { label: 'Updates enabled', tone: 'ok', description: autoDownload ? (status.installMode === 'open_dmg' ? 'Rel.AI checks for updates and downloads verified updates automatically. It asks before opening the macOS installer.' : 'Rel.AI checks for updates and downloads verified updates automatically. It asks before installation.') : (status.installMode === 'open_dmg' ? 'Rel.AI checks for updates at least once per day and verifies each update. It asks before downloading and before opening the macOS installer.' : 'Rel.AI checks for updates at least once per day and verifies each update. It asks before downloading and before installation.'), action: { id: 'check', label: 'Check for updates', className: 'secondary' } };
+}
+
+function UpdateSynchronizationNotice({ synchronization }) {
+  if (!synchronization || synchronization.status === 'current') return null;
+  const deviceUpdate = synchronization.deviceUpdateRequired === true;
+  const toolRefresh = synchronization.toolRefreshRequired === true;
+  const message = deviceUpdate
+    ? 'This update changes the Rel.AI device protocol. After restart, update any connected device-side Rel.AI component before using that device again.'
+    : toolRefresh
+      ? 'This update changes ChatGPT tool definitions. After Rel.AI restarts, you will be prompted to refresh the ChatGPT connector.'
+      : '';
+  if (!message) return null;
+  return h('div', { className: 'connection-notice warn application-update-sync', role: 'status' },
+    h('strong', null, deviceUpdate ? 'Device update required' : 'ChatGPT refresh required'),
+    h('p', null, message)
+  );
 }
 
 function UpdateSupportPolicy({ policy }) {
@@ -897,7 +964,7 @@ function LocalDataSettings() {
     const confirmed = await confirmAction({
       title: 'Clear analytics',
       message: 'Clear local analytics history?',
-      detail: 'This removes aggregate action, reliability, timing, project, and failure-category history. Project files, task history, memory, settings, and external telemetry configuration are not changed.',
+      detail: 'This deletes local analytics history. It does not change project files, task history, memory, settings, or external telemetry settings.',
       confirmLabel: 'Clear analytics',
       danger: true
     });
@@ -926,7 +993,7 @@ function LocalDataSettings() {
   return h(Card, { title: 'Local data & storage', className: 'desktop-local-data-panel' },
     h('div', { className: 'local-data-summary' },
       h('div', null, h('span', null, 'Total Rel.AI local data'), h('strong', null, `${formatBytes(usage.totalBytes, { zero: true })}${usage.approximate ? ' approx.' : ''}`)),
-      h('small', null, 'Includes Rel.AI state, desktop app data, connection state, logs, indexes, and caches. Use Log out → Clear all local data to erase everything Rel.AI stores locally.')
+      h('small', null, 'Use Log out to remove all local Rel.AI data.')
     ),
     h('div', { className: 'local-data-list' },
       h(DataRow, { label: 'Task & activity history', bytes: categories.history?.bytes }),
@@ -962,7 +1029,7 @@ function LogoutRow() {
     }
   };
   return h('div', { className: 'setting-row' },
-    h('div', { className: 'setting-row-copy' }, h('strong', null, 'Log out'), h('span', null, 'Disconnect the saved OpenAI tunnel from this Rel.AI installation. You can choose whether to keep local Rel.AI data when you log out.')),
+    h('div', { className: 'setting-row-copy' }, h('strong', null, 'Log out'), h('span', null, 'Disconnect the saved OpenAI tunnel from this Rel.AI installation.')),
     h('button', { className: 'secondary settings-nowrap-action', type: 'button', disabled: busy, onClick: () => void logout() }, busy ? 'Logging out…' : 'Log out')
   );
 }
@@ -1046,7 +1113,7 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
       : h('span', { className: 'about-detail-value' }, label);
   };
   return h(React.Fragment, null,
-    h(SettingsHeader, { title: 'About Rel.AI', description: 'Rel.AI keeps your projects local and shares bounded tool results through your configured ChatGPT connection when a task needs them.' }),
+    h(SettingsHeader, { title: 'About Rel.AI', description: 'Rel.AI connects ChatGPT to projects on this computer.' }),
     h(Card, { title: 'Application information' },
       h('div', { className: 'about-product' }, h('img', { src: '/public/assets/relai-logo.png', width: 193, height: 187, alt: '', 'aria-hidden': 'true' }), h('div', null,
         h('h4', null, metadata.name || 'Rel.AI MCP'),
@@ -1062,12 +1129,11 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
         h('strong', null, runtimeNotice.title),
         h('div', null, runtimeNotice.message)
       ) : null,
-      h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, 'Developed by ', developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${developer.name} on GitHub (@${developer.username})` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')),
+      h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${developer.name} on GitHub (@${developer.username})` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')),
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || '')),
       h(AboutRow, { label: 'License' }, documentLink('LICENSE', String(metadata.license || 'Apache-2.0')))
     ),
     h(Card, { title: 'Legal & privacy' },
-      h('p', { className: 'settings-help' }, 'These documents describe Rel.AI data handling, use of official project services, security reporting, and third-party software notices.'),
       h(AboutRow, { label: 'Privacy' }, documentLink('PRIVACY.md', 'Privacy Policy')),
       h(AboutRow, { label: 'Terms' }, documentLink('TERMS.md', 'Terms of Use')),
       h(AboutRow, { label: 'Security' }, documentLink('SECURITY.md', 'Security Policy')),
@@ -1092,8 +1158,8 @@ function runtimeCompatibilityNotice(runtime = {}, repositoryRuntime = {}, compat
   const message = activeTasksPreventRestart
     ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Finish active tasks before restarting Rel.AI to load the current source.`
     : restartRequired
-      ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Restart Rel.AI to load the current source and tool surface.`
-      : `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. The connected runtime remains compatible, but development observations may not match this source tree exactly.`;
+      ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Restart Rel.AI to load the current source and tools.`
+      : `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. The running version is compatible, but its behavior may not match this source exactly.`;
   return { title, message, runningVersion, sourceVersion };
 }
 
@@ -1125,7 +1191,7 @@ function repositoryDocumentUrl(repositoryUrl, filePath) {
 }
 function formatBytes(value, { zero = false } = {}) { let bytes = Number(value || 0); if (!Number.isFinite(bytes) || bytes < 0) bytes = 0; if (bytes === 0) return zero ? '0 B' : ''; const units = ['B', 'KB', 'MB', 'GB', 'TB']; let unit = 0; while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; unit += 1; } return `${bytes >= 10 || unit === 0 ? bytes.toFixed(0) : bytes.toFixed(1)} ${units[unit]}`; }
 function normalizeReleaseNoteText(value) { return String(value || '').replace(/<\s*br\s*\/?\s*>/gi, '\n').replace(/<\s*li(?:\s[^>]*)?>/gi, '\n• ').replace(/<\s*\/\s*li\s*>/gi, '\n').replace(/<\s*\/?\s*(?:h[1-6]|p|div|ul|ol|section|article)(?:\s[^>]*)?>/gi, '\n').replace(/<[^>]*>/g, '').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); }
-function messageOf(error) { return error instanceof Error ? error.message : String(error || 'The operation failed.'); }
+function messageOf(error) { return error instanceof Error ? error.message : String(error || 'The action failed.'); }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; }
 
 export { advanceDeveloperUnlockClicks, connectionGuideMode, connectionPrimaryAction, normalizeNotificationPreferences, normalizeReleaseNoteText, runtimeCompatibilityNotice, updateView };

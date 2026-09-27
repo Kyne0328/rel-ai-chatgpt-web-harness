@@ -1,6 +1,6 @@
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { readConfig } from '../config.js';
-import { recordLocalTransportEvent } from '../localAnalytics.ts';
+import { scheduleLocalTransportEvent } from '../localAnalytics.ts';
 import { createRelaiCoreRuntime } from './runtime.ts';
 import { createLocalAdminPolicy } from '../mcp/authorizationPolicy.ts';
 import { mcpConnectionManager } from '../mcp/connectionManager.js';
@@ -100,7 +100,7 @@ export function finishMcpRequest(requestId: string, details: Record<string, unkn
 
 export function recordMcpTransportEvent(event: string, details: Record<string, unknown> = {}): void {
   try {
-    recordLocalTransportEvent(readConfig(), { event });
+    scheduleLocalTransportEvent(readConfig(), { event });
   } catch {}
   try {
     mcpConnectionManager.record(`mcp_transport_${event}`, details);

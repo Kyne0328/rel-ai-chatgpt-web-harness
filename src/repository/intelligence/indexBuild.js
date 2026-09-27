@@ -233,7 +233,7 @@ async function refreshRepositoryIndex(job, signal) {
         for (const sourceId of relationshipSourceIdsForNames(db, [...relationshipNames])) impacted.add(sourceId);
         for (const sourceId of relationshipImpactForPaths(db, relationshipPaths).sourceFileIds) impacted.add(sourceId);
         if (addedPaths.length || deleted.length) {
-          for (const sourceId of relationshipSourceIdsForImportResolutionChanges(db, workspace.path, resolutionCache)) impacted.add(sourceId);
+          for (const sourceId of relationshipSourceIdsForImportResolutionChanges(db, workspace.path, resolutionCache, [...addedPaths, ...deleted])) impacted.add(sourceId);
         }
         if (impacted.size <= 500) relationshipSourceIds = [...impacted];
       }

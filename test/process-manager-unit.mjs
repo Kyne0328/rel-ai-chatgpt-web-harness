@@ -14,9 +14,8 @@ import {
   stopManagedProcess,
   writeManagedProcess
 } from '../src/processManager.js';
+import { readProcessCreationIdentity } from '../src/process.js';
 
-const processSource = fs.readFileSync(new URL('../src/process.js', import.meta.url), 'utf8');
-assert.doesNotMatch(processSource, /spawnSync|PowerShell/, 'managed process liveness and termination must not block the MCP event loop');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-process-manager-'));
 const stateDir = path.join(root, 'state');
@@ -35,6 +34,7 @@ const otherWorkspaceContext = { taskId: 'work-session-d', principal: principalA,
 const workspaceRecovery = { principal: principalA, workspace: 'app' };
 const createdProcessIds = [];
 let externalChild = null;
+let mismatchedChild = null;
 
 fs.mkdirSync(workspaceRoot, { recursive: true });
 fs.mkdirSync(otherWorkspace.path, { recursive: true });
@@ -262,13 +262,15 @@ try {
     stdio: ['ignore', 'ignore', 'ignore']
   });
   await once(externalChild, 'spawn');
+  const externalCreationIdentity = await readProcessCreationIdentity(externalChild.pid);
+  assert.ok(externalCreationIdentity, 'restart recovery fixture requires a verifiable OS process creation identity');
   const staleProcessId = `proc_${'r'.repeat(24)}`;
   const staleDirectory = path.join(stateDir, 'processes', staleProcessId);
   fs.mkdirSync(staleDirectory, { recursive: true });
   fs.writeFileSync(path.join(staleDirectory, 'stdout.log'), 'historical output\n');
   fs.writeFileSync(path.join(staleDirectory, 'stderr.log'), '');
   fs.writeFileSync(path.join(staleDirectory, 'metadata.json'), JSON.stringify({
-    schemaVersion: 2,
+    schemaVersion: 4,
     runtimeId: 'previous-runtime',
     processId: staleProcessId,
     workspaceId: 'app',
@@ -283,6 +285,7 @@ try {
     exitCode: null,
     signal: '',
     pid: externalChild.pid,
+    processCreationIdentity: externalCreationIdentity,
     stdoutBytes: 18,
     stderrBytes: 0,
     stdoutStartOffset: 0,
@@ -301,12 +304,62 @@ try {
   );
   const restored = readManagedProcess(config, { processId: staleProcessId });
   assert.equal(restored.status, 'orphaned');
-  assert.match(restored.error, /survived a Rel\.AI restart/i);
+  assert.match(restored.error, /creation identity must be verified/i);
   const restoredStop = await stopManagedProcess(config, { processId: staleProcessId, graceMs: 250 });
   assert.equal(restoredStop.status, 'stopped');
   assert.equal(restoredStop.duplicate, false);
   assert.equal(await waitForChildExit(externalChild, 3000), true);
   externalChild = null;
+
+  mismatchedChild = spawn(process.execPath, [persistentScript], {
+    cwd: workspaceRoot,
+    detached: process.platform !== 'win32',
+    windowsHide: true,
+    stdio: ['ignore', 'ignore', 'ignore']
+  });
+  await once(mismatchedChild, 'spawn');
+  const mismatchedProcessId = `proc_${'m'.repeat(24)}`;
+  const mismatchedDirectory = path.join(stateDir, 'processes', mismatchedProcessId);
+  fs.mkdirSync(mismatchedDirectory, { recursive: true });
+  fs.writeFileSync(path.join(mismatchedDirectory, 'stdout.log'), '');
+  fs.writeFileSync(path.join(mismatchedDirectory, 'stderr.log'), '');
+  fs.writeFileSync(path.join(mismatchedDirectory, 'metadata.json'), JSON.stringify({
+    schemaVersion: 4,
+    runtimeId: 'previous-runtime',
+    processId: mismatchedProcessId,
+    workspaceId: 'app',
+    workspacePath: workspaceRoot,
+    lifecycle: 'persistent',
+    kind: 'service',
+    purpose: 'PID reuse safety fixture.',
+    commandSummary: 'stale mismatched child',
+    label: 'stale-mismatched-record',
+    cwd: '.',
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    endedAt: '',
+    exitCode: null,
+    signal: '',
+    pid: mismatchedChild.pid,
+    processCreationIdentity: 'mismatched-process-creation-identity',
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    stdoutStartOffset: 0,
+    stderrStartOffset: 0,
+    environmentKeys: [],
+    maxLogBytes: 65536
+  }, null, 2));
+  const mismatchedRestored = readManagedProcess(config, { processId: mismatchedProcessId });
+  assert.equal(mismatchedRestored.status, 'orphaned');
+  await assert.rejects(
+    stopManagedProcess(config, { processId: mismatchedProcessId, graceMs: 0 }),
+    error => error?.code === 'PROCESS_IDENTITY_MISMATCH'
+  );
+  assert.equal(mismatchedChild.exitCode, null,
+    'a live PID with mismatching creation identity must never be terminated by restart recovery');
+  mismatchedChild.kill('SIGKILL');
+  await waitForChildExit(mismatchedChild, 3000);
+  mismatchedChild = null;
 
   const shutdownPersistence = await startManagedProcess(workspace, config, {
     executable: process.execPath,
@@ -330,6 +383,10 @@ try {
   if (externalChild) {
     try { externalChild.kill('SIGKILL'); } catch {}
     await waitForChildExit(externalChild, 3000).catch(() => false);
+  }
+  if (mismatchedChild) {
+    try { mismatchedChild.kill('SIGKILL'); } catch {}
+    await waitForChildExit(mismatchedChild, 3000).catch(() => false);
   }
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }

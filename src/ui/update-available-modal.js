@@ -65,6 +65,12 @@ function availableUpdateModalView(status = {}) {
   if (String(status.state || '') !== 'available') return null;
   const version = cleanVersion(status.availableVersion);
   if (!version) return null;
+  const synchronization = status.updateSynchronization;
+  const syncDetail = synchronization?.deviceUpdateRequired === true
+    ? ' This release also changes the Rel.AI device protocol. Update connected Rel.AI device components after restart.'
+    : synchronization?.toolRefreshRequired === true
+      ? ' This release changes ChatGPT tool definitions. Rel.AI will ask you to refresh the ChatGPT connector after restart.'
+      : '';
   return {
     key: `available:${version}`,
     state: 'available',
@@ -72,7 +78,7 @@ function availableUpdateModalView(status = {}) {
     allowLater: true,
     title: 'Update available',
     description: `Rel.AI MCP v${version} is available.`,
-    detail: 'Download it now or keep working. Rel.AI will remind you on a later launch if you choose Later.'
+    detail: `Download it now or keep working. Rel.AI will remind you on a later launch if you choose Later.${syncDetail}`
   };
 }
 
@@ -86,7 +92,7 @@ function installingUpdateModalView(status = {}) {
     allowLater: false,
     title: 'Updating Rel.AI',
     description: version ? `Installing Rel.AI MCP v${version}…` : 'Installing the Rel.AI MCP update…',
-    detail: 'Rel.AI is temporarily paused while it prepares the verified update. The app will restart automatically for the final swap.'
+    detail: 'Rel.AI is temporarily paused while it prepares the verified update. The app restarts automatically to finish installation.'
   };
 }
 
@@ -163,7 +169,7 @@ function initUpdateAvailableModal(options = {}) {
       view,
       status,
       onLater: closeModal,
-      onAction: method => void runSupportUpdateAction(method)
+      onAction: action => void runSupportUpdateAction(action)
     });
     if (activeModalKey !== view.key) {
       activeModalKey = view.key;
@@ -185,12 +191,13 @@ function initUpdateAvailableModal(options = {}) {
     closeModal();
   }
 
-  async function runSupportUpdateAction(method) {
+  async function runSupportUpdateAction(action = {}) {
+    const method = action.method;
     if (!method || typeof bridge?.[method] !== 'function') return;
     const keepModalOpen = method === 'installUpdate';
     if (!keepModalOpen) closeModal();
     try {
-      const result = await bridge[method]();
+      const result = await bridge[method](...(action.args || []));
       if (result?.status) latestStatus = { ...latestStatus, ...result.status };
       consider(latestStatus);
       if (result?.ok === false && !keepModalOpen) throw new Error(result.error || 'The update action failed.');
@@ -211,11 +218,15 @@ function supportUpdateAction(status = {}) {
   const state = String(status.state || 'idle');
   if (state === 'unsupported') return { kind: 'link', label: 'Open GitHub Releases' };
   if (state === 'available') return { kind: 'button', method: 'downloadUpdate', label: `Download v${cleanVersion(status.availableVersion) || 'update'}`, disabled: false, busy: false };
-  if (state === 'downloaded') return {
-    kind: 'button', method: 'installUpdate',
-    label: status.installMode === 'open_dmg' ? 'Open DMG' : 'Install update',
-    disabled: false, busy: false
-  };
+  if (state === 'downloaded') {
+    if (status.installDeferred === true) return { kind: 'button', method: '', label: 'Install queued for when work finishes', disabled: true, busy: true };
+    if (status.canDeferInstall === true) return { kind: 'button', method: 'installUpdate', args: [{ deferIfBusy: true }], label: 'Install when task finishes', disabled: false, busy: false };
+    return {
+      kind: 'button', method: 'installUpdate',
+      label: status.installMode === 'open_dmg' ? 'Open DMG and close Rel.AI' : 'Install update',
+      disabled: false, busy: false
+    };
+  }
   if (state === 'checking') return { kind: 'button', method: '', label: 'Checking for update…', disabled: true, busy: true };
   if (state === 'downloading') return { kind: 'button', method: '', label: 'Downloading update…', disabled: true, busy: true };
   if (state === 'installing') return { kind: 'button', method: '', label: 'Installing update…', disabled: true, busy: true };
@@ -241,7 +252,7 @@ function UpdateNoticeContent({ view, status, onLater, onAction }) {
         className: 'primary',
         disabled: action.disabled,
         'aria-busy': action.busy ? 'true' : undefined,
-        onClick: () => onAction(action.method)
+        onClick: () => onAction(action)
       }, action.label);
   return h(React.Fragment, null,
     h('p', null, view.description),

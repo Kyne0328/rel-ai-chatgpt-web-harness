@@ -422,6 +422,7 @@ See [Development](docs/DEVELOPMENT.md) for source architecture, generated assets
 | Understand recovery and completion authority | [Workflow reliability](docs/WORKFLOW_RELIABILITY.md) |
 | Understand sessions, activity, and observable evidence | [Task observability](docs/TASK_OBSERVABILITY.md) |
 | Build, test, package, or release Rel.AI | [Development](docs/DEVELOPMENT.md) |
+| Create and publish Rel.AI extensions | [Extension publisher monorepos](docs/EXTENSIONS.md) |
 | See changes between releases | [Changelog](CHANGELOG.md) |
 
 ## Contributing

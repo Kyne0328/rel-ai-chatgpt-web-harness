@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { clipBrowserSurfaceBounds, releaseBrowserRouteControl } from '../src/ui/features/browser/react.js';
+import { clipBrowserSurfaceBounds, releaseBrowserRouteControl } from '../src/ui/features/browser/behavior.js';
 
 assert.deepEqual(
   clipBrowserSurfaceBounds(

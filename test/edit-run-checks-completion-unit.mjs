@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { clearAuditHistory } from '../src/audit.js';
+import { flushLocalAnalytics } from '../src/localAnalytics.ts';
 import { callTool as rawCallTool } from '../src/tools.js';
 import { clearTaskHistory, flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
 import { resetToolActivity } from '../src/toolActivity.js';
@@ -66,6 +67,7 @@ try {
 
 } finally {
   await repositoryIntelligence.shutdown();
+  await flushLocalAnalytics();
   resetToolActivity();
   await flushTaskHistoryPersistence();
   clearTaskHistory({ stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') });

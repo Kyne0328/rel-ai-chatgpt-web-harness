@@ -55,6 +55,15 @@ try {
   const dashboardBody = await dashboard.json();
   assert.equal(dashboardBody.ok, true);
   assert.deepEqual(dashboardBody.config.workspaces, []);
+  assert.equal(dashboardBody.onboarding.skipped, true, 'dashboard bootstrap data must include persisted onboarding state');
+  assert.equal(dashboardBody.onboarding.needsOnboarding, false);
+
+  for (const iconPath of ['/public/assets/favicon.png', '/assets/favicon.png']) {
+    const icon = await fetch(`${base}${iconPath}`, { headers: { connection: 'close' } });
+    assert.equal(icon.status, 200, `${iconPath} should serve the connector icon`);
+    assert.match(String(icon.headers.get('content-type') || ''), /^image\/png/i);
+    await icon.arrayBuffer();
+  }
 
   const onboarding = JSON.parse(fs.readFileSync(path.join(stateDir, 'onboarding.json'), 'utf8'));
   assert.equal(onboarding.skipped, true);
@@ -78,6 +87,20 @@ try {
   assert.equal(migratedStatus.needsOnboarding, false, 'existing configured workspaces must suppress first-run onboarding');
   const migratedOnboarding = JSON.parse(fs.readFileSync(path.join(stateDir, 'onboarding.json'), 'utf8'));
   assert.equal(migratedOnboarding.workspaceCount, 1);
+
+  const complete = await fetch(`${base}/api/onboarding/complete`, {
+    method: 'POST',
+    headers: {
+      cookie: dashboardCookie,
+      connection: 'close',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ completed: true, skipped: false, source: 'onboarding-config-smoke', handoffPending: false })
+  });
+  assert.equal(complete.status, 200);
+  const completedOnboarding = JSON.parse(fs.readFileSync(path.join(stateDir, 'onboarding.json'), 'utf8'));
+  assert.equal(completedOnboarding.migrated, true, 'completing onboarding must preserve migration metadata');
+  assert.equal(completedOnboarding.workspaceCount, 1, 'completing onboarding must preserve inferred workspace metadata');
 } finally {
   if (server.listening) await new Promise(resolve => server.close(resolve));
   resetTaskHistoryCaches();

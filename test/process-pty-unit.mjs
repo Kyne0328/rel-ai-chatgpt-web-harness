@@ -73,7 +73,30 @@ try {
     /only available for kind: interactive/i
   );
 
-  console.log('Managed PTY allocation, input, resize, metadata, and stop tests passed.');
+  if (process.platform === 'win32') {
+    const previousIdleTimeout = process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS;
+    process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS = '1000';
+    try {
+      const idleShell = await startManagedProcess(workspace, config, {
+        executable: process.env.ComSpec || 'cmd.exe',
+        argv: ['/Q'],
+        kind: 'interactive',
+        purpose: 'Verify idle shell prompts retire automatically.',
+        pty: true,
+        startupWaitMs: 100
+      }, context);
+      processId = idleShell.processId;
+      await waitFor(snapshot => /[A-Za-z]:\\[^\r\n>]*>/.test(snapshot.stdout.text), 5000);
+      const retired = await waitFor(snapshot => snapshot.status === 'stopped', 6000);
+      assert.equal(retired.status, 'stopped', 'an idle cmd prompt must retire after the configured grace period');
+      processId = '';
+    } finally {
+      if (previousIdleTimeout === undefined) delete process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS;
+      else process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS = previousIdleTimeout;
+    }
+  }
+
+  console.log('Managed PTY allocation, input, resize, idle retirement, metadata, and stop tests passed.');
 } finally {
   if (processId) await stopManagedProcess(config, { processId, graceMs: 0 }, context).catch(() => {});
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import { slimCompactPublicResult } from './compactResult.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { withTaskIdentity } from './task.js';
@@ -10,10 +12,43 @@ import {
   pruneEmpty
 } from './connectorHelpers.js';
 
+const RESULT_IDENTITY_FIELDS = new Set(['workspace', 'action', 'sessionId', 'tabId', 'processId', 'observationId', 'semanticObservationId', 'targetId']);
+
 function serializeConnectorResult({ publicName, action, operationName, value, args = {}, workId = '' }) {
   const operationResult = compactForConnector(operationName, value, args);
   const publicResult = slimCompactPublicResult(publicName, action, operationResult);
-  return withTaskIdentity(publicResult, workId);
+  const identified = withTaskIdentity(publicResult, workId);
+  let result = identified;
+  if (!shouldReturnTaskIdentity(publicName, value, args) && identified && typeof identified === 'object' && !Array.isArray(identified)) {
+    const { work_id: _workId, ...withoutTaskEcho } = identified;
+    result = withoutTaskEcho;
+  }
+  return shouldPruneArgumentEchoes(publicName, value)
+    ? pruneArgumentEchoes(result, args)
+    : result;
+}
+
+function shouldReturnTaskIdentity(publicName, value, args) {
+  if (!String(args?.work_id || '').trim()) return true;
+  if (publicName === 'relai_work' || value?.ok === false) return true;
+  if (String(value?.status || '') === 'running' || value?.operationId) return true;
+  return Array.isArray(value?.completedOperations) && value.completedOperations.length > 0;
+}
+
+function shouldPruneArgumentEchoes(publicName, value) {
+  if (publicName === 'relai_work' || value?.ok === false) return false;
+  if (String(value?.status || '') === 'running' || value?.operationId) return false;
+  return !(Array.isArray(value?.completedOperations) && value.completedOperations.length > 0);
+}
+
+function pruneArgumentEchoes(value, args) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const result = { ...value };
+  for (const [key, argument] of Object.entries(args || {})) {
+    if (key === 'work_id' || RESULT_IDENTITY_FIELDS.has(key) || !Object.hasOwn(result, key)) continue;
+    if (isDeepStrictEqual(result[key], argument)) delete result[key];
+  }
+  return result;
 }
 
 function compactBackgroundOperation(value) {
@@ -118,7 +153,7 @@ function compactForConnector(name, value, args = {}) {
     case OP.VALIDATE_CHECKS:
       return pruneEmpty({
         ok: value.ok,
-        workspace: value.workspace,
+        workspace: value.workspace || args.workspace,
         level: value.level,
         checks: value.checks,
         results: Array.isArray(value.results) ? value.results.map(compactCommandResult) : value.results,
@@ -173,7 +208,7 @@ function compactForConnector(name, value, args = {}) {
         ok: value.ok,
         executed: value.executed,
         commandSucceeded: value.commandSucceeded,
-        workspace: value.workspace,
+        workspace: value.workspace || args.workspace,
         command: value.command,
         shell: value.shell || undefined,
         cwd: value.cwd && value.cwd !== '.' ? value.cwd : undefined,
@@ -210,7 +245,7 @@ function compactForConnector(name, value, args = {}) {
     case OP.PROCESS_READ:
       return pruneEmpty({ ...compactProcessMetadata(value), stdout: value.stdout, stderr: value.stderr });
     case OP.SNAPSHOT: {
-      const files = boundedStringArray(value.files, 12 * 1024);
+      const files = boundedStringArray(value.files, 4 * 1024);
       return pruneEmpty({
         ok: value.ok,
         workspace: value.workspace,

@@ -33,9 +33,29 @@ const degradedSupervisor = createTunnelRecoverySupervisor({
   setTimer(fn, delayMs) { const timer = { fn, delayMs, cancelled: false }; degradedTimers.push(timer); return timer; },
   clearTimer(timer) { timer.cancelled = true; }
 });
-assert.equal(degradedSupervisor.observe({ state: 'degraded', errorCode: 'tunnel_command_delivery_degraded', error: 'responses dropping' }).scheduled, true, 'degraded tunnel health must schedule the existing recovery path');
+const inPlace = degradedSupervisor.observe({ state: 'degraded', recoveryMode: 'in_place', errorCode: 'tunnel_command_delivery_degraded', error: 'responses dropping' });
+assert.equal(inPlace.scheduled, false, 'a live tunnel-client recovering in place must not be restarted by the outer supervisor');
+assert.equal(degradedTimers.length, 0);
+assert.equal(degradedSupervisor.observe({ state: 'degraded', recoveryMode: 'restart', errorCode: 'tunnel_connection_interrupted', error: 'local health failed' }).scheduled, true, 'restart-worthy degraded tunnel health must still schedule recovery');
 degradedSupervisor.observe({ state: 'running' });
 assert.equal(degradedTimers[0].cancelled, true, 'a recovered response must cancel the pending degraded retry');
+
+let inPlaceReconnectCalls = 0;
+const inPlaceReconnectTimers = [];
+const inPlaceReconnectSupervisor = createTunnelRecoverySupervisor({
+  restartConnection: async () => {
+    inPlaceReconnectCalls += 1;
+    return { serverRunning: true, tunnelStatus: 'degraded', tunnelRecoveryMode: 'in_place', errorCode: 'tunnel_connection_interrupted', error: 'routing correction in progress' };
+  },
+  retryDelaysMs: [10],
+  setTimer(fn, delayMs) { const timer = { fn, delayMs, cancelled: false }; inPlaceReconnectTimers.push(timer); return timer; },
+  clearTimer(timer) { timer.cancelled = true; }
+});
+const inPlaceReconnect = await inPlaceReconnectSupervisor.retryNow();
+assert.equal(inPlaceReconnect.tunnelStatus, 'degraded');
+assert.equal(inPlaceReconnectCalls, 1, 'a replacement client that owns in-place recovery must not be replaced again');
+assert.equal(inPlaceReconnectSupervisor.snapshot().scheduled, false);
+assert.equal(inPlaceReconnectTimers.length, 0);
 
 const first = supervisor.observe({ state: 'failed', errorCode: 'secure_tunnel_failed', error: 'tunnel-client exited' });
 assert.equal(first.scheduled, true, 'unexpected tunnel failure must schedule automatic recovery');

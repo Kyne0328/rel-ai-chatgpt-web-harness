@@ -5,7 +5,7 @@ description: Use only when repository work requires a persistent development ser
 
 # Rel.AI Development Process
 
-Reuse an active `work_id` when durable attribution is already useful, but do not create one merely to start or interact with a process. Process authority comes from the authenticated principal, authorized workspace, and `processId`; an explicitly supplied work_id must still match any existing task attribution. If `relai_process` returns `reused: true`, continue from that process's readiness/log state rather than starting a duplicate.
+Reuse an active `work_id` for the current meaningful user goal. If the persistent-process request is itself a new user goal, establish that goal through `relai_work begin` before project work; do not create an extra task merely to own or interact with a process. Process authority still comes from the authenticated principal, authorized workspace, and `processId`; an explicitly supplied work_id must match any existing task attribution. If `relai_process` returns `reused: true`, continue from that process's readiness/log state rather than starting a duplicate.
 
 Use this process flow: `start with explicit purpose -> determine readiness -> inspect incremental output -> interact only if required -> reuse process -> stop when no longer needed`.
 

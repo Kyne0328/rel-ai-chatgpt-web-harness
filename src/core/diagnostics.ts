@@ -72,6 +72,7 @@ export function getDiagnosticsReport(options: DiagnosticsRuntimeOptions, workspa
     cautionData: productUx.cautionSummary(config, { windowHours: 24, limit: 500 }),
     connection: connectionSummary,
     connectionState,
+    tunnelHealth: desktopStatus?.tunnelHealth || null,
     runtimeLogs,
     auditLogs,
     taskHistoryPersistence: taskHistoryPersistenceSnapshot(),

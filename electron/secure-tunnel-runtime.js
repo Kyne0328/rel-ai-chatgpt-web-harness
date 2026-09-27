@@ -70,7 +70,9 @@ function createSecureTunnelRuntime({
     lastConnectedAt: null,
     consecutiveFailures: 0,
     transportFailureStreak: 0,
-    outageStartedAt: null
+    outageStartedAt: null,
+    recoveryMode: '',
+    tunnelHealth: null
   });
 
   async function start(config = {}) {
@@ -82,7 +84,7 @@ function createSecureTunnelRuntime({
     const runGeneration = ++generation;
     stopping = false;
     transportFailureStreak = 0;
-    update({ state: 'starting', tunnelId, healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null });
+    update({ state: 'starting', tunnelId, healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
 
     let executable;
     try {
@@ -91,7 +93,7 @@ function createSecureTunnelRuntime({
       await ensureExecutable(executable);
     } catch (error) {
       const failure = tunnelFailure(TUNNEL_RUNTIME_UNAVAILABLE_CODE, messageOf(error));
-      if (runGeneration === generation) update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code });
+      if (runGeneration === generation) update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, recoveryMode: '' });
       throw failure;
     }
 
@@ -121,18 +123,7 @@ function createSecureTunnelRuntime({
       onLog(entry);
       if (TRANSPORT_FAILURE_CODES.has(entry.code) && runGeneration === generation) {
         transportFailureStreak += 1;
-        if (transportFailureStreak >= degradedAfterFailures && ['running', 'degraded'].includes(state.state)) {
-          update({
-            state: 'degraded',
-            tunnelId,
-            healthUrl: state.healthUrl,
-            errorCode: 'tunnel_command_delivery_degraded',
-            error: 'Tunnel command responses are repeatedly failing to reach the control plane. Rel.AI will recover the secure tunnel automatically.',
-            transportFailureStreak
-          });
-        } else if (state.transportFailureStreak !== transportFailureStreak) {
-          update({ transportFailureStreak });
-        }
+        if (state.transportFailureStreak !== transportFailureStreak) update({ transportFailureStreak });
       }
       if (!FATAL_TUNNEL_CODES.has(entry.code) || fatalFailure || runGeneration !== generation) return;
       fatalFailure = tunnelFailure(entry.code, entry.message);
@@ -143,7 +134,8 @@ function createSecureTunnelRuntime({
         errorCode: fatalFailure.code,
         consecutiveFailures: 0,
         transportFailureStreak,
-        outageStartedAt: null
+        outageStartedAt: null,
+        recoveryMode: ''
       });
       if (ownedChild && ownedChild.exitCode === null) {
         fatalStopPromise = stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 })
@@ -166,7 +158,7 @@ function createSecureTunnelRuntime({
       });
     } catch (error) {
       const failure = tunnelFailure(TUNNEL_RUNTIME_UNAVAILABLE_CODE, messageOf(error));
-      update({ state: 'failed', tunnelId, error: failure.message, errorCode: failure.code });
+      update({ state: 'failed', tunnelId, error: failure.message, errorCode: failure.code, recoveryMode: '' });
       throw failure;
     }
 
@@ -176,14 +168,14 @@ function createSecureTunnelRuntime({
     ownedChild.once('error', error => {
       if (runGeneration !== generation) return;
       fatalFailure ||= tunnelFailure(TUNNEL_RUNTIME_UNAVAILABLE_CODE, messageOf(error));
-      update({ state: 'failed', tunnelId, error: fatalFailure.message, errorCode: fatalFailure.code });
+      update({ state: 'failed', tunnelId, error: fatalFailure.message, errorCode: fatalFailure.code, recoveryMode: '' });
     });
     ownedChild.once('exit', (code, signal) => {
       if (runGeneration !== generation || child !== ownedChild) return;
       child = null;
       void fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
       if (stopping) {
-        update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, outageStartedAt: null });
+        update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
         return;
       }
       if (state.state === 'failed') return;
@@ -192,7 +184,8 @@ function createSecureTunnelRuntime({
         tunnelId,
         healthUrl: '',
         errorCode: 'secure_tunnel_failed',
-        error: `OpenAI tunnel-client exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'none'}).`
+        error: `OpenAI tunnel-client exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'none'}).`,
+        recoveryMode: 'restart'
       });
     });
 
@@ -213,16 +206,19 @@ function createSecureTunnelRuntime({
       if (fatalFailure) throw fatalFailure;
       if (runGeneration !== generation || child !== ownedChild) return { cancelled: true, ...snapshot() };
 
+      const degraded = operational.degraded === true;
       update({
-        state: 'running',
+        state: degraded ? 'degraded' : 'running',
         tunnelId,
         healthUrl: operational.healthUrl,
-        error: '',
-        errorCode: '',
-        lastConnectedAt: Date.now(),
+        error: degraded ? operational.error : '',
+        errorCode: degraded ? operational.errorCode : '',
+        lastConnectedAt: degraded ? state.lastConnectedAt : Date.now(),
         consecutiveFailures: 0,
-        transportFailureStreak,
-        outageStartedAt: null
+        transportFailureStreak: degraded ? transportFailureStreak : 0,
+        outageStartedAt: degraded ? Date.now() : null,
+        recoveryMode: degraded ? 'in_place' : '',
+        tunnelHealth: operational.health || null
       });
       monitorPromise = monitorTunnel({
         runGeneration,
@@ -240,7 +236,7 @@ function createSecureTunnelRuntime({
         else if (ownedChild?.exitCode === null) await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
         if (child === ownedChild) child = null;
         await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
-        update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, consecutiveFailures: 0, outageStartedAt: null });
+        update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, consecutiveFailures: 0, outageStartedAt: null, recoveryMode: '' });
       }
       throw failure;
     }
@@ -269,22 +265,19 @@ function createSecureTunnelRuntime({
             error: messageOf(error),
             errorCode: error.code,
             consecutiveFailures: 0,
-            outageStartedAt: null
+            outageStartedAt: null,
+            recoveryMode: ''
           });
           return;
         }
-        operational = { ok: false, error: messageOf(error) };
+        operational = { ok: false, localAlive: false, recoverInPlace: false, error: messageOf(error), errorCode: 'tunnel_connection_interrupted', health: null };
       }
+
       if (operational.ok) {
         consecutiveFailures = 0;
         outageStartedAt = 0;
-        if (state.errorCode === 'tunnel_command_delivery_degraded') {
-          if (state.consecutiveFailures !== 0 || state.outageStartedAt !== null) {
-            update({ consecutiveFailures: 0, outageStartedAt: null });
-          }
-          continue;
-        }
-        if (state.state !== 'running') {
+        transportFailureStreak = 0;
+        if (state.state !== 'running' || state.errorCode || state.recoveryMode) {
           update({
             state: 'running',
             tunnelId,
@@ -293,7 +286,10 @@ function createSecureTunnelRuntime({
             errorCode: '',
             lastConnectedAt: Date.now(),
             consecutiveFailures: 0,
-            outageStartedAt: null
+            transportFailureStreak: 0,
+            outageStartedAt: null,
+            recoveryMode: '',
+            tunnelHealth: operational.health || state.tunnelHealth
           });
         }
         continue;
@@ -301,6 +297,23 @@ function createSecureTunnelRuntime({
 
       consecutiveFailures += 1;
       outageStartedAt ||= Date.now();
+
+      if (operational.recoverInPlace) {
+        if (consecutiveFailures < degradedAfterFailures) continue;
+        update({
+          state: 'degraded',
+          tunnelId,
+          healthUrl,
+          errorCode: operational.errorCode || 'tunnel_connection_interrupted',
+          error: operational.error || 'OpenAI tunnel-client is live and recovering the secure tunnel in place.',
+          consecutiveFailures,
+          outageStartedAt,
+          recoveryMode: 'in_place',
+          tunnelHealth: operational.health || state.tunnelHealth
+        });
+        continue;
+      }
+
       if (consecutiveFailures >= failedAfterFailures || Date.now() - outageStartedAt >= failedAfterMs) {
         if (child === ownedChild) child = null;
         await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
@@ -309,25 +322,25 @@ function createSecureTunnelRuntime({
           tunnelId,
           healthUrl: '',
           errorCode: 'tunnel_connection_interrupted',
-          error: 'Tunnel connectivity remained interrupted. Rel.AI will restart the secure tunnel automatically.',
+          error: 'OpenAI tunnel-client stopped responding locally. Rel.AI will restart the secure tunnel automatically.',
           consecutiveFailures,
-          outageStartedAt
+          outageStartedAt,
+          recoveryMode: 'restart',
+          tunnelHealth: operational.health || state.tunnelHealth
         });
         return;
       }
       if (consecutiveFailures < degradedAfterFailures) continue;
-      if (state.errorCode === 'tunnel_command_delivery_degraded') {
-        update({ consecutiveFailures, outageStartedAt });
-        continue;
-      }
       update({
         state: 'degraded',
         tunnelId,
         healthUrl,
         errorCode: 'tunnel_connection_interrupted',
-        error: 'Tunnel connectivity is interrupted. Rel.AI is retrying automatically.',
+        error: 'OpenAI tunnel-client is not responding to local health checks. Rel.AI will restart it automatically.',
         consecutiveFailures,
-        outageStartedAt
+        outageStartedAt,
+        recoveryMode: 'restart',
+        tunnelHealth: operational.health || state.tunnelHealth
       });
     }
   }
@@ -408,7 +421,7 @@ function createSecureTunnelRuntime({
     child = null;
     if (!ownedChild) {
       transportFailureStreak = 0;
-      update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null });
+      update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
       return { stopped: true, exited: true, forced: false };
     }
     let result;
@@ -418,13 +431,13 @@ function createSecureTunnelRuntime({
       if (monitorPromise) await Promise.race([monitorPromise, delay(100)]).catch(() => {});
       monitorPromise = null;
       transportFailureStreak = 0;
-      update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null });
+      update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
       return { stopped: false, exited: false, forced: true, error: messageOf(error) };
     }
     if (monitorPromise) await Promise.race([monitorPromise, delay(100)]).catch(() => {});
     monitorPromise = null;
     transportFailureStreak = 0;
-    update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null });
+    update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
     return { stopped: true, ...result };
   }
 
@@ -532,6 +545,7 @@ async function waitForOperational({ ownedChild, healthUrlFile, fetchImpl, tunnel
   let localReadyAnnounced = false;
   let authenticatingAnnounced = false;
   let lastError = '';
+  let lastRecoverable = null;
   while (Date.now() < deadline) {
     const fatalFailure = getFatalFailure();
     if (fatalFailure) throw fatalFailure;
@@ -542,47 +556,222 @@ async function waitForOperational({ ownedChild, healthUrlFile, fetchImpl, tunnel
       catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error; }
     }
     if (healthUrl) {
-      const live = await probeUrl(fetchImpl, `${healthUrl}/healthz`);
-      if (live.ok && !localReadyAnnounced) {
+      const operational = await tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId });
+      if (operational.localAlive && !localReadyAnnounced) {
         localReadyAnnounced = true;
         onPhase('locally_ready', healthUrl);
       }
-      if (live.ok && !authenticatingAnnounced) {
+      if (operational.localAlive && !authenticatingAnnounced) {
         authenticatingAnnounced = true;
         onPhase('authenticating', healthUrl);
       }
-      if (live.ok) {
-        const operational = await tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId });
-        if (operational.ok) return { healthUrl, status: operational.status };
-        lastError = operational.error || lastError;
-      } else {
-        lastError = live.error || lastError;
+      if (operational.ok) {
+        return { healthUrl, status: operational.status, health: operational.health, degraded: false, error: '', errorCode: '' };
       }
+      lastRecoverable = operational.recoverInPlace ? operational : null;
+      lastError = operational.error || lastError;
     }
     await delay(START_POLL_MS);
+  }
+  if (lastRecoverable && healthUrl) {
+    return {
+      healthUrl,
+      status: lastRecoverable.status,
+      health: lastRecoverable.health,
+      degraded: true,
+      error: lastRecoverable.error || 'OpenAI tunnel-client is live and still recovering the secure tunnel.',
+      errorCode: lastRecoverable.errorCode || 'tunnel_connection_interrupted'
+    };
   }
   throw new Error(`OpenAI Secure MCP Tunnel did not become ready within ${Math.round(timeoutMs / 1000)} seconds${lastError ? `: ${lastError}` : '.'}`);
 }
 
 async function tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId }) {
-  const [ready, admin] = await Promise.all([
+  const live = await probeUrl(fetchImpl, `${healthUrl}/healthz`);
+  if (!live.ok) {
+    return {
+      ok: false,
+      localAlive: false,
+      recoverInPlace: false,
+      errorCode: 'tunnel_connection_interrupted',
+      error: live.error || 'OpenAI tunnel-client local health check failed.',
+      health: null
+    };
+  }
+
+  const [ready, admin, controlPlane, responseDelivery] = await Promise.all([
     probeUrl(fetchImpl, `${healthUrl}/readyz`),
-    readTunnelAdminStatus(fetchImpl, healthUrl)
+    readTunnelAdminStatus(fetchImpl, healthUrl),
+    readTunnelHealthComponent(fetchImpl, healthUrl, 'control-plane'),
+    readTunnelHealthComponent(fetchImpl, healthUrl, 'response-delivery')
   ]);
-  if (!ready.ok) return { ok: false, error: ready.error || `readyz returned HTTP ${ready.status || 0}` };
+  const health = Object.freeze({
+    schemaVersion: 1,
+    controlPlane: controlPlane.value || null,
+    responseDelivery: responseDelivery.value || null
+  });
+
   if (!admin.ok) {
     if (admin.status === 401) throw tunnelFailure('tunnel_authentication_failed', 'OpenAI rejected the tunnel runtime API key.');
     if (admin.status === 403) throw tunnelFailure('tunnel_access_denied', 'OpenAI denied this runtime key access to the configured Secure MCP Tunnel.');
     if (admin.status === 404) throw tunnelFailure('tunnel_not_found', 'OpenAI could not find the configured Secure MCP Tunnel.');
-    return { ok: false, error: admin.error || `status returned HTTP ${admin.status || 0}` };
+    return {
+      ok: false,
+      localAlive: true,
+      recoverInPlace: true,
+      errorCode: 'tunnel_connection_interrupted',
+      error: admin.error || `status returned HTTP ${admin.status || 0}`,
+      health
+    };
   }
+
   const observedTunnelId = tunnelIdFromStatus(admin.value);
   if (observedTunnelId && observedTunnelId !== tunnelId) {
     throw tunnelFailure('tunnel_not_found', `Tunnel-client reported ${observedTunnelId}, but Rel.AI is configured for ${tunnelId}.`);
   }
-  if (!observedTunnelId) return { ok: false, error: 'Tunnel metadata is not available yet.' };
-  if (mcpProbeFailed(admin.value)) return { ok: false, error: 'The local MCP startup probe is not ready yet.' };
-  return { ok: true, status: admin.value };
+
+  const deliveryDegraded = responseDelivery.value?.status === 'degraded';
+  const controlPlaneDegraded = controlPlane.value?.status === 'degraded';
+  if (deliveryDegraded || controlPlaneDegraded) {
+    return {
+      ok: false,
+      localAlive: true,
+      recoverInPlace: true,
+      errorCode: deliveryDegraded ? 'tunnel_command_delivery_degraded' : 'tunnel_connection_interrupted',
+      error: deliveryDegraded
+        ? 'Tunnel response delivery is degraded while tunnel-client remains live and is recovering in place.'
+        : 'OpenAI tunnel polling is degraded while tunnel-client remains live and is recovering in place.',
+      status: admin.value,
+      health
+    };
+  }
+
+  if (!ready.ok) {
+    return {
+      ok: false,
+      localAlive: true,
+      recoverInPlace: true,
+      errorCode: 'tunnel_connection_interrupted',
+      error: ready.error || `readyz returned HTTP ${ready.status || 0}`,
+      status: admin.value,
+      health
+    };
+  }
+  if (!observedTunnelId) {
+    return {
+      ok: false,
+      localAlive: true,
+      recoverInPlace: true,
+      errorCode: 'tunnel_connection_interrupted',
+      error: 'Tunnel metadata is not available yet.',
+      status: admin.value,
+      health
+    };
+  }
+  if (mcpProbeFailed(admin.value)) {
+    return {
+      ok: false,
+      localAlive: true,
+      recoverInPlace: true,
+      errorCode: 'tunnel_connection_interrupted',
+      error: 'The local MCP startup probe is not ready yet.',
+      status: admin.value,
+      health
+    };
+  }
+  return { ok: true, localAlive: true, recoverInPlace: false, status: admin.value, health };
+}
+
+async function readTunnelHealthComponent(fetchImpl, healthUrl, component) {
+  try {
+    const response = await fetchImpl(`${healthUrl}/health/${component}`, { signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS) });
+    if (!response?.ok) {
+      return {
+        ok: false,
+        status: Number(response?.status || 0),
+        unsupported: Number(response?.status || 0) === 404,
+        error: `health/${component} returned HTTP ${response?.status || 0}`,
+        value: null
+      };
+    }
+    if (typeof response.json !== 'function') return { ok: false, error: `health/${component} response was not JSON.`, value: null };
+    const value = normalizeTunnelHealthComponent(await response.json(), component);
+    return value ? { ok: true, status: Number(response.status || 200), value } : { ok: false, error: `health/${component} response was invalid.`, value: null };
+  } catch (error) {
+    return { ok: false, error: messageOf(error), value: null };
+  }
+}
+
+function normalizeTunnelHealthComponent(value, component) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (Number(value.schema_version) !== 1 || String(value.component || '') !== component) return null;
+  const status = String(value.status || '').toLowerCase();
+  if (!['ok', 'degraded', 'unknown', 'disabled'].includes(status)) return null;
+  const base = {
+    status,
+    state: healthString(value.state, 64),
+    reasonCode: healthString(value.reason_code, 96),
+    observedAt: healthString(value.observed_at, 96),
+    limited: value.limited === true
+  };
+  const details = value.details && typeof value.details === 'object' && !Array.isArray(value.details) ? value.details : {};
+  if (component === 'control-plane') {
+    return Object.freeze({
+      ...base,
+      details: Object.freeze({
+        lastAttempt: healthString(details.last_attempt, 96),
+        lastSuccess: healthString(details.last_success, 96),
+        lastError: healthString(details.last_error, 96),
+        consecutiveFailures: healthCount(details.consecutive_failures),
+        currentPollAgeSeconds: healthNumber(details.current_poll_age_seconds),
+        configuredWaitSeconds: healthNumber(details.configured_wait_seconds),
+        effectiveWaitSeconds: healthNumber(details.effective_wait_seconds),
+        deadlineSeconds: healthNumber(details.deadline_seconds),
+        nextRetry: healthString(details.next_retry, 96),
+        failureCategory: healthString(details.failure_category, 96),
+        httpStatus: healthStatus(details.http_status)
+      })
+    });
+  }
+  if (component === 'response-delivery') {
+    return Object.freeze({
+      ...base,
+      details: Object.freeze({
+        inProgress: healthCount(details.in_progress),
+        lastAccepted: healthString(details.last_accepted, 96),
+        lastCompleted: healthString(details.last_completed, 96),
+        lastFailure: healthString(details.last_failure, 96),
+        disposition: healthString(details.disposition, 64),
+        failureCategory: healthString(details.failure_category, 96),
+        httpStatus: healthStatus(details.http_status),
+        attempts: healthCount(details.attempts),
+        retries: healthCount(details.retries),
+        accepted: healthCount(details.accepted),
+        completed: healthCount(details.completed),
+        terminalFailures: healthCount(details.terminal_failures)
+      })
+    });
+  }
+  return Object.freeze(base);
+}
+
+function healthString(value, maxLength) {
+  return sanitizeText(value == null ? '' : value, maxLength).trim();
+}
+
+function healthNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function healthCount(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+function healthStatus(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 100 && number <= 599 ? number : 0;
 }
 
 async function readTunnelAdminStatus(fetchImpl, healthUrl) {

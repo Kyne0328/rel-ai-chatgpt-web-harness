@@ -1,4 +1,6 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import './styles.css';
+import { fetchJson } from '../../api.js';
 import { toast } from '../../components/toast.js';
 import { Icon } from '../../components/icons.js';
 import { getRouteParams, replaceRouteParams, routeHref } from '../../router.js';
@@ -6,6 +8,10 @@ import { classifyTaskChangedFiles } from '../../../taskSemanticProgress.js';
 
 const h = React.createElement;
 const CODE_STORE_KEYS = Object.freeze(['tasks', 'live']);
+const HTTP_CODE_BRIDGE = Object.freeze({
+  get: taskId => requestCodeJson(`/api/tasks/files?task=${encodeURIComponent(taskId)}`),
+  diff: (taskId, path) => requestCodeJson(`/api/tasks/diff?task=${encodeURIComponent(taskId)}&file=${encodeURIComponent(path)}`)
+});
 let monacoPromise = null;
 
 export function createCodeRoute(useDashboardSlices) {
@@ -16,10 +22,9 @@ export function createCodeRoute(useDashboardSlices) {
 }
 
 function ChangesRoute({ data = {} }) {
-  const bridge = window.relaiDesktop?.codeWorkspace;
-  const tasks = useMemo(() => codeTasks(data), [data.tasks]);
+  const bridge = window.relaiDesktop?.codeWorkspace || HTTP_CODE_BRIDGE;
+  const tasks = useMemo(() => codeTasks(data), [data]);
 
-  if (!bridge) return h(DesktopOnlyState);
   if (!tasks.length) return h(EmptyChangesState);
   return h(ChangesDesktop, {
     bridge,
@@ -43,6 +48,7 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
   const [editorLoadFailed, setEditorLoadFailed] = useState(false);
   const [editorId, setEditorId] = useState('');
   const [openingIde, setOpeningIde] = useState(false);
+  const [diffLayout, setDiffLayout] = useState('side-by-side');
   const workspaceRequestRef = useRef(0);
   const diffRequestRef = useRef(0);
   const taskIdRef = useRef(selectedTaskId);
@@ -61,6 +67,7 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
       if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId) return false;
       filePathRef.current = normalizedPath;
       setFilePath(normalizedPath);
+      replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
       setDiffFile(file);
       setViewerMessage('');
       setViewerTone('');
@@ -137,11 +144,17 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
     void refreshWorkspace(selectedTaskId);
   }, [refreshWorkspace, selectedTaskId, taskRevision, taskSource]);
 
+  const canOpenIde = typeof bridge.editors === 'function' && typeof bridge.openIde === 'function';
+
   useEffect(() => {
     let active = true;
     setEditors(null);
     setEditorLoadFailed(false);
     setEditorId('');
+    if (!canOpenIde) {
+      setEditors([]);
+      return () => { active = false; };
+    }
     Promise.resolve(bridge.editors()).then(result => {
       if (!active) return;
       const available = Array.isArray(result?.editors) ? result.editors : [];
@@ -153,13 +166,14 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
       setEditorLoadFailed(true);
     });
     return () => { active = false; };
-  }, [bridge]);
+  }, [bridge, canOpenIde]);
 
   const changedFiles = useMemo(() => changedTextFiles(workspace), [workspace]);
   const visibleFiles = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return changedFiles.filter(file => !normalized || file.toLowerCase().includes(normalized));
   }, [changedFiles, query]);
+  const fileTree = useMemo(() => buildFileTree(visibleFiles), [visibleFiles]);
   const meta = workspaceMeta(workspace, workspaceError);
   const viewState = workspace?.historyMode === 'unavailable' ? 'Recorded files only' : 'Read-only diff';
   const ideDisabled = openingIde || !editorId || !editors?.length;
@@ -200,23 +214,25 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
           'data-code-task-link': '',
           href: routeHref('tasks', { workspace: selectedTask?.workspace, task: selectedTaskId })
         }, h(Icon, { name: 'chevronLeft' }), h('span', null, 'Task')),
-        h('select', {
-          'data-code-ide': '',
-          'aria-label': 'Application for project',
-          value: editorId,
-          onChange: event => setEditorId(event.target.value)
-        }, editorLoadFailed
-          ? h('option', { value: '' }, 'IDE unavailable')
-          : editors == null
-            ? h('option', { value: '' }, 'Loading applications…')
-            : editors.map(editor => h('option', { key: editor.id, value: editor.id }, editor.label))),
-        h('button', {
-          className: 'secondary',
-          type: 'button',
-          'data-code-open-ide': '',
-          disabled: ideDisabled,
-          onClick: () => { void openIde(); }
-        }, h(Icon, { name: 'externalLink' }), h('span', null, openingIde ? 'Opening…' : 'IDE')),
+        canOpenIde ? h(React.Fragment, null,
+          h('select', {
+            'data-code-ide': '',
+            'aria-label': 'Application for project',
+            value: editorId,
+            onChange: event => setEditorId(event.target.value)
+          }, editorLoadFailed
+            ? h('option', { value: '' }, 'IDE unavailable')
+            : editors == null
+              ? h('option', { value: '' }, 'Loading applications…')
+              : editors.map(editor => h('option', { key: editor.id, value: editor.id }, editor.label))),
+          h('button', {
+            className: 'secondary',
+            type: 'button',
+            'data-code-open-ide': '',
+            disabled: ideDisabled,
+            onClick: () => { void openIde(); }
+          }, h(Icon, { name: 'externalLink' }), h('span', null, openingIde ? 'Opening…' : 'IDE'))
+        ) : null,
         h('button', {
           className: 'secondary',
           type: 'button',
@@ -241,57 +257,59 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
         ),
         h('div', { className: 'code-file-list', 'data-code-files': '' },
           visibleFiles.length
-            ? visibleFiles.map(file => {
-                const status = changedFileStatus(workspace, file);
-                const label = `${status.label}: ${file}`;
-                return h('button', {
-                  className: `code-file-row${file === filePath ? ' active' : ''}`,
-                  type: 'button',
-                  'data-code-file': file,
-                  title: label,
-                  'aria-label': label,
-                  key: file,
-                  onClick: () => openFile(file)
-                },
-                h('span', {
-                  className: `code-file-marker status-${status.tone}`,
-                  'aria-hidden': 'true'
-                }, status.code),
-                h('span', { className: 'code-file-name' }, file));
-              })
+            ? h('ul', { className: 'code-file-tree' }, ...renderFileTree(fileTree, { workspace, filePath, openFile }))
             : h('div', { className: 'code-file-empty' }, query ? 'No matching changed files.' : (workspaceError ? 'Task changes are unavailable.' : 'No task-owned changes to review.'))
         )
       ),
       h('section', { className: 'code-editor-pane', 'aria-label': 'Task diff viewer' },
         h('div', { className: 'code-editor-toolbar' },
           h('div', { className: 'code-file-heading mono', 'data-code-file-heading': '' }, filePath || 'No file selected'),
-          h('span', { className: 'code-view-state', 'data-code-view-state': '' }, viewState)
+          h('div', { className: 'code-view-controls' },
+            h('span', { className: 'code-keyboard-hint' }, h('kbd', null, 'Ctrl+M'), ' changes whether Tab moves focus'),
+            h('div', { className: 'code-diff-layout', role: 'group', 'aria-label': 'Diff layout' },
+              h('button', {
+                className: `secondary compact-button code-layout-button${diffLayout === 'side-by-side' ? ' active' : ''}`,
+                type: 'button',
+                'aria-pressed': diffLayout === 'side-by-side',
+                onClick: () => setDiffLayout('side-by-side')
+              }, 'Side by side'),
+              h('button', {
+                className: `secondary compact-button code-layout-button${diffLayout === 'unified' ? ' active' : ''}`,
+                type: 'button',
+                'aria-pressed': diffLayout === 'unified',
+                onClick: () => setDiffLayout('unified')
+              }, 'Unified')
+            ),
+            h('span', { className: 'code-view-state', 'data-code-view-state': '' }, viewState)
+          )
         ),
-        h(DiffViewer, { file: diffFile, message: viewerMessage, tone: viewerTone })
+        h(DiffViewer, { file: diffFile, message: viewerMessage, tone: viewerTone, layout: diffLayout })
       )
     )
   );
 }
 
-function DiffViewer({ file, message, tone }) {
+function DiffViewer({ file, message, tone, layout }) {
   if (!file) {
     return h('div', {
       className: `code-editor-host code-editor-message${tone ? ` ${tone}` : ''}`,
       'data-code-editor': ''
     }, message || 'Choose a changed file to review its diff.');
   }
-  return h(MonacoDiffViewer, { file });
+  return h(MonacoDiffViewer, { file, layout });
 }
 
-const MonacoDiffViewer = memo(function MonacoDiffViewer({ file }) {
+const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout }) {
   const hostRef = useRef(null);
   const editorRef = useRef(null);
   const monacoRef = useRef(null);
   const modelsRef = useRef([]);
   const fileRef = useRef(file);
+  const layoutRef = useRef(layout);
   const [loadError, setLoadError] = useState('');
 
   fileRef.current = file;
+  layoutRef.current = layout;
 
   useEffect(() => {
     let active = true;
@@ -306,12 +324,13 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file }) {
         readOnly: true,
         originalEditable: false,
         automaticLayout: false,
-        renderSideBySide: true,
+        renderSideBySide: layoutRef.current !== 'unified',
         useInlineViewWhenSpaceIsLimited: true,
         renderIndicators: true,
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
         wordWrap: 'off',
+        fontFamily: '"Cascadia Code", "SFMono-Regular", Consolas, monospace',
         fontLigatures: true
       });
       editorRef.current = editor;
@@ -341,8 +360,16 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file }) {
     applyDiffModels(monacoRef.current, editorRef.current, modelsRef, file);
   }, [file]);
 
+  useEffect(() => {
+    if (!editorRef.current) return;
+    try {
+      editorRef.current.updateOptions({ renderSideBySide: layout !== 'unified' });
+      editorRef.current.layout();
+    } catch {}
+  }, [layout]);
+
   if (loadError) {
-    return h('div', { className: 'code-editor-host', 'data-code-editor': '' }, h(DiffFallback, { file }));
+    return h('div', { className: 'code-editor-host', 'data-code-editor': '' }, h(DiffFallback, { file, layout }));
   }
   return h('div', {
     ref: hostRef,
@@ -352,8 +379,8 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file }) {
   });
 });
 
-function DiffFallback({ file }) {
-  return h('div', { className: 'code-diff-fallback' },
+function DiffFallback({ file, layout }) {
+  return h('div', { className: `code-diff-fallback${layout === 'unified' ? ' is-unified' : ''}` },
     h(FallbackColumn, { label: 'Before', content: file?.baseContent || '' }),
     h(FallbackColumn, { label: 'After', content: file?.content || '' })
   );
@@ -474,6 +501,61 @@ function taskLabel(task) {
   return [title, workspace, status].filter(Boolean).join(' · ');
 }
 
+function buildFileTree(files = []) {
+  const root = { folders: new Map(), files: [] };
+  for (const file of files) {
+    const normalized = String(file || '').replaceAll('\\', '/').replace(/^\/+|\/+$/g, '');
+    if (!normalized) continue;
+    const parts = normalized.split('/').filter(Boolean);
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      if (!node.folders.has(part)) node.folders.set(part, { folders: new Map(), files: [] });
+      node = node.folders.get(part);
+    }
+    node.files.push({ name: parts.at(-1), path: file });
+  }
+  return root;
+}
+
+function renderFileTree(node, context, prefix = '') {
+  const folders = [...node.folders.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const files = [...node.files].sort((a, b) => a.name.localeCompare(b.name));
+  return [
+    ...folders.map(([name, child]) => {
+      const path = prefix ? `${prefix}/${name}` : name;
+      return h('li', { className: 'code-tree-folder', key: `folder:${path}` },
+        h('div', { className: 'code-tree-folder-label', title: path },
+          h(Icon, { name: 'chevronDown', size: 13 }),
+          h('span', null, name)
+        ),
+        h('ul', null, ...renderFileTree(child, context, path))
+      );
+    }),
+    ...files.map(file => {
+      const status = changedFileStatus(context.workspace, file.path);
+      const statsLabel = status.hasLineStats ? `, +${status.additions} -${status.deletions}` : '';
+      const label = `${status.label}${statsLabel}: ${file.path}`;
+      return h('li', { className: 'code-tree-file', key: file.path },
+        h('button', {
+          className: `code-file-row${file.path === context.filePath ? ' active' : ''}`,
+          type: 'button',
+          'data-code-file': file.path,
+          title: label,
+          'aria-label': label,
+          onClick: () => context.openFile(file.path)
+        },
+          h('span', { className: `code-file-marker status-${status.tone}`, 'aria-hidden': 'true' }, status.code),
+          h('span', { className: 'code-file-name' }, file.name),
+          status.hasLineStats ? h('span', { className: 'code-file-stats', 'aria-hidden': 'true' },
+            h('span', { className: 'additions' }, `+${status.additions}`),
+            h('span', { className: 'deletions' }, `-${status.deletions}`)
+          ) : null
+        )
+      );
+    })
+  ];
+}
+
 function changedTextFiles(workspace = {}) {
   return [...new Set((Array.isArray(workspace?.changedFiles) ? workspace.changedFiles : [])
     .map(file => String(file || '').trim())
@@ -482,11 +564,14 @@ function changedTextFiles(workspace = {}) {
 
 function changedFileStatus(workspace = {}, file = '') {
   const raw = workspace?.changedFileStatuses?.[file];
-  if (!raw || typeof raw !== 'object') return { code: 'M', label: 'Modified', tone: 'warning' };
+  if (!raw || typeof raw !== 'object') return { code: 'M', label: 'Modified', tone: 'warning', hasLineStats: false, additions: 0, deletions: 0 };
   const code = String(raw.code || 'M').slice(0, 1).toUpperCase();
   const label = String(raw.label || 'Modified');
   const tone = ['info', 'success', 'warning', 'danger', 'neutral'].includes(raw.tone) ? raw.tone : 'neutral';
-  return { code, label, tone };
+  const additions = Number(raw.additions);
+  const deletions = Number(raw.deletions);
+  const hasLineStats = Number.isFinite(additions) && Number.isFinite(deletions) && additions >= 0 && deletions >= 0;
+  return { code, label, tone, hasLineStats, additions: hasLineStats ? additions : 0, deletions: hasLineStats ? deletions : 0 };
 }
 
 function workspaceMeta(workspace, error) {
@@ -523,20 +608,14 @@ function shortCommit(value) {
   return /^[a-f0-9]{7,64}$/i.test(text) ? text.slice(0, 8) : '';
 }
 
-function messageFor(error) {
-  return error instanceof Error ? error.message : String(error || 'The changes viewer request failed.');
+async function requestCodeJson(url) {
+  const response = await fetchJson(url, { cache: 'no-store', timeout: 30_000, pauseTimeoutWhenHidden: false });
+  if (response?.ok === false) throw new Error(String(response.error || 'The changes viewer request failed.'));
+  return response;
 }
 
-function DesktopOnlyState() {
-  return h('div', { className: 'section code-page', 'data-code-react': '' },
-    h('div', { className: 'dashboard-state' },
-      h('div', { className: 'dashboard-state-card' },
-        h('span', { className: 'status-pill warn' }, 'Desktop feature'),
-        h('h2', null, 'Open Changes in the Rel.AI desktop app.'),
-        h('p', null, 'The browser dashboard cannot access local task diffs or IDEs.')
-      )
-    )
-  );
+function messageFor(error) {
+  return error instanceof Error ? error.message : String(error || 'The changes viewer request failed.');
 }
 
 function EmptyChangesState() {

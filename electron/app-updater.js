@@ -8,7 +8,7 @@ const { runtimeMetadata } = await importResourceModule('src/runtimeCompatibility
 import { bindUpdaterEvents } from "./app-updater-events.js";
 import { taskActivityBlockReason } from './tool-sleep-blocker.js';
 import { createMacManualUpdater } from './macos-manual-updater.js';
-import { compareVersions, isStableVersion, parseStableVersion } from "./update-version.js";
+import { compareUpdateVersions, compareVersions, isStableVersion, isUpdateVersion, parseStableVersion } from "./update-version.js";
 
 const RELEASE_DISCOVERY_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases/latest/download/latest.yml';
 const RELEASE_DOWNLOAD_PREFIX = '/Kyne0328/rel-ai-chatgpt-web-harness/releases/download/';
@@ -38,6 +38,7 @@ function createAppUpdater(options = {}) {
     onStatusChange = () => {},
     onBeforeInstall = async () => {},
     onInstallCommit = async () => {},
+    onInstallerLaunch = async () => {},
     onInstallFailed = async () => {},
     retryDelay = delay => new Promise(resolve => setTimer(resolve, delay)),
     onLog = () => {},
@@ -47,7 +48,9 @@ function createAppUpdater(options = {}) {
     fetchImpl = globalThis.fetch,
     openUpdateFile = null,
     manualMacUpdater = null,
-    shouldAutoDownload = () => false
+    shouldAutoDownload = () => false,
+    getUpdateChannel = () => 'stable',
+    onMacInstallerOpened = async () => {}
   } = options;
   if (!app || typeof app.getVersion !== 'function') throw new TypeError('Electron app is required.');
   if (!autoUpdater || typeof autoUpdater.on !== 'function') throw new TypeError('electron-updater autoUpdater is required.');
@@ -70,6 +73,7 @@ function createAppUpdater(options = {}) {
   let releaseDiscoveryPromise = null;
   let lastReleaseDiscoveryAt = 0;
   let retryingOperation = '';
+  let installDeferred = false;
   let started = false;
   let lifecycleGeneration = 0;
   let status = normalizeStatus({
@@ -92,7 +96,7 @@ function createAppUpdater(options = {}) {
       autoUpdater.autoDownload = false;
       autoUpdater.autoInstallOnAppQuit = false;
       autoUpdater.disableDifferentialDownload = false;
-      autoUpdater.allowPrerelease = false;
+      configureUpdateChannel();
       autoUpdater.logger = createLogger(onLog);
       bindUpdaterEvents({
         autoUpdater,
@@ -104,7 +108,8 @@ function createAppUpdater(options = {}) {
         store,
         now,
         log,
-        currentCompatibility: installedCompatibility
+        currentCompatibility: installedCompatibility,
+        allowPrerelease
       });
     }
     void scheduleAutomaticCheck().then(fullCheckDelay => {
@@ -134,8 +139,9 @@ function createAppUpdater(options = {}) {
     log('Checking for application updates.');
     let result;
     try {
+      configureUpdateChannel();
       if (platform === 'darwin') {
-        const info = await runWithRetries('Update check', () => macUpdater.checkForUpdates());
+        const info = await runWithRetries('Update check', () => macUpdater.checkForUpdates({ channel: updateChannel() }));
         applyMacCheckResult(info);
       } else {
         await runWithRetries('Update check', () => autoUpdater.checkForUpdates());
@@ -173,7 +179,7 @@ function createAppUpdater(options = {}) {
     }
   }
 
-  async function installUpdate() {
+  async function installUpdate(options = {}) {
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
     if (status.state !== 'downloaded' || status.integrityVerified !== true) {
       const guidance = platform === 'darwin'
@@ -181,14 +187,19 @@ function createAppUpdater(options = {}) {
         : 'Download and verify the update before installing it.';
       return failure(codes.busy, guidance, false);
     }
-    if (platform === 'darwin') return openMacUpdate();
     const taskBlock = taskActivityBlockReason(getTaskActivity(), 'installing the update');
-    if (taskBlock) return failure(codes.blocked, taskBlock, true);
+    if (taskBlock) {
+      if (options.deferIfBusy === true) return deferInstallUntilIdle();
+      return failure(codes.blocked, taskBlock, true);
+    }
+    installDeferred = false;
+    if (platform === 'darwin') return openMacUpdate();
     emit({ state: 'installing', error: '', errorCode: '' });
     log(`Closing Rel.AI MCP to install ${status.availableVersion || 'update'}. The app will reopen automatically when the update is done.`);
     try {
       await onBeforeInstall();
       await onInstallCommit();
+      await onInstallerLaunch();
       autoUpdater.quitAndInstall(true, true);
       return { ok: true, installing: true, status: snapshot() };
     } catch (error) {
@@ -208,6 +219,7 @@ function createAppUpdater(options = {}) {
     try {
       await macUpdater.openDownloaded(status.availableVersion);
       log(`Opened verified macOS update ${status.availableVersion || ''} for manual installation.`);
+      await onMacInstallerOpened();
       return { ok: true, opened: true, status: snapshot() };
     } catch (error) {
       return handleError(error);
@@ -216,11 +228,11 @@ function createAppUpdater(options = {}) {
 
   function applyMacCheckResult(info = {}) {
     const availableVersion = String(info.version || '').trim();
-    if (!isStableVersion(availableVersion)) throw new Error('Update metadata contains an invalid stable version.');
-    if (!isStableVersion(status.currentVersion)) {
+    if (!isUpdateVersion(availableVersion, { allowPrerelease: allowPrerelease() })) throw new Error('Update metadata contains an invalid version for the selected release channel.');
+    if (!isUpdateVersion(status.currentVersion, { allowPrerelease: true })) {
       throw new Error('The installed application version is invalid, so the update cannot be trusted.');
     }
-    if (compareVersions(availableVersion, status.currentVersion) <= 0) {
+    if (compareUpdateVersions(availableVersion, status.currentVersion, { allowPrerelease: true }) <= 0) {
       log('Rel.AI MCP is up to date.');
       emit({
         state: 'up_to_date', availableVersion: '', releaseDate: '', releaseNotes: [],
@@ -242,7 +254,7 @@ function createAppUpdater(options = {}) {
 
   function applyMacDownloadResult(info = {}) {
     const downloadedVersion = String(info.version || '').trim();
-    if (!isStableVersion(downloadedVersion) || downloadedVersion !== status.availableVersion) {
+    if (!isUpdateVersion(downloadedVersion, { allowPrerelease: allowPrerelease() }) || downloadedVersion !== status.availableVersion) {
       throw new Error(`Downloaded update version ${downloadedVersion || 'unknown'} does not match expected version ${status.availableVersion || 'unknown'}.`);
     }
     log(`Application update ${downloadedVersion} passed SHA-256 release verification and is ready to open.`);
@@ -270,6 +282,7 @@ function createAppUpdater(options = {}) {
     const discoveryGeneration = lifecycleGeneration;
     releaseDiscoveryPromise = (async () => {
       try {
+        if (allowPrerelease()) return await checkForUpdates();
         const latestVersion = await fetchLatestReleaseVersion(fetchImpl);
         if (!started || lifecycleGeneration !== discoveryGeneration) {
           return { ok: true, skipped: true, status: snapshot() };
@@ -376,6 +389,7 @@ function createAppUpdater(options = {}) {
     const previousState = status.state;
     const previousVersion = status.availableVersion;
     status = normalizeStatus({ ...status, ...patch });
+    if (status.state !== 'downloaded') installDeferred = false;
     onStatusChange(snapshot());
     const newlyAvailable = status.state === 'available'
       && (previousState !== 'available' || previousVersion !== status.availableVersion);
@@ -387,14 +401,60 @@ function createAppUpdater(options = {}) {
   }
 
   function snapshot() {
-    return { ...status, progress: status.progress ? { ...status.progress } : null };
+    const installBlockedReason = status.canInstall
+      ? taskActivityBlockReason(getTaskActivity(), 'installing the update')
+      : '';
+    return {
+      ...status,
+      progress: status.progress ? { ...status.progress } : null,
+      updateChannel: updateChannel(),
+      installDeferred,
+      installBlockedReason,
+      canDeferInstall: Boolean(installBlockedReason) && !installDeferred
+    };
+  }
+
+  function updateChannel() {
+    return getUpdateChannel() === 'beta' ? 'beta' : 'stable';
+  }
+
+  function allowPrerelease() {
+    return updateChannel() === 'beta';
+  }
+
+  function configureUpdateChannel() {
+    if (platform !== 'darwin' && support.supported) autoUpdater.allowPrerelease = allowPrerelease();
+  }
+
+  async function deferInstallUntilIdle() {
+    if (!support.supported) return failure(codes.unsupported, support.reason, false);
+    if (status.state !== 'downloaded' || status.integrityVerified !== true) {
+      return failure(codes.busy, 'Download and verify the update before scheduling installation.', false);
+    }
+    const taskBlock = taskActivityBlockReason(getTaskActivity(), 'installing the update');
+    if (!taskBlock) return installUpdate();
+    installDeferred = true;
+    log(`Update ${status.availableVersion || ''} will install automatically when active Rel.AI work finishes.`);
+    onStatusChange(snapshot());
+    return { ok: true, deferred: true, status: snapshot() };
+  }
+
+  async function resumeDeferredInstall() {
+    if (!installDeferred || status.state !== 'downloaded' || status.integrityVerified !== true) {
+      return { ok: true, skipped: true, status: snapshot() };
+    }
+    if (taskActivityBlockReason(getTaskActivity(), 'installing the update')) {
+      return { ok: true, deferred: true, status: snapshot() };
+    }
+    installDeferred = false;
+    return installUpdate();
   }
 
   function log(message, options = {}) {
     onLog(cleanText(message, 1000), { source: 'updater', ...options });
   }
 
-  return { start, stop, getStatus: snapshot, discoverUpdate, checkForUpdates, downloadUpdate, installUpdate };
+  return { start, stop, getStatus: snapshot, discoverUpdate, checkForUpdates, downloadUpdate, installUpdate, deferInstallUntilIdle, resumeDeferredInstall };
 }
 
 async function fetchLatestReleaseVersion(fetchImpl) {

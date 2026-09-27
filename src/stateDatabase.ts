@@ -15,7 +15,7 @@ import {
   writeSqliteValidationStamp
 } from './sqliteDurability.ts';
 
-const STATE_SCHEMA_VERSION = 2;
+const STATE_SCHEMA_VERSION = 3;
 const STATE_VALIDATION_KEY = `state-v${STATE_SCHEMA_VERSION}`;
 
 interface StateDatabaseConfig extends Record<string, unknown> {
@@ -101,9 +101,170 @@ CREATE INDEX IF NOT EXISTS workspace_integrity_updated_idx
   ON workspace_integrity(updated_at_ms DESC);
 `;
 
+const SCHEMA_V3_SQL = `
+CREATE TABLE IF NOT EXISTS analytics_counter_state(
+  month TEXT PRIMARY KEY,
+  source_updated_at_ms INTEGER NOT NULL,
+  dirty INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS analytics_counter_rows(
+  month TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  dimension_key TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY(month,bucket,kind,dimension_key)
+) STRICT;
+CREATE INDEX IF NOT EXISTS analytics_counter_rows_month_idx
+  ON analytics_counter_rows(month,bucket,kind);
+CREATE TABLE IF NOT EXISTS task_history_events(
+  task_id TEXT NOT NULL,
+  event_key TEXT NOT NULL,
+  event_index INTEGER NOT NULL,
+  task_updated_at_ms INTEGER NOT NULL,
+  event_timestamp TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  PRIMARY KEY(task_id,event_key)
+) STRICT;
+CREATE INDEX IF NOT EXISTS task_history_events_recent_idx
+  ON task_history_events(event_timestamp DESC,task_updated_at_ms DESC,task_id ASC,event_index DESC);
+CREATE TRIGGER IF NOT EXISTS task_history_events_after_insert
+AFTER INSERT ON task_history
+BEGIN
+  DELETE FROM task_history_events WHERE task_id=NEW.id;
+  INSERT OR REPLACE INTO task_history_events(
+    task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+  )
+  SELECT
+    NEW.id,
+    COALESCE(
+      NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+      NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+      NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
+      'index'
+    ) || ':index:' || CAST(event.key AS TEXT),
+    CAST(event.key AS INTEGER),
+    NEW.updated_at_ms,
+    COALESCE(
+      CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+      CAST(json_extract(event.value,'$.ts') AS TEXT),
+      CAST(json_extract(event.value,'$.at') AS TEXT),
+      CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+      CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.workspace') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
+      NEW.id
+    ),
+    event.value
+  FROM json_each(
+    CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
+    '$.events'
+  ) AS event
+  WHERE event.type='object';
+END;
+CREATE TRIGGER IF NOT EXISTS task_history_events_after_update
+AFTER UPDATE OF updated_at_ms,payload ON task_history
+BEGIN
+  DELETE FROM task_history_events WHERE task_id=NEW.id;
+  INSERT OR REPLACE INTO task_history_events(
+    task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+  )
+  SELECT
+    NEW.id,
+    COALESCE(
+      NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+      NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+      NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
+      'index'
+    ) || ':index:' || CAST(event.key AS TEXT),
+    CAST(event.key AS INTEGER),
+    NEW.updated_at_ms,
+    COALESCE(
+      CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+      CAST(json_extract(event.value,'$.ts') AS TEXT),
+      CAST(json_extract(event.value,'$.at') AS TEXT),
+      CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+      CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.workspace') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
+      NEW.id
+    ),
+    event.value
+  FROM json_each(
+    CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
+    '$.events'
+  ) AS event
+  WHERE event.type='object';
+END;
+CREATE TRIGGER IF NOT EXISTS task_history_events_after_delete
+AFTER DELETE ON task_history
+BEGIN
+  DELETE FROM task_history_events WHERE task_id=OLD.id;
+END;
+INSERT OR REPLACE INTO task_history_events(
+  task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+)
+SELECT
+  task.id,
+  COALESCE(
+    NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+    NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+    NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),''),
+    'index'
+  ) || ':index:' || CAST(event.key AS TEXT),
+  CAST(event.key AS INTEGER),
+  task.updated_at_ms,
+  COALESCE(
+    CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+    CAST(json_extract(event.value,'$.ts') AS TEXT),
+    CAST(json_extract(event.value,'$.at') AS TEXT),
+    CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+    CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+    ''
+  ),
+  COALESCE(
+    CAST(json_extract(event.value,'$.workspace') AS TEXT),
+    CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.workspace') AS TEXT) END,
+    ''
+  ),
+  COALESCE(
+    CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+    CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.sessionId') AS TEXT) END,
+    task.id
+  ),
+  event.value
+FROM task_history AS task
+CROSS JOIN json_each(
+  CASE WHEN json_valid(task.payload) THEN task.payload ELSE '{"events":[]}' END,
+  '$.events'
+) AS event
+WHERE event.type='object';
+INSERT INTO state_meta(key,value) VALUES('task_history_event_index_v1','1')
+  ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+`;
+
 const STATE_MIGRATIONS: readonly StateMigration[] = Object.freeze([
   { version: 1, apply: db => db.exec(SCHEMA_V1_SQL) },
-  { version: 2, apply: db => db.exec(SCHEMA_V2_SQL) }
+  { version: 2, apply: db => db.exec(SCHEMA_V2_SQL) },
+  { version: 3, apply: db => db.exec(SCHEMA_V3_SQL) }
 ]);
 
 function stateDatabasePath(config: StateDatabaseConfig = {}): string {
@@ -119,31 +280,21 @@ function openStateDatabase(config: StateDatabaseConfig = {}, options: OpenStateD
   const file = stateDatabasePath(config);
   if (!readonly) fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   if (readonly && !fs.existsSync(file)) return null;
-  const timeout = Math.max(0, Math.floor(Number(options.timeoutMs ?? 5000)));
-  // SQLite can reject a journal-mode change immediately despite busy_timeout
-  // when another connection holds a transaction. Retry only initialization;
-  // replaying an arbitrary caller operation could duplicate side effects.
-  const deadline = performance.now() + timeout;
-  const sleeper = new Int32Array(new SharedArrayBuffer(4));
-  for (;;) {
-    const remainingTimeout = Math.max(0, Math.ceil(deadline - performance.now()));
-    const db = new DatabaseSync(file, { readOnly: readonly, timeout: remainingTimeout });
-    try {
-      db.enableLoadExtension(false);
-      db.exec('PRAGMA foreign_keys=ON');
-      if (!readonly) {
-        db.exec('PRAGMA journal_mode=WAL');
-        db.exec('PRAGMA synchronous=NORMAL');
-        ensureStateSchema(db, file);
-        try { fs.chmodSync(file, 0o600); } catch {}
-      }
-      return db;
-    } catch (error) {
-      try { db.close(); } catch {}
-      const remaining = deadline - performance.now();
-      if (!isSqliteBusyError(error) || remaining <= 0) throw error;
-      Atomics.wait(sleeper, 0, 0, Math.min(25, remaining));
+  const timeout = Math.max(0, Math.floor(Number(options.timeoutMs ?? 0)));
+  const db = new DatabaseSync(file, { readOnly: readonly, timeout });
+  try {
+    db.enableLoadExtension(false);
+    db.exec('PRAGMA foreign_keys=ON');
+    if (!readonly) {
+      db.exec('PRAGMA journal_mode=WAL');
+      db.exec('PRAGMA synchronous=NORMAL');
+      ensureStateSchema(db, file);
+      try { fs.chmodSync(file, 0o600); } catch {}
     }
+    return db;
+  } catch (error) {
+    try { db.close(); } catch {}
+    throw error;
   }
 }
 

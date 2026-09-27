@@ -1,13 +1,14 @@
 import { safeLogAudit } from '../audit.js';
 import { createValidationFingerprint } from '../bridge/validationPlan.js';
 import { readConfig, resolveWorkspace, resolveWorkspaceInput } from '../config.js';
-import { principalFingerprint, principalForContext } from '../mcp/principal.js';
+import { principalFingerprint, principalForContext, principalKind } from '../mcp/principal.js';
+import { PRINCIPAL_KIND } from '../mcp/contracts.ts';
 import { assertAuthorizedToolCall, authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.js';
 import { clearSessionPolicy } from '../policyResolver.js';
-import { readTaskIntegrity } from '../taskIntegrity.ts';
+import { readTaskIntegrity, recordTaskIntegrityEvent } from '../taskIntegrity.ts';
 import { bindTaskHistoryActivityPersistence, recordWorkflowEvidence } from '../taskHistoryStore.ts';
 import { buildToolActivityDetails } from '../taskObservability.js';
-import { beginConnectorToolCall, normalizeTaskId, onToolActivity, taskError } from '../toolActivity.js';
+import { beginConnectorToolCall, getToolActivity, normalizeTaskId, onToolActivity, taskError } from '../toolActivity.js';
 import { serializeConnectorResult } from './connector.js';
 import { enhanceToolError } from './errors.js';
 import { executeToolCall } from './execution.js';
@@ -19,7 +20,7 @@ import { applyCautionAudit, buildExtraAudit, invalidateSessionCacheForCall } fro
 import { assertKnownTask, assertTaskWorkspaceOwnership, findReusableTask, taskAttributionHint, isTerminalTaskReference, taskAuditContext, withTaskIdentity } from './task.js';
 import { deterministicActionId } from '../workflow/contracts.js';
 import { classifyTaskIntent } from '../workflow/intent.js';
-import { recordLocalTaskCompletion, recordLocalToolOutcome } from '../localAnalytics.js';
+import { scheduleLocalTaskCompletion, scheduleLocalToolOutcome } from '../localAnalytics.js';
 import { buildWorkflowEvidenceReceipt } from '../workflow/evidence.js';
 import { invalidateRepositoryTopology } from '../workflow/topology.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
@@ -74,9 +75,23 @@ async function callToolObserved(name, args = {}, context = {}) {
     const taskScoped = taskScope === 'required';
     const taskAware = taskScoped || taskScope === 'optional';
     effectivePrincipal = principalForContext(context, connector);
+    const trustedLocalTaskControl = context?.trustedLocalTaskControl === true
+      && !connector
+      && principalKind(effectivePrincipal) === PRINCIPAL_KIND.LOCAL_TRUSTED
+      && (operationName === OP.WORK_CANCEL || operationName === OP.WORK_STOP);
     requestedTaskId = normalizeTaskId(effectiveArgs?.work_id);
     if (requestedTaskId && effectiveArgs?.independent === true) {
-      throw taskError('TASK_SCOPE_CONFLICT', 'Choose work_id for task work or independent:true for separate workspace work, not both.');
+      throw taskError(
+        'TASK_SCOPE_CONFLICT',
+        `Conflicting scope parameters: both work_id "${requestedTaskId}" (task scope) and independent: true (separate workspace scope) were provided. Choose one: to attach this call to task "${requestedTaskId}", omit "independent". To run separate workspace work outside the task, omit "work_id".`,
+        {
+          retryable: true,
+          allowedAlternatives: [
+            `Remove independent: true to continue work within task "${requestedTaskId}"`,
+            'Remove work_id to run independently at workspace scope'
+          ]
+        }
+      );
     }
     if (taskProgressPatch && !requestedTaskId) {
       throw taskError('TASK_ID_REQUIRED', 'taskProgress requires the exact work_id of the durable task whose checklist should be updated.');
@@ -85,7 +100,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       throw taskError('TASK_ID_REQUIRED', `${name} requires the work_id returned by relai_work action begin.`);
     }
     if (requestedTaskId && operationName !== OP.WORK_BEGIN) {
-      knownTask = assertKnownTask(config, requestedTaskId, '', operationName, effectivePrincipal, effectiveArgs);
+      knownTask = assertKnownTask(config, requestedTaskId, '', operationName, effectivePrincipal, effectiveArgs, { trustedLocalTaskControl });
       if (knownTask && taskAware && !String(effectiveArgs?.workspace || '').trim()) effectiveArgs = { ...effectiveArgs, workspace: knownTask.workspace };
     }
     assertAuthorizedToolCall({
@@ -126,8 +141,22 @@ async function callToolObserved(name, args = {}, context = {}) {
       // resolution cannot change that record, so validate ownership against the
       // resolved alias without re-reading task history a second time.
       assertTaskWorkspaceOwnership(knownTask, effectiveArgs?.workspace);
-      const integrity = readTaskIntegrity(config, requestedTaskId, effectiveArgs?.workspace);
-      const lifecycleWithoutIntegrity = operationName === OP.WORK_FINISH || operationName === OP.WORK_STOP || operationName === OP.WORK_CANCEL;
+      let integrity = readTaskIntegrity(config, requestedTaskId, effectiveArgs?.workspace);
+      const requestedWorkspace = String(effectiveArgs?.workspace || '').trim();
+      const projectlessTask = !String(knownTask?.workspace || '').trim();
+      if (!integrity && projectlessTask && requestedWorkspace && taskOperationBindsProject(operationName)) {
+        await recordTaskIntegrityEvent(config, {
+          taskId: requestedTaskId,
+          taskIdentityVersion: 2,
+          taskIdExplicit: true,
+          taskHistoryEligible: false,
+          tool: OP.WORK_BEGIN,
+          workspace: requestedWorkspace,
+          deferBaseline: true
+        });
+        integrity = readTaskIntegrity(config, requestedTaskId, requestedWorkspace);
+      }
+      const lifecycleWithoutIntegrity = taskLifecycleCanRunWithoutIntegrity(operationName);
       if (!integrity && !lifecycleWithoutIntegrity && (taskScoped || taskAttributionRequiresIntegrity(operationName))) {
         throw taskError(
           'TASK_INTEGRITY_STATE_MISSING',
@@ -142,7 +171,19 @@ async function callToolObserved(name, args = {}, context = {}) {
         workflowContextEvidence: null,
         topology: null
       };
+      if (projectlessTask && taskLifecycleIgnoresWorkspaceArgument(operationName) && requestedWorkspace) {
+        effectiveArgs = { ...effectiveArgs };
+        delete effectiveArgs.workspace;
+        workspaceResolution = null;
+      }
     }
+    assertTaskPlanReady({
+      taskId: requestedTaskId,
+      knownTask,
+      operationName,
+      workspace: authorizedWorkspace,
+      taskProgressPatch
+    });
     const attributionHint = taskScope === 'optional' && !requestedTaskId && effectiveArgs?.independent !== true
       ? taskAttributionHint(config, authorizedWorkspace, effectivePrincipal, context?.conversationId)
       : '';
@@ -187,7 +228,9 @@ async function callToolObserved(name, args = {}, context = {}) {
         conversationId: context?.conversationId
       },
       input: publicArgs,
-      principalFingerprint: principalFingerprint(effectivePrincipal)
+      principalFingerprint: trustedLocalTaskControl
+        ? knownTask?.principalFingerprint
+        : principalFingerprint(effectivePrincipal)
     });
     if (taskProgressPatch) applyTaskProgressPatch(requestedTaskId, taskProgressPatch, finishActivity?.update);
     const execution = await executeToolCall({
@@ -220,7 +263,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       repositoryFingerprint: String(value?.validationFingerprint || ''),
       commandId: workflowCommandId(operationName, resolved.action, effectiveArgs)
     }) : null;
-    const auditEntry = await safeLogAudit(config, {
+    const auditPromise = safeLogAudit(config, {
       ...activityResult.activity,
       ...taskAuditContext(context, finishActivity, requestedTaskId, operationName, valueOk, value),
       tool: operationName,
@@ -228,7 +271,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       ...(operationName === OP.WORK_BEGIN ? { deferBaseline: true } : {}),
       internalOperation: operationName === name ? undefined : operationName,
       action: resolved.action || undefined,
-      operation: finishActivity?.operation,
+      operation: activityResult.activity?.title || finishActivity?.operation,
       ok: valueOk,
       workspace: effectiveArgs?.workspace,
       ...(workspaceResolution?.source === 'configured_path' ? {
@@ -240,7 +283,8 @@ async function callToolObserved(name, args = {}, context = {}) {
       ms: Date.now() - started,
       ...extraAudit,
       ...(valueOk ? {} : { error: activityResult.error })
-    }, { strictIntegrity: true });
+    }, { strictIntegrity: Boolean(workId) });
+    const auditEntry = workId ? await auditPromise : null;
     refreshRequestTaskIntegrity(requestTaskContext, auditEntry);
     if (workId && evidenceDraft && auditEntry) {
       await persistWorkflowEvidence(
@@ -316,7 +360,7 @@ async function callToolObserved(name, args = {}, context = {}) {
         publicTool: name,
         internalOperation: operationName === name ? undefined : operationName,
         action: resolvedAction || undefined,
-        operation: finishActivity?.operation,
+        operation: activityResult.activity?.title || finishActivity?.operation,
         ok: false,
         workspace: effectiveArgs?.workspace,
         workspaceInput: publicArgs?.workspace == null ? '' : String(publicArgs.workspace),
@@ -337,7 +381,7 @@ async function callToolObserved(name, args = {}, context = {}) {
     }
     throw enhanced;
   } finally {
-    recordLocalToolOutcome(config, {
+    scheduleLocalToolOutcome(config, {
       tool: name,
       operationName,
       workspace: workspaceResolution?.alias || knownTask?.workspace || '',
@@ -350,9 +394,54 @@ async function callToolObserved(name, args = {}, context = {}) {
     });
     finishActivity?.(activityResult);
     if (activityResult.ok === true && completedTaskAnalytics) {
-      recordLocalTaskCompletion(config, completedTaskAnalytics);
+      scheduleLocalTaskCompletion(config, completedTaskAnalytics);
     }
   }
+}
+
+function taskPlanHasSteps(plan) {
+  return Array.isArray(plan?.steps) && plan.steps.length > 0;
+}
+
+function assertTaskPlanReady({ taskId, knownTask, operationName }) {
+  if (!taskId || !knownTask || taskPlanGateExemptOperations.has(operationName)) return;
+  const liveTask = getToolActivity().tasks.find(task => String(task.id || task.taskId || '') === taskId);
+  const task = liveTask || knownTask;
+  if (taskPlanHasSteps(task.plan)) return;
+  throw taskError(
+    'TASK_PLAN_REQUIRED',
+    'Every durable Rel.AI task requires a non-empty plan before normal task-scoped work can continue. Start new tasks with steps on relai_work action "begin", or repair an older planless task with relai_work action "plan".',
+    {
+      retryable: true,
+      allowedAlternatives: [
+        `Call relai_work action "plan" with work_id "${taskId}" and ordered steps`,
+        'For a projectless one-shot utility or control request, run the supported operation taskless instead of creating a durable task'
+      ]
+    }
+  );
+}
+
+const taskPlanGateExemptOperations = new Set([
+  OP.WORK_BEGIN, OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL,
+  OP.PROCESS_READ, OP.PROCESS_LIST, OP.PROCESS_STOP
+]);
+
+function taskOperationBindsProject(operationName) {
+  return ![
+    OP.WORK_BEGIN, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+  ].includes(operationName);
+}
+
+function taskLifecycleCanRunWithoutIntegrity(operationName) {
+  return [
+    OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+  ].includes(operationName);
+}
+
+function taskLifecycleIgnoresWorkspaceArgument(operationName) {
+  return [
+    OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+  ].includes(operationName);
 }
 
 function taskAttributionRequiresIntegrity(operationName) {

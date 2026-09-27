@@ -49,7 +49,7 @@ function connectionView(status) {
     return {
       key: 'failed', badge: 'Needs attention', eyebrow: 'Connection failed',
       title: 'Rel.AI could not finish connecting.',
-      description: 'Restart the connection first. If the problem continues, restart Rel.AI or edit the connection settings.'
+      description: 'Use the recovery actions below.'
     };
   }
   return {
@@ -99,10 +99,10 @@ function attentionHero(activity, taskCount, reason = '') {
       ? 'Checks need attention.'
       : 'The current task is blocked.';
   const description = reason === 'waiting_for_approval'
-    ? 'The task is paused until the required approval is handled in the AI host.'
+    ? 'The task is paused and waits for your approval in ChatGPT.'
     : reason === 'validation_failed'
-      ? 'Review the failed checks, fix the issue, then validate again.'
-      : 'Resolve the blocker before the task can continue.';
+      ? 'Review the failed checks. Fix the issue. Validate again.'
+      : 'Resolve the problem before the task can continue.';
   return {
     key: 'attention',
     badge: 'Action required',
@@ -338,8 +338,17 @@ function ensureClock() {
   }, delay);
 }
 
-function nextRelativeClockDelay(timestamp) {
-  const age = Math.max(0, Date.now() - (Date.parse(timestamp) || Number(timestamp) || Date.now()));
+function parseTimestampMs(value) {
+  if (value == null || value === '') return Number.NaN;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && String(value).trim() !== '') return numeric;
+  return Date.parse(String(value));
+}
+
+function nextRelativeClockDelay(timestamp, now = Date.now()) {
+  const parsed = parseTimestampMs(timestamp);
+  const age = Number.isFinite(parsed) ? Math.max(0, now - parsed) : 0;
   if (age < 60_000) return Math.max(250, 1000 - (age % 1000));
   return Math.max(1000, 60_000 - (age % 60_000));
 }
@@ -347,18 +356,22 @@ function nextRelativeClockDelay(timestamp) {
 function renderTemporalText() {
   const activity = currentStatus.taskActivity || {};
   const elapsed = document.getElementById('taskElapsed');
-  if (elapsed && activity.startedAt) elapsed.textContent = formatDuration(Date.now() - activity.startedAt);
+  const startedAt = parseTimestampMs(activity.startedAt);
+  if (elapsed) elapsed.textContent = Number.isFinite(startedAt) ? formatDuration(Date.now() - startedAt) : '';
   const task = activity.lastTask;
   const lastTime = document.getElementById('lastTaskTime');
   const endedAt = task?.endedAt || task?.completedAt;
-  if (lastTime && endedAt) {
-    lastTime.dateTime = new Date(endedAt).toISOString();
-    lastTime.textContent = relativeTime(endedAt);
+  const endedAtMs = parseTimestampMs(endedAt);
+  if (lastTime && Number.isFinite(endedAtMs)) {
+    lastTime.dateTime = new Date(endedAtMs).toISOString();
+    lastTime.textContent = relativeTime(endedAtMs);
   }
 }
 
-function relativeTime(timestamp) {
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+function relativeTime(timestamp, now = Date.now()) {
+  const parsed = parseTimestampMs(timestamp);
+  if (!Number.isFinite(parsed)) return '';
+  const seconds = Math.max(0, Math.floor((now - parsed) / 1000));
   if (seconds < 5) return 'Just now';
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);

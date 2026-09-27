@@ -89,7 +89,7 @@ async function connect() {
   button.textContent = 'Connecting…';
   try {
     const result = await window.electronAPI.wizardDone({ tunnelId, tunnelApiKey, port, restart: recoveryMode });
-    if (!result?.ok || !result?.status?.serverRunning || result.status.tunnelStatus !== 'running') {
+    if (!result?.ok || !result?.status?.serverRunning) {
       throw new Error(result?.status?.error || 'The ChatGPT connection did not become ready.');
     }
   } catch (error) {
@@ -125,14 +125,14 @@ function applyUpdateMode() {
   if (detail && (updatePreviousVersion || updateCurrentVersion)) {
     const from = updatePreviousVersion ? ` from v${updatePreviousVersion}` : '';
     const to = updateCurrentVersion ? ` to v${updateCurrentVersion}` : '';
-    detail.textContent = `This looks like an update${from}${to} installed from a full download instead of the in-app updater. Your previous connection was not found on this launch, so reconnect once and you will be back where you left off.`;
+    detail.textContent = `Rel.AI was updated${from}${to} with a full download. This launch did not find the saved connection. Reconnect once to continue.`;
   }
   const eyebrow = $('wizardEyebrow');
   if (eyebrow) eyebrow.textContent = 'Finish updating Rel.AI';
   const title = $('wizardTitle');
   if (title) title.textContent = 'Reconnect after the update';
   const subtitle = $('wizardSubtitle');
-  if (subtitle) subtitle.textContent = 'Rel.AI was updated from a full download. Confirm your Secure MCP Tunnel below to finish updating — nothing else needs to change.';
+  if (subtitle) subtitle.textContent = 'Rel.AI was updated with a full download. Confirm your Secure MCP Tunnel below. No other settings need to change.';
   const action = $('connectBtn');
   if (action) action.textContent = 'Reconnect after update';
   // Remember the pre-update button label so a failed reconnect restores the
@@ -140,7 +140,10 @@ function applyUpdateMode() {
   if (action) action.dataset.updateLabel = 'Reconnect after update';
 }
 
-$('connectBtn').addEventListener('click', connect);
+$('connectionForm').addEventListener('submit', event => {
+  event.preventDefault();
+  void connect();
+});
 $('runtimeKeyToggle').addEventListener('click', () => {
   const input = $('tunnelApiKeyInput');
   const button = $('runtimeKeyToggle');

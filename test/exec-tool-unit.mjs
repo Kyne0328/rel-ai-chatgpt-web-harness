@@ -169,6 +169,18 @@ try {
     true,
     'provably read-only direct exec must use the no-mutation-scan path'
   );
+  assert.equal(isClearlyReadOnlyExec({ command: 'git status --short --branch' }), true, 'simple read-only shell commands must skip mutation scans');
+  assert.equal(isClearlyReadOnlyExec({ command: 'node --version' }), true, 'simple read-only Node shell commands must skip mutation scans');
+  assert.equal(isClearlyReadOnlyExec({ command: 'git status && node --version' }), false, 'shell control operators must keep conservative mutation tracking');
+  assert.equal(isClearlyReadOnlyExec({ command: 'git status > status.txt' }), false, 'shell redirection must never be classified read-only');
+  for (const command of ['ls -la', 'dir /b', 'cat package.json', 'head -n 5 package.json', 'tail -n 5 package.json', 'grep rel-ai package.json', 'rg rel-ai src', 'find src -name package.json', 'findstr rel-ai package.json', 'wc -l package.json', 'diff package.json package.json']) {
+    assert.equal(isClearlyReadOnlyExec({ command }), true, `${command} must use the read-only execution path`);
+  }
+  assert.equal(isClearlyReadOnlyExec({ command: 'find . -delete' }), false, 'find actions that mutate files must remain mutation-tracked');
+  assert.equal(isClearlyReadOnlyExec({ command: 'find . -exec rm {} ;' }), false, 'shell control syntax must keep find -exec mutation-tracked');
+  assert.equal(isClearlyReadOnlyExec({ command: 'rg --pre formatter pattern src' }), false, 'ripgrep pre-processors can execute arbitrary commands and must remain mutation-tracked');
+  assert.equal(isClearlyReadOnlyExec({ command: 'diff --output patch.txt package.json package.json' }), false, 'diff output files must remain mutation-tracked');
+  assert.equal(isClearlyReadOnlyExec({ command: 'npm test' }), false, 'test runners are not provably read-only and must remain mutation-tracked');
   const directReadOnly = await execCall({ executable: process.execPath, argv: ['--version'] });
   assert.equal(directReadOnly.commandSucceeded, true);
 
@@ -208,7 +220,7 @@ try {
     cwd: 'nested',
     env: { RELAI_EXEC_TEST: 'nested' }
   });
-  assert.equal(nestedResult.cwd, 'nested');
+  assert.equal(nestedResult.cwd, undefined, 'routine success must not echo the caller-owned cwd');
   assert.match(nestedResult.stdout, /cwd=nested;env=nested/);
 
   const failure = await execCall({

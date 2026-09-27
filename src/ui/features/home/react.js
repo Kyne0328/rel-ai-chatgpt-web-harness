@@ -1,12 +1,11 @@
 import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { copyText } from '../../clipboard.js';
 import { Icon } from '../../components/icons.js';
-import { pillClass } from '../../components/pill.js';
+import { StatusPill } from '../../components/pill.js';
 import { taskProgressView } from '../../components/task-progress.js';
 import { toast } from '../../components/toast.js';
 import { routeMetadata } from '../../navigation-catalog.js';
 import { getWorkspaceFilter, routeHref } from '../../router.js';
-import { statusTone } from '../../status-tone.js';
 import { workSessionStateView } from '../../task-identity.js';
 import { classifyTaskActivity } from '../../../taskActivityPresentation.js';
 import { formatDuration, timeAgo } from '../../utils.js';
@@ -17,8 +16,9 @@ import { loadAnalyticsData } from '../usage/data.js';
 import { desktopSetupState, homeAnalyticsView, overviewState, overviewWorkspaceStatus } from './index.js';
 
 const h = React.createElement;
-const SparkChart = lazy(() => import('../../components/charts.js').then(module => ({ default: module.SparkChart })));
+const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
 const HOME_STORE_KEYS = Object.freeze(['config', 'health', 'connection', 'connectionState', 'desktopStatus', 'mcpConnection', 'tasks', 'taskActivity', 'live']);
+const HOME_TASK_SUMMARY_MAX = 180;
 
 export function createHomeRoute(useDashboardSlices) {
   return function HomeRoute() {
@@ -46,9 +46,9 @@ function HomeView({ data = {} }) {
 function ConnectionHero({ state }) {
   return h('section', { className: `overview-hero overview-hero-compact ${state.tone}`, 'data-home-live-connection': '' },
     h('div', { className: 'overview-copy' },
-      h('div', { className: 'overview-kicker' }, state.kicker),
+      state.kicker ? h('div', { className: 'overview-kicker' }, state.kicker) : null,
       h('h2', { className: 'overview-title' }, state.title),
-      h('p', { className: 'overview-description' }, state.description)
+      state.description ? h('p', { className: 'overview-description' }, state.description) : null
     ),
     h('a', { className: 'buttonlike secondary compact-button', href: routeMetadata('settings/connection').href }, 'View connection')
   );
@@ -61,7 +61,7 @@ function TaskActivityCard({ model }) {
     const startedAtMs = Date.parse(startedAt) || Number(task.startedAt || Date.now());
     const stateClass = model.attention ? 'attention' : model.waiting ? 'waiting' : 'active';
     return h('section', { className: `card task-overview ${stateClass}`, 'data-home-live-activity': '' },
-      h('div', { className: 'task-overview-mark', 'aria-hidden': 'true' }, model.attention ? '!' : model.waiting ? '…' : h('span', { className: 'task-overview-spinner' })),
+      h('div', { className: 'task-overview-mark', 'aria-hidden': 'true' }, model.attention ? h(Icon, { name: 'warning', size: 18 }) : model.waiting ? h(Icon, { name: 'timer', size: 18 }) : h('span', { className: 'task-overview-spinner' })),
       h('div', { className: 'task-overview-copy' },
         h('div', { className: 'overview-kicker' }, 'Current task'),
         h('h3', null, model.title),
@@ -75,16 +75,17 @@ function TaskActivityCard({ model }) {
     );
   }
   return h('section', { className: `card task-overview ${model.tone}`, 'data-home-live-activity': '' },
-    h('div', { className: 'task-overview-mark', 'aria-hidden': 'true' }, model.mark),
+    h('div', { className: 'task-overview-mark', 'aria-hidden': 'true' }, h(Icon, { name: model.icon, size: 18 })),
     h('div', { className: 'task-overview-copy' },
       h('div', { className: 'overview-kicker' }, 'Previous task'),
       h('h3', null, task.title || model.title),
-      h('p', null, model.description),
+      h('p', { className: 'task-overview-summary' }, model.description),
       h(TaskProgress, { progress: task.progress, status: task.status, compact: true })
     ),
     h('div', { className: 'task-overview-meta' },
       h('span', { 'data-clock-relative': task.endedAt || task.completedAt || '' }, timeAgo(task.endedAt || task.completedAt)),
-      h('strong', null, formatDuration(task.durationMs))
+      h('strong', null, formatDuration(task.durationMs)),
+      model.detailsHref ? h('a', { className: 'task-overview-link', href: model.detailsHref }, 'View task') : null
     )
   );
 }
@@ -132,18 +133,28 @@ function taskActivityModel(activity = {}, persistedTask = null) {
   const completed = task.status === 'completed' && task.completionKnown === true;
   const failed = Number(task.failures || 0);
   const callCount = Number(task.calls || 0);
-  let mark = '•';
+  let icon = 'pause';
   let title = 'Last task is inactive';
   if (attention) {
-    mark = '!';
+    icon = 'warning';
     title = task.status === 'blocked' ? 'Last task was blocked' : task.status === 'validation_failed' ? 'Last task needs attention' : 'Last task failed';
   } else if (completed) {
-    mark = '✓';
+    icon = 'success';
     title = 'Task completed';
   }
   const failureText = failed ? completed ? ` · ${failed} warning${failed === 1 ? '' : 's'}` : ` · ${failed} failed` : '';
-  const completionText = completed ? ` · ${task.summary || 'final checks passed'}` : ' · ChatGPT did not report a final result';
-  return { active: false, task, mark, title, tone: attention ? 'attention' : completed ? 'completed' : 'waiting', description: `${task.workspace || 'project'} · ${callCount} ${pluralLabel(callCount, 'action')}${failureText}${completionText}` };
+  const completionSummary = completed ? compactTaskSummary(task.summary) || 'Final checks passed.' : 'ChatGPT did not report a final result.';
+  const taskId = String(task.id || task.taskId || task.work_id || '').trim();
+  const detailsHref = taskId ? routeHref('tasks', { workspace: task.workspace || '', task: taskId }) : '';
+  return {
+    active: false,
+    task,
+    icon,
+    title,
+    tone: attention ? 'attention' : completed ? 'completed' : 'waiting',
+    detailsHref,
+    description: `${task.workspace || 'No project'} · ${callCount} ${pluralLabel(callCount, 'action')}${failureText} · ${completionSummary}`
+  };
 }
 
 function WorkspaceSummaryCard({ workspaces, findings }) {
@@ -169,10 +180,10 @@ function RecentTasksCard({ tasks }) {
         const taskId = String(task.id || task.taskId || task.work_id || '').trim();
         return h('a', { className: 'activity-row', href: routeHref('tasks', { workspace: task.workspace || '', task: taskId }), key: taskId || `${task.workspace}-${endedAt || task.startedAt || ''}` },
           h('span', { className: 'activity-time', 'data-clock-relative': endedAt || undefined }, endedAt ? timeAgo(endedAt) : 'now'),
-          h('span', { className: 'activity-name truncate' }, h('strong', null, task.title || task.operation || taskAction(task.lastTool)), ` · ${task.workspace || 'project'} · ${task.toolCallCount ?? task.calls ?? 0} actions${warningText}`),
+          h('span', { className: 'activity-name truncate' }, h('strong', null, task.title || task.operation || taskAction(task.lastTool)), ` · ${task.workspace || 'No project'} · ${task.toolCallCount ?? task.calls ?? 0} actions${warningText}`),
           h(StatusPill, recentTaskStatusProps(task))
         );
-      }) : h('div', { className: 'empty' }, 'Tasks will appear here after ChatGPT starts using Rel.AI on a project.')
+      }) : h('div', { className: 'empty' }, 'Tasks will appear here after ChatGPT starts a Rel.AI goal.')
     )
   );
 }
@@ -253,11 +264,21 @@ function DesktopSetupChecklist({ setup }) {
     window.addEventListener('relai:onboarding-state', onState);
     return () => window.removeEventListener('relai:onboarding-state', onState);
   }, []);
-  useEffect(() => { if (!remaining.length) void completeDesktopSetup(); }, [remaining.length]);
+  useEffect(() => {
+    if (remaining.length) return;
+    void completeDesktopSetup().then(result => {
+      if (result?.ok) toast('Rel.AI is connected and ready to use with ChatGPT!', { variant: 'success' });
+    });
+  }, [remaining.length]);
   if (!remaining.length || dismissed) return null;
   const dismiss = async () => {
     setDismissed(true);
-    await dismissDesktopSetup();
+    const result = await dismissDesktopSetup();
+    if (!result?.ok) {
+      setDismissed(false);
+      toast('Could not dismiss the getting started guide. Try again.', { variant: 'error' });
+      return;
+    }
     toast('Getting started guide dismissed.', { variant: 'info' });
   };
   const copyPrompt = async () => {
@@ -269,7 +290,7 @@ function DesktopSetupChecklist({ setup }) {
   };
   return h('section', { className: 'card desktop-setup-checklist', 'data-desktop-setup-checklist': '' },
     h('div', { className: 'card-head desktop-setup-head' },
-      h('div', null, h('span', { className: 'desktop-setup-eyebrow' }, 'Getting started'), h('h3', null, 'Get Rel.AI working with ChatGPT'), h('p', null, `${completedCount} of ${steps.length} steps complete. Follow the highlighted step.`)),
+      h('div', null, h('span', { className: 'desktop-setup-eyebrow' }, 'Getting started'), h('h3', null, 'Get Rel.AI working with ChatGPT'), h('p', null, `${completedCount} of ${steps.length} steps complete.`)),
       h('button', { className: 'secondary compact-button', type: 'button', onClick: dismiss }, 'Dismiss guide')
     ),
     h('div', { className: 'card-body desktop-setup-items' }, steps.map((item, index) => h(DesktopSetupStep, { key: item.id, item, index, current: item.id === current?.id, setup, copyState, onCopy: copyPrompt })))
@@ -280,7 +301,7 @@ function DesktopSetupStep({ item, index, current, setup, copyState, onCopy }) {
   const state = item.complete ? 'Done' : item.locked ? 'Not ready' : current ? 'Next' : 'Ready';
   const className = `desktop-setup-item${item.complete ? ' done' : ''}${current ? ' current' : ''}${item.locked ? ' locked' : ''}`;
   return h('div', { className },
-    h('span', { className: 'desktop-setup-index', 'aria-hidden': 'true' }, item.complete ? '✓' : index + 1),
+    h('span', { className: 'desktop-setup-index', 'aria-hidden': 'true' }, item.complete ? h(Icon, { name: 'check', size: 12 }) : index + 1),
     h('div', { className: 'desktop-setup-copy' },
       h('div', { className: 'desktop-setup-title-row' }, h('strong', null, item.title), h('span', { className: 'desktop-setup-state' }, state)),
       h('p', null, item.description),
@@ -305,14 +326,14 @@ function ChatGptSetupGuide({ tunnelId }) {
     setIconSaved(true);
   };
   return h('div', { className: 'chatgpt-setup-guide compact desktop-chatgpt-guide' },
-    h('div', { className: 'chatgpt-guide-heading' }, h('strong', null, 'Finish ChatGPT setup'), h('span', null, 'Use Tunnel + No authentication. Rel.AI keeps the local connection private.')),
+    h('div', { className: 'chatgpt-guide-heading' }, h('span', null, 'Use Tunnel + No authentication.')),
     h('section', { className: 'chatgpt-connector-handoff', 'aria-label': 'ChatGPT connector setup' },
       h('dl', { className: 'chatgpt-connector-values' }, h('dt', null, 'Name'), h('dd', null, 'Rel.AI MCP'), h('dt', null, 'Connection'), h('dd', null, 'Tunnel'), h('dt', null, 'Tunnel'), h('dd', { className: 'mono' }, tunnelId || 'Select this computer’s tunnel'), h('dt', null, 'Authentication'), h('dd', null, 'No authentication')),
       h('div', { className: 'chatgpt-connector-actions', role: 'group', 'aria-label': 'ChatGPT connector setup actions' },
         h('button', { className: 'primary', type: 'button', onClick: () => window.open(CHATGPT_CONNECTOR_CREATE_URL, '_blank', 'noopener,noreferrer') }, 'ChatGPT setup'),
         h('button', { className: 'secondary', type: 'button', onClick: saveIcon }, iconSaved ? `Optional icon saved · ${RELAI_CONNECTOR_ICON_FILENAME}` : h(React.Fragment, null, 'Save optional Rel.AI icon ', h('span', null, 'PNG · under 10 KB')))
       ),
-      h('p', { className: 'chatgpt-connector-note' }, iconSaved ? 'The icon is optional. Open ChatGPT setup when you are ready.' : 'Open ChatGPT now. You can add the Rel.AI icon after the connector works.')
+      iconSaved ? null : h('p', { className: 'chatgpt-connector-note' }, 'You can add the optional Rel.AI icon after the connector works.')
     ),
     h('ol', null, steps.map(step => h('li', { key: step }, step)))
   );
@@ -334,13 +355,6 @@ function taskAction(tool) {
   if (/git_commit|git_push/.test(value)) return 'Publishing changes';
   if (/edit|write|replace|tidy_run|restore|reset_workspace/.test(value)) return 'Applying changes';
   return 'Looking through the project';
-}
-function StatusPill({ value, classOverride = '' }) {
-  const cls = String(classOverride || pillClass(value)).trim();
-  return h('span', { className: `status-pill${cls ? ` ${cls}` : ''}` },
-    String(value || 'unknown'),
-    h('span', { className: 'sr-only' }, ` (${statusTone(value)})`)
-  );
 }
 
 function TaskProgress({ progress, status, compact = false }) {
@@ -387,4 +401,11 @@ function recentTaskStatusProps(task) {
   return { value: 'unknown' };
 }
 function statusLabel(status) { return String(status || 'open').replaceAll('_', ' '); }
+function compactTaskSummary(value, maxLength = HOME_TASK_SUMMARY_MAX) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  const boundary = text.lastIndexOf(' ', maxLength - 1);
+  const end = boundary >= Math.floor(maxLength * 0.65) ? boundary : maxLength - 1;
+  return `${text.slice(0, end).trimEnd()}…`;
+}
 function pluralLabel(count, singular) { return Number(count) === 1 ? singular : `${singular}s`; }
