@@ -4,10 +4,7 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { performance } from 'node:perf_hooks';
 
-process.env.REL_AI_MCP_HEAVY_WORK_LIMIT = '2';
-process.env.REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS = '60';
 process.env.REL_AI_MCP_PERSISTENT_PROCESS_LIMIT = '2';
 process.env.REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS = '1000';
 
@@ -26,13 +23,12 @@ const {
 
 await verifyRoundRobinFairness();
 await verifyQueueCancellation();
-await verifyDefaultHeavyQueueTimeout();
+await verifyUnboundedHeavyAdmission();
 await verifyDefaultPersistentQueueTimeout();
-await verifyExecutionTimeoutExcludesQueueWait();
 await verifyRepositoryQueryTimeoutExcludesQueueWait();
 await verifyPersistentCapacityIncludesRestartOrphans();
 
-console.log('Host resource scheduling, fairness, timeout, and restart-capacity tests passed.');
+console.log('Host resource scheduling, unbounded heavy execution, fairness, timeout, and restart-capacity tests passed.');
 
 async function verifyRoundRobinFairness() {
   const scheduler = createFairResourceScheduler({ heavy: 1 });
@@ -68,23 +64,26 @@ async function verifyQueueCancellation() {
   assert.equal(scheduler.stats().heavy.active, 0);
 }
 
-async function verifyDefaultHeavyQueueTimeout() {
-  const blockerA = await acquireHostResource('heavy', 'default-timeout-a');
-  const blockerB = await acquireHostResource('heavy', 'default-timeout-b');
+async function verifyUnboundedHeavyAdmission() {
+  const blockerA = await acquireHostResource('heavy', 'unbounded-a');
+  const blockerB = await acquireHostResource('heavy', 'unbounded-b');
   try {
+    assert.deepEqual(hostResourceStats().heavy, { limit: null, active: 2, queued: 0, queuedOwners: 0 });
     const result = await runProcess(process.execPath, ['-e', 'process.exit(0)'], {
       resourceClass: 'heavy',
-      resourceOwner: 'default-timeout-c',
+      resourceOwner: 'unbounded-c',
+      queueTimeoutMs: 1,
       timeout: 3000
     });
-    assert.equal(result.queueTimedOut, true, 'heavy work must not wait indefinitely when host capacity is full');
-    assert.equal(result.cancelled, false);
-    assert.ok(result.queueWaitMs >= 40, `expected the default queue deadline to be observed, got ${result.queueWaitMs}ms`);
+    assert.equal(result.exitCode, 0, 'heavy work should start immediately without an application-level admission cap');
+    assert.equal(result.queueTimedOut, undefined);
+    assert.equal(result.queueWaitMs, 0);
+    assert.deepEqual(hostResourceStats().heavy, { limit: null, active: 2, queued: 0, queuedOwners: 0 });
   } finally {
     blockerA.release();
     blockerB.release();
   }
-  assert.equal(hostResourceStats().heavy.queued, 0, 'timed-out host work must leave no queue residue');
+  assert.deepEqual(hostResourceStats().heavy, { limit: null, active: 0, queued: 0, queuedOwners: 0 });
 }
 
 async function verifyDefaultPersistentQueueTimeout() {
@@ -119,30 +118,6 @@ async function verifyDefaultPersistentQueueTimeout() {
   }
 }
 
-async function verifyExecutionTimeoutExcludesQueueWait() {
-  const blockerA = await acquireHostResource('heavy', 'blocker-a');
-  const blockerB = await acquireHostResource('heavy', 'blocker-b');
-  const started = performance.now();
-  const command = runProcess(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 10)'], {
-    resourceClass: 'heavy',
-    resourceOwner: 'repo-c',
-    queueTimeoutMs: 5000,
-    timeout: 3000
-  });
-  await waitFor(() => hostResourceStats().heavy.queued === 1, 'one-shot command to enter the host queue');
-  await sleep(3300);
-  blockerA.release();
-  const result = await command;
-  blockerB.release();
-
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.timedOut, false);
-  assert.equal(result.queueTimedOut, undefined);
-  assert.ok(result.queueWaitMs >= 3000, `expected queue wait to exceed the execution timeout, got ${result.queueWaitMs}ms`);
-  assert.ok(performance.now() - started >= 3000, 'the command must actually have waited longer than its execution timeout before admission');
-  assert.equal(hostResourceStats().heavy.active, 0);
-}
-
 async function verifyRepositoryQueryTimeoutExcludesQueueWait() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-host-ri-'));
   const stateDir = path.join(root, 'state');
@@ -158,8 +133,7 @@ async function verifyRepositoryQueryTimeoutExcludesQueueWait() {
     }
   };
 
-  let blockerA;
-  let blockerB;
+  const blockers = [];
   try {
     await repositoryIntelligence.ensure(workspace, config, { watch: false });
     const warmSummary = await repositoryIntelligence.cachedSummary(workspace, config, {
@@ -167,26 +141,25 @@ async function verifyRepositoryQueryTimeoutExcludesQueueWait() {
       queryQueueTimeoutMs: 5000
     });
     assert.equal(warmSummary?.available, true, 'warm-up must prove the query worker is ready before queue timing is measured');
-    blockerA = await acquireHostResource('heavy', 'ri-blocker-a');
-    blockerB = await acquireHostResource('heavy', 'ri-blocker-b');
+    for (let index = 0; index < 4; index += 1) {
+      blockers.push(await acquireHostResource('repositoryQuery', `ri-blocker-${index}`));
+    }
     const query = repositoryIntelligence.cachedSummary(workspace, config, {
       queryTimeoutMs: 1000,
       queryQueueTimeoutMs: 3000
     });
-    await waitFor(() => hostResourceStats().heavy.queued === 1, 'Repository Intelligence query to enter the host queue');
+    await waitFor(() => hostResourceStats().repositoryQuery.queued === 1, 'Repository Intelligence query to enter the host queue');
     await sleep(1200);
-    blockerA.release();
-    blockerA = null;
+    blockers.shift()?.release();
     const summary = await query;
     assert.equal(summary?.available, true);
     assert.equal(summary?.source, 'persistent-code-graph');
   } finally {
-    blockerA?.release();
-    blockerB?.release();
+    for (const blocker of blockers) blocker.release();
     await repositoryIntelligence.shutdown().catch(() => {});
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
-  assert.equal(hostResourceStats().heavy.active, 0);
+  assert.equal(hostResourceStats().repositoryQuery.active, 0);
 }
 
 async function verifyPersistentCapacityIncludesRestartOrphans() {

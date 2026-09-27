@@ -534,6 +534,23 @@ async function case_execution_plan_unit() {
   assert.equal(parallelResult.metrics.parallelGroupCount, 1);
   assert.ok(parallelResult.metrics.overlapTimeMs > 50, `expected measurable step overlap, got ${parallelResult.metrics.overlapTimeMs}ms`);
   assert.ok(parallelWallMs < 260, `four 70ms steps at concurrency 2 should overlap, got ${parallelWallMs}ms`);
+
+  active = 0;
+  observedMax = 0;
+  const requestedConcurrency = 12;
+  const unboundedResult = await runPlan(parallel(
+    Array.from({ length: requestedConcurrency }, (_, index) => step(`unbounded-${index}`, async () => {
+      active += 1;
+      observedMax = Math.max(observedMax, active);
+      await sleep(20);
+      active -= 1;
+      return index;
+    })),
+    { maxConcurrency: requestedConcurrency }
+  ));
+  assert.equal(unboundedResult.ok, true);
+  assert.equal(observedMax, requestedConcurrency, 'explicit execution-plan concurrency must not be clamped by a fixed application ceiling');
+  assert.equal(unboundedResult.metrics.maxConcurrentSteps, requestedConcurrency);
   
   const sequenceStarted = performance.now();
   const sequenceResult = await runPlan(sequence([

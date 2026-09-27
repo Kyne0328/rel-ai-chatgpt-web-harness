@@ -1,7 +1,6 @@
 import { performance } from 'node:perf_hooks';
 
 const DEFAULT_MAX_CONCURRENCY = 4;
-const MAX_CONCURRENCY = 8;
 
 type ExecutionStepValue = unknown;
 type ExecutionStepRunner = (context: { readonly signal: AbortSignal | undefined }) => ExecutionStepValue | Promise<ExecutionStepValue>;
@@ -287,7 +286,7 @@ function countGroups(node: unknown, type: 'parallel' | 'sequence'): number {
 function clampConcurrency(value: unknown): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return DEFAULT_MAX_CONCURRENCY;
-  return Math.min(MAX_CONCURRENCY, Math.max(1, Math.floor(numeric)));
+  return Math.max(1, Math.floor(numeric));
 }
 
 function abortError(signal: AbortSignal | undefined): Error {

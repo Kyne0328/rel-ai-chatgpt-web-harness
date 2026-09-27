@@ -245,7 +245,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
       }
     ));
     return stage.parallel
-      ? parallel(nodes, { maxConcurrency: 3, stopOnFailure })
+      ? parallel(nodes, { maxConcurrency: nodes.length, stopOnFailure })
       : sequence(nodes, { stopOnFailure });
   });
   const execution = await runPlan(sequence(planStages, { stopOnFailure }), { signal });
