@@ -61,7 +61,7 @@ assert.equal(result.structuredContent.image.data, undefined);
 assert.equal(result.structuredContent.image.mimeType, 'image/png');
 assert.equal(result.structuredContent.image.bytes, 32);
 assert.equal(result.structuredContent.work_id, undefined, 'routine screenshot success must not echo caller-owned task identity');
-assert.equal(result.structuredContent.workspace, undefined, 'routine screenshot success must not echo caller-owned workspace');
+assert.equal(result.structuredContent.workspace, 'repo', 'routine screenshot success must retain required workspace identity');
 assert.equal(result.structuredContent.action, 'screenshot', 'routine success must retain action identity');
 assert.equal(result.structuredContent.sessionId, screenshotArgs.sessionId, 'routine success must retain resource identity');
 

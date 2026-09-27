@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -16,9 +17,12 @@ function isTransientAuditFailure(result = {}) {
 function runAudit(npmCli, prefix) {
   const args = [npmCli, 'audit', '--omit=dev', ...(prefix ? [] : ['--omit=peer']), '--audit-level=high', ...AUDIT_NETWORK_ARGS];
   if (prefix) args.push('--prefix', prefix);
+  const env = { ...process.env, npm_config_userconfig: os.devNull };
+  delete env.npm_config_allow_scripts;
+  delete env.NPM_CONFIG_ALLOW_SCRIPTS;
   return spawnSync(process.execPath, args, {
     cwd: root,
-    env: process.env,
+    env,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
     shell: false,

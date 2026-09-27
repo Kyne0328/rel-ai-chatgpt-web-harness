@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -31,6 +32,9 @@ function evaluatePackagingAudit({ report }) {
 }
 
 function runNpmAuditAttempt(npmCli) {
+  const env = { ...process.env, npm_config_userconfig: os.devNull };
+  delete env.npm_config_allow_scripts;
+  delete env.NPM_CONFIG_ALLOW_SCRIPTS;
   return spawnSync(process.execPath, [
     npmCli,
     'audit',
@@ -40,7 +44,7 @@ function runNpmAuditAttempt(npmCli) {
     ...AUDIT_NETWORK_ARGS
   ], {
     cwd: root,
-    env: process.env,
+    env,
     encoding: 'utf8',
     maxBuffer: 16 * 1024 * 1024,
     shell: false,
