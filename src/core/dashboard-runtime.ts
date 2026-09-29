@@ -312,7 +312,7 @@ export function createDashboardEventSubscription(
     try {
       const config = readConfigCached();
       sendDomain(DASHBOARD_LIVE_EVENTS.PROCESS_UPDATED, 'process', event.revision, {
-        managedProcesses: listManagedProcesses(config, { limit: 200, activeOnly: true }).processes
+        managedProcesses: listManagedProcesses(config, { limit: 200, activeOnly: true, includeTail: true, tailBytes: 16 * 1024 }).processes
       });
     } catch (error) {
       sink.onError(error);

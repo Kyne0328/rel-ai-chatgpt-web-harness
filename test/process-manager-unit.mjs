@@ -8,6 +8,7 @@ import path from 'node:path';
 import {
   activeProcessesForWorkSession,
   listManagedProcesses,
+  onManagedProcessChange,
   readManagedProcess,
   startManagedProcess,
   stopAllManagedProcesses,
@@ -148,6 +149,15 @@ try {
   }, workspaceRecovery);
   assert.equal(tasklessWrite.acceptedBytes, 15, 'same-principal workspace-scoped process input must not require resurrecting the original task');
 
+  let outputUpdate = null;
+  const outputUpdated = new Promise(resolve => {
+    const unsubscribe = onManagedProcessChange(event => {
+      if (event.processId !== started.processId || event.status !== 'running') return;
+      unsubscribe();
+      outputUpdate = event;
+      resolve(event);
+    });
+  });
   const written = await writeManagedProcess(config, {
     processId: started.processId,
     input: 'hello\n'
@@ -157,6 +167,18 @@ try {
     stdoutOffset: first.stdout.nextOffset
   });
   assert.match(echoed.stdout.text, /ECHO:hello/);
+  await Promise.race([outputUpdated, sleep(1000)]);
+  assert.ok(outputUpdate, 'persisted stdout/stderr changes must notify dashboard subscribers while the process is still running');
+  const listedWithOutput = listManagedProcesses(config, {
+    workspace: 'app',
+    includeTail: true,
+    tailBytes: 8192
+  }, ownerLater);
+  const listedProcessWithOutput = listedWithOutput.processes.find(item => item.processId === started.processId);
+  assert.match(listedProcessWithOutput?.stdoutTail || '', /ECHO:hello/);
+  const listedWithoutOutput = listManagedProcesses(config, { workspace: 'app' }, ownerLater);
+  const listedProcessWithoutOutput = listedWithoutOutput.processes.find(item => item.processId === started.processId);
+  assert.equal(Object.hasOwn(listedProcessWithoutOutput || {}, 'stdoutTail'), false, 'public process listings must stay compact unless output tails are explicitly requested');
 
   await writeManagedProcess(config, {
     processId: started.processId,

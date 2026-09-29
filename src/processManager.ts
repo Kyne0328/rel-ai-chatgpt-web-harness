@@ -66,6 +66,8 @@ interface ManagedProcessArgs extends GenericRecord {
   readonly status?: unknown;
   readonly includeTerminal?: unknown;
   readonly activeOnly?: unknown;
+  readonly includeTail?: unknown;
+  readonly tailBytes?: unknown;
   readonly limit?: unknown;
   readonly taskId?: unknown;
 }
@@ -973,7 +975,9 @@ function listManagedProcesses(config: ManagedProcessConfig, args: ManagedProcess
     .filter(item => includeTerminal || !TERMINAL_STATUSES.has(item.status))
     .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
     .slice(0, clampNumber(args.limit, 1, 500, 100))
-    .map(item => processSnapshot(item));
+    .map(item => processSnapshot(item, args.includeTail === true
+      ? { includeTail: true, tailBytes: clampNumber(args.tailBytes, 1024, 64 * 1024, 8192) }
+      : {}));
   return createManagedProcessList(items);
 }
 
@@ -1382,7 +1386,9 @@ function scheduleMetadataPersist(config: ManagedProcessConfig, record: ManagedPr
   if (record.persistTimer || record.persistenceFailureHandled) return;
   record.persistTimer = setTimeout(() => {
     record.persistTimer = null;
-    void queueMetadataPersist(config, record);
+    void queueMetadataPersist(config, record).then(persisted => {
+      if (persisted && !record.discarded) notifyProcessState(record);
+    });
   }, METADATA_FLUSH_DELAY_MS);
   record.persistTimer.unref?.();
 }

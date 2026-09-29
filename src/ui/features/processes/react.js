@@ -114,13 +114,13 @@ const ProcessRow = memo(function ProcessRow({ row }) {
           h('div', null, state.recovery)
         )
       : null,
-    h(ProcessOutput, { output: row.output })
+    h(ProcessOutput, { output: row.output, active: state.active })
   );
 });
 
-function ProcessOutput({ output }) {
-  return h('details', { className: 'process-output' },
-    h('summary', null, 'Recent output'),
+function ProcessOutput({ output, active = false }) {
+  return h('details', { className: 'process-output', open: active && output.hasOutput },
+    h('summary', null, active ? 'Live output' : 'Recent output'),
     output.hasOutput
       ? h(React.Fragment, null,
           output.stdout.trim() ? h(OutputBlock, { stream: 'stdout', value: output.stdout }) : null,
