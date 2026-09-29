@@ -218,7 +218,10 @@ function SessionsPage({ data = {} }) {
                 olderExpanded,
                 setOlderExpanded
               })
-            : h('div', { className: 'inspector-empty' }, h('strong', null, 'Select a task'))
+            : h('div', { className: 'inspector-empty' },
+                h('strong', null, 'Select a task'),
+                h('span', null, 'View its overview, activity, and technical details here.')
+              )
         )
       )
     )

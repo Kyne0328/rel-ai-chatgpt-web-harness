@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { copyText } from '../../clipboard.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
@@ -12,9 +12,11 @@ import { formatDuration, timeAgo } from '../../utils.js';
 import { buildTaskSemanticProgress } from '../../../taskSemanticProgress.js';
 import { completeDesktopSetup, desktopSetupSteps, dismissDesktopSetup, isDesktopSetupDismissed } from '../onboarding/index.js';
 import { CHATGPT_CONNECTOR_CREATE_URL, chatGptFirstPrompt, chatGptGuideSteps } from '../settings/connection-guidance.js';
-import { desktopSetupState, overviewState, overviewWorkspaceStatus } from './index.js';
+import { loadAnalyticsData } from '../usage/data.js';
+import { desktopSetupState, homeAnalyticsView, overviewState, overviewWorkspaceStatus } from './index.js';
 
 const h = React.createElement;
+const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
 const HOME_STORE_KEYS = Object.freeze(['config', 'health', 'connection', 'connectionState', 'desktopStatus', 'mcpConnection', 'tasks', 'taskActivity', 'live']);
 const HOME_TASK_SUMMARY_MAX = 180;
 
@@ -29,13 +31,15 @@ function HomeView({ data = {} }) {
   const state = useMemo(() => overviewState(data, workspace), [data, workspace]);
   const setup = useMemo(() => desktopSetupState(data), [data]);
   const activeCard = taskActivityModel(data.taskActivity, state.tasks[0]);
+  const recentTasks = state.tasks.filter(task => workSessionStateView(task).terminal === true);
   return h('div', { className: 'section', 'data-home-react': '' },
     activeCard ? h(TaskActivityCard, { model: activeCard }) : null,
     h(DesktopSetupChecklist, { setup }),
     h(ConnectionHero, { state: state.bridgeState }),
+    h(HomeAnalytics, { taskRevision: Number(data.live?.revisions?.task || 0), workspace }),
     h('div', { className: 'layout-grid' },
       h(WorkspaceSummaryCard, { workspaces: state.workspaces, findings: state.findings }),
-      h(RecentTasksCard, { tasks: state.tasks })
+      h(RecentTasksCard, { tasks: recentTasks })
     )
   );
 }
@@ -57,15 +61,28 @@ function TaskActivityCard({ model }) {
     const startedAt = task.startedAtIso || task.createdAt || task.startedAt || '';
     const startedAtMs = Date.parse(startedAt) || Number(task.startedAt || Date.now());
     const stateClass = model.attention ? 'attention' : model.waiting ? 'waiting' : 'active';
-    return h('section', { className: `card task-overview ${stateClass}`, 'data-home-live-activity': '' },
+    const multipleTasks = model.tasks?.length > 1;
+    return h('section', { className: `card task-overview ${stateClass}${multipleTasks ? ' multiple' : ''}`, 'data-home-live-activity': '' },
       h('div', { className: 'task-overview-mark', 'aria-hidden': 'true' }, model.attention ? h(Icon, { name: 'warning', size: 18 }) : model.waiting ? h(Icon, { name: 'timer', size: 18 }) : h('span', { className: 'task-overview-spinner' })),
       h('div', { className: 'task-overview-copy' },
-        h('div', { className: 'overview-kicker' }, 'Current task'),
-        h('h3', null, model.title),
-        h('p', null, model.description),
-        h(TaskProgress, { progress: task.progress, status: task.status, compact: true })
+        multipleTasks
+          ? h('div', { className: 'task-overview-multiple-head' },
+              h('div', null,
+                h('div', { className: 'overview-kicker' }, 'Active tasks'),
+                h('h3', null, `${model.tasks.length} active ${pluralLabel(model.tasks.length, 'task')}`)
+              ),
+              h('a', { className: 'section-action', href: routeHref('tasks') }, 'View all tasks')
+            )
+          : h(React.Fragment, null,
+              h('div', { className: 'overview-kicker' }, 'Current task'),
+              h('h3', null, model.title),
+              h('p', null, model.description)
+            ),
+        multipleTasks
+          ? h(ActiveTasksSummary, { tasks: model.tasks })
+          : h(TaskProgress, { progress: task.progress, status: task.status, compact: true })
       ),
-      h('div', { className: 'task-overview-meta' },
+      multipleTasks ? null : h('div', { className: 'task-overview-meta' },
         h('span', null, model.activityLabel),
         h('strong', { 'data-clock-elapsed-start': startedAt }, formatDuration(Date.now() - startedAtMs, { live: true }))
       )
@@ -84,6 +101,25 @@ function TaskActivityCard({ model }) {
       h('strong', null, formatDuration(task.durationMs)),
       model.detailsHref ? h('a', { className: 'task-overview-link', href: model.detailsHref }, 'View task') : null
     )
+  );
+}
+
+function ActiveTasksSummary({ tasks = [] }) {
+  const visible = tasks.slice(0, 3);
+  return h('div', { className: 'overview-active-tasks', 'aria-label': 'Active tasks' },
+    visible.map(task => {
+      const taskId = String(task.id || task.taskId || task.work_id || '').trim();
+      const href = taskId ? routeHref('tasks', { workspace: task.workspace || '', task: taskId }) : routeHref('tasks');
+      const state = workSessionStateView(task);
+      return h('a', { className: 'overview-active-task-row', href, key: taskId || `${task.workspace}-${task.title}-${task.startedAt || ''}` },
+        h('span', { className: 'overview-active-task-copy' },
+          h('strong', null, task.title || task.operation || taskAction(task.lastTool || task.tool)),
+          h('span', null, task.workspace || 'No project')
+        ),
+        h(StatusPill, { state, label: state.label || statusLabel(task.status) })
+      );
+    }),
+    tasks.length > visible.length ? h('a', { className: 'overview-active-task-more', href: routeHref('tasks') }, `+${tasks.length - visible.length} more active ${pluralLabel(tasks.length - visible.length, 'task')}`) : null
   );
 }
 
@@ -107,13 +143,16 @@ function taskActivityModel(activity = {}, persistedTask = null) {
     let title = task.title || operation || 'Current task';
     let description = activityText && activityText !== stage ? `${stage} · ${activityText}` : stage || activityText || 'Task is open';
     description = location ? `${description} in ${location}.` : `${description}.`;
-    if (!task.title && !attention && !waiting && activeTasks.length > 1) title = `${activeCalls} Rel.AI actions are running.`;
-    if (!attention && !waiting && activeTasks.length > 1) description = `${activeCalls} ${pluralLabel(activeCalls, 'active action')} across ${activeTaskLocation(activeTasks)}.`;
+    if (!attention && !waiting && activeTasks.length > 1) {
+      title = `${activeTasks.length} active ${pluralLabel(activeTasks.length, 'task')}`;
+      description = `${activeCalls} ${pluralLabel(activeCalls, 'active action')} across ${activeTaskLocation(activeTasks)}.`;
+    }
     return {
       active: true,
       attention,
       waiting,
       task,
+      tasks: activeTasks,
       title,
       description,
       stage,
@@ -180,7 +219,88 @@ function RecentTasksCard({ tasks }) {
           h('span', { className: 'activity-name truncate' }, h('strong', null, task.title || task.operation || taskAction(task.lastTool)), ` · ${task.workspace || 'No project'} · ${task.toolCallCount ?? task.calls ?? 0} actions${warningText}`),
           h(StatusPill, recentTaskStatusProps(task))
         );
-      }) : h('div', { className: 'empty' }, 'Tasks will appear here after ChatGPT starts a Rel.AI goal.')
+      }) : h('div', { className: 'empty' }, 'Completed tasks will appear here.')
+    )
+  );
+}
+
+function HomeAnalytics({ taskRevision, workspace }) {
+  const [analytics, setAnalytics] = useState({ scope: null, error: false, loading: true });
+  useEffect(() => {
+    let active = true;
+    const timer = window.setTimeout(() => {
+      setAnalytics(current => ({ ...current, loading: !current.scope, error: false }));
+      void loadAnalyticsData({ desktop: globalThis.window?.relaiDesktop, range: '24h', now: new Date(), workspace })
+        .then(({ current }) => { if (active) setAnalytics({ scope: current, error: false, loading: false }); })
+        .catch(() => { if (active) setAnalytics(current => ({ ...current, error: true, loading: false })); });
+    }, 180);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [taskRevision, workspace]);
+  if (analytics.scope) return h(HomeAnalyticsContent, { scope: analytics.scope, refreshing: analytics.loading });
+  return h('section', { className: 'card home-analytics-card compact-summary', 'data-home-analytics': '', 'aria-busy': analytics.loading ? 'true' : 'false' },
+    h('div', { className: 'card-head home-analytics-head' },
+      h('div', null, h('h3', null, 'Last 24 hours'), h('p', null, analytics.error ? 'Activity could not be loaded.' : 'Loading activity…')),
+      h('a', { className: 'buttonlike secondary compact-button', href: routeHref('usage', workspace ? { workspace } : {}) }, 'View analytics')
+    ),
+    analytics.loading ? h('div', { className: 'home-analytics-loading', 'aria-hidden': 'true' }, h('span'), h('span'), h('span')) : null
+  );
+}
+
+function HomeAnalyticsContent({ scope, refreshing }) {
+  const view = homeAnalyticsView(scope);
+  const metrics = view.metrics.slice(0, 3);
+  return h('section', { className: 'card home-analytics-card compact-summary', 'data-home-analytics': '', 'aria-busy': refreshing ? 'true' : 'false' },
+    h('div', { className: 'card-head home-analytics-head' },
+      h('div', null, h('div', { className: 'home-analytics-title-row' }, h(Icon, { name: 'usage', className: 'home-analytics-title-icon', size: 17 }), h('h3', null, view.workspaceScoped ? `${view.workspace} · 24h` : 'Last 24 hours'))),
+      h('a', { className: 'buttonlike secondary compact-button home-analytics-link', href: routeHref('usage', view.workspaceScoped ? { workspace: view.workspace } : {}) }, h('span', null, 'View analytics'), h(Icon, { name: 'chevronRight', size: 15 }))
+    ),
+    h('div', { className: 'home-analytics-body' },
+      h('div', { className: 'home-analytics-metrics' }, metrics.map(metric => h('div', { className: 'home-analytics-metric', key: metric.label }, h('div', { className: 'home-analytics-metric-label' }, h(Icon, { name: homeAnalyticsMetricIcon(metric.label), size: 15 }), h('span', null, metric.label)), h('strong', null, metric.value), metric.detail ? h('small', null, metric.detail) : null))),
+      h(HomeAnalyticsPulse, { pulse: view.pulse }),
+      view.errorSummary ? h('div', { className: 'home-analytics-foot bad', role: 'status' }, h('span', null, view.errorSummary), h('a', { href: routeHref('diagnostics') }, 'Troubleshoot')) : null
+    )
+  );
+}
+
+function homeAnalyticsMetricIcon(label) {
+  if (label === 'Successful actions') return 'success';
+  if (label === 'Average time') return 'timer';
+  return 'activity';
+}
+
+function HomeAnalyticsPulse({ pulse }) {
+  const latestIndex = Math.max(0, Number.isInteger(pulse.latestIndex) ? pulse.latestIndex : pulse.values.length - 1);
+  const [activeIndex, setActiveIndex] = useState(latestIndex);
+  const signature = `${pulse.values.join('|')}:${pulse.labels?.join('|') || ''}`;
+  useEffect(() => { setActiveIndex(latestIndex); }, [signature, latestIndex]);
+  if (pulse.empty) return h('div', { className: 'home-analytics-pulse-empty compact' }, 'No activity yet.');
+
+  const safeIndex = Math.max(0, Math.min(latestIndex, activeIndex));
+  const selected = Number(pulse.values[safeIndex] || 0);
+  const selectedTime = pulse.detailedLabels?.[safeIndex] || pulse.labels?.[safeIndex] || 'Selected hour';
+  const peak = Number(pulse.peak || 0);
+  const readoutId = 'home-analytics-chart-readout';
+  return h('div', { className: 'home-analytics-chart compact' },
+    h('div', { className: 'home-analytics-chart-readout', id: readoutId },
+      h('span', null, selectedTime),
+      h('strong', null, `${selected.toLocaleString()} ${pluralLabel(selected, 'action')}`),
+      h('small', null, safeIndex === pulse.peakIndex ? 'Peak in this range' : `Peak ${peak.toLocaleString()}`)
+    ),
+    h(Suspense, { fallback: h('div', { className: 'home-analytics-chart-canvas chart-loading', 'aria-hidden': 'true' }) },
+      h(SparkChart, {
+        values: pulse.values,
+        className: 'home-analytics-chart-canvas',
+        ariaLabel: pulse.summary,
+        ariaDescribedBy: readoutId,
+        decorative: false,
+        interactive: true,
+        activeIndex: safeIndex,
+        onActiveIndexChange: setActiveIndex
+      })
+    ),
+    h('div', { className: 'home-analytics-scale', 'aria-hidden': 'true' },
+      h('span', null, pulse.labels?.[0] || ''),
+      h('span', null, pulse.labels?.at(-1) || '')
     )
   );
 }

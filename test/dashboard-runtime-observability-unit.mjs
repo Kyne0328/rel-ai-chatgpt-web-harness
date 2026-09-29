@@ -230,7 +230,8 @@ const settingsSource = fs.readFileSync(path.join(root, 'src/ui/features/settings
 const cssSource = fs.readFileSync(path.join(root, 'src/ui/styles/app.css'), 'utf8');
 const sessionCssSource = fs.readFileSync(path.join(root, 'src/ui/features/sessions/styles.css'), 'utf8');
 
-assert.match(sessionsSource, /Recent (?:sessions|tasks)/, 'Tasks surface must use a compact user-facing heading');
+assert.match(sessionsSource, /sessions-summary-line/, 'Tasks surface must retain a compact user-facing summary in its toolbar');
+assert.match(sessionsSource, /View its overview, activity, and technical details here\./, 'Tasks empty inspector must explain what selecting a task reveals');
 assert.match(sessionsSource, /Rel\.AI task ID/);
 assert.match(sessionsSource, /Process ID/);
 assert.match(sessionsSource, /'aria-label': `Copy \$\{label\} \$\{value\}`/);
@@ -245,6 +246,10 @@ assert.match(sessionsSource, /Task cancellation requested\./, 'task cancellation
 assert.match(sessionsSource, /\/api\/tasks\/control/);
 assert.match(processesSource, /data-stop-process/);
 assert.match(processesSource, /: 'Stop'/);
+assert.match(processesSource, /filter\(row => row\.state\.terminal\)\.slice\(0, 5\)/, 'Running Commands must retain a bounded recently-ended view without inventing a time-based persistence policy');
+assert.match(processesSource, /className: 'recent-processes'/, 'Recently ended commands must use progressive disclosure');
+assert.match(processesSource, /href: '#activity'/, 'Running Commands must link to the full Activity history');
+assert.match(processesSource, /Servers, watchers, debuggers, and other long-running commands appear here/, 'Running Commands empty state must explain what appears on the page');
 assert.doesNotMatch(processesSource, /Startup task completed; process still running|Native task ID|Process ID|Saved output|process-detail-grid|process-relationship/);
 assert.doesNotMatch(processesSource, /Cancel task|data-cancel-native-task/);
 assert.match(processesSource, /'aria-label': `Recent \$\{stream\} output`/);

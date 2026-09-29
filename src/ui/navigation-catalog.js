@@ -20,7 +20,7 @@ export const SYSTEM_NAV_ITEMS = Object.freeze([
 
 export const APPLICATION_NAV_ITEMS = Object.freeze([
   route('system', 'System', 'processes', 'Running commands, troubleshooting, tools, and analytics.', 'Application'),
-  route('settings', 'Settings', 'settings', 'Change connection, preferences, and app settings.', 'Application')
+  route('settings', 'Settings', 'settings', 'Change connection, preferences, privacy, and app settings.', 'Application')
 ]);
 
 export const EXTENSIONS_NAV_ITEM = route(
@@ -51,8 +51,9 @@ export const MOBILE_MORE_NAV_ITEMS = Object.freeze([
 export const MOBILE_NAV_ITEMS = Object.freeze([...DESKTOP_NAV_ITEMS]);
 
 export const SETTINGS_NAV_ITEMS = Object.freeze([
-  route('connection', 'Connection', 'settings/connection', 'Connect this computer and change OpenAI connection settings.', 'Settings'),
-  route('preferences', 'Preferences', 'settings', 'Change appearance and desktop notifications.', 'Settings'),
+  route('connection', 'Connection', 'settings/connection', 'Connect this computer and manage the saved OpenAI connection.', 'Settings'),
+  route('preferences', 'Preferences', 'settings', 'Change appearance, Rel.AI Pulse, and desktop notifications.', 'Settings'),
+  route('privacy', 'Privacy & data', 'settings/privacy', 'Manage permissions, browser sign-ins, telemetry, and local data.', 'Settings'),
   route('application', 'App', 'settings/application', 'Choose startup behavior and manage app updates.', 'Settings'),
   route('about', 'About', 'settings/about', 'View app, developer, source code, and license information.', 'Settings')
 ]);

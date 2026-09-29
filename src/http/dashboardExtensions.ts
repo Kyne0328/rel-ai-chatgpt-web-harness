@@ -1,4 +1,10 @@
-import { getExtensionsDashboard, installDashboardExtension, removeDashboardExtension } from '../core/extensions.ts';
+import {
+  addDashboardExtensionSource,
+  getExtensionsDashboard,
+  installDashboardExtension,
+  removeDashboardExtension,
+  removeDashboardExtensionSource
+} from '../core/extensions.ts';
 import { readJsonBody, sendJson } from './io.ts';
 import type { HttpRouteContext } from './types.ts';
 
@@ -11,11 +17,28 @@ async function handleApiExtensionsAction(ctx: HttpRouteContext): Promise<void> {
   try {
     const payload = await readJsonBody(ctx.req, ctx.options.maxBodyBytes);
     const action = String(payload.action || '').trim().toLowerCase();
+
+    if (action === 'add_source') {
+      const url = String(payload.url || '').trim();
+      if (!url) throw new Error('Repository URL is required.');
+      sendJson(ctx.res, 200, await addDashboardExtensionSource(url));
+      return;
+    }
+
+    if (action === 'remove_source') {
+      const sourceId = String(payload.sourceId || '').trim();
+      if (!sourceId) throw new Error('Extension source ID is required.');
+      if (payload.confirmRemoveSource !== true) throw new Error('Confirm the extension source removal.');
+      sendJson(ctx.res, 200, removeDashboardExtensionSource(sourceId));
+      return;
+    }
+
     const id = String(payload.id || '').trim();
     if (!id) throw new Error('Extension ID is required.');
     if (action === 'install' || action === 'update') {
       if (payload.confirmPermissions !== true) throw new Error('Review the extension permissions before installation.');
-      const extension = await installDashboardExtension(id);
+      const sourceId = String(payload.sourceId || '').trim();
+      const extension = await installDashboardExtension(id, sourceId);
       sendJson(ctx.res, 200, { ok: true, action, extension });
       return;
     }

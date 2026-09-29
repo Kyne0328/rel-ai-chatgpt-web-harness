@@ -34,6 +34,9 @@ async function runLocalBrowserAction(
     case 'screenshot': return browserRuntime.screenshot(workspace, args, context, options);
     case 'upload': return browserRuntime.upload(workspace, args, context, options);
     case 'download': return browserRuntime.download(workspace, args, context, options);
+    case 'handoff': return browserRuntime.handoff(workspace, args, context);
+    case 'resume': return browserRuntime.resume(workspace, args, context);
+    case 'clear_profile': return browserRuntime.clearProfile(workspace, args, context);
     case 'stop': return browserRuntime.stop(workspace, args, context);
     default: throw new Error(`Unsupported local browser action '${action || '(missing)'}.`);
   }

@@ -80,7 +80,7 @@ const COMPUTER_OMIT = Object.freeze({
 
 const BROWSER_FIELDS = Object.freeze([
   'sessionId', 'tabId', 'url', 'profile', 'ignoreHTTPSErrors', 'width', 'height', 'timeoutMs', 'detail',
-  'interaction', 'target', 'input', 'key', 'selectValue', 'state', 'fullPage', 'path'
+  'interaction', 'target', 'input', 'key', 'selectValue', 'state', 'fullPage', 'path', 'reason'
 ]);
 function browserOmit(...allowed) {
   const keep = new Set(allowed);
@@ -98,6 +98,9 @@ const BROWSER_OMIT = Object.freeze({
   screenshot: browserOmit('sessionId', 'tabId', 'fullPage'),
   upload: browserOmit('sessionId', 'tabId', 'timeoutMs', 'target', 'path'),
   download: browserOmit('sessionId', 'tabId', 'timeoutMs', 'interaction', 'target', 'path'),
+  handoff: browserOmit('sessionId', 'tabId', 'reason'),
+  resume: browserOmit('sessionId'),
+  clear_profile: browserOmit(),
   stop: browserOmit('sessionId')
 });
 
@@ -150,6 +153,15 @@ const PUBLIC_BINDINGS_BY_OPERATION = Object.freeze({
     expose('relai_browser', 'screenshot', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId'], omit: BROWSER_OMIT.screenshot }) }),
     expose('relai_browser', 'upload', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId', 'path', 'target'], omit: BROWSER_OMIT.upload }) }),
     expose('relai_browser', 'download', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId', 'path', 'interaction', 'target'], omit: BROWSER_OMIT.download }) }),
+    expose('relai_browser', 'handoff', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId'], omit: BROWSER_OMIT.handoff }) }),
+    expose('relai_browser', 'resume', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId'], omit: BROWSER_OMIT.resume }) }),
+    expose('relai_browser', 'clear_profile', {
+      capability: PROCESS,
+      keepAction: true,
+      behavior: { taskScope: 'optional' },
+      publicContract: contract({ omit: BROWSER_OMIT.clear_profile }),
+      approval: () => ({ message: 'Clear saved browser sign-ins and site data for this Rel.AI browser profile?' })
+    }),
     expose('relai_browser', 'stop', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId'], omit: BROWSER_OMIT.stop }) })
   ],
   [OP.UI]: [

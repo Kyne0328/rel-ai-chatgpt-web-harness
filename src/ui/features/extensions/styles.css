@@ -535,6 +535,151 @@
     border-bottom: none;
   }
 
+  /* Extension Sources */
+  .extensions-sources-panel {
+    @apply flex flex-col gap-4;
+  }
+
+  .extensions-source-add-card {
+    @apply grid gap-4 rounded-xl border p-4;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+    grid-template-columns: minmax(220px, 0.8fr) minmax(320px, 1.2fr);
+  }
+
+  .extensions-source-add-copy h3,
+  .extensions-source-card h3 {
+    @apply text-sm font-bold;
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-source-add-copy p,
+  .extensions-source-card-heading p {
+    @apply mt-1 text-[12px] leading-relaxed;
+    color: var(--ui-text-secondary);
+  }
+
+  .extensions-source-form {
+    @apply flex flex-col gap-2;
+  }
+
+  .extensions-source-form label {
+    @apply text-[12px] font-semibold;
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-source-form-row {
+    @apply flex items-stretch gap-2;
+  }
+
+  .extensions-source-form-row input {
+    @apply min-w-0 flex-1 rounded-lg border px-3 py-2.5 text-[13px];
+    min-height: 42px;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-input);
+    color: var(--ui-text-primary);
+  }
+
+  .extensions-source-form-row input:focus-visible {
+    outline: 2px solid var(--ui-focus-ring);
+    outline-offset: 1px;
+    border-color: var(--ui-border-control);
+  }
+
+  .extensions-source-form-row input[aria-invalid='true'] {
+    border-color: var(--ui-status-danger-border);
+  }
+
+  .extensions-source-form-row button {
+    min-height: 42px;
+    white-space: nowrap;
+  }
+
+  .extensions-source-help,
+  .extensions-source-error {
+    @apply text-[11px] leading-relaxed;
+  }
+
+  .extensions-source-help {
+    color: var(--ui-text-tertiary);
+  }
+
+  .extensions-source-error {
+    color: var(--ui-status-danger-foreground);
+  }
+
+  .extensions-source-list {
+    @apply flex flex-col gap-3;
+  }
+
+  .extensions-source-card {
+    @apply flex flex-wrap items-start justify-between gap-4 rounded-xl border p-4;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-primary);
+    box-shadow: var(--ui-electron-elevation1);
+  }
+
+  .extensions-source-card.has-error {
+    border-color: var(--ui-status-danger-border);
+  }
+
+  .extensions-source-card-main {
+    @apply flex min-w-0 flex-1 flex-col gap-2.5;
+  }
+
+  .extensions-source-title-row {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .extensions-source-badge {
+    @apply rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider;
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-secondary);
+  }
+
+  .extensions-source-badge.official {
+    color: var(--ui-action-primary);
+    border-color: color-mix(in srgb, var(--ui-action-primary) 30%, transparent);
+    background: color-mix(in srgb, var(--ui-action-primary) 8%, var(--ui-surface-secondary));
+  }
+
+  .extensions-source-meta {
+    @apply flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px];
+    color: var(--ui-text-tertiary);
+  }
+
+  .extensions-source-meta code {
+    @apply max-w-full truncate font-mono;
+  }
+
+  .extensions-source-card-actions {
+    @apply flex shrink-0 flex-wrap items-center justify-end gap-2;
+  }
+
+  .extensions-source-status,
+  .extensions-source-installed-count {
+    @apply rounded-full border px-2 py-1 text-[11px] font-semibold;
+  }
+
+  .extensions-source-status.ok {
+    color: var(--ui-status-success-foreground);
+    border-color: var(--ui-status-success-border);
+    background: var(--ui-status-success-background);
+  }
+
+  .extensions-source-status.bad {
+    color: var(--ui-status-danger-foreground);
+    border-color: var(--ui-status-danger-border);
+    background: var(--ui-status-danger-background);
+  }
+
+  .extensions-source-installed-count {
+    border-color: var(--ui-border-subtle);
+    background: var(--ui-surface-secondary);
+    color: var(--ui-text-secondary);
+  }
+
   /* Developer Tab Elements */
   .extensions-developer-grid {
     @apply grid gap-4;
@@ -633,5 +778,20 @@
   }
   .extensions-kpi-strip {
     grid-template-columns: repeat(2, 1fr);
+  }
+  .extensions-source-add-card {
+    grid-template-columns: 1fr;
+  }
+  .extensions-source-form-row {
+    flex-direction: column;
+  }
+  .extensions-source-form-row input,
+  .extensions-source-form-row button {
+    min-height: 48px;
+    width: 100%;
+  }
+  .extensions-source-card-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }

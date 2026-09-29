@@ -111,6 +111,11 @@
 .diagnostic-page-head { @apply min-w-0 items-start; }
 .diagnostic-page-actions { @apply min-w-0 flex-wrap justify-end; }
 .diagnostic-page-actions button { @apply min-w-0; }
+.diagnostic-more-actions { @apply relative; }
+.diagnostic-more-actions > summary { @apply min-h-11 cursor-pointer list-none rounded-lg border px-3 py-2 text-[12px] font-semibold; border-color: var(--ui-border-control); background: var(--ui-surface-primary); color: var(--ui-text-primary); }
+.diagnostic-more-actions > summary::-webkit-details-marker { display: none; }
+.diagnostic-more-actions-menu { @apply absolute right-0 z-10 mt-1 min-w-44 rounded-lg border p-1.5 shadow-lg; border-color: var(--ui-border-default); background: var(--ui-surface-primary); }
+.diagnostic-more-actions-menu button { @apply w-full justify-start; }
 .diagnostic-live-tail { @apply min-w-0; }
 .diagnostic-summary, .diagnostic-list { @apply flex min-w-0 flex-col gap-3; }
 .diagnostic-metric { @apply flex items-end justify-between gap-3; }
@@ -188,7 +193,9 @@
 }
 @container diagnostic-page (max-width: 480px) {
   .diagnostic-page-actions { @apply grid w-full; grid-template-columns: minmax(0,1fr); }
-  .diagnostic-page-actions button { @apply w-full; }
+  .diagnostic-page-actions button, .diagnostic-more-actions { @apply w-full; }
+  .diagnostic-more-actions > summary { @apply w-full; }
+  .diagnostic-more-actions-menu { @apply static mt-1 w-full shadow-none; }
 }
 
 @layer components {

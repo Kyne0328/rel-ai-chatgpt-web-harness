@@ -37,7 +37,7 @@ for (const name of ['relai_edit', 'relai_exec', 'relai_validate']) {
   assert.ok(publicTools.find(tool => tool.name === name)?.inputSchema?.properties?.independent,
     `${name} discovery must retain independent for intentionally detached mutation or execution`);
 }
-assert.match(publicTools.find(tool => tool.name === 'relai_browser')?.inputSchema?.properties?.action?.description || '', /sessionId! except status\/start/i,
+assert.match(publicTools.find(tool => tool.name === 'relai_browser')?.inputSchema?.properties?.action?.description || '', /sessionId! except status\/start\/clear_profile/i,
   'browser discovery must factor repeated session identity instead of repeating it on every action');
 assert.match(publicTools.find(tool => tool.name === 'relai_computer')?.inputSchema?.properties?.action?.description || '', /app! except status\/displays\/stop/i,
   'computer discovery must factor repeated app identity instead of repeating it on every action');

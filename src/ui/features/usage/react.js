@@ -156,6 +156,10 @@ export function createUsageRoute(useDashboardSlices) {
                   h('button', { type: 'button', className: 'secondary', 'data-usage-retry': true, onClick: () => setRefreshToken(value => value + 1) }, 'Retry')
                 )
               : analytics ? h(UsageContent, { bounds: analytics.bounds, current: analytics.current, previous: analytics.previous }) : null
+        ),
+        h('div', { className: 'usage-data-note' },
+          h('span', null, 'Local analytics are kept for about 180 days.'),
+          h('a', { href: '#settings/privacy' }, 'Privacy & data details')
         )
       )
     );

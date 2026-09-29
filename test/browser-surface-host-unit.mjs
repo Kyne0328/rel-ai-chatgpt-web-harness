@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
 
 import { createBrowserSurfaceHost } from '../electron/browser-surface-host.js';
 import { registerBrowserSurfaceIpc } from '../electron/ipc-handlers-dashboard.js';
@@ -10,13 +11,16 @@ class FakeSession extends EventEmitter {
   constructor() {
     super();
     this.storageCleared = 0;
+    this.storageClearOptions = [];
     this.cacheCleared = 0;
+    this.cookieValues = [];
+    this.cookies = { get: async () => this.cookieValues };
     this.certificateVerifier = undefined;
   }
   setPermissionRequestHandler(handler) { this.permissionRequestHandler = handler; }
   setPermissionCheckHandler(handler) { this.permissionCheckHandler = handler; }
   setCertificateVerifyProc(handler) { this.certificateVerifier = handler; }
-  async clearStorageData() { this.storageCleared += 1; }
+  async clearStorageData(options) { this.storageCleared += 1; this.storageClearOptions.push(options); }
   async clearCache() { this.cacheCleared += 1; }
 }
 
@@ -34,6 +38,14 @@ class FakeWebContents extends EventEmitter {
     this.inputEvents = [];
     this.debuggerCommands = [];
     this.debuggerAttached = false;
+    this.mainFrame = {
+      name: '',
+      url: this.url,
+      framesInSubtree: [],
+      isDestroyed: () => this.destroyed,
+      executeJavaScript: (script, userGesture) => this.executeJavaScript(script, userGesture)
+    };
+    this.mainFrame.framesInSubtree = [this.mainFrame];
     this.debugger = {
       isAttached: () => this.debuggerAttached,
       attach: () => { this.debuggerAttached = true; },
@@ -52,6 +64,7 @@ class FakeWebContents extends EventEmitter {
   async loadURL(url) {
     this.emit('did-start-loading');
     this.url = url;
+    this.mainFrame.url = url;
     this.title = 'Loaded';
     this.emit('did-navigate');
     this.emit('did-stop-loading');
@@ -90,7 +103,14 @@ class FakeWebContentsView {
   setBounds(bounds) { this.bounds = bounds; }
 }
 
-function createHarness({ failOpen = false } = {}) {
+function createHarness({
+  failOpen = false,
+  clearPersistentData = async () => ({ cleared: true }),
+  listPersistentProfiles = async () => [],
+  readPersistentSites = async () => [],
+  recordPersistentSite = async () => {},
+  forgetPersistentSite = async () => {}
+} = {}) {
   const sessions = [];
   const views = [];
   const webContents = [];
@@ -101,9 +121,14 @@ function createHarness({ failOpen = false } = {}) {
       webContents.push(this.webContents);
     }
   };
+  const pathSessions = new Map();
   const sessionApi = {
     fromPartition() { const value = new FakeSession(); sessions.push(value); return value; },
-    fromPath() { const value = new FakeSession(); sessions.push(value); return value; }
+    fromPath(profilePath) {
+      const key = String(profilePath || '');
+      if (!pathSessions.has(key)) { const value = new FakeSession(); pathSessions.set(key, value); sessions.push(value); }
+      return pathSessions.get(key);
+    }
   };
   const childViews = new Set();
   const sent = [];
@@ -129,9 +154,14 @@ function createHarness({ failOpen = false } = {}) {
       routes.push(route);
       if (failOpen) throw new Error('dashboard unavailable');
     },
+    clearPersistentData,
+    listPersistentProfiles,
+    readPersistentSites,
+    recordPersistentSite,
+    forgetPersistentSite,
     onEvent: event => events.push(event)
   });
-  return { host, sessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents };
+  return { host, sessions, pathSessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents };
 }
 
 {
@@ -141,6 +171,10 @@ function createHarness({ failOpen = false } = {}) {
     DESKTOP_BROWSER_GET_STATE: 'get-state',
     DESKTOP_BROWSER_SET_BOUNDS: 'set-bounds',
     DESKTOP_BROWSER_SET_CONTROL: 'set-control',
+    DESKTOP_BROWSER_PERMISSION: 'permission',
+    DESKTOP_BROWSER_LIST_SAVED_SITES: 'list-saved-sites',
+    DESKTOP_BROWSER_CLEAR_SAVED_SITE: 'clear-saved-site',
+    DESKTOP_BROWSER_CLEAR_SAVED_DATA: 'clear-saved-data',
     DESKTOP_BROWSER_SELECT_SESSION: 'select-session',
     DESKTOP_BROWSER_SELECT_TAB: 'select-tab',
     DESKTOP_BROWSER_CLOSE_TAB: 'close-tab',
@@ -153,6 +187,10 @@ function createHarness({ failOpen = false } = {}) {
     getBrowserState: () => ({}),
     setBrowserSurfaceBounds: bounds => { receivedBounds = bounds; return bounds; },
     setBrowserControl: () => ({}),
+    respondBrowserPermission: () => ({}),
+    listSavedBrowserSites: () => ({ sites: [] }),
+    clearSavedBrowserSite: origin => ({ origin }),
+    clearSavedBrowserData: () => ({}),
     selectBrowserSession: () => ({}),
     selectBrowserTab: () => ({}),
     closeBrowserTab: () => ({}),
@@ -160,12 +198,89 @@ function createHarness({ failOpen = false } = {}) {
   });
   handlers.get('set-bounds')({}, { visible: true, x: 12.4, y: 34.6, width: 900.2, height: 600.8 });
   assert.deepEqual(receivedBounds, { visible: true, x: 12, y: 35, width: 900, height: 601 }, 'visible browser bounds must stay visible across the dashboard IPC boundary');
+  assert.throws(() => handlers.get('permission')({}, 'bad-id', true), /identifier is invalid/i);
+  assert.throws(() => handlers.get('permission')({}, 'browser_permission_abcdefghijklmnop', 'yes'), /must be a boolean/i);
+  assert.equal(handlers.get('clear-saved-site')({}, 'https://Example.test/path').origin, 'https://example.test');
+  assert.throws(() => handlers.get('clear-saved-site')({}, 'file:///tmp/browser'), /absolute HTTP or HTTPS origin/i);
 }
 
 {
   const { host } = createHarness({ failOpen: true });
   await assert.rejects(() => host.run({ action: 'start' }), /dashboard unavailable/);
   assert.equal(host.getState().active, false, 'a failed dashboard handoff must not leave a hidden native browser session active');
+}
+
+{
+  const { host, sessions, webContents, routes } = createHarness();
+  const started = await host.run({ action: 'start' });
+  await host.run({ action: 'open_page', nativeSessionId: started.nativeSessionId });
+  let decision = null;
+  sessions[0].permissionRequestHandler(
+    webContents[0],
+    'geolocation',
+    allowed => { decision = allowed; },
+    { requestingUrl: 'https://example.test/login' }
+  );
+  const request = host.getState().permissionRequests[0];
+  assert.equal(decision, null, 'site permission requests must wait for an explicit user decision');
+  assert.equal(request.permission, 'geolocation');
+  assert.equal(request.origin, 'https://example.test');
+  assert.equal(routes.at(-1), '#browser', 'permission requests must bring the Browser surface forward for the user');
+  await host.respondPermission(request.requestId, true);
+  assert.equal(decision, true, 'allowing a site permission must release the pending Chromium permission request');
+  assert.equal(sessions[0].permissionCheckHandler(webContents[0], 'geolocation', 'https://example.test'), true, 'an approved permission must remain granted for the current browser session');
+  assert.equal(sessions[0].permissionCheckHandler(null, 'geolocation', 'https://example.test'), true, 'permission checks without a webContents must still honor the session-scoped origin grant');
+  assert.equal(sessions[0].permissionCheckHandler({ id: 999 }, 'geolocation', 'https://example.test'), true, 'the grant must apply to another tab in the same browser session');
+  assert.equal(sessions[0].permissionCheckHandler({ id: 999 }, 'notifications', 'https://example.test'), false, 'a session grant must not authorize a different permission');
+  assert.equal(sessions[0].permissionCheckHandler({ id: 999 }, 'geolocation', 'https://other.test'), false, 'a session grant must not authorize a different origin');
+  assert.deepEqual(host.getState().permissionRequests, []);
+  await host.closeAll();
+}
+
+{
+  let clearCalls = 0;
+  const { host } = createHarness({ clearPersistentData: async () => { clearCalls += 1; return { cleared: true }; } });
+  assert.equal((await host.clearSavedData()).cleared, true);
+  assert.equal(clearCalls, 1, 'saved browser data clearing must delegate to the persistent profile owner');
+  const persistent = await host.run({ action: 'start', profileDirectory: 'C:/relai-test-profile' });
+  await assert.rejects(() => host.clearSavedData(), /Stop persistent browser sessions/i);
+  assert.equal(clearCalls, 1, 'saved data must not be deleted while its persistent session is active');
+  await host.run({ action: 'close_session', nativeSessionId: persistent.nativeSessionId });
+}
+
+{
+  const profileDirectory = 'C:/relai-saved-profile/default';
+  const forgotten = [];
+  const recorded = [];
+  const { host, pathSessions, webContents } = createHarness({
+    listPersistentProfiles: async () => [profileDirectory],
+    readPersistentSites: async () => ['https://example.test', 'https://storage.test'],
+    recordPersistentSite: async (directory, url) => recorded.push([directory, url]),
+    forgetPersistentSite: async (directory, origin) => forgotten.push([directory, origin])
+  });
+  const initial = await host.listSavedSites();
+  assert.deepEqual(initial.sites.map(site => site.origin), ['https://example.test', 'https://storage.test']);
+  const savedSession = [...pathSessions.values()][0];
+  savedSession.cookieValues = [
+    { domain: '.example.test', secure: false },
+    { domain: '.cookie-only.test', secure: true }
+  ];
+  const withCookies = await host.listSavedSites();
+  assert.ok(withCookies.sites.some(site => site.origin === 'https://cookie-only.test'), 'cookie-only legacy profiles must remain discoverable before the site registry has seen them');
+  assert.equal(withCookies.sites.filter(site => site.host === 'example.test').length, 1, 'registered HTTPS origins must not be duplicated by non-secure cookies for the same host');
+  const cleared = await host.clearSavedSite('https://example.test');
+  assert.equal(cleared.origin, 'https://example.test');
+  assert.deepEqual(savedSession.storageClearOptions.at(-1), { origin: 'https://example.test' }, 'per-site deletion must clear complete Chromium origin storage');
+  assert.deepEqual(forgotten.at(-1), [path.resolve(profileDirectory), 'https://example.test']);
+
+  const persistent = await host.run({ action: 'start', profileDirectory });
+  const page = await host.run({ action: 'open_page', nativeSessionId: persistent.nativeSessionId });
+  await webContents.at(-1).loadURL('https://remembered.test/login');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(recorded.some(([, url]) => url === 'https://remembered.test/login'), 'persistent navigation must register the site for later per-site management');
+  await assert.rejects(() => host.clearSavedSite('https://storage.test'), /Stop persistent browser sessions/i);
+  await host.run({ action: 'close_session', nativeSessionId: persistent.nativeSessionId });
+  assert.ok(page.nativePageId);
 }
 
 {
@@ -231,6 +346,37 @@ function createHarness({ failOpen = false } = {}) {
   assert.equal(layout.detail, 'layout', 'embedded browser snapshots must expose the requested layout detail mode');
   assert.equal(layout.snapshot, 'true', 'embedded layout snapshots must execute through the page DOM rather than requiring the accessibility debugger');
   await host.run({ action: 'close_session', nativeSessionId: started.nativeSessionId });
+}
+
+{
+  const { host, webContents } = createHarness();
+  const started = await host.run({ action: 'start' });
+  const opened = await host.run({ action: 'open_page', nativeSessionId: started.nativeSessionId });
+  let frameInteraction = '';
+  const childFrame = {
+    name: 'signin-frame',
+    url: 'https://example.test/frame',
+    isDestroyed: () => false,
+    executeJavaScript: async script => {
+      const source = String(script);
+      if (source.includes('return { attached:')) return { attached: true, visible: true };
+      frameInteraction = source;
+      return true;
+    }
+  };
+  webContents[0].mainFrame.framesInSubtree.push(childFrame);
+  const described = await host.run({ action: 'describe', nativeSessionId: started.nativeSessionId, nativePageId: opened.nativePageId });
+  assert.deepEqual(described.frames, [{ index: 0, name: 'signin-frame', url: 'https://example.test/frame' }]);
+  await host.run({
+    action: 'interact',
+    nativeSessionId: started.nativeSessionId,
+    nativePageId: opened.nativePageId,
+    interaction: 'fill',
+    target: { by: 'label', value: 'Account', frame: { by: 'name', value: 'signin-frame', exact: true } },
+    input: 'user@example.test'
+  });
+  assert.match(frameInteraction, /user@example\.test/, 'embedded structured interaction must execute in the selected child frame');
+  await host.closeAll();
 }
 
 {

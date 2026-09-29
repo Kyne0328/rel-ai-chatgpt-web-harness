@@ -13,6 +13,24 @@ fs.mkdirSync(workspacePath, { recursive: true });
 fs.writeFileSync(path.join(workspacePath, 'invoice.pdf'), 'fixture invoice');
 
 const server = http.createServer((req, res) => {
+  if (req.url === '/auth/login') {
+    res.statusCode = 200;
+    res.setHeader('set-cookie', 'relai_auth=ok; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax');
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end('<!doctype html><title>Login complete</title><main><h1>Login complete</h1></main>');
+    return;
+  }
+  if (req.url === '/auth/protected') {
+    const authenticated = String(req.headers.cookie || '').includes('relai_auth=ok');
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end(`<!doctype html><title>Protected</title><main><h1>${authenticated ? 'Authenticated session' : 'Anonymous session'}</h1></main>`);
+    return;
+  }
+  if (req.url === '/frame-content') {
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end('<!doctype html><title>Sign-in frame</title><label>Frame user <input aria-label="Frame user"></label><button type="button" onclick="document.body.dataset.saved=document.querySelector(\'[aria-label=&quot;Frame user&quot;]\').value">Frame save</button><p id="frame-result"></p><script>new MutationObserver(() => document.querySelector(\'#frame-result\').textContent = document.body.dataset.saved ? `Frame saved ${document.body.dataset.saved}` : ``).observe(document.body,{attributes:true})</script>');
+    return;
+  }
   if (req.url === '/download') {
     res.statusCode = 200;
     res.setHeader('content-type', 'text/plain; charset=utf-8');
@@ -37,6 +55,7 @@ const server = http.createServer((req, res) => {
       <a href="/download">Download report</a>
       <button type="button" id="remember">Remember profile</button>
       <p id="profile-result" aria-live="polite"></p>
+      <iframe name="signin-frame" src="/frame-content" title="Sign-in frame"></iframe>
       <script>
         document.querySelector('#save').addEventListener('click', () => {
           document.querySelector('#result').textContent = 'Saved ' + document.querySelector('[aria-label="Name"]').value;
@@ -67,7 +86,7 @@ const context = { taskId: 'work_browser_fixture' };
 const runtime = createBrowserRuntime({ getProfileConfig: () => ({ stateDir }) });
 
 try {
-  const started = await runtime.start(workspace, { url: origin, work_id: context.taskId }, context);
+  const started = await runtime.start(workspace, { url: origin, profile: 'ephemeral', work_id: context.taskId }, context);
   const sessionId = started.sessionId;
   assert.equal(started.ok, true);
   assert.equal(started.statusCode, 200);
@@ -97,6 +116,22 @@ try {
   }, context);
   const after = await runtime.snapshot(workspace, { sessionId, work_id: context.taskId }, context);
   assert.match(after.snapshot, /Saved Rel\.AI/);
+  assert.ok(Array.isArray(after.frames) && after.frames.some(frame => frame.name === 'signin-frame'), 'semantic browser results must expose child frame metadata');
+  await runtime.interact(workspace, {
+    sessionId,
+    interaction: 'fill',
+    target: { by: 'label', value: 'Frame user', frame: { by: 'name', value: 'signin-frame', exact: true } },
+    input: 'Frame User',
+    work_id: context.taskId
+  }, context);
+  await runtime.interact(workspace, {
+    sessionId,
+    interaction: 'click',
+    target: { by: 'role', value: 'button', name: 'Frame save', frame: { by: 'name', value: 'signin-frame', exact: true } },
+    work_id: context.taskId
+  }, context);
+  const afterFrame = await runtime.snapshot(workspace, { sessionId, work_id: context.taskId }, context);
+  assert.match(afterFrame.snapshot, /Frame saved Frame User/, 'structured interactions must work inside a named iframe');
 
   const upload = await runtime.upload(workspace, {
     sessionId,
@@ -137,7 +172,6 @@ try {
   const persistentRuntime = createBrowserRuntime({ getProfileConfig: () => ({ stateDir }) });
   const persistent = await persistentRuntime.start(workspace, {
     url: origin,
-    profile: 'persistent',
     work_id: persistentTask.taskId
   }, persistentTask);
   assert.equal(persistent.profile, 'persistent');
@@ -152,6 +186,11 @@ try {
     work_id: persistentTask.taskId
   }, persistentTask);
   assert.match(remembered.snapshot, /Remembered profile/);
+  await persistentRuntime.navigate(workspace, {
+    sessionId: persistent.sessionId,
+    url: `${origin}/auth/login`,
+    work_id: persistentTask.taskId
+  }, persistentTask);
   await persistentRuntime.stop(workspace, {
     sessionId: persistent.sessionId,
     work_id: persistentTask.taskId
@@ -161,7 +200,6 @@ try {
   const afterRestartRuntime = createBrowserRuntime({ getProfileConfig: () => ({ stateDir }) });
   const afterRestart = await afterRestartRuntime.start(workspace, {
     url: origin,
-    profile: 'persistent',
     work_id: restartTask.taskId
   }, restartTask);
   const restored = await afterRestartRuntime.snapshot(workspace, {
@@ -169,12 +207,23 @@ try {
     work_id: restartTask.taskId
   }, restartTask);
   assert.match(restored.snapshot, /Remembered profile/, 'persistent site state must survive a new Rel.AI browser runtime instance');
+  const protectedPage = await afterRestartRuntime.navigate(workspace, {
+    sessionId: afterRestart.sessionId,
+    url: `${origin}/auth/protected`,
+    work_id: restartTask.taskId
+  }, restartTask);
+  assert.match(protectedPage.url, /\/auth\/protected$/);
+  const authenticated = await afterRestartRuntime.snapshot(workspace, {
+    sessionId: afterRestart.sessionId,
+    work_id: restartTask.taskId
+  }, restartTask);
+  assert.match(authenticated.snapshot, /Authenticated session/, 'persistent browser profiles must retain HTTP authentication cookies across runtime restart');
   await afterRestartRuntime.stop(workspace, {
     sessionId: afterRestart.sessionId,
     work_id: restartTask.taskId
   }, restartTask);
 
-  console.log(`General local browser fixture passed upload, download, and persistent profile flows with ${started.browserProduct}.`);
+  console.log(`General local browser fixture passed upload, download, iframe interaction, and persistent cookie/profile flows with ${started.browserProduct}.`);
 } finally {
   await runtime.shutdown().catch(() => {});
   server.closeAllConnections?.();

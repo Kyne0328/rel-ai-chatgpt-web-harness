@@ -50,6 +50,7 @@ interface LocalBrowserDriver {
   close(): Promise<void>;
   onDisconnected(listener: () => void): void;
   onPageCreated?(listener: (page: BrowserPageDriver, active: boolean) => void): void;
+  setControl?(owner: 'ai' | 'user', reason?: string): Promise<void>;
 }
 
 async function launchLocalBrowserDriver(options: LaunchBrowserDriverOptions): Promise<LocalBrowserDriver> {
@@ -89,7 +90,8 @@ async function launchLocalBrowserDriver(options: LaunchBrowserDriverOptions): Pr
         if (!persistent) await currentBrowser?.close().catch(error => failures.push(error));
         if (failures.length) throw new Error(failures.map(errorMessage).join('; '));
       },
-      onDisconnected: (listener: () => void) => currentBrowser?.once('disconnected', listener)
+      onDisconnected: (listener: () => void) => currentBrowser?.once('disconnected', listener),
+      setControl: async () => {}
     });
   } catch (error) {
     await context?.close().catch(() => {});
@@ -122,7 +124,7 @@ function wrapPage(page: Page): BrowserPageDriver {
       const normalizedDetail = normalizeBrowserSnapshotDetail(detail) as BrowserSnapshotDetail;
       const raw = normalizedDetail === 'layout'
         ? String(await page.evaluate(layoutSnapshotExpression()))
-        : await page.locator('body').ariaSnapshot({ timeout: timeoutMs });
+        : await semanticSnapshotWithFrames(page, timeoutMs);
       const bounded = boundText(raw, MAX_SNAPSHOT_CHARS);
       return pageResult(page, { title: await safeTitle(page), detail: normalizedDetail, snapshot: bounded.text, truncated: bounded.truncated });
     },
@@ -173,8 +175,27 @@ function wrapDownload(download: Download): BrowserDownloadHandle {
   });
 }
 
+async function semanticSnapshotWithFrames(page: Page, timeoutMs: number): Promise<string> {
+  const sections: string[] = [await page.locator('body').ariaSnapshot({ timeout: timeoutMs })];
+  const frames = page.frames().filter(frame => frame !== page.mainFrame());
+  for (let index = 0; index < frames.length; index += 1) {
+    const frame = frames[index];
+    if (!frame) continue;
+    try {
+      const snapshot = await frame.locator('body').ariaSnapshot({ timeout: timeoutMs });
+      sections.push(`[Frame ${index}: ${frame.name() || 'unnamed'} ${sanitizeUiUrl(frame.url())}]\n${snapshot}`);
+    } catch {}
+  }
+  return sections.join('\n\n');
+}
+
 function pageResult(page: Page, extra: Record<string, unknown> = {}): BrowserPageResult {
-  return { url: sanitizeUiUrl(page.url()), ...extra };
+  const frames = page.frames().filter(frame => frame !== page.mainFrame()).map((frame, index) => ({
+    index,
+    name: frame.name(),
+    url: sanitizeUiUrl(frame.url())
+  }));
+  return { url: sanitizeUiUrl(page.url()), ...(frames.length ? { frames } : {}), ...extra };
 }
 
 function assertSupportedPageUrl(page: Page, allowBlank = false): void {

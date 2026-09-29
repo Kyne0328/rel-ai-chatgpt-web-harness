@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EXTENSIONS_REPOSITORY_URL, PERMISSION_METADATA, TEMPLATES } from '../src/ui/features/extensions/metadata.js';
+import { EXTENSIONS_REPOSITORY_URL, PERMISSION_METADATA, TABS, TEMPLATES } from '../src/ui/features/extensions/metadata.js';
 import { parseExtensionManifest, PERMISSIONS } from '../src/extensions/registry.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -20,6 +20,8 @@ assert.match(stylesCode, /\.extensions-page/, 'styles.css must style extensions-
 assert.match(stylesCode, /\.extensions-kpi-strip/, 'styles.css must style extensions-kpi-strip');
 assert.match(stylesCode, /\.extension-pro-card/, 'styles.css must style extension-pro-card');
 assert.match(stylesCode, /\.extensions-filter-toolbar/, 'styles.css must style extensions-filter-toolbar');
+assert.match(stylesCode, /\.extensions-source-add-card/, 'styles.css must style the source add form');
+assert.match(stylesCode, /\.extensions-source-card/, 'styles.css must style configured extension sources');
 
 // 3. Permission coverage
 for (const permission of PERMISSIONS) {
@@ -49,8 +51,18 @@ assert.match(reactCode, /role: 'tabpanel'/);
 assert.match(reactCode, /'aria-selected'/);
 assert.match(reactCode, /'aria-controls'/);
 assert.match(reactCode, /onKeyDown/);
-assert.match(reactCode, /ExtensionsKpiStrip/);
+assert.doesNotMatch(reactCode, /function ExtensionsKpiStrip/, 'Extensions must not restore the oversized KPI strip');
+assert.match(reactCode, /Extensions add reusable skills and local tools to ChatGPT\./, 'Extensions must retain concise orientation copy');
+assert.match(reactCode, /needsSetupCount/);
+assert.match(reactCode, /Show setup needed/, 'Extensions must surface installed packages that still require setup');
 assert.match(reactCode, /ExtensionsFilterToolbar/);
 assert.match(reactCode, /ExtensionInspectorDialog/);
+assert.ok(TABS.some(([id]) => id === 'sources'), 'Extensions navigation must expose source management');
+assert.match(reactCode, /function SourcesPanel/);
+assert.match(reactCode, /Add an extension source/);
+assert.match(reactCode, /type: 'url'/, 'Source input must use native URL validation');
+assert.match(reactCode, /action: 'add_source'/);
+assert.match(reactCode, /action: 'remove_source'/);
+assert.match(reactCode, /installed extension.*will stay installed/s, 'Source removal must explain that installed extensions are retained');
 
 console.log('Extensions UI and design intelligence unit tests passed.');

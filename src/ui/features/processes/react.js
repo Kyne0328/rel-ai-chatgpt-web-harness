@@ -16,17 +16,28 @@ export function createProcessesRoute(useDashboardSlices) {
       [data]
     );
     const rows = model.rows.filter(row => row.state.active);
+    const recentRows = model.rows.filter(row => row.state.terminal).slice(0, 5);
     const count = `${rows.length} running`;
+    const recentLabel = model.finished > recentRows.length
+      ? `Recently ended · latest ${recentRows.length}`
+      : `Recently ended · ${recentRows.length}`;
 
     return h('div', { className: 'settings-content system-content', 'data-processes-react': 'true' },
       h('div', { className: 'section processes-page runtime-observability-page' },
         h('section', { className: 'card processes-card' },
-          h('div', { className: 'card-head' }, h('span', { className: 'feature-count' }, count)),
+          h('div', { className: 'card-head' },
+            h('span', { className: 'feature-count' }, count),
+            h('a', { className: 'section-action', href: '#activity' }, 'Activity', h(Icon, { name: 'chevronRight', size: 14 }))
+          ),
           h('div', { className: 'card-body', 'data-process-list': true },
             rows.length
               ? rows.map(row => h(ProcessRow, { key: row.processId, row }))
               : h(EmptyProcesses)
-          )
+          ),
+          recentRows.length ? h('details', { className: 'recent-processes' },
+            h('summary', null, recentLabel),
+            h('div', { className: 'recent-process-list' }, recentRows.map(row => h(ProcessRow, { key: row.processId, row })))
+          ) : null
         )
       )
     );
@@ -130,6 +141,7 @@ function OutputBlock({ stream, value }) {
 function EmptyProcesses() {
   return h('div', { className: 'empty-state' },
     h('span', { className: 'empty-state-icon', 'aria-hidden': 'true' }, h(Icon, { name: 'processes', size: 28 })),
-    h('strong', { className: 'empty-state-title' }, 'No running commands')
+    h('strong', { className: 'empty-state-title' }, 'No running commands'),
+    h('p', { className: 'empty-state-copy' }, 'Servers, watchers, debuggers, and other long-running commands appear here while they are active.')
   );
 }

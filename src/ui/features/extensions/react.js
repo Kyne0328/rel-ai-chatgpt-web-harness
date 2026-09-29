@@ -62,9 +62,10 @@ function createExtensionsRoute() {
         readyCount,
         needsSetupCount: installed.length - readyCount,
         updatesCount,
-        catalogCount: catalog.length
+        catalogCount: catalog.length,
+        sourcesCount: data?.sources?.length || 0
       };
-    }, [data?.installed, data?.catalog]);
+    }, [data?.installed, data?.catalog, data?.sources?.length]);
 
     const runInstall = async (entry, action = 'install') => {
       if (!entry?.id || busy) return;
@@ -84,7 +85,7 @@ function createExtensionsRoute() {
       });
       if (!confirmed) return;
       setBusy(`${action}:${entry.id}`);
-      const result = await postJson('/api/extensions', { action, id: entry.id, confirmPermissions: true }, { cache: 'no-store', timeout: 15 * 60 * 1000 });
+      const result = await postJson('/api/extensions', { action, id: entry.id, sourceId: entry.sourceId || '', confirmPermissions: true }, { cache: 'no-store', timeout: 15 * 60 * 1000 });
       setBusy('');
       if (!result?.ok) {
         toast(result?.error || `Could not ${action} the extension.`, { variant: 'error' });
@@ -102,6 +103,53 @@ function createExtensionsRoute() {
       await load();
       if (inspectedExtension?.id === entry.id) {
         setInspectedExtension(null);
+      }
+    };
+
+    const runAddSource = async url => {
+      if (busy) return { ok: false, error: 'Another extension action is still running.' };
+      setBusy('add-source');
+      try {
+        const result = await postJson('/api/extensions', { action: 'add_source', url }, { cache: 'no-store', timeout: 60 * 1000 });
+        if (!result?.ok) {
+          toast(result?.error || 'Could not add the extension source.', { variant: 'error' });
+          return result || { ok: false, error: 'Could not add the extension source.' };
+        }
+        const count = Number(result.source?.extensionCount || 0);
+        toast(`Extension source added${count ? ` with ${count} extension${count === 1 ? '' : 's'}` : ''}.`, { variant: 'success' });
+        await load({ refresh: true });
+        return result;
+      } finally {
+        setBusy('');
+      }
+    };
+
+    const runRemoveSource = async source => {
+      if (!source?.id || source.official || busy) return null;
+      const installedCount = Number(source.installedCount || 0);
+      const confirmed = await confirmAction({
+        title: `Remove ${source.name}`,
+        message: 'Remove this extension source from Rel.AI?',
+        detail: installedCount
+          ? `${installedCount} installed extension${installedCount === 1 ? '' : 's'} from this source will stay installed. Update discovery for them stops until you add the source again.`
+          : 'Installed extensions are not removed when you remove a source.',
+        confirmLabel: 'Remove source',
+        danger: true
+      });
+      if (!confirmed) return null;
+      setBusy(`remove-source:${source.id}`);
+      try {
+        const result = await postJson('/api/extensions', { action: 'remove_source', sourceId: source.id, confirmRemoveSource: true }, { cache: 'no-store' });
+        if (!result?.ok) {
+          toast(result?.error || 'Could not remove the extension source.', { variant: 'error' });
+          return result;
+        }
+        const retained = Array.isArray(result.installedExtensions) ? result.installedExtensions.length : 0;
+        toast(retained ? `Source removed. ${retained} installed extension${retained === 1 ? '' : 's'} kept.` : 'Extension source removed.', { variant: 'success' });
+        await load({ refresh: true });
+        return result;
+      } finally {
+        setBusy('');
       }
     };
 
@@ -131,7 +179,10 @@ function createExtensionsRoute() {
 
     return h('div', { className: 'section extensions-page', 'data-extensions-react': '' },
       h('div', { className: 'section-head' },
-        h('div', { className: 'extensions-header-copy' }, h('h2', null, 'Extensions')),
+        h('div', { className: 'extensions-header-copy' },
+          h('h2', null, 'Extensions'),
+          h('p', null, 'Extensions add reusable skills and local tools to ChatGPT.')
+        ),
         h('div', { className: 'section-head-actions' },
           h('button', {
             className: 'secondary compact-button',
@@ -142,9 +193,14 @@ function createExtensionsRoute() {
         )
       ),
 
+      data && stats.needsSetupCount > 0 ? h('div', { className: 'connection-notice warn extensions-status-notice', role: 'status' },
+        h('strong', null, `${stats.needsSetupCount} installed ${stats.needsSetupCount === 1 ? 'extension needs' : 'extensions need'} setup`),
+        h('button', { className: 'secondary compact-button', type: 'button', onClick: () => { setActiveTab('installed'); setFilterStatus('needs_setup'); setSearchQuery(''); setFilterKind('all'); } }, 'Show setup needed')
+      ) : null,
+
       h('div', { className: 'extensions-tabs-row' },
         h(ExtensionTabs, { activeTab, setActiveTab, stats }),
-        activeTab !== 'developer' && data ? h(ExtensionsFilterToolbar, {
+        (activeTab === 'installed' || activeTab === 'discover') && data ? h(ExtensionsFilterToolbar, {
           activeTab,
           searchQuery,
           setSearchQuery,
@@ -191,6 +247,13 @@ function createExtensionsRoute() {
         onClearFilters: () => { setSearchQuery(''); setFilterKind('all'); setFilterStatus('all'); }
       }) : null,
 
+      data && activeTab === 'sources' ? h(SourcesPanel, {
+        data,
+        busy,
+        onAddSource: runAddSource,
+        onRemoveSource: runRemoveSource
+      }) : null,
+
       activeTab === 'developer' ? h(DeveloperPanel, { installRoot: data?.installRoot || '' }) : null,
 
       inspectedExtension ? h(ExtensionInspectorDialog, {
@@ -229,6 +292,9 @@ function ExtensionTabs({ activeTab, setActiveTab, stats }) {
       return stats.updatesCount
         ? h('span', { className: 'extensions-tab-badge highlight', title: `${stats.updatesCount} update(s) available` }, `${stats.catalogCount} (${stats.updatesCount} updates)`)
         : h('span', { className: 'extensions-tab-badge' }, stats.catalogCount);
+    }
+    if (id === 'sources' && stats) {
+      return h('span', { className: 'extensions-tab-badge' }, stats.sourcesCount);
     }
     return null;
   };
@@ -528,6 +594,7 @@ function ExtensionProCard({
       return { text: isSkill ? 'Skill' : 'CLI tool', tone: 'neutral', icon: isSkill ? 'puzzle' : 'processes' };
     }
     if (hasUpdate) return { text: `Update to v${catalog?.version || extension.version}`, tone: 'warn', icon: 'download' };
+    if (extension.sourceAvailable === false && !extension.localDevelopment) return { text: 'Source unavailable', tone: 'warn', icon: 'warning' };
     if (extension.status === 'invalid') return { text: 'Invalid package', tone: 'bad', icon: 'warning' };
     if (!isReady) return { text: 'Setup needed', tone: 'warn', icon: 'warning' };
     return { text: 'Ready', tone: 'ok', icon: 'check' };
@@ -596,6 +663,11 @@ function ExtensionProCard({
           h('span', null, errorCopy.message),
           errorCopy.detail ? h('code', { className: 'text-[10px] break-all' }, errorCopy.detail) : null
         )
+      ) : null,
+
+      isInstalledTab && extension.sourceAvailable === false && !extension.localDevelopment ? h('div', { className: 'extension-alert-box' },
+        h(Icon, { name: 'warning', size: 15, className: 'shrink-0 mt-0.5' }),
+        h('span', null, 'This extension stays installed, but its source is no longer active. Add the source again to discover updates.')
       ) : null,
 
       h(PermissionBadgesList, { permissions: extension.permissions }),
@@ -884,6 +956,100 @@ function ExtensionInspectorDialog({
   );
 }
 
+function SourcesPanel({ data, busy, onAddSource, onRemoveSource }) {
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [sourceError, setSourceError] = useState('');
+  const sources = Array.isArray(data?.sources) ? data.sources : [];
+  const adding = busy === 'add-source';
+
+  const onSubmit = async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (!form.reportValidity()) return;
+    setSourceError('');
+    try {
+      const result = await onAddSource(sourceUrl.trim());
+      if (!result?.ok) {
+        setSourceError(result?.error || 'Could not add the extension source.');
+        return;
+      }
+      setSourceUrl('');
+    } catch (error) {
+      setSourceError(error instanceof Error ? error.message : 'Could not add the extension source.');
+    }
+  };
+
+  return h('section', {
+    id: 'extensions-panel-sources',
+    role: 'tabpanel',
+    'aria-labelledby': 'extensions-tab-sources',
+    tabIndex: 0,
+    className: 'extensions-sources-panel'
+  },
+    h('div', { className: 'extensions-source-add-card' },
+      h('div', { className: 'extensions-source-add-copy' },
+        h('h3', null, 'Add an extension source'),
+        h('p', null, 'Add a developer repository once to discover every extension they publish. Adding a source does not install or run its extensions.')
+      ),
+      h('form', { action: '/api/extensions', method: 'post', className: 'extensions-source-form', onSubmit },
+        h('label', { htmlFor: 'extension-source-url' }, 'Repository URL'),
+        h('div', { className: 'extensions-source-form-row' },
+          h('input', {
+            id: 'extension-source-url',
+            name: 'url',
+            type: 'url',
+            required: true,
+            value: sourceUrl,
+            placeholder: 'https://github.com/developer/my-relai-extensions',
+            'aria-describedby': sourceError ? 'extension-source-help extension-source-error' : 'extension-source-help',
+            'aria-invalid': sourceError ? 'true' : undefined,
+            onChange: event => {
+              setSourceUrl(event.target.value);
+              if (sourceError) setSourceError('');
+            }
+          }),
+          h('button', { type: 'submit', className: 'primary', disabled: adding }, adding ? 'Adding…' : 'Add source')
+        ),
+        h('p', { id: 'extension-source-help', className: 'extensions-source-help' },
+          'GitHub repository URLs use publisher-catalog.json from the main branch. For another host, paste the direct HTTPS publisher-catalog.json URL.'
+        ),
+        sourceError ? h('p', { id: 'extension-source-error', className: 'extensions-source-error', role: 'alert', 'aria-live': 'polite' }, sourceError) : null
+      )
+    ),
+
+    h('div', { className: 'extensions-source-list' },
+      sources.map(source => h('article', { key: source.id, className: `extensions-source-card${source.error ? ' has-error' : ''}` },
+        h('div', { className: 'extensions-source-card-main' },
+          h('div', { className: 'extensions-source-card-heading' },
+            h('div', { className: 'extensions-source-title-row' },
+              h('h3', null, source.name || 'Extension source'),
+              h('span', { className: source.official ? 'extensions-source-badge official' : 'extensions-source-badge' }, source.official ? 'Built in' : 'Added')
+            ),
+            h('p', null, source.official
+              ? 'The official Rel.AI catalog is always available and cannot be removed.'
+              : `${Number(source.extensionCount || 0)} extension${Number(source.extensionCount || 0) === 1 ? '' : 's'} available from this source.`)
+          ),
+          h('div', { className: 'extensions-source-meta' },
+            source.repositoryUrl ? h(ExternalLink, { href: source.repositoryUrl, label: 'Open repository' }) : null,
+            h('code', null, source.catalogUrl)
+          ),
+          source.error ? h('div', { className: 'extension-alert-box danger', role: 'status' }, source.error) : null
+        ),
+        h('div', { className: 'extensions-source-card-actions' },
+          h('span', { className: `extensions-source-status ${source.status === 'ready' ? 'ok' : 'bad'}` }, source.status === 'ready' ? 'Available' : 'Needs attention'),
+          Number(source.installedCount || 0) > 0 ? h('span', { className: 'extensions-source-installed-count' }, `${source.installedCount} installed`) : null,
+          !source.official ? h('button', {
+            type: 'button',
+            className: 'danger compact-button',
+            disabled: Boolean(busy),
+            onClick: () => { void onRemoveSource(source); }
+          }, busy === `remove-source:${source.id}` ? 'Removing…' : 'Remove source') : null
+        )
+      ))
+    )
+  );
+}
+
 function DeveloperPanel({ installRoot }) {
   const [selectedTemplate, setSelectedTemplate] = useState('skill');
   const [copiedTemplate, setCopiedTemplate] = useState(false);
@@ -948,10 +1114,10 @@ function DeveloperPanel({ installRoot }) {
         h('div', { className: 'developer-step-card' },
           h('div', { className: 'flex items-center gap-2' },
             h('span', { className: 'developer-step-number' }, '3'),
-            h('span', { className: 'developer-step-title' }, 'Verify and install from HTTPS')
+            h('span', { className: 'developer-step-title' }, 'Publish and share the repository')
           ),
           h('p', { className: 'developer-step-desc' },
-            'Rel.AI downloads published manifests through HTTPS. You review the requested permissions. Rel.AI verifies checksums before it installs the files.'
+            'Push the publisher repository over HTTPS. Users can add its repository URL in Sources; Rel.AI discovers publisher-catalog.json and verifies extension checksums before installation.'
           )
         ),
         h('div', { className: 'developer-step-card' },
@@ -1005,7 +1171,7 @@ function DeveloperPanel({ installRoot }) {
           h('li', null, 'Initialize one repository with ', h('code', null, 'relai-extension init'), '. Use a globally unique publisher namespace.'),
           h('li', null, 'Add packages with ', h('code', null, 'relai-extension create <name>'), ' under ', h('code', null, 'extensions/<name>'), '. One repository can contain many extensions.'),
           h('li', null, 'Run ', h('code', null, 'relai-extension sync'), ' to update file checksums and ', h('code', null, 'publisher-catalog.json'), '. Run ', h('code', null, 'relai-extension validate'), ' before you publish.'),
-          h('li', null, 'Submit the generated entries to the Rel.AI extension catalog. You can still use standalone extension repositories.')
+          h('li', null, 'Share the publisher repository URL so users can add it under Sources. Submission to the official Rel.AI catalog is optional and only needed for built-in discovery.')
         ),
         h('div', { className: 'flex flex-wrap gap-2 pt-2' },
           h(ExternalLink, { href: EXTENSION_SCHEMA_URL, label: 'Manifest schema' }),

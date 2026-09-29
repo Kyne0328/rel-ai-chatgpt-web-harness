@@ -42,6 +42,8 @@
 .overview-actions { @apply mt-5 flex flex-wrap gap-2; }
 
 .task-overview { @apply grid items-center gap-4 p-4; grid-template-columns: 42px minmax(0,1fr) auto; }
+.task-overview.multiple { @apply items-start; grid-template-columns: 42px minmax(0,1fr); }
+.task-overview.multiple .task-overview-mark { @apply mt-1; }
 .task-overview-mark { @apply grid size-10 place-items-center rounded-xl text-lg font-bold; background: var(--ui-selection-background); color: var(--ui-action-primary); border: 1px solid color-mix(in srgb, var(--ui-action-primary) 30%, transparent); }
 .task-overview-spinner {
   position: relative;
@@ -66,6 +68,17 @@
 .task-overview-meta { @apply flex flex-col items-end gap-1 text-[12px]; color: var(--ui-text-secondary); }
 .task-overview-meta strong { @apply text-[14px]; color: var(--ui-text-primary); }
 .task-overview-link { @apply inline-flex min-h-11 items-center text-[12px] font-semibold; color: var(--ui-action-primary); }
+.task-overview-multiple-head { @apply flex min-w-0 items-end justify-between gap-4; }
+.task-overview-multiple-head > div { @apply min-w-0; }
+.task-overview-multiple-head .overview-kicker { @apply mb-1; }
+.task-overview-multiple-head .section-action { @apply shrink-0 pb-0.5; }
+.overview-active-tasks { @apply mt-3 grid border-t; border-color: var(--ui-border-subtle); }
+.overview-active-task-row { @apply grid min-h-13 items-center gap-3 border-b py-2.5; grid-template-columns: minmax(0,1fr) auto; border-color: var(--ui-border-subtle); }
+.overview-active-task-copy { @apply grid min-w-0 gap-0.5; }
+.overview-active-task-copy strong { @apply truncate text-[13px] font-semibold; color: var(--ui-text-primary); }
+.overview-active-task-copy > span { @apply truncate text-[11px]; color: var(--ui-text-secondary); }
+.overview-active-task-row .status-pill { @apply justify-self-end; }
+.overview-active-task-more { @apply inline-flex min-h-11 items-center text-[12px] font-semibold; color: var(--ui-action-primary); }
 .attention-list { @apply p-0; }
 .attention-item { @apply grid min-h-16 items-center gap-3 border-b px-4 py-3 last:border-b-0; grid-template-columns: auto minmax(0,1fr) auto; border-color: var(--ui-border-subtle); }
 .attention-icon { @apply size-2 rounded-full; background: var(--ui-status-warning-foreground); }
@@ -89,6 +102,8 @@
 .home-analytics-link { @apply inline-flex items-center gap-1; }
 .home-analytics-body { @apply grid; }
 .home-analytics-metrics { @apply grid; grid-template-columns: repeat(4,minmax(0,1fr)); border-top: 1px solid var(--ui-border-subtle); border-bottom: 1px solid var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+.home-analytics-card.compact-summary .home-analytics-metrics,
+.home-analytics-card.compact-summary .home-analytics-loading { grid-template-columns: repeat(3,minmax(0,1fr)); }
 .home-analytics-metric { @apply grid min-w-0 gap-1 border-r px-4 py-4 last:border-r-0; border-color: var(--ui-border-subtle); }
 .home-analytics-metric-label { @apply flex min-w-0 items-center gap-1.5 text-[12px] font-semibold uppercase tracking-[.05em]; color: var(--ui-text-secondary); }
 .home-analytics-metric-label > .ui-icon { @apply shrink-0; }
@@ -102,9 +117,19 @@
 .home-analytics-pulse-head strong { @apply text-[12px] font-semibold; overflow-wrap: anywhere; color: var(--ui-text-primary); }
 .home-analytics-pulse-head small { @apply shrink-0 text-[11px]; color: var(--ui-text-tertiary); }
 .home-analytics-chart { @apply overflow-hidden rounded-lg border px-3 pb-2 pt-1; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+.home-analytics-chart.compact { @apply rounded-none border-x-0 border-t-0 px-4 pb-3 pt-2; }
+.home-analytics-chart-readout { @apply flex min-h-10 items-baseline gap-2 border-b pb-2 text-[12px]; border-color: var(--ui-border-subtle); }
+.home-analytics-chart-readout > span { color: var(--ui-text-secondary); }
+.home-analytics-chart-readout > strong { @apply text-[13px] font-bold; color: var(--ui-text-primary); }
+.home-analytics-chart-readout > small { @apply ml-auto text-[11px]; color: var(--ui-text-secondary); }
 .home-analytics-chart-canvas { position: relative; width: 100%; height: 112px; }
+.home-analytics-chart.compact .home-analytics-chart-canvas { height: 96px; }
+.home-analytics-chart.compact .home-analytics-chart-canvas:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
+.home-analytics-chart.compact .sparkline-active-guide { stroke: var(--ui-action-primary); stroke-width: 1.5; stroke-dasharray: 2 2; opacity: .72; }
 .home-analytics-scale { @apply flex items-center justify-between text-[11px] font-medium; color: var(--ui-text-tertiary); }
+.home-analytics-chart.compact .home-analytics-scale { @apply mt-1; }
 .home-analytics-pulse-empty { @apply grid min-h-[112px] place-items-center rounded-xl border border-dashed text-[13px]; color: var(--ui-text-secondary); border-color: var(--ui-border-subtle); }
+.home-analytics-pulse-empty.compact { @apply min-h-11 rounded-none border-x-0 border-t-0; }
 .home-analytics-foot { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t px-4 py-2 text-[11px]; color: var(--ui-text-tertiary); border-color: var(--ui-border-subtle); }
 .home-analytics-foot.bad { color: var(--ui-status-danger-foreground); background: var(--ui-status-danger-background); border-color: var(--ui-status-danger-border); }
 .home-analytics-foot a { @apply font-semibold; color: inherit; }
@@ -122,7 +147,9 @@
   .overview-hero { @apply p-5; }
   .task-overview { grid-template-columns: 38px minmax(0,1fr); }
   .task-overview-meta { grid-column: 2; @apply flex-row items-center justify-start; }
-  .home-analytics-metrics, .home-analytics-loading { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .home-analytics-metrics, .home-analytics-loading,
+  .home-analytics-card.compact-summary .home-analytics-metrics,
+  .home-analytics-card.compact-summary .home-analytics-loading { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .home-analytics-metric:nth-child(2n), .home-analytics-loading span:nth-child(2n) { border-right: 0; }
   .home-analytics-metric:nth-child(-n+2), .home-analytics-loading span:nth-child(-n+2) { border-bottom: 1px solid var(--ui-border-subtle); }
 }
@@ -130,6 +157,9 @@
 @media (max-width: 520px) {
   .overview-title { font-size: 28px; }
   .task-overview-copy p { font-size: 0.875rem; line-height: 1.5; }
+  .task-overview-multiple-head { @apply items-start; }
+  .overview-active-task-row { grid-template-columns: minmax(0,1fr); gap: 6px; }
+  .overview-active-task-row .status-pill { @apply justify-self-start; }
   .activity-name { font-size: 0.8125rem; }
   .home-analytics-head, .home-analytics-pulse-head { @apply items-stretch flex-col; }
   .home-analytics-head .compact-button { @apply w-full; }

@@ -4,12 +4,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { discoverSkills } from '../src/skillDiscovery.js';
+import { makeDefaultConfig, invalidateConfigCache, writeConfig } from '../src/config.js';
+import {
+  addDashboardExtensionSource,
+  getExtensionsDashboard,
+  removeDashboardExtensionSource
+} from '../src/core/extensions.ts';
 import {
   extensionDashboard,
   installExtension,
   listInstalledExtensions,
   parseExtensionManifest,
-  removeExtension
+  removeExtension,
+  validateExtensionSource
 } from '../src/extensions/registry.js';
 import {
   extensionCommandPathEntries,
@@ -208,6 +215,7 @@ fs.rmSync(unsafeArchive, { force: true });
 fs.rmSync(unsafeDestination, { recursive: true, force: true });
 
 const originalFetch = globalThis.fetch;
+const extraResponses = new Map();
 globalThis.fetch = async url => {
   const href = String(url);
   if (href === catalogUrl) return responseJson(catalog);
@@ -223,6 +231,7 @@ globalThis.fetch = async url => {
   if (href === bundleManifestUrl) return responseJson(bundleManifest);
   if (href === bundleSkillUrl) return new Response(bundleSkill, { status: 200 });
   if (href === bundleArtifactUrl) return new Response(bundleArtifact, { status: 200 });
+  if (extraResponses.has(href)) return extraResponses.get(href)();
   return new Response('not found', { status: 404 });
 };
 
@@ -350,6 +359,114 @@ try {
   const removed = removeExtension(config, manifest.id);
   assert.equal(removed.removed, true);
   assert.equal(listInstalledExtensions(config).length, 0);
+
+  const customRepositoryUrl = 'https://github.com/acme/relai-extensions';
+  const customCatalogUrl = 'https://raw.githubusercontent.com/acme/relai-extensions/main/publisher-catalog.json';
+  const customManifestUrl = 'https://raw.githubusercontent.com/acme/relai-extensions/main/extensions/tool/relai-extension.json';
+  const customSkillUrl = 'https://raw.githubusercontent.com/acme/relai-extensions/main/extensions/tool/SKILL.md';
+  const customSkill = `---\nname: tool\ndescription: Third-party source fixture.\n---\n\n# Tool\n`;
+  const customManifest = {
+    ...manifest,
+    id: 'acme.tool',
+    name: 'Acme Tool',
+    description: 'Third-party extension source fixture.',
+    publisher: { name: 'Acme' },
+    repository: customRepositoryUrl,
+    files: [{ path: 'SKILL.md', sha256: crypto.createHash('sha256').update(customSkill).digest('hex') }]
+  };
+  const customCatalog = {
+    schemaVersion: 1,
+    updatedAt: '2026-09-29T00:00:00.000Z',
+    extensions: [catalogEntry(customManifest, customManifestUrl)]
+  };
+  extraResponses.set(customCatalogUrl, () => responseJson(customCatalog));
+  extraResponses.set(customManifestUrl, () => responseJson(customManifest));
+  extraResponses.set(customSkillUrl, () => new Response(customSkill, { status: 200 }));
+
+  const previousCatalogOverride = process.env.REL_AI_EXTENSIONS_CATALOG_URL;
+  process.env.REL_AI_EXTENSIONS_CATALOG_URL = catalogUrl;
+  try {
+    await assert.rejects(
+      validateExtensionSource(config, `${customRepositoryUrl}/tree/main`),
+      /repository URL itself/i,
+      'GitHub source input must be the repository URL rather than a branch or subfolder URL'
+    );
+    const source = await validateExtensionSource(config, customRepositoryUrl);
+    assert.equal(source.repositoryUrl, customRepositoryUrl);
+    assert.equal(source.catalogUrl, customCatalogUrl);
+    assert.equal(source.extensionCount, 1);
+
+    const sourceConfig = {
+      ...config,
+      extensions: { sources: [{ repositoryUrl: customRepositoryUrl, catalogUrl: customCatalogUrl }] }
+    };
+    const sourceDashboard = await extensionDashboard(sourceConfig, { refresh: true });
+    const sourceEntry = sourceDashboard.catalog.find(item => item.id === customManifest.id);
+    assert.equal(sourceEntry?.sourceRepositoryUrl, customRepositoryUrl);
+    assert.equal(sourceDashboard.sources.find(item => item.id === sourceEntry?.sourceId)?.status, 'ready');
+
+    const customInstalled = await installExtension(sourceConfig, customManifest.id, { sourceId: sourceEntry.sourceId });
+    assert.equal(customInstalled.ready, true);
+    assert.equal(customInstalled.sourceId, sourceEntry.sourceId);
+    assert.equal(customInstalled.sourceCatalogUrl, customCatalogUrl);
+
+    const sourceRemovedDashboard = await extensionDashboard(config, { refresh: true });
+    const retained = sourceRemovedDashboard.installed.find(item => item.id === customManifest.id);
+    assert.equal(retained?.sourceAvailable, false, 'removing a source must keep the installed package but disable update discovery');
+
+    const takeoverCatalogUrl = 'https://takeover.test/publisher-catalog.json';
+    const takeoverManifestUrl = 'https://takeover.test/acme-tool/relai-extension.json';
+    const takeoverManifest = { ...customManifest, version: '1.1.0', repository: 'https://takeover.test/repository' };
+    const takeoverCatalog = {
+      schemaVersion: 1,
+      updatedAt: '2026-09-29T00:01:00.000Z',
+      extensions: [catalogEntry(takeoverManifest, takeoverManifestUrl)]
+    };
+    extraResponses.set(takeoverCatalogUrl, () => responseJson(takeoverCatalog));
+    extraResponses.set(takeoverManifestUrl, () => responseJson(takeoverManifest));
+    await assert.rejects(
+      installExtension(sourceConfig, customManifest.id, { catalogUrl: takeoverCatalogUrl }),
+      /different source/i,
+      'an extension id already installed from one source must not be replaced from another source'
+    );
+    await assert.rejects(
+      validateExtensionSource(sourceConfig, takeoverCatalogUrl),
+      /conflicts with active extension id/i,
+      'adding a source with a duplicate active extension id must be rejected'
+    );
+
+    const removedCustom = removeExtension(sourceConfig, customManifest.id);
+    assert.equal(removedCustom.removed, true);
+  } finally {
+    if (previousCatalogOverride == null) delete process.env.REL_AI_EXTENSIONS_CATALOG_URL;
+    else process.env.REL_AI_EXTENSIONS_CATALOG_URL = previousCatalogOverride;
+  }
+  assert.equal(listInstalledExtensions(config).length, 0);
+
+  const previousConfigPath = process.env.REL_AI_MCP_CONFIG;
+  const previousCoreCatalogOverride = process.env.REL_AI_EXTENSIONS_CATALOG_URL;
+  const coreConfigPath = path.join(root, 'source-core-config.json');
+  process.env.REL_AI_MCP_CONFIG = coreConfigPath;
+  process.env.REL_AI_EXTENSIONS_CATALOG_URL = catalogUrl;
+  try {
+    writeConfig({ ...makeDefaultConfig(), stateDir: path.join(root, 'source-core-state') });
+    const addedSource = await addDashboardExtensionSource(customRepositoryUrl);
+    assert.equal(addedSource.ok, true);
+    const persistedAfterAdd = JSON.parse(fs.readFileSync(coreConfigPath, 'utf8'));
+    assert.deepEqual(persistedAfterAdd.extensions.sources, [{ repositoryUrl: customRepositoryUrl, catalogUrl: customCatalogUrl }]);
+    const coreDashboard = await getExtensionsDashboard(true);
+    assert.equal(coreDashboard.catalog.some(item => item.id === customManifest.id), true);
+    const removedSource = removeDashboardExtensionSource(addedSource.source.id);
+    assert.equal(removedSource.removed, true);
+    const persistedAfterRemove = JSON.parse(fs.readFileSync(coreConfigPath, 'utf8'));
+    assert.deepEqual(persistedAfterRemove.extensions.sources, []);
+  } finally {
+    if (previousConfigPath == null) delete process.env.REL_AI_MCP_CONFIG;
+    else process.env.REL_AI_MCP_CONFIG = previousConfigPath;
+    if (previousCoreCatalogOverride == null) delete process.env.REL_AI_EXTENSIONS_CATALOG_URL;
+    else process.env.REL_AI_EXTENSIONS_CATALOG_URL = previousCoreCatalogOverride;
+    invalidateConfigCache();
+  }
 } finally {
   globalThis.fetch = originalFetch;
   fs.rmSync(root, { recursive: true, force: true });

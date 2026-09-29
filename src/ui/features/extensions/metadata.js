@@ -4,6 +4,7 @@ const EXTENSION_SCHEMA_URL = `${EXTENSIONS_REPOSITORY_URL}/blob/main/schema/rela
 const TABS = Object.freeze([
   ['installed', 'Installed'],
   ['discover', 'Discover'],
+  ['sources', 'Sources'],
   ['developer', 'Developer']
 ]);
 

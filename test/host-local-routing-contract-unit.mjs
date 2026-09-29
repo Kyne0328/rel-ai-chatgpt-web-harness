@@ -51,7 +51,7 @@ assert.match(browser, /public web stays host-owned/i);
 const browserTool = publicTools.get('relai_browser');
 const browserActions = browserTool?.inputSchema?.properties?.action?.enum || [];
 assert.deepEqual(browserTool?.inputSchema?.properties?.detail?.enum, ['semantic', 'layout'], 'relai_browser must expose semantic and layout snapshot detail modes');
-for (const action of ['status', 'start', 'tabs', 'navigate', 'snapshot', 'upload', 'download', 'stop']) {
+for (const action of ['status', 'start', 'tabs', 'navigate', 'snapshot', 'upload', 'download', 'handoff', 'resume', 'clear_profile', 'stop']) {
   assert.ok(browserActions.includes(action), `relai_browser must expose ${action}`);
 }
 

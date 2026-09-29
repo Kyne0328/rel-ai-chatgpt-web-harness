@@ -7,6 +7,7 @@ import { layoutSnapshotExpression, normalizeBrowserSnapshotDetail } from '../src
 
 const MAX_SNAPSHOT_CHARS = 64 * 1024;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
+const PERMISSION_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
 const DOWNLOAD_TEMP_ROOT = path.resolve(os.tmpdir(), 'relai-browser-downloads');
 const CONTROL_OWNERS = new Set(['ai', 'user']);
 const READ_ONLY_ACTIONS = new Set(['describe', 'snapshot', 'screenshot']);
@@ -19,6 +20,11 @@ function createBrowserSurfaceHost(options = {}) {
     session,
     getDashboardWindow,
     openDashboard = async () => {},
+    clearPersistentData = async () => ({ cleared: false }),
+    listPersistentProfiles = async () => [],
+    readPersistentSites = async () => [],
+    recordPersistentSite = async () => {},
+    forgetPersistentSite = async () => {},
     onEvent = () => {},
     onStateChange = () => {},
     onError = () => {}
@@ -49,6 +55,7 @@ function createBrowserSurfaceHost(options = {}) {
       case 'screenshot': return withPage(payload, action, screenshotPage, options);
       case 'upload': return withPage(payload, action, uploadFile, options);
       case 'begin_download': return withPage(payload, action, beginDownload, options);
+      case 'set_control': return setControlForSession(payload.nativeSessionId, payload.owner, payload.reason);
       case 'close_page': return closePage(payload);
       case 'close_session': return closeSessionFromTool(payload.nativeSessionId);
       default: throw new Error(`Unsupported embedded browser action '${action || '(missing)'}.`);
@@ -64,19 +71,23 @@ function createBrowserSurfaceHost(options = {}) {
     const browserSession = persistent
       ? session.fromPath(path.resolve(profileDirectory))
       : session.fromPartition(`relai-browser:${nativeSessionId}`);
-    secureBrowserSession(browserSession, payload.ignoreHTTPSErrors === true);
     const record = {
       nativeSessionId,
       electronSession: browserSession,
       persistent,
+      profileDirectory: persistent ? path.resolve(profileDirectory) : '',
       viewport,
       pages: new Map(),
       activePageId: '',
       control: 'ai',
+      handoffReason: '',
       createdAt: new Date().toISOString(),
       pendingDownloads: new Map(),
+      pendingPermissions: new Map(),
+      permissionGrants: new Set(),
       downloadListener: null
     };
+    secureBrowserSession(record, payload.ignoreHTTPSErrors === true);
     record.downloadListener = (event, item, webContents) => handleWillDownload(record, event, item, webContents);
     browserSession.on('will-download', record.downloadListener);
     sessions.set(nativeSessionId, record);
@@ -166,7 +177,8 @@ function createBrowserSurfaceHost(options = {}) {
     return {
       url: publicPageUrl(page.webContents.getURL()),
       title: String(page.webContents.getTitle?.() || ''),
-      loading: page.loading === true
+      loading: page.loading === true,
+      ...(browserFrameSummaries(page.webContents).length ? { frames: browserFrameSummaries(page.webContents) } : {})
     };
   }
 
@@ -289,6 +301,7 @@ function createBrowserSurfaceHost(options = {}) {
 
   async function uploadFile(record, page, payload, options = {}) {
     assertAiControl(record, 'upload');
+    if (payload.target?.frame) throw new Error('Browser uploads inside frames are not supported. Take control to complete this upload manually.');
     const filePath = path.resolve(String(payload.filePath || ''));
     let file;
     try { file = fs.statSync(filePath); } catch { file = null; }
@@ -356,6 +369,9 @@ function createBrowserSurfaceHost(options = {}) {
       for (const pending of entries) pending.cancel(browserError('BROWSER_OPERATION_CANCELLED', 'Browser session closed before download completed.'));
     }
     record.pendingDownloads.clear();
+    for (const pending of record.pendingPermissions.values()) settlePermissionRequest(record, pending, false);
+    record.pendingPermissions.clear();
+    record.permissionGrants.clear();
     if (record.persistent) record.electronSession.setCertificateVerifyProc?.(null);
     if (!record.persistent) {
       await Promise.allSettled([
@@ -369,6 +385,73 @@ function createBrowserSurfaceHost(options = {}) {
     attachActiveView();
     publishState();
     return { ok: true, nativeSessionId, status: 'closed' };
+  }
+
+  async function listSavedSites() {
+    const profiles = await Promise.resolve(listPersistentProfiles());
+    const sites = new Map();
+    for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
+      const directory = path.resolve(String(profileDirectory || ''));
+      if (!directory) continue;
+      const electronSession = session.fromPath(directory);
+      const [registered, cookies] = await Promise.all([
+        Promise.resolve(readPersistentSites(directory)).catch(() => []),
+        Promise.resolve(electronSession.cookies?.get?.({})).catch(() => [])
+      ]);
+      const origins = new Set((Array.isArray(registered) ? registered : []).map(normalizeSavedSiteOrigin).filter(Boolean));
+      for (const cookie of Array.isArray(cookies) ? cookies : []) {
+        const origin = cookieSiteOrigin(cookie);
+        const hostname = safeOriginHostname(origin);
+        if (origin && ![...origins].some(candidate => safeOriginHostname(candidate) === hostname)) origins.add(origin);
+      }
+      for (const origin of origins) {
+        const current = sites.get(origin) || { origin, host: safeOriginHost(origin), profileCount: 0 };
+        current.profileCount += 1;
+        sites.set(origin, current);
+      }
+    }
+    return { ok: true, sites: [...sites.values()].sort((left, right) => left.host.localeCompare(right.host) || left.origin.localeCompare(right.origin)) };
+  }
+
+  async function clearSavedSite(value) {
+    if ([...sessions.values()].some(record => record.persistent)) {
+      throw new Error('Stop persistent browser sessions before clearing saved browser data.');
+    }
+    const origin = normalizeSavedSiteOrigin(value);
+    if (!origin) throw new Error('Saved browser site must be an absolute HTTP or HTTPS origin.');
+    const profiles = await Promise.resolve(listPersistentProfiles());
+    let cleared = false;
+    for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
+      const directory = path.resolve(String(profileDirectory || ''));
+      if (!directory) continue;
+      const electronSession = session.fromPath(directory);
+      if (typeof electronSession.clearStorageData === 'function') {
+        await electronSession.clearStorageData({ origin });
+        cleared = true;
+      }
+      await Promise.resolve(forgetPersistentSite(directory, origin));
+    }
+    publishState();
+    return { ok: true, origin, cleared };
+  }
+
+  async function clearSavedData() {
+    if ([...sessions.values()].some(record => record.persistent)) {
+      throw new Error('Stop persistent browser sessions before clearing saved browser data.');
+    }
+    const profiles = await Promise.resolve(listPersistentProfiles());
+    for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
+      const directory = path.resolve(String(profileDirectory || ''));
+      if (!directory) continue;
+      const electronSession = session.fromPath(directory);
+      await Promise.allSettled([
+        Promise.resolve(electronSession.clearStorageData?.()),
+        Promise.resolve(electronSession.clearCache?.())
+      ]);
+    }
+    const result = await clearPersistentData();
+    publishState();
+    return { ok: true, cleared: result?.cleared === true };
   }
 
   async function stopActiveSession() {
@@ -408,13 +491,25 @@ function createBrowserSurfaceHost(options = {}) {
   }
 
   async function setControl(owner) {
-    const value = String(owner || '').trim();
-    if (!CONTROL_OWNERS.has(value)) throw new Error('Browser control owner must be ai or user.');
+    const value = normalizeControlOwner(owner);
     const record = value === 'ai' && pinnedSessionId
       ? sessions.get(pinnedSessionId) || activeRecord()
       : visibleRecord();
     if (!record) throw new Error('No embedded browser session is active.');
+    return applyControl(record, value, '');
+  }
+
+  async function setControlForSession(value, owner, reason = '') {
+    const record = requireSession(value);
+    const control = normalizeControlOwner(owner);
+    activeSessionId = record.nativeSessionId;
+    if (control === 'user') await openDashboard('#browser');
+    return applyControl(record, control, reason);
+  }
+
+  async function applyControl(record, value, reason = '') {
     record.control = value;
+    record.handoffReason = value === 'user' ? String(reason || record.handoffReason || '').trim().slice(0, 80) : '';
     if (value === 'user') {
       pinnedSessionId = record.nativeSessionId;
       const page = activePage(record);
@@ -445,6 +540,8 @@ function createBrowserSurfaceHost(options = {}) {
         nativeSessionId: candidate.nativeSessionId,
         active: candidate.nativeSessionId === record?.nativeSessionId,
         control: candidate.control,
+        profile: candidate.persistent ? 'persistent' : 'ephemeral',
+        handoffReason: candidate.handoffReason || '',
         viewport: { ...candidate.viewport },
         pageCount: candidate.pages.size,
         url: candidatePage ? publicPageUrl(candidatePage.webContents.getURL()) : '',
@@ -470,6 +567,9 @@ function createBrowserSurfaceHost(options = {}) {
       activeSessionCount: sessions.size,
       sessions: sessionSummaries,
       control: record?.control || 'ai',
+      profile: record ? (record.persistent ? 'persistent' : 'ephemeral') : '',
+      handoffReason: record?.handoffReason || '',
+      permissionRequests: record ? [...record.pendingPermissions.values()].map(publicPermissionRequest) : [],
       viewport: record ? { ...record.viewport } : null,
       nativeSessionId: record?.nativeSessionId || '',
       nativePageId: page?.nativePageId || '',
@@ -517,6 +617,11 @@ function createBrowserSurfaceHost(options = {}) {
     const page = requirePage(record, value);
     await destroyPage(record, page, { emit: true });
     return getState();
+  }
+
+  function rememberPersistentSite(record, value) {
+    if (!record?.persistent || !record.profileDirectory) return;
+    void Promise.resolve(recordPersistentSite(record.profileDirectory, value)).catch(onError);
   }
 
   function configurePage(record, page) {
@@ -576,8 +681,15 @@ function createBrowserSurfaceHost(options = {}) {
     });
     wc.on('unresponsive', () => { page.unresponsive = true; publishState(); });
     wc.on('responsive', () => { page.unresponsive = false; publishState(); });
-    wc.on('did-navigate', () => { page.loadFailed = false; publishState(); });
-    wc.on('did-navigate-in-page', () => publishState());
+    wc.on('did-navigate', (_event, url) => {
+      page.loadFailed = false;
+      rememberPersistentSite(record, url || wc.getURL());
+      publishState();
+    });
+    wc.on('did-navigate-in-page', (_event, url) => {
+      rememberPersistentSite(record, url || wc.getURL());
+      publishState();
+    });
     wc.on('page-title-updated', () => publishState());
     wc.on('before-input-event', event => {
       if (record.control === 'ai' && page.aiInputDepth === 0) event.preventDefault();
@@ -622,12 +734,73 @@ function createBrowserSurfaceHost(options = {}) {
     });
   }
 
-  function secureBrowserSession(browserSession, ignoreHTTPSErrors) {
-    browserSession.setPermissionRequestHandler?.((_contents, _permission, callback) => callback(false));
-    browserSession.setPermissionCheckHandler?.(() => false);
+  function secureBrowserSession(record, ignoreHTTPSErrors) {
+    const browserSession = record.electronSession;
+    browserSession.setPermissionRequestHandler?.((contents, permission, callback, details = {}) => {
+      const key = permissionGrantKey(contents, permission, details.requestingUrl || contents?.getURL?.());
+      if (record.permissionGrants.has(key)) {
+        callback(true);
+        return;
+      }
+      const requestId = `browser_permission_${crypto.randomBytes(12).toString('base64url')}`;
+      const pending = {
+        requestId,
+        permission: String(permission || 'unknown'),
+        origin: permissionOrigin(details.requestingUrl || contents?.getURL?.()),
+        webContentsId: Number(contents?.id || 0),
+        key,
+        callback,
+        settled: false,
+        timer: null
+      };
+      pending.timer = setTimeout(() => settlePermissionRequest(record, pending, false), PERMISSION_REQUEST_TIMEOUT_MS);
+      pending.timer.unref?.();
+      record.pendingPermissions.set(requestId, pending);
+      publishState();
+      void openDashboard('#browser').catch(onError);
+    });
+    browserSession.setPermissionCheckHandler?.((contents, permission, requestingOrigin) =>
+      record.permissionGrants.has(permissionGrantKey(contents, permission, requestingOrigin)));
     if (typeof browserSession.setCertificateVerifyProc === 'function') {
       browserSession.setCertificateVerifyProc(ignoreHTTPSErrors ? ((_request, callback) => callback(0)) : null);
     }
+  }
+
+  function respondPermission(requestId, allowed) {
+    const id = String(requestId || '').trim();
+    for (const record of sessions.values()) {
+      const pending = record.pendingPermissions.get(id);
+      if (!pending) continue;
+      settlePermissionRequest(record, pending, allowed === true);
+      publishState();
+      return getState();
+    }
+    throw new Error('Browser permission request is no longer active.');
+  }
+
+  function settlePermissionRequest(record, pending, allowed) {
+    if (!pending || pending.settled) return;
+    pending.settled = true;
+    clearTimeout(pending.timer);
+    record.pendingPermissions.delete(pending.requestId);
+    if (allowed) record.permissionGrants.add(pending.key);
+    try { pending.callback(allowed === true); } catch {}
+  }
+
+  function publicPermissionRequest(pending) {
+    return {
+      requestId: pending.requestId,
+      permission: pending.permission,
+      origin: pending.origin
+    };
+  }
+
+  function permissionGrantKey(_contents, permission, origin) {
+    return `${String(permission || '')}\u0000${permissionOrigin(origin)}`;
+  }
+
+  function permissionOrigin(value) {
+    try { return new URL(String(value || '')).origin; } catch { return ''; }
   }
 
   function handleWillDownload(record, event, item, webContents) {
@@ -855,10 +1028,38 @@ function createBrowserSurfaceHost(options = {}) {
     throw browserError('BROWSER_USER_CONTROL_ACTIVE', `The user currently controls this browser session. Return control to AI before ${action.replaceAll('_', ' ')}.`);
   }
 
-  return Object.freeze({ run, getState, setBounds, setControl, selectSession, selectTab, closeTab, stopActiveSession, closeAll });
+  return Object.freeze({ run, getState, setBounds, setControl, respondPermission, listSavedSites, clearSavedSite, clearSavedData, selectSession, selectTab, closeTab, stopActiveSession, closeAll });
 }
 
-async function runDomInteraction(webContents, interaction, payload) {
+function normalizeSavedSiteOrigin(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : '';
+  } catch { return ''; }
+}
+
+function safeOriginHost(origin) {
+  try { return new URL(origin).host; } catch { return origin; }
+}
+
+function safeOriginHostname(origin) {
+  try { return new URL(origin).hostname; } catch { return ''; }
+}
+
+function cookieSiteOrigin(cookie = {}) {
+  const domain = String(cookie.domain || '').trim().replace(/^\./, '');
+  if (!domain) return '';
+  try { return new URL(`${cookie.secure === true ? 'https' : 'http'}://${domain}`).origin; } catch { return ''; }
+}
+
+function normalizeControlOwner(owner) {
+  const value = String(owner || '').trim();
+  if (!CONTROL_OWNERS.has(value)) throw new Error('Browser control owner must be ai or user.');
+  return value;
+}
+
+function runDomInteraction(webContents, interaction, payload) {
+  const frame = targetExecutionFrame(webContents, payload.target);
   const target = JSON.stringify(normalizeTarget(payload.target));
   const input = JSON.stringify(String(payload.input ?? ''));
   const selectValue = JSON.stringify(String(payload.selectValue ?? ''));
@@ -882,12 +1083,13 @@ async function runDomInteraction(webContents, interaction, payload) {
     }
     return true;
   })()`;
-  return webContents.executeJavaScript(script, true);
+  return frame.executeJavaScript(script, true);
 }
 
 async function focusTarget(webContents, target) {
+  const frame = targetExecutionFrame(webContents, target);
   const encoded = JSON.stringify(normalizeTarget(target));
-  return webContents.executeJavaScript(`(() => { const el = (${targetResolverSource()})(${encoded}); if (!el) throw new Error('Browser interaction target was not found.'); el.focus(); return true; })()`, true);
+  return frame.executeJavaScript(`(() => { const el = (${targetResolverSource()})(${encoded}); if (!el) throw new Error('Browser interaction target was not found.'); el.focus(); return true; })()`, true);
 }
 
 async function waitForTarget(webContents, target, stateValue, timeoutMs, signal) {
@@ -896,7 +1098,8 @@ async function waitForTarget(webContents, target, stateValue, timeoutMs, signal)
   const deadline = Date.now() + timeoutMs;
   while (true) {
     throwIfAborted(signal);
-    const result = await withAbort(webContents.executeJavaScript(`(() => {
+    const frame = targetExecutionFrame(webContents, target);
+    const result = await withAbort(frame.executeJavaScript(`(() => {
       const el = (${targetResolverSource()})(${encoded});
       if (!el) return { attached: false, visible: false };
       const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
@@ -914,9 +1117,10 @@ async function waitForTarget(webContents, target, stateValue, timeoutMs, signal)
 }
 
 async function markTarget(webContents, target, marker) {
+  const frame = targetExecutionFrame(webContents, target);
   const encoded = JSON.stringify(normalizeTarget(target));
   const safeMarker = JSON.stringify(marker);
-  const result = await webContents.executeJavaScript(`(() => { const el = (${targetResolverSource()})(${encoded}); if (!(el instanceof HTMLInputElement) || el.type !== 'file') return false; el.setAttribute('data-relai-upload-marker', ${safeMarker}); return true; })()`, true);
+  const result = await frame.executeJavaScript(`(() => { const el = (${targetResolverSource()})(${encoded}); if (!(el instanceof HTMLInputElement) || el.type !== 'file') return false; el.setAttribute('data-relai-upload-marker', ${safeMarker}); return true; })()`, true);
   if (!result) throw new Error('Browser upload target is not a file input.');
 }
 
@@ -1051,6 +1255,45 @@ function axValue(entry) {
   return value == null ? '' : String(value).replace(/\s+/g, ' ').trim();
 }
 
+function browserFrameSummaries(webContents) {
+  const frames = webContents?.mainFrame?.framesInSubtree || [];
+  return frames.filter(frame => frame !== webContents.mainFrame && !frame.isDestroyed?.()).map((frame, index) => ({
+    index,
+    name: String(frame.name || ''),
+    url: publicPageUrl(frame.url)
+  }));
+}
+
+function targetExecutionFrame(webContents, target) {
+  const frameTarget = target?.frame;
+  if (!frameTarget) return webContents.mainFrame || webContents;
+  const normalized = normalizeFrameTarget(frameTarget);
+  const frames = (webContents?.mainFrame?.framesInSubtree || []).filter(frame => frame !== webContents.mainFrame && !frame.isDestroyed?.());
+  const wanted = normalized.value;
+  const match = value => normalized.exact === true
+    ? String(value || '').trim() === wanted
+    : String(value || '').trim().toLowerCase().includes(wanted.toLowerCase());
+  const candidates = frames.filter(frame => match(normalized.by === 'name' ? frame.name : frame.url));
+  const selected = candidates[normalized.index || 0];
+  if (!selected) throw new Error(`Browser frame target was not found by ${normalized.by}.`);
+  return selected;
+}
+
+function normalizeFrameTarget(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('target.frame must be an object.');
+  const by = String(value.by || '').trim();
+  const targetValue = String(value.value || '').trim();
+  if (!['name', 'url'].includes(by)) throw new Error(`Unsupported target.frame.by '${by || '(missing)'}.`);
+  if (!targetValue) throw new Error('target.frame.value is required.');
+  const index = Number(value.index);
+  return {
+    by,
+    value: targetValue,
+    ...(value.exact === true ? { exact: true } : {}),
+    ...(Number.isInteger(index) && index >= 0 ? { index } : {})
+  };
+}
+
 function normalizeTarget(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('interact requires target.');
   const by = String(value.by || '').trim();
@@ -1063,7 +1306,8 @@ function normalizeTarget(value) {
     value: targetValue,
     ...(value.name ? { name: String(value.name) } : {}),
     ...(value.exact === true ? { exact: true } : {}),
-    ...(Number.isInteger(index) && index >= 0 ? { index } : {})
+    ...(Number.isInteger(index) && index >= 0 ? { index } : {}),
+    ...(value.frame ? { frame: normalizeFrameTarget(value.frame) } : {})
   };
 }
 

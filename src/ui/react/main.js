@@ -721,20 +721,32 @@ function DashboardState({ kind = 'loading', title, description, primaryLabel = '
     setBusy(key);
     try { await action(); } finally { setBusy(''); }
   };
+  if (loading) {
+    return h('div', {
+      className: 'dashboard-state dashboard-state-loading',
+      role: 'status',
+      'aria-live': 'polite',
+      'aria-busy': 'true'
+    },
+    h('span', { className: 'sr-only' }, title || 'Loading page'),
+    h('div', { className: 'dashboard-loading-skeleton', 'aria-hidden': 'true' },
+      h('div', { className: 'dashboard-loading-line dashboard-loading-title' }),
+      h('div', { className: 'dashboard-loading-line dashboard-loading-copy' }),
+      h('div', { className: 'skeleton-grid' },
+        h('div', { className: 'skeleton-block' }),
+        h('div', { className: 'skeleton-block' }),
+        h('div', { className: 'skeleton-block' })
+      )
+    ));
+  }
   return h('div', {
     className: 'dashboard-state',
-    role: loading ? 'status' : 'alert',
-    'aria-live': loading ? 'polite' : undefined,
-    'aria-busy': loading ? 'true' : undefined
+    role: 'alert'
   }, h('div', { className: 'dashboard-state-card' },
-    loading ? h('div', { className: 'loading-mark', 'aria-hidden': 'true' }) : h(StatusPill, { label: 'Connection error', tone: 'bad' }),
+    h(StatusPill, { label: 'Connection error', tone: 'bad' }),
     h('h2', null, title),
     h('p', null, description),
-    loading ? h('div', { className: 'skeleton-grid', 'aria-hidden': 'true' },
-      h('div', { className: 'skeleton-block' }),
-      h('div', { className: 'skeleton-block' }),
-      h('div', { className: 'skeleton-block' })
-    ) : h('div', { className: 'dashboard-state-actions' },
+    h('div', { className: 'dashboard-state-actions' },
       onPrimary ? h('button', { className: 'primary', type: 'button', disabled: Boolean(busy), onClick: () => { void run('primary', onPrimary); } }, busy === 'primary' ? primaryBusyLabel : primaryLabel) : null,
       onSecondary ? h('button', { className: 'secondary', type: 'button', disabled: Boolean(busy), onClick: () => { void run('secondary', onSecondary); } }, busy === 'secondary' ? secondaryBusyLabel : secondaryLabel) : null,
       diagnosticsHref ? h('a', { className: 'buttonlike secondary', href: diagnosticsHref }, 'Open Troubleshooting') : null

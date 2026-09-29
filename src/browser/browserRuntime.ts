@@ -19,7 +19,7 @@ import {
   type BrowserLocalIoWorkspace
 } from './browserLocalIo.ts';
 import { launchBrowserDriver, type BrowserPageDriver, type LocalBrowserDriver } from './browserDriver.ts';
-import { normalizeBrowserProfileMode, preparePersistentBrowserProfile, type BrowserProfileMode } from './browserProfile.ts';
+import { browserProfileDirectory, clearPersistentBrowserProfile, normalizeBrowserProfileMode, preparePersistentBrowserProfile, recordPersistentBrowserSite, type BrowserProfileMode } from './browserProfile.ts';
 import type { StructuredInteractionArgs } from './playwrightPrimitives.ts';
 
 const MAX_ACTIVE_BROWSER_SESSIONS = 8;
@@ -41,6 +41,7 @@ type BrowserArgs = Readonly<Record<string, unknown> & StructuredInteractionArgs 
   fullPage?: unknown;
   path?: unknown;
   profile?: unknown;
+  reason?: unknown;
 }>;
 
 type BrowserOperationOptions = Readonly<{ signal?: AbortSignal }>;
@@ -60,7 +61,9 @@ type BrowserSessionRecord = {
   createdAt: string;
   browserProduct: string;
   profileMode: BrowserProfileMode;
+  profileDirectory: string;
   profileKey: string;
+  handoff: Readonly<{ active: true; reason: string; startedAt: string }> | null;
 };
 
 type BrowserRuntimeDependencies = Readonly<{
@@ -80,6 +83,9 @@ interface BrowserRuntime {
   screenshot(workspace: AutomationWorkspace, args?: BrowserArgs, context?: BrowserContext, options?: BrowserOperationOptions): Promise<Record<string, unknown>>;
   upload(workspace: AutomationWorkspace, args?: BrowserArgs, context?: BrowserContext, options?: BrowserOperationOptions): Promise<Record<string, unknown>>;
   download(workspace: AutomationWorkspace, args?: BrowserArgs, context?: BrowserContext, options?: BrowserOperationOptions): Promise<Record<string, unknown>>;
+  handoff(workspace: AutomationWorkspace, args?: BrowserArgs, context?: BrowserContext): Promise<Record<string, unknown>>;
+  resume(workspace: AutomationWorkspace, args?: BrowserArgs, context?: BrowserContext): Promise<Record<string, unknown>>;
+  clearProfile(workspace: AutomationWorkspace, args?: BrowserArgs, context?: BrowserContext): Promise<Record<string, unknown>>;
   stop(workspace: AutomationWorkspace, args?: BrowserArgs, context?: BrowserContext): Promise<Record<string, unknown>>;
   stopSessionsForTask(taskId: string): Promise<{ stopped: number }>;
   shutdown(): Promise<{ stopped: number }>;
@@ -116,6 +122,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
         activeTabId: record.activeTabId,
         browserProduct: record.browserProduct,
         profile: record.profileMode,
+        handoff: record.handoff,
         createdAt: record.createdAt
       }))
     };
@@ -177,7 +184,9 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
         createdAt,
         browserProduct: driver.browserProduct,
         profileMode,
-        profileKey
+        profileDirectory,
+        profileKey,
+        handoff: null
       };
       sessions.set(sessionId, record);
       if (profileKey) activeProfiles.set(profileKey, sessionId);
@@ -194,6 +203,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       const initial = args.url
         ? await navigateTab(tab, normalizeBrowserUrl(args.url), timeoutFor(args.timeoutMs), options.signal)
         : await withAbort(tab.page.describe(options.signal), options.signal, browserCancellationError);
+      if (profileDirectory && initial.url) await recordPersistentBrowserSite(profileDirectory, initial.url);
       return sessionResult(record, 'start', {
         tabId: tab.tabId,
         viewport,
@@ -229,11 +239,13 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     options: BrowserOperationOptions = {}
   ): Promise<Record<string, unknown>> {
     const record = requireSession(workspace, args, context);
+    assertAiControl(record, 'open a tab');
     const tab = await createTab(record, options.signal);
     try {
       const result = args.url
         ? await navigateTab(tab, normalizeBrowserUrl(args.url), timeoutFor(args.timeoutMs), options.signal)
         : await withAbort(tab.page.describe(options.signal), options.signal, browserCancellationError);
+      if (record.profileDirectory && result.url) await recordPersistentBrowserSite(record.profileDirectory, result.url);
       return sessionResult(record, 'open_tab', { tabId: tab.tabId, ...result });
     } catch (error) {
       record.tabs.delete(tab.tabId);
@@ -249,6 +261,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     context: BrowserContext = {}
   ): Promise<Record<string, unknown>> {
     const record = requireSession(workspace, args, context);
+    assertAiControl(record, 'close a tab');
     const tab = requireTab(record, args.tabId);
     record.tabs.delete(tab.tabId);
     if (record.activeTabId === tab.tabId) record.activeTabId = firstTabId(record);
@@ -263,8 +276,10 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     options: BrowserOperationOptions = {}
   ): Promise<Record<string, unknown>> {
     const record = requireSession(workspace, args, context);
+    assertAiControl(record, 'navigate');
     const tab = requireTab(record, args.tabId);
     const result = await navigateTab(tab, normalizeBrowserUrl(args.url), timeoutFor(args.timeoutMs), options.signal);
+    if (record.profileDirectory && result.url) await recordPersistentBrowserSite(record.profileDirectory, result.url);
     record.activeTabId = tab.tabId;
     return sessionResult(record, 'navigate', { tabId: tab.tabId, ...result });
   }
@@ -324,6 +339,49 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       'download',
       { tabId: tab.tabId, ...(await downloadBrowserFile(requireLocalIoWorkspace(workspace), tab.page, args, timeoutFor(args.timeoutMs), options)) }
     ));
+  }
+
+  async function handoff(
+    workspace: AutomationWorkspace,
+    args: BrowserArgs = {},
+    context: BrowserContext = {}
+  ): Promise<Record<string, unknown>> {
+    const record = requireSession(workspace, args, context);
+    const reason = normalizeHandoffReason(args.reason);
+    const tab = requireTab(record, args.tabId);
+    record.activeTabId = tab.tabId;
+    if (!record.handoff) {
+      record.handoff = Object.freeze({ active: true, reason, startedAt: new Date().toISOString() });
+    }
+    await record.driver.setControl?.('user', reason);
+    return sessionResult(record, 'handoff', { tabId: tab.tabId, status: 'user_input_required', ...(await tab.page.describe()) });
+  }
+
+  async function resume(
+    workspace: AutomationWorkspace,
+    args: BrowserArgs = {},
+    context: BrowserContext = {}
+  ): Promise<Record<string, unknown>> {
+    const record = requireSession(workspace, args, context);
+    await record.driver.setControl?.('ai');
+    record.handoff = null;
+    return sessionResult(record, 'resume', { status: 'ready' });
+  }
+
+  async function clearProfile(
+    workspace: AutomationWorkspace,
+    args: BrowserArgs = {},
+    context: BrowserContext = {}
+  ): Promise<Record<string, unknown>> {
+    const attribution = createAutomationAttribution(workspace, args, context);
+    const config = getProfileConfig();
+    const directory = browserProfileDirectory(config, attribution.principalFingerprint);
+    const profileKey = normalizeProfileKey(directory);
+    if (activeProfiles.has(profileKey) || pendingProfiles.has(profileKey)) {
+      throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Stop the persistent browser session before clearing its saved site data.');
+    }
+    const result = await clearPersistentBrowserProfile(config, attribution.principalFingerprint);
+    return { ok: true, workspace: workspace.alias, action: 'clear_profile', profile: 'persistent', cleared: result.cleared };
   }
 
   async function stop(
@@ -414,6 +472,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
   ): Promise<T> {
     throwIfAborted(options.signal, browserCancellationError);
     const record = requireSession(workspace, args, context);
+    if (['snapshot', 'interact', 'screenshot', 'upload', 'download'].includes(_action)) assertAiControl(record, _action);
     const tab = requireTab(record, args.tabId);
     record.activeTabId = tab.tabId;
     return callback(record, tab);
@@ -458,6 +517,9 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     screenshot,
     upload,
     download,
+    handoff,
+    resume,
+    clearProfile,
     stop,
     stopSessionsForTask,
     shutdown,
@@ -476,8 +538,23 @@ function sessionResult(record: BrowserSessionRecord, action: string, extra: Reco
     action,
     sessionId: record.sessionId,
     activeTabId: record.activeTabId,
+    profile: record.profileMode,
+    handoff: record.handoff,
     ...extra
   };
+}
+
+function assertAiControl(record: BrowserSessionRecord, action: string): void {
+  if (!record.handoff?.active) return;
+  throw taskError('BROWSER_USER_CONTROL_ACTIVE', `The user currently controls this browser session. Resume AI control before trying to ${action}.`);
+}
+
+function normalizeHandoffReason(value: unknown): string {
+  const reason = String(value || 'sign_in').trim().toLowerCase();
+  if (!['sign_in', 'mfa', 'captcha', 'user_input'].includes(reason)) {
+    throw new Error('Browser handoff reason must be sign_in, mfa, captcha, or user_input.');
+  }
+  return reason;
 }
 
 function normalizeBrowserUrl(value: unknown): string {

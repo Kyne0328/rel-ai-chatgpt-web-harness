@@ -14,6 +14,8 @@ import { extractToolBundleZip } from './toolBundle.js';
 import { beginExtensionInstallTransaction, completeExtensionInstallTransaction, markExtensionInstallCommitted, recoverInterruptedExtensionInstalls } from './installTransaction.js';
 
 const CATALOG_URL = 'https://raw.githubusercontent.com/Kyne0328/rel-ai-extensions/main/catalog.json';
+const OFFICIAL_EXTENSION_REPOSITORY_URL = 'https://github.com/Kyne0328/rel-ai-extensions';
+const PUBLISHER_CATALOG_FILENAME = 'publisher-catalog.json';
 const MANIFEST_FILENAME = 'relai-extension.json';
 const INSTALL_METADATA_FILENAME = '.relai-install.json';
 const MAX_CATALOG_BYTES = 1024 * 1024;
@@ -42,7 +44,7 @@ const PERMISSIONS = Object.freeze([
   'browser',
   'computer'
 ]);
-let catalogCache = null;
+const catalogCache = new Map();
 const installedExtensionVerificationCache = new Map();
 
 const extensionFileSchema = z.object({
@@ -241,6 +243,18 @@ function listInstalledExtensions(config = {}, options = {}) {
     .sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id)));
 }
 
+function readExtensionInstallMetadata(directory) {
+  const metadataPath = path.join(directory, INSTALL_METADATA_FILENAME);
+  try {
+    const stat = fs.lstatSync(metadataPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return null;
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+    return metadata?.schemaVersion === 1 ? metadata : null;
+  } catch {
+    return null;
+  }
+}
+
 function readInstalledExtension(directory, directoryName = path.basename(directory), config = {}, options = {}) {
   try {
     const manifestPath = path.join(directory, MANIFEST_FILENAME);
@@ -262,7 +276,18 @@ function readInstalledExtension(directory, directoryName = path.basename(directo
     const files = verifyInstalledFiles(directory, manifest, cached?.files, options.metrics);
     installedExtensionVerificationCache.set(directory, { manifestSignature, manifest, files });
     const readiness = extensionReadiness(manifest, config);
-    return { ...publicManifest(manifest), ...readiness };
+    const metadata = readExtensionInstallMetadata(directory) || {};
+    const sourceCatalogUrl = String(metadata.catalogUrl || '');
+    const localDevelopment = metadata.localDevelopment === true;
+    const sourceId = String(metadata.sourceId || '') || (sourceCatalogUrl ? extensionSourceId(sourceCatalogUrl) : localDevelopment ? 'local-development' : '');
+    return {
+      ...publicManifest(manifest),
+      ...readiness,
+      sourceId,
+      sourceCatalogUrl,
+      sourceRepositoryUrl: String(metadata.repositoryUrl || ''),
+      localDevelopment
+    };
   } catch (error) {
     installedExtensionVerificationCache.delete(directory);
     return {
@@ -316,41 +341,134 @@ function extensionSkillRecords(config = {}, options = {}) {
 
 async function extensionDashboard(config = {}, options = {}) {
   const installed = listInstalledExtensions(config, options);
-  let catalog = null;
-  let catalogError = '';
-  try {
-    catalog = await fetchExtensionCatalog(options);
-  } catch (error) {
-    catalogError = errorMessage(error);
-  }
-  const installedById = new Map(installed.map(item => [item.id, item]));
-  const available = (catalog?.extensions || []).map(entry => {
+  const loaded = await loadExtensionCatalogSources(config, options);
+  const sourceById = new Map(loaded.sources.map(source => [source.id, source]));
+  const installedWithSource = installed.map(extension => {
+    const source = sourceById.get(extension.sourceId);
+    return {
+      ...extension,
+      sourceAvailable: extension.localDevelopment || Boolean(source && source.status === 'ready'),
+      sourceName: source?.name || (extension.localDevelopment ? 'Local development' : ''),
+      sourceRepositoryUrl: extension.sourceRepositoryUrl || source?.repositoryUrl || ''
+    };
+  });
+  const installedById = new Map(installedWithSource.map(item => [item.id, item]));
+  const available = loaded.entries.map(entry => {
     const current = installedById.get(entry.id);
+    const sourceMatches = !current || (
+      current.sourceCatalogUrl
+        ? current.sourceCatalogUrl === entry.sourceCatalogUrl
+        : !current.localDevelopment && entry.sourceOfficial === true
+    );
     return {
       ...entry,
       installedVersion: current?.version || '',
       installed: Boolean(current?.version),
-      updateAvailable: Boolean(current?.version && semver.gt(entry.version, current.version))
+      sourceMismatch: Boolean(current?.version && !sourceMatches),
+      updateAvailable: Boolean(current?.version && sourceMatches && semver.gt(entry.version, current.version))
     };
   });
+  const sources = loaded.sources.map(source => ({
+    ...source,
+    installedCount: installedWithSource.filter(extension => extension.sourceId === source.id || (
+      !extension.sourceId && extension.sourceCatalogUrl && extension.sourceCatalogUrl === source.catalogUrl
+    )).length
+  }));
+  const official = sources.find(source => source.official) || officialExtensionSource(options);
   return {
     ok: true,
-    catalogUrl: resolveCatalogUrl(options),
+    catalogUrl: official.catalogUrl,
     installRoot: extensionsRoot(config),
-    installed,
+    installed: installedWithSource,
     catalog: available,
-    catalogUpdatedAt: catalog?.updatedAt || '',
-    catalogError
+    sources,
+    catalogUpdatedAt: official.catalogUpdatedAt || '',
+    catalogError: sources.filter(source => source.error).map(source => `${source.name}: ${source.error}`).join(' ')
   };
+}
+
+async function loadExtensionCatalogSources(config = {}, options = {}) {
+  const descriptors = options.catalogUrl
+    ? [{
+        id: String(options.sourceId || '') || extensionSourceId(resolveCatalogUrl(options)),
+        name: String(options.sourceName || '') || new URL(resolveCatalogUrl(options)).hostname,
+        official: options.sourceId === 'official',
+        repositoryUrl: String(options.repositoryUrl || ''),
+        catalogUrl: resolveCatalogUrl(options)
+      }]
+    : [officialExtensionSource(options), ...configuredExtensionSources(config)];
+  const claimed = new Map();
+  const sources = [];
+  const entries = [];
+
+  for (const descriptor of descriptors) {
+    let catalog;
+    try {
+      catalog = await fetchExtensionCatalog({ catalogUrl: descriptor.catalogUrl, refresh: options.refresh });
+    } catch (error) {
+      sources.push({ ...descriptor, status: 'error', error: errorMessage(error), extensionCount: 0, catalogUpdatedAt: '' });
+      continue;
+    }
+    const conflicts = catalog.extensions.map(entry => entry.id).filter(id => claimed.has(id));
+    if (conflicts.length) {
+      sources.push({
+        ...descriptor,
+        status: 'conflict',
+        error: `Duplicate extension id${conflicts.length === 1 ? '' : 's'} already provided by another active source: ${conflicts.join(', ')}.`,
+        extensionCount: catalog.extensions.length,
+        catalogUpdatedAt: catalog.updatedAt
+      });
+      continue;
+    }
+    for (const entry of catalog.extensions) claimed.set(entry.id, descriptor.id);
+    const sourceEntries = catalog.extensions.map(entry => ({
+      ...entry,
+      sourceId: descriptor.id,
+      sourceName: descriptor.name,
+      sourceOfficial: descriptor.official === true,
+      sourceRepositoryUrl: descriptor.repositoryUrl,
+      sourceCatalogUrl: descriptor.catalogUrl
+    }));
+    entries.push(...sourceEntries);
+    sources.push({
+      ...descriptor,
+      status: 'ready',
+      error: '',
+      extensionCount: sourceEntries.length,
+      catalogUpdatedAt: catalog.updatedAt
+    });
+  }
+  return { sources, entries };
+}
+
+async function validateExtensionSource(config = {}, input, options = {}) {
+  const source = extensionSourceFromInput(input);
+  const official = officialExtensionSource();
+  if (source.catalogUrl === official.catalogUrl || source.repositoryUrl === official.repositoryUrl) {
+    throw new Error('The official Rel.AI extension source is already built in.');
+  }
+  const configured = configuredExtensionSources(config);
+  if (configured.some(item => item.catalogUrl === source.catalogUrl)) {
+    throw new Error('This extension source is already added.');
+  }
+  const catalog = await fetchExtensionCatalog({ catalogUrl: source.catalogUrl, refresh: true });
+  const loaded = await loadExtensionCatalogSources(config, { refresh: options.refresh === true });
+  const existingIds = new Set(loaded.entries.map(entry => entry.id));
+  const conflicts = catalog.extensions.map(entry => entry.id).filter(id => existingIds.has(id));
+  if (conflicts.length) {
+    throw new Error(`This source conflicts with active extension id${conflicts.length === 1 ? '' : 's'}: ${conflicts.join(', ')}.`);
+  }
+  return { ...source, status: 'ready', error: '', extensionCount: catalog.extensions.length, catalogUpdatedAt: catalog.updatedAt };
 }
 
 async function fetchExtensionCatalog(options = {}) {
   const url = resolveCatalogUrl(options);
   const now = Date.now();
-  if (!options.refresh && catalogCache?.url === url && catalogCache.expiresAt > now) return catalogCache.value;
+  const cached = catalogCache.get(url);
+  if (!options.refresh && cached?.expiresAt > now) return cached.value;
   const raw = await fetchJsonDocument(url, MAX_CATALOG_BYTES, 'extension catalog');
   const catalog = parseExtensionCatalog(raw);
-  catalogCache = { url, value: catalog, expiresAt: now + CATALOG_TTL_MS };
+  catalogCache.set(url, { value: catalog, expiresAt: now + CATALOG_TTL_MS });
   return catalog;
 }
 
@@ -534,9 +652,21 @@ async function installExtension(config, id, options = {}) {
   const extensionId = normalizeExtensionId(id);
   const recovery = recoverInterruptedExtensionInstalls(config);
   if (!recovery.ok) throw new Error(`Could not recover an interrupted extension installation: ${recovery.errors[0]?.error || 'unknown recovery error'}`);
-  const catalog = await fetchExtensionCatalog({ ...options, refresh: true });
-  const entry = catalog.extensions.find(item => item.id === extensionId);
-  if (!entry) throw new Error(`Extension '${extensionId}' is not in the Rel.AI extension catalog.`);
+  const { source, entry } = await resolveExtensionInstallSource(config, extensionId, options);
+  const target = path.join(extensionsRoot(config), extensionId);
+  if (fs.existsSync(target)) {
+    const installedMetadata = readExtensionInstallMetadata(target);
+    if (installedMetadata?.localDevelopment === true) {
+      throw new Error(`Extension '${extensionId}' is installed from local development sources. Remove it before installing from a repository source.`);
+    }
+    const installedCatalogUrl = String(installedMetadata?.catalogUrl || '');
+    if (!installedCatalogUrl) {
+      throw new Error(`Extension '${extensionId}' has no recorded source. Remove it before installing from a repository source.`);
+    }
+    if (installedCatalogUrl !== source.catalogUrl) {
+      throw new Error(`Extension '${extensionId}' is installed from a different source. Remove it before switching sources.`);
+    }
+  }
   const rawManifest = await fetchJsonDocument(entry.manifestUrl, MAX_MANIFEST_BYTES, 'extension manifest');
   const manifest = parseExtensionManifest(rawManifest);
   if (manifest.id !== entry.id || manifest.version !== entry.version || manifest.kind !== entry.kind) {
@@ -551,14 +681,50 @@ async function installExtension(config, id, options = {}) {
   assertInstallCompatibility(manifest, config);
   return await commitExtensionPackage(config, manifest, {
     metadata: {
+      sourceId: source.id,
+      repositoryUrl: source.repositoryUrl,
       manifestUrl: entry.manifestUrl,
-      catalogUrl: resolveCatalogUrl(options)
+      catalogUrl: source.catalogUrl
     },
     readFile: file => {
       const fileUrl = new URL(file.path.replaceAll('\\', '/'), entry.manifestUrl).href;
       return fetchFile(fileUrl, MAX_EXTENSION_FILE_BYTES, `extension file ${file.path}`);
     }
   });
+}
+
+async function resolveExtensionInstallSource(config, extensionId, options = {}) {
+  if (options.catalogUrl) {
+    const catalogUrl = resolveCatalogUrl(options);
+    const source = {
+      id: String(options.sourceId || '') || extensionSourceId(catalogUrl),
+      name: String(options.sourceName || '') || new URL(catalogUrl).hostname,
+      official: options.sourceId === 'official',
+      repositoryUrl: String(options.repositoryUrl || ''),
+      catalogUrl
+    };
+    const catalog = await fetchExtensionCatalog({ catalogUrl, refresh: true });
+    const entry = catalog.extensions.find(item => item.id === extensionId);
+    if (!entry) throw new Error(`Extension '${extensionId}' is not in the selected Rel.AI extension source.`);
+    return { source, entry };
+  }
+
+  const descriptors = [officialExtensionSource(), ...configuredExtensionSources(config)];
+  if (options.sourceId) {
+    const source = descriptors.find(item => item.id === options.sourceId);
+    if (!source) throw new Error('The selected extension source is no longer configured.');
+    const catalog = await fetchExtensionCatalog({ catalogUrl: source.catalogUrl, refresh: true });
+    const entry = catalog.extensions.find(item => item.id === extensionId);
+    if (!entry) throw new Error(`Extension '${extensionId}' is not available from the selected source.`);
+    return { source, entry };
+  }
+
+  const loaded = await loadExtensionCatalogSources(config, { refresh: true });
+  const entry = loaded.entries.find(item => item.id === extensionId);
+  if (!entry) throw new Error(`Extension '${extensionId}' is not available from any active Rel.AI extension source.`);
+  const source = loaded.sources.find(item => item.id === entry.sourceId);
+  if (!source || source.status !== 'ready') throw new Error(`The source for extension '${extensionId}' is unavailable.`);
+  return { source, entry };
 }
 
 async function installLocalExtension(config, extensionDirectory) {
@@ -767,6 +933,111 @@ function safeJoin(root, relative) {
   return resolved;
 }
 
+function officialExtensionSource(options = {}) {
+  return {
+    id: 'official',
+    name: 'Rel.AI Extensions',
+    official: true,
+    repositoryUrl: OFFICIAL_EXTENSION_REPOSITORY_URL,
+    catalogUrl: resolveCatalogUrl(options)
+  };
+}
+
+function configuredExtensionSources(config = {}) {
+  const sources = Array.isArray(config?.extensions?.sources) ? config.extensions.sources : [];
+  const seen = new Set();
+  const normalized = [];
+  for (const item of sources) {
+    try {
+      const source = normalizeExtensionSourceRecord(item);
+      if (!source.catalogUrl || source.catalogUrl === CATALOG_URL || seen.has(source.catalogUrl)) continue;
+      seen.add(source.catalogUrl);
+      normalized.push(source);
+    } catch {}
+  }
+  return normalized;
+}
+
+function extensionSourceFromInput(value) {
+  const text = String(value || '').trim();
+  if (!text) throw new Error('Repository URL is required.');
+  let parsed;
+  try { parsed = new URL(text); } catch { throw new Error('Enter a valid HTTPS repository or catalog URL.'); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error('Extension sources must use HTTPS and cannot contain embedded credentials.');
+  }
+  parsed.hash = '';
+  if (parsed.hostname.toLowerCase() === 'github.com') {
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    if (parts.length !== 2) throw new Error('Enter the GitHub repository URL itself, without a branch, file, or subfolder path.');
+    const owner = parts[0];
+    const repositoryName = parts[1].replace(/\.git$/i, '');
+    const repositoryUrl = `https://github.com/${owner}/${repositoryName}`;
+    const catalogUrl = `https://raw.githubusercontent.com/${owner}/${repositoryName}/main/${PUBLISHER_CATALOG_FILENAME}`;
+    return {
+      id: extensionSourceId(catalogUrl),
+      name: `${owner}/${repositoryName}`,
+      official: false,
+      repositoryUrl,
+      catalogUrl
+    };
+  }
+  if (!parsed.pathname.toLowerCase().endsWith('.json')) {
+    throw new Error(`Non-GitHub sources must point directly to an HTTPS ${PUBLISHER_CATALOG_FILENAME} file.`);
+  }
+  const catalogUrl = parsed.href;
+  return {
+    id: extensionSourceId(catalogUrl),
+    name: parsed.hostname,
+    official: false,
+    repositoryUrl: '',
+    catalogUrl
+  };
+}
+
+function normalizeExtensionSourceRecord(record = {}) {
+  const catalogUrl = normalizeHttpsSourceUrl(record.catalogUrl, 'catalog URL');
+  const repositoryUrl = String(record.repositoryUrl || '').trim()
+    ? normalizeHttpsSourceUrl(record.repositoryUrl, 'repository URL')
+    : '';
+  return {
+    id: extensionSourceId(catalogUrl),
+    name: repositoryUrl ? sourceDisplayName(repositoryUrl) : new URL(catalogUrl).hostname,
+    official: false,
+    repositoryUrl,
+    catalogUrl
+  };
+}
+
+function extensionSourceId(catalogUrl) {
+  const normalized = String(catalogUrl || '').trim();
+  if (normalized === CATALOG_URL) return 'official';
+  return `source_${crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16)}`;
+}
+
+function sourceDisplayName(repositoryUrl) {
+  try {
+    const parsed = new URL(repositoryUrl);
+    if (parsed.hostname.toLowerCase() === 'github.com') {
+      return parsed.pathname.split('/').filter(Boolean).slice(0, 2).join('/') || parsed.hostname;
+    }
+    return parsed.hostname;
+  } catch {
+    return repositoryUrl;
+  }
+}
+
+function normalizeHttpsSourceUrl(value, label) {
+  const text = String(value || '').trim();
+  let parsed;
+  try { parsed = new URL(text); } catch { throw new Error(`Extension source ${label} is invalid.`); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+    throw new Error(`Extension source ${label} must use HTTPS without embedded credentials.`);
+  }
+  parsed.hash = '';
+  return parsed.href;
+}
+
 function resolveCatalogUrl(options = {}) {
   const url = String(options.catalogUrl || process.env.REL_AI_EXTENSIONS_CATALOG_URL || CATALOG_URL).trim();
   if (!isHttpsUrl(url)) throw new Error('The Rel.AI extension catalog URL must use HTTPS.');
@@ -955,10 +1226,12 @@ export {
   MAX_EXTENSION_FILE_BYTES,
   MAX_EXTENSION_TOTAL_BYTES,
   PERMISSIONS,
+  configuredExtensionSources,
   extensionCatalogSchema,
   extensionDashboard,
   extensionManifestSchema,
   extensionSkillRecords,
+  extensionSourceId,
   extensionsRoot,
   fetchExtensionCatalog,
   installExtension,
@@ -966,5 +1239,6 @@ export {
   listInstalledExtensions,
   parseExtensionCatalog,
   parseExtensionManifest,
-  removeExtension
+  removeExtension,
+  validateExtensionSource
 };

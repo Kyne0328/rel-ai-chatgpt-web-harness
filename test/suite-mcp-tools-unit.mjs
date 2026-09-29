@@ -33,6 +33,9 @@ async function case_approval_broker_unit() {
   assert.equal(approvalRequirement('relai_publish', {
     action: 'push', workspace: 'repo', work_id: 'work-a', remote: 'origin', branch: 'main', dryRun: true
   }), null, 'dry-run push must not require approval');
+  const browserClearApproval = approvalRequirement('relai_browser', { action: 'clear_profile', workspace: 'repo' });
+  assert.ok(browserClearApproval, 'clearing saved browser sign-ins must require explicit user approval');
+  assert.match(browserClearApproval.message, /saved browser sign-ins and site data/i);
   assert.equal(supportsNativeApproval({}), false);
   assert.equal(supportsNativeApproval({ elicitation: {} }), true);
   assert.equal(supportsNativeApproval({ elicitation: { form: {} } }), true);
@@ -1997,11 +2000,14 @@ async function case_tool_action_catalog_parity_unit() {
       case 'relai_ui:interact': Object.assign(args, { sessionId: 'ui_abcdefghijklmnopqrst', interaction: 'click', target: { by: 'text', value: 'Save' } }); break;
       case 'relai_ui:viewport': Object.assign(args, { sessionId: 'ui_abcdefghijklmnopqrst', width: 1280, height: 720 }); break;
       case 'relai_browser:start': args.url = 'http://192.168.1.20/app'; break;
-      case 'relai_browser:status': break;
+      case 'relai_browser:status':
+      case 'relai_browser:clear_profile': break;
       case 'relai_browser:tabs':
       case 'relai_browser:open_tab':
       case 'relai_browser:snapshot':
       case 'relai_browser:screenshot':
+      case 'relai_browser:handoff':
+      case 'relai_browser:resume':
       case 'relai_browser:stop': args.sessionId = 'browser_abcdefghijklmnopqrst'; break;
       case 'relai_browser:close_tab': Object.assign(args, { sessionId: 'browser_abcdefghijklmnopqrst', tabId: 'tab_abcdefghijklmnopqrst' }); break;
       case 'relai_browser:navigate': Object.assign(args, { sessionId: 'browser_abcdefghijklmnopqrst', url: 'https://intranet.example.test/page' }); break;
@@ -2255,7 +2261,12 @@ async function case_tool_action_contract_unit() {
   for (const entry of catalog.filter(item => item.publicTool === 'relai_browser')) {
     assert.equal(entry.capability, 'process:manage', `relai_browser:${entry.action} must use structured process/browser authorization rather than raw computer control`);
     assert.equal(entry.behavior.taskScope, 'optional', `relai_browser:${entry.action} must allow principal/workspace/session authority without synthetic durable work`);
-    assert.equal(approvalRequirement('relai_browser', sampleArgs(entry)), null, `relai_browser:${entry.action} must use principal authorization without a duplicate MCP approval flow`);
+    const requirement = approvalRequirement('relai_browser', sampleArgs(entry));
+    if (entry.action === 'clear_profile') {
+      assert.ok(requirement, 'relai_browser:clear_profile must require explicit user approval because it deletes saved sign-ins and site data');
+    } else {
+      assert.equal(requirement, null, `relai_browser:${entry.action} must use principal authorization without a duplicate MCP approval flow`);
+    }
   }
   for (const entry of catalog.filter(item => item.publicTool === 'relai_desktop')) {
     assert.equal(approvalRequirement('relai_desktop', sampleArgs(entry)), null, `relai_desktop:${entry.action} must use principal authorization without a duplicate MCP approval flow`);
@@ -2297,11 +2308,14 @@ async function case_tool_action_contract_unit() {
       case 'relai_ui:interact': Object.assign(args, { sessionId: 'ui_abcdefghijklmnopqrst', interaction: 'click', target: { by: 'text', value: 'Save' } }); break;
       case 'relai_ui:viewport': Object.assign(args, { sessionId: 'ui_abcdefghijklmnopqrst', width: 1280, height: 720 }); break;
       case 'relai_browser:start': args.url = 'http://192.168.1.20/app'; break;
-      case 'relai_browser:status': break;
+      case 'relai_browser:status':
+      case 'relai_browser:clear_profile': break;
       case 'relai_browser:tabs':
       case 'relai_browser:open_tab':
       case 'relai_browser:snapshot':
       case 'relai_browser:screenshot':
+      case 'relai_browser:handoff':
+      case 'relai_browser:resume':
       case 'relai_browser:stop': args.sessionId = 'browser_abcdefghijklmnopqrst'; break;
       case 'relai_browser:close_tab': Object.assign(args, { sessionId: 'browser_abcdefghijklmnopqrst', tabId: 'tab_abcdefghijklmnopqrst' }); break;
       case 'relai_browser:navigate': Object.assign(args, { sessionId: 'browser_abcdefghijklmnopqrst', url: 'https://intranet.example.test/page' }); break;
@@ -2690,11 +2704,14 @@ async function case_tool_output_validation_unit() {
       case 'relai_ui:reload':
       case 'relai_ui:stop': return { sessionId: 'ui_abcdefghijklmnopqrst' };
       case 'relai_browser:start': return { url: 'http://192.168.1.20/app' };
-      case 'relai_browser:status': return {};
+      case 'relai_browser:status':
+      case 'relai_browser:clear_profile': return {};
       case 'relai_browser:tabs':
       case 'relai_browser:open_tab':
       case 'relai_browser:snapshot':
       case 'relai_browser:screenshot':
+      case 'relai_browser:handoff':
+      case 'relai_browser:resume':
       case 'relai_browser:stop': return { sessionId: 'browser_abcdefghijklmnopqrst' };
       case 'relai_browser:close_tab': return { sessionId: 'browser_abcdefghijklmnopqrst', tabId: 'tab_abcdefghijklmnopqrst' };
       case 'relai_browser:navigate': return { sessionId: 'browser_abcdefghijklmnopqrst', url: 'https://intranet.example.test/page' };

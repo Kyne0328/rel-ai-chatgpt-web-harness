@@ -82,6 +82,7 @@ const ICONS = Object.freeze({
   workspaces: FolderKanban,
   activity: Activity,
   preferences: SlidersHorizontal,
+  privacy: Shield,
   application: AppWindow,
   about: CircleHelp,
   connection: Link2,

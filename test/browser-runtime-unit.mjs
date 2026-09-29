@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createBrowserRuntime, normalizeBrowserUrl } from '../src/browser/browserRuntime.ts';
 
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-browser-runtime-unit-'));
+const stateDir = path.join(temp, 'state');
 const workspace = { alias: 'repo' };
 const context = { taskId: 'work_browser_unit' };
 const fake = createFakeBrowserHarness();
-const runtime = createBrowserRuntime({ launch: fake.launch });
+const runtime = createBrowserRuntime({ launch: fake.launch, getProfileConfig: () => ({ stateDir }) });
 
 const concurrentFake = createFakeBrowserHarness();
 let releaseConcurrentLaunch;
 concurrentFake.state.launchBarrier = new Promise(resolve => { releaseConcurrentLaunch = resolve; });
-const concurrentRuntime = createBrowserRuntime({ launch: concurrentFake.launch });
+const concurrentRuntime = createBrowserRuntime({ launch: concurrentFake.launch, getProfileConfig: () => ({ stateDir: path.join(temp, 'concurrent-state') }) });
 const concurrentContext = { taskId: 'work_browser_concurrent' };
 const concurrentStarts = [
   concurrentRuntime.start(workspace, { url: 'http://127.0.0.1:3000/concurrent-a', work_id: concurrentContext.taskId }, concurrentContext),
@@ -29,6 +34,10 @@ assert.throws(() => normalizeBrowserUrl('/relative'), /absolute http or https/i)
 
 const started = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/start', work_id: context.taskId }, context);
 assert.equal(started.ok, true);
+assert.equal(started.profile, 'persistent', 'local browser sessions must remember sign-ins by default');
+assert.ok(fake.state.launchOptions.at(-1)?.profileDirectory, 'default persistent sessions must launch with a durable profile directory');
+const persistentProfileDirectory = fake.state.launchOptions.at(-1).profileDirectory;
+assert.deepEqual(JSON.parse(fs.readFileSync(path.join(persistentProfileDirectory, '.relai-sites.json'), 'utf8')), ['http://127.0.0.1:3000'], 'persistent sessions must register visited origins for per-site data management');
 assert.match(started.sessionId, /^browser_/);
 assert.match(started.tabId, /^tab_/);
 assert.equal(runtime.activeSessionCount(), 1);
@@ -39,6 +48,7 @@ const navigated = await runtime.navigate(workspace, {
   sessionId, tabId: firstTabId, url: 'http://192.168.1.20/internal', work_id: context.taskId
 }, context);
 assert.equal(navigated.url, 'http://192.168.1.20/internal');
+assert.ok(JSON.parse(fs.readFileSync(path.join(persistentProfileDirectory, '.relai-sites.json'), 'utf8')).includes('http://192.168.1.20'), 'later persistent navigations must extend the saved-site registry');
 
 const snapshot = await runtime.snapshot(workspace, { sessionId, tabId: firstTabId, work_id: context.taskId }, context);
 assert.equal(snapshot.detail, 'semantic');
@@ -54,6 +64,22 @@ const interaction = await runtime.interact(workspace, {
   work_id: context.taskId
 }, context);
 assert.equal(interaction.interaction, 'click');
+
+const handoff = await runtime.handoff(workspace, { sessionId, tabId: firstTabId, reason: 'mfa', work_id: context.taskId }, context);
+assert.equal(handoff.status, 'user_input_required');
+assert.equal(handoff.handoff?.reason, 'mfa');
+assert.deepEqual(fake.state.controlChanges.at(-1), { owner: 'user', reason: 'mfa' });
+for (const blocked of [
+  () => runtime.snapshot(workspace, { sessionId, tabId: firstTabId, work_id: context.taskId }, context),
+  () => runtime.screenshot(workspace, { sessionId, tabId: firstTabId, work_id: context.taskId }, context),
+  () => runtime.interact(workspace, { sessionId, tabId: firstTabId, interaction: 'click', target: { by: 'text', value: 'Continue' }, work_id: context.taskId }, context)
+]) {
+  await assert.rejects(blocked, error => error?.code === 'BROWSER_USER_CONTROL_ACTIVE');
+}
+const resumed = await runtime.resume(workspace, { sessionId, work_id: context.taskId }, context);
+assert.equal(resumed.status, 'ready');
+assert.equal(resumed.handoff, null);
+assert.deepEqual(fake.state.controlChanges.at(-1), { owner: 'ai', reason: '' });
 
 const screenshot = await runtime.screenshot(workspace, { sessionId, tabId: firstTabId, work_id: context.taskId }, context);
 assert.equal(screenshot.image.mimeType, 'image/png');
@@ -172,8 +198,8 @@ await assert.rejects(
   error => error?.code === 'BROWSER_SESSION_NOT_FOUND'
 );
 
-const tasklessA = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/a' }, {});
-const _tasklessB = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/b' }, {});
+const tasklessA = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/a', profile: 'ephemeral' }, {});
+const _tasklessB = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/b', profile: 'ephemeral' }, {});
 assert.equal(runtime.activeSessionCount(), 2);
 const shutdown = await runtime.shutdown();
 assert.equal(shutdown.stopped, 2);
@@ -191,7 +217,8 @@ await assert.rejects(
   error => error?.code === 'BROWSER_SESSION_NOT_FOUND'
 );
 
-console.log('Local browser runtime lifecycle, tabs, cancellation, failure recovery, active ownership boundaries, and cleanup passed.');
+fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+console.log('Local browser runtime lifecycle, persistent defaults, user handoff, tabs, cancellation, failure recovery, active ownership boundaries, and cleanup passed.');
 
 function createFakeBrowserHarness() {
   const state = {
@@ -201,10 +228,13 @@ function createFakeBrowserHarness() {
     timeoutInteraction: false,
     pendingSnapshot: false,
     navigateCount: 0,
+    launchOptions: [],
+    controlChanges: [],
     drivers: []
   };
 
-  async function launch() {
+  async function launch(options = {}) {
+    state.launchOptions.push(options);
     if (state.launchBarrier) await state.launchBarrier;
     if (state.failNextLaunch) {
       state.failNextLaunch = false;
@@ -244,6 +274,7 @@ function createFakeBrowserHarness() {
       },
       async close() { state.closeCount += 1; },
       onDisconnected(listener) { disconnected = listener; },
+      async setControl(owner, reason = '') { state.controlChanges.push({ owner, reason }); },
       disconnect() { disconnected?.(); }
     };
     state.drivers.push(driver);

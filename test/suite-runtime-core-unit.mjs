@@ -1045,6 +1045,10 @@ async function case_ipc_channel_contract_unit() {
     getBrowserState: () => ({ sessionId: '', pages: [] }),
     setBrowserSurfaceBounds: value => ({ ok: true, value }),
     setBrowserControl: value => ({ ok: true, value }),
+    respondBrowserPermission: (requestId, allowed) => ({ ok: true, requestId, allowed }),
+    listSavedBrowserSites: () => ({ ok: true, sites: [] }),
+    clearSavedBrowserSite: origin => ({ ok: true, origin }),
+    clearSavedBrowserData: () => ({ ok: true }),
     selectBrowserSession: value => ({ ok: true, value }),
     selectBrowserTab: value => ({ ok: true, value }),
     closeBrowserTab: value => ({ ok: true, value }),
@@ -1128,6 +1132,8 @@ async function case_ipc_channel_contract_unit() {
       case 'desktop:reload-dashboard': return ['#tasks'];
       case 'desktop:browser:set-bounds': return [{ visible: false }];
       case 'desktop:browser:set-control': return ['user'];
+      case 'desktop:browser:permission': return ['browser_permission_abcdefghijklmnop', true];
+      case 'desktop:browser:clear-saved-site': return ['https://example.com'];
       case 'desktop:browser:select-session': return ['embedded_browser_1234567890abcdef'];
       case 'desktop:browser:select-tab':
       case 'desktop:browser:close-tab': return ['embedded_page_1234567890abcdef'];
@@ -2383,7 +2389,9 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageData, /desktop\.getLocalUsage/);
   assert.doesNotMatch(`${usageSource}\n${usageData}`, /getGatewayUsage|connectionMode|pairing_required|cloudUsageAvailability/i);
   assert.doesNotMatch(`${usageSource}\n${usageData}`, /fetch\(|DASHBOARD_DATA_URL|auditTail|taskActivity/);
-  assert.doesNotMatch(usageReact, /data-usage-privacy/, 'Analytics must not repeat passive privacy-policy copy in the operational view');
+  assert.doesNotMatch(usageReact, /data-usage-privacy/, 'Analytics must not repeat the old privacy-policy wall in the operational view');
+  assert.match(usageReact, /Local analytics are kept for about 180 days\./, 'Analytics must retain concise local-retention context');
+  assert.match(usageReact, /Privacy & data details/, 'Analytics must provide a direct drill-down to privacy/data details');
   assert.doesNotMatch(usageSource, /Minimal usage counting is always on|aggregate action categories and work-type labels locally/i, 'Analytics helpers must not retain removed passive privacy copy');
   assert.match(settingsReact, /title: 'Diagnostics'/, 'App settings must keep the actionable diagnostics control');
   assert.doesNotMatch(settingsReact, /Usage counting/, 'App settings must not show non-actionable installation reporting');
@@ -2395,10 +2403,14 @@ async function case_usage_ui_contract_unit() {
   assert.doesNotMatch(usageReact, /'data-usage-content'.*'aria-live'/);
   assert.match(usageReact, /Analytics updated for \$\{bounds\.label\}/);
   assert.match(usageReact, /taskRevision/, 'Analytics must refresh current local metrics from canonical live task activity');
-  assert.doesNotMatch(homeReact, /HomeAnalytics|loadAnalyticsData/, 'Overview must not duplicate the dedicated Analytics page');
+  assert.match(homeReact, /HomeAnalytics/, 'Overview must retain a compact current-activity summary before the detailed Analytics page');
+  assert.match(homeReact, /loadAnalyticsData/, 'Overview analytics must load from the canonical local analytics source');
   assert.doesNotMatch(homeReact, /firstRequestObserved\s*\?\s*h\(RecentTasksCard/, 'Persisted recent tasks must not disappear when volatile MCP request history resets on restart');
-  assert.doesNotMatch(workspacesReact, /WorkspaceAnalytics|loadAnalyticsModels|Loading analytics…|Analytics unavailable/, 'Project cards must not embed duplicate analytics panels');
-  assert.match(workspacesReact, /routeHref\('usage'/, 'Project cards must retain a direct Analytics link');
+  assert.match(workspacesReact, /WorkspaceAnalytics/, 'Project cards must retain compact project analytics context');
+  assert.match(workspacesReact, /Loading analytics…/, 'Project analytics must expose an explicit loading state');
+  assert.match(workspacesReact, /Analytics unavailable/, 'Project analytics must expose an explicit failure state');
+  assert.match(workspacesReact, /workspace-status-summary/, 'Projects must retain a compact readiness summary without large KPI cards');
+  assert.match(workspacesReact, /routeHref\('usage'/, 'Project cards must retain a direct Analytics drill-down');
   assert.match(usageReact, /'aria-pressed': range === key \? 'true' : 'false'/);
   assert.match(usageReact, /role: 'tooltip'/, 'Analytics metric help must expose tooltip semantics');
   assert.match(usageReact, /'aria-describedby': helpId/, 'Analytics metric help triggers must reference their tooltip text');
@@ -2517,7 +2529,8 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageReact, /Open Troubleshooting/, 'Infrastructure warnings must link to Troubleshooting');
   assert.doesNotMatch(usageReact, /usage-transport-alert|Connection delivery/, 'Historical transport counters must not render as a standalone warning banner');
   assert.match(usageRender, /Request delivery/, 'Transport delivery must be integrated as a neutral Analytics metric');
-  assert.doesNotMatch(workspacesReact, /Successful actions|label: 'Reliable'/, 'Project cards must not duplicate analytics metrics');
+  assert.match(workspacesReact, /label: 'Successful'/, 'Project analytics must show normal action success context');
+  assert.doesNotMatch(workspacesReact, /label: 'Reliable'/, 'Project analytics must not expose the diagnostic reliability percentage');
   for (const field of ['requests', 'toolCalls', 'successes', 'failures', 'executionMs', 'activeDays']) {
     assert.match(usageCombined, new RegExp(`\\b${field}\\b`), `Analytics must consume ${field}.`);
   }

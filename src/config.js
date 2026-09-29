@@ -59,6 +59,9 @@ function makeDefaultConfig() {
     processEnvironment: {
       allow: []
     },
+    extensions: {
+      sources: []
+    },
     workspaces: {}
   };
 }
@@ -206,8 +209,23 @@ function configSchema(base) {
     processEnvironment: objectSchema(z.object({
       allow: z.any().optional().transform(value => normalizeAllowedKeys(value))
     })),
+    extensions: objectSchema(z.object({
+      sources: extensionSourcesSchema()
+    })),
     workspaces: objectSchema(z.record(z.string(), workspaceConfigSchema()))
   }));
+}
+
+function extensionSourcesSchema() {
+  return z.preprocess(value => {
+    if (!Array.isArray(value)) return [];
+    return value
+      .filter(item => item && typeof item === 'object' && !Array.isArray(item))
+      .slice(0, 20);
+  }, z.array(z.object({
+    repositoryUrl: stringSchema('').transform(value => value.trim()),
+    catalogUrl: stringSchema('').transform(value => value.trim())
+  }).strict()).max(20));
 }
 
 function workspaceConfigSchema() {

@@ -239,7 +239,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_browser', title: 'Use Local Browser',
-    description: 'Local browser for localhost/LAN/intranet/VPN, machine-authenticated sessions, and workspace file transfer. Semantic snapshots explain page content, layout snapshots cover geometry/overflow, and screenshots provide pixel evidence. Public web stays host-owned.',
+    description: 'Local browser for localhost/LAN/intranet/VPN, machine-authenticated sessions, and workspace file transfer. Persistent browsing is the default so cookies and sign-ins can be reused; use profile:ephemeral for a private session. Use handoff when the user must enter a password, MFA code, CAPTCHA, or other private site input, then resume AI control. clear_profile removes saved browser site data for the current authenticated client. Semantic snapshots explain page content, layout snapshots cover geometry/overflow, and screenshots provide pixel evidence. Public web stays host-owned.',
     annotations: annotations(false, true, false, true), dashboard: { capabilities: ['execute'] }
   },
   {

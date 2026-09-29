@@ -56,6 +56,10 @@ assert.equal(view.pulse.empty, false);
 assert.match(view.pulse.summary, /Current hour 10 actions/);
 assert.match(view.pulse.summary, /Overall trend increasing/);
 assert.deepEqual(view.pulse.values, [1, 5, 2, 10]);
+assert.deepEqual(view.pulse.labels, ['3h ago', '2h ago', '1h ago', 'Current hour']);
+assert.equal(view.pulse.latestIndex, 3);
+assert.equal(view.pulse.peakIndex, 3);
+assert.equal(view.pulse.peak, 10);
 assert.equal('polyline' in view.pulse, false);
 assert.equal('area' in view.pulse, false);
 

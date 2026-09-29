@@ -34,6 +34,11 @@ const runtime = createBrowserRuntime({
 
 try {
   const started = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/', work_id: task.taskId }, task);
+  assert.equal(started.profile, 'persistent', 'local browser sessions must reuse the principal-isolated Rel.AI profile by default');
+  assert.ok(
+    fake.state.launchOptions.at(-1).profileDirectory.startsWith(persistentBrowserProfileRoot({ stateDir })),
+    'the default persistent browser must use Rel.AI-owned profile storage rather than an external Chrome profile'
+  );
   const sessionId = started.sessionId;
 
   const uploaded = await runtime.upload(workspace, {
@@ -193,9 +198,14 @@ try {
     profile: 'persistent',
     work_id: 'work_profile_other'
   }, { taskId: 'work_profile_other', principal: otherPrincipal });
-  assert.notEqual(restartedHarness.state.launchOptions.at(-1).profileDirectory, firstProfilePath, 'different principals must not share browser profile storage');
+  const otherProfilePath = restartedHarness.state.launchOptions.at(-1).profileDirectory;
+  assert.notEqual(otherProfilePath, firstProfilePath, 'different principals must not share browser profile storage');
   await restartedRuntime.stop(workspace, { sessionId: persistentOther.sessionId, work_id: 'work_profile_other' }, { taskId: 'work_profile_other', principal: otherPrincipal });
   await restartedRuntime.stop(workspace, { sessionId: persistentAfterRestart.sessionId, work_id: 'work_profile_after_restart' }, { taskId: 'work_profile_after_restart', principal });
+  const clearedPrincipal = await restartedRuntime.clearProfile(workspace, { work_id: 'work_profile_clear' }, { taskId: 'work_profile_clear', principal });
+  assert.equal(clearedPrincipal.cleared, true, 'clear_profile must remove the current authenticated client\'s saved browser state');
+  assert.equal(fs.existsSync(firstProfilePath), false);
+  assert.equal(fs.existsSync(otherProfilePath), true, 'clearing one authenticated client must not erase another client\'s browser profile');
 
   const corruptPrincipal = { clientId: 'browser-io-test', subject: 'corrupt-user', authMode: 'test' };
   const corruptPath = browserProfileDirectory({ stateDir }, principalFingerprint(corruptPrincipal));

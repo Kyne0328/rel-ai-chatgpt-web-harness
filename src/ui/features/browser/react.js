@@ -14,8 +14,11 @@ function createBrowserRoute() {
     const [error, setError] = useState('');
     const [busy, setBusy] = useState('');
     const [copyStatus, setCopyStatus] = useState('');
+    const [notice, setNotice] = useState('');
     const surfaceRef = useRef(null);
     const frameRef = useRef(0);
+    const handoffRef = useRef('');
+    handoffRef.current = String(state.handoffReason || '');
 
     const syncBounds = useCallback(() => {
       if (typeof browser?.setBounds !== 'function') return;
@@ -59,7 +62,9 @@ function createBrowserRoute() {
 
     useEffect(() => {
       if (!browser || typeof browser.setControl !== 'function') return undefined;
-      return () => { void releaseBrowserRouteControl(browser); };
+      return () => {
+        if (!handoffRef.current) void releaseBrowserRouteControl(browser);
+      };
     }, [browser]);
 
     useEffect(() => {
@@ -104,6 +109,7 @@ function createBrowserRoute() {
       if (busy === key || typeof action !== 'function') return;
       setBusy(key);
       setError('');
+      setNotice('');
       try {
         const next = await action();
         if (next && typeof next === 'object') setState(current => ({ ...current, ...next }));
@@ -149,13 +155,18 @@ function createBrowserRoute() {
         h('div', { className: 'browser-empty card' },
           h(Icon, { name: 'browser', className: 'browser-empty-icon', size: 28 }),
           h('h2', null, 'No local browser session'),
-          h('p', null, 'A live page appears here when ChatGPT starts a browser task.')
+          h('p', null, 'A live page appears here when ChatGPT starts a browser task. Sign-ins are remembered unless ChatGPT explicitly starts a private session.')
         ),
+        notice ? h('div', { className: 'connection-notice good', role: 'status' }, notice) : null,
         error ? h('div', { className: 'connection-notice bad', role: 'alert' }, error) : null
       );
     }
 
     const userControl = state.control === 'user';
+    const handoffReason = String(state.handoffReason || '');
+    const permissions = Array.isArray(state.permissionRequests) ? state.permissionRequests : [];
+    const permissionRequest = permissions[0] || null;
+    const profile = state.profile === 'ephemeral' ? 'ephemeral' : 'persistent';
     const sessions = Array.isArray(state.sessions) ? state.sessions : [];
     const tabs = Array.isArray(state.tabs) ? state.tabs : [];
     const activeIndex = Math.max(0, tabs.findIndex(tab => tab?.active === true || String(tab?.nativePageId || '') === state.nativePageId));
@@ -164,8 +175,20 @@ function createBrowserRoute() {
     return h('section', { className: 'section browser-route', 'data-browser-control': userControl ? 'user' : 'ai' },
       userControl ? h('div', { className: 'browser-takeover-banner', role: 'status' },
         h(Icon, { name: 'warning', size: 16 }),
-        h('span', null, 'Manual control is active. Return control to resume AI interaction.'),
-        h('button', { className: 'secondary compact-button', type: 'button', disabled: busy === 'control' || busy === 'stop', onClick: () => { void run('control', () => browser.setControl('ai')); } }, busy === 'control' ? 'Returning…' : 'Return to AI')
+        h('span', null,
+          handoffReason
+            ? `${handoffTitle(handoffReason)} Complete this step in the local browser. Enter passwords and verification codes here, not in ChatGPT. When finished, confirm in ChatGPT.`
+            : 'Manual control is active. Return control to resume AI interaction.'
+        ),
+        handoffReason ? null : h('button', { className: 'secondary compact-button', type: 'button', disabled: busy === 'control' || busy === 'stop', onClick: () => { void run('control', () => browser.setControl('ai')); } }, busy === 'control' ? 'Returning…' : 'Return to AI')
+      ) : null,
+      permissionRequest ? h('div', { className: 'browser-permission-banner', role: 'region', 'aria-label': 'Site permission request' },
+        h(Icon, { name: 'warning', size: 16 }),
+        h('span', null, `${permissionRequest.origin || 'This site'} wants permission to use ${permissionLabel(permissionRequest.permission)}.`),
+        h('div', { className: 'browser-permission-actions' },
+          h('button', { className: 'secondary compact-button', type: 'button', disabled: busy === `permission:${permissionRequest.requestId}`, onClick: () => { void run(`permission:${permissionRequest.requestId}`, () => browser.respondPermission(permissionRequest.requestId, false)); } }, 'Deny'),
+          h('button', { className: 'primary compact-button', type: 'button', disabled: busy === `permission:${permissionRequest.requestId}`, onClick: () => { void run(`permission:${permissionRequest.requestId}`, () => browser.respondPermission(permissionRequest.requestId, true)); } }, 'Allow for this session')
+        )
       ) : null,
       h('div', { className: 'browser-chrome card' },
         sessions.length > 1
@@ -298,6 +321,7 @@ function createBrowserRoute() {
           ),
           state.loading ? h('div', { className: 'browser-loading-bar', 'aria-hidden': 'true' }, h('i', null)) : null,
           h(StatusPill, { label: userControl ? 'Your control' : 'AI control', tone: userControl ? 'warn' : 'working' }),
+          h(StatusPill, { label: profile === 'persistent' ? 'Sign-ins remembered' : 'Private session', tone: profile === 'persistent' ? 'good' : 'neutral' }),
           viewportLabel ? h('span', { className: 'browser-viewport-pill mono', title: 'AI browser viewport' }, viewportLabel) : null,
           h('div', { className: 'browser-toolbar-actions' },
             h('button', {
@@ -317,6 +341,7 @@ function createBrowserRoute() {
           )
         )
       ),
+      notice ? h('div', { className: 'connection-notice good', role: 'status' }, notice) : null,
       error ? h('div', { className: 'connection-notice bad', role: 'alert' }, error) : null,
       h('div', {
         className: 'browser-surface-slot',
@@ -431,6 +456,18 @@ function formatViewport(viewport) {
   const height = Number(viewport?.height);
   if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return '';
   return `${Math.round(width)} × ${Math.round(height)}`;
+}
+
+function handoffTitle(reason) {
+  if (reason === 'mfa') return 'Verification required.';
+  if (reason === 'captcha') return 'CAPTCHA required.';
+  if (reason === 'user_input') return 'Your input is required.';
+  return 'Sign-in required.';
+}
+
+function permissionLabel(permission) {
+  const value = String(permission || '').trim().replaceAll('-', ' ');
+  return value || 'this browser feature';
 }
 
 function hostOf(url) {

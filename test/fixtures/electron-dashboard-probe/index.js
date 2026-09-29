@@ -53,6 +53,7 @@ app.whenReady().then(async () => {
     if (details.statusCode >= 400) failures.push(`http:${details.statusCode}:${details.url}`);
   });
   win.webContents.session.webRequest.onErrorOccurred({ urls: ['http://*/*'] }, details => {
+    if (expectedEventStreamClose(details)) return;
     failures.push(`network:${details.error}:${details.url}`);
   });
   const navigationCounts = { didStartNavigation: 0, didNavigate: 0, didFinishLoad: 0 };
@@ -689,6 +690,11 @@ async function measurePassiveRouteStability(win, mcpSession, navigationCounts, r
       didFinishLoad: navigationCounts.didFinishLoad - beforeNavigation.didFinishLoad
     }
   };
+}
+
+function expectedEventStreamClose(details) {
+  if (details?.error !== 'net::ERR_FAILED') return false;
+  try { return new URL(String(details.url || '')).pathname === '/events'; } catch { return false; }
 }
 
 async function exerciseNavigationControls(win, failures) {

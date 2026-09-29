@@ -27,10 +27,10 @@ const NOTIFICATION_DEFAULTS = Object.freeze({
   ignoredUpdateVersion: ''
 });
 const NOTIFICATION_CATEGORIES = Object.freeze([
-  ['taskCompleted', 'Task completed'],
-  ['errors', 'Errors'],
-  ['connectionStatus', 'Connection status'],
-  ['applicationUpdates', 'App updates']
+  ['taskCompleted', 'Task completed', 'Notify you when a Rel.AI task finishes.'],
+  ['errors', 'Errors', 'Notify you when a project action, connection, or app update fails.'],
+  ['connectionStatus', 'Connection status', 'Notify you when ChatGPT connects, disconnects, or needs to reconnect.'],
+  ['applicationUpdates', 'App updates', 'Notify you when a Rel.AI update is available.']
 ]);
 
 export function createSettingsRoute(useDashboardStore) {
@@ -45,7 +45,8 @@ export function SettingsView({ data = {}, subPage = '' }) {
   const content = {
     connection: h(ConnectionPage, { data }),
     preferences: h(PreferencesPage),
-    application: h(ApplicationPage, { computerControl: data.config?.computerControl }),
+    privacy: h(PrivacyDataPage, { computerControl: data.config?.computerControl }),
+    application: h(ApplicationPage),
     about: h(AboutPage, {
       metadata: data.application || {},
       buildStatus: data.desktopStatus?.buildStatus,
@@ -156,7 +157,8 @@ function ConnectionPage({ data }) {
     guideMode ? h(ConnectionGuide, { mode: guideMode, tunnelId, workspaceAlias }) : null,
     h('section', { id: 'connectionControls', className: 'connection-controls-section', ref: controlsRef },
       h(DesktopConnectionSettings, { expanded: String(state.publicEndpoint?.status || '') === 'disabled' })
-    )
+    ),
+    typeof window.relaiDesktop?.logout === 'function' ? h(Card, { title: 'Connection controls' }, h(LogoutRow)) : null
   );
 }
 
@@ -450,12 +452,215 @@ function PreferencesPage() {
     h(Card, { title: 'Appearance' },
       h('div', { className: 'settings-field' },
         h('span', null, 'Theme'),
-        h(ThemeSwitch, { theme, onChange: value => { setTheme(value); setThemePreference(value); } })
+        h(ThemeSwitch, { theme, onChange: value => { setTheme(value); setThemePreference(value); } }),
+        h('p', { className: 'settings-help' }, 'Applies to the dashboard and Rel.AI Pulse. Setup and recovery windows follow your system appearance.')
       )
     ),
+    h(PulsePreference),
     h(DesktopNotificationsSettings)
   );
 }
+
+function PulsePreference() {
+  const desktop = window.relaiDesktop;
+  const [enabled, setEnabled] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (typeof desktop?.getLifecycleStatus !== 'function') return undefined;
+    let active = true;
+    void desktop.getLifecycleStatus().then(status => { if (active) setEnabled(status?.pulseEnabled !== false); }).catch(() => { if (active) setEnabled(null); });
+    return () => { active = false; };
+  }, [desktop]);
+  if (typeof desktop?.getLifecycleStatus !== 'function' || typeof desktop?.setAppPreferences !== 'function') {
+    return h(Card, { title: 'Rel.AI Pulse' }, h('p', { className: 'settings-help' }, 'Pulse settings are available only inside the installed Rel.AI desktop app.'));
+  }
+  if (enabled == null) return h(Card, { title: 'Rel.AI Pulse' }, h('div', { className: 'settings-loading', role: 'status' }, 'Loading Pulse preference…'));
+  const update = async value => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await desktop.setAppPreferences({ pulseEnabled: value });
+      if (result?.ok === false) throw new Error(result.error || 'Rel.AI Pulse preference could not be changed.');
+      setEnabled(typeof result?.status?.pulseEnabled === 'boolean' ? result.status.pulseEnabled : value);
+    } catch (error) { toast(messageOf(error), { variant: 'error' }); }
+    finally { setBusy(false); }
+  };
+  return h(Card, { title: 'Rel.AI Pulse' }, h(ToggleRow, {
+    label: 'Show Rel.AI Pulse', checked: enabled, disabled: busy, busy,
+    enabledLabel: 'Pulse on', disabledLabel: 'Pulse off',
+    help: 'Show a small status card for Rel.AI activity. Approvals still happen in ChatGPT.',
+    onChange: value => void update(value)
+  }));
+}
+
+function PrivacyDataPage({ computerControl }) {
+  return h(React.Fragment, null,
+    h(SettingsHeader, { title: 'Privacy & data' }),
+    h(ComputerControlSettings, { initial: computerControl }),
+    h(BrowserDataSettings),
+    h(TelemetrySettings),
+    h(LocalDataSettings)
+  );
+}
+
+function BrowserDataSettings() {
+  const browser = window.relaiDesktop?.browser;
+  const [model, setModel] = useState({ loading: true, sites: [], activePersistent: false, error: '' });
+  const [busy, setBusy] = useState('');
+  const load = useCallback(async () => {
+    if (!browser?.listSavedSites || !browser?.getState) return;
+    try {
+      const [saved, state] = await Promise.all([browser.listSavedSites(), browser.getState()]);
+      const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+      setModel({
+        loading: false,
+        sites: Array.isArray(saved?.sites) ? saved.sites : [],
+        activePersistent: sessions.some(session => session?.profile === 'persistent'),
+        error: ''
+      });
+    } catch (error) {
+      setModel(current => ({ ...current, loading: false, error: messageOf(error) }));
+    }
+  }, [browser]);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => typeof browser?.onState === 'function' ? browser.onState(state => {
+    const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+    setModel(current => ({ ...current, activePersistent: sessions.some(session => session?.profile === 'persistent') }));
+  }) : undefined, [browser]);
+  if (!browser?.listSavedSites || !browser?.clearSavedSite || !browser?.clearSavedData) {
+    return h(Card, { title: 'Browser data' }, h('p', { className: 'settings-help' }, 'Saved browser-data controls are available only inside the installed Rel.AI desktop app.'));
+  }
+
+  const clearSite = async site => {
+    const confirmed = await confirmAction({
+      title: `Remove saved data for ${site.host}?`,
+      message: `Remove Rel.AI browser data for ${site.host}?`,
+      detail: 'This signs Rel.AI out of this site and removes its cookies and site storage from all saved Rel.AI browser profiles. Other sites are not changed.',
+      confirmLabel: 'Remove site data',
+      danger: true
+    });
+    if (!confirmed) return;
+    setBusy(site.origin);
+    try {
+      const result = await browser.clearSavedSite(site.origin);
+      if (result?.ok === false) throw new Error(result.error || 'Saved site data could not be removed.');
+      toast(`Saved browser data removed for ${site.host}.`, { variant: 'success' });
+      await load();
+    } catch (error) { toast(messageOf(error), { variant: 'error' }); }
+    finally { setBusy(''); }
+  };
+  const clearAll = async () => {
+    const confirmed = await confirmAction({
+      title: 'Clear all saved browser data?',
+      message: 'Clear all saved Rel.AI browser sign-ins and site data?',
+      detail: 'This signs Rel.AI out of saved sites in every persistent browser profile. Private browser sessions are not affected.',
+      confirmLabel: 'Clear all browser data',
+      danger: true
+    });
+    if (!confirmed) return;
+    setBusy('all');
+    try {
+      const result = await browser.clearSavedData();
+      if (result?.ok === false) throw new Error(result.error || 'Saved browser data could not be cleared.');
+      toast(result?.cleared === true ? 'Saved browser data cleared.' : 'No saved browser data was found.', { variant: 'success' });
+      await load();
+    } catch (error) { toast(messageOf(error), { variant: 'error' }); }
+    finally { setBusy(''); }
+  };
+
+  const sites = Array.isArray(model.sites) ? model.sites : [];
+  const accountSites = sites.filter(site => !isDevelopmentBrowserSite(site));
+  const developmentSites = sites.filter(isDevelopmentBrowserSite);
+  const countLabel = model.loading
+    ? 'Loading saved sites…'
+    : model.error
+      ? 'Saved sites unavailable'
+      : `${sites.length} saved ${sites.length === 1 ? 'site' : 'sites'}`;
+
+  return h(Card, { title: 'Browser data', className: 'browser-data-settings' },
+    h('div', { className: 'browser-profile-summary' },
+      h('div', { className: 'setting-row-copy' },
+        h('strong', null, 'Remember site sign-ins'),
+        h('span', null, 'Rel.AI reuses authenticated sessions in its own dedicated browser profile. It does not automatically use your personal Chrome profile. ChatGPT can explicitly start a private session when sign-ins should not be retained.')
+      ),
+      h(StatusPill, { label: 'On', tone: 'good' })
+    ),
+    h('details', { className: 'browser-site-disclosure' },
+      h('summary', { className: 'browser-site-disclosure-summary' },
+        h('span', null,
+          h('strong', null, 'Manage saved sites'),
+          h('small', null, countLabel)
+        )
+      ),
+      h('div', { className: 'browser-site-disclosure-body' },
+        model.loading ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading saved sites…') : null,
+        model.error ? h('p', { className: 'settings-help', role: 'alert' }, model.error) : null,
+        !model.loading && !model.error && accountSites.length
+          ? h(BrowserSiteList, { sites: accountSites, busy, disabled: model.activePersistent, onRemove: clearSite })
+          : null,
+        !model.loading && !model.error && developmentSites.length
+          ? h('details', { className: 'browser-development-sites' },
+            h('summary', null,
+              h('span', null, 'Development sites'),
+              h('small', null, `${developmentSites.length} ${developmentSites.length === 1 ? 'site' : 'sites'}`)
+            ),
+            h('div', { className: 'browser-development-sites-body' },
+              h(BrowserSiteList, { sites: developmentSites, busy, disabled: model.activePersistent, onRemove: clearSite })
+            )
+          )
+          : null,
+        !model.loading && !model.error && !sites.length
+          ? h('div', { className: 'browser-sites-empty' }, 'No saved site data found.')
+          : null,
+        model.activePersistent
+          ? h('p', { className: 'settings-help browser-site-warning' }, 'Stop persistent browser sessions before removing saved browser data.')
+          : null,
+        !model.loading && !model.error && sites.length
+          ? h('div', { className: 'browser-site-actions' },
+            h('button', {
+              className: 'secondary danger',
+              type: 'button',
+              disabled: model.activePersistent || Boolean(busy),
+              onClick: () => void clearAll()
+            }, busy === 'all' ? 'Clearing…' : 'Clear all browser data')
+          )
+          : null
+      )
+    )
+  );
+}
+function BrowserSiteList({ sites, busy, disabled, onRemove }) {
+  return h('div', { className: 'browser-site-list' },
+    sites.map(site => h('div', { className: 'browser-site-row', key: site.origin },
+      h('div', { className: 'browser-site-copy' },
+        h('strong', null, site.host || site.origin),
+        Number(site.profileCount || 0) > 1
+          ? h('span', null, `${site.profileCount} Rel.AI profiles`)
+          : null
+      ),
+      h('button', {
+        className: 'secondary compact-button',
+        type: 'button',
+        disabled: disabled || Boolean(busy),
+        onClick: () => void onRemove(site)
+      }, busy === site.origin ? 'Removing…' : 'Remove data')
+    ))
+  );
+}
+
+function isDevelopmentBrowserSite(site = {}) {
+  try {
+    const hostname = new URL(String(site.origin || '')).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return hostname === 'localhost'
+      || hostname.endsWith('.localhost')
+      || hostname === '0.0.0.0'
+      || hostname === '::1'
+      || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+  } catch {
+    return false;
+  }
+}
+
 
 function ThemeSwitch({ theme, onChange }) {
   const options = [
@@ -520,10 +725,11 @@ function DesktopNotificationsSettings() {
     h(ToggleRow, {
       label: 'Desktop notifications', checked: preferences.enabled, disabled: pending, busy: pending,
       enabledLabel: 'Notifications on', disabledLabel: 'Notifications off',
+      help: 'Turn desktop notifications on or off. Your category choices are kept while notifications are off.',
       onChange: value => void update({ enabled: value })
     }),
-    NOTIFICATION_CATEGORIES.map(([key, label]) => h(ToggleRow, {
-      key, label, checked: preferences[key], disabled: pending || !preferences.enabled, busy: pending,
+    NOTIFICATION_CATEGORIES.map(([key, label, help]) => h(ToggleRow, {
+      key, label, help, checked: preferences[key], disabled: pending || !preferences.enabled, busy: pending,
       enabledLabel: 'On', disabledLabel: 'Off', onChange: value => void update({ [key]: value })
     })),
     preferences.ignoredUpdateVersion ? h('div', { className: 'settings-field' },
@@ -531,7 +737,8 @@ function DesktopNotificationsSettings() {
       h('div', { className: 'connection-actions' },
         h('code', null, `v${preferences.ignoredUpdateVersion}`),
         h('button', { className: 'secondary', type: 'button', disabled: pending, onClick: () => void update({ ignoredUpdateVersion: '' }) }, `Show notifications for v${preferences.ignoredUpdateVersion} again`)
-      )
+      ),
+      h('p', { className: 'settings-help' }, 'Only this version is muted. Newer versions can still notify you.')
     ) : null
   );
 }
@@ -549,7 +756,7 @@ function normalizeNotificationPreferences(value = {}) {
   };
 }
 
-function ApplicationPage({ computerControl }) {
+function ApplicationPage() {
   const [lifecycle, setLifecycle] = useState(undefined);
   const developerOptionsUnlocked = readDeveloperOptionsUnlocked();
   const [developerFeatures, setDeveloperFeatures] = useState(() => Object.fromEntries(
@@ -566,10 +773,7 @@ function ApplicationPage({ computerControl }) {
     h(SettingsHeader, { title: 'App' }),
     lifecycle === undefined ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading app settings…') : h(React.Fragment, null,
       h(StartupSettings, { initial: lifecycle }),
-      h(ComputerControlSettings, { initial: computerControl }),
       h(ApplicationUpdates, { lifecycle }),
-      h(TelemetrySettings),
-      h(LocalDataSettings),
       developerOptionsUnlocked ? h(DeveloperOptions, {
         enabledFeatures: developerFeatures,
         onChange: (feature, enabled) => setDeveloperFeatures(current => ({
@@ -577,12 +781,7 @@ function ApplicationPage({ computerControl }) {
           [feature]: writeDeveloperFeatureEnabled(feature, enabled)
         }))
       }) : null,
-      typeof desktop?.quitApp === 'function' || typeof desktop?.logout === 'function'
-        ? h(Card, { title: 'Application controls' },
-            typeof desktop?.logout === 'function' ? h(LogoutRow) : null,
-            typeof desktop?.quitApp === 'function' ? h(QuitRow) : null
-          )
-        : null
+      typeof desktop?.quitApp === 'function' ? h(Card, { title: 'Application controls' }, h(QuitRow)) : null
     )
   );
 }
@@ -697,12 +896,6 @@ function StartupSettings({ initial }) {
       onChange: value => void update('keepRunningOnClose', value)
     }),
     h(ToggleRow, {
-      label: 'Show Rel.AI Pulse', checked: state.pulseEnabled !== false, disabled: busy === 'pulseEnabled', busy: busy === 'pulseEnabled',
-      enabledLabel: 'Pulse on', disabledLabel: 'Pulse off',
-      help: 'Show a small status card for Rel.AI activity. Approvals still happen in ChatGPT.',
-      onChange: value => void update('pulseEnabled', value)
-    }),
-    h(ToggleRow, {
       label: 'Keep computer awake', checked: state.keepAwake === true, disabled: busy === 'keepAwake', busy: busy === 'keepAwake',
       enabledLabel: 'Keep computer awake on', disabledLabel: 'Keep computer awake off',
       help: 'Prevents this computer from automatically sleeping or hibernating while Rel.AI is running. The display can still turn off normally.',
@@ -714,8 +907,7 @@ function StartupSettings({ initial }) {
       help: 'Skip optional repository preparation to reduce idle CPU and memory use. Repository analysis still runs when a task needs it.',
       onChange: value => void update('reducedBackgroundWork', value)
     }),
-    state.updated ? h(LifecycleNotice, { tone: 'ok', title: 'Update completed', text: `Rel.AI started successfully after updating from v${state.previousVersion || 'an earlier version'} to v${state.currentVersion || 'the current version'}.` }) : null,
-    state.recoveredAfterUncleanShutdown ? h(LifecycleNotice, { tone: 'warn', title: 'Rel.AI recovered after closing unexpectedly', text: 'Rel.AI did not close normally last time, but your settings were kept and the app started normally. Open Troubleshooting only if this keeps happening.' }) : null
+    state.updated ? h(LifecycleNotice, { tone: 'ok', title: 'Update completed', text: `Rel.AI started successfully after updating from v${state.previousVersion || 'an earlier version'} to v${state.currentVersion || 'the current version'}.` }) : null
   );
 }
 
@@ -809,12 +1001,12 @@ function ApplicationUpdates({ lifecycle }) {
   const view = updateView(current, autoDownload);
   const showReleaseNotes = ['available', 'downloading', 'downloaded', 'installing'].includes(String(current.state || ''));
   return h(Card, { title: 'App updates', className: 'application-update-panel' },
-    h(SettingsField, { label: 'Release channel', inputId: 'updateReleaseChannel' },
+    h(SettingsField, { label: 'Release channel', inputId: 'updateReleaseChannel', help: 'Stable is recommended for normal use. Beta receives pre-release builds intended mainly for developers and testers.' },
       h('select', {
         id: 'updateReleaseChannel',
         value: updateChannel,
         disabled: busy === 'channel',
-        'aria-describedby': updateChannel === 'beta' ? 'updateReleaseChannelWarning' : undefined,
+        'aria-describedby': updateChannel === 'beta' ? 'updateReleaseChannelHelp updateReleaseChannelWarning' : 'updateReleaseChannelHelp',
         onChange: event => void updateReleaseChannel(event.currentTarget.value)
       },
         h('option', { value: 'stable' }, 'Stable'),
@@ -829,8 +1021,8 @@ function ApplicationUpdates({ lifecycle }) {
     },
       h('span', { className: 'application-update-beta-warning-icon', 'aria-hidden': 'true' }, h(Icon, { name: 'warning', size: 16 })),
       h('div', null,
-        h('strong', null, 'Beta builds can be unstable'),
-        h('p', null, 'Use Stable for normal work.')
+        h('strong', null, 'Beta builds can contain serious bugs or incomplete changes'),
+        h('p', null, 'Use Stable for normal work. You may need to reinstall if a beta build fails.')
       )
     ) : null,
     h(ToggleRow, {
@@ -868,7 +1060,7 @@ function updateView(status = {}, autoDownload = false) {
   const availableVersion = status.availableVersion ? `v${status.availableVersion}` : '';
   if (state === 'unsupported') return { label: 'Manual update', tone: 'warn', description: status.supportReason || 'This build must be updated manually from GitHub Releases.' };
   if (state === 'checking') return { label: 'Checking', tone: 'working', description: 'Checking for a newer version of Rel.AI.' };
-  if (state === 'up_to_date') return { label: 'Up to date', tone: 'ok', description: '', action: { id: 'check', label: 'Check again', className: 'secondary' } };
+  if (state === 'up_to_date') return { label: 'Up to date', tone: 'ok', description: 'Rel.AI checks automatically once per day.', action: { id: 'check', label: 'Check again', className: 'secondary' } };
   if (state === 'available') return { label: 'Update available', tone: 'warn', description: autoDownload ? `${availableVersion || 'A newer version'} is available. Rel.AI will download it automatically without restarting.` : `${availableVersion || 'A newer version'} is available. Downloading does not restart Rel.AI.`, action: { id: 'download', label: `Download ${availableVersion || 'update'}`, className: 'primary' }, secondary: { id: 'check', label: 'Check again' } };
   if (state === 'downloading') return { label: 'Downloading', tone: 'working', description: `Downloading ${availableVersion || 'the update'}. You can keep using Rel.AI while it downloads.` };
   if (state === 'downloaded') {
@@ -1016,7 +1208,7 @@ function LocalDataSettings() {
   return h(Card, { title: 'Local data & storage', className: 'desktop-local-data-panel' },
     h('div', { className: 'local-data-summary' },
       h('div', null, h('span', null, 'Total Rel.AI local data'), h('strong', null, `${formatBytes(usage.totalBytes, { zero: true })}${usage.approximate ? ' approx.' : ''}`)),
-      h('small', null, 'Use Log out to remove all local Rel.AI data.')
+      h('small', null, 'Log out in Connection can remove all local Rel.AI data.')
     ),
     h('div', { className: 'local-data-list' },
       h(DataRow, { label: 'Task & activity history', bytes: categories.history?.bytes }),
@@ -1114,8 +1306,11 @@ function QuitRow() {
   );
 }
 
-function AboutPage({ metadata, runtime = {}, repositoryRuntime = {}, runtimeCompatibility = {} }) {
+function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime = {}, runtimeCompatibility = {} }) {
   const repositoryUrl = validatedGitHubUrl(metadata.repositoryUrl);
+  const developer = metadata.developer || {};
+  const developerUrl = validatedGitHubUrl(developer.profileUrl);
+  const buildId = buildIdOf(buildStatus);
   const runtimeNotice = runtimeCompatibilityNotice(runtime, repositoryRuntime, runtimeCompatibility);
   const developerUnlockRef = useRef({ count: 0, startedAt: 0 });
   const onBuildClick = () => {
@@ -1142,12 +1337,14 @@ function AboutPage({ metadata, runtime = {}, repositoryRuntime = {}, runtimeComp
           type: 'button',
           onClick: onBuildClick,
           'aria-label': `Version ${metadata.version ? `v${metadata.version}` : 'unknown'}`
-        }, metadata.version ? `v${metadata.version}` : 'Unknown'))
+        }, metadata.version ? `v${metadata.version}` : 'Unknown')),
+        buildId ? h('p', null, 'Build: ', h('code', null, buildId)) : null
       )),
       runtimeNotice ? h('div', { className: 'connection-notice warn about-runtime-mismatch', role: 'status' },
         h('strong', null, runtimeNotice.title),
         h('div', null, runtimeNotice.message)
       ) : null,
+      developer.name ? h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': developer.username ? `${developer.name} on GitHub (@${developer.username})` : `${developer.name} on GitHub` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')) : null,
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
     ),
     h(Card, { title: 'Legal & privacy' },
@@ -1167,6 +1364,8 @@ function AboutRow({ label, children }) {
   return h('div', { className: 'setting-row about-detail-row' }, h('div', { className: 'setting-row-copy' }, h('strong', null, label)), children);
 }
 
+function buildIdOf(buildStatus = {}) { return String(buildStatus?.buildId || '').trim(); }
+
 function runtimeCompatibilityNotice(runtime = {}, repositoryRuntime = {}, compatibility = {}) {
   if (compatibility?.available !== true || compatibility?.metadataMatches !== false) return null;
   const runningVersion = String(runtime?.applicationVersion || runtime?.packageVersion || '').trim();
@@ -1174,6 +1373,7 @@ function runtimeCompatibilityNotice(runtime = {}, repositoryRuntime = {}, compat
   if (!runningVersion || !sourceVersion) return null;
   const activeTasksPreventRestart = compatibility?.activeTasksPreventRestart === true;
   const restartRequired = compatibility?.restartRequired === true;
+  if (runningVersion === sourceVersion && !restartRequired) return null;
   const title = restartRequired ? 'Restart required to load current source' : 'Running runtime differs from current source';
   const message = activeTasksPreventRestart
     ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Finish active tasks before restarting Rel.AI to load the current source.`

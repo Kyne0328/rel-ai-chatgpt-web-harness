@@ -99,6 +99,7 @@ export const EVERYDAY_TEST_FILES = [
   "task-reconciliation-unit.mjs",
   "taskless-exec-queue-unit.mjs",
   "tasks-telemetry-unit.mjs",
+  "telemetry-worker-unit.mjs",
   "test-rigidity-audit-unit.mjs",
   "tool-activity-unit.mjs",
   "tool-failure-accounting-unit.mjs",

@@ -256,6 +256,7 @@ assert.doesNotMatch(sessionsReact, /replaceWith|replaceChildren|innerHTML/, 'Rea
 
 const bootSource = functionSource(dashboard, 'boot');
 assert.match(bootSource, /mountReactFoundation\(ensureDashboardRoot\(\)/, 'the dashboard must mount one canonical React root');
+assert.doesNotMatch(bootSource, /Loading Rel\.AI|Checking your connection and project access/, 'routine bootstrap must not show the old branded loading splash');
 assert.match(bootSource, /relai:dashboard-refresh', \(\) => doRefresh/, 'dashboard refresh events must refresh canonical state only');
 assert.doesNotMatch(bootSource, /visibilitychange[\s\S]*doRefresh/, 'visibility changes must rely on SSE revision catch-up instead of rebuilding the dashboard');
 assert.match(functionSource(dashboard, 'liveCatchUpRequired'), /remoteRevisions/, 'SSE reconnects must compare typed server revisions before refreshing');

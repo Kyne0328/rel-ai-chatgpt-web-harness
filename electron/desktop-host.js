@@ -70,11 +70,12 @@ async function createDesktopHost(options = {}) {
   registerLocalScheme(protocol);
   configureApplicationIdentity(app);
 
-  const [connection, configModule, errorContracts, processEnvironment] = await Promise.all([
+  const [connection, configModule, errorContracts, processEnvironment, browserProfiles] = await Promise.all([
     importResourceModule('src/connectionProfile.js'),
     importResourceModule('src/config.js'),
     importResourceModule('src/contracts/errors.ts'),
-    importResourceModule('src/processEnvironment.js')
+    importResourceModule('src/processEnvironment.js'),
+    importResourceModule('src/browser/browserProfile.ts')
   ]);
   const { ERROR_CODES } = errorContracts;
   let processModulePromise = null;
@@ -190,11 +191,17 @@ async function createDesktopHost(options = {}) {
       details
     })
   });
+  const browserProfileConfig = () => configModule.readConfig({ allowMissing: true });
   const browserSurfaceHost = createBrowserSurfaceHost({
     WebContentsView,
     session,
     getDashboardWindow: dashboardWindowManager.getWindow,
     openDashboard: route => showDashboardWindow(route),
+    clearPersistentData: () => browserProfiles.clearPersistentBrowserProfiles(browserProfileConfig()),
+    listPersistentProfiles: () => browserProfiles.persistentBrowserProfileDirectories(browserProfileConfig()),
+    readPersistentSites: profileDirectory => browserProfiles.readPersistentBrowserSites(profileDirectory),
+    recordPersistentSite: (profileDirectory, url) => browserProfiles.recordPersistentBrowserSite(profileDirectory, url),
+    forgetPersistentSite: (profileDirectory, origin) => browserProfiles.forgetPersistentBrowserSite(profileDirectory, origin),
     onEvent: event => serviceProcessClient?.sendNativeEvent(event),
     onError: error => runtimeLogs.append(formatError(error), { level: 'warning', source: 'embedded-browser' })
   });
@@ -395,6 +402,10 @@ async function createDesktopHost(options = {}) {
     getBrowserState: browserSurfaceHost.getState,
     setBrowserSurfaceBounds: browserSurfaceHost.setBounds,
     setBrowserControl: browserSurfaceHost.setControl,
+    respondBrowserPermission: browserSurfaceHost.respondPermission,
+    listSavedBrowserSites: browserSurfaceHost.listSavedSites,
+    clearSavedBrowserSite: browserSurfaceHost.clearSavedSite,
+    clearSavedBrowserData: browserSurfaceHost.clearSavedData,
     selectBrowserSession: browserSurfaceHost.selectSession,
     selectBrowserTab: browserSurfaceHost.selectTab,
     closeBrowserTab: browserSurfaceHost.closeTab,

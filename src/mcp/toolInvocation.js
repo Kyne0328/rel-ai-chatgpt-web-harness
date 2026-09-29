@@ -4,6 +4,7 @@ import { callTool } from '../tools.js';
 import { serializeToolError } from '../tools/errors.js';
 import { acknowledgeFallbackCompletionNotice, consumeFallbackCompletionNotices } from './fallbackExecutions.js';
 import { principalFingerprint } from './principal.js';
+import { browserHandoffOperationArgs, requestBrowserHandoff } from './browserHandoff.ts';
 
 async function invokeRelaiTool(options = {}) {
   const name = String(options.name || '');
@@ -18,6 +19,19 @@ async function invokeRelaiTool(options = {}) {
         options.requestStateCodec
       );
       if (approval) return approval;
+    }
+    if (name === 'relai_browser' && args.action === 'handoff' && options.approvalContext && options.requestStateCodec) {
+      return requestBrowserHandoff({
+        args,
+        context: options.context || {},
+        rawContext: options.approvalContext,
+        codec: options.requestStateCodec,
+        execute: async action => {
+          const output = await callTool(name, browserHandoffOperationArgs(args, action), options.context || {});
+          if (output?.ok !== false && typeof options.validateOutput === 'function') await options.validateOutput(output);
+          return output;
+        }
+      });
     }
     const output = await callTool(name, args, options.context || {});
     if (output?.ok !== false && typeof options.validateOutput === 'function') {

@@ -43,6 +43,11 @@
 .process-command-summary code { overflow-wrap: anywhere; padding: .65rem .75rem; border: 1px solid var(--ui-border-subtle); border-radius: .55rem; background: var(--ui-surface-secondary); font-size: .72rem; }
 .process-independent, .process-recovery { margin-top: .8rem; }
 .process-output-empty { margin-top: .65rem; padding: .75rem; border: 1px dashed var(--ui-border-default); border-radius: .55rem; color: var(--ui-text-secondary); font-size: .72rem; line-height: 1.5; }
+.recent-processes { border-top: 1px solid var(--ui-border-default); }
+.recent-processes > summary { @apply flex min-h-11 cursor-pointer items-center px-4 py-2 text-[12px] font-semibold; color: var(--ui-text-secondary); background: var(--ui-surface-secondary); }
+.recent-processes > summary:hover { color: var(--ui-text-primary); }
+.recent-process-list { border-top: 1px solid var(--ui-border-subtle); }
+.recent-process-list .process-row { background: var(--ui-surface-primary); }
 @media (max-width: 980px) {
   .process-detail-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }

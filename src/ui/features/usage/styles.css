@@ -11,6 +11,8 @@
 .usage-month-control { @apply grid gap-1 text-[12px] font-semibold; color: var(--ui-text-secondary); }
 .usage-month-control input { min-width: 154px; }
 .usage-content, .usage-overview { @apply grid gap-3; }
+.usage-data-note { @apply flex flex-wrap items-center justify-between gap-2 px-1 text-[11px]; color: var(--ui-text-tertiary); }
+.usage-data-note a { @apply font-semibold; color: var(--ui-action-primary); }
 .usage-privacy-body { @apply flex flex-wrap items-start justify-between gap-3; }
 .usage-privacy-copy { @apply grid min-w-0 flex-1 gap-1; }
 .usage-privacy-copy strong { @apply text-[13px]; color: var(--ui-text-primary); }

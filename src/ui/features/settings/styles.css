@@ -135,6 +135,32 @@
 .local-data-row { @apply flex min-h-11 items-center justify-between gap-3 border-b px-3 py-2.5 last:border-b-0; border-color: var(--ui-border-subtle); }
 .local-data-row span, .local-data-row strong { @apply text-[12px]; }
 .local-data-row strong { @apply whitespace-nowrap; }
+.browser-profile-summary { @apply flex items-start justify-between gap-4 rounded-lg p-3; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
+.browser-profile-summary .setting-row-copy { @apply min-w-0; }
+.browser-profile-summary .setting-row-copy strong { @apply block text-[12px]; }
+.browser-profile-summary .setting-row-copy span { @apply mt-1 block max-w-3xl text-[12px] leading-5; color: var(--ui-text-secondary); }
+.browser-profile-summary .pill { @apply shrink-0; }
+.browser-site-disclosure { @apply overflow-hidden rounded-lg; border: 1px solid var(--ui-border-default); background: var(--ui-surface-primary); }
+.browser-site-disclosure-summary { @apply cursor-pointer px-3 py-3; }
+.browser-site-disclosure-summary > span { @apply inline-grid gap-0.5 align-middle; }
+.browser-site-disclosure-summary strong { @apply text-[12px] font-semibold; }
+.browser-site-disclosure-summary small { @apply text-[11px] font-normal; color: var(--ui-text-secondary); }
+.browser-site-disclosure[open] > .browser-site-disclosure-summary { border-bottom: 1px solid var(--ui-border-default); }
+.browser-site-disclosure-body { @apply grid gap-3 p-3; }
+.browser-site-list { @apply grid overflow-hidden rounded-lg; border: 1px solid var(--ui-border-default); }
+.browser-site-row { @apply flex min-h-11 items-center justify-between gap-3 border-b px-3 py-2.5 last:border-b-0; border-color: var(--ui-border-subtle); }
+.browser-site-copy { @apply min-w-0; }
+.browser-site-copy strong { @apply block break-words text-[12px]; }
+.browser-site-copy span { @apply mt-0.5 block text-[11px]; color: var(--ui-text-secondary); }
+.browser-site-row > button { @apply shrink-0; }
+.browser-development-sites { @apply overflow-hidden rounded-lg; border: 1px solid var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+.browser-development-sites > summary { @apply flex cursor-pointer items-center justify-between gap-3 px-3 py-2.5 text-[12px] font-semibold; }
+.browser-development-sites > summary small { @apply text-[11px] font-normal; color: var(--ui-text-secondary); }
+.browser-development-sites[open] > summary { border-bottom: 1px solid var(--ui-border-subtle); }
+.browser-development-sites-body { @apply p-2.5; }
+.browser-sites-empty { @apply rounded-lg px-3 py-3 text-[12px]; background: var(--ui-surface-secondary); color: var(--ui-text-secondary); border: 1px solid var(--ui-border-subtle); }
+.browser-site-warning { @apply rounded-lg px-3 py-2.5; background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground); border: 1px solid var(--ui-status-warning-border); }
+.browser-site-actions { @apply flex justify-end; }
 .local-data-actions { @apply flex flex-wrap gap-2; }
 .about-build-trigger { all: unset; border-radius: 4px; cursor: default; }
 .about-build-trigger:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 2px; }

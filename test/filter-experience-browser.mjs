@@ -84,7 +84,7 @@ try {
   assert.equal(result.diagnostics.applied.badge, 'Filters (2)');
   assert.match(result.diagnostics.applied.summary, /findings.*log entries shown/);
   assert.equal(result.diagnostics.applied.liveTailPressed, 'false');
-  assert.deepEqual(result.diagnostics.applied.reportActions, ['Export support information']);
+  assert.deepEqual(result.diagnostics.applied.reportActions, ['Copy report', 'Export support information']);
   assert.match(result.tools.applied.chip, /Validate/);
   assert.equal(result.tools.applied.badge, 'Filters (1)');
   assert.match(result.tools.applied.summary, /tools shown/);

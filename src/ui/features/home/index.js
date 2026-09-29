@@ -137,21 +137,43 @@ export function homeAnalyticsView(scope = {}) {
 }
 
 function homeAnalyticsPulseView(points = []) {
-  const values = (Array.isArray(points) ? points : [])
+  const source = Array.isArray(points) ? points : [];
+  const values = source
     .map(point => Number(point?.toolCalls || 0))
     .map(value => Number.isFinite(value) && value >= 0 ? value : 0);
-  if (!values.length || values.every(value => value === 0)) return { empty: true, values };
+  const labels = source.map((point, index) => formatHomeAnalyticsPointTime(point?.at, { index, count: source.length }));
+  const detailedLabels = source.map((point, index) => formatHomeAnalyticsPointTime(point?.at, { detailed: true, index, count: source.length }));
+  if (!values.length || values.every(value => value === 0)) return { empty: true, values, labels, detailedLabels, latestIndex: Math.max(0, values.length - 1) };
   const total = values.reduce((sum, value) => sum + value, 0);
-  const latest = values.at(-1) || 0;
+  const latestIndex = Math.max(0, values.length - 1);
+  const latest = values[latestIndex] || 0;
   const peak = Math.max(...values);
   const peakIndex = values.indexOf(peak);
-  const hoursAgo = Math.max(0, values.length - 1 - peakIndex);
+  const hoursAgo = Math.max(0, latestIndex - peakIndex);
   const trend = latest > values[0] ? 'increasing' : latest < values[0] ? 'decreasing' : 'steady';
   return {
     empty: false,
     values,
+    labels,
+    detailedLabels,
+    latestIndex,
+    peak,
+    peakIndex,
     summary: `Action activity across the latest 24 UTC-hour buckets. ${formatInteger(total)} total actions. Peak ${formatInteger(peak)} ${pluralLabel(peak, 'action')} ${hoursAgo ? `${hoursAgo} ${pluralLabel(hoursAgo, 'hour')} ago` : 'in the current hour'}. Current hour ${formatInteger(latest)} ${pluralLabel(latest, 'action')}. Overall trend ${trend}.`
   };
+}
+
+function formatHomeAnalyticsPointTime(value, { detailed = false, index = 0, count = 0 } = {}) {
+  const time = Number(value);
+  if (!Number.isFinite(time)) {
+    const hoursAgo = Math.max(0, Number(count || 0) - 1 - Number(index || 0));
+    return hoursAgo ? `${hoursAgo}h ago` : 'Current hour';
+  }
+  const options = detailed
+    ? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC', hour12: false }
+    : { hour: '2-digit', minute: '2-digit', timeZone: 'UTC', hour12: false };
+  const label = new Intl.DateTimeFormat(undefined, options).format(new Date(time));
+  return detailed ? `${label} UTC` : label;
 }
 
 function actionableFindings(health = {}) {

@@ -101,7 +101,10 @@ async function launchBrowserDriver(options: LaunchBrowserDriverOptions): Promise
       await bridge({ action: 'close_session', nativeSessionId });
     },
     onDisconnected: (listener: () => void) => { onDisconnected = listener; },
-    onPageCreated: (listener: (page: BrowserPageDriver, active: boolean) => void) => { sessionPageCreatedListeners.set(nativeSessionId, listener); }
+    onPageCreated: (listener: (page: BrowserPageDriver, active: boolean) => void) => { sessionPageCreatedListeners.set(nativeSessionId, listener); },
+    setControl: async (owner: 'ai' | 'user', reason = '') => {
+      await bridge({ action: 'set_control', nativeSessionId, owner, reason });
+    }
   });
 }
 

@@ -1,7 +1,11 @@
-function registerBrowserSurfaceIpc({ ipc, channels, getBrowserState, setBrowserSurfaceBounds, setBrowserControl, selectBrowserSession, selectBrowserTab, closeBrowserTab, stopActiveBrowserSession }) {
+function registerBrowserSurfaceIpc({ ipc, channels, getBrowserState, setBrowserSurfaceBounds, setBrowserControl, respondBrowserPermission, listSavedBrowserSites, clearSavedBrowserSite, clearSavedBrowserData, selectBrowserSession, selectBrowserTab, closeBrowserTab, stopActiveBrowserSession }) {
   ipc.handle(channels.DESKTOP_BROWSER_GET_STATE, 'Embedded browser state', () => getBrowserState());
   ipc.handle(channels.DESKTOP_BROWSER_SET_BOUNDS, 'Embedded browser surface', (_event, bounds) => setBrowserSurfaceBounds(normalizeBrowserBounds(bounds)));
   ipc.handle(channels.DESKTOP_BROWSER_SET_CONTROL, 'Embedded browser control', (_event, owner) => setBrowserControl(normalizeBrowserControl(owner)));
+  ipc.handle(channels.DESKTOP_BROWSER_PERMISSION, 'Embedded browser permission', (_event, requestId, allowed) => respondBrowserPermission(normalizeBrowserPermissionRequestId(requestId), normalizeBoolean(allowed, 'Browser permission decision')));
+  ipc.handle(channels.DESKTOP_BROWSER_LIST_SAVED_SITES, 'Embedded browser saved sites', () => listSavedBrowserSites());
+  ipc.handle(channels.DESKTOP_BROWSER_CLEAR_SAVED_SITE, 'Embedded browser saved site', (_event, origin) => clearSavedBrowserSite(normalizeBrowserOrigin(origin)));
+  ipc.handle(channels.DESKTOP_BROWSER_CLEAR_SAVED_DATA, 'Embedded browser saved data', () => clearSavedBrowserData());
   ipc.handle(channels.DESKTOP_BROWSER_SELECT_SESSION, 'Embedded browser session selection', (_event, nativeSessionId) => selectBrowserSession(normalizeBrowserSessionId(nativeSessionId)));
   ipc.handle(channels.DESKTOP_BROWSER_SELECT_TAB, 'Embedded browser tab selection', (_event, nativePageId) => selectBrowserTab(normalizeBrowserPageId(nativePageId)));
   ipc.handle(channels.DESKTOP_BROWSER_CLOSE_TAB, 'Embedded browser tab close', (_event, nativePageId) => closeBrowserTab(normalizeBrowserPageId(nativePageId)));
@@ -72,6 +76,25 @@ function normalizeBrowserControl(owner) {
   const value = String(owner || '').trim();
   if (value !== 'ai' && value !== 'user') throw new Error('Embedded browser control owner must be ai or user.');
   return value;
+}
+
+function normalizeBrowserPermissionRequestId(value) {
+  const requestId = String(value || '').trim();
+  if (!/^browser_permission_[A-Za-z0-9_-]{16,160}$/.test(requestId)) throw new Error('Embedded browser permission request identifier is invalid.');
+  return requestId;
+}
+
+function normalizeBoolean(value, label) {
+  if (typeof value !== 'boolean') throw new Error(`${label} must be a boolean.`);
+  return value;
+}
+
+function normalizeBrowserOrigin(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    if (!['http:', 'https:'].includes(url.protocol) || url.origin === 'null') throw new Error();
+    return url.origin;
+  } catch { throw new Error('Embedded browser saved site must be an absolute HTTP or HTTPS origin.'); }
 }
 
 function normalizeBrowserSessionId(value) {

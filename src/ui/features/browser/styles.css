@@ -36,6 +36,20 @@
 .browser-takeover-banner > span { min-width: 0; flex: 1; font-size: 12px; font-weight: 650; }
 .browser-takeover-banner > button { flex: 0 0 auto; }
 
+.browser-permission-banner {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid var(--ui-border-default);
+  border-radius: var(--radius-lg);
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-primary);
+}
+.browser-permission-banner > span { min-width: 0; flex: 1; font-size: 12px; font-weight: 600; }
+.browser-permission-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+
 .browser-sessions {
   display: flex;
   min-width: 0;

@@ -12,6 +12,7 @@ const CANONICAL_PATHS = new Set([
   'usage',
   'settings',
   'settings/connection',
+  'settings/privacy',
   'settings/application',
   'settings/about'
 ]);

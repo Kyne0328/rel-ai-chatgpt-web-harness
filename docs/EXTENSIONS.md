@@ -80,19 +80,30 @@ Validation checks every manifest with Rel.AI's production extension schema, veri
 
 `dev-install` runs `sync` and validation first, then installs the selected extension from the local publisher working tree into Rel.AI's managed extension directory. Local package files must pass the same manifest, size, path, permission, compatibility, and SHA-256 checks as published packages. CLI install artifacts declared by a manifest still use their normal verified HTTPS download path. Run `dev-install` again after changing package files.
 
-This local source path exists only for the explicit developer CLI. The normal Extensions UI and production install API continue to require an HTTPS catalog and HTTPS manifests/files; local paths and `file:` URLs are not accepted as catalog sources.
+This local source path exists only for the explicit developer CLI. Production source discovery still requires HTTPS catalogs and HTTPS manifests/files; local paths and `file:` URLs are not accepted as catalog sources.
 
-The generated `publisher-catalog.json` remains a normal Rel.AI catalog. If you need to test the remote publishing path itself, push it to an HTTPS location and point `REL_AI_EXTENSIONS_CATALOG_URL` at its raw URL.
+## Share a publisher repository
 
-## Publish to the canonical catalog
+The generated `publisher-catalog.json` is the public discovery document for the repository. After `relai-extension sync` and `relai-extension validate` pass, push the publisher repository to an HTTPS host and share its URL.
 
-Rel.AI keeps one normal discovery catalog for users. A publisher monorepo is a package source, not a second catalog users must configure.
+For a GitHub repository on the `main` branch, users can open Extensions → Sources and add the normal repository URL, for example:
 
-For publication:
+```text
+https://github.com/example/example-relai-extensions
+```
 
-1. Push the publisher monorepo to a public HTTPS Git host.
-2. Run `relai-extension sync` and `relai-extension validate`.
-3. Submit the relevant entries from `publisher-catalog.json` to the canonical `Kyne0328/rel-ai-extensions` catalog.
-4. Keep each catalog entry pointed at the nested raw manifest URL, such as `extensions/officecli/relai-extension.json`.
+Rel.AI resolves that repository to its raw `publisher-catalog.json`, validates the catalog, and makes its extensions available in Discover. For a publisher hosted somewhere other than GitHub, users can add the direct HTTPS URL to `publisher-catalog.json`.
 
-Production installs continue to require the canonical catalog, HTTPS package sources, declared permissions, and SHA-256 verification. Publisher monorepos do not weaken the runtime trust model.
+Adding a source does not install or execute its extensions. Installation still requires permission review, manifest/catalog agreement, compatibility checks, safe package paths, and SHA-256 verification. Active sources cannot claim an extension ID already supplied by another active source. Installed extensions are pinned to the catalog that installed them, so another repository cannot take over updates for the same ID.
+
+Removing a source does not uninstall its extensions. The installed package remains available, but Rel.AI stops discovering updates for it until that source is added again.
+
+`REL_AI_EXTENSIONS_CATALOG_URL` remains available as a development override for the built-in catalog when testing unpublished remote changes.
+
+## Optional official catalog publication
+
+The built-in `Kyne0328/rel-ai-extensions` catalog remains the curated default source. A third-party publisher does not need to submit every extension there; users can add the publisher repository directly.
+
+If you want an extension to appear in the built-in catalog without users adding a source, submit its catalog entry to `Kyne0328/rel-ai-extensions` after publishing and validating the extension package.
+
+Production installs continue to require HTTPS package sources, declared permissions, and SHA-256 verification regardless of whether the extension comes from the built-in catalog or an added source.

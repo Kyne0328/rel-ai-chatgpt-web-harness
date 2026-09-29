@@ -87,6 +87,7 @@ function renderDashboardHtml(nonce: string): string {
 <link rel="icon" href="/public/assets/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/public/assets/favicon.png">
 <link rel="apple-touch-icon" href="/public/assets/relai-logo-192.png">
+<link rel="preload" as="image" href="/public/assets/relai-logo.png" fetchpriority="high">
 <script nonce="${nonce}">${renderDashboardShellBootstrap()}</script>
 <link rel="stylesheet" href="/public/dashboard.css">
 </head>

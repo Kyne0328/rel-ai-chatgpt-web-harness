@@ -93,7 +93,8 @@ try {
   assert.equal(result.initialHydration.before.falseEmpty, false, JSON.stringify(result.initialHydration));
   assert.equal(result.initialHydration.during.falseEmpty, false, JSON.stringify(result.initialHydration));
   assert.equal(result.initialHydration.during.loading, true, JSON.stringify(result.initialHydration));
-  assert.match(result.initialHydration.during.loadingText, /Loading Rel\.AI/i, JSON.stringify(result.initialHydration));
+  assert.match(result.initialHydration.during.loadingText, /Loading page/i, JSON.stringify(result.initialHydration));
+  assert.doesNotMatch(result.initialHydration.during.loadingText, /Loading Rel\.AI|Checking your connection/i, JSON.stringify(result.initialHydration));
   assert.ok(result.initialHydration.after.workspaceCount >= 1, JSON.stringify(result.initialHydration));
   assert.equal(result.initialHydration.after.falseEmpty, false, JSON.stringify(result.initialHydration));
   assert.ok(result.initial.rowCount >= 9);

@@ -78,13 +78,7 @@ async function boot() {
       : initialPayload;
   if (initial?.onboarding) syncDesktopSetupState(initial.onboarding);
   initStore(initial?.ok !== false ? initial || {} : {});
-  if (!initial) {
-    showShellDashboardState({
-      kind: 'loading',
-      title: 'Loading Rel.AI…',
-      description: 'Checking your connection and project access.'
-    });
-  }
+  if (!initial) showShellDashboardState({ kind: 'loading' });
   mountReactFoundation(ensureDashboardRoot(), { getSnapshot: getStore, subscribe: subscribeStore }, {
     desktop: window.relaiDesktop || null,
     onAddWorkspace: async () => {
