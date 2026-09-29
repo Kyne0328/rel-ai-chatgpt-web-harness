@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { adminHtml, axiomTraceUrl, constantTimeEqual, hashAdminPassword, isAuthorizedAdmin, parseBasicAuthorization, validatePresence } from '../cloud/telemetry-worker/src/index.mjs';
+import telemetryWorker, { adminHtml, axiomTraceUrl, constantTimeEqual, hashAdminPassword, hashAdminSessionToken, isAuthorizedAdmin, readCookie, validatePresence, verifyAdminCredentials } from '../cloud/telemetry-worker/src/index.mjs';
 
 const valid = {
   schemaVersion: 1,
@@ -33,14 +33,87 @@ const env = {
   ADMIN_PASSWORD_SALT: salt,
   ADMIN_PASSWORD_HASH: passwordHash
 };
-const authorization = `Basic ${btoa(`admin:${password}`)}`;
-const authorized = new Request('https://telemetry.example/api/v1/admin/summary', {
-  headers: { authorization }
+assert.equal(await verifyAdminCredentials('admin', password, env), true);
+assert.equal(await verifyAdminCredentials('other', password, env), false);
+assert.equal(await verifyAdminCredentials('admin', 'wrong-password', env), false);
+
+const issuedSessions = new Map();
+const adminDb = {
+  prepare(sql) {
+    if (sql.startsWith('DELETE FROM admin_sessions WHERE unixepoch')) {
+      return { run: async () => ({ success: true }) };
+    }
+    if (sql.startsWith('INSERT INTO admin_sessions')) {
+      return {
+        bind(sessionHash, expiresAt) {
+          return {
+            run: async () => {
+              issuedSessions.set(sessionHash, expiresAt);
+              return { success: true };
+            }
+          };
+        }
+      };
+    }
+    if (sql.startsWith('DELETE FROM admin_sessions WHERE session_hash')) {
+      return {
+        bind(sessionHash) {
+          return {
+            run: async () => {
+              issuedSessions.delete(sessionHash);
+              return { success: true };
+            }
+          };
+        }
+      };
+    }
+    throw new Error(`Unexpected admin DB statement: ${sql}`);
+  }
+};
+const adminEnv = { ...env, DB: adminDb };
+const loginResponse = await telemetryWorker.fetch(new Request('https://telemetry.example/api/v1/admin/login', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ username: 'admin', password, remember: true })
+}), adminEnv);
+assert.equal(loginResponse.status, 200);
+assert.equal((await loginResponse.json()).ok, true);
+const setCookie = loginResponse.headers.get('set-cookie') || '';
+assert.match(setCookie, /^relai_admin_session=[A-Za-z0-9_-]+;/);
+assert.match(setCookie, /HttpOnly/);
+assert.match(setCookie, /Secure/);
+assert.match(setCookie, /SameSite=Strict/);
+assert.match(setCookie, /Max-Age=604800/);
+const issuedCookie = setCookie.split(';', 1)[0];
+const issuedToken = issuedCookie.slice(issuedCookie.indexOf('=') + 1);
+assert.equal(issuedSessions.has(await hashAdminSessionToken(issuedToken)), true);
+
+const logoutResponse = await telemetryWorker.fetch(new Request('https://telemetry.example/api/v1/admin/logout', {
+  method: 'POST',
+  headers: { cookie: issuedCookie }
+}), adminEnv);
+assert.equal(logoutResponse.status, 200);
+assert.equal(issuedSessions.size, 0);
+assert.match(logoutResponse.headers.get('set-cookie') || '', /Max-Age=0/);
+
+const sessionToken = 'test-session-token';
+const sessionHash = await hashAdminSessionToken(sessionToken);
+const sessionRequest = new Request('https://telemetry.example/api/v1/admin/summary', {
+  headers: { cookie: `other=value; relai_admin_session=${sessionToken}` }
 });
-assert.deepEqual(parseBasicAuthorization(authorized), { username: 'admin', password });
-assert.equal(await isAuthorizedAdmin(authorized, env), true);
-assert.equal(await isAuthorizedAdmin(authorized, { ...env, ADMIN_USERNAME: 'other' }), false);
-assert.equal(await isAuthorizedAdmin(new Request('https://telemetry.example/'), env), false);
+assert.equal(readCookie(sessionRequest, 'relai_admin_session'), sessionToken);
+const sessionDb = {
+  prepare(sql) {
+    assert.match(sql, /admin_sessions/);
+    return {
+      bind(value) {
+        return { first: async () => value === sessionHash ? { session_hash: value } : null };
+      }
+    };
+  }
+};
+assert.equal(await isAuthorizedAdmin(sessionRequest, { DB: sessionDb }), true);
+assert.equal(await isAuthorizedAdmin(new Request('https://telemetry.example/'), { DB: sessionDb }), false);
 assert.equal(constantTimeEqual('same', 'same'), true);
 assert.equal(constantTimeEqual('same', 'nope'), false);
 assert.equal(axiomTraceUrl({ AXIOM_DOMAIN: 'https://us-east-1.aws.edge.axiom.co/' }), 'https://us-east-1.aws.edge.axiom.co/v1/traces');
@@ -51,5 +124,9 @@ assert.ok(inlineScript, 'admin page must include an inline script');
 assert.doesNotThrow(() => new Function(inlineScript), 'generated admin page JavaScript must parse');
 assert.match(generatedAdminHtml, /id="btn-login"/);
 assert.match(generatedAdminHtml, /id="btn-toggle-pwd"/);
+assert.match(generatedAdminHtml, /autocomplete="current-password"/);
+assert.match(generatedAdminHtml, /\/api\/v1\/admin\/login/);
+assert.doesNotMatch(generatedAdminHtml, /sessionStorage/);
+assert.doesNotMatch(generatedAdminHtml, /headers:\s*\{\s*authorization:/);
 
 console.log('Telemetry Worker validation tests passed.');

@@ -46,10 +46,11 @@ D1 region: APAC
 
 D1 binding: `DB`
 
-The Worker also has two rate-limit bindings:
+The Worker has three rate-limit bindings:
 
 - `USAGE_RATE_LIMITER` for presence requests;
-- `TRACE_RATE_LIMITER` for diagnostic batches.
+- `TRACE_RATE_LIMITER` for diagnostic batches; and
+- `ADMIN_RATE_LIMITER` for administrator sign-in attempts.
 
 Preview URLs are disabled. The stable `workers.dev` route remains enabled.
 
@@ -72,6 +73,8 @@ A daily cron runs at 00:15 UTC and writes a small aggregate snapshot to `daily_m
 - total installations;
 - active 1/7/30 day installations; and
 - new installations in the last day.
+
+`admin_sessions` stores only hashed, expiring developer-console session identifiers. The browser receives the corresponding random identifier in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie; the administrator password is never stored in browser storage.
 
 Apply new migrations with:
 
@@ -111,7 +114,9 @@ Open:
 
 The page itself contains no analytics data until you sign in with a username and password.
 
-The production username is `admin`. The password is independent from Axiom and is verified against a salted SHA-256 hash. `ADMIN_PASSWORD_SALT` and `ADMIN_PASSWORD_HASH` are Cloudflare Worker secrets; their values are not stored in the repository. To rotate the password, generate a new random salt and salted hash, replace both Worker secrets, then redeploy the Worker.
+The production username is `admin`. The password is independent from Axiom and is verified against a salted SHA-256 hash. `ADMIN_PASSWORD_SALT` and `ADMIN_PASSWORD_HASH` are Cloudflare Worker secrets and must not be stored in `wrangler.jsonc`, source code, Git history, or release artifacts. To rotate the password, generate a new random salt and salted hash, replace both Worker secrets, then redeploy the Worker.
+
+Signing in sends the password only to `POST /api/v1/admin/login`. A successful login creates an expiring server-side session and sets an `HttpOnly` cookie, so the page does not turn the password into a reusable browser token or persist a Basic authorization value in JavaScript storage. Selecting **Keep me signed in for 7 days** gives the cookie a seven-day lifetime; otherwise it is a browser-session cookie with a server-side 12-hour ceiling. `POST /api/v1/admin/logout` revokes the current session.
 
 The admin page shows installation totals, active 1/7/30-day counts, new-install counts, version adoption, platforms, and CPU architectures. Diagnostic trace exploration stays in Axiom.
 

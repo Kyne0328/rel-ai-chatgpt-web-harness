@@ -75,14 +75,25 @@ assert.deepEqual(otelErrors, [], `OTLP proxy/export reported errors: ${otelError
 let adminChecked = false;
 const adminPassword = String(process.env.REL_AI_TELEMETRY_ADMIN_PASSWORD || '');
 if (adminPassword) {
-  const authorization = `Basic ${Buffer.from(`admin:${adminPassword}`, 'utf8').toString('base64')}`;
-  const admin = await fetch(`${base}/api/v1/admin/summary`, {
-    headers: { authorization }
+  const login = await fetch(`${base}/api/v1/admin/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: adminPassword, remember: false })
   });
+  assert.equal(login.status, 200, `admin login failed with HTTP ${login.status}`);
+  assert.equal((await login.json()).ok, true);
+  const setCookie = login.headers.get('set-cookie') || '';
+  const cookie = setCookie.split(';', 1)[0];
+  assert.match(cookie, /^relai_admin_session=/, 'admin login must issue a session cookie');
+
+  const admin = await fetch(`${base}/api/v1/admin/summary`, { headers: { cookie } });
   assert.equal(admin.status, 200, `admin summary failed with HTTP ${admin.status}`);
   const adminBody = await admin.json();
   assert.equal(adminBody.ok, true);
   assert.ok(adminBody.summary && typeof adminBody.summary === 'object');
+
+  const logout = await fetch(`${base}/api/v1/admin/logout`, { method: 'POST', headers: { cookie } });
+  assert.equal(logout.status, 200, `admin logout failed with HTTP ${logout.status}`);
   adminChecked = true;
 }
 

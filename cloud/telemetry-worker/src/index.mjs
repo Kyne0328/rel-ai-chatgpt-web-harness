@@ -1,6 +1,10 @@
 const MAX_PRESENCE_BYTES = 4096;
 const MAX_TRACE_BYTES = 1024 * 1024;
+const MAX_ADMIN_LOGIN_BYTES = 4096;
 const PRESENCE_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000;
+const ADMIN_SESSION_COOKIE = 'relai_admin_session';
+const ADMIN_SESSION_SECONDS = 12 * 60 * 60;
+const ADMIN_REMEMBER_SESSION_SECONDS = 7 * 24 * 60 * 60;
 const ALLOWED_PLATFORMS = new Set(['win32', 'darwin', 'linux']);
 const ALLOWED_ARCHITECTURES = new Set(['x64', 'arm64', 'arm', 'ia32']);
 const PRESENCE_KEYS = new Set(['schemaVersion', 'installationId', 'version', 'platform', 'arch']);
@@ -54,12 +58,21 @@ function validatePresence(input) {
   return { ok: true, value: { installationId, version, platform, arch } };
 }
 
+function encodeBase64Url(bytes) {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
 async function hashAdminPassword(password, salt) {
   const bytes = new TextEncoder().encode(`${salt}\0${password}`);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-  let binary = '';
-  for (const byte of digest) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return encodeBase64Url(digest);
+}
+
+async function hashAdminSessionToken(token) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
+  return encodeBase64Url(digest);
 }
 
 function constantTimeEqual(left, right) {
@@ -71,28 +84,60 @@ function constantTimeEqual(left, right) {
   return diff === 0;
 }
 
-function parseBasicAuthorization(request) {
-  const header = String(request.headers.get('authorization') || '');
-  if (!header.startsWith('Basic ')) return null;
-  try {
-    const decoded = atob(header.slice(6));
-    const separator = decoded.indexOf(':');
-    if (separator < 0) return null;
-    return { username: decoded.slice(0, separator), password: decoded.slice(separator + 1) };
-  } catch {
-    return null;
-  }
-}
-
-async function isAuthorizedAdmin(request, env) {
-  const credentials = parseBasicAuthorization(request);
-  if (!credentials) return false;
+async function verifyAdminCredentials(username, password, env) {
   const expectedUsername = String(env.ADMIN_USERNAME || 'admin');
   const salt = String(env.ADMIN_PASSWORD_SALT || '');
   const expectedHash = String(env.ADMIN_PASSWORD_HASH || '');
-  if (!salt || !expectedHash || credentials.username !== expectedUsername) return false;
-  const actualHash = await hashAdminPassword(credentials.password, salt);
+  if (!salt || !expectedHash || username !== expectedUsername || !password) return false;
+  const actualHash = await hashAdminPassword(password, salt);
   return constantTimeEqual(actualHash, expectedHash);
+}
+
+function readCookie(request, name) {
+  const header = String(request.headers.get('cookie') || '');
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0) continue;
+    if (part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
+  }
+  return '';
+}
+
+function adminSessionCookie(token, maxAge = null) {
+  const age = Number.isFinite(maxAge) && maxAge > 0 ? `; Max-Age=${Math.floor(maxAge)}` : '';
+  return `${ADMIN_SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict${age}`;
+}
+
+function clearAdminSessionCookie() {
+  return `${ADMIN_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`;
+}
+
+async function createAdminSession(db, remember) {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const token = encodeBase64Url(bytes);
+  const tokenHash = await hashAdminSessionToken(token);
+  const lifetimeSeconds = remember ? ADMIN_REMEMBER_SESSION_SECONDS : ADMIN_SESSION_SECONDS;
+  const expiresAt = new Date(Date.now() + lifetimeSeconds * 1000).toISOString();
+  await db.prepare("DELETE FROM admin_sessions WHERE unixepoch(expires_at) <= unixepoch('now')").run();
+  await db.prepare('INSERT INTO admin_sessions(session_hash, expires_at) VALUES (?, ?)').bind(tokenHash, expiresAt).run();
+  return { token, maxAge: remember ? lifetimeSeconds : null };
+}
+
+async function revokeAdminSession(request, db) {
+  const token = readCookie(request, ADMIN_SESSION_COOKIE);
+  if (!token) return;
+  const tokenHash = await hashAdminSessionToken(token);
+  await db.prepare('DELETE FROM admin_sessions WHERE session_hash = ?').bind(tokenHash).run();
+}
+
+async function isAuthorizedAdmin(request, env) {
+  const token = readCookie(request, ADMIN_SESSION_COOKIE);
+  if (!token) return false;
+  const tokenHash = await hashAdminSessionToken(token);
+  const session = await env.DB.prepare(
+    "SELECT session_hash FROM admin_sessions WHERE session_hash = ? AND unixepoch(expires_at) > unixepoch('now')"
+  ).bind(tokenHash).first();
+  return Boolean(session);
 }
 
 function axiomTraceUrl(env) {
@@ -259,8 +304,50 @@ async function aggregateSummary(db) {
   };
 }
 
+async function handleAdminLogin(request, env) {
+  if (!String(request.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) {
+    return json({ ok: false, error: 'Content-Type must be application/json.' }, 415);
+  }
+
+  const actor = request.headers.get('cf-connecting-ip') || 'unknown';
+  if (!await allowRate(env.ADMIN_RATE_LIMITER, actor)) {
+    return json({ ok: false, error: 'Too many sign-in attempts.' }, 429, { 'retry-after': '60' });
+  }
+
+  let body;
+  try {
+    const bytes = await readLimitedBody(request, MAX_ADMIN_LOGIN_BYTES);
+    body = JSON.parse(new TextDecoder().decode(bytes));
+  } catch (error) {
+    return json({ ok: false, error: error?.status === 413 ? 'Sign-in request is too large.' : 'Invalid sign-in request.' }, error?.status || 400);
+  }
+
+  const allowedKeys = new Set(['username', 'password', 'remember']);
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !allowedKeys.has(key))) {
+    return json({ ok: false, error: 'Invalid sign-in request.' }, 400);
+  }
+
+  const username = typeof body.username === 'string' ? body.username.trim() : '';
+  const password = typeof body.password === 'string' ? body.password : '';
+  const remember = body.remember === true;
+  if (!username || !password || username.length > 128 || password.length > 512 || (body.remember !== undefined && typeof body.remember !== 'boolean')) {
+    return json({ ok: false, error: 'Invalid username or password.' }, 401);
+  }
+  if (!await verifyAdminCredentials(username, password, env)) {
+    return json({ ok: false, error: 'Invalid username or password.' }, 401);
+  }
+
+  const session = await createAdminSession(env.DB, remember);
+  return json({ ok: true }, 200, { 'set-cookie': adminSessionCookie(session.token, session.maxAge) });
+}
+
+async function handleAdminLogout(request, env) {
+  await revokeAdminSession(request, env.DB);
+  return json({ ok: true }, 200, { 'set-cookie': clearAdminSessionCookie() });
+}
+
 async function handleAdminSummary(request, env) {
-  if (!await isAuthorizedAdmin(request, env)) return json({ ok: false, error: 'Invalid username or password.' }, 401, { 'www-authenticate': 'Basic realm="Rel.AI Developer Analytics", charset="UTF-8"' });
+  if (!await isAuthorizedAdmin(request, env)) return json({ ok: false, error: 'Authentication required.' }, 401);
   return json({ ok: true, summary: await aggregateSummary(env.DB) });
 }
 
@@ -1347,7 +1434,7 @@ a {
           <span class="input-icon-left" aria-hidden="true">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </span>
-          <input id="login-username" type="text" autocomplete="username" value="admin" required placeholder="admin">
+          <input id="login-username" name="username" type="text" autocomplete="username" value="admin" required placeholder="admin">
         </div>
       </div>
 
@@ -1357,7 +1444,7 @@ a {
           <span class="input-icon-left" aria-hidden="true">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           </span>
-          <input id="login-password" type="password" autocomplete="current-password" required placeholder="RelAI-••••••••••••••••••••••••">
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required>
           <button type="button" class="input-toggle-right" id="btn-toggle-pwd" title="Toggle password visibility" aria-label="Toggle password visibility">
             <svg id="eye-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
@@ -1366,7 +1453,7 @@ a {
 
       <label class="auth-checkbox-row">
         <input type="checkbox" id="auth-remember" checked>
-        <span>Remember session on this device</span>
+        <span>Keep me signed in for 7 days</span>
       </label>
 
       <button type="submit" class="btn btn-primary auth-submit-btn" id="btn-login">
@@ -1599,18 +1686,6 @@ a {
     toast.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => toast.classList.remove('show'), 2600);
-  }
-
-  function getSavedAuth() {
-    return sessionStorage.getItem('relai_telemetry_auth') || '';
-  }
-
-  function saveAuth(authorization) {
-    sessionStorage.setItem('relai_telemetry_auth', authorization);
-  }
-
-  function clearAuth() {
-    sessionStorage.removeItem('relai_telemetry_auth');
   }
 
   const platformMeta = {
@@ -1848,17 +1923,20 @@ a {
     });
   }
 
-  async function fetchSummary(authHeader, isManual = false) {
+  async function fetchSummary(isManual = false) {
     const syncBtn = q('btn-sync');
     const syncIcon = syncBtn.querySelector('.icon-sync');
     if (syncIcon) syncIcon.classList.add('spinning');
 
     try {
-      const res = await fetch('/api/v1/admin/summary', {
-        headers: { authorization: authHeader }
-      });
+      const res = await fetch('/api/v1/admin/summary', { credentials: 'same-origin' });
       const data = await res.json();
       if (!res.ok || !data.ok) {
+        if (res.status === 401) {
+          q('auth-view').style.display = 'flex';
+          q('dashboard-view').style.display = 'none';
+          q('header-authenticated-actions').style.display = 'none';
+        }
         throw new Error(data.error || 'Authentication rejected (' + res.status + ')');
       }
 
@@ -1891,15 +1969,17 @@ a {
     submitBtn.disabled = true;
     submitText.textContent = 'Verifying credentials…';
 
-    const auth = 'Basic ' + btoa(user + ':' + pass);
-
     try {
-      await fetchSummary(auth);
-      if (q('auth-remember').checked) {
-        saveAuth(auth);
-      } else {
-        clearAuth();
-      }
+      const res = await fetch('/api/v1/admin/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass, remember: q('auth-remember').checked })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Invalid username or password.');
+      q('login-password').value = '';
+      await fetchSummary();
       showToast('Welcome, Administrator');
     } catch (err) {
       errText.textContent = err.message || 'Invalid username or password.';
@@ -1911,16 +1991,21 @@ a {
     }
   }
 
-  function handleLogout() {
-    clearAuth();
-    currentSummary = null;
-    q('login-password').value = '';
-    q('dashboard-view').style.display = 'none';
-    q('header-authenticated-actions').style.display = 'none';
-    q('auth-view').style.display = 'flex';
-    q('auth-error').classList.remove('visible');
-    q('login-password').focus();
-    showToast('Signed out of developer console');
+  async function handleLogout() {
+    try {
+      const res = await fetch('/api/v1/admin/logout', { method: 'POST', credentials: 'same-origin' });
+      if (!res.ok) throw new Error('Sign-out request failed.');
+      currentSummary = null;
+      q('login-password').value = '';
+      q('dashboard-view').style.display = 'none';
+      q('header-authenticated-actions').style.display = 'none';
+      q('auth-view').style.display = 'flex';
+      q('auth-error').classList.remove('visible');
+      q('login-password').focus();
+      showToast('Signed out of developer console');
+    } catch {
+      showToast('Could not sign out. Try again.');
+    }
   }
 
   function copyMarkdownSummary() {
@@ -1980,10 +2065,7 @@ a {
     if (e.key === 'Enter') q('login-password').focus();
   });
   q('btn-logout').addEventListener('click', handleLogout);
-  q('btn-sync').addEventListener('click', () => {
-    const auth = getSavedAuth();
-    if (auth) fetchSummary(auth, true);
-  });
+  q('btn-sync').addEventListener('click', () => fetchSummary(true));
   q('btn-copy').addEventListener('click', copyMarkdownSummary);
 
   q('btn-toggle-pwd').addEventListener('click', () => {
@@ -2011,29 +2093,18 @@ a {
 
   window.addEventListener('keydown', e => {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-    if (e.key === 'r' || e.key === 'R') {
-      const auth = getSavedAuth();
-      if (auth && q('dashboard-view').style.display !== 'none') {
-        e.preventDefault();
-        fetchSummary(auth, true);
-      }
+    if ((e.key === 'r' || e.key === 'R') && q('dashboard-view').style.display !== 'none') {
+      e.preventDefault();
+      fetchSummary(true);
     }
   });
 
-  // Auto-authenticate if session exists
-  const existingAuth = getSavedAuth();
-  if (existingAuth) {
-    fetchSummary(existingAuth).catch(() => {
-      clearAuth();
-      q('auth-view').style.display = 'flex';
-      q('dashboard-view').style.display = 'none';
-      q('header-authenticated-actions').style.display = 'none';
-    });
-  } else {
+  // Restore an existing HttpOnly session without exposing credentials to JavaScript.
+  fetchSummary().catch(() => {
     q('auth-view').style.display = 'flex';
     q('dashboard-view').style.display = 'none';
     q('header-authenticated-actions').style.display = 'none';
-  }
+  });
 })();
 </script>
 </body></html>`;
@@ -2062,6 +2133,8 @@ const handler = {
           })
         });
       }
+      if (request.method === 'POST' && url.pathname === '/api/v1/admin/login') return handleAdminLogin(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/v1/admin/logout') return handleAdminLogout(request, env);
       if (request.method === 'GET' && url.pathname === '/api/v1/admin/summary') return handleAdminSummary(request, env);
       if (request.method === 'POST' && url.pathname === '/api/v1/installation/presence') return handlePresence(request, env);
       if (request.method === 'POST' && url.pathname === '/v1/traces') return handleTraces(request, env);
@@ -2077,5 +2150,5 @@ const handler = {
   }
 };
 
-export { adminHtml, aggregateSummary, axiomTraceUrl, constantTimeEqual, hashAdminPassword, isAuthorizedAdmin, parseBasicAuthorization, validatePresence, writeDailySnapshot };
+export { adminHtml, aggregateSummary, axiomTraceUrl, constantTimeEqual, hashAdminPassword, hashAdminSessionToken, isAuthorizedAdmin, readCookie, validatePresence, verifyAdminCredentials, writeDailySnapshot };
 export default handler;

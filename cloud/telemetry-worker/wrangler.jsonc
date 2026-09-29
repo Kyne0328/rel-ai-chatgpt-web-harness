@@ -31,6 +31,11 @@
       "name": "TRACE_RATE_LIMITER",
       "namespace_id": "53102",
       "simple": { "limit": 120, "period": 60 }
+    },
+    {
+      "name": "ADMIN_RATE_LIMITER",
+      "namespace_id": "53103",
+      "simple": { "limit": 10, "period": 60 }
     }
   ],
   "triggers": {
