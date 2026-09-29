@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
 import { safeLogAudit } from '../audit.js';
 import { createValidationFingerprint } from '../bridge/validationPlan.js';
 import { readConfig, resolveWorkspace, resolveWorkspaceInput } from '../config.js';
@@ -26,6 +29,7 @@ import { invalidateRepositoryTopology } from '../workflow/topology.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { observeRepeatCall } from './repeatCallGuard.js';
 import { applyTaskProgressPatch } from './taskProgress.js';
+import { classifySensitivePath, resolveSafePath } from '../safety.js';
 import {
   measurePerformancePhaseSync,
   performanceBreakdownSnapshot,
@@ -56,6 +60,7 @@ async function callToolObserved(name, args = {}, context = {}) {
   let effectivePrincipal = null;
   let completedTaskAnalytics = null;
   let taskProgressPatch = null;
+  let workspaceOverride = null;
   try {
     if (!isToolCallable(name, config)) {
       throw new Error(`Unknown tool '${name}'. Available tools: ${getToolNames(config).join(', ')}. Removed direct operation names are not callable; restart or reconnect if discovery is stale.`);
@@ -108,11 +113,20 @@ async function callToolObserved(name, args = {}, context = {}) {
       operationName,
       workspace: ''
     });
+    const directFilesystem = resolveDirectFilesystemCall(config, effectiveArgs, operationName);
+    if (directFilesystem) {
+      effectiveArgs = directFilesystem.args;
+      workspaceOverride = directFilesystem.workspace;
+    }
     const workspaceRequired = Array.isArray(definition?.inputSchema?.required)
       && definition.inputSchema.required.includes('workspace');
-    workspaceResolution = resolveConfiguredWorkspaceArgument(config, effectiveArgs?.workspace, { required: workspaceRequired });
+    workspaceResolution = workspaceOverride
+      ? null
+      : resolveConfiguredWorkspaceArgument(config, effectiveArgs?.workspace, { required: workspaceRequired });
     if (workspaceResolution?.alias) effectiveArgs = { ...effectiveArgs, workspace: workspaceResolution.alias };
-    const authorizedWorkspace = workspaceResolution?.alias || effectiveArgs?.workspace || knownTask?.workspace || '';
+    const authorizedWorkspace = workspaceOverride
+      ? ''
+      : workspaceResolution?.alias || effectiveArgs?.workspace || knownTask?.workspace || '';
     if (authorizedWorkspace) {
       assertAuthorizedToolCall({
         principal: effectivePrincipal,
@@ -120,7 +134,9 @@ async function callToolObserved(name, args = {}, context = {}) {
         workspace: authorizedWorkspace
       });
     }
-    await validateExecutableOperationInput(operationName, effectiveArgs, {
+    await validateExecutableOperationInput(operationName, workspaceOverride
+      ? { ...effectiveArgs, workspace: workspaceOverride.alias }
+      : effectiveArgs, {
       publicLabel: resolved.action ? `${name} action '${resolved.action}'` : name
     });
     if (operationName === OP.WORK_BEGIN) {
@@ -156,7 +172,7 @@ async function callToolObserved(name, args = {}, context = {}) {
         });
         integrity = readTaskIntegrity(config, requestedTaskId, requestedWorkspace);
       }
-      const lifecycleWithoutIntegrity = taskLifecycleCanRunWithoutIntegrity(operationName);
+      const lifecycleWithoutIntegrity = taskLifecycleCanRunWithoutIntegrity(operationName) || Boolean(workspaceOverride);
       if (!integrity && !lifecycleWithoutIntegrity && (taskScoped || taskAttributionRequiresIntegrity(operationName))) {
         throw taskError(
           'TASK_INTEGRITY_STATE_MISSING',
@@ -234,7 +250,7 @@ async function callToolObserved(name, args = {}, context = {}) {
     });
     if (taskProgressPatch) applyTaskProgressPatch(requestedTaskId, taskProgressPatch, finishActivity?.update);
     const execution = await executeToolCall({
-      config, name, executionName: operationName, effectiveArgs, context, requestTaskContext, finishActivity, definition, started
+      config, name, executionName: operationName, effectiveArgs, context, requestTaskContext, finishActivity, definition, started, workspaceOverride
     });
     const value = execution.value;
     sessionStart = execution.sessionStart;
@@ -510,6 +526,148 @@ function resolveConfiguredWorkspaceArgument(config, input, options = {}) {
   if (resolution.source === 'path_unavailable' || resolution.source === 'unmatched_path') resolveWorkspace(config, input);
   if (options.required === true && resolution.source === 'unmatched_alias') resolveWorkspace(config, input);
   return resolution;
+}
+
+function resolveDirectFilesystemCall(config, args = {}, operationName) {
+  const workspace = String(args?.workspace || '').trim();
+  const rootInput = String(args?.root || '').trim();
+  if (workspace) {
+    if (rootInput) throw directFilesystemError('DIRECT_FILESYSTEM_SCOPE_CONFLICT', 'root can be used only when workspace is omitted.');
+    return null;
+  }
+  if (config?.projectAccess?.directFilesystem !== true) return null;
+  if (![OP.READ, OP.SEARCH_TEXT, OP.EDIT].includes(operationName)) return null;
+  if (operationName === OP.READ && args?.asResource === true) {
+    throw directFilesystemError('DIRECT_FILESYSTEM_RESOURCE_UNSUPPORTED', 'Direct filesystem reads do not support asResource. Read the file as text or use a configured project for resource transfer.');
+  }
+  if (operationName === OP.EDIT) assertDirectFilesystemEditForm(args);
+
+  const targets = directFilesystemTargets(operationName, args);
+  const root = resolveDirectFilesystemRoot(rootInput, targets, operationName);
+  const normalizedArgs = normalizeDirectFilesystemArgs(args, operationName, root);
+  return {
+    args: normalizedArgs,
+    workspace: {
+      alias: '@filesystem',
+      path: root,
+      sourcePaths: [root],
+      directFilesystem: true
+    }
+  };
+}
+
+function resolveDirectFilesystemRoot(rootInput, targets, operationName) {
+  let root = rootInput;
+  if (root) {
+    if (!path.isAbsolute(root)) throw directFilesystemError('DIRECT_FILESYSTEM_ROOT_ABSOLUTE_REQUIRED', `Direct filesystem root must be absolute: ${root}`);
+    root = path.resolve(root);
+  } else {
+    if (!targets.length) {
+      const noun = operationName === OP.SEARCH_TEXT ? 'search' : 'operation';
+      throw directFilesystemError('DIRECT_FILESYSTEM_ROOT_REQUIRED', `Direct filesystem ${noun} requires an absolute root, or absolute target paths that identify one filesystem root.`);
+    }
+    const absoluteTargets = targets.map(value => String(value || '').trim());
+    if (absoluteTargets.some(value => !path.isAbsolute(value))) {
+      throw directFilesystemError('DIRECT_FILESYSTEM_ROOT_REQUIRED', 'Relative paths outside configured projects require an absolute root.');
+    }
+    const roots = [...new Set(absoluteTargets.map(value => directFilesystemRootKey(path.parse(path.resolve(value)).root)))];
+    if (roots.length !== 1) throw directFilesystemError('DIRECT_FILESYSTEM_MULTIPLE_ROOTS', 'One direct filesystem call cannot span multiple filesystem roots or Windows drives. Split the request.');
+    root = path.parse(path.resolve(absoluteTargets[0])).root;
+  }
+  let stat;
+  try { stat = fs.statSync(root); } catch {
+    throw directFilesystemError('DIRECT_FILESYSTEM_ROOT_UNAVAILABLE', `Direct filesystem root does not exist or is unavailable: ${root}`);
+  }
+  if (!stat.isDirectory()) throw directFilesystemError('DIRECT_FILESYSTEM_ROOT_NOT_DIRECTORY', `Direct filesystem root must be a directory: ${root}`);
+  const sensitive = classifySensitivePath(root);
+  if (sensitive.sensitive) {
+    throw directFilesystemError('SENSITIVE_PATH_RESTRICTED', `Direct filesystem root is blocked by the sensitive-path policy: ${root}`);
+  }
+  return root;
+}
+
+function directFilesystemTargets(operationName, args = {}) {
+  const values = operationName === OP.READ
+    ? [
+        ...(Array.isArray(args.paths) ? args.paths : []),
+        ...(Array.isArray(args.ranges) ? args.ranges.map(entry => entry?.path) : [])
+      ]
+    : operationName === OP.EDIT
+      ? [
+          args.path,
+          ...(Array.isArray(args.edits) ? args.edits.map(entry => entry?.path) : [])
+        ]
+      : [];
+  return [...new Set(values.map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+function normalizeDirectFilesystemArgs(args, operationName, root) {
+  if (operationName === OP.READ) {
+    return {
+      ...args,
+      ...(Array.isArray(args.paths) ? { paths: args.paths.map(value => normalizeDirectFilesystemPath(root, value, 'read')) } : {}),
+      ...(Array.isArray(args.ranges) ? { ranges: args.ranges.map(entry => ({ ...entry, path: normalizeDirectFilesystemPath(root, entry?.path, 'read') })) } : {})
+    };
+  }
+  if (operationName === OP.EDIT) {
+    const editOperation = args.envAction ? `env-${String(args.envAction).trim().toLowerCase()}` : 'write';
+    const envOperation = Boolean(args.envAction);
+    return {
+      ...args,
+      ...(args.path ? { path: normalizeDirectFilesystemPath(root, args.path, editOperation, { allowSensitiveRealPath: envOperation }) } : {}),
+      ...(args.templatePath ? { templatePath: normalizeDirectFilesystemPath(root, args.templatePath, 'read') } : {}),
+      ...(Array.isArray(args.edits) ? { edits: args.edits.map(entry => ({ ...entry, path: normalizeDirectFilesystemPath(root, entry?.path, 'write') })) } : {})
+    };
+  }
+  return args;
+}
+
+function normalizeDirectFilesystemPath(root, value, operation, options = {}) {
+  const raw = String(value || '').trim();
+  if (!raw) return raw;
+  const relative = path.isAbsolute(raw)
+    ? path.relative(root, path.resolve(raw))
+    : raw;
+  const outsideRoot = relative === '..'
+    || relative.startsWith('../')
+    || relative.startsWith('..\\')
+    || path.isAbsolute(relative);
+  if (outsideRoot) {
+    throw directFilesystemError('DIRECT_FILESYSTEM_PATH_OUTSIDE_ROOT', `Path is outside the selected direct filesystem root: ${raw}`);
+  }
+  const normalized = (relative || '.').replaceAll('\\', '/');
+  if (classifySensitivePath(normalized).sensitive) return normalized;
+  const safe = resolveSafePath(root, normalized, { operation, label: 'Direct filesystem path' });
+  if (options.allowSensitiveRealPath !== true) {
+    const realRoot = fs.realpathSync(root);
+    const realRelative = path.relative(realRoot, safe.realPath).replaceAll('\\', '/');
+    const sensitive = classifySensitivePath(realRelative);
+    if (sensitive.sensitive) {
+      throw directFilesystemError('SENSITIVE_PATH_RESTRICTED', `Direct filesystem target resolves to a sensitive path: ${raw}`);
+    }
+  }
+  return safe.relativePath;
+}
+
+function assertDirectFilesystemEditForm(args = {}) {
+  if (args.semantic || args.symbolEdit || args.updateText || args.stage || args.writeId) {
+    throw directFilesystemError('DIRECT_FILESYSTEM_REPOSITORY_FEATURE_REQUIRED', 'Direct filesystem edits support exact/full-file, batch, native-file, and environment forms. Semantic, symbol, patch, and staged repository edit forms still require a configured project.');
+  }
+  if (args.runChecks === true || args.returnDiff === true) {
+    throw directFilesystemError('DIRECT_FILESYSTEM_REPOSITORY_FEATURE_REQUIRED', 'Direct filesystem edits cannot run repository checks or return repository diffs. Use a configured project for those options.');
+  }
+}
+
+function directFilesystemRootKey(value) {
+  const normalized = String(value || '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function directFilesystemError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  error.retryable = true;
+  return error;
 }
 
 function restrictWorkspaceRecoveryErrorAliases(error, principal, connector) {

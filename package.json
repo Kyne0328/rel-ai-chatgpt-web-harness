@@ -3,6 +3,10 @@
   "productName": "Rel.AI MCP",
   "version": "1.1.4",
   "description": "Local agency/runtime harness that turns ChatGPT Web into a repository- and computer-capable development agent.",
+  "relaiTelemetry": {
+    "usageEndpoint": "https://relai-telemetry.kynemcp.workers.dev/api/v1/installation/presence",
+    "diagnosticsEndpoint": "https://relai-telemetry.kynemcp.workers.dev/v1/traces"
+  },
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
@@ -72,6 +76,10 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.boundaries.json && tsc -b tsconfig.packages.json",
     "init-config": "node bin/relai-mcp-config.js init",
     "workspace:add": "node bin/relai-mcp-config.js workspace add",
+    "telemetry:test": "node test/telemetry-worker-unit.mjs && node test/tasks-telemetry-unit.mjs",
+    "telemetry:migrate": "npx wrangler d1 migrations apply relai-telemetry --remote --config cloud/telemetry-worker/wrangler.jsonc",
+    "telemetry:deploy": "npx wrangler deploy --config cloud/telemetry-worker/wrangler.jsonc",
+    "telemetry:smoke": "node scripts/telemetry-live-smoke.mjs",
     "test": "npm run test:all",
     "test:repo-health": "node test/repo-health.mjs",
     "test:smoke": "node test/smoke.mjs",

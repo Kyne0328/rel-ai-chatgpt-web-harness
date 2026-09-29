@@ -11,7 +11,7 @@ import { Icon } from '../../components/icons.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref } from '../../router.js';
 import { ANALYTICS_RANGES, analyticsBounds, workspaceOptions } from './range-model.js';
 import { loadAnalyticsData } from './data.js';
-import { analyticsPrivacyCopy, customDateDefaults, rangeButtonLabel } from './index.js';
+import { customDateDefaults, rangeButtonLabel } from './index.js';
 import { analyticsMetrics, failureCategoryLabel, formatChartValue, integer, pointMetric, timelineModel } from './render.js';
 
 const h = React.createElement;
@@ -146,7 +146,6 @@ export function createUsageRoute(useDashboardSlices) {
           selectedWorkspace,
           start
         }),
-        h(PrivacyCard, { privacy: analytics?.privacy }),
         h('div', { className: 'sr-only', 'data-usage-status': true, role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, status),
         h('div', { className: 'usage-content', 'data-usage-content': true, 'aria-busy': loadState.status === 'loading' ? 'true' : undefined },
           loadState.status === 'loading' && !analytics
@@ -201,22 +200,6 @@ function AnalyticsToolbar({ end, loading, onDateChange, onRangeChange, onRefresh
         disabled: loading,
         onClick: onRefresh
       }, h(Icon, { name: 'refresh', className: loading ? 'is-spinning' : '' }), h('span', null, loading ? 'Loading…' : 'Refresh'))
-    )
-  );
-}
-
-function PrivacyCard({ privacy }) {
-  if (!privacy) return h('div', { 'data-usage-privacy': true });
-  const copy = analyticsPrivacyCopy(privacy);
-  return h('div', { 'data-usage-privacy': true },
-    h('section', { className: 'card usage-privacy-card', 'aria-label': 'Analytics privacy' },
-      h('div', { className: 'card-body usage-privacy-body' },
-        h('div', { className: 'usage-privacy-copy' },
-          h('strong', { className: 'usage-privacy-title' }, h(Icon, { name: 'reliability', size: 17 }), h('span', null, 'Data & privacy')),
-          h('span', null, copy.retention),
-          h('span', null, copy.telemetry)
-        )
-      )
     )
   );
 }

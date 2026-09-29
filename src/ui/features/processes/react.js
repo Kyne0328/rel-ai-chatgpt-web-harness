@@ -15,18 +15,16 @@ export function createProcessesRoute(useDashboardSlices) {
       () => processListView(data),
       [data]
     );
-    const count = `${model.running} running${model.finished ? ` · ${model.finished} finished` : ''}`;
+    const rows = model.rows.filter(row => row.state.active);
+    const count = `${rows.length} running`;
 
     return h('div', { className: 'settings-content system-content', 'data-processes-react': 'true' },
       h('div', { className: 'section processes-page runtime-observability-page' },
         h('section', { className: 'card processes-card' },
-          h('div', { className: 'card-head' },
-            h('span', { className: 'feature-count' }, count),
-            h('a', { className: 'section-action', href: '#activity' }, 'Activity', h(Icon, { name: 'chevronRight', size: 14 }))
-          ),
+          h('div', { className: 'card-head' }, h('span', { className: 'feature-count' }, count)),
           h('div', { className: 'card-body', 'data-process-list': true },
-            model.rows.length
-              ? model.rows.map(row => h(ProcessRow, { key: row.processId, row }))
+            rows.length
+              ? rows.map(row => h(ProcessRow, { key: row.processId, row }))
               : h(EmptyProcesses)
           )
         )
@@ -98,7 +96,7 @@ const ProcessRow = memo(function ProcessRow({ row }) {
       h('strong', null, 'Could not stop command'),
       h('div', null, stopError)
     ) : null,
-    h('div', { className: 'process-command-summary' }, h('span', null, 'Command'), h('code', null, row.commandSummary)),
+    h('div', { className: 'process-command-summary' }, h('code', null, row.commandSummary)),
     row.error || ['failed', 'orphaned', 'unknown'].includes(state.status)
       ? h('div', { className: `connection-notice ${state.status === 'failed' ? 'bad' : 'warn'} process-recovery` },
           h('strong', null, row.error || state.label),
@@ -132,7 +130,6 @@ function OutputBlock({ stream, value }) {
 function EmptyProcesses() {
   return h('div', { className: 'empty-state' },
     h('span', { className: 'empty-state-icon', 'aria-hidden': 'true' }, h(Icon, { name: 'processes', size: 28 })),
-    h('strong', { className: 'empty-state-title' }, 'No running commands'),
-    h('p', { className: 'empty-state-copy' }, 'Servers, watchers, debuggers, and other long-running commands will appear here.')
+    h('strong', { className: 'empty-state-title' }, 'No running commands')
   );
 }

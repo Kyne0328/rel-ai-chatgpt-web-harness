@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchJson } from '../../api.js';
-import { copyText } from '../../clipboard.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
@@ -140,13 +139,6 @@ function DiagnosticsView({ data = {} }) {
   const summary = report ? `${view.findings.length} of ${view.totalFindings} findings · ${view.shownLogs} of ${view.totalLogs} log entries shown` : 'Loading diagnostics…';
 
   const clearFilters = () => { captureLogPositions(); setFilters(DEFAULT_FILTERS); };
-  const copyReport = async () => {
-    if (!report?.reportText) return;
-    setBusy('copy');
-    try { await copyText(report.reportText); toast('Diagnostic report copied.', { variant: 'success' }); }
-    catch { toast('Could not copy the report.', { variant: 'error' }); }
-    finally { setBusy(''); }
-  };
   const exportReport = async () => {
     if (!report) return;
     setBusy('export');
@@ -155,15 +147,6 @@ function DiagnosticsView({ data = {} }) {
         ? await window.relaiDesktop.exportDiagnosticState(report)
         : downloadDiagnosticState(report);
       if (result?.ok === false) throw new Error(result.error || 'Could not export diagnostic state.');
-    } catch (error) { toast(messageOf(error), { variant: 'error' }); }
-    finally { setBusy(''); }
-  };
-  const openFolder = async () => {
-    if (typeof window.relaiDesktop?.openDiagnosticsFolder !== 'function') return;
-    setBusy('folder');
-    try {
-      const result = await window.relaiDesktop.openDiagnosticsFolder();
-      if (result?.ok === false) throw new Error(result.error || 'Could not open the support folder.');
     } catch (error) { toast(messageOf(error), { variant: 'error' }); }
     finally { setBusy(''); }
   };
@@ -185,22 +168,14 @@ function DiagnosticsView({ data = {} }) {
     h('div', { className: 'diagnostic-page', 'data-diagnostics-react': '' },
       h('div', { className: 'section-head diagnostic-page-head' },
         h('div', { className: 'section-head-actions diagnostic-page-actions' },
-          h('button', { className: 'secondary', type: 'button', disabled: !report?.reportText || busy === 'copy', onClick: () => void copyReport() },
-            h(Icon, { name: 'copy', size: 14 }),
-            h('span', null, busy === 'copy' ? 'Copying report…' : 'Copy report')
-          ),
           h('button', { className: 'secondary', type: 'button', disabled: !report || busy === 'export', onClick: () => void exportReport() },
             h(Icon, { name: 'download', size: 14 }),
             h('span', null, busy === 'export' ? 'Exporting…' : 'Export support information')
           ),
-          h('button', { className: 'secondary', type: 'button', disabled: typeof window.relaiDesktop?.runTunnelDoctor !== 'function' || busy === 'doctor', onClick: () => void runTunnelDoctor() },
+          typeof window.relaiDesktop?.runTunnelDoctor === 'function' ? h('button', { className: 'secondary', type: 'button', disabled: busy === 'doctor', onClick: () => void runTunnelDoctor() },
             h(Icon, { name: 'reliability', size: 14 }),
-            h('span', null, typeof window.relaiDesktop?.runTunnelDoctor === 'function' ? (busy === 'doctor' ? 'Running tunnel diagnostics…' : 'Run tunnel diagnostics') : 'Tunnel diagnostics — desktop app only')
-          ),
-          h('button', { className: 'secondary', type: 'button', disabled: typeof window.relaiDesktop?.openDiagnosticsFolder !== 'function' || busy === 'folder', onClick: () => void openFolder() },
-            h(Icon, { name: 'folder', size: 14 }),
-            h('span', null, typeof window.relaiDesktop?.openDiagnosticsFolder === 'function' ? (busy === 'folder' ? 'Opening folder…' : 'Support folder') : 'Support folder — desktop app only')
-          )
+            h('span', null, busy === 'doctor' ? 'Running diagnostics…' : 'Run diagnostics')
+          ) : null
         )
       ),
       h('div', { id: 'diagnosticFilterHost' },
@@ -358,12 +333,13 @@ function TunnelHealthSummary({ health = {} }) {
   ].filter(item => item.value && typeof item.value === 'object');
   if (!components.length) return null;
   const recovering = components.some(item => String(item.value.status || '') === 'degraded');
-  return h('section', { className: `card diagnostic-doctor-card${recovering ? ' warning' : ''}`, 'data-diagnostic-region': 'tunnel-health' },
+  if (!recovering) return null;
+  return h('section', { className: 'card diagnostic-doctor-card warning', 'data-diagnostic-region': 'tunnel-health' },
     h('div', { className: 'card-head' },
       h('div', null,
         h('h3', null, 'Secure tunnel health')
       ),
-      h(StatusPill, { label: recovering ? 'Recovering' : 'Healthy', tone: recovering ? 'warn' : 'ok' })
+      h(StatusPill, { label: 'Recovering', tone: 'warn' })
     ),
     h('div', { className: 'card-body diagnostic-doctor-list' }, components.map(item => {
       const value = item.value || {};
@@ -399,8 +375,8 @@ function TunnelDoctorResult({ result = {} }) {
         const next = Array.isArray(check?.next) ? check.next.filter(Boolean) : [];
         return h('article', { className: `diagnostic-doctor-check ${checkView.tone}`.trim(), key: check?.id || index },
           h('div', { className: 'diagnostic-doctor-check-head' }, h('code', null, checkView.label || `check-${index + 1}`), h('strong', null, checkView.statusLabel)),
-          checkView.summary ? h('p', null, checkView.summary) : null,
-          checkView.why ? h('p', null, h('strong', null, 'Why: '), checkView.why) : null,
+          checkView.tone !== 'pass' && checkView.summary ? h('p', null, checkView.summary) : null,
+          checkView.tone !== 'pass' && checkView.why ? h('p', null, h('strong', null, 'Why: '), checkView.why) : null,
           next.length
             ? checkView.optionalSetup
               ? h('details', { className: 'diagnostic-doctor-optional-setup' },
@@ -487,7 +463,7 @@ function tunnelDoctorCheckPresentation(check = {}) {
 
 function DiagnosticFindings({ findings, total, onReload }) {
   if (!findings.length) return total === 0
-    ? h('div', { className: 'diagnostic-clear', 'data-diagnostic-region': 'findings' }, h('strong', null, 'No current problems found'), h('span', null, 'Recent failures can still appear in the logs below.'))
+    ? h('div', { className: 'diagnostic-clear', 'data-diagnostic-region': 'findings' }, h('strong', null, 'No current problems'))
     : h('div', { className: 'diagnostic-log-empty', 'data-diagnostic-region': 'findings' }, h('strong', null, 'No findings match the current filters.'));
   return h('div', { className: 'diagnostic-list', 'data-diagnostic-region': 'findings' }, findings.map(finding => h(DiagnosticFinding, { finding, key: finding.code, onReload })));
 }

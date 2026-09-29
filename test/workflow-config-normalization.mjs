@@ -39,11 +39,11 @@ assert.deepEqual(strict.workspaces.repo.context.includeRoots, ['src']);
 assert.equal(Object.hasOwn(normalizeConfig({ productUx: { showAutomaticValidation: false }, workspaces: {} }).productUx, 'showAutomaticValidation'), false);
 for (const key of ['protectedBranches', 'defaultBaseBranch', 'allowedRemotes']) assert.equal(Object.hasOwn(strict.workspaces.repo, key), false, `removed workspace field ${key} must be discarded`);
 const runtimePolicy = normalizeConfig({
-  telemetry: { enabled: true, endpoint: ' http://127.0.0.1:4318/v1/traces ', sampleRatio: 0.25 },
+  telemetry: { diagnosticsEnabled: false, endpoint: ' http://127.0.0.1:4318/v1/traces ', sampleRatio: 0.25 },
   processEnvironment: { allow: ['CUSTOM_SAFE', 'GITHUB_TOKEN', 'CUSTOM_SAFE', ''] }
 });
 assert.deepEqual(runtimePolicy.telemetry, {
-  enabled: true,
+  diagnosticsEnabled: false,
   endpoint: 'http://127.0.0.1:4318/v1/traces',
   sampleRatio: 0.25
 });

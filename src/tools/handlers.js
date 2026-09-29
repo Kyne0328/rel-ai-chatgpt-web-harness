@@ -280,7 +280,7 @@ function inWorkspace(handler) {
    * @param {{ connector?: boolean, taskId?: string, requestHeaders?: Record<string, string> }} [context]
    */
   return (config, args = {}, context = {}) => {
-    const workspace = resolveWorkspace(config, args.workspace);
+    const workspace = context?.workspaceOverride || resolveWorkspace(config, args.workspace);
     return handler(workspace, config, args, context);
   };
 }

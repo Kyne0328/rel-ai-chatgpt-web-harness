@@ -1,0 +1,39 @@
+{
+  "$schema": "https://developers.cloudflare.com/workers/wrangler/config-schema.json",
+  "name": "relai-telemetry",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-09-28",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "AXIOM_DOMAIN": "us-east-1.aws.edge.axiom.co",
+    "AXIOM_DATASET": "relai-diagnostics",
+    "ADMIN_USERNAME": "admin"
+  },
+  "secrets": {
+    "required": ["ADMIN_PASSWORD_SALT", "ADMIN_PASSWORD_HASH"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "relai-telemetry",
+      "database_id": "0cc429a9-1600-4f18-bdd3-ea506c6eaa05",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ratelimits": [
+    {
+      "name": "USAGE_RATE_LIMITER",
+      "namespace_id": "53101",
+      "simple": { "limit": 6, "period": 60 }
+    },
+    {
+      "name": "TRACE_RATE_LIMITER",
+      "namespace_id": "53102",
+      "simple": { "limit": 120, "period": 60 }
+    }
+  ],
+  "triggers": {
+    "crons": ["15 0 * * *"]
+  }
+}

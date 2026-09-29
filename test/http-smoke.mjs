@@ -74,6 +74,27 @@ try {
   await dashboardLogin.arrayBuffer();
   const dashboardHeaders = { cookie: dashboardCookie };
 
+  const telemetrySettings = await fetch(`${base}/api/telemetry`, { headers: dashboardHeaders }).then(response => response.json());
+  assert.equal(telemetrySettings.ok, true);
+  assert.equal(telemetrySettings.settings?.usageReportingRequired, true, 'usage counting must not expose an off preference');
+  assert.equal(telemetrySettings.settings?.diagnosticsEnabled, true, 'diagnostic telemetry must default on');
+  const disableDiagnosticsResponse = await fetch(`${base}/api/telemetry`, {
+    method: 'POST',
+    headers: { ...dashboardHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ diagnosticsEnabled: false })
+  });
+  assert.equal(disableDiagnosticsResponse.status, 200);
+  const disabledDiagnostics = await disableDiagnosticsResponse.json();
+  assert.equal(disabledDiagnostics.ok, true);
+  assert.equal(disabledDiagnostics.settings?.diagnosticsEnabled, false, 'diagnostics must be independently disableable');
+  const reenableDiagnosticsResponse = await fetch(`${base}/api/telemetry`, {
+    method: 'POST',
+    headers: { ...dashboardHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ diagnosticsEnabled: true })
+  });
+  assert.equal(reenableDiagnosticsResponse.status, 200);
+  assert.equal((await reenableDiagnosticsResponse.json()).settings?.diagnosticsEnabled, true);
+
   const analyticsResetResponse = await fetch(`${base}/api/diagnostics/reset`, {
     method: 'POST',
     headers: { ...dashboardHeaders, 'content-type': 'application/json' },

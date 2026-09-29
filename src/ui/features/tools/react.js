@@ -45,18 +45,11 @@ export function createToolsRoute() {
       () => tools.filter(tool => toolMatchesFilters(tool, { search, capability })),
       [tools, search, capability]
     );
-    const filtered = capability !== 'all' || Boolean(search.trim());
     const summary = loadState.status === 'error'
       ? 'Tool catalog unavailable'
       : loadState.status === 'loading'
         ? 'Loading tool catalog…'
         : `${visible.length} of ${tools.length} tools shown`;
-    const count = loadState.status === 'error'
-      ? 'Unavailable'
-      : loadState.status === 'loading'
-        ? 'Loading…'
-        : filtered ? `Showing ${visible.length} of ${tools.length}` : `${tools.length} Rel.AI tools`;
-
     const openFilters = () => openFilterDrawer({
       title: 'Tool filters',
       value: { capability },
@@ -81,9 +74,6 @@ export function createToolsRoute() {
 
     return h('div', { className: 'settings-content system-content', 'data-tools-react': 'true' },
       h('div', { className: 'section tools-section' },
-        h('div', { className: 'section-head' },
-          h('span', { className: 'section-action', id: 'toolsCount' }, count)
-        ),
         h(ToolsFilterBar, {
           search,
           capability,
@@ -158,20 +148,17 @@ function ToolCard({ tool }) {
   const parameters = Array.isArray(tool.parameters) ? tool.parameters : [];
   return h('article', { className: `tool-card ${capabilities.map(item => `capability-${item}`).join(' ')}` },
     h('div', { className: 'tool-card-head' },
-      h('span', { className: 'tool-capability' }, capabilities.map(capabilityLabel).join(' · ')),
-      h('span', { className: 'tool-parameter-count' }, `${parameters.length} parameter${parameters.length === 1 ? '' : 's'}`)
+      h('span', { className: 'tool-capability' }, capabilities.map(capabilityLabel).join(' · '))
     ),
-    h('div', { className: 'tool-card-title' },
-      h('h3', null, tool.title || tool.displayName || tool.name || 'Tool'),
-      h('code', null, tool.name || '')
-    ),
+    h('div', { className: 'tool-card-title' }, h('h3', null, tool.title || tool.displayName || tool.name || 'Tool')),
     h('p', null, tool.description || 'No description provided.'),
-    parameters.length
-      ? h('details', { className: 'tool-parameters' },
-          h('summary', null, 'View parameters'),
-          h('div', { className: 'tool-parameter-list' }, parameters.map(parameter => h('code', { key: parameter }, parameter)))
-        )
-      : h('div', { className: 'tool-parameters-empty' }, 'No input parameters')
+    h('details', { className: 'tool-parameters' },
+      h('summary', null, 'Technical details'),
+      h('div', { className: 'tool-parameter-list' },
+        h('code', null, tool.name || ''),
+        ...parameters.map(parameter => h('code', { key: parameter }, parameter))
+      )
+    )
   );
 }
 

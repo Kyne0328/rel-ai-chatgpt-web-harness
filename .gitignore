@@ -9,6 +9,8 @@
 # used to land here and dirty the tree.
 /.rel-ai-mcp-state
 /node_modules
+.env
+.dev.vars
 # OpenAI tunnel-client binaries are fetched from pinned official archives at build time.
 /vendor/tunnel-client/win32/tunnel-client.exe
 /vendor/tunnel-client/linux/tunnel-client

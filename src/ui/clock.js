@@ -2,9 +2,6 @@ import { formatDuration, timeAgo } from './utils.js';
 
 const CLOCK_SELECTOR = '[data-clock-elapsed-start], [data-clock-relative]';
 const CLOCK_ATTRIBUTE_FILTER = Object.freeze(['data-clock-elapsed-start', 'data-clock-elapsed-end', 'data-clock-relative']);
-const MINUTE_MS = 60_000;
-const HOUR_MS = 60 * MINUTE_MS;
-const DAY_MS = 24 * HOUR_MS;
 
 export function parseClockTime(value) {
   if (value == null || value === '') return Number.NaN;
@@ -21,15 +18,6 @@ export function elapsedAt(start, end, now = Date.now()) {
   return formatDuration(Math.max(0, boundary - started), { live: !Number.isFinite(completed) });
 }
 
-function relativeRefreshAt(value, currentTime) {
-  const timestamp = parseClockTime(value);
-  if (!Number.isFinite(timestamp)) return Number.POSITIVE_INFINITY;
-  const age = Math.max(0, currentTime - timestamp);
-  if (age < HOUR_MS) return timestamp + (Math.floor(age / MINUTE_MS) + 1) * MINUTE_MS;
-  if (age < DAY_MS) return timestamp + (Math.floor(age / HOUR_MS) + 1) * HOUR_MS;
-  return timestamp + (Math.floor(age / DAY_MS) + 1) * DAY_MS;
-}
-
 export function createDashboardClock(options = {}) {
   const documentRef = options.documentRef || document;
   const windowRef = options.windowRef || window;
@@ -44,7 +32,6 @@ export function createDashboardClock(options = {}) {
   let observer = null;
   let timer = null;
   let stopped = true;
-  let nextRelativeRefreshAt = Number.POSITIVE_INFINITY;
 
   function updateElapsedNode(node, currentTime) {
     const text = elapsedAt(
@@ -71,10 +58,6 @@ export function createDashboardClock(options = {}) {
     if (node.hasAttribute('data-clock-relative')) {
       relativeNodes.add(node);
       updateRelativeNode(node, currentTime);
-      nextRelativeRefreshAt = Math.min(
-        nextRelativeRefreshAt,
-        relativeRefreshAt(node.getAttribute('data-clock-relative'), currentTime)
-      );
     } else {
       relativeNodes.delete(node);
     }
@@ -98,20 +81,7 @@ export function createDashboardClock(options = {}) {
     }
   }
 
-  function refreshRelativeSchedule(currentTime) {
-    let next = Number.POSITIVE_INFINITY;
-    for (const node of relativeNodes) {
-      if (node?.isConnected === false || !node?.hasAttribute?.('data-clock-relative')) {
-        relativeNodes.delete(node);
-        continue;
-      }
-      next = Math.min(next, relativeRefreshAt(node.getAttribute('data-clock-relative'), currentTime));
-    }
-    if (!Number.isFinite(next) && typeof MutationObserverRef !== 'function') next = currentTime + MINUTE_MS;
-    nextRelativeRefreshAt = next;
-  }
-
-  function tick(forceRelative = false) {
+  function tick() {
     const currentTime = now();
     updateRegistered(
       liveElapsedNodes,
@@ -119,10 +89,7 @@ export function createDashboardClock(options = {}) {
       currentTime,
       node => node.hasAttribute('data-clock-elapsed-start') && !node.hasAttribute('data-clock-elapsed-end')
     );
-    if (forceRelative || currentTime >= nextRelativeRefreshAt) {
-      updateRegistered(relativeNodes, updateRelativeNode, currentTime, node => node.hasAttribute('data-clock-relative'));
-      refreshRelativeSchedule(currentTime);
-    }
+    updateRegistered(relativeNodes, updateRelativeNode, currentTime, node => node.hasAttribute('data-clock-relative'));
     onTick?.(currentTime);
   }
 
@@ -139,7 +106,6 @@ export function createDashboardClock(options = {}) {
           for (const child of node?.querySelectorAll?.(CLOCK_SELECTOR) || []) registerNode(child, currentTime);
         }
       }
-      refreshRelativeSchedule(currentTime);
     });
     observer.observe(target, {
       childList: true,
@@ -171,7 +137,7 @@ export function createDashboardClock(options = {}) {
       stopTimer();
       return;
     }
-    tick(true);
+    tick();
     startTimer();
   }
 
@@ -179,10 +145,8 @@ export function createDashboardClock(options = {}) {
     if (!stopped) return api;
     stopped = false;
     documentRef.addEventListener?.('visibilitychange', handleVisibility);
-    nextRelativeRefreshAt = Number.POSITIVE_INFINITY;
     const currentTime = now();
     observe(documentRef);
-    refreshRelativeSchedule(currentTime);
     onTick?.(currentTime);
     startObserver();
     startTimer();

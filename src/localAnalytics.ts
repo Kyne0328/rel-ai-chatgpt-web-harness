@@ -288,6 +288,8 @@ function projectLocalUsageSnapshot(config: AnalyticsConfig, month: string, docum
       retentionDays: LOCAL_ANALYTICS_RETENTION_DAYS,
       externalTelemetry: {
         enabled: externalTelemetry.enabled === true,
+        diagnosticsEnabled: externalTelemetry.diagnosticsEnabled === true,
+        usageReportingEnabled: externalTelemetry.usageReportingEnabled === true,
         endpointConfigured: externalTelemetry.endpointConfigured === true,
         sampleRatio: number(externalTelemetry.sampleRatio)
       }

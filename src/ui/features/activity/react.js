@@ -657,10 +657,7 @@ function ActivitySpacerRow({ height }) {
 function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
-      h('div', { className: 'inspector-empty' },
-        h('strong', null, 'Select an activity'),
-        h('span', null, 'Choose an event.')
-      )
+      h('div', { className: 'inspector-empty' }, h('strong', null, 'Select an activity'))
     );
   }
   const group = activityStatusGroup(entry);

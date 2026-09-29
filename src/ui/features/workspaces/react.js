@@ -1,12 +1,10 @@
-import React, { Suspense, lazy, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
-import { postJson } from '../../api.js';
+import { postJson, requestDashboardRefresh } from '../../api.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref } from '../../router.js';
-import { analyticsRangeScope } from '../usage/range-model.js';
-import { loadAnalyticsModels } from '../usage/data.js';
 import {
   actionableFindings,
   findingSeverityLabel,
@@ -18,8 +16,7 @@ import {
 import { DeleteProjectModal, ProjectFormModal, RepairProjectModal } from './react-modals.js';
 
 const h = React.createElement;
-const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
-const WORKSPACE_STORE_KEYS = Object.freeze(['config', 'health', 'live']);
+const WORKSPACE_STORE_KEYS = Object.freeze(['config', 'health']);
 
 export function createWorkspacesRoute(useDashboardSlices) {
   return function WorkspacesRoute() {
@@ -55,10 +52,7 @@ function WorkspacesView({ data = {} }) {
     [workspaces, healthByAlias]
   );
   const findings = useMemo(() => actionableFindings(health), [health]);
-  const availableCount = views.filter(view => view.available).length;
   const [modal, setModal] = useState(null);
-  const analyticsAliases = useMemo(() => views.map(view => view.alias), [views]);
-  const analyticsState = useWorkspaceAnalytics(analyticsAliases, Number(data.live?.revisions?.task || 0));
 
   useLayoutEffect(() => {
     if (!focusAlias || focusRequest !== '1') return;
@@ -97,26 +91,11 @@ function WorkspacesView({ data = {} }) {
         h('button', { className: 'primary', type: 'button', onClick: event => openForm('add', null, event.currentTarget) }, 'Add project')
       )
     ),
+    h(DirectFilesystemAccess, { initial: data.config?.projectAccess }),
     !workspaces.length ? h(EmptyWorkspaceState, { onAdd: event => openForm('add', null, event.currentTarget) }) : h(React.Fragment, null,
-      h('div', { className: 'overview-grid overview-grid-compact summary-metrics overview-grid-two' },
-        h(Metric, {
-          label: 'Ready for ChatGPT',
-          value: `${availableCount}/${workspaces.length}`,
-          meta: availableCount === workspaces.length ? 'All project folders are available' : 'One or more project folders need attention',
-          tone: availableCount === workspaces.length ? 'good' : 'warn'
-        }),
-        h(Metric, {
-          label: 'Needs attention',
-          value: findings.length,
-          meta: findings.length ? 'Problems that may affect a project' : 'No blocking problems',
-          tone: findings.length ? 'bad' : 'good'
-        })
-      ),
       h('div', { className: 'workspace-grid workspace-grid-detailed' },
         views.map(view => h(WorkspaceCard, {
           key: view.alias,
-          analytics: analyticsState.scopes.get(view.alias) || null,
-          analyticsStatus: analyticsState.status,
           view,
           workspace: workspaceByAlias.get(view.alias),
           onEdit: openForm,
@@ -146,7 +125,45 @@ function WorkspacesView({ data = {} }) {
   );
 }
 
-const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, view, workspace, onEdit, onRepair }) {
+function DirectFilesystemAccess({ initial = {} }) {
+  const [enabled, setEnabled] = useState(initial?.directFilesystem === true);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setEnabled(initial?.directFilesystem === true), [initial?.directFilesystem]);
+  const update = async value => {
+    if (busy) return;
+    setBusy(true);
+    const result = await postJson('/api/workspaces', {
+      action: 'project_access',
+      directFilesystem: value
+    }).catch(error => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    setBusy(false);
+    if (!result?.ok) {
+      toast(result?.error || 'Could not save direct filesystem access.', { variant: 'error' });
+      return;
+    }
+    const saved = result.config?.projectAccess?.directFilesystem === true;
+    setEnabled(saved);
+    requestDashboardRefresh();
+    toast(saved ? 'Direct filesystem access enabled.' : 'Direct filesystem access disabled.', { variant: 'success' });
+  };
+  return h('section', { className: 'workspace-direct-access card', 'aria-labelledby': 'workspaceDirectAccessTitle' },
+    h('div', { className: 'workspace-direct-access-copy' },
+      h('strong', { id: 'workspaceDirectAccessTitle' }, 'Allow access outside projects'),
+      h('p', null, 'When on, ChatGPT can read, search, and edit ordinary local files outside configured projects. Access is limited by this computer account and Rel.AI sensitive-path protections.')
+    ),
+    h('button', {
+      className: 'workspace-direct-access-switch',
+      type: 'button',
+      role: 'switch',
+      'aria-checked': String(enabled),
+      'aria-labelledby': 'workspaceDirectAccessTitle',
+      disabled: busy,
+      onClick: () => { void update(!enabled); }
+    }, busy ? 'Saving…' : enabled ? 'On' : 'Off')
+  );
+}
+
+const WorkspaceCard = memo(function WorkspaceCard({ view, workspace, onEdit, onRepair }) {
   const [folderBusy, setFolderBusy] = useState(false);
   const repository = repositorySummary(view.operational);
   const pathParts = splitWorkspacePath(view.path);
@@ -178,13 +195,6 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
     ) : null,
     h(WorkspaceReadiness, { available: view.available, repository }),
     notices.length ? h('div', { className: 'workspace-notice' }, notices.map(item => h('span', { key: item }, item))) : null,
-    analytics
-      ? h(WorkspaceAnalytics, { scope: analytics })
-      : analyticsStatus === 'loading'
-        ? h(WorkspaceAnalyticsState, { label: 'Loading analytics…', loading: true })
-        : analyticsStatus === 'error'
-          ? h(WorkspaceAnalyticsState, { label: 'Analytics unavailable' })
-          : null,
     h('footer', { className: 'workspace-actions workspace-primary-actions' },
       document.documentElement.dataset.surface === 'desktop' ? h('button', {
         className: 'secondary', type: 'button', disabled: folderBusy, onClick: event => { void openFolder(event); }
@@ -259,93 +269,6 @@ function EmptyWorkspaceState({ onAdd }) {
   );
 }
 
-function Metric({ label, value, meta, tone }) {
-  return h('div', { className: `metric ${tone}` }, h('div', { className: 'metric-label' }, label), h('div', { className: 'metric-value' }, value), h('div', { className: 'metric-meta' }, meta));
-}
-
-
-function WorkspaceAnalytics({ scope }) {
-  const completed = Number(scope?.completed || 0);
-  const toolCalls = Number(scope?.toolCalls || 0);
-  const successRate = Number(scope?.operationSuccessRate || 0);
-  const infrastructureFailures = Number(scope?.infrastructureFailures || 0);
-  const averageDuration = Number(scope?.averageDuration || 0);
-  const values = Array.isArray(scope?.points) ? scope.points.map(point => Number(point.toolCalls || 0)) : [];
-  return h('section', { className: 'workspace-analytics-mini', 'aria-label': `${scope.workspace || 'Project'} analytics` },
-    h('div', { className: 'workspace-analytics-head' }, h('span', null, '24h · hourly')),
-    h('div', { className: 'workspace-analytics-metrics' },
-      h(MiniMetric, { label: 'Actions', value: formatInteger(toolCalls) }),
-      h(MiniMetric, { label: 'Successful actions', value: completed ? formatPercent(successRate) : '—' }),
-      h(MiniMetric, { label: 'Average time', value: completed ? formatDuration(averageDuration) : '—' })
-    ),
-    infrastructureFailures
-      ? h('div', { className: 'connection-notice bad', role: 'status' }, `${formatInteger(infrastructureFailures)} Rel.AI internal ${infrastructureFailures === 1 ? 'error' : 'errors'}`)
-      : null,
-    values.length
-      ? h(Suspense, { fallback: h('span', { className: 'workspace-analytics-sparkline-empty', 'aria-hidden': 'true' }) },
-        h(SparkChart, { values, className: 'workspace-analytics-sparkline' }))
-      : h('span', { className: 'workspace-analytics-sparkline-empty', 'aria-hidden': 'true' })
-  );
-}
-
-function MiniMetric({ label, value }) { return h('div', null, h('span', null, label), h('strong', null, value)); }
-
-function WorkspaceAnalyticsState({ label, loading = false }) {
-  return h('section', {
-    className: 'workspace-analytics-mini',
-    role: 'status',
-    'aria-live': 'polite',
-    'aria-busy': loading ? 'true' : undefined
-  },
-  h('div', { className: 'workspace-analytics-head' }, h('span', null, label)),
-  loading ? h('span', { className: 'workspace-analytics-sparkline-empty', 'aria-hidden': 'true' }) : null);
-}
-
-function useWorkspaceAnalytics(aliases, taskRevision = 0) {
-  const key = aliases.join('\u0000');
-  const previousKeyRef = useRef('');
-  const [state, setState] = useState(() => ({ scopes: new Map(), status: 'loading' }));
-  useEffect(() => {
-    const desktop = globalThis.window?.relaiDesktop;
-    if (!aliases.length || !desktop?.getLocalUsage) {
-      previousKeyRef.current = key;
-      setState({ scopes: new Map(), status: 'unavailable' });
-      return undefined;
-    }
-    let active = true;
-    const aliasChanged = previousKeyRef.current !== key;
-    previousKeyRef.current = key;
-    const load = () => {
-      setState(current => ({ ...current, status: 'loading' }));
-      void loadAnalyticsModels({ desktop, range: '24h', now: new Date() })
-        .then(({ bounds, models }) => {
-          if (!active) return;
-          setState({
-            scopes: new Map(aliases.map(alias => [alias, analyticsRangeScope(models, bounds, { workspace: alias })])),
-            status: 'ready'
-          });
-        })
-        .catch(() => {
-          if (!active) return;
-          setState(current => ({ ...current, status: 'error' }));
-        });
-    };
-    if (aliasChanged) {
-      load();
-      return () => { active = false; };
-    }
-    const timer = window.setTimeout(load, 180);
-    return () => {
-      active = false;
-      window.clearTimeout(timer);
-    };
-  }, [aliases, key, taskRevision]);
-  return state;
-}
-
 function findingDotClass(severity) { return severity === 'error' ? 'bad' : severity === 'warning' ? 'warn' : ''; }
 function cssEscape(value) { return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : String(value).replace(/[^a-zA-Z0-9_-]/g, character => `\\${character}`); }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; }
-function formatInteger(value) { return Math.floor(Number(value) || 0).toLocaleString(); }
-function formatPercent(value) { const number = Number(value) || 0; return `${number.toFixed(number >= 10 ? 1 : 2)}%`; }
-function formatDuration(value) { const ms = Number(value) || 0; if (ms < 1000) return `${Math.floor(ms)} ms`; const seconds = ms / 1000; if (seconds < 60) return `${seconds.toFixed(seconds >= 10 ? 1 : 2)} s`; return `${(seconds / 60).toFixed(1)} min`; }

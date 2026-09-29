@@ -483,6 +483,10 @@ async function case_dashboard_clock_unit() {
   [...timers.values()][0].callback();
   assert.equal(elapsedNode.textContent, '1m 10s');
   assert.equal(relativeNode.textContent, '2m ago');
+  relativeNode.textContent = '1m ago';
+  now = Date.parse('2026-07-28T10:01:11.000Z');
+  [...timers.values()][0].callback();
+  assert.equal(relativeNode.textContent, '2m ago', 'shared clock ticks must repair a stale relative label even before the next minute boundary');
   assert.equal(lateRelativeNode.textContent, '6m ago', 'late-mounted task times must refresh without selecting a task');
   assert.equal(completedNode.textContent, '30s', 'completed durations must remain anchored to completion time');
   assert.equal(documentRef.queryCount, queriesAfterBoundary, 'clock must rely on registered nodes and mutation observation instead of periodic document rescans');

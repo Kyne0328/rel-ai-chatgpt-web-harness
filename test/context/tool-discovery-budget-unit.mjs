@@ -21,6 +21,13 @@ const validateTool = publicTools.find(tool => tool.name === 'relai_validate');
 const inspectTool = publicTools.find(tool => tool.name === 'relai_inspect');
 assert.match(validateTool?.description || '', /complete:true.*succeeds/i, 'validation discovery must explain opt-in atomic completion');
 assert.match(inspectTool?.description || '', /audit\/architecture\/diagnostics.*no symbol or query/i, 'inspect discovery must explain the audit action shape');
+for (const name of ['relai_read', 'relai_search', 'relai_edit']) {
+  const tool = publicTools.find(item => item.name === name);
+  assert.equal(tool?.inputSchema?.required?.includes('workspace'), false,
+    `${name} discovery must allow direct filesystem access without a configured project when the user enables it`);
+  assert.ok(tool?.inputSchema?.properties?.root,
+    `${name} discovery must expose the direct-filesystem root argument`);
+}
 assert.doesNotMatch(publicTools.find(tool => tool.name === 'relai_browser')?.inputSchema?.properties?.action?.description || '', /work_id/, 'optional work_id must not be repeated in every action grammar');
 for (const name of ['relai_work', 'relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect']) {
   assert.equal(publicTools.find(tool => tool.name === name)?.inputSchema?.properties?.independent, undefined,

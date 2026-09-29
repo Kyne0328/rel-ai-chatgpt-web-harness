@@ -7,7 +7,12 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-connector-result-'));
 const wsRoot = path.join(tmp, 'repo');
 const stateDir = path.join(tmp, 'state');
 const configPath = path.join(tmp, 'config.json');
+const outsideRoot = path.join(tmp, 'outside');
+const outsideFile = path.join(outsideRoot, 'outside.txt');
 fs.mkdirSync(wsRoot, { recursive: true });
+fs.mkdirSync(path.join(outsideRoot, '.ssh'), { recursive: true });
+fs.writeFileSync(outsideFile, 'outside before\nsearch needle\n');
+fs.writeFileSync(path.join(outsideRoot, '.ssh', 'id_rsa'), 'blocked secret\n');
 fs.writeFileSync(path.join(wsRoot, 'big.txt'), 'x'.repeat(400000));
 for (const name of ['multi-a.txt', 'multi-b.txt', 'multi-c.txt']) {
   fs.writeFileSync(path.join(wsRoot, name), name[6].repeat(700000));
@@ -20,6 +25,7 @@ fs.writeFileSync(configPath, JSON.stringify({
   stateDir,
   auditLogPath: path.join(stateDir, 'audit.jsonl'),
   trustedBudgetMultiplier: 2,
+  projectAccess: { directFilesystem: true },
   workspaces: {
     repo: {
       path: wsRoot,
@@ -31,6 +37,7 @@ fs.writeFileSync(configPath, JSON.stringify({
 process.env.REL_AI_MCP_CONFIG = configPath;
 
 const { flushAuditWrites } = await import('../src/audit.js');
+const { invalidateConfigCache } = await import('../src/config.js');
 const { flushLocalAnalytics } = await import('../src/localAnalytics.js');
 const { flushTaskHistoryPersistence } = await import('../src/taskHistoryStore.ts');
 const { resetTaskHistoryCaches } = await import('../src/taskHistoryStorage.ts');
@@ -56,6 +63,73 @@ try {
   }, { publicHttpOnly: true, requestId: 2, transportType: 'test' });
   assert.equal(tasklessRead.ok, true, 'ordinary authorized workspace reads must not require a live work_id');
   assert.equal(tasklessRead.items[0].content, `${largeLines[0]}\n`);
+  const directRead = await callTool('relai_read', {
+    paths: [outsideFile],
+    maxBytes: 16 * 1024,
+    guidanceMode: 'none'
+  }, { publicHttpOnly: true, requestId: 'direct-filesystem-read', transportType: 'test' });
+  assert.equal(directRead.ok, true, 'enabled direct filesystem access must read an absolute path outside configured projects');
+  assert.equal(directRead.workspace, '@filesystem');
+  assert.equal(directRead.items[0].content, 'outside before\nsearch needle\n');
+
+  const directSearch = await callTool('relai_search', {
+    root: outsideRoot,
+    pattern: 'search needle',
+    fixed: true,
+    maxResults: 10,
+    mode: 'compact'
+  }, { publicHttpOnly: true, requestId: 'direct-filesystem-search', transportType: 'test' });
+  assert.equal(directSearch.ok, true, 'enabled direct filesystem access must search an explicit root outside configured projects');
+  assert.equal(directSearch.workspace, '@filesystem');
+  assert.ok(directSearch.matches?.some(match => match.path === 'outside.txt') || directSearch.results?.some(result => result.matches?.some(match => match.path === 'outside.txt')));
+
+  const directEdit = await callTool('relai_edit', {
+    root: outsideRoot,
+    path: 'outside.txt',
+    oldText: 'outside before',
+    newText: 'outside after',
+    independent: true
+  }, { publicHttpOnly: true, requestId: 'direct-filesystem-edit', transportType: 'test' });
+  assert.equal(directEdit.ok, true, 'enabled direct filesystem access must edit a root-relative path outside configured projects');
+  assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'outside after\nsearch needle\n');
+
+  const sensitiveRead = await callTool('relai_read', {
+    root: outsideRoot,
+    paths: ['.ssh/id_rsa'],
+    guidanceMode: 'none'
+  }, { publicHttpOnly: true, requestId: 'direct-filesystem-sensitive-read', transportType: 'test' });
+  assert.equal(sensitiveRead.returnedCount, 0, 'direct filesystem access must preserve sensitive-path blocking');
+  assert.match(sensitiveRead.skipped[0].reason, /blocked sensitive path|sensitive path/i);
+
+  const projectlessTask = await callTool('relai_work', {
+    action: 'begin',
+    title: 'Direct filesystem task',
+    objective: 'Edit an ordinary file outside configured projects.',
+    bootstrap: 'none',
+    steps: [{ id: 'edit', title: 'Edit the outside file', status: 'in_progress' }]
+  }, { publicHttpOnly: true, requestId: 'direct-filesystem-task-begin', transportType: 'test' });
+  const taskEdit = await callTool('relai_edit', {
+    work_id: projectlessTask.work_id,
+    root: outsideRoot,
+    path: 'outside.txt',
+    oldText: 'outside after',
+    newText: 'outside task'
+  }, { publicHttpOnly: true, requestId: 'direct-filesystem-task-edit', transportType: 'test' });
+  assert.equal(taskEdit.ok, true, 'projectless durable work must be able to use enabled direct filesystem access');
+  assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'outside task\nsearch needle\n');
+  await callTool('relai_work', {
+    action: 'cancel', work_id: projectlessTask.work_id, reason: 'direct filesystem regression complete'
+  }, { publicHttpOnly: true, requestId: 'direct-filesystem-task-cancel', transportType: 'test' });
+
+  const disabledConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  disabledConfig.projectAccess.directFilesystem = false;
+  fs.writeFileSync(configPath, JSON.stringify(disabledConfig, null, 2));
+  invalidateConfigCache();
+  await assert.rejects(
+    () => callTool('relai_read', { paths: [outsideFile], guidanceMode: 'none' }, { publicHttpOnly: true, requestId: 'direct-filesystem-disabled', transportType: 'test' }),
+    /workspace/i,
+    'disabling direct filesystem access must restore the configured-project requirement'
+  );
 
   const computerStatus = await callTool('relai_computer', {
     action: 'status',

@@ -44,12 +44,15 @@ function makeDefaultConfig() {
     computerControl: {
       enabled: false
     },
+    projectAccess: {
+      directFilesystem: false
+    },
     release: {
       minimumReadinessScore: 80,
       requireHttpToken: true
     },
     telemetry: {
-      enabled: false,
+      diagnosticsEnabled: true,
       endpoint: "",
       sampleRatio: 1
     },
@@ -188,12 +191,15 @@ function configSchema(base) {
     computerControl: objectSchema(z.object({
       enabled: booleanSchema(base.computerControl.enabled)
     })),
+    projectAccess: objectSchema(z.object({
+      directFilesystem: booleanSchema(base.projectAccess.directFilesystem)
+    })),
     release: objectSchema(z.object({
       minimumReadinessScore: boundedIntegerSchema(0, 100, base.release.minimumReadinessScore),
       requireHttpToken: booleanSchema(base.release.requireHttpToken)
     })),
     telemetry: objectSchema(z.object({
-      enabled: booleanSchema(base.telemetry.enabled),
+      diagnosticsEnabled: booleanSchema(base.telemetry.diagnosticsEnabled),
       endpoint: stringSchema(base.telemetry.endpoint).transform(value => value.trim()),
       sampleRatio: boundedRatioSchema(base.telemetry.sampleRatio)
     })),
@@ -487,6 +493,7 @@ function publicConfigSummary(config) {
     productUx: config.productUx,
     knowledge: config.knowledge,
     computerControl: config.computerControl,
+    projectAccess: config.projectAccess,
     release: config.release,
     telemetry: telemetryStatus(config),
     workspaces: Object.entries(config.workspaces || {}).map(([alias, entry]) => {

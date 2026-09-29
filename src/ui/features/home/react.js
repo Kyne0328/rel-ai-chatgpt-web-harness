@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { copyText } from '../../clipboard.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
@@ -11,12 +11,10 @@ import { classifyTaskActivity } from '../../../taskActivityPresentation.js';
 import { formatDuration, timeAgo } from '../../utils.js';
 import { buildTaskSemanticProgress } from '../../../taskSemanticProgress.js';
 import { completeDesktopSetup, desktopSetupSteps, dismissDesktopSetup, isDesktopSetupDismissed } from '../onboarding/index.js';
-import { CHATGPT_CONNECTOR_CREATE_URL, RELAI_CONNECTOR_ICON_FILENAME, chatGptFirstPrompt, chatGptGuideSteps, downloadRelaiConnectorIcon } from '../settings/connection-guidance.js';
-import { loadAnalyticsData } from '../usage/data.js';
-import { desktopSetupState, homeAnalyticsView, overviewState, overviewWorkspaceStatus } from './index.js';
+import { CHATGPT_CONNECTOR_CREATE_URL, chatGptFirstPrompt, chatGptGuideSteps } from '../settings/connection-guidance.js';
+import { desktopSetupState, overviewState, overviewWorkspaceStatus } from './index.js';
 
 const h = React.createElement;
-const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
 const HOME_STORE_KEYS = Object.freeze(['config', 'health', 'connection', 'connectionState', 'desktopStatus', 'mcpConnection', 'tasks', 'taskActivity', 'live']);
 const HOME_TASK_SUMMARY_MAX = 180;
 
@@ -35,7 +33,6 @@ function HomeView({ data = {} }) {
     activeCard ? h(TaskActivityCard, { model: activeCard }) : null,
     h(DesktopSetupChecklist, { setup }),
     h(ConnectionHero, { state: state.bridgeState }),
-    h(HomeAnalytics, { taskRevision: Number(data.live?.revisions?.task || 0), workspace }),
     h('div', { className: 'layout-grid' },
       h(WorkspaceSummaryCard, { workspaces: state.workspaces, findings: state.findings }),
       h(RecentTasksCard, { tasks: state.tasks })
@@ -188,70 +185,6 @@ function RecentTasksCard({ tasks }) {
   );
 }
 
-function HomeAnalytics({ taskRevision, workspace }) {
-  const [analytics, setAnalytics] = useState({ scope: null, error: false, loading: true });
-  useEffect(() => {
-    let active = true;
-    const timer = window.setTimeout(() => {
-      setAnalytics(current => ({ ...current, loading: !current.scope, error: false }));
-      void loadAnalyticsData({ desktop: globalThis.window?.relaiDesktop, range: '24h', now: new Date(), workspace })
-        .then(({ current }) => { if (active) setAnalytics({ scope: current, error: false, loading: false }); })
-        .catch(() => { if (active) setAnalytics(current => ({ ...current, error: true, loading: false })); });
-    }, 180);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [taskRevision, workspace]);
-  if (analytics.scope) return h(HomeAnalyticsContent, { scope: analytics.scope, refreshing: analytics.loading });
-  return h('section', { className: 'card home-analytics-card', 'data-home-analytics': '', 'aria-busy': analytics.loading ? 'true' : 'false' },
-    h('div', { className: 'card-head home-analytics-head' },
-      h('div', null, h('h3', null, 'Activity'), h('p', null, analytics.error ? 'Activity could not be loaded.' : 'Loading activity…')),
-      h('a', { className: 'buttonlike secondary compact-button', href: routeHref('usage', workspace ? { workspace } : {}) }, 'View analytics')
-    ),
-    analytics.loading ? h('div', { className: 'home-analytics-loading', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'), h('span')) : null
-  );
-}
-
-function HomeAnalyticsContent({ scope, refreshing }) {
-  const view = homeAnalyticsView(scope);
-  return h('section', { className: 'card home-analytics-card', 'data-home-analytics': '', 'aria-busy': refreshing ? 'true' : 'false' },
-    h('div', { className: 'card-head home-analytics-head' },
-      h('div', null, h('div', { className: 'home-analytics-title-row' }, h(Icon, { name: 'usage', className: 'home-analytics-title-icon', size: 17 }), h('h3', null, view.heading), h('span', null, '24h · hourly'))),
-      h('a', { className: 'buttonlike secondary compact-button home-analytics-link', href: routeHref('usage', view.workspaceScoped ? { workspace: view.workspace } : {}) }, h('span', null, 'View analytics'), h(Icon, { name: 'chevronRight', size: 15 }))
-    ),
-    h('div', { className: 'home-analytics-body' },
-      h('div', { className: 'home-analytics-metrics' }, view.metrics.map(metric => h('div', { className: 'home-analytics-metric', key: metric.label }, h('div', { className: 'home-analytics-metric-label' }, h(Icon, { name: homeAnalyticsMetricIcon(metric.label), size: 15 }), h('span', null, metric.label)), h('strong', null, metric.value), metric.detail ? h('small', null, metric.detail) : null))),
-      h('div', { className: 'home-analytics-pulse' }, h('div', { className: 'home-analytics-pulse-head' }, h('div', null, h('span', null, 'Hourly activity'), h('strong', null, view.contextSummary)), h('small', null, 'UTC')), h(HomeAnalyticsPulse, { pulse: view.pulse })),
-      view.errorSummary
-        ? h('div', { className: 'home-analytics-foot bad', role: 'status' },
-            h('span', null, view.errorSummary),
-            h('a', { href: routeHref('diagnostics') }, 'Open Troubleshooting')
-          )
-        : null
-    )
-  );
-}
-
-function homeAnalyticsMetricIcon(label) {
-  if (label === 'Successful actions') return 'success';
-  if (label === 'Average time' || label === 'Total execution time') return 'timer';
-  if (label === 'Active projects') return 'workspaces';
-  return 'activity';
-}
-
-function HomeAnalyticsPulse({ pulse }) {
-  if (pulse.empty) return h('div', { className: 'home-analytics-pulse-empty' }, 'No activity yet.');
-  return h('div', { className: 'home-analytics-chart' },
-    h(Suspense, { fallback: h('div', { className: 'home-analytics-chart-canvas chart-loading', 'aria-hidden': 'true' }) },
-      h(SparkChart, {
-        values: pulse.values,
-        className: 'home-analytics-chart-canvas',
-        ariaLabel: pulse.summary,
-        decorative: false
-      })
-    ),
-    h('div', { className: 'home-analytics-scale' }, h('span', null, 'Earlier'), h('span', null, 'Current hour'))
-  );
-}
-
 function DesktopSetupChecklist({ setup }) {
   const [dismissed, setDismissed] = useState(() => isDesktopSetupDismissed());
   const [copyState, setCopyState] = useState('idle');
@@ -320,20 +253,13 @@ function setupAction(item, current, copyState, onCopy) {
 
 function ChatGptSetupGuide({ tunnelId }) {
   const steps = chatGptGuideSteps({ mode: 'create', tunnelId });
-  const [iconSaved, setIconSaved] = useState(false);
-  const saveIcon = () => {
-    downloadRelaiConnectorIcon();
-    setIconSaved(true);
-  };
   return h('div', { className: 'chatgpt-setup-guide compact desktop-chatgpt-guide' },
     h('div', { className: 'chatgpt-guide-heading' }, h('span', null, 'Use Tunnel + No authentication.')),
     h('section', { className: 'chatgpt-connector-handoff', 'aria-label': 'ChatGPT connector setup' },
       h('dl', { className: 'chatgpt-connector-values' }, h('dt', null, 'Name'), h('dd', null, 'Rel.AI MCP'), h('dt', null, 'Connection'), h('dd', null, 'Tunnel'), h('dt', null, 'Tunnel'), h('dd', { className: 'mono' }, tunnelId || 'Select this computer’s tunnel'), h('dt', null, 'Authentication'), h('dd', null, 'No authentication')),
       h('div', { className: 'chatgpt-connector-actions', role: 'group', 'aria-label': 'ChatGPT connector setup actions' },
-        h('button', { className: 'primary', type: 'button', onClick: () => window.open(CHATGPT_CONNECTOR_CREATE_URL, '_blank', 'noopener,noreferrer') }, 'ChatGPT setup'),
-        h('button', { className: 'secondary', type: 'button', onClick: saveIcon }, iconSaved ? `Optional icon saved · ${RELAI_CONNECTOR_ICON_FILENAME}` : h(React.Fragment, null, 'Save optional Rel.AI icon ', h('span', null, 'PNG · under 10 KB')))
-      ),
-      iconSaved ? null : h('p', { className: 'chatgpt-connector-note' }, 'You can add the optional Rel.AI icon after the connector works.')
+        h('button', { className: 'primary', type: 'button', onClick: () => window.open(CHATGPT_CONNECTOR_CREATE_URL, '_blank', 'noopener,noreferrer') }, 'ChatGPT setup')
+      )
     ),
     h('ol', null, steps.map(step => h('li', { key: step }, step)))
   );

@@ -217,6 +217,8 @@ function normalizePrivacy(value) {
     retentionDays: Number.isFinite(retentionDays) && retentionDays > 0 ? Math.floor(retentionDays) : 0,
     externalTelemetry: {
       enabled: telemetry.enabled === true,
+      diagnosticsEnabled: telemetry.diagnosticsEnabled === true,
+      usageReportingEnabled: telemetry.usageReportingEnabled === true,
       endpointConfigured: telemetry.endpointConfigured === true,
       sampleRatio: optionalNumber(telemetry.sampleRatio, 1, 'privacy.externalTelemetry.sampleRatio')
     }

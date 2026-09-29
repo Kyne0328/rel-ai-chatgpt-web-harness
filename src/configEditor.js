@@ -111,6 +111,23 @@ function updateWorkspace(current, payload = {}) {
   return handler(alias, payload, next);
 }
 
+function updateProjectAccess(current, payload = {}) {
+  const next = clone(current);
+  next.projectAccess = {
+    directFilesystem: payload.directFilesystem === true
+  };
+  const normalized = writeConfig(next);
+  return {
+    ok: true,
+    changed: ['projectAccess.directFilesystem'],
+    message: normalized.projectAccess.directFilesystem
+      ? 'Direct filesystem access enabled.'
+      : 'Direct filesystem access disabled.',
+    configPath: getConfigPath(),
+    config: publicConfigSummary(normalized)
+  };
+}
+
 function clone(value) {
   return structuredClone(objectOrEmpty(value));
 }
@@ -146,4 +163,4 @@ function validateAlias(alias) {
   if (!/^[A-Za-z0-9._-]{1,80}$/.test(alias)) throw new Error("Workspace alias must be 1-80 characters using letters, numbers, dot, underscore, or dash.");
 }
 
-export { updateWorkspace };
+export { updateProjectAccess, updateWorkspace };

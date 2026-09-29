@@ -9,7 +9,7 @@ import { connectionLayerViews, connectionStateFor, connectionSummary, hasObserve
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath } from '../../router.js';
-import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL, RELAI_CONNECTOR_ICON_FILENAME, downloadRelaiConnectorIcon } from './connection-guidance.js';
+import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL } from './connection-guidance.js';
 import { restartConnection } from './connection-recovery.js';
 import { supportPolicyView } from './desktop-update-policy.js';
 
@@ -27,10 +27,10 @@ const NOTIFICATION_DEFAULTS = Object.freeze({
   ignoredUpdateVersion: ''
 });
 const NOTIFICATION_CATEGORIES = Object.freeze([
-  ['taskCompleted', 'Task completed', 'Show a desktop alert after Rel.AI completes a task.'],
-  ['errors', 'Errors', 'Show alerts when a project action, connection, or app update fails.'],
-  ['connectionStatus', 'Connection status', 'Show alerts when ChatGPT connects, disconnects, or needs you to reconnect it.'],
-  ['applicationUpdates', 'App updates', 'Show desktop alerts when an app update is available.']
+  ['taskCompleted', 'Task completed'],
+  ['errors', 'Errors'],
+  ['connectionStatus', 'Connection status'],
+  ['applicationUpdates', 'App updates']
 ]);
 
 export function createSettingsRoute(useDashboardStore) {
@@ -141,15 +141,6 @@ function ConnectionPage({ data }) {
     }
     toast('Connection retry started. Rel.AI is checking the Secure MCP Tunnel.', { variant: 'success' });
   };
-  const refreshStatus = async () => {
-    try {
-      const status = await window.relaiDesktop?.getStatus?.();
-      if (status) window.dispatchEvent(new CustomEvent('relai:desktop-status-refresh', { detail: status }));
-    } catch {}
-    window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
-    toast('Refreshing connection status…', { variant: 'info' });
-  };
-
   return h('div', { className: 'section connection-page', 'data-connection-react': '' },
     h('section', { className: `card connection-summary-card ${summary.tone}` },
       h('div', { className: 'card-head' }, h(StatusPill, { label: summary.label, tone: summary.tone })),
@@ -158,11 +149,9 @@ function ConnectionPage({ data }) {
         action.kind !== 'none' ? h('div', { className: 'connection-primary-action' }, connectionActionElement(action, { openSetup, openSettings, retry })) : null
       )
     ),
-    h('div', { className: 'connection-support-row' },
-      h('button', { className: 'secondary compact-button', type: 'button', onClick: () => void refreshStatus() }, 'Refresh status'),
-      ['restart', 'settings'].includes(action.kind) ? h('button', { className: 'secondary compact-button', type: 'button', onClick: () => openSettings({ focus: true }) }, 'Review settings') : null,
-      action.href === '#diagnostics' || action.kind === 'none' ? null : h('a', { className: 'buttonlike secondary compact-button', href: '#diagnostics' }, 'Troubleshooting')
-    ),
+    action.kind !== 'none' ? h('div', { className: 'connection-support-row' },
+      action.href === '#diagnostics' ? null : h('a', { className: 'buttonlike secondary compact-button', href: '#diagnostics' }, 'Troubleshooting')
+    ) : null,
     h(ConnectionLayers, { state, summary }),
     guideMode ? h(ConnectionGuide, { mode: guideMode, tunnelId, workspaceAlias }) : null,
     h('section', { id: 'connectionControls', className: 'connection-controls-section', ref: controlsRef },
@@ -187,7 +176,7 @@ function connectionPrimaryAction(state = {}) {
   if (endpoint === 'degraded') return { kind: 'restart', label: 'Retry now' };
   if (summary.tone === 'working') return { kind: 'none' };
   if (summary.tone === 'bad' || summary.tone === 'warn') return { kind: 'route', href: '#diagnostics', label: 'Troubleshoot' };
-  return { kind: 'route', href: '#tasks', label: 'Tasks' };
+  return { kind: 'none' };
 }
 
 function connectionActionElement(action, handlers) {
@@ -204,9 +193,7 @@ function connectionActionElement(action, handlers) {
 function ConnectionLayers({ state, summary }) {
   const [open, setOpen] = useState(summary.tone === 'bad' || summary.tone === 'warn');
   return h('details', { className: 'card connector-details connection-layer-disclosure', open, onToggle: event => setOpen(event.currentTarget.open) },
-    h('summary', { className: 'connector-details-summary' },
-      h('span', null, h('strong', null, 'Connection check'), h('small', null, 'This computer, Secure MCP Tunnel, and ChatGPT'))
-    ),
+    h('summary', { className: 'connector-details-summary' }, h('span', null, h('strong', null, 'Connection details'))),
     h('div', { className: 'connection-path' }, connectionLayerViews(state).map(layer => h('article', { className: `connection-path-step ${layer.tone}`, key: layer.key },
       h('div', { className: 'connection-layer-card-head' },
         h('span', { className: 'connection-layer-dot', 'aria-hidden': 'true' }),
@@ -227,13 +214,8 @@ function connectionGuideMode(state = {}) {
 }
 
 function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
-  const [iconSaved, setIconSaved] = useState(false);
   const steps = chatGptGuideSteps({ mode, tunnelId });
   const title = mode === 'reconnect' ? 'Reconnect ChatGPT' : 'Connect ChatGPT';
-  const saveIcon = () => {
-    downloadRelaiConnectorIcon();
-    setIconSaved(true);
-  };
   return h('div', { className: 'connection-guide-region' },
     h('section', { className: 'card connection-guide-card' },
       h('div', { className: 'card-head' }, h('h3', null, title), h('span', { className: 'section-action' }, 'Connection setup')),
@@ -250,10 +232,8 @@ function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
               h('dt', null, 'Authentication'), h('dd', null, 'No authentication')
             ),
             h('div', { className: 'chatgpt-connector-actions', role: 'group', 'aria-label': 'ChatGPT connector setup actions' },
-              h('button', { className: 'primary', type: 'button', onClick: () => window.open(CHATGPT_CONNECTOR_CREATE_URL, '_blank', 'noopener,noreferrer') }, 'ChatGPT setup'),
-              h('button', { className: 'secondary', type: 'button', onClick: saveIcon }, iconSaved ? `Optional icon saved · ${RELAI_CONNECTOR_ICON_FILENAME}` : h(React.Fragment, null, 'Save optional Rel.AI icon ', h('span', null, 'PNG · under 10 KB')))
-            ),
-            iconSaved ? null : h('p', { className: 'chatgpt-connector-note' }, 'You can add the optional Rel.AI icon after the connector works.')
+              h('button', { className: 'primary', type: 'button', onClick: () => window.open(CHATGPT_CONNECTOR_CREATE_URL, '_blank', 'noopener,noreferrer') }, 'ChatGPT setup')
+            )
           ) : null,
           h('ol', null, steps.map((step, index) => h('li', { key: index }, step))),
           h('div', { className: 'chatgpt-first-prompt' }, h('span', null, 'First test request'), h('code', null, chatGptFirstPrompt(workspaceAlias)))
@@ -466,12 +446,11 @@ function tunnelCredentialError(value = {}) {
 function PreferencesPage() {
   const [theme, setTheme] = useState(() => getUiPreferences().theme);
   return h(React.Fragment, null,
-    h(SettingsHeader, { title: 'Preferences', description: 'Change appearance and desktop notifications.' }),
+    h(SettingsHeader, { title: 'Preferences' }),
     h(Card, { title: 'Appearance' },
       h('div', { className: 'settings-field' },
         h('span', null, 'Theme'),
-        h(ThemeSwitch, { theme, onChange: value => { setTheme(value); setThemePreference(value); } }),
-        h('p', { className: 'settings-help' }, 'Theme applies to the dashboard and Rel.AI Pulse. Setup and recovery windows follow your system appearance.')
+        h(ThemeSwitch, { theme, onChange: value => { setTheme(value); setThemePreference(value); } })
       )
     ),
     h(DesktopNotificationsSettings)
@@ -541,11 +520,10 @@ function DesktopNotificationsSettings() {
     h(ToggleRow, {
       label: 'Desktop notifications', checked: preferences.enabled, disabled: pending, busy: pending,
       enabledLabel: 'Notifications on', disabledLabel: 'Notifications off',
-      help: 'Turn all desktop notifications on or off. Your choices below are kept while notifications are off.',
       onChange: value => void update({ enabled: value })
     }),
-    NOTIFICATION_CATEGORIES.map(([key, label, help]) => h(ToggleRow, {
-      key, label, help, checked: preferences[key], disabled: pending || !preferences.enabled, busy: pending,
+    NOTIFICATION_CATEGORIES.map(([key, label]) => h(ToggleRow, {
+      key, label, checked: preferences[key], disabled: pending || !preferences.enabled, busy: pending,
       enabledLabel: 'On', disabledLabel: 'Off', onChange: value => void update({ [key]: value })
     })),
     preferences.ignoredUpdateVersion ? h('div', { className: 'settings-field' },
@@ -553,8 +531,7 @@ function DesktopNotificationsSettings() {
       h('div', { className: 'connection-actions' },
         h('code', null, `v${preferences.ignoredUpdateVersion}`),
         h('button', { className: 'secondary', type: 'button', disabled: pending, onClick: () => void update({ ignoredUpdateVersion: '' }) }, `Show notifications for v${preferences.ignoredUpdateVersion} again`)
-      ),
-      h('p', { className: 'settings-help' }, 'Notifications for only this exact version are muted. Newer versions can still notify you.')
+      )
     ) : null
   );
 }
@@ -574,7 +551,6 @@ function normalizeNotificationPreferences(value = {}) {
 
 function ApplicationPage({ computerControl }) {
   const [lifecycle, setLifecycle] = useState(undefined);
-  const [desktopStatus, setDesktopStatus] = useState(undefined);
   const developerOptionsUnlocked = readDeveloperOptionsUnlocked();
   const [developerFeatures, setDeveloperFeatures] = useState(() => Object.fromEntries(
     DEVELOPER_FEATURE_FLAGS.map(feature => [feature.id, readDeveloperFeatureEnabled(feature.id)])
@@ -584,16 +560,15 @@ function ApplicationPage({ computerControl }) {
     let active = true;
     if (typeof desktop?.getLifecycleStatus !== 'function') setLifecycle(null);
     else void desktop.getLifecycleStatus().then(status => { if (active) setLifecycle(status); }).catch(() => { if (active) setLifecycle(null); });
-    if (typeof desktop?.getStatus !== 'function') setDesktopStatus(null);
-    else void desktop.getStatus().then(status => { if (active) setDesktopStatus(status); }).catch(() => { if (active) setDesktopStatus(null); });
     return () => { active = false; };
   }, [desktop]);
   return h(React.Fragment, null,
-    h(SettingsHeader, { title: 'App', description: 'Startup, background behavior, updates, and local storage.' }),
+    h(SettingsHeader, { title: 'App' }),
     lifecycle === undefined ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading app settings…') : h(React.Fragment, null,
       h(StartupSettings, { initial: lifecycle }),
       h(ComputerControlSettings, { initial: computerControl }),
-      h(ApplicationUpdates, { lifecycle, buildStatus: desktopStatus?.buildStatus }),
+      h(ApplicationUpdates, { lifecycle }),
+      h(TelemetrySettings),
       h(LocalDataSettings),
       developerOptionsUnlocked ? h(DeveloperOptions, {
         enabledFeatures: developerFeatures,
@@ -625,6 +600,61 @@ function DeveloperOptions({ enabledFeatures, onChange }) {
         onChange: enabled => onChange(feature.id, enabled)
       }))
     )
+  );
+}
+
+function TelemetrySettings() {
+  const [settings, setSettings] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    void fetchJson('/api/telemetry', { cache: 'no-store' }).then(result => {
+      if (!active) return;
+      if (!result?.ok) throw new Error(result?.error || 'Telemetry settings could not be loaded.');
+      setSettings(result.settings || {});
+      setLoadError('');
+    }).catch(error => {
+      if (!active) return;
+      setLoadError(messageOf(error));
+    });
+    return () => { active = false; };
+  }, []);
+
+  const updateDiagnostics = async enabled => {
+    if (!settings || busy) return;
+    setBusy(true);
+    try {
+      const result = await postJson('/api/telemetry', { diagnosticsEnabled: enabled });
+      if (!result?.ok) throw new Error(result?.error || 'Diagnostic telemetry could not be changed.');
+      setSettings(result.settings || {});
+      toast(enabled ? 'Diagnostic telemetry enabled.' : 'Diagnostic telemetry disabled.', { variant: 'success' });
+    } catch (error) {
+      toast(messageOf(error), { variant: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!settings) {
+    return h(Card, { title: 'Diagnostics' },
+      h('p', { className: 'settings-help', role: loadError ? 'alert' : 'status' }, loadError || 'Loading telemetry settings…')
+    );
+  }
+
+  const diagnosticsEnabled = settings.diagnosticsEnabled !== false;
+  return h(Card, { title: 'Diagnostics' },
+    h(ToggleRow, {
+      label: 'Diagnostic telemetry',
+      checked: diagnosticsEnabled,
+      disabled: busy,
+      busy,
+      enabledLabel: 'Diagnostic telemetry on',
+      disabledLabel: 'Diagnostic telemetry off',
+      help: 'Helps identify reliability and performance problems. It does not include prompts, file contents, command output, or raw error messages.',
+      onChange: value => void updateDiagnostics(value)
+    })
   );
 }
 
@@ -712,7 +742,7 @@ function ComputerControlSettings({ initial = {} }) {
   }));
 }
 
-function ApplicationUpdates({ lifecycle, buildStatus }) {
+function ApplicationUpdates({ lifecycle }) {
   const bridge = window.relaiDesktop;
   const supported = Boolean(bridge?.getUpdateStatus && bridge?.checkForUpdates && bridge?.downloadUpdate && bridge?.installUpdate);
   const [status, setStatus] = useState(null);
@@ -776,15 +806,15 @@ function ApplicationUpdates({ lifecycle, buildStatus }) {
     } finally { setBusy(''); }
   };
   const current = status || { state: 'idle' };
-  const buildId = buildIdOf(buildStatus);
   const view = updateView(current, autoDownload);
+  const showReleaseNotes = ['available', 'downloading', 'downloaded', 'installing'].includes(String(current.state || ''));
   return h(Card, { title: 'App updates', className: 'application-update-panel' },
-    h(SettingsField, { label: 'Release channel', inputId: 'updateReleaseChannel', help: 'Stable is recommended for normal use. Beta receives pre-release builds intended mainly for developers and testers.' },
+    h(SettingsField, { label: 'Release channel', inputId: 'updateReleaseChannel' },
       h('select', {
         id: 'updateReleaseChannel',
         value: updateChannel,
         disabled: busy === 'channel',
-        'aria-describedby': updateChannel === 'beta' ? 'updateReleaseChannelHelp updateReleaseChannelWarning' : 'updateReleaseChannelHelp',
+        'aria-describedby': updateChannel === 'beta' ? 'updateReleaseChannelWarning' : undefined,
         onChange: event => void updateReleaseChannel(event.currentTarget.value)
       },
         h('option', { value: 'stable' }, 'Stable'),
@@ -799,53 +829,46 @@ function ApplicationUpdates({ lifecycle, buildStatus }) {
     },
       h('span', { className: 'application-update-beta-warning-icon', 'aria-hidden': 'true' }, h(Icon, { name: 'warning', size: 16 })),
       h('div', null,
-        h('strong', null, 'Beta builds are mainly for developers and testers'),
-        h('p', null, 'Beta builds can contain serious bugs or incomplete changes. Use Stable for normal work. You may need to reinstall if a beta build fails.')
+        h('strong', null, 'Beta builds can be unstable'),
+        h('p', null, 'Use Stable for normal work.')
       )
     ) : null,
     h(ToggleRow, {
       label: 'Download verified updates automatically', checked: autoDownload, disabled: busy === 'auto', busy: busy === 'auto',
       enabledLabel: 'Automatic downloads on', disabledLabel: 'Ask before downloading',
-      help: 'Downloads a verified update in the background when one is found. Rel.AI still asks before installing it or opening the macOS installer.',
+      help: 'Downloads verified updates automatically. Rel.AI still asks before installation.',
       onChange: value => void updateAuto(value)
     }),
     h('div', { className: 'application-update-status', 'data-auto-download-updates': String(autoDownload), 'data-update-channel': updateChannel },
       h('div', { className: 'application-update-summary' },
         h('div', null,
           h('span', { className: 'application-update-label' }, 'Installed version'),
-          h('strong', null, current.currentVersion ? `v${current.currentVersion}` : 'Unknown version'),
-          buildId ? h('span', { className: 'application-update-label' }, 'Build') : null,
-          buildId ? h('span', { className: 'application-update-build' }, buildId) : null
+          h('strong', null, current.currentVersion ? `v${current.currentVersion}` : 'Unknown version')
         ),
         h(StatusPill, { label: view.label, tone: view.tone })
       ),
-      h('p', { className: 'muted application-update-copy' }, view.description),
+      view.description ? h('p', { className: 'muted application-update-copy' }, view.description) : null,
       h(UpdateSupportPolicy, { policy: current.supportPolicy }),
       h(UpdateSynchronizationNotice, { synchronization: current.updateSynchronization }),
-      h(UpdateReleaseNotes, { status: current, releaseNotes }),
+      showReleaseNotes ? h(UpdateReleaseNotes, { status: current, releaseNotes }) : null,
       current.state === 'downloading' ? h(UpdateProgress, { progress: current.progress }) : null,
       current.errorCode ? h('code', { className: 'application-update-code' }, `Error code: ${current.errorCode}`) : null,
       h('div', { className: 'connection-actions application-update-actions' },
         view.action ? h('button', { className: view.action.className, type: 'button', disabled: Boolean(busy), onClick: () => void run(view.action.id) }, busy === view.action.id ? `${view.action.label}…` : view.action.label) : null,
         view.secondary ? h('button', { className: 'secondary', type: 'button', disabled: Boolean(busy), onClick: () => void run(view.secondary.id) }, view.secondary.label) : null,
-        h('a', { className: 'buttonlike secondary', href: RELEASES_URL, target: '_blank', rel: 'noreferrer' }, 'GitHub Releases'),
+        ['unsupported', 'error'].includes(String(current.state || '')) ? h('a', { className: 'buttonlike secondary', href: RELEASES_URL, target: '_blank', rel: 'noreferrer' }, 'GitHub Releases') : null,
         current.state === 'error' ? h('a', { className: 'buttonlike secondary', href: '#diagnostics' }, 'Troubleshoot') : null
       )
     )
   );
 }
 
-function buildIdOf(buildStatus = {}) {
-  return String(buildStatus?.buildId || '').trim();
-}
-
 function updateView(status = {}, autoDownload = false) {
   const state = String(status.state || 'idle');
-  const currentVersion = status.currentVersion ? `v${status.currentVersion}` : 'Unknown version';
   const availableVersion = status.availableVersion ? `v${status.availableVersion}` : '';
   if (state === 'unsupported') return { label: 'Manual update', tone: 'warn', description: status.supportReason || 'This build must be updated manually from GitHub Releases.' };
   if (state === 'checking') return { label: 'Checking', tone: 'working', description: 'Checking for a newer version of Rel.AI.' };
-  if (state === 'up_to_date') return { label: 'Up to date', tone: 'ok', description: `${currentVersion} is the latest available version. Rel.AI checks again once per day.`, action: { id: 'check', label: 'Check again', className: 'secondary' } };
+  if (state === 'up_to_date') return { label: 'Up to date', tone: 'ok', description: '', action: { id: 'check', label: 'Check again', className: 'secondary' } };
   if (state === 'available') return { label: 'Update available', tone: 'warn', description: autoDownload ? `${availableVersion || 'A newer version'} is available. Rel.AI will download it automatically without restarting.` : `${availableVersion || 'A newer version'} is available. Downloading does not restart Rel.AI.`, action: { id: 'download', label: `Download ${availableVersion || 'update'}`, className: 'primary' }, secondary: { id: 'check', label: 'Check again' } };
   if (state === 'downloading') return { label: 'Downloading', tone: 'working', description: `Downloading ${availableVersion || 'the update'}. You can keep using Rel.AI while it downloads.` };
   if (state === 'downloaded') {
@@ -856,7 +879,7 @@ function updateView(status = {}, autoDownload = false) {
   }
   if (state === 'installing') return { label: 'Installing', tone: 'working', description: 'Rel.AI is temporarily paused while it prepares the update. It restarts automatically to finish installation.' };
   if (state === 'error') return { label: 'Update failed', tone: 'bad', description: status.error || 'The update could not be completed. The installed version is still available.', action: { id: 'check', label: 'Try again', className: 'primary' } };
-  return { label: 'Updates enabled', tone: 'ok', description: autoDownload ? (status.installMode === 'open_dmg' ? 'Rel.AI checks for updates and downloads verified updates automatically. It asks before opening the macOS installer.' : 'Rel.AI checks for updates and downloads verified updates automatically. It asks before installation.') : (status.installMode === 'open_dmg' ? 'Rel.AI checks for updates at least once per day and verifies each update. It asks before downloading and before opening the macOS installer.' : 'Rel.AI checks for updates at least once per day and verifies each update. It asks before downloading and before installation.'), action: { id: 'check', label: 'Check for updates', className: 'secondary' } };
+  return { label: 'Updates enabled', tone: 'ok', description: '', action: { id: 'check', label: 'Check for updates', className: 'secondary' } };
 }
 
 function UpdateSynchronizationNotice({ synchronization }) {
@@ -1091,11 +1114,8 @@ function QuitRow() {
   );
 }
 
-function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime = {}, runtimeCompatibility = {} }) {
+function AboutPage({ metadata, runtime = {}, repositoryRuntime = {}, runtimeCompatibility = {} }) {
   const repositoryUrl = validatedGitHubUrl(metadata.repositoryUrl);
-  const developer = metadata.developer || {};
-  const developerUrl = validatedGitHubUrl(developer.profileUrl);
-  const buildId = buildIdOf(buildStatus);
   const runtimeNotice = runtimeCompatibilityNotice(runtime, repositoryRuntime, runtimeCompatibility);
   const developerUnlockRef = useRef({ count: 0, startedAt: 0 });
   const onBuildClick = () => {
@@ -1113,32 +1133,32 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
       : h('span', { className: 'about-detail-value' }, label);
   };
   return h(React.Fragment, null,
-    h(SettingsHeader, { title: 'About Rel.AI', description: 'Rel.AI connects ChatGPT to projects on this computer.' }),
+    h(SettingsHeader, { title: 'About Rel.AI' }),
     h(Card, { title: 'Application information' },
-      h('div', { className: 'about-product' }, h('img', { src: '/public/assets/relai-logo.png', width: 193, height: 187, alt: '', 'aria-hidden': 'true' }), h('div', null,
+      h('div', { className: 'about-product' }, h('div', null,
         h('h4', null, metadata.name || 'Rel.AI MCP'),
-        h('p', null, `Version: ${metadata.version ? `v${metadata.version}` : 'Unknown version'}`),
-        buildId ? h('p', null, 'Build: ', h('button', {
+        h('p', null, 'Version: ', h('button', {
           className: 'about-build-trigger',
           type: 'button',
           onClick: onBuildClick,
-          'aria-label': `Build ${buildId}`
-        }, buildId)) : null
+          'aria-label': `Version ${metadata.version ? `v${metadata.version}` : 'unknown'}`
+        }, metadata.version ? `v${metadata.version}` : 'Unknown'))
       )),
       runtimeNotice ? h('div', { className: 'connection-notice warn about-runtime-mismatch', role: 'status' },
         h('strong', null, runtimeNotice.title),
         h('div', null, runtimeNotice.message)
       ) : null,
-      h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${developer.name} on GitHub (@${developer.username})` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')),
-      h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || '')),
-      h(AboutRow, { label: 'License' }, documentLink('LICENSE', String(metadata.license || 'Apache-2.0')))
+      h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
     ),
     h(Card, { title: 'Legal & privacy' },
       h(AboutRow, { label: 'Privacy' }, documentLink('PRIVACY.md', 'Privacy Policy')),
       h(AboutRow, { label: 'Terms' }, documentLink('TERMS.md', 'Terms of Use')),
       h(AboutRow, { label: 'Security' }, documentLink('SECURITY.md', 'Security Policy')),
-      h(AboutRow, { label: 'Third-party software' }, documentLink('THIRD_PARTY_NOTICES.md', 'Third-party notices')),
-      h(AboutRow, { label: 'Attribution' }, documentLink('NOTICE', 'NOTICE'))
+      h(AboutRow, { label: 'Licenses & notices' }, h('span', { className: 'about-detail-value' },
+        documentLink('LICENSE', String(metadata.license || 'License')), ' · ',
+        documentLink('THIRD_PARTY_NOTICES.md', 'Third-party'), ' · ',
+        documentLink('NOTICE', 'NOTICE')
+      ))
     )
   );
 }

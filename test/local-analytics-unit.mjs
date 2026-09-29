@@ -27,7 +27,7 @@ try {
   const snapshot = readLocalUsageSnapshot(config, '2026-08');
   assert.deepEqual(snapshot.privacy, {
     retentionDays: LOCAL_ANALYTICS_RETENTION_DAYS,
-    externalTelemetry: { enabled: false, endpointConfigured: false, sampleRatio: 1 }
+    externalTelemetry: { enabled: false, diagnosticsEnabled: false, usageReportingEnabled: false, endpointConfigured: false, sampleRatio: 1 }
   });
   assert.equal(LOCAL_ANALYTICS_RETENTION_DAYS, 180);
   assert.deepEqual(snapshot.totals, {

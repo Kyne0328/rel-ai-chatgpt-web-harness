@@ -13,7 +13,8 @@ for (const file of requiredDocuments) {
 const privacy = fs.readFileSync(path.join(root, 'PRIVACY.md'), 'utf8');
 assert.match(privacy, /bounded tool inputs and results/i);
 assert.match(privacy, /180 days/i);
-assert.match(privacy, /off by default/i);
+assert.match(privacy, /usage measurement is always enabled/i);
+assert.match(privacy, /on by default/i);
 assert.match(privacy, /safeStorage/);
 assert.match(privacy, /Clear all local data/i);
 

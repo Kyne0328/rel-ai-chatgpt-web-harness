@@ -44,10 +44,11 @@ function publicEditInputSchema(inputSchema, maxBatchEdits) {
     description: 'One primary edit form is accepted per call. Rel.AI validates the selected form before touching the workspace.',
     properties: {
       ...properties,
-      workspace: describe('workspace', 'Authorized workspace for this edit. It may be omitted only when an explicitly supplied valid work_id already identifies the workspace.'),
+      workspace: describe('workspace', 'Configured project for this edit. Omit it only when direct filesystem access is enabled or a valid work_id already identifies a project.'),
+      root: describe('root', 'Absolute local directory for direct-filesystem edits when workspace is omitted. Relative edit paths are resolved inside this root.'),
       semantic: describe('semantic', 'Language-server-authoritative rename at an exact file position. Rel.AI validates and applies the proposed WorkspaceEdit.'),
       symbolEdit: describe('symbolEdit', 'Indexed structural symbol edit. Supports replace, insert_before, and insert_after; pass path or a qualified symbol when the name is ambiguous.'),
-      path: describe('path', 'Workspace-relative target path. Required for full-file content and exact replacement forms.'),
+      path: describe('path', 'Target path. Use a project-relative path with workspace, or an absolute path / root-relative path when direct filesystem access is enabled.'),
       oldText: describe('oldText', 'Exact non-empty current text to replace. Pair with newText.'),
       newText: describe('newText', 'Replacement text paired with oldText. An empty string deletes the matched text.'),
       occurrence: describe('occurrence', 'One-based occurrence to replace when oldText is not unique.'),

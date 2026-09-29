@@ -99,6 +99,7 @@ assert.doesNotMatch(main, /createSecureTunnelRuntime|createTunnelCredentialStore
 assert.match(desktopHost, /createSecureTunnelRuntime/);
 assert.match(desktopHost, /createTunnelCredentialStore/);
 assert.match(desktopHost, /createServiceProcessClient/);
+assert.match(desktopHost, /REL_AI_OFFICIAL_BUILD:\s*app\.isPackaged\s*===\s*true\s*\?\s*'1'\s*:\s*'0'/, 'the service process must enable built-in telemetry endpoints only for installed official builds');
 assert.match(desktopHost, /utilityProcess/);
 assert.doesNotMatch(desktopHost, /startHttpServer|stopAllManagedProcesses/, 'Electron desktop host must not own the MCP HTTP/runtime process path');
 assert.doesNotMatch(desktopHost, /readLocalUsageSnapshot(?:Async)?|onboardingState|taskCodeWorkspace/, 'Rel.AI business operations must stay behind the utility-process boundary');

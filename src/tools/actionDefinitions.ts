@@ -364,9 +364,12 @@ function actionBranch(action: string, mapping: ActionMapping): ObjectJsonSchema 
   for (const field of publicContract.omit || []) delete properties[field];
   const taskScope = mapping.behavior?.taskScope || operation.behavior?.taskScope || TASK_SCOPE.REQUIRED;
   const taskScoped = taskScope === TASK_SCOPE.REQUIRED;
-  // Let work.begin reach runtime workspace resolution so missing/typo inputs can
-  // return authorized workspace aliases instead of failing in schema validation.
-  const workspaceRecoverable = mapping.operationName === OP.WORK_BEGIN;
+  // Let operations with safe runtime workspace recovery reach dispatch instead of
+  // failing at public-schema validation.
+  const workspaceRecoverable = mapping.operationName === OP.WORK_BEGIN
+    || mapping.operationName === OP.READ
+    || mapping.operationName === OP.SEARCH_TEXT
+    || mapping.operationName === OP.EDIT;
   const required = new Set((schema.required || [])
     .filter(field => field !== 'action' && !((taskScoped || workspaceRecoverable) && field === 'workspace') && Object.hasOwn(properties, field)));
   for (const field of publicContract.required || []) {

@@ -132,6 +132,11 @@ export function completeDashboardOnboarding(payload: JsonRecord): JsonRecord {
 export async function updateDashboardWorkspace(payload: JsonRecord): Promise<JsonRecord> {
   const current = readConfig();
   const action = String(payload.action || 'upsert').toLowerCase();
+  if (action === 'project_access') {
+    return configEditor.updateProjectAccess(current, {
+      directFilesystem: payload.directFilesystem === true
+    }) as JsonRecord;
+  }
   const workspaceConfig = asJsonRecord(payload.workspaceConfig);
   const originalAlias = String(payload.originalAlias || workspaceConfig.originalAlias || payload.alias || payload.workspace || '').trim();
   const previousWorkspace = current.workspaces?.[originalAlias]

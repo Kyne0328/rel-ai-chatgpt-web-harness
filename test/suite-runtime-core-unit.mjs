@@ -2383,11 +2383,11 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageData, /desktop\.getLocalUsage/);
   assert.doesNotMatch(`${usageSource}\n${usageData}`, /getGatewayUsage|connectionMode|pairing_required|cloudUsageAvailability/i);
   assert.doesNotMatch(`${usageSource}\n${usageData}`, /fetch\(|DASHBOARD_DATA_URL|auditTail|taskActivity/);
-  assert.match(usageSource, /Rel\.AI stores aggregate action categories and work-type labels locally/i, 'Analytics privacy copy must state what stays local');
-  assert.match(usageReact, /data-usage-privacy/, 'Analytics must disclose local retention and external telemetry state');
-  assert.match(usageSource, /External developer telemetry is off/, 'Analytics must make the default external-telemetry state explicit');
-  assert.match(usageSource, /OTLP endpoint is configured, but Rel\.AI does not export traces while telemetry is off/, 'Analytics must distinguish a configured endpoint from an enabled exporter');
-  assert.match(usageSource, /raw error messages/, 'Analytics must disclose the external trace redaction boundary');
+  assert.doesNotMatch(usageReact, /data-usage-privacy/, 'Analytics must not repeat passive privacy-policy copy in the operational view');
+  assert.doesNotMatch(usageSource, /Minimal usage counting is always on|aggregate action categories and work-type labels locally/i, 'Analytics helpers must not retain removed passive privacy copy');
+  assert.match(settingsReact, /title: 'Diagnostics'/, 'App settings must keep the actionable diagnostics control');
+  assert.doesNotMatch(settingsReact, /Usage counting/, 'App settings must not show non-actionable installation reporting');
+  assert.match(settingsReact, /Diagnostic telemetry/, 'App settings must expose the diagnostic telemetry toggle');
   assert.doesNotMatch(usageReact, /target: 'analytics', confirm: true/, 'Analytics page must not expose the destructive local-history clear action');
   assert.match(settingsReact, /target: 'analytics', confirm: true/, 'Settings must retain an explicit local-history clear action');
   assert.doesNotMatch(`${usageSource}\n${usageRender}`, /innerHTML|replaceChildren|insertAdjacentHTML/, 'Analytics model/view helpers must not retain the legacy DOM renderer');
@@ -2395,13 +2395,10 @@ async function case_usage_ui_contract_unit() {
   assert.doesNotMatch(usageReact, /'data-usage-content'.*'aria-live'/);
   assert.match(usageReact, /Analytics updated for \$\{bounds\.label\}/);
   assert.match(usageReact, /taskRevision/, 'Analytics must refresh current local metrics from canonical live task activity');
-  assert.match(homeReact, /revisions\?\.task/, 'Overview analytics must refresh from canonical live task revisions');
-  assert.doesNotMatch(homeReact, /firstRequestObserved\s*\?\s*h\(HomeAnalytics/, 'Overview analytics must not disappear when volatile MCP request history resets on restart');
+  assert.doesNotMatch(homeReact, /HomeAnalytics|loadAnalyticsData/, 'Overview must not duplicate the dedicated Analytics page');
   assert.doesNotMatch(homeReact, /firstRequestObserved\s*\?\s*h\(RecentTasksCard/, 'Persisted recent tasks must not disappear when volatile MCP request history resets on restart');
-  assert.match(workspacesReact, /taskRevision/, 'Project analytics must refresh from canonical live task revisions');
-  assert.match(workspacesReact, /Loading analytics…/, 'Project cards must show an explicit analytics loading state instead of a blank region');
-  assert.match(workspacesReact, /Analytics unavailable/, 'Project cards must show an explicit analytics failure state when initial analytics loading fails');
-  assert.doesNotMatch(workspacesReact, /setTimeout\(\(\) => \{[\s\S]{0,500}loadAnalyticsModels/, 'Project analytics must not wait on an arbitrary timer before starting the initial load');
+  assert.doesNotMatch(workspacesReact, /WorkspaceAnalytics|loadAnalyticsModels|Loading analytics…|Analytics unavailable/, 'Project cards must not embed duplicate analytics panels');
+  assert.match(workspacesReact, /routeHref\('usage'/, 'Project cards must retain a direct Analytics link');
   assert.match(usageReact, /'aria-pressed': range === key \? 'true' : 'false'/);
   assert.match(usageReact, /role: 'tooltip'/, 'Analytics metric help must expose tooltip semantics');
   assert.match(usageReact, /'aria-describedby': helpId/, 'Analytics metric help triggers must reference their tooltip text');
@@ -2520,8 +2517,7 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageReact, /Open Troubleshooting/, 'Infrastructure warnings must link to Troubleshooting');
   assert.doesNotMatch(usageReact, /usage-transport-alert|Connection delivery/, 'Historical transport counters must not render as a standalone warning banner');
   assert.match(usageRender, /Request delivery/, 'Transport delivery must be integrated as a neutral Analytics metric');
-  assert.match(workspacesReact, /Successful actions/, 'Project analytics must show normal success rate instead of the reliability percentage');
-  assert.doesNotMatch(workspacesReact, /label: 'Reliable'/, 'Project analytics must not expose the diagnostic reliability percentage');
+  assert.doesNotMatch(workspacesReact, /Successful actions|label: 'Reliable'/, 'Project cards must not duplicate analytics metrics');
   for (const field of ['requests', 'toolCalls', 'successes', 'failures', 'executionMs', 'activeDays']) {
     assert.match(usageCombined, new RegExp(`\\b${field}\\b`), `Analytics must consume ${field}.`);
   }
@@ -2600,7 +2596,7 @@ async function case_usage_ui_contract_unit() {
     desktop: { getLocalUsage: async () => ({
       ok: true,
       month: '2026-08',
-      privacy: { retentionDays: 180, externalTelemetry: { enabled: false, endpointConfigured: true, sampleRatio: 0.25 } },
+      privacy: { retentionDays: 180, externalTelemetry: { enabled: false, diagnosticsEnabled: false, usageReportingEnabled: true, endpointConfigured: true, sampleRatio: 0.25 } },
       totals: { requests: 2, toolCalls: 2, successes: 2, failures: 0, executionMs: 120, activeDays: 1 },
       tools: [], workspaces: [{ workspace: 'repo', toolCalls: 2, successes: 2, failures: 0, executionMs: 120 }],
       workspaceTools: [],
@@ -2614,7 +2610,7 @@ async function case_usage_ui_contract_unit() {
   assert.equal(loaded.current.workspaces[0].workspace, 'repo');
   assert.deepEqual(loaded.privacy, {
     retentionDays: 180,
-    externalTelemetry: { enabled: false, endpointConfigured: true, sampleRatio: 0.25 }
+    externalTelemetry: { enabled: false, diagnosticsEnabled: false, usageReportingEnabled: true, endpointConfigured: true, sampleRatio: 0.25 }
   });
   
   console.log('Local analytics UI and privacy contracts passed.');

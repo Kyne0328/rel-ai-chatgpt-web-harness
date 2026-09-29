@@ -9,6 +9,13 @@
   box-shadow: none;
 }
 .workspace-grid { @apply grid gap-3; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.workspace-direct-access { @apply flex items-center justify-between gap-4 px-4 py-3; }
+.workspace-direct-access-copy { @apply min-w-0; }
+.workspace-direct-access-copy strong { @apply block text-[13px]; }
+.workspace-direct-access-copy p { @apply m-0 mt-1 max-w-4xl text-[12px] leading-5; color: var(--ui-text-secondary); }
+.workspace-direct-access-switch { @apply min-h-11 min-w-16 shrink-0 rounded-lg px-3 text-[12px] font-semibold; border: 1px solid var(--ui-border-control); background: var(--ui-surface-raised); color: var(--ui-text-secondary); }
+.workspace-direct-access-switch[aria-checked="true"] { border-color: var(--ui-action-primary); background: var(--ui-selection-background); color: var(--ui-action-primary); }
+.workspace-direct-access-switch:disabled { @apply cursor-wait opacity-70; }
 .workspace-card { @apply flex min-w-0 flex-col; }
 .workspace-card-head { @apply flex items-start justify-between gap-4 border-b px-4 py-3; border-color: var(--ui-border-subtle); }
 .workspace-identity { @apply min-w-0; }
@@ -100,6 +107,7 @@ textarea.ws-form-path { @apply min-h-24 resize-y; }
 }
 
 @media (max-width: 760px) {
+  .workspace-direct-access { @apply items-start; }
   .workspace-readiness { grid-template-columns: 1fr; }
   .workspace-readiness-facts { border-left: 0; border-top: 1px solid var(--ui-border-default); }
 }

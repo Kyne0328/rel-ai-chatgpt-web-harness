@@ -2,6 +2,11 @@
 
 ## [1.1.4] — 2026-09-27
 
+### Privacy-bounded usage measurement and diagnostics
+- **Add stable, minimal installation counting for official builds.** Rel.AI sends a small JSON presence request with a random locally persisted installation ID plus app version, platform, and architecture. A successful report is suppressed locally for 24 hours, the ID survives normal reinstalls while Rel.AI local data is retained, and it is not derived from hardware or operating-system account identifiers.
+- **Deploy the zero-cost maintainer analytics backend.** Official usage reports now terminate at a Cloudflare Worker and update one deduplicated installation row in a dedicated APAC D1 database, with daily aggregate snapshots and a username/password-protected developer analytics view. The Worker strictly validates the fixed presence schema, applies request-size and rate limits, and does not add network-address metadata to stored installation rows.
+- **Make diagnostic telemetry default-on but independently disableable.** Settings separates non-disableable installation counting from richer diagnostic OpenTelemetry traces. Official traces are proxied through the Cloudflare Worker to the dedicated Axiom diagnostic dataset so no Axiom credential is shipped in Rel.AI; users can turn diagnostics off without suppressing the installation count, and custom diagnostic OTLP endpoints cannot redirect the maintainer usage stream.
+
 ### Plan-backed tasks and projectless Direct utilities
 - **Make every durable task plan-backed.** `work.begin` now establishes a non-empty ordered checklist atomically with task identity, using caller-supplied `steps` when available and a proportional single goal step otherwise. Compact `taskProgress` updates one existing step, while `work.plan` is reserved for structural plan changes; durable tasks no longer expose Direct versus Planned execution modes.
 - **Keep projectless one-shot utility/control work taskless.** General machine-local one-shots do not need a fake project or durable task; meaningful project goals retain explicit `work_id` isolation.

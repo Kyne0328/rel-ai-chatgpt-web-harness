@@ -372,6 +372,8 @@ Rel.AI treats reconnection and repository-work recovery separately. Restoring th
 
 The Usage view measures **locally observed Rel.AI activity**, not ChatGPT model tokens or ChatGPT billing. It can report request counts, tool calls, outcomes, execution duration, active days, tools, and workspace aggregates from local Rel.AI records.
 
+Official release builds also send a minimal always-on installation-presence request to the maintainer so unique and active Rel.AI installations can be counted without treating every normal reinstall as a new installation. The request contains a random locally stored installation ID plus app version, platform, and architecture, and a successful report is suppressed locally for 24 hours. Diagnostic telemetry is separate, on by default, and can be turned off in Settings. Official diagnostics use OpenTelemetry through the maintainer's Cloudflare edge; the installation registry is stored separately in Cloudflare D1. See [PRIVACY.md](PRIVACY.md) for the exact data boundary.
+
 Keep tunnel runtime API keys, local bearer credentials, repository credentials, private keys, and other secrets out of public issues and unreviewed diagnostic exports.
 
 ## Build Rel.AI from source

@@ -1,6 +1,6 @@
 # Rel.AI MCP Privacy Policy
 
-**Effective date: September 8, 2026**
+**Effective date: September 28, 2026**
 
 This Privacy Policy explains how Rel.AI MCP ("Rel.AI") handles information when you use the Rel.AI desktop application, local MCP runtime, repository tools, browser/computer capabilities, update surfaces, and related project resources maintained by Kyne ("the maintainer").
 
@@ -46,13 +46,17 @@ Local analytics do **not** store prompts, file paths, file contents, command out
 
 You can clear local analytics from the Analytics page without deleting project files, task history, memory, settings, or telemetry configuration.
 
-## 5. Optional external telemetry
+## 5. External usage measurement and diagnostic telemetry
 
-External OpenTelemetry tracing is **off by default** and requires `telemetry.enabled` to be explicitly enabled. Merely configuring an OTLP endpoint does not turn telemetry on.
+Official Rel.AI release builds send a minimal installation-presence request to the maintainer's usage endpoint. This usage measurement is always enabled in an official build that has that endpoint configured and does not have a separate off switch. It is used to count unique and active Rel.AI installations without treating every normal reinstall as a new installation.
 
-When enabled, operational traces can include tool names, project aliases, task identifiers, client/runtime information, timings, and summarized commands. Rel.AI's telemetry boundary excludes prompts, file contents, command output, and raw exception messages from exported traces.
+The presence payload contains only a schema version, a random pseudonymous installation ID, Rel.AI version, operating-system platform, and CPU architecture. The service records the receipt time. The installation ID is generated locally and stored in Rel.AI-owned local state. A successful presence request records its local report time so normal restarts do not report again for 24 hours. Normal reinstalls reuse the ID while that local state is retained. Clearing all Rel.AI local data, changing operating-system users, or otherwise removing that identity can cause a later installation to receive a new ID. Rel.AI does not derive this ID from a hardware serial number, device fingerprint, or operating-system account identifier.
 
-If you configure or enable an external OTLP endpoint, the operator of that endpoint controls its own storage, retention, security, and deletion practices. Rel.AI cannot retroactively delete data from an external telemetry system that it does not operate.
+The maintainer usage service stores one installation row keyed by that pseudonymous ID, with first-seen and last-seen times, first and current Rel.AI versions, platform, and architecture. It also stores small daily aggregate counts for trend reporting. The presence schema rejects unexpected client fields instead of adding them to this registry.
+
+Diagnostic OpenTelemetry tracing is **on by default** but can be turned off in Settings. Diagnostic traces can include tool names, project aliases, task identifiers, client/runtime information, timings, and summarized commands. Rel.AI's telemetry boundary excludes prompts, file contents, command output, and raw exception messages from exported diagnostic traces. Official builds send diagnostics through the maintainer's Cloudflare telemetry edge to the configured diagnostic storage service; disabling diagnostic telemetry stops that trace export without disabling the minimal installation count.
+
+Cloudflare processes requests to the maintainer telemetry endpoint and can process normal network metadata to deliver and protect that service. The Rel.AI Worker does not add network-address metadata to D1 installation records or diagnostic trace attributes. Advanced or development configurations can direct diagnostic traces to another OTLP endpoint; the operator of that external endpoint controls its own storage, retention, security, and deletion practices.
 
 ## 6. Local retention and deletion
 
@@ -69,7 +73,8 @@ Derived repository indexes and caches can be rebuilt from local project source a
 Rel.AI can interact with third-party services that have their own terms and privacy practices, including:
 
 - **OpenAI / ChatGPT / Secure MCP Tunnel** for the ChatGPT connection you configure;
-- **GitHub** for source code, release discovery, downloads, issues, and release artifacts; and
+- **GitHub** for source code, release discovery, downloads, issues, and release artifacts;
+- **Cloudflare and Axiom** for the official usage-measurement and optional diagnostic-telemetry services described above; and
 - operating-system or browser services that you explicitly invoke through Rel.AI.
 
 Using those services can cause information to be processed by those providers independently of Rel.AI.

@@ -131,29 +131,16 @@ function createExtensionsRoute() {
 
     return h('div', { className: 'section extensions-page', 'data-extensions-react': '' },
       h('div', { className: 'section-head' },
-        h('div', { className: 'extensions-header-copy' },
-          h('h2', null, 'Add skills and tools to ChatGPT'),
-          h('p', null, 'Extensions add reusable instructions and local tools to ChatGPT. ChatGPT continues to handle the conversation and reasoning.')
-        ),
+        h('div', { className: 'extensions-header-copy' }, h('h2', null, 'Extensions')),
         h('div', { className: 'section-head-actions' },
           h('button', {
             className: 'secondary compact-button',
             type: 'button',
             disabled: Boolean(busy),
             onClick: () => { void refreshCatalog(); }
-          }, h(Icon, { name: 'refresh', size: 14, className: busy === 'refresh' ? 'animate-spin' : '' }), busy === 'refresh' ? 'Refreshing…' : 'Refresh catalog'),
-          h(ExternalLink, { href: EXTENSIONS_REPOSITORY_URL, label: 'Catalog repository' })
+          }, h(Icon, { name: 'refresh', size: 14, className: busy === 'refresh' ? 'animate-spin' : '' }), busy === 'refresh' ? 'Refreshing…' : 'Refresh catalog')
         )
       ),
-
-      data ? h(ExtensionsKpiStrip, {
-        stats,
-        installRoot: data.installRoot || '',
-        onViewUpdates: () => {
-          setActiveTab(stats.installedCount ? 'installed' : 'discover');
-          setFilterStatus('updates');
-        }
-      }) : null,
 
       h('div', { className: 'extensions-tabs-row' },
         h(ExtensionTabs, { activeTab, setActiveTab, stats }),
@@ -217,81 +204,6 @@ function createExtensionsRoute() {
       }) : null
     );
   };
-}
-
-function ExtensionsKpiStrip({ stats, installRoot, onViewUpdates }) {
-  const [copied, setCopied] = useState(false);
-
-  const onCopyPath = async () => {
-    if (!installRoot) return;
-    try {
-      await copyText(installRoot);
-      setCopied(true);
-      toast('Extension storage folder copied to clipboard.', { variant: 'info' });
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      toast('Could not copy path to clipboard.', { variant: 'error' });
-    }
-  };
-
-  return h('div', { className: 'extensions-kpi-strip' },
-    h('div', { className: 'extensions-kpi-card' },
-      h('div', { className: 'extensions-kpi-icon' }, h(Icon, { name: 'package', size: 20 })),
-      h('div', { className: 'extensions-kpi-content' },
-        h('span', { className: 'extensions-kpi-value' }, stats.installedCount),
-        h('span', { className: 'extensions-kpi-label' }, 'Installed')
-      )
-    ),
-    h('div', { className: 'extensions-kpi-card' },
-      h('div', { className: 'extensions-kpi-icon ok' }, h(Icon, { name: 'check', size: 20 })),
-      h('div', { className: 'extensions-kpi-content' },
-        h('span', { className: 'extensions-kpi-value' }, stats.readyCount),
-        h('span', { className: 'extensions-kpi-label' }, 'Ready')
-      )
-    ),
-    stats.updatesCount
-      ? h('button', {
-          type: 'button',
-          className: 'extensions-kpi-card',
-          onClick: onViewUpdates,
-          title: 'View extensions with available updates'
-        },
-          h('div', { className: 'extensions-kpi-icon warn' }, h(Icon, { name: 'download', size: 20 })),
-          h('div', { className: 'extensions-kpi-content' },
-            h('span', { className: 'extensions-kpi-value' }, stats.updatesCount),
-            h('span', { className: 'extensions-kpi-label' }, 'Updates available')
-          )
-        )
-      : h('div', { className: 'extensions-kpi-card' },
-          h('div', { className: 'extensions-kpi-icon' }, h(Icon, { name: 'download', size: 20 })),
-          h('div', { className: 'extensions-kpi-content' },
-            h('span', { className: 'extensions-kpi-value' }, stats.updatesCount),
-            h('span', { className: 'extensions-kpi-label' }, 'Up to date')
-          )
-        ),
-    h('div', { className: 'extensions-kpi-card' },
-      h('div', { className: 'extensions-kpi-icon accent' }, h(Icon, { name: 'sparkles', size: 20 })),
-      h('div', { className: 'extensions-kpi-content' },
-        h('span', { className: 'extensions-kpi-value' }, stats.catalogCount),
-        h('span', { className: 'extensions-kpi-label' }, 'Available in catalog')
-      )
-    ),
-    installRoot ? h('div', { className: 'extensions-kpi-card' },
-      h('div', { className: 'extensions-kpi-icon' }, h(Icon, { name: 'folder', size: 20 })),
-      h('div', { className: 'extensions-kpi-content' },
-        h('button', {
-          type: 'button',
-          className: 'extensions-kpi-copy-btn',
-          onClick: onCopyPath,
-          title: `Copy path: ${installRoot}`
-        },
-          h('span', { className: 'extensions-kpi-path' }, installRoot.split(/[/\\]/).pop() || 'extensions'),
-          h(Icon, { name: copied ? 'check' : 'copy', size: 14, className: copied ? 'ok' : '' })
-        ),
-        h('span', { className: 'extensions-kpi-label' }, 'Storage folder')
-      )
-    ) : null
-  );
 }
 
 function ExtensionTabs({ activeTab, setActiveTab, stats }) {

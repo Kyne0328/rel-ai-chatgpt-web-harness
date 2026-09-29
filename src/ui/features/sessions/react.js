@@ -191,13 +191,6 @@ function SessionsPage({ data = {} }) {
       )
     ),
     h('section', { className: 'card sessions-history-card' },
-      h('div', { className: 'card-head' },
-        h('div', null, h('h3', null, 'Recent tasks')),
-        h('div', { className: 'card-head-actions' },
-          h('a', { className: 'section-action', href: '#activity' }, 'Activity'),
-          h('a', { className: 'section-action', href: '#diagnostics' }, 'Troubleshooting')
-        )
-      ),
       h('div', { className: 'sessions-master-detail' },
         h('div', { className: 'card-body task-list', ref: taskListRef, onKeyDown: onTaskListKeyDown },
           visibleSessions.length
@@ -225,10 +218,7 @@ function SessionsPage({ data = {} }) {
                 olderExpanded,
                 setOlderExpanded
               })
-            : h('div', { className: 'inspector-empty' },
-                h('strong', null, 'Select a task'),
-                h('span', null, 'Choose a task to inspect its overview, activity, and technical details without leaving this page.')
-              )
+            : h('div', { className: 'inspector-empty' }, h('strong', null, 'Select a task'))
         )
       )
     )

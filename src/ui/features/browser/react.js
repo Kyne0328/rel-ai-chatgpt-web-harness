@@ -148,11 +148,8 @@ function createBrowserRoute() {
       return h('section', { className: 'section browser-route' },
         h('div', { className: 'browser-empty card' },
           h(Icon, { name: 'browser', className: 'browser-empty-icon', size: 28 }),
-          h('h2', null, 'No local browser session is active.'),
-          h('p', null, 'When ChatGPT uses Rel.AI for a local browser task, the live page will open here automatically.'),
-          h('div', { className: 'browser-empty-hint' },
-            h(StatusPill, { label: 'Waiting for AI', tone: 'neutral' })
-          )
+          h('h2', null, 'No local browser session'),
+          h('p', null, 'A live page appears here when ChatGPT starts a browser task.')
         ),
         error ? h('div', { className: 'connection-notice bad', role: 'alert' }, error) : null
       );

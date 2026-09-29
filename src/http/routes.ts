@@ -23,6 +23,8 @@ const NOT_FOUND_PAYLOAD = {
     logsApi: 'GET /api/logs',
     diagnosticsApi: 'GET /api/diagnostics',
     diagnosticsResetApi: 'POST /api/diagnostics/reset',
+    telemetryApi: 'GET /api/telemetry',
+    telemetryUpdateApi: 'POST /api/telemetry',
     extensionsApi: 'GET /api/extensions',
     extensionsActionApi: 'POST /api/extensions',
     updateWorkspacesApi: 'POST /api/workspaces',
@@ -56,6 +58,7 @@ const loadDashboardComputer = () => import('./dashboardComputer.ts');
 const loadDashboardDiagnostics = () => import('./dashboardDiagnostics.ts');
 const loadDashboardExtensions = () => import('./dashboardExtensions.ts');
 const loadDashboardProcesses = () => import('./dashboardProcesses.ts');
+const loadDashboardTelemetry = () => import('./dashboardTelemetry.ts');
 let mcpTransportPromise: ReturnType<typeof importMcpTransport> | null = null;
 function importMcpTransport() { return import('./mcpTransport.ts'); }
 function loadMcpTransport() {
@@ -86,6 +89,7 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/tasks/session': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskSession') },
   '/api/logs': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiLogs') },
   '/api/diagnostics': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnostics') },
+  '/api/telemetry': { auth: authDashboard, handler: lazyRoute(loadDashboardTelemetry, 'handleApiTelemetry') },
   '/api/extensions': { auth: authDashboard, handler: lazyRoute(loadDashboardExtensions, 'handleApiExtensions') },
   '/api/computer': { auth: authDashboard, handler: lazyRoute(loadDashboardComputer, 'handleApiComputer') },
   '/api/release-notes': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleReleaseNotes') },
@@ -97,6 +101,7 @@ const POST_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/onboarding/complete': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleOnboardingComplete') },
   '/api/workspaces': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiWorkspaces') },
   '/api/diagnostics/reset': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnosticsReset') },
+  '/api/telemetry': { auth: authDashboard, handler: lazyRoute(loadDashboardTelemetry, 'handleApiTelemetryAction') },
   '/api/extensions': { auth: authDashboard, handler: lazyRoute(loadDashboardExtensions, 'handleApiExtensionsAction') },
   '/api/computer': { auth: authDashboard, handler: lazyRoute(loadDashboardComputer, 'handleApiComputerAction') },
   '/api/pick-folder': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handlePickFolder') },

@@ -212,7 +212,9 @@ async function createDesktopHost(options = {}) {
     utilityProcess,
     modulePath: path.join(electronRoot, 'service-process.js'),
     cwd: path.dirname(electronRoot),
-    env: makeServiceProcessEnvironment({}, { allow: configuredProcessEnvironmentAllow() }),
+    env: makeServiceProcessEnvironment({
+      REL_AI_OFFICIAL_BUILD: app.isPackaged === true ? '1' : '0'
+    }, { allow: configuredProcessEnvironmentAllow() }),
     nativeHandlers: {
       pickFolder: () => dashboardWindowManager.pickFolder(),
       openFolder: payload => dashboardWindowManager.openFolder(payload.path),

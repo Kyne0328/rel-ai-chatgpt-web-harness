@@ -34,7 +34,7 @@ const WORK_FINISH_QUEUE_TIMEOUT_MS = 2_000;
 const DEFAULT_MUTATION_WATCHDOG_MS = 5 * 60_000;
 const MUTATION_WATCHDOG_TERMINATION_GRACE_MS = 15_000;
 
-async function executeToolCall({ config, name, executionName = name, effectiveArgs, context, requestTaskContext = null, finishActivity, definition }) {
+async function executeToolCall({ config, name, executionName = name, effectiveArgs, context, requestTaskContext = null, finishActivity, definition, workspaceOverride = null }) {
   let sessionStart = { started: false, alias: '' };
   const value = await runWithToolActivity(finishActivity, () => runSpan(config,
     executionName === OP.WORK_BEGIN ? 'relai.logical_task.start' : 'relai.tool.call',
@@ -45,7 +45,8 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       const backgroundStatusMode = executionName === OP.WORK_STATUS
         && Boolean(backgroundReference)
         && fallbackExecutionStatus(backgroundReference, { config })?.status === 'running';
-      const workspace = effectiveArgs?.workspace ? resolveWorkspace(config, effectiveArgs.workspace) : null;
+      const workspace = workspaceOverride || (effectiveArgs?.workspace ? resolveWorkspace(config, effectiveArgs.workspace) : null);
+      const directFilesystem = workspace?.directFilesystem === true;
       const branchChange = isExplicitBranchChange(executionName, effectiveArgs);
       const readOnlyExec = executionName === OP.EXEC && isClearlyReadOnlyExec(effectiveArgs);
       const queueMode = queueModeFor(executionName, definition, readOnlyExec);
@@ -69,9 +70,11 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           cancel: context?.cancel || null,
           requestTaskContext,
           backgroundStatusMode,
-          mutationTrackingRequired: executionName !== OP.EXEC || !readOnlyExec
+          mutationTrackingRequired: executionName !== OP.EXEC || !readOnlyExec,
+          workspaceOverride: workspaceOverride || undefined
         }));
         if (workspace
+          && !directFilesystem
           && taskId
           && effectiveArgs?.dryRun !== true
           && (executionName === OP.EDIT || executionName === OP.EXEC)
@@ -88,7 +91,9 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       if (executionName === OP.WORK_FINISH) finishActivity?.assertCompletionAvailable?.();
       const operationSignal = combineAbortSignals(context?.signal, finishActivity?.signal);
       const result = await runWorkspaceOperation(
-        executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || backgroundStatusMode ? '' : effectiveArgs?.workspace,
+        executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || backgroundStatusMode
+          ? ''
+          : workspaceOverride?.alias || effectiveArgs?.workspace,
         async () => {
           const watchdog = createMutationWatchdog(
             queueScope,
@@ -99,11 +104,11 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             hasAgentCancellationHandle(effectiveArgs, { taskId, nativeTaskId: context?.nativeTaskId })
           );
           try {
-            if (workspace && isMutationScope(queueScope)) {
+            if (workspace && !directFilesystem && isMutationScope(queueScope)) {
               assertNoRecoveredMutationProcess(config, workspace.alias);
               recoverStructuredPatchTransaction(config, workspace);
             }
-            if (taskId && workspace && taskBaselineRequired(executionName, queueScope)) {
+            if (taskId && workspace && !directFilesystem && taskBaselineRequired(executionName, queueScope)) {
               try {
                 const integrity = await ensureTaskBaseline(config, taskId, workspace.alias, { signal: watchdog.signal });
                 if (requestTaskContext && integrity) requestTaskContext.integrity = integrity;
@@ -120,7 +125,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
               'tool.session',
               () => maybeStartSession(config, executionName, effectiveArgs || {}, { taskId })
             );
-            const handled = await (workspace && isMutationScope(queueScope)
+            const handled = await (workspace && !directFilesystem && isMutationScope(queueScope)
               ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal))
               : invokeHandler(effectiveArgs, watchdog.signal));
             if (workspace && isMutationScope(queueScope) && hasUnconfirmedTermination(handled)) {

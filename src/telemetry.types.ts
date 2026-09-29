@@ -120,8 +120,9 @@ export interface ExecutionPlanMetrics {
 }
 
 export interface TelemetryConfig {
+  stateDir?: string;
   telemetry?: {
-    enabled?: boolean;
+    diagnosticsEnabled?: boolean;
     endpoint?: unknown;
     sampleRatio?: unknown;
   };
@@ -129,7 +130,10 @@ export interface TelemetryConfig {
 
 export interface TelemetryStatus {
   enabled: boolean;
+  diagnosticsEnabled: boolean;
+  usageReportingEnabled: boolean;
   initialized: boolean;
+  usageInitialized: boolean;
   exporter: '' | 'otlp-http';
   endpointConfigured: boolean;
   endpoint: '' | '[configured]';

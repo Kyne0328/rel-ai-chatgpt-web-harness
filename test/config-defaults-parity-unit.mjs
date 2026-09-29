@@ -11,12 +11,13 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 
 try {
   const { makeDefaultConfig, makeDefaultContextConfig } = await import('../src/config.js');
-  const { updateWorkspace } = await import('../src/configEditor.js');
+  const { updateProjectAccess, updateWorkspace } = await import('../src/configEditor.js');
 
   const defaults = makeDefaultContextConfig();
   assert.ok(defaults.excludePaths.includes('.rel-ai-mcp-state'), 'canonical defaults must exclude Rel.AI state');
 
   const current = makeDefaultConfig();
+  assert.equal(current.projectAccess.directFilesystem, false, 'direct filesystem access must remain opt-in by default');
   current.stateDir = path.join(root, 'state');
   updateWorkspace(current, {
     action: 'upsert',
@@ -31,6 +32,9 @@ try {
     defaults,
     'config editing must consume the same canonical context defaults as config loading'
   );
+  const projectAccess = updateProjectAccess(persisted, { directFilesystem: true });
+  assert.equal(projectAccess.config.projectAccess.directFilesystem, true, 'direct filesystem switch must persist through the canonical config editor');
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).projectAccess.directFilesystem, true);
 
   const editorSource = fs.readFileSync(new URL('../src/configEditor.js', import.meta.url), 'utf8');
   assert.equal(editorSource.includes('const DEFAULT_CONTEXT'), false, 'config editor must not retain a second context-default owner');

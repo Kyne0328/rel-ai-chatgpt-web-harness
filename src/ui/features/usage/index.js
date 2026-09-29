@@ -20,20 +20,3 @@ export function customDateDefaults(now = new Date()) {
     end: end.toISOString().slice(0, 10)
   };
 }
-
-export function analyticsPrivacyCopy(privacy = {}) {
-  const retentionDays = Math.max(0, Number(privacy?.retentionDays || 0));
-  const telemetry = privacy?.externalTelemetry || {};
-  const retention = retentionDays
-    ? `Aggregate local analytics are retained for about ${Math.floor(retentionDays)} days.`
-    : 'Aggregate local analytics are retained locally.';
-  const telemetryCopy = telemetry.enabled === true
-    ? `External developer telemetry is on at a ${Math.round(Number(telemetry.sampleRatio || 0) * 100)}% sample rate. Developer telemetry can include tool names, project names, task IDs, client/runtime information, timings, and command summaries. It does not include prompts, file contents, command output, or raw error messages.`
-    : telemetry.endpointConfigured === true
-      ? 'External developer telemetry is off. An OTLP endpoint is configured, but Rel.AI does not export traces while telemetry is off.'
-      : 'External developer telemetry is off. No OTLP trace endpoint is active.';
-  return {
-    retention: `${retention} Rel.AI stores aggregate action categories and work-type labels locally. Local analytics do not store prompts, task objectives, file paths, command output, action results, or raw errors.`,
-    telemetry: telemetryCopy
-  };
-}

@@ -1,6 +1,6 @@
 # Rel.AI MCP Terms of Use
 
-**Effective date: September 8, 2026**
+**Effective date: September 28, 2026**
 
 These Terms of Use ("Terms") describe the terms that apply when you use official Rel.AI MCP application distributions, project websites, release/update channels, documentation, support surfaces, or other services operated by the Rel.AI maintainer (collectively, the "Rel.AI Services").
 
@@ -33,13 +33,13 @@ Nothing in these Terms grants rights to third-party trademarks, services, models
 
 ## 4. Third-party services
 
-Rel.AI relies on or can interact with third-party services, including OpenAI services and GitHub. Your use of those services is governed by their own agreements and policies.
+Rel.AI relies on or can interact with third-party services, including OpenAI services, GitHub, Cloudflare, and Axiom. Official builds use Cloudflare for the maintainer-operated telemetry edge and installation-count storage, and can use Axiom for optional diagnostic-trace storage. Your use of third-party services is subject to their applicable agreements and policies.
 
 The maintainer does not control the availability, pricing, rate limits, model behavior, account eligibility, data handling, API behavior, or continued operation of third-party services. A change by a third party can affect Rel.AI functionality without a Rel.AI code change.
 
 ## 5. Privacy and local data
 
-Rel.AI is local-first, but requested tool results can be sent through your configured ChatGPT connection when a task needs them. Local analytics, optional external telemetry, credential storage, retention, and deletion controls are described in the [Privacy Policy](PRIVACY.md).
+Rel.AI is local-first, but requested tool results can be sent through your configured ChatGPT connection when a task needs them. Local analytics, minimal external usage measurement, optional diagnostic telemetry, credential storage, retention, and deletion controls are described in the [Privacy Policy](PRIVACY.md).
 
 By enabling a capability or external endpoint, you are responsible for understanding the data that capability can process or transmit.
 

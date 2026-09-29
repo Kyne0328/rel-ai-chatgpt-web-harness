@@ -114,7 +114,7 @@ async function case_artifact_resource_unit() {
     version: 7,
     stateDir,
     auditLogPath: path.join(stateDir, 'audit.jsonl'),
-    telemetry: { enabled: false },
+    telemetry: { diagnosticsEnabled: false },
     processEnvironment: { allow: [] },
     workspaces: {
       artifact: {
