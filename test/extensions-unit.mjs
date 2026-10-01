@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { discoverSkills } from '../src/skillDiscovery.js';
 import { makeDefaultConfig, invalidateConfigCache, writeConfig } from '../src/config.js';
 import {
@@ -50,11 +51,21 @@ const bundleArtifact = makeStoredZip([
   [bundleHelperPath, Buffer.from('fixture helper\n', 'utf8')],
   ['lib/data.txt', Buffer.from('support data\n', 'utf8')]
 ]);
+const tarBundleManifestUrl = 'https://catalog.test/tar-tool-bundle/relai-extension.json';
+const tarBundleSkillUrl = 'https://catalog.test/tar-tool-bundle/SKILL.md';
+const tarBundleArtifactUrl = 'https://downloads.test/tool-bundle.tar.gz';
+const tarBundleCommand = 'relai-tar-bundle-fixture';
+const tarBundleCommandPath = `bin/${tarBundleCommand}${process.platform === 'win32' ? '.cmd' : ''}`;
+const tarBundleArtifact = makeTarGz([
+  { name: tarBundleCommandPath, data: Buffer.from('tar fixture tool\n', 'utf8'), mode: 0o755 },
+  { name: 'lib/data.txt', data: Buffer.from('tar support data\n', 'utf8') }
+]);
 const sha256 = crypto.createHash('sha256').update(skill).digest('hex');
 const cliSkillSha256 = crypto.createHash('sha256').update(cliSkill).digest('hex');
 const bundleSkillSha256 = crypto.createHash('sha256').update(bundleSkill).digest('hex');
 const cliArtifactSha256 = crypto.createHash('sha256').update(cliArtifact).digest('hex');
 const bundleArtifactSha256 = crypto.createHash('sha256').update(bundleArtifact).digest('hex');
+const tarBundleArtifactSha256 = crypto.createHash('sha256').update(tarBundleArtifact).digest('hex');
 const manifest = {
   schemaVersion: 1,
   id: 'sample-extension',
@@ -153,6 +164,24 @@ const bundleManifest = {
   },
   files: [{ path: 'SKILL.md', sha256: bundleSkillSha256 }]
 };
+const tarBundleManifest = {
+  ...bundleManifest,
+  id: 'tar-tool-bundle-extension',
+  name: 'TAR.GZ tool bundle extension',
+  description: 'CLI extension with a verified TAR.GZ tool bundle.',
+  requires: { commands: [tarBundleCommand], platforms: [] },
+  entrypoints: { skill: 'SKILL.md', command: tarBundleCommand },
+  install: {
+    type: 'bundle',
+    artifacts: [{
+      platform: process.platform,
+      arch: process.arch,
+      url: tarBundleArtifactUrl,
+      sha256: tarBundleArtifactSha256,
+      commands: [{ command: tarBundleCommand, path: tarBundleCommandPath }]
+    }]
+  }
+};
 
 const catalog = {
   schemaVersion: 1,
@@ -162,7 +191,8 @@ const catalog = {
     catalogEntry(cliManifest, cliManifestUrl, true),
     catalogEntry(systemManifest, systemManifestUrl),
     catalogEntry(missingManifest, missingManifestUrl),
-    catalogEntry(bundleManifest, bundleManifestUrl, true)
+    catalogEntry(bundleManifest, bundleManifestUrl, true),
+    catalogEntry(tarBundleManifest, tarBundleManifestUrl, true)
   ]
 };
 
@@ -214,6 +244,33 @@ assert.equal(fs.existsSync(path.join(root, 'escape.txt')), false);
 fs.rmSync(unsafeArchive, { force: true });
 fs.rmSync(unsafeDestination, { recursive: true, force: true });
 
+const unsafeTarArchive = path.join(root, 'unsafe-tool-bundle.tar.gz');
+const unsafeTarDestination = path.join(root, 'unsafe-tool-bundle-tar');
+fs.writeFileSync(unsafeTarArchive, makeTarGz([{ name: '../escape-tar.txt', data: Buffer.from('escape', 'utf8') }]));
+await assert.rejects(
+  extractToolBundleZip(unsafeTarArchive, unsafeTarDestination),
+  /tool bundle|path|tar/i
+);
+assert.equal(fs.existsSync(path.join(root, 'escape-tar.txt')), false);
+assert.equal(fs.existsSync(unsafeTarDestination), false);
+
+for (const [type, label] of [['2', 'symbolic'], ['1', 'hard']]) {
+  fs.writeFileSync(unsafeTarArchive, makeTarGz([{ name: `unsafe-${label}-link`, type, linkname: '../outside' }]));
+  await assert.rejects(
+    extractToolBundleZip(unsafeTarArchive, unsafeTarDestination),
+    /regular file|directory|link/i
+  );
+  assert.equal(fs.existsSync(unsafeTarDestination), false);
+}
+
+fs.writeFileSync(unsafeTarArchive, makeTarGz([{ name: 'large.bin', data: Buffer.alloc(16, 1) }]));
+await assert.rejects(
+  extractToolBundleZip(unsafeTarArchive, unsafeTarDestination, { maxFileBytes: 8 }),
+  /per-file extraction limit/i
+);
+assert.equal(fs.existsSync(unsafeTarDestination), false);
+fs.rmSync(unsafeTarArchive, { force: true });
+
 const originalFetch = globalThis.fetch;
 const extraResponses = new Map();
 globalThis.fetch = async url => {
@@ -231,6 +288,9 @@ globalThis.fetch = async url => {
   if (href === bundleManifestUrl) return responseJson(bundleManifest);
   if (href === bundleSkillUrl) return new Response(bundleSkill, { status: 200 });
   if (href === bundleArtifactUrl) return new Response(bundleArtifact, { status: 200 });
+  if (href === tarBundleManifestUrl) return responseJson(tarBundleManifest);
+  if (href === tarBundleSkillUrl) return new Response(bundleSkill, { status: 200 });
+  if (href === tarBundleArtifactUrl) return new Response(tarBundleArtifact, { status: 200 });
   if (extraResponses.has(href)) return extraResponses.get(href)();
   return new Response('not found', { status: 404 });
 };
@@ -355,6 +415,17 @@ try {
   assert.deepEqual(removedBundle.removedCommands, [bundleHelperCommand, bundleCommand].sort());
   assert.equal(fs.existsSync(bundleTarget), false);
   assert.equal(fs.existsSync(managedExtensionCommandMetadataPath(config, bundleCommand)), false);
+
+  const tarBundleInstalled = await installExtension(config, tarBundleManifest.id, { catalogUrl });
+  assert.equal(tarBundleInstalled.ready, true);
+  assert.deepEqual(tarBundleInstalled.missingCommands, []);
+  const tarBundleTarget = managedExtensionBundleCommandPath(config, tarBundleManifest.id, tarBundleCommandPath);
+  assert.equal(fs.readFileSync(tarBundleTarget, 'utf8'), 'tar fixture tool\n');
+  assert.equal(fs.readFileSync(path.join(path.dirname(path.dirname(tarBundleTarget)), 'lib', 'data.txt'), 'utf8'), 'tar support data\n');
+  if (process.platform !== 'win32') assert.notEqual(fs.statSync(tarBundleTarget).mode & 0o111, 0);
+  const removedTarBundle = removeExtension(config, tarBundleManifest.id);
+  assert.equal(removedTarBundle.removed, true);
+  assert.deepEqual(removedTarBundle.removedCommands, [tarBundleCommand]);
 
   const removed = removeExtension(config, manifest.id);
   assert.equal(removed.removed, true);
@@ -534,6 +605,53 @@ function makeStoredZip(files) {
   end.writeUInt32LE(centralDirectory.length, 12);
   end.writeUInt32LE(offset, 16);
   return Buffer.concat([...localParts, centralDirectory, end]);
+}
+
+function makeTarGz(entries) {
+  const parts = [];
+  for (const entry of entries) {
+    const type = entry.type || '0';
+    const isRegular = type === '0';
+    const data = isRegular ? Buffer.from(entry.data || Buffer.alloc(0)) : Buffer.alloc(0);
+    const header = Buffer.alloc(512);
+    writeTarString(header, 0, 100, entry.name);
+    writeTarOctal(header, 100, 8, entry.mode ?? (type === '5' ? 0o755 : 0o644));
+    writeTarOctal(header, 108, 8, 0);
+    writeTarOctal(header, 116, 8, 0);
+    writeTarOctal(header, 124, 12, data.length);
+    writeTarOctal(header, 136, 12, 0);
+    header.fill(0x20, 148, 156);
+    header.write(type, 156, 1, 'ascii');
+    if (entry.linkname) writeTarString(header, 157, 100, entry.linkname);
+    writeTarString(header, 257, 6, 'ustar\0');
+    writeTarString(header, 263, 2, '00');
+    let checksum = 0;
+    for (const byte of header) checksum += byte;
+    const checksumText = checksum.toString(8).padStart(6, '0');
+    header.write(checksumText, 148, 6, 'ascii');
+    header[154] = 0;
+    header[155] = 0x20;
+    parts.push(header);
+    if (data.length) {
+      parts.push(data);
+      const padding = (512 - (data.length % 512)) % 512;
+      if (padding) parts.push(Buffer.alloc(padding));
+    }
+  }
+  parts.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(parts));
+}
+
+function writeTarString(buffer, offset, length, value) {
+  const bytes = Buffer.from(String(value || ''), 'utf8');
+  if (bytes.length > length) throw new Error(`TAR fixture field is too long: ${value}`);
+  bytes.copy(buffer, offset);
+}
+
+function writeTarOctal(buffer, offset, length, value) {
+  const text = Number(value).toString(8).padStart(length - 1, '0');
+  buffer.write(text, offset, length - 1, 'ascii');
+  buffer[offset + length - 1] = 0;
 }
 
 function crc32(buffer) {
