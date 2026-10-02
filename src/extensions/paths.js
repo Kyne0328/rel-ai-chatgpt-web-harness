@@ -68,6 +68,25 @@ function extensionCommandPathEntries(config = {}) {
       const stat = fs.lstatSync(target);
       if (!stat.isFile() || stat.isSymbolicLink()) continue;
       paths.push(path.dirname(target));
+      if (metadata.sourceType === 'conda') {
+        const toolRoot = extensionManagedToolRoot(config, metadata.extensionId);
+        const runtimePaths = process.platform === 'win32'
+          ? [
+              toolRoot,
+              path.join(toolRoot, 'Library', 'mingw-w64', 'bin'),
+              path.join(toolRoot, 'Library', 'usr', 'bin'),
+              path.join(toolRoot, 'Library', 'bin'),
+              path.join(toolRoot, 'Scripts'),
+              path.join(toolRoot, 'bin')
+            ]
+          : [path.join(toolRoot, 'bin')];
+        for (const runtimePath of runtimePaths) {
+          try {
+            const runtimeStat = fs.lstatSync(runtimePath);
+            if (runtimeStat.isDirectory() && !runtimeStat.isSymbolicLink()) paths.push(runtimePath);
+          } catch {}
+        }
+      }
     } catch {}
   }
   const seen = new Set();

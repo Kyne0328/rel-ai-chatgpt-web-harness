@@ -1,6 +1,8 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import semver from 'semver';
 import { z } from 'zod';
 import { getApplicationMetadata } from '../appMetadata.js';
@@ -27,10 +29,24 @@ const MAX_TOOL_BUNDLE_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_TOOL_BUNDLE_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_TOOL_BUNDLE_FILE_BYTES = 1024 * 1024 * 1024;
 const MAX_TOOL_BUNDLE_ENTRIES = 20_000;
+const MAX_CONDA_LOCK_BYTES = 512 * 1024;
+const MAX_CONDA_PACKAGES = 300;
+const MAX_CONDA_PACKAGE_BYTES = 256 * 1024 * 1024;
+const MAX_CONDA_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
+const CONDA_INSTALL_TIMEOUT_MS = 20 * 60_000;
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 const EXTENSION_ID_PATTERN = /^[a-z0-9][a-z0-9.-]{0,79}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const INSTALL_ARCHITECTURES = Object.freeze(['x64', 'arm64']);
+const CONDA_SUBDIRS = Object.freeze(['win-64', 'osx-64', 'osx-arm64', 'linux-64', 'linux-aarch64']);
+const MICROMAMBA_ARTIFACTS = Object.freeze({
+  'win32/x64': { url: 'https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-win-64.exe', sha256: 'a6d804394b2418991c4e29562853eaace2f2ce9d9da661a98e74e02e8dbb44b0' },
+  'win32/arm64': { url: 'https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-win-arm64.exe', sha256: 'f0da836d2398c00ac0b43e01f7581ba3430224a04405075c39eb3dd78bf0339a' },
+  'darwin/x64': { url: 'https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-osx-64', sha256: '1e71054bb3ac9a076e21f7ec48acfef536f9b3f1408f371a942784bf5ef83d8a' },
+  'darwin/arm64': { url: 'https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-osx-arm64', sha256: 'ec2a072f028e1a7cf20f3e2e74d5a8127cf5a5f27636375b5359811565f4e5be' },
+  'linux/x64': { url: 'https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-linux-64', sha256: '366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3' },
+  'linux/arm64': { url: 'https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-linux-aarch64', sha256: '9f93b974adcb4d166996af969b6cd371287d1a3e52733704727884d9b74cb7a7' }
+});
 const RESERVED_MANAGED_COMMANDS = new Set([
   'bash', 'cmd', 'git', 'node', 'npm', 'npx', 'powershell', 'pwsh', 'python', 'python3',
   'rel-ai-mcp', 'rel-ai-mcp-http', 'relai-extension', 'relai-mcp-config', 'sh', 'zsh'
@@ -86,6 +102,39 @@ const bundleInstallSchema = z.object({
   artifacts: z.array(bundleArtifactSchema).min(1).max(12)
 }).strict();
 
+const condaArtifactSchema = z.object({
+  platform: z.enum(['win32', 'darwin', 'linux']),
+  arch: z.enum(INSTALL_ARCHITECTURES),
+  subdir: z.enum(CONDA_SUBDIRS),
+  lockUrl: z.string().url(),
+  lockSha256: z.string().regex(SHA256_PATTERN),
+  commands: z.array(bundleCommandSchema).min(1).max(20)
+}).strict().superRefine((artifact, ctx) => {
+  if (!isHttpsUrl(artifact.lockUrl)) ctx.addIssue({ code: 'custom', path: ['lockUrl'], message: 'Conda lock URLs must use HTTPS.' });
+  const expectedSubdir = condaSubdirForTarget(artifact.platform, artifact.arch);
+  if (artifact.subdir !== expectedSubdir) {
+    ctx.addIssue({ code: 'custom', path: ['subdir'], message: `Conda subdir for ${artifact.platform}/${artifact.arch} must be '${expectedSubdir}'.` });
+  }
+});
+
+const condaInstallSchema = z.object({
+  type: z.literal('conda'),
+  artifacts: z.array(condaArtifactSchema).min(1).max(12)
+}).strict();
+
+const condaLockPackageSchema = z.object({
+  url: z.string().url(),
+  sha256: z.string().regex(SHA256_PATTERN),
+  size: z.number().int().positive().max(MAX_CONDA_PACKAGE_BYTES)
+}).strict().superRefine((pkg, ctx) => {
+  if (!isHttpsUrl(pkg.url)) ctx.addIssue({ code: 'custom', path: ['url'], message: 'Conda package URLs must use HTTPS.' });
+});
+const condaLockSchema = z.object({
+  schemaVersion: z.literal(1),
+  subdir: z.enum(CONDA_SUBDIRS),
+  packages: z.array(condaLockPackageSchema).min(1).max(MAX_CONDA_PACKAGES)
+}).strict();
+
 const extensionManifestSchema = z.object({
   schemaVersion: z.literal(1),
   id: z.string().regex(EXTENSION_ID_PATTERN),
@@ -111,7 +160,7 @@ const extensionManifestSchema = z.object({
     skill: z.string().min(1).max(240),
     command: z.string().regex(/^[A-Za-z0-9._+-]{1,100}$/).optional()
   }).strict(),
-  install: z.union([binaryInstallSchema, bundleInstallSchema]).optional(),
+  install: z.union([binaryInstallSchema, bundleInstallSchema, condaInstallSchema]).optional(),
   files: z.array(extensionFileSchema).min(1).max(64)
 }).strict().superRefine((manifest, ctx) => {
   if (!semver.valid(manifest.version)) {
@@ -149,21 +198,21 @@ const extensionManifestSchema = z.object({
   }
   if (manifest.install) {
     const targets = new Set();
-    let bundleCommandSet = null;
+    let managedCommandSet = null;
     for (const [index, artifact] of manifest.install.artifacts.entries()) {
       const target = `${artifact.platform}/${artifact.arch}`;
       if (targets.has(target)) ctx.addIssue({ code: 'custom', path: ['install', 'artifacts', index], message: `Duplicate install artifact target '${target}'.` });
       targets.add(target);
-      if (manifest.install.type !== 'bundle') continue;
+      if (manifest.install.type !== 'bundle' && manifest.install.type !== 'conda') continue;
       const commands = new Set();
       for (const [commandIndex, entry] of artifact.commands.entries()) {
         const issuePath = ['install', 'artifacts', index, 'commands', commandIndex];
         if (!isSafeRelativePath(entry.path)) {
-          ctx.addIssue({ code: 'custom', path: [...issuePath, 'path'], message: 'Tool bundle command paths must be safe relative paths.' });
+          ctx.addIssue({ code: 'custom', path: [...issuePath, 'path'], message: 'Managed command paths must be safe relative paths.' });
         }
         const normalizedCommand = normalizeCommandName(entry.command);
         if (isSafeRelativePath(entry.path) && normalizeCommandName(path.basename(entry.path)) !== normalizedCommand) {
-          ctx.addIssue({ code: 'custom', path: [...issuePath, 'path'], message: `Tool bundle command path must have the same executable name as '${entry.command}'.` });
+          ctx.addIssue({ code: 'custom', path: [...issuePath, 'path'], message: `Managed command path must have the same executable name as '${entry.command}'.` });
         }
         if (RESERVED_MANAGED_COMMANDS.has(normalizedCommand)) {
           ctx.addIssue({ code: 'custom', path: [...issuePath, 'command'], message: `Managed command '${entry.command}' is reserved.` });
@@ -173,16 +222,16 @@ const extensionManifestSchema = z.object({
         }
         commands.add(normalizedCommand);
         if (!manifest.requires.commands.includes(entry.command)) {
-          ctx.addIssue({ code: 'custom', path: ['requires', 'commands'], message: `Tool bundle command '${entry.command}' must be listed in requires.commands.` });
+          ctx.addIssue({ code: 'custom', path: ['requires', 'commands'], message: `Managed command '${entry.command}' must be listed in requires.commands.` });
         }
       }
       if (manifest.entrypoints.command && !artifact.commands.some(entry => entry.command === manifest.entrypoints.command)) {
-        ctx.addIssue({ code: 'custom', path: ['entrypoints', 'command'], message: 'entrypoints.command must be provided by every tool bundle artifact.' });
+        ctx.addIssue({ code: 'custom', path: ['entrypoints', 'command'], message: 'entrypoints.command must be provided by every managed artifact.' });
       }
       const currentSet = [...commands].sort().join('\n');
-      if (bundleCommandSet == null) bundleCommandSet = currentSet;
-      else if (bundleCommandSet !== currentSet) {
-        ctx.addIssue({ code: 'custom', path: ['install', 'artifacts', index, 'commands'], message: 'Tool bundle artifacts must expose the same command names on every platform/architecture.' });
+      if (managedCommandSet == null) managedCommandSet = currentSet;
+      else if (managedCommandSet !== currentSet) {
+        ctx.addIssue({ code: 'custom', path: ['install', 'artifacts', index, 'commands'], message: 'Managed artifacts must expose the same command names on every platform/architecture.' });
       }
     }
   }
@@ -216,6 +265,12 @@ const extensionCatalogSchema = z.object({
     ids.add(entry.id);
   }
 });
+
+function condaSubdirForTarget(platform, arch) {
+  if (platform === 'win32') return 'win-64';
+  if (platform === 'darwin') return arch === 'arm64' ? 'osx-arm64' : 'osx-64';
+  return arch === 'arm64' ? 'linux-aarch64' : 'linux-64';
+}
 
 function parseExtensionManifest(value) {
   return extensionManifestSchema.parse(value);
@@ -479,6 +534,9 @@ async function prepareManagedCommandInstall(config, manifest, extensionStaging) 
   if (manifest.install.type === 'bundle') {
     return await prepareManagedBundleInstall(config, manifest, artifact, extensionStaging);
   }
+  if (manifest.install.type === 'conda') {
+    return await prepareManagedCondaInstall(config, manifest, artifact, extensionStaging);
+  }
 
   const command = String(manifest.entrypoints.command || '').trim();
   if (!command) return null;
@@ -545,6 +603,157 @@ async function prepareManagedBundleInstall(config, manifest, artifact, extension
     sha256: artifact.sha256
   }));
   return { entries, committed: false };
+}
+
+async function prepareManagedCondaInstall(config, manifest, artifact, extensionStaging) {
+  const managed = artifact.commands
+    .map(item => ({ item, disposition: managedCommandDisposition(config, manifest.id, item.command) }))
+    .filter(item => item.disposition);
+  if (!managed.length) return null;
+
+  const manager = MICROMAMBA_ARTIFACTS[`${process.platform}/${process.arch}`];
+  if (!manager) throw new Error(`Managed Conda installation is unavailable on ${process.platform}/${process.arch}.`);
+
+  const lockContent = await fetchFile(artifact.lockUrl, MAX_CONDA_LOCK_BYTES, `Conda lock for ${manifest.id}`, { timeoutMs: 120_000 });
+  const lockDigest = crypto.createHash('sha256').update(lockContent).digest('hex');
+  if (lockDigest !== artifact.lockSha256) throw new Error(`Checksum mismatch for Conda lock for '${manifest.id}'.`);
+
+  let lockRaw;
+  try {
+    lockRaw = JSON.parse(lockContent.toString('utf8'));
+  } catch (error) {
+    throw new Error(`Conda lock for '${manifest.id}' is not valid JSON.`, { cause: error });
+  }
+  const lock = condaLockSchema.parse(lockRaw);
+  if (lock.subdir !== artifact.subdir) {
+    throw new Error(`Conda lock subdir '${lock.subdir}' does not match manifest subdir '${artifact.subdir}'.`);
+  }
+  const totalBytes = lock.packages.reduce((sum, pkg) => sum + pkg.size, 0);
+  if (totalBytes > MAX_CONDA_TOTAL_BYTES) throw new Error(`Conda lock for '${manifest.id}' exceeds the allowed total package size.`);
+
+  const toolRoot = path.join(extensionStaging, '.tool');
+  const downloadRoot = path.join(extensionStaging, '.conda-packages');
+  const managerRoot = path.join(extensionStaging, '.conda-manager');
+  const managerPath = path.join(managerRoot, process.platform === 'win32' ? 'micromamba.exe' : 'micromamba');
+  const explicitPath = path.join(extensionStaging, '.conda-explicit.txt');
+  fs.mkdirSync(downloadRoot, { recursive: true, mode: 0o700 });
+
+  await downloadVerifiedFile(
+    manager.url,
+    32 * 1024 * 1024,
+    'micromamba runtime',
+    managerPath,
+    manager.sha256,
+    { timeoutMs: 180_000 }
+  );
+  if (process.platform !== 'win32') fs.chmodSync(managerPath, 0o700);
+
+  const localPackages = [];
+  for (const [index, pkg] of lock.packages.entries()) {
+    const filename = path.basename(new URL(pkg.url).pathname);
+    if (!filename) throw new Error(`Conda package ${index + 1} for '${manifest.id}' has no filename.`);
+    const packagePath = path.join(downloadRoot, `${String(index).padStart(3, '0')}-${filename}`);
+    await downloadVerifiedFile(
+      pkg.url,
+      Math.min(MAX_CONDA_PACKAGE_BYTES, Math.max(pkg.size, 1)),
+      `Conda package ${index + 1} for ${manifest.id}`,
+      packagePath,
+      pkg.sha256,
+      { timeoutMs: 15 * 60_000 }
+    );
+    const stat = fs.statSync(packagePath);
+    if (stat.size !== pkg.size) throw new Error(`Conda package ${index + 1} for '${manifest.id}' has an unexpected size.`);
+    localPackages.push(packagePath);
+  }
+
+  const explicit = ['@EXPLICIT', ...localPackages.map(packagePath => pathToFileURL(packagePath).href), ''].join('\n');
+  fs.writeFileSync(explicitPath, explicit, { mode: 0o600 });
+  await runMicromamba(managerPath, [
+    'create',
+    '--yes',
+    '--offline',
+    '--no-rc',
+    '--root-prefix', path.join(extensionStaging, '.conda-root'),
+    '--prefix', toolRoot,
+    '--file', explicitPath
+  ], { cwd: extensionStaging });
+
+  for (const item of artifact.commands) {
+    const commandPath = safeJoin(toolRoot, item.path);
+    let stat;
+    try { stat = fs.lstatSync(commandPath); } catch {
+      throw new Error(`Conda command '${item.command}' is missing declared path '${item.path}'.`);
+    }
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`Conda command '${item.command}' is not a safe regular file.`);
+    }
+    if (process.platform !== 'win32') fs.chmodSync(commandPath, stat.mode | 0o111);
+  }
+
+  fs.rmSync(downloadRoot, { recursive: true, force: true });
+  fs.rmSync(managerRoot, { recursive: true, force: true });
+  fs.rmSync(path.join(extensionStaging, '.conda-root'), { recursive: true, force: true });
+  fs.rmSync(explicitPath, { force: true });
+
+  const entries = managed.map(({ item }) => createManagedCommandTransactionEntry(config, manifest, item.command, {
+    installType: 'bundle',
+    sourceType: 'conda',
+    relativePath: item.path,
+    lockUrl: artifact.lockUrl,
+    lockSha256: artifact.lockSha256,
+    subdir: artifact.subdir
+  }));
+  return { entries, committed: false };
+}
+
+function runMicromamba(executable, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      cwd: options.cwd,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        MAMBA_NO_BANNER: '1',
+        MAMBA_ROOT_PREFIX: path.join(options.cwd || process.cwd(), '.conda-root')
+      }
+    });
+    let stdout = '';
+    let stderr = '';
+    let outputBytes = 0;
+    let settled = false;
+    const maxOutputBytes = 4 * 1024 * 1024;
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(new Error('Managed Conda installation timed out.'));
+    }, CONDA_INSTALL_TIMEOUT_MS);
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const append = (current, chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > maxOutputBytes) {
+        child.kill();
+        finish(new Error('Managed Conda installation produced too much output.'));
+        return current;
+      }
+      return current + chunk.toString('utf8');
+    };
+    child.stdout.on('data', chunk => { stdout = append(stdout, chunk); });
+    child.stderr.on('data', chunk => { stderr = append(stderr, chunk); });
+    child.on('error', error => finish(new Error('Could not start the managed micromamba runtime.', { cause: error })));
+    child.on('close', code => {
+      if (code !== 0) {
+        finish(new Error(`Managed Conda installation failed with exit code ${code}: ${(stderr || stdout).trim()}`));
+        return;
+      }
+      finish();
+    });
+  });
 }
 
 function managedCommandDisposition(config, extensionId, command) {
@@ -811,9 +1020,6 @@ async function commitExtensionPackage(config, manifest, options) {
     packageCommitted = true;
     commitManagedCommandInstall(managedInstall);
     markExtensionInstallCommitted(config, manifest.id);
-    if (fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-    finalizeManagedCommandInstall(managedInstall);
-    completeExtensionInstallTransaction(config, manifest.id);
   } catch (error) {
     fs.rmSync(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     rollbackManagedCommandInstall(managedInstall);
@@ -821,6 +1027,14 @@ async function commitExtensionPackage(config, manifest, options) {
     if (!fs.existsSync(target) && fs.existsSync(backup)) fs.renameSync(backup, target);
     completeExtensionInstallTransaction(config, manifest.id);
     throw error;
+  }
+  try {
+    if (fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    finalizeManagedCommandInstall(managedInstall);
+    completeExtensionInstallTransaction(config, manifest.id);
+  } catch {
+    // The committed package must survive cleanup failures. Keep the committed
+    // transaction marker so recovery can retry removing obsolete files.
   }
   installedExtensionVerificationCache.delete(target);
   return readInstalledExtension(target, manifest.id, config);
@@ -1145,8 +1359,10 @@ function systemCommandAvailable(command, config = {}) {
     for (const extension of extensions) {
       const candidate = path.join(directory, process.platform === 'win32' && path.extname(name) ? name : `${name}${extension}`);
       try {
-        const stat = fs.lstatSync(candidate);
-        if (stat.isFile() && !stat.isSymbolicLink()) return true;
+        const stat = process.platform === 'win32' ? fs.lstatSync(candidate) : fs.statSync(candidate);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+        if (process.platform !== 'win32') fs.accessSync(candidate, fs.constants.X_OK);
+        return true;
       } catch {}
     }
   }
@@ -1182,7 +1398,9 @@ function commandAvailable(command, config = {}) {
       ? managedExtensionBundleCommandPath(config, metadata.extensionId, metadata.relativePath)
       : managedExtensionCommandPath(config, command);
     const stat = fs.lstatSync(target);
-    return stat.isFile() && !stat.isSymbolicLink();
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    if (process.platform !== 'win32') fs.accessSync(target, fs.constants.X_OK);
+    return true;
   } catch {
     return false;
   }

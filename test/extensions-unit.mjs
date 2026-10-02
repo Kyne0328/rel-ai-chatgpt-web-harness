@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { gzipSync } from 'node:zlib';
+import sevenZip from '7zip-bin';
 import { discoverSkills } from '../src/skillDiscovery.js';
 import { makeDefaultConfig, invalidateConfigCache, writeConfig } from '../src/config.js';
 import {
@@ -233,6 +235,46 @@ assert.throws(
   /safe relative paths/i
 );
 
+const condaCommand = 'relai-conda-fixture';
+const condaCommandPath = process.platform === 'win32' ? `bin/${condaCommand}.cmd` : `bin/${condaCommand}`;
+const currentCondaSubdir = process.platform === 'win32'
+  ? 'win-64'
+  : process.platform === 'darwin'
+    ? (process.arch === 'arm64' ? 'osx-arm64' : 'osx-64')
+    : (process.arch === 'arm64' ? 'linux-aarch64' : 'linux-64');
+const condaManifest = {
+  ...bundleManifest,
+  id: 'conda-extension',
+  name: 'Conda extension',
+  requires: { commands: [condaCommand], platforms: [] },
+  entrypoints: { skill: 'SKILL.md', command: condaCommand },
+  install: {
+    type: 'conda',
+    artifacts: [{
+      platform: process.platform,
+      arch: process.arch,
+      subdir: currentCondaSubdir,
+      lockUrl: 'https://downloads.test/conda-lock.json',
+      lockSha256: '1'.repeat(64),
+      commands: [{ command: condaCommand, path: condaCommandPath }]
+    }]
+  }
+};
+assert.equal(parseExtensionManifest(condaManifest).install.type, 'conda');
+assert.throws(
+  () => parseExtensionManifest({
+    ...condaManifest,
+    install: {
+      ...condaManifest.install,
+      artifacts: condaManifest.install.artifacts.map(artifact => ({
+        ...artifact,
+        subdir: artifact.subdir === 'linux-64' ? 'osx-64' : 'linux-64'
+      }))
+    }
+  }),
+  /conda subdir/i
+);
+
 const unsafeArchive = path.join(root, 'unsafe-tool-bundle.zip');
 const unsafeDestination = path.join(root, 'unsafe-tool-bundle');
 fs.writeFileSync(unsafeArchive, makeStoredZip([['../escape.txt', Buffer.from('escape', 'utf8')]]));
@@ -244,6 +286,29 @@ assert.equal(fs.existsSync(path.join(root, 'escape.txt')), false);
 fs.rmSync(unsafeArchive, { force: true });
 fs.rmSync(unsafeDestination, { recursive: true, force: true });
 
+const linkedZipArchive = path.join(root, 'linked-tool-bundle.zip');
+const linkedZipDestination = path.join(root, 'linked-tool-bundle');
+fs.writeFileSync(linkedZipArchive, makeStoredZip([
+  ['lib/libqpdf.30.0.2.dylib', Buffer.from('qpdf dylib\n'), 0o100644],
+  ['lib/libqpdf.30.dylib', Buffer.from('libqpdf.30.0.2.dylib'), 0o120777]
+]));
+await extractToolBundleZip(linkedZipArchive, linkedZipDestination);
+const linkedZipTarget = path.join(linkedZipDestination, 'lib', 'libqpdf.30.dylib');
+assert.equal(fs.readFileSync(linkedZipTarget, 'utf8'), 'qpdf dylib\n');
+assert.equal(fs.lstatSync(linkedZipTarget).isSymbolicLink(), false);
+
+const escapingZipArchive = path.join(root, 'escaping-link-tool-bundle.zip');
+const escapingZipDestination = path.join(root, 'escaping-link-tool-bundle');
+fs.writeFileSync(escapingZipArchive, makeStoredZip([
+  ['lib/source.txt', Buffer.from('safe\n'), 0o100644],
+  ['lib/escape', Buffer.from('../../outside-zip-link.txt'), 0o120777]
+]));
+await assert.rejects(
+  extractToolBundleZip(escapingZipArchive, escapingZipDestination),
+  /link|unsafe|target/i
+);
+assert.equal(fs.existsSync(path.join(root, 'outside-zip-link.txt')), false);
+
 const unsafeTarArchive = path.join(root, 'unsafe-tool-bundle.tar.gz');
 const unsafeTarDestination = path.join(root, 'unsafe-tool-bundle-tar');
 fs.writeFileSync(unsafeTarArchive, makeTarGz([{ name: '../escape-tar.txt', data: Buffer.from('escape', 'utf8') }]));
@@ -254,11 +319,25 @@ await assert.rejects(
 assert.equal(fs.existsSync(path.join(root, 'escape-tar.txt')), false);
 assert.equal(fs.existsSync(unsafeTarDestination), false);
 
+const linkedTarArchive = path.join(root, 'linked-tool-bundle.tar.gz');
+const linkedTarDestination = path.join(root, 'linked-tool-bundle-tar');
+fs.writeFileSync(linkedTarArchive, makeTarGz([
+  { name: 'pandoc/bin/pandoc', data: Buffer.from('pandoc binary\n'), mode: 0o755 },
+  { name: 'pandoc/bin/pandoc-server', type: '2', linkname: 'pandoc' },
+  { name: 'pandoc/bin/pandoc-hard', type: '1', linkname: 'pandoc/bin/pandoc' }
+]));
+await extractToolBundleZip(linkedTarArchive, linkedTarDestination);
+for (const name of ['pandoc-server', 'pandoc-hard']) {
+  const target = path.join(linkedTarDestination, 'pandoc', 'bin', name);
+  assert.equal(fs.readFileSync(target, 'utf8'), 'pandoc binary\n');
+  assert.equal(fs.lstatSync(target).isSymbolicLink(), false);
+}
+
 for (const [type, label] of [['2', 'symbolic'], ['1', 'hard']]) {
   fs.writeFileSync(unsafeTarArchive, makeTarGz([{ name: `unsafe-${label}-link`, type, linkname: '../outside' }]));
   await assert.rejects(
     extractToolBundleZip(unsafeTarArchive, unsafeTarDestination),
-    /regular file|directory|link/i
+    /link|unsafe/i
   );
   assert.equal(fs.existsSync(unsafeTarDestination), false);
 }
@@ -270,6 +349,28 @@ await assert.rejects(
 );
 assert.equal(fs.existsSync(unsafeTarDestination), false);
 fs.rmSync(unsafeTarArchive, { force: true });
+
+const extraFormatSource = path.join(root, 'extra-format-source');
+fs.mkdirSync(path.join(extraFormatSource, 'bin'), { recursive: true });
+fs.writeFileSync(path.join(extraFormatSource, 'bin', 'tool'), 'extra format fixture\n');
+const sevenZipArchive = path.join(root, 'tool-bundle.7z');
+const sevenZipCreate = spawnSync(sevenZip.path7za, ['a', '-t7z', sevenZipArchive, '.'], {
+  cwd: extraFormatSource,
+  encoding: 'utf8'
+});
+assert.equal(sevenZipCreate.status, 0, sevenZipCreate.stderr || sevenZipCreate.stdout);
+const sevenZipDestination = path.join(root, 'tool-bundle-7z');
+await extractToolBundleZip(sevenZipArchive, sevenZipDestination);
+assert.equal(fs.readFileSync(path.join(sevenZipDestination, 'bin', 'tool'), 'utf8'), 'extra format fixture\n');
+
+const plainTarArchive = path.join(root, 'tool-bundle.tar');
+fs.writeFileSync(plainTarArchive, makeTar([{ name: 'bin/tool', data: Buffer.from('tar xz fixture\n'), mode: 0o755 }]));
+const tarXzArchive = path.join(root, 'tool-bundle.tar.xz');
+const xzCreate = spawnSync(sevenZip.path7za, ['a', '-txz', tarXzArchive, plainTarArchive], { encoding: 'utf8' });
+assert.equal(xzCreate.status, 0, xzCreate.stderr || xzCreate.stdout);
+const tarXzDestination = path.join(root, 'tool-bundle-tar-xz');
+await extractToolBundleZip(tarXzArchive, tarXzDestination);
+assert.equal(fs.readFileSync(path.join(tarXzDestination, 'bin', 'tool'), 'utf8'), 'tar xz fixture\n');
 
 const originalFetch = globalThis.fetch;
 const extraResponses = new Map();
@@ -404,10 +505,17 @@ try {
   assert.equal(fs.readFileSync(bundleHelperTarget, 'utf8'), 'fixture helper\n');
   assert.equal(fs.readFileSync(path.join(path.dirname(path.dirname(bundleTarget)), 'lib', 'data.txt'), 'utf8'), 'support data\n');
   assert.equal(fs.existsSync(managedExtensionCommandPath(config, bundleCommand)), false);
-  const bundleMetadata = JSON.parse(fs.readFileSync(managedExtensionCommandMetadataPath(config, bundleCommand), 'utf8'));
+  const bundleMetadataPath = managedExtensionCommandMetadataPath(config, bundleCommand);
+  const bundleMetadata = JSON.parse(fs.readFileSync(bundleMetadataPath, 'utf8'));
   assert.equal(bundleMetadata.installType, 'bundle');
   assert.equal(bundleMetadata.relativePath, bundleCommandPath);
   assert.equal(extensionCommandPathEntries(config).includes(path.dirname(bundleTarget)), true);
+  if (process.platform === 'win32') {
+    const condaRuntime = path.join(path.dirname(path.dirname(bundleTarget)), 'Library', 'bin');
+    fs.mkdirSync(condaRuntime, { recursive: true });
+    fs.writeFileSync(bundleMetadataPath, `${JSON.stringify({ ...bundleMetadata, sourceType: 'conda' }, null, 2)}\n`);
+    assert.equal(extensionCommandPathEntries(config).includes(condaRuntime), true);
+  }
   if (process.platform !== 'win32') assert.notEqual(fs.statSync(bundleTarget).mode & 0o111, 0);
 
   const removedBundle = removeExtension(config, bundleManifest.id);
@@ -565,7 +673,7 @@ function makeStoredZip(files) {
   const localParts = [];
   const centralParts = [];
   let offset = 0;
-  for (const [name, data] of files) {
+  for (const [name, data, mode] of files) {
     const fileName = Buffer.from(name, 'utf8');
     const payload = Buffer.from(data);
     const crc = crc32(payload);
@@ -583,7 +691,7 @@ function makeStoredZip(files) {
 
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(mode == null ? 20 : ((3 << 8) | 20), 4);
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0x0800, 8);
     central.writeUInt16LE(0, 10);
@@ -591,6 +699,7 @@ function makeStoredZip(files) {
     central.writeUInt32LE(payload.length, 20);
     central.writeUInt32LE(payload.length, 24);
     central.writeUInt16LE(fileName.length, 28);
+    if (mode != null) central.writeUInt32LE((mode << 16) >>> 0, 38);
     central.writeUInt32LE(offset, 42);
     centralParts.push(central, fileName);
 
@@ -607,7 +716,7 @@ function makeStoredZip(files) {
   return Buffer.concat([...localParts, centralDirectory, end]);
 }
 
-function makeTarGz(entries) {
+function makeTar(entries) {
   const parts = [];
   for (const entry of entries) {
     const type = entry.type || '0';
@@ -639,7 +748,11 @@ function makeTarGz(entries) {
     }
   }
   parts.push(Buffer.alloc(1024));
-  return gzipSync(Buffer.concat(parts));
+  return Buffer.concat(parts);
+}
+
+function makeTarGz(entries) {
+  return gzipSync(makeTar(entries));
 }
 
 function writeTarString(buffer, offset, length, value) {
