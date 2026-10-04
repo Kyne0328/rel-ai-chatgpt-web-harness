@@ -12,19 +12,10 @@ export const CANONICAL_TASK_STATUSES = Object.freeze([
   'cancelled'
 ] as const);
 
-export const NATIVE_TASK_STATUSES = Object.freeze([
-  'working',
-  'input_required',
-  'completed',
-  'failed',
-  'cancelled'
-] as const);
-
 export const TASK_ACTIVITY_STATES = Object.freeze(['idle', 'working', 'waiting', 'settling'] as const);
 
 export type TaskStatus = typeof CANONICAL_TASK_STATUSES[number];
 export type TaskState = TaskStatus;
-export type NativeTaskStatus = typeof NATIVE_TASK_STATUSES[number];
 export type TaskActivityState = typeof TASK_ACTIVITY_STATES[number];
 
 export interface TaskTransition {
@@ -77,6 +68,9 @@ export interface TaskDto {
   failures?: number;
   changedFiles?: string[];
   changedFileCount?: number;
+  changedFilesTruncated?: boolean;
+  productChangedFileCount?: number;
+  supportArtifactCount?: number;
   currentStage?: string;
   currentActivity?: string;
   tool?: string;

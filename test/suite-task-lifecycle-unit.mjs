@@ -664,7 +664,7 @@ async function case_task_history_store_unit() {
     const path = __m3.default;
   
     const __m4 = await import("../src/taskHistoryStore.ts");
-    const { clearTaskHistory, flushTaskHistoryPersistence, getTaskHistoryDir, readCrossWorkspaceTaskEpisodes, readRecentTaskHistoryEvents, readRecentWorkflowEvidence, readRelevantTaskEpisodes, readTaskHistory, readTaskHistorySessionRecord, recordTaskActivityEvent, recordTaskHistoryEvent, recordWorkflowEvidenceBatch } = __m4;
+    const { clearTaskHistory, flushTaskHistoryPersistence, getTaskHistoryDir, readCrossWorkspaceTaskEpisodes, readRecentTaskHistoryEvents, readRecentTaskHistoryEventsPage, readRecentWorkflowEvidence, readRelevantTaskEpisodes, readTaskHistory, readTaskHistoryPage, readTaskHistorySessionRecord, recordTaskActivityEvent, recordTaskHistoryEvent, recordWorkflowEvidenceBatch } = __m4;
   
     const __m5 = await import("../src/taskHistoryStorage.ts");
     const { writeSession } = __m5;
@@ -672,7 +672,7 @@ async function case_task_history_store_unit() {
     const __m6 = await import("../src/stateDatabase.ts");
     const { withStateDatabase } = __m6;
   
-    const __m7 = await import("../src/mcp/principal.js");
+    const __m7 = await import("../src/mcp/principal.ts");
     const { principalFingerprint } = __m7;
   
     const __m8 = await import("../src/tools/task.js");
@@ -723,9 +723,56 @@ async function case_task_history_store_unit() {
     let sessions = readTaskHistory(config, { state: 'idle' }, { limit: 500 });
     assert.equal(sessions.length, 251);
     assert.equal(sessions[0].id, 'task-250');
+    const firstTaskPage = readTaskHistoryPage(config, { limit: 100 });
+    assert.equal(firstTaskPage.tasks.length, 100);
+    assert.equal(firstTaskPage.hasMore, true);
+    assert.ok(firstTaskPage.cursor?.updatedAtMs);
+    const secondTaskPage = readTaskHistoryPage(config, { limit: 100, cursor: firstTaskPage.cursor });
+    assert.equal(secondTaskPage.tasks.length, 100);
+    assert.equal(
+      secondTaskPage.tasks.some(task => firstTaskPage.tasks.some(first => first.id === task.id)),
+      false,
+      'cursor-paged task history must not repeat the previous page'
+    );
+    const firstEventPage = readRecentTaskHistoryEventsPage(config, { limit: 100 });
+    assert.equal(firstEventPage.entries.length, 100);
+    assert.equal(firstEventPage.hasMore, true);
+    assert.ok(firstEventPage.cursor?.eventTimestamp);
+    const secondEventPage = readRecentTaskHistoryEventsPage(config, { limit: 100, cursor: firstEventPage.cursor });
+    assert.equal(secondEventPage.entries.length, 100);
+    assert.equal(
+      secondEventPage.entries.some(event => firstEventPage.entries.some(first => first.taskId === event.taskId)),
+      false,
+      'cursor-paged activity history must not repeat the previous page'
+    );
     assert.equal(sessions.some(session => session.id === 'legacy-task'), false, 'pre-current session records must not be interpreted');
     assert.equal(fs.existsSync(path.join(historyDir, 'legacy.json')), false, 'pre-current session records must be removed on read');
-  
+
+    for (let index = 0; index < 251; index += 1) {
+      recordTaskHistoryEvent(config, currentEvent('long-task', {
+        eventId: `long-event-${index}`,
+        ts: new Date(base + 400000 + index * 1000).toISOString(),
+        tool: 'exec',
+        operation: `Long task operation ${index}`,
+        ms: 5
+      }));
+    }
+    const longTaskSession = readTaskHistorySessionRecord(config, 'long-task');
+    assert.equal(longTaskSession?.events?.length, 200, 'task snapshots must remain bounded even when a task runs for many operations');
+    assert.equal(longTaskSession?.events?.[0]?.eventId, 'long-event-51', 'bounded task snapshots must retain the newest 200 events');
+    const longTaskFirstPage = readRecentTaskHistoryEventsPage(config, { taskId: 'long-task', limit: 200 });
+    assert.equal(longTaskFirstPage.entries.length, 200, 'Task activity must return the newest retained page for one long-running task');
+    assert.equal(longTaskFirstPage.hasMore, true);
+    assert.equal(longTaskFirstPage.entries[0]?.eventId, 'long-event-250');
+    const longTaskSecondPage = readRecentTaskHistoryEventsPage(config, {
+      taskId: 'long-task',
+      limit: 200,
+      cursor: longTaskFirstPage.cursor
+    });
+    assert.equal(longTaskSecondPage.entries.length, 51, 'Task activity pagination must retain events that rolled out of the bounded task snapshot');
+    assert.equal(longTaskSecondPage.hasMore, false);
+    assert.equal(longTaskSecondPage.entries.at(-1)?.eventId, 'long-event-0');
+
     recordTaskHistoryEvent(config, currentEvent('exact-task', {
       ts: new Date(base + 300000).toISOString(), tool: 'validate.checks', validationStatus: 'passed'
     }));
@@ -945,9 +992,8 @@ async function case_task_identity_unit() {
     const __m1 = await import("../src/ui/task-identity.js");
     const { taskEntityView } = __m1;
   
-  assert.deepEqual(taskEntityView({ work_id: 'logical-1', nativeTaskId: 'native-1', processId: 42 }), {
+  assert.deepEqual(taskEntityView({ work_id: 'logical-1', processId: 42 }), {
     logicalTaskId: 'logical-1',
-    nativeTaskId: 'native-1',
     processId: '42'
   });
   console.log('Dashboard task identity contracts passed.');
@@ -1439,6 +1485,9 @@ async function case_task_observability_unit() {
   const exactCommand = 'Write-Host "one  two"\nGet-ChildItem';
   const execCompleted = buildToolActivityDetails('exec', { command: exactCommand }, { exitCode: 0 }, null, { phase: 'complete' });
   assert.equal(execCompleted.command, exactCommand, 'exec activity must retain the command text shown to the user');
+  const longCommand = `adb logcat -d ${'GCASH-OBSERVER:I '.repeat(1800)}"*:S"`;
+  const longExecCompleted = buildToolActivityDetails('exec', { command: longCommand }, { exitCode: 0 }, null, { phase: 'complete' });
+  assert.equal(longExecCompleted.command, longCommand, 'exec activity must not truncate long visible commands');
   const execEvent = createActivityEvent({
     eventId: 'exec-command-1',
     taskId: 'task-command-1',
@@ -1859,6 +1908,8 @@ async function case_task_semantic_progress_unit() {
   
     const __m2 = await import("../src/taskSemanticProgress.js");
     const { buildTaskSemanticProgress, classifyTaskChangedFiles, semanticMilestoneForEvent } = __m2;
+    const __m3 = await import("../src/ui/features/sessions/model.js");
+    const { semanticFileCounts } = __m3;
   
   const files = classifyTaskChangedFiles([
     'tools/apktool.jar',
@@ -1867,6 +1918,21 @@ async function case_task_semantic_progress_unit() {
   ]);
   assert.deepEqual(files.productFiles, ['decoded/smali/com/example/PremiumGate.smali']);
   assert.deepEqual(files.supportArtifacts, ['tools/apktool.jar', '.relai/cache/native-index.bin']);
+  const exactCounts = buildTaskSemanticProgress({
+    status: 'planning',
+    changedFiles: Array.from({ length: 200 }, (_, index) => `src/generated/file-${index}.js`),
+    changedFileCount: 251,
+    changedFilesTruncated: true,
+    productChangedFileCount: 250,
+    supportArtifactCount: 1
+  });
+  assert.equal(exactCounts.productChangedFileCount, 250, 'semantic progress must preserve exact project-file counts beyond the bounded preview');
+  assert.equal(exactCounts.supportArtifactCount, 1, 'semantic progress must preserve exact support-artifact counts beyond the bounded preview');
+  assert.deepEqual(semanticFileCounts({
+    changedFiles: exactCounts.productFiles,
+    productChangedFileCount: 250,
+    supportArtifactCount: 1
+  }, exactCounts), { product: 250, support: 1 }, 'Tasks view-model counts must use exact totals instead of recounting the bounded file preview');
   
   const nativeInspection = semanticMilestoneForEvent({
     timestamp: '2026-08-29T12:00:00.000Z',
@@ -1993,17 +2059,13 @@ async function case_task_state_unit() {
   
   const {
     CANONICAL_TASK_STATUSES,
-    NATIVE_TASK_STATUSES,
     TASK_TRANSITIONS,
     assertTaskStatusTransition,
     canTransitionTaskStatus,
     internalStatusToDashboardStatus,
     isCanonicalTaskStatus,
-    isNativeTaskStatus,
     isTerminalDashboardTaskStatus,
-    isTerminalNativeTaskStatus,
     isTerminalTaskStatus,
-    nativeStatusToInternalStatus,
     normalizeHistoricalTaskStatus,
     normalizeLiveTaskStatus,
     transitionTaskStatus
@@ -2014,16 +2076,6 @@ async function case_task_state_unit() {
     'validation_failed', 'inactive', 'completed', 'failed', 'cancelled'
   ]);
   for (const status of CANONICAL_TASK_STATUSES) assert.equal(isCanonicalTaskStatus(status), true, status);
-  assert.deepEqual(NATIVE_TASK_STATUSES, ['working', 'input_required', 'completed', 'failed', 'cancelled']);
-  for (const status of NATIVE_TASK_STATUSES) assert.equal(isNativeTaskStatus(status), true, status);
-  assert.equal(isNativeTaskStatus('running'), false, 'internal and native protocol status vocabularies remain distinct');
-  assert.equal(nativeStatusToInternalStatus('working'), 'running');
-  assert.equal(nativeStatusToInternalStatus('input_required'), 'blocked');
-  assert.equal(nativeStatusToInternalStatus('completed'), 'completed');
-  assert.equal(nativeStatusToInternalStatus('unknown'), '');
-  assert.equal(isTerminalNativeTaskStatus('completed'), true);
-  assert.equal(isTerminalNativeTaskStatus('working'), false);
-  assert.equal(isTerminalNativeTaskStatus('unknown'), false);
   assert.equal(normalizeLiveTaskStatus('blocked', {}, { blockedMeansApproval: true }), 'waiting_for_approval');
   assert.equal(normalizeLiveTaskStatus('blocked'), 'blocked');
   assert.equal(normalizeLiveTaskStatus('working'), 'running');
@@ -2075,7 +2127,7 @@ async function case_task_state_unit() {
   assert.equal(normalizeHistoricalTaskStatus('unknown-active', {}), 'planning');
   
   const { workSessionStateView } = await import('../src/ui/task-identity.js');
-  const { isOngoingSession, sessionSummary } = await import('../src/ui/features/sessions/index.js');
+  const { isOngoingSession, sessionSummary } = await import('../src/ui/features/sessions/model.js');
   const runningView = workSessionStateView({ status: 'running', state: 'working', activeCalls: 1 });
   assert.equal(runningView.active, true);
   assert.equal(runningView.open, false);
@@ -2105,7 +2157,7 @@ async function case_task_trace_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/ui/features/sessions/index.js");
+    const __m1 = await import("../src/ui/features/sessions/model.js");
     const { taskTraceJsonl } = __m1;
   
   const session = {

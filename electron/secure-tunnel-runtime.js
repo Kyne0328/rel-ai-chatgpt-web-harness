@@ -36,6 +36,7 @@ function createSecureTunnelRuntime({
   resolveExecutable = bundledTunnelClientPath,
   makeEnvironment,
   stateDir = process.env.REL_AI_MCP_STATE_DIR || path.join(os.homedir(), '.rel-ai-mcp'),
+  instanceId = '',
   onLog = () => {},
   onStatus = () => {},
   monitorIntervalMs = MONITOR_INTERVAL_MS,
@@ -86,20 +87,25 @@ function createSecureTunnelRuntime({
     transportFailureStreak = 0;
     update({ state: 'starting', tunnelId, healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
 
+    const instanceSuffix = normalizeInstanceId(instanceId);
+    const healthUrlFile = path.join(path.resolve(stateDir), `tunnel-health-${process.pid}${instanceSuffix ? `-${instanceSuffix}` : ''}-${runGeneration}.url`);
     let executable;
     try {
       executable = await resolveExecutable();
+      if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
       if (!executable) throw new Error('Bundled OpenAI tunnel-client is missing. Fetch and verify vendor/tunnel-client before starting Rel.AI.');
       await ensureExecutable(executable);
+      if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
+      await fs.promises.mkdir(path.dirname(healthUrlFile), { recursive: true, mode: 0o700 });
+      if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
+      await fs.promises.rm(healthUrlFile, { force: true });
     } catch (error) {
+      if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
       const failure = tunnelFailure(TUNNEL_RUNTIME_UNAVAILABLE_CODE, messageOf(error));
-      if (runGeneration === generation) update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, recoveryMode: '' });
+      update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, recoveryMode: '' });
       throw failure;
     }
-
-    const healthUrlFile = path.join(path.resolve(stateDir), `tunnel-health-${process.pid}.url`);
-    await fs.promises.mkdir(path.dirname(healthUrlFile), { recursive: true, mode: 0o700 });
-    await fs.promises.rm(healthUrlFile, { force: true });
+    if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
 
     const args = [
       ...tunnelConnectionArgs('run', tunnelId, port),
@@ -146,6 +152,7 @@ function createSecureTunnelRuntime({
       }
     };
 
+    if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
     try {
       ownedChild = spawnImpl(executable, args, {
         cwd: path.dirname(healthUrlFile),
@@ -171,9 +178,9 @@ function createSecureTunnelRuntime({
       update({ state: 'failed', tunnelId, error: fatalFailure.message, errorCode: fatalFailure.code, recoveryMode: '' });
     });
     ownedChild.once('exit', (code, signal) => {
+      void fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
       if (runGeneration !== generation || child !== ownedChild) return;
       child = null;
-      void fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
       if (stopping) {
         update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
         return;
@@ -204,7 +211,12 @@ function createSecureTunnelRuntime({
       });
       if (fatalStopPromise) await fatalStopPromise;
       if (fatalFailure) throw fatalFailure;
-      if (runGeneration !== generation || child !== ownedChild) return { cancelled: true, ...snapshot() };
+      if (runGeneration !== generation || child !== ownedChild) {
+        if (ownedChild?.exitCode === null) await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
+        if (child === ownedChild) child = null;
+        await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
+        return { cancelled: true, ...snapshot() };
+      }
 
       const degraded = operational.degraded === true;
       update({
@@ -231,13 +243,12 @@ function createSecureTunnelRuntime({
       return { ok: true, process: ownedChild, ...snapshot() };
     } catch (error) {
       const failure = fatalFailure || normalizeTunnelFailure(error);
-      if (runGeneration === generation) {
-        if (fatalStopPromise) await fatalStopPromise;
-        else if (ownedChild?.exitCode === null) await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
-        if (child === ownedChild) child = null;
-        await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
-        update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, consecutiveFailures: 0, outageStartedAt: null, recoveryMode: '' });
-      }
+      if (fatalStopPromise) await fatalStopPromise;
+      else if (ownedChild?.exitCode === null) await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
+      if (child === ownedChild) child = null;
+      await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
+      if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
+      update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, consecutiveFailures: 0, outageStartedAt: null, recoveryMode: '' });
       throw failure;
     }
   }
@@ -415,6 +426,7 @@ function createSecureTunnelRuntime({
   }
 
   async function stop() {
+    const ownedHealthUrlFile = path.join(path.resolve(stateDir), `tunnel-health-${process.pid}-${generation}.url`);
     generation += 1;
     stopping = true;
     const ownedChild = child;
@@ -427,6 +439,7 @@ function createSecureTunnelRuntime({
     let result;
     try {
       result = await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 });
+      if (result?.exited) await fs.promises.rm(ownedHealthUrlFile, { force: true }).catch(() => {});
     } catch (error) {
       if (monitorPromise) await Promise.race([monitorPromise, delay(100)]).catch(() => {});
       monitorPromise = null;
@@ -838,6 +851,12 @@ function normalizeTunnelId(value) {
   const text = String(value || '').trim();
   if (!/^tunnel_[A-Za-z0-9_-]{8,200}$/.test(text)) throw new Error('OpenAI Secure MCP Tunnel ID must start with tunnel_.');
   return text;
+}
+
+function normalizeInstanceId(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 96);
 }
 
 function normalizePort(value) {

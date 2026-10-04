@@ -8,6 +8,8 @@
 # Local MCP runtime state — journals, staged payloads, oauth store. Test artifacts
 # used to land here and dirty the tree.
 /.rel-ai-mcp-state
+# Local recovery/probe staging created during development. Never repository state.
+/.rel-ai-temp
 /node_modules
 .env
 .dev.vars

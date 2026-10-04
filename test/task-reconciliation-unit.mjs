@@ -6,9 +6,11 @@ import path from 'node:path';
 
 import { flushAuditWrites } from '../src/audit.js';
 import { readConfig } from '../src/config.js';
+import { dashboardSnapshot, dashboardTaskHistory, dashboardTaskSession } from '../src/core/dashboard-runtime.ts';
+import { activeFallbackWorkIds, cancelFallbackExecution, resetFallbackExecutions, startFallbackExecution } from '../src/mcp/fallbackExecutions.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
 import { withStateDatabase } from '../src/stateDatabase.ts';
-import { flushTaskHistoryPersistence, readTaskHistory, readTaskHistorySessionRecord } from '../src/taskHistoryStore.ts';
+import { flushTaskHistoryPersistence, readTaskHistory, readTaskHistorySessionRecord, recordTaskBackgroundOperation } from '../src/taskHistoryStore.ts';
 import { taskCommitOwnership } from '../src/taskIntegrity.ts';
 import { ensureCurrentHistory, getTaskHistoryDir, listSessions, pruneSessions, writeSession } from '../src/taskHistoryStorage.ts';
 import { DEFAULT_TASK_IDLE_MS, getToolActivity, resetToolActivity } from '../src/toolActivity.js';
@@ -109,6 +111,147 @@ try {
   resetToolActivity();
   const historyAfterIdle = readTaskHistory(readConfig(), getToolActivity(), { limit: 100 });
   assert.equal(historyAfterIdle.some(session => session.id === idleTask && session.status === 'inactive'), true, 'an idle no-op task must remain stored as resumable inactive work');
+
+  resetToolActivity();
+  const backgroundTask = await begin('Running background task stays active');
+  await flushTaskHistoryPersistence();
+  const backgroundSession = readTaskHistorySessionRecord(readConfig(), backgroundTask);
+  const backgroundStaleAt = new Date(Date.now() - DEFAULT_TASK_IDLE_MS - 5_000).toISOString();
+  writeSession(getTaskHistoryDir(readConfig()), {
+    ...backgroundSession,
+    status: 'planning',
+    state: 'waiting',
+    currentActivity: 'Running long validation',
+    updatedAt: backgroundStaleAt,
+    lastActivityAt: backgroundStaleAt,
+    events: (backgroundSession.events || []).map(event => ({ ...event, timestamp: backgroundStaleAt, ts: backgroundStaleAt, startedAt: backgroundStaleAt, completedAt: backgroundStaleAt }))
+  });
+  const liveBackground = startFallbackExecution({
+    config: readConfig(),
+    workId: backgroundTask,
+    tool: 'relai_validate',
+    workspace: 'app',
+    signature: 'long-running-task-activity',
+    run: signal => new Promise(resolve => {
+      const finish = () => resolve({ isError: false, structuredContent: { ok: false, cancelled: true } });
+      if (signal.aborted) finish();
+      else signal.addEventListener('abort', finish, { once: true });
+    })
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  resetToolActivity();
+  const historyDuringBackground = readTaskHistory(readConfig(), getToolActivity(), {
+    limit: 100,
+    activeTaskIds: activeFallbackWorkIds()
+  });
+  const backgroundHistoryTask = historyDuringBackground.find(session => session.id === backgroundTask);
+  assert.notEqual(backgroundHistoryTask?.status, 'inactive', 'a genuinely live background operation must keep its owning task active past the idle window');
+  assert.equal(backgroundHistoryTask?.currentActivity, 'Running long validation', 'long-running background work must retain the task activity shown in Tasks');
+  const dashboardDuringBackground = dashboardSnapshot({ getTaskActivity: getToolActivity });
+  assert.notEqual(dashboardDuringBackground.tasks.find(task => task.id === backgroundTask)?.status, 'inactive', 'dashboard snapshots must preserve genuinely live detached background work');
+  const stoppedBackground = cancelFallbackExecution(liveBackground.record.operationId, {
+    config: readConfig(),
+    expectedWorkId: backgroundTask,
+    reason: 'Background activity retention regression complete.'
+  });
+  await (stoppedBackground.settlement || liveBackground.record.promise);
+  await rawCallTool('relai_work', { action: 'cancel', workspace: 'app', work_id: backgroundTask, reason: 'Background activity retention regression complete.' }, context);
+
+  resetFallbackExecutions();
+  resetToolActivity();
+  const staleBackgroundTask = await begin('Stale persisted background task becomes inactive');
+  await flushTaskHistoryPersistence();
+  const staleBackgroundSession = readTaskHistorySessionRecord(readConfig(), staleBackgroundTask);
+  const staleBackgroundAt = new Date(Date.now() - DEFAULT_TASK_IDLE_MS - 5_000).toISOString();
+  writeSession(getTaskHistoryDir(readConfig()), {
+    ...staleBackgroundSession,
+    status: 'planning',
+    state: 'waiting',
+    updatedAt: staleBackgroundAt,
+    lastActivityAt: staleBackgroundAt,
+    events: (staleBackgroundSession.events || []).map(event => ({ ...event, timestamp: staleBackgroundAt, ts: staleBackgroundAt, startedAt: staleBackgroundAt, completedAt: staleBackgroundAt }))
+  });
+  recordTaskBackgroundOperation(readConfig(), staleBackgroundTask, {
+    operationId: 'fallback_stale_task_activity',
+    workId: staleBackgroundTask,
+    tool: 'relai_validate',
+    workspace: 'app',
+    status: 'running',
+    phase: 'running',
+    startedAt: staleBackgroundAt,
+    updatedAt: staleBackgroundAt,
+    revision: 1
+  });
+  resetFallbackExecutions();
+  resetToolActivity();
+  const staleBackgroundHistory = readTaskHistory(readConfig(), getToolActivity(), {
+    limit: 100,
+    activeTaskIds: activeFallbackWorkIds()
+  });
+  assert.equal(staleBackgroundHistory.find(session => session.id === staleBackgroundTask)?.status, 'inactive', 'persisted running state without a live execution must not keep an old task Planning');
+
+  resetToolActivity();
+  const pagedTask = await begin('Paged old task becomes inactive');
+  await flushTaskHistoryPersistence();
+  const pagedSession = readTaskHistorySessionRecord(readConfig(), pagedTask);
+  const pagedInactiveAt = new Date(Date.now() - DEFAULT_TASK_IDLE_MS - 5_000).toISOString();
+  writeSession(getTaskHistoryDir(readConfig()), {
+    ...pagedSession,
+    status: 'planning',
+    state: 'waiting',
+    updatedAt: pagedInactiveAt,
+    lastActivityAt: pagedInactiveAt,
+    events: (pagedSession.events || []).map(event => ({ ...event, timestamp: pagedInactiveAt, ts: pagedInactiveAt, startedAt: pagedInactiveAt, completedAt: pagedInactiveAt }))
+  });
+  resetToolActivity();
+  assert.equal(dashboardTaskHistory({ limit: 100 }).tasks.find(task => task.id === pagedTask)?.status, 'inactive', 'older dashboard history must use the same inactivity reconciliation as the recent task list');
+
+  resetToolActivity();
+  const detailTask = await begin('Old task detail becomes inactive');
+  await flushTaskHistoryPersistence();
+  const detailSession = readTaskHistorySessionRecord(readConfig(), detailTask);
+  const detailInactiveAt = new Date(Date.now() - DEFAULT_TASK_IDLE_MS - 5_000).toISOString();
+  writeSession(getTaskHistoryDir(readConfig()), {
+    ...detailSession,
+    status: 'planning',
+    state: 'waiting',
+    updatedAt: detailInactiveAt,
+    lastActivityAt: detailInactiveAt,
+    events: (detailSession.events || []).map(event => ({ ...event, timestamp: detailInactiveAt, ts: detailInactiveAt, startedAt: detailInactiveAt, completedAt: detailInactiveAt }))
+  });
+  resetToolActivity();
+  assert.equal(dashboardTaskSession(detailTask)?.session?.status, 'inactive', 'opening an old task must reconcile its detail status instead of restoring stale Planning state');
+
+  resetToolActivity();
+  const completedWithStaleBackground = await begin('Completion outranks stale background state');
+  await flushTaskHistoryPersistence();
+  const completedWithStaleSession = readTaskHistorySessionRecord(readConfig(), completedWithStaleBackground);
+  const completedWithStaleAt = new Date(Date.now() - DEFAULT_TASK_IDLE_MS - 5_000).toISOString();
+  writeSession(getTaskHistoryDir(readConfig()), {
+    ...completedWithStaleSession,
+    status: 'planning',
+    state: 'waiting',
+    completionKnown: true,
+    endReason: 'explicit_completion',
+    updatedAt: completedWithStaleAt,
+    lastActivityAt: completedWithStaleAt
+  });
+  recordTaskBackgroundOperation(readConfig(), completedWithStaleBackground, {
+    operationId: 'fallback_stale_after_completion',
+    workId: completedWithStaleBackground,
+    tool: 'relai_validate',
+    workspace: 'app',
+    status: 'running',
+    phase: 'running',
+    startedAt: completedWithStaleAt,
+    updatedAt: completedWithStaleAt,
+    revision: 1
+  });
+  resetFallbackExecutions();
+  resetToolActivity();
+  const completedWithStaleHistory = readTaskHistory(readConfig(), getToolActivity(), { limit: 100 });
+  assert.equal(completedWithStaleHistory.find(session => session.id === completedWithStaleBackground)?.status, 'completed', 'explicit completion must outrank stale persisted background state');
+
   const differentConversation = await rawCallTool('relai_work', {
     action: 'begin', workspace: 'app', title: 'Idle task must remain resumable', bootstrap: 'none'
   }, { ...context, conversationId: 'different-reconciliation-chat' });
@@ -166,6 +309,9 @@ try {
   record('terminal-completed', 'completed', { completionKnown: true });
   record('terminal-cancelled', 'cancelled', { endReason: 'explicit_cancellation' });
   withStateDatabase(pruneConfig, db => {
+    const oldUpdatedAt = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    db.prepare('UPDATE task_history SET updated_at_ms=? WHERE id IN (?,?)')
+      .run(oldUpdatedAt, 'terminal-completed', 'terminal-cancelled');
     const insertIntegrity = db.prepare('INSERT INTO task_integrity_tasks(task_id,updated_at_ms,payload) VALUES(?,?,?)');
     insertIntegrity.run('terminal-completed', Date.now(), JSON.stringify({ taskId: 'terminal-completed', completedAt: new Date().toISOString() }));
     insertIntegrity.run('terminal-cancelled', Date.now(), JSON.stringify({ taskId: 'terminal-cancelled', cancelledAt: new Date().toISOString() }));
@@ -174,8 +320,8 @@ try {
     db.prepare('INSERT INTO workspace_integrity(workspace,updated_at_ms,payload) VALUES(?,?,?)')
       .run('app', Date.now(), JSON.stringify({ workspace: 'app', uncommittedOwners: { 'owned.txt': ['terminal-completed'] } }));
   }, { transaction: true });
-  pruneSessions(pruneDirectory, 1);
-  assert.deepEqual(listSessions(pruneDirectory, 10).map(session => session.id), ['open-inactive'], 'history pruning must preserve nonterminal work even when it exceeds the nominal retention target');
+  pruneSessions(pruneDirectory, { retentionDays: 1, storageBudgetBytes: 1024 * 1024, nowMs: Date.now() });
+  assert.deepEqual(listSessions(pruneDirectory, 10).map(session => session.id), ['open-inactive'], 'age-based history pruning must preserve resumable nonterminal work while expiring old terminal history');
   const retainedIntegrity = withStateDatabase(pruneConfig, db =>
     db.prepare('SELECT task_id FROM task_integrity_tasks ORDER BY task_id').all().map(row => row.task_id)
   , { transaction: true });
@@ -188,7 +334,7 @@ try {
     db.prepare('UPDATE workspace_integrity SET payload=? WHERE workspace=?')
       .run(JSON.stringify({ workspace: 'app', uncommittedOwners: {} }), 'app');
   }, { transaction: true });
-  pruneSessions(pruneDirectory, 1);
+  pruneSessions(pruneDirectory, { retentionDays: 1, storageBudgetBytes: 1024 * 1024, nowMs: Date.now() });
   const integrityAfterOwnershipRelease = withStateDatabase(pruneConfig, db =>
     db.prepare('SELECT task_id FROM task_integrity_tasks ORDER BY task_id').all().map(row => row.task_id)
   , { transaction: true });
@@ -196,6 +342,13 @@ try {
     integrityAfterOwnershipRelease,
     ['orphan-resumable'],
     'a previously protected terminal orphan must retire after its outstanding ownership is released'
+  );
+  record('terminal-budget', 'completed', { completionKnown: true });
+  pruneSessions(pruneDirectory, { retentionDays: 3650, storageBudgetBytes: 1, nowMs: Date.now() });
+  assert.deepEqual(
+    listSessions(pruneDirectory, 10).map(session => session.id),
+    ['open-inactive'],
+    'the storage budget must prune terminal history before resumable nonterminal work'
   );
   fs.rmSync(pruneStateDir, { recursive: true, force: true });
 

@@ -1,7 +1,7 @@
 function hasAgentCancellationHandle(args = {}, context = {}) {
   return Boolean(
     String(args.work_id || context.taskId || '').trim()
-    || String(args._operationTaskId || context.nativeTaskId || '').trim()
+
   );
 }
 
@@ -11,7 +11,12 @@ function resolveOneShotTimeoutMs(args = {}, context = {}, options = {}) {
   const fallbackMs = Math.min(maxMs, Math.max(minMs, positiveNumber(options.fallbackMs, 120000)));
   const requested = Number(args.timeoutMs);
   if (Number.isFinite(requested) && requested > 0) {
-    return Math.min(maxMs, Math.max(minMs, Math.floor(requested)));
+    const bounded = Math.min(maxMs, Math.max(minMs, Math.floor(requested)));
+    const deadlineAtMs = Number(context?.deadlineAtMs);
+    if (Number.isFinite(deadlineAtMs) && deadlineAtMs > 0) {
+      return Math.max(1, Math.min(bounded, Math.floor(deadlineAtMs - Date.now())));
+    }
+    return bounded;
   }
   return hasAgentCancellationHandle(args, context) ? 0 : fallbackMs;
 }

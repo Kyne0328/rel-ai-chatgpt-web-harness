@@ -1,4 +1,5 @@
 import { TOOL_SURFACE_VERSION, getCatalogTools } from './actionCatalog.js';
+import { TOOL_SCHEMA_VERSION } from './schemaVersion.js';
 
 const tools = getCatalogTools();
 
@@ -22,7 +23,6 @@ function getToolMetadata() {
       longRunning: definition.behavior?.longRunning === true,
       taskScope: definition.behavior?.taskScope || 'required',
       executionClass: definition.behavior?.executionClass || 'bounded_synchronous',
-      taskSupport: aggregateTaskSupport(definition, actions),
       ...(actions.length ? { actions } : {})
     };
   });
@@ -37,7 +37,6 @@ function getToolSurfaceManifest() {
       state: 'active',
       outputFields: outputFields(tool),
       executionClass: definition.behavior?.executionClass || 'bounded_synchronous',
-      taskSupport: aggregateTaskSupport(definition, actions),
       ...(actions.length ? {
         executionClasses: [...new Set(actions.map(action => action.executionClass))],
         actions
@@ -45,7 +44,7 @@ function getToolSurfaceManifest() {
     };
   });
   return {
-    schemaVersion: 7,
+    schemaVersion: TOOL_SCHEMA_VERSION,
     toolSurfaceVersion: TOOL_SURFACE_VERSION,
     toolCount: manifestTools.length,
     tools: manifestTools,
@@ -69,18 +68,12 @@ function actionMetadata(tool) {
       fields: [...entry.fields],
       required: [...entry.required],
       executionClass: entry.behavior?.executionClass || 'bounded_synchronous',
-      taskSupport: entry.execution?.taskSupport || 'forbidden',
       taskScope: entry.behavior?.taskScope || 'required',
       concurrencyScope: entry.behavior?.concurrencyScope || 'task',
       annotations: entry.annotations || tool.definition.annotations || {}
     }));
 }
 
-function aggregateTaskSupport(definition, actions) {
-  return actions.some(action => action.taskSupport === 'optional')
-    ? 'optional'
-    : definition.execution?.taskSupport || 'forbidden';
-}
 
 function getToolGroups() {
   const definitions = tools.map(tool => tool.definition);

@@ -301,4 +301,4 @@ function compactSearchText(value) {
   return String(value || '').replace(/\p{Cc}+/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, 12_000);
 }
 
-export { queryTaskSignature, sessionTaskSignature, taskEpisodeMatch };
+export { queryTaskSignature, taskEpisodeMatch };

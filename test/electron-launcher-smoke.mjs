@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { assertRuntimeResourceMappings } from '../scripts/packaged-runtime-parity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const utils = await import(pathToFileURL(path.join(root, 'electron', 'launcher-utils.js')).href);
@@ -18,15 +19,21 @@ assert.throws(() => normalizeTunnelId('not-a-tunnel'), /must start with tunnel_/
 
 const electronPkg = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
 const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+assert.equal(electronPkg.build.nsis.runAfterFinish, true, 'fresh Windows installs must offer to launch Rel.AI immediately so first-run setup is visible');
 const srcResource = electronPkg.build.extraResources.find(item => item.from === '../src');
 assert.ok(srcResource, 'Electron packaging must include the backend source runtime.');
-assert.deepEqual(srcResource.filter, ['**/*.js', '**/*.ts', '**/*.ps1']);
-assert.equal(fs.existsSync(path.join(root, 'src', 'mcp', 'ui', 'workflow-card.html')), false, 'Electron packaging must not retain the removed ChatGPT iframe task card.');
+for (const platform of ['win32', 'linux', 'darwin']) {
+  assertRuntimeResourceMappings({ sourceRoot: root, rootPackage: rootPkg, electronPackage: electronPkg, platform });
+}
+assert.equal(fs.existsSync(path.join(root, 'src', 'mcp', 'ui', 'task-panel.html')), false, 'Electron packaging must not retain the removed MCP Apps task panel.');
+assert.equal(fs.existsSync(path.join(root, 'src', 'mcp', 'ui', 'workflow-card.html')), false, 'Electron packaging must not retain the removed legacy task card.');
 
 for (const file of [
   'desktop-host.js',
   'secure-tunnel-runtime.js',
+  'tunnel-runtime-pool.js',
   'tunnel-credentials.js',
+  'tunnel-connections.js',
   'service-runtime.js',
   'service-process.js',
   'service-process-client.js',

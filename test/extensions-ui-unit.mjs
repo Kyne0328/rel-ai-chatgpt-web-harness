@@ -13,6 +13,11 @@ const stylesCode = fs.readFileSync(path.join(root, 'src/ui/features/extensions/s
 assert.match(reactCode, /function createExtensionsRoute\(\)/, 'React route factory remains defined in the frontend module');
 assert.match(reactCode, /from '\.\/metadata\.js'/, 'React route consumes CSS-free extension metadata');
 assert.equal(EXTENSIONS_REPOSITORY_URL, 'https://github.com/Kyne0328/rel-ai-extensions');
+assert.match(reactCode, /EXTENSIONS_LOAD_TIMEOUT_MS = 30 \* 1000/, 'Extension catalog loading must outlive the backend catalog fetch timeout');
+assert.match(reactCode, /EXTENSIONS_CACHE_TTL_MS = 15 \* 1000/, 'Extension remounts must reuse a short-lived catalog snapshot instead of cold-fetching every time');
+assert.match(reactCode, /refresh[\s\S]*cache: 'no-store'[\s\S]*cacheTtlMs: EXTENSIONS_CACHE_TTL_MS/, 'Explicit Extension refreshes must bypass cache while ordinary route loads reuse the short-lived cache');
+assert.match(reactCode, /invalidateCache\('\/api\/extensions'\)/, 'Extension mutations must invalidate the ordinary route cache before reloading installed state');
+assert.match(reactCode, /timeout: EXTENSIONS_LOAD_TIMEOUT_MS/, 'Extension catalog GET requests must use the dedicated longer timeout');
 
 // 2. CSS integration
 assert.match(reactCode, /import '\.\/styles\.css';/, 'Extensions React module must own its feature stylesheet');

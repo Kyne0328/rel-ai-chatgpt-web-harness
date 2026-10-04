@@ -1,4 +1,4 @@
-export const DEVELOPER_OPTIONS_STORAGE_KEY = 'relai_developer_options_unlocked';
+const DEVELOPER_OPTIONS_STORAGE_KEY = 'relai_developer_options_unlocked';
 export const DEVELOPER_FEATURE_CHANGE_EVENT = 'relai:developer-feature-change';
 
 const LEGACY_DEVELOPER_MODE_STORAGE_KEY = 'relai_developer_mode_enabled';

@@ -183,6 +183,31 @@ async function case_ipc_security_unit() {
   
   assert.ok(Number.isSafeInteger(MAX_CLIPBOARD_TEXT_BYTES) && MAX_CLIPBOARD_TEXT_BYTES > 0, 'clipboard input must remain bounded');
   const guards = createWindowGuards(deps.BrowserWindow);
+  assert.equal(guards.isSenderWindow(eventFor(null), () => null), false, 'two absent windows must never authorize IPC');
+  assert.equal(guards.isSenderWindow({}, () => dashboard), false, 'missing senders must be rejected');
+  assert.equal(guards.isSenderWindow(eventFor(dashboard), () => null), false, 'an absent expected window must be rejected');
+  const destroyedWindow = { isDestroyed: () => true };
+  assert.equal(guards.isSenderWindow(eventFor(destroyedWindow), () => destroyedWindow), false, 'a destroyed expected window must be rejected');
+  const liveWindow = { isDestroyed: () => false };
+  assert.equal(guards.isSenderWindow(eventFor(liveWindow), () => liveWindow), true, 'the matching live window remains authorized');
+  let unauthorizedCalls = 0;
+  assert.throws(() => guards.allowedWindows(eventFor(null), [() => null], 'Absent window', () => { unauthorizedCalls += 1; }), /not available/);
+  const absentHandles = new Map();
+  const absentListeners = new Map();
+  const absentRegistrar = createContractIpcRegistrar({
+    ipcMain: { handle: (channel, handler) => absentHandles.set(channel, handler), on: (channel, handler) => absentListeners.set(channel, handler) },
+    BrowserWindow: deps.BrowserWindow,
+    contract: {
+      'test:absent-handle': { mode: 'handle', windows: ['dashboard'], failure: 'reject' },
+      'test:absent-on': { mode: 'on', windows: ['dashboard'], failure: 'ignore' }
+    },
+    windowGetters: { dashboard: () => null }
+  });
+  absentRegistrar.handle('test:absent-handle', 'Absent window', () => { unauthorizedCalls += 1; });
+  absentRegistrar.on('test:absent-on', 'Absent window', () => { unauthorizedCalls += 1; });
+  assert.throws(() => absentHandles.get('test:absent-handle')(eventFor(null)), /not available/);
+  absentListeners.get('test:absent-on')(eventFor(null));
+  assert.equal(unauthorizedCalls, 0, 'neither rejected requests nor ignored events may invoke privileged actions');
   assert.equal(guards.windowOnly(eventFor(dashboard), () => dashboard, 'Dashboard', () => 'allowed'), 'allowed');
   assert.throws(() => guards.windowOnly(eventFor(other), () => dashboard, 'Dashboard', () => 'denied'), /not available/);
   const registrar = createContractIpcRegistrar({

@@ -77,7 +77,7 @@ async function case_analytics_reliability_unit() {
     const __m3 = await import("node:path");
     const path = __m3.default;
   
-    const __m4 = await import("../src/analyticsOutcome.js");
+    const __m4 = await import("../src/analyticsOutcome.ts");
     const { OUTCOME_CLASSES, classifyAnalyticsOutcome } = __m4;
   
     const __m5 = await import("../src/analyticsFailureCategory.ts");
@@ -332,7 +332,7 @@ async function case_analytics_taxonomy_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/analyticsTaxonomy.js");
+    const __m1 = await import("../src/analyticsTaxonomy.ts");
     const { ANALYTICS_USE_CASES,
     analyticsTaskIntentLabel,
     analyticsUseCaseForOperation,
@@ -1056,6 +1056,8 @@ async function case_ipc_channel_contract_unit() {
     getLocalUsage: month => ({ ok: true, month, source: 'local' }),
     getDesktopSettings: () => ({ ok: true }),
     saveDesktopSettings: value => ({ ok: true, value }),
+    saveAdditionalTunnel: value => { calls.push(['saveAdditionalTunnel', value]); return { ok: true, connection: value }; },
+    removeAdditionalTunnel: value => { calls.push(['removeAdditionalTunnel', value]); return { ok: true, tunnelId: value }; },
     getLifecycleStatus: () => ({ ok: true }),
     acknowledgeConnectorRefresh: () => ({ ok: true }),
     setLaunchAtLogin: value => value,
@@ -1094,6 +1096,14 @@ async function case_ipc_channel_contract_unit() {
     }
   }
   
+  const additionalTunnel = { tunnelId: 'tunnel_additional123', enabled: false };
+  const savedTunnel = await handles.get(DESKTOP_IPC.DESKTOP_TUNNEL_SAVE)(eventFor(windows.dashboard), additionalTunnel);
+  assert.deepEqual(savedTunnel, { ok: true, connection: additionalTunnel });
+  assert.deepEqual(calls.at(-1), ['saveAdditionalTunnel', additionalTunnel]);
+  const removedTunnel = await handles.get(DESKTOP_IPC.DESKTOP_TUNNEL_REMOVE)(eventFor(windows.dashboard), additionalTunnel.tunnelId);
+  assert.deepEqual(removedTunnel, { ok: true, tunnelId: additionalTunnel.tunnelId });
+  assert.deepEqual(calls.at(-1), ['removeAdditionalTunnel', additionalTunnel.tunnelId]);
+
   assert.throws(() => handles.get('url:copy')(eventFor(windows.wizard), 'x'.repeat(64 * 1024 + 1)), /64 KiB/);
   assert.throws(() => handles.get('desktop:logout')(eventFor(windows.dashboard), { clearData: 'yes' }), /clearData as a boolean/);
   const logout = await handles.get('desktop:logout')(eventFor(windows.dashboard), { clearData: true });
@@ -1155,340 +1165,6 @@ async function case_ipc_channel_contract_unit() {
   }
 }
 await case_ipc_channel_contract_unit();
-
-// Formerly native-task-protocol-unit.mjs
-async function case_native_task_protocol_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("node:fs");
-    const fs = __m1.default;
-  
-    const __m2 = await import("node:os");
-    const os = __m2.default;
-  
-    const __m3 = await import("node:path");
-    const path = __m3.default;
-  
-    const __m4 = await import("@modelcontextprotocol/server");
-    const { CLIENT_CAPABILITIES_META_KEY,
-    PROTOCOL_VERSION_META_KEY,
-    SERVER_INFO_META_KEY } = __m4;
-  
-    const __m5 = await import("../src/mcp/nativeTaskService.js");
-    const { createNativeTask,
-    requestNativeTaskInput } = __m5;
-  
-    const __m6 = await import("../src/stateDatabase.ts");
-    const { withStateDatabase } = __m6;
-  
-    const __m7 = await import("../src/mcp/protocol.js");
-    const { INVALID_TASKS_CAPABILITY_CODE,
-    MCP_PROTOCOL_VERSION,
-    MISSING_TASKS_CAPABILITY_CODE,
-    TASKS_EXTENSION_REVISION } = __m7;
-  
-    const __m8 = await import("../src/mcp/transportTasks.js");
-    const { handleTransportTaskRequest } = __m8;
-  
-  const extensionId = 'io.modelcontextprotocol/tasks';
-  const tasksCapability = { extensions: { [extensionId]: { revision: TASKS_EXTENSION_REVISION } } };
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-task-protocol-'));
-  const config = { stateDir: root };
-  let resumeCount = 0;
-  let resumedWith = null;
-  
-  function message(id, method, params = {}, capabilities = tasksCapability) {
-    return {
-      jsonrpc: '2.0',
-      id,
-      method,
-      params: {
-        ...params,
-        _meta: {
-          [PROTOCOL_VERSION_META_KEY]: MCP_PROTOCOL_VERSION,
-          [CLIENT_CAPABILITIES_META_KEY]: capabilities
-        }
-      }
-    };
-  }
-  
-  function handle(targetConfig, request, principal = 'principal-a') {
-    return handleTransportTaskRequest(targetConfig, request, {
-      principal,
-      transportType: 'test'
-    });
-  }
-  
-  try {
-    const created = createNativeTask(config, {
-      principal: 'principal-a',
-      method: 'tools/call',
-      name: 'input-round-trip-test',
-      executor: {
-        resume(inputResponses) {
-          resumeCount += 1;
-          resumedWith = inputResponses;
-        }
-      }
-    });
-    requestNativeTaskInput(config, created.taskId, {
-      approval: { mode: 'elicitation', message: 'Approve?' },
-      note: { mode: 'elicitation', message: 'Add a note.' }
-    }, { principal: 'principal-a' });
-  
-    const waiting = await handle(config, message(1, 'tasks/get', { taskId: created.taskId }));
-    assert.equal(waiting.body.result.status, 'input_required');
-    assert.ok(waiting.body.result._meta?.[SERVER_INFO_META_KEY]);
-    assert.deepEqual(Object.keys(waiting.body.result.inputRequests).sort(), ['approval', 'note']);
-  
-    const partial = await handle(config, message(2, 'tasks/update', {
-      taskId: created.taskId,
-      inputResponses: {
-        approval: { approved: true },
-        unknown: { ignored: true }
-      }
-    }));
-    assert.equal(partial.body.result.resultType, 'complete');
-    assert.ok(partial.body.result._meta?.[SERVER_INFO_META_KEY]);
-    const afterPartial = await handle(config, message(3, 'tasks/get', { taskId: created.taskId }));
-    assert.equal(afterPartial.body.result.status, 'input_required');
-    assert.deepEqual(Object.keys(afterPartial.body.result.inputRequests), ['note']);
-    assert.equal(resumeCount, 0);
-  
-    const fulfilled = await handle(config, message(4, 'tasks/update', {
-      taskId: created.taskId,
-      inputResponses: { note: { text: 'Proceed.' } }
-    }));
-    assert.equal(fulfilled.body.result.resultType, 'complete');
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(resumeCount, 1);
-    assert.deepEqual(resumedWith, {
-      approval: { approved: true },
-      note: { text: 'Proceed.' }
-    });
-  
-    const replay = await handle(config, message(5, 'tasks/update', {
-      taskId: created.taskId,
-      inputResponses: { note: { text: 'Replay.' } }
-    }));
-    assert.equal(replay.body.error, undefined);
-    assert.equal(replay.body.result.resultType, 'complete');
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(resumeCount, 1, 'already satisfied input must not resume the executor twice');
-  
-    const missingCapability = await handle(
-      config,
-      message(6, 'tasks/get', { taskId: created.taskId }, {})
-    );
-    assert.equal(missingCapability.body.error.code, MISSING_TASKS_CAPABILITY_CODE);
-    assert.deepEqual(
-      missingCapability.body.error.data.requiredCapabilities.extensions[extensionId],
-      { revision: TASKS_EXTENSION_REVISION }
-    );
-  
-    const malformedCapability = await handle(
-      config,
-      message(7, 'tasks/get', { taskId: created.taskId }, { extensions: [] })
-    );
-    assert.equal(malformedCapability.body.error.code, INVALID_TASKS_CAPABILITY_CODE);
-    assert.deepEqual(malformedCapability.body.error.data, {
-      reason: 'invalid_client_capabilities',
-      capabilityReason: 'malformed_extensions',
-      expectedCapabilities: tasksCapability
-    });
-  
-    const wrongPrincipal = await handle(
-      config,
-      message(8, 'tasks/get', { taskId: created.taskId }),
-      'principal-b'
-    );
-    const unknownTask = await handle(
-      config,
-      message(9, 'tasks/get', { taskId: 'task_invalid' })
-    );
-    assert.equal(wrongPrincipal.body.error.code, -32602);
-    assert.equal(unknownTask.body.error.code, -32602);
-    assert.equal(wrongPrincipal.body.error.message, unknownTask.body.error.message);
-  
-    const malformedInput = await handle(config, message(10, 'tasks/update', {
-      taskId: created.taskId,
-      inputResponses: []
-    }));
-    assert.equal(malformedInput.body.error.code, -32602);
-    assert.match(malformedInput.body.error.message, /input map must be an object/i);
-  
-    const emptyInput = await handle(config, message(11, 'tasks/update', {
-      taskId: created.taskId,
-      inputResponses: {}
-    }));
-    assert.equal(emptyInput.body.error.code, -32602);
-    assert.match(emptyInput.body.error.message, /at least one response/i);
-  
-    const unknownOnly = createNativeTask(config, {
-      principal: 'principal-a',
-      method: 'tools/call',
-      name: 'unknown-input-test',
-      executor: { controller: new AbortController() }
-    });
-    requestNativeTaskInput(config, unknownOnly.taskId, {
-      approval: { mode: 'elicitation', message: 'Approve?' }
-    }, { principal: 'principal-a' });
-    const unmatchedInput = await handle(config, message(12, 'tasks/update', {
-      taskId: unknownOnly.taskId,
-      inputResponses: { unknown: true }
-    }));
-    assert.equal(unmatchedInput.body.error, undefined);
-    assert.equal(unmatchedInput.body.result.resultType, 'complete');
-    const unknownOnlyState = await handle(config, message(13, 'tasks/get', { taskId: unknownOnly.taskId }));
-    assert.equal(unknownOnlyState.body.result.status, 'input_required');
-  
-    const notification = message(undefined, 'tasks/get', { taskId: unknownOnly.taskId });
-    delete notification.id;
-    const notificationResult = await handle(config, notification);
-    assert.equal(notificationResult.status, 204);
-    assert.equal(notificationResult.body, null);
-  
-    const corrupt = createNativeTask(config, {
-      principal: 'principal-a',
-      method: 'tools/call',
-      name: 'protocol-corruption-test',
-      restartPolicy: 'restart_reconcilable',
-      recovery: { mode: 'deadline', completeAtMs: Date.now() + 60_000, result: { ok: true } }
-    });
-    withStateDatabase(config, db => db.prepare('UPDATE native_tasks SET payload=? WHERE task_id=?').run('{corrupt', corrupt.taskId), { transaction: true });
-    const corruptResponse = await handle(config, message(14, 'tasks/get', { taskId: corrupt.taskId }));
-    assert.equal(corruptResponse.body.error.code, -32603);
-    assert.equal(corruptResponse.body.error.message, 'Native task record is corrupt.');
-    assert.deepEqual(corruptResponse.body.error.data, {
-      reason: 'task_record_corrupt',
-      retryable: false
-    });
-    assert.doesNotMatch(JSON.stringify(corruptResponse), /[A-Za-z]:\\|\/Users\/|\/home\//);
-    assert.equal(withStateDatabase(config, db => Number(db.prepare('SELECT COUNT(*) AS count FROM native_tasks WHERE task_id=?').get(corrupt.taskId)?.count || 0)), 0);
-  
-    const blockedState = path.join(root, 'blocked-state');
-    fs.writeFileSync(blockedState, 'not a directory', 'utf8');
-    const storageFailure = await handle(
-      { stateDir: blockedState },
-      message(15, 'tasks/get', { taskId: `task_${'A'.repeat(43)}` })
-    );
-    assert.equal(storageFailure.body.error.code, -32603);
-    assert.equal(storageFailure.body.error.message, 'Native task storage is unavailable.');
-    assert.equal(storageFailure.body.error.data.retryable, true);
-    assert.doesNotMatch(JSON.stringify(storageFailure), /[A-Za-z]:\\|\/Users\/|\/home\//);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-  
-  console.log('Canonical native task wire routing, input validation, capability gating, corruption handling, and ownership non-disclosure passed.');
-}
-await case_native_task_protocol_unit();
-
-// Formerly operation-task-parity-unit.mjs
-async function case_operation_task_parity_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("node:fs");
-    const fs = __m1.default;
-  
-    const __m2 = await import("node:os");
-    const os = __m2.default;
-  
-    const __m3 = await import("node:path");
-    const path = __m3.default;
-  
-    const __m4 = await import("../src/mcp/nativeToolTasks.js");
-    const { completeNativeToolTask,
-    createNativeToolTask,
-    failNativeToolTask,
-    nativeToolTaskSignal } = __m4;
-  
-    const __m5 = await import("../src/mcp/nativeTaskService.js");
-    const { acknowledgeNativeTaskCancellation,
-    cancelNativeTask,
-    getNativeTask,
-    getNativeTaskRecord } = __m5;
-  
-    const __m6 = await import("../src/stateDatabase.ts");
-    const { stateDatabasePath } = __m6;
-  
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-tool-task-parity-'));
-  const config = { stateDir: root };
-  try {
-    const created = createNativeToolTask(config, {
-      method: 'tools/call',
-      name: 'relai_validate',
-      workspace: 'repo',
-      logicalTaskId: 'logical-a',
-      principal: 'principal-a',
-      message: 'Starting validation.'
-    });
-    assert.equal(created.status, 'working');
-    assert.equal(nativeToolTaskSignal(created.taskId)?.aborted, false);
-  
-    const nativeCreated = getNativeTaskRecord(config, created.taskId, {
-      principal: 'principal-a',
-      logicalTaskId: 'logical-a'
-    });
-    assert.equal(nativeCreated.origin.method, 'tools/call');
-    assert.equal(nativeCreated.origin.name, 'relai_validate');
-    assert.equal(nativeCreated.origin.logicalTaskId, 'logical-a');
-    assert.equal(nativeCreated.internal.workspace, 'repo');
-    assert.equal(Object.hasOwn(nativeCreated.internal, 'compatibilityOperation'), false);
-    assert.ok(fs.existsSync(stateDatabasePath(config)));
-    assert.equal(fs.existsSync(path.join(root, 'native-tasks')), false);
-    assert.equal(fs.existsSync(path.join(root, 'operation-tasks')), false);
-  
-    assert.throws(
-      () => getNativeTaskRecord(config, created.taskId, { principal: 'principal-b' }),
-      error => error?.code === 'NATIVE_TASK_UNAVAILABLE'
-    );
-    assert.throws(
-      () => getNativeTaskRecord(config, created.taskId, { principal: 'principal-a', logicalTaskId: 'logical-b' }),
-      error => error?.code === 'NATIVE_TASK_UNAVAILABLE'
-    );
-  
-    const completed = await completeNativeToolTask(config, created.taskId, { ok: true, checks: 3 });
-    assert.equal(completed.status, 'completed');
-    assert.deepEqual(completed.result, { ok: true, checks: 3 });
-    assert.equal(completed.statusMessage, 'Tool execution completed.');
-  
-    const failedTask = createNativeToolTask(config, {
-      method: 'tools/call',
-      name: 'relai_exec',
-      principal: 'principal-a'
-    });
-    const failed = await failNativeToolTask(config, failedTask.taskId, 'Command failed.');
-    assert.equal(failed.status, 'failed');
-    assert.equal(failed.error.message, 'Command failed.');
-  
-    const cancellable = createNativeToolTask(config, {
-      method: 'tools/call',
-      name: 'relai_exec',
-      principal: 'principal-a'
-    });
-    const signal = nativeToolTaskSignal(cancellable.taskId);
-    const requested = cancelNativeTask(config, cancellable.taskId, { principal: 'principal-a' });
-    assert.equal(requested.status, 'working');
-    assert.equal(signal.aborted, true);
-    const requestedRecord = getNativeTaskRecord(config, cancellable.taskId, { principal: 'principal-a' });
-    assert.equal(requestedRecord.cancelRequested, true);
-    assert.equal(requestedRecord.cancellationAcknowledgedAt, null);
-    acknowledgeNativeTaskCancellation(config, cancellable.taskId, {
-      principal: 'principal-a',
-      executionStopped: true
-    });
-    assert.equal(getNativeTask(config, cancellable.taskId, { principal: 'principal-a' }).status, 'cancelled');
-  
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-  
-  console.log('Native tool-task adapter, ownership, and cancellation passed without compatibility operation fields.');
-}
-await case_operation_task_parity_unit();
 
 // Formerly performance-observability-unit.mjs
 async function case_performance_observability_unit() {
@@ -1704,11 +1380,6 @@ async function case_runtime_lifecycle_unit() {
     normalizeTunnelLifecycleStatus,
     normalizeUpdaterLifecycleStatus } = __m1;
   
-    const __m2 = await import("../src/taskState.js");
-    const { NATIVE_TASK_TRANSITIONS,
-    canTransitionNativeTaskStatus,
-    normalizeNativeTaskStatus } = __m2;
-  
   assert.deepEqual(PROCESS_LIFECYCLE_STATUSES, ['starting', 'running', 'stopping', 'orphaned', 'stopped', 'exited', 'failed']);
   assert.equal(normalizeProcessLifecycleStatus('RUNNING'), 'running');
   assert.equal(normalizeProcessLifecycleStatus('unknown'), '');
@@ -1753,14 +1424,6 @@ async function case_runtime_lifecycle_unit() {
   assert.equal(canTransitionConnectionLayer('localService', 'stopped', 'running'), false);
   assert.equal(assertConnectionLayerTransition('publicEndpoint', 'degraded', 'available'), 'available');
   assert.throws(() => assertConnectionLayerTransition('localService', 'stopped', 'running'), error => error?.code === 'INVALID_CONNECTION_STATE');
-  
-  assert.ok(Object.isFrozen(NATIVE_TASK_TRANSITIONS));
-  assert.equal(normalizeNativeTaskStatus('INPUT_REQUIRED'), 'input_required');
-  assert.equal(normalizeNativeTaskStatus('running'), '');
-  assert.equal(canTransitionNativeTaskStatus('working', 'input_required'), true);
-  assert.equal(canTransitionNativeTaskStatus('input_required', 'working'), true);
-  assert.equal(canTransitionNativeTaskStatus('working', 'completed'), true);
-  assert.equal(canTransitionNativeTaskStatus('completed', 'working'), false);
   
   console.log('Runtime lifecycle vocabularies and transition guards passed.');
 }
@@ -2402,11 +2065,13 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageReact, /'data-usage-status': true, role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true'/);
   assert.doesNotMatch(usageReact, /'data-usage-content'.*'aria-live'/);
   assert.match(usageReact, /Analytics updated for \$\{bounds\.label\}/);
-  assert.match(usageReact, /taskRevision/, 'Analytics must refresh current local metrics from canonical live task activity');
+  assert.doesNotMatch(usageReact, /taskRevision/, 'Analytics must not refresh expensive monthly history on every live task activity revision');
   assert.match(homeReact, /HomeAnalytics/, 'Overview must retain a compact current-activity summary before the detailed Analytics page');
   assert.match(homeReact, /loadAnalyticsData/, 'Overview analytics must load from the canonical local analytics source');
+  assert.doesNotMatch(homeReact, /HomeAnalytics, \{ taskRevision:/, 'Overview analytics must not reload from every live task revision');
   assert.doesNotMatch(homeReact, /firstRequestObserved\s*\?\s*h\(RecentTasksCard/, 'Persisted recent tasks must not disappear when volatile MCP request history resets on restart');
   assert.match(workspacesReact, /WorkspaceAnalytics/, 'Project cards must retain compact project analytics context');
+  assert.doesNotMatch(workspacesReact, /useWorkspaceAnalytics\(analyticsAliases, Number\(data\.live/, 'Project analytics must not reload from every live task revision');
   assert.match(workspacesReact, /Loading analytics…/, 'Project analytics must expose an explicit loading state');
   assert.match(workspacesReact, /Analytics unavailable/, 'Project analytics must expose an explicit failure state');
   assert.match(workspacesReact, /workspace-status-summary/, 'Projects must retain a compact readiness summary without large KPI cards');

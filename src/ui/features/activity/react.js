@@ -31,6 +31,7 @@ import {
   activityToolLabel,
   filterActivityEntries,
   mergeActivityEntries,
+  normalizeStatusFilter,
   nextActivityExpiry,
   parseActivityHistoryResponse,
   replaceActivityHistory
@@ -71,6 +72,9 @@ function ActivityView({ data = {} }) {
   const [paused, setPaused] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  const [historyCursor, setHistoryCursor] = useState(null);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [olderHistoryLoading, setOlderHistoryLoading] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(initialRoute.eventId);
   const [now, setNow] = useState(() => Date.now());
   const [copyState, setCopyState] = useState('idle');
@@ -147,7 +151,7 @@ function ActivityView({ data = {} }) {
   const loadHistory = useCallback(async mode => {
     const requestId = ++historyRequestRef.current;
     try {
-      const response = await fetchJson('/api/logs?limit=500', { pauseTimeoutWhenHidden: false });
+      const response = await fetchJson('/api/logs?limit=500', { pauseTimeoutWhenHidden: false, cacheTtlMs: 15_000 });
       if (requestId !== historyRequestRef.current) return false;
       const parsed = parseActivityHistoryResponse(response);
       if (!parsed.ok) throw new Error(parsed.error);
@@ -157,6 +161,8 @@ function ActivityView({ data = {} }) {
         liveEntriesSinceLoadRef.current = [];
         allEntriesRef.current = merged;
         setAllEntries(merged);
+        setHistoryCursor(parsed.nextCursor);
+        setHistoryHasMore(parsed.hasMore);
       } else {
         mergeIntoVisibleEntries(parsed.entries);
       }
@@ -183,6 +189,27 @@ function ActivityView({ data = {} }) {
       return false;
     }
   }, [mergeIntoVisibleEntries]);
+
+  const loadOlderHistory = useCallback(async () => {
+    if (!historyHasMore || !historyCursor || olderHistoryLoading) return;
+    setOlderHistoryLoading(true);
+    try {
+      const params = new URLSearchParams({
+        limit: '500',
+        cursor: JSON.stringify(historyCursor)
+      });
+      const response = await fetchJson(`/api/logs?${params.toString()}`, { pauseTimeoutWhenHidden: false });
+      const parsed = parseActivityHistoryResponse(response);
+      if (!parsed.ok) throw new Error(parsed.error);
+      mergeIntoVisibleEntries(parsed.entries);
+      setHistoryCursor(parsed.nextCursor);
+      setHistoryHasMore(parsed.hasMore);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
+    } finally {
+      setOlderHistoryLoading(false);
+    }
+  }, [historyCursor, historyHasMore, mergeIntoVisibleEntries, olderHistoryLoading]);
 
   useEffect(() => {
     const highlightTimers = highlightTimersRef.current;
@@ -305,6 +332,7 @@ function ActivityView({ data = {} }) {
   }, [selectedEventId, selectedEntry]);
 
   const syncRoute = useCallback(next => {
+    setRequestedEventId('');
     replaceRouteParams({ ...activityRouteParams(next), event: null });
   }, []);
 
@@ -382,6 +410,8 @@ function ActivityView({ data = {} }) {
     window.clearTimeout(copyTimerRef.current);
     setCopyState('idle');
     selectionFocusRef.current = true;
+    setRequestedEventId(eventId);
+    replaceRouteParams({ event: eventId });
     setSelectedEventId(eventId);
   }, []);
 
@@ -474,7 +504,19 @@ function ActivityView({ data = {} }) {
                 )
               )
             )
-          )
+          ),
+          historyHasMore && !historyLoading && !loadError
+            ? h('div', { className: 'activity-history-footer' },
+                h('span', null, `${allEntries.length} retained event${allEntries.length === 1 ? '' : 's'} loaded`),
+                h('button', {
+                  className: 'secondary',
+                  type: 'button',
+                  disabled: olderHistoryLoading,
+                  onClick: () => { void loadOlderHistory(); },
+                  'data-load-older-activity': ''
+                }, olderHistoryLoading ? 'Loading…' : 'Load older activity')
+              )
+            : null
         ),
         h(ActivityInspector, {
           entry: selectedEntry,
@@ -590,9 +632,9 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, isNe
         'aria-label': activityActionLabel(entry),
         onClick: activate
       },
+        h('span', { className: 'activity-row-status' }, h(ActivityRowStatus, { value: status })),
         h('span', { className: 'activity-message-copy', title: message }, message),
         h('span', { className: 'activity-row-meta' },
-          h(ActivityRowStatus, { value: status }),
           h('span', { className: 'activity-row-action' }, action),
           h('span', { className: 'activity-row-task', title: taskTitle }, taskTitle),
           h('span', { className: 'activity-row-project', title: project }, project)
@@ -667,6 +709,7 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
   const message = activityMessage(entry);
   const target = activityTargetLabel(entry);
   const result = activityResultText(entry);
+  const command = String(entry.command || '').trim();
   const fileLocation = activityFileLocation(entry);
   const error = activityErrorText(entry);
   const summaryText = distinctActivityText(message, heading) ? message : '';
@@ -709,6 +752,7 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
         )
       ) : null,
       readableSection('Target', targetText),
+      command ? h(CommandDetail, { command }) : null,
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
       readableSection('Error', errorText, 'activity-detail-error'),
@@ -732,6 +776,29 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
         }, copyState === 'success' ? 'Copied' : 'Copy event JSON')
       )
     )
+  );
+}
+
+function CommandDetail({ command }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef(0);
+  useEffect(() => () => window.clearTimeout(timerRef.current), []);
+  const copyCommand = async () => {
+    try {
+      await copyText(command);
+      setCopied(true);
+      window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      toast('Clipboard access failed.', { variant: 'error' });
+    }
+  };
+  return h('section', { className: 'activity-detail-section activity-detail-command', 'data-activity-command': '' },
+    h('div', { className: 'activity-detail-command-head' },
+      h('h3', null, 'Command'),
+      h('button', { type: 'button', className: 'secondary compact-button', onClick: () => { void copyCommand(); } }, copied ? 'Copied' : 'Copy command')
+    ),
+    h('pre', null, h('code', null, command))
   );
 }
 
@@ -785,10 +852,12 @@ function RawDetail({ title, value }) {
     h('div', { className: 'activity-detail-raw-head' },
       h('h4', null, title),
       h('div', { className: 'activity-detail-raw-actions' },
-        objectValue ? h(React.Fragment, null,
-          h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setTreeRevision(current => ({ id: current.id + 1, open: true })) }, 'Expand all'),
-          h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setTreeRevision(current => ({ id: current.id + 1, open: false })) }, 'Collapse all')
-        ) : null,
+        objectValue ? h('button', {
+          type: 'button',
+          className: 'secondary compact-button',
+          'aria-expanded': treeRevision.open,
+          onClick: () => setTreeRevision(current => ({ id: current.id + 1, open: !current.open }))
+        }, treeRevision.open ? 'Collapse all' : 'Expand all') : null,
         h('button', { type: 'button', className: 'secondary compact-button', onClick: () => { void copyValue(); } }, copied ? 'Copied' : 'Copy value')
       )
     ),
@@ -906,18 +975,11 @@ function readRouteState() {
       timeRange: ['15m', '1h', '24h', '7d', 'all'].includes(requestedRange) ? requestedRange : '1h',
       workspace: getWorkspaceFilter(),
       tool: params.get('tool') || '',
-      status: routeStatus(params.get('status')),
+      status: normalizeStatusFilter(params.get('status')),
       task: params.get('task') || ''
     },
     eventId: params.get('event') || ''
   };
-}
-
-function routeStatus(value) {
-  const status = String(value || '').trim().toLowerCase();
-  if (status === 'ok') return 'succeeded';
-  if (status === 'error') return 'failed';
-  return ['succeeded', 'active', 'failed', 'blocked', 'cancelled', 'other'].includes(status) ? status : '';
 }
 
 function activityFilters(filterState, sessionIndex) {
@@ -1032,6 +1094,7 @@ function safeEventProjection(entry) {
     target: entry.target || (entry.path ? { workspaceRelativePath: entry.path } : undefined),
     result: entry.result,
     error: entry.error,
+    command: entry.command,
     metadata: entry.metadata
   };
 }

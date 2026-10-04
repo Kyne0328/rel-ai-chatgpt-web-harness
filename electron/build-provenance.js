@@ -32,4 +32,4 @@ function readPackagedProvenance(resourcesPath) {
   }
 }
 
-export { readBuildStatus, readPackagedProvenance };
+export { readBuildStatus };

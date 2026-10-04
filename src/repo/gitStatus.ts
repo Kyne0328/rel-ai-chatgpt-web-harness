@@ -12,7 +12,8 @@ interface GitStatusEntry {
   readonly owner?: GitStatusOwner;
 }
 
-interface GitAheadBehind {
+/** Ahead/behind counts are part of the exported Git status contract. */
+export interface GitAheadBehind {
   readonly ahead: number;
   readonly behind: number;
 }
@@ -125,4 +126,4 @@ function statusMapFromOutput(output: unknown): Map<string, string> {
 }
 
 export { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, formatGitStatus, statusMapFromOutput };
-export type { GitAheadBehind, GitStatusEntry, GitStatusOwner, ParsedGitStatus };
+export type { GitStatusEntry, GitStatusOwner, ParsedGitStatus };

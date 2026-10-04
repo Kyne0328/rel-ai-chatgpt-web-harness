@@ -2,9 +2,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn as nodeSpawn } from 'node:child_process';
 
-import { MAX_CLIPBOARD_TEXT_BYTES } from './ipc-security.js';
+import { importResourceModule } from './resource-path.js';
 
-const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+const { assertDesktopClipboardSize, normalizeApplication, normalizeDesktopUri } = await importResourceModule('src/contracts/desktopValidation.js');
+
 
 function createDesktopOsOperations(options = {}) {
   const {
@@ -74,37 +75,8 @@ function existingAbsolutePath(value) {
   return target;
 }
 
-function normalizeExternalUri(value) {
-  const raw = String(value || '').trim();
-  if (!raw) throw new Error('Desktop URI is required.');
-  let parsed;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error('Desktop URI must be an absolute valid URI.');
-  }
-  if (!ALLOWED_EXTERNAL_PROTOCOLS.has(parsed.protocol.toLowerCase())) {
-    throw new Error(`Desktop URI protocol is not allowed: ${parsed.protocol || '(missing)'}.`);
-  }
-  return parsed.href;
-}
-
-function normalizeApplicationIdentifier(value) {
-  const application = String(value || '').trim();
-  if (!application) throw new Error('Application identifier is required.');
-  if (application.length > 200) throw new Error('Application identifier is too long.');
-  if (application.startsWith('-') || /[\\/:]/.test(application) || hasControlCharacter(application)) {
-    throw new Error('Application identifier must be a plain application name, executable name, or desktop identifier, not a path or command.');
-  }
-  return application;
-}
-
-function hasControlCharacter(value) {
-  return [...value].some(character => {
-    const code = character.charCodeAt(0);
-    return code <= 0x1f || code === 0x7f;
-  });
-}
+const normalizeExternalUri = normalizeDesktopUri;
+const normalizeApplicationIdentifier = normalizeApplication;
 
 function launchApplication(application, options = {}) {
   const platform = String(options.platform || process.platform);
@@ -192,15 +164,9 @@ function applicationLaunchError(application, error) {
 }
 
 function assertClipboardSize(text) {
-  if (Buffer.byteLength(text, 'utf8') > MAX_CLIPBOARD_TEXT_BYTES) {
-    throw new Error('Clipboard text exceeds the 64 KiB safety limit.');
-  }
+  assertDesktopClipboardSize(text);
 }
 
 export {
-  ALLOWED_EXTERNAL_PROTOCOLS,
-  createDesktopOsOperations,
-  launchApplication,
-  normalizeApplicationIdentifier,
-  normalizeExternalUri
+  createDesktopOsOperations
 };

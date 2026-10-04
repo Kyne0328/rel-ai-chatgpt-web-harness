@@ -339,7 +339,7 @@ function sendHtml(
 function contentTypeForStaticAsset(filePath: string): string {
   const lower = String(filePath || '').toLowerCase();
   if (lower.endsWith('.css')) return 'text/css';
-  if (lower.endsWith('.js') || lower.endsWith('.ts')) return 'application/javascript';
+  if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.ts')) return 'application/javascript';
   if (lower.endsWith('.md')) return 'text/markdown';
   if (lower.endsWith('.png')) return 'image/png';
   if (lower.endsWith('.ico')) return 'image/x-icon';
@@ -350,16 +350,5 @@ function contentTypeForStaticAsset(filePath: string): string {
 }
 
 export {
-  DEFAULT_MAX_BODY_BYTES,
-  DEFAULT_MAX_SSE_QUEUE_BYTES,
-  contentTypeForStaticAsset,
-  isAuthorized,
-  normalizeMaxBodyBytes,
-  readJsonBody,
-  readRawBody,
-  sendHtml,
-  sendJson,
-  sendSse,
-  createSseWriter,
-  setBaseHeaders
+  DEFAULT_MAX_BODY_BYTES, contentTypeForStaticAsset, isAuthorized, normalizeMaxBodyBytes, readJsonBody, readRawBody, sendHtml, sendJson, sendSse, createSseWriter, setBaseHeaders
 };

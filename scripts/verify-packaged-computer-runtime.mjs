@@ -34,7 +34,7 @@ app.whenReady().then(async () => {
   if (!status.available) throw new Error(status.message || 'Packaged computer runtime is unavailable.');
   let semantic = null;
   if (process.platform === 'win32') {
-    const semanticUrl = pathToFileURL(path.join(resourcesRoot, 'src', 'computer', 'windowsUiaAdapter.js')).href;
+    const semanticUrl = pathToFileURL(path.join(resourcesRoot, 'src', 'computer', 'windowsUiaAdapter.ts')).href;
     const { createWindowsUiaAdapter } = await import(semanticUrl);
     const semanticAdapter = createWindowsUiaAdapter({ timeoutMs: 10_000 });
     try {

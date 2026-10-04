@@ -1,6 +1,6 @@
 # Rel.AI MCP One-Click Setup
 
-This guide covers the packaged desktop application. Rel.AI connects ChatGPT web to local projects through one supported connection: **OpenAI Secure MCP Tunnel**. ChatGPT provides the conversation and reasoning; project files and commands stay on the computer running Rel.AI.
+This guide covers the packaged desktop application. Rel.AI connects ChatGPT web to local projects through one supported transport: **OpenAI Secure MCP Tunnel**. One desktop can supervise multiple independent tunnels for different ChatGPT accounts while keeping one local MCP service, one workspace configuration, and one task history. ChatGPT provides the conversation and reasoning; project files and commands stay on the computer running Rel.AI.
 
 ## Before you begin
 
@@ -23,6 +23,12 @@ You need:
 7. Enable Rel.AI MCP in the chat and send a read-only first request.
 
 The runtime API key is encrypted through Electron `safeStorage` and is write-only after it is saved. Rel.AI does not require a second public transport account or a public URL entered by the user.
+
+## Add another ChatGPT account
+
+Each additional ChatGPT account should create its own Secure MCP Tunnel and runtime API key in the OpenAI Platform context that account can use. Then open **Settings → Connection → Additional ChatGPT tunnels** in Rel.AI and add that Tunnel ID and runtime key.
+
+Rel.AI starts another bundled tunnel-client for that Tunnel ID, but it does not start another MCP server or duplicate your workspaces. The primary tunnel and all additional tunnels forward to the same private local `/mcp` endpoint. Removing an additional tunnel stops only that tunnel connection.
 
 ## What stays local
 

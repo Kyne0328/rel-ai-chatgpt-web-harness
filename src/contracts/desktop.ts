@@ -115,6 +115,8 @@ export interface DesktopIpcRequestMap {
   'desktop:analytics:local': [month?: string];
   'desktop:settings:get': [];
   'desktop:settings:save': [settings: Record<string, unknown>];
+  'desktop:tunnels:save': [connection: Record<string, unknown>];
+  'desktop:tunnels:remove': [tunnelId: string];
   'desktop:lifecycle:get': [];
   'desktop:lifecycle:acknowledge-connector-refresh': [];
   'desktop:startup:set': [enabled: boolean];
@@ -165,6 +167,8 @@ export interface DesktopIpcResponseMap {
   'desktop:browser:stop': Record<string, unknown>;
   'desktop:settings:get': Record<string, unknown>;
   'desktop:settings:save': Record<string, unknown>;
+  'desktop:tunnels:save': Record<string, unknown>;
+  'desktop:tunnels:remove': Record<string, unknown>;
   'desktop:lifecycle:get': Record<string, unknown>;
   'desktop:lifecycle:acknowledge-connector-refresh': Record<string, unknown>;
   'desktop:analytics:local': Record<string, unknown>;
@@ -220,6 +224,8 @@ export const DESKTOP_IPC = Object.freeze({
   DESKTOP_ANALYTICS_LOCAL: 'desktop:analytics:local',
   DESKTOP_SETTINGS_GET: 'desktop:settings:get',
   DESKTOP_SETTINGS_SAVE: 'desktop:settings:save',
+  DESKTOP_TUNNEL_SAVE: 'desktop:tunnels:save',
+  DESKTOP_TUNNEL_REMOVE: 'desktop:tunnels:remove',
   DESKTOP_LIFECYCLE_GET: 'desktop:lifecycle:get',
   DESKTOP_LIFECYCLE_ACK_CONNECTOR_REFRESH: 'desktop:lifecycle:acknowledge-connector-refresh',
   DESKTOP_STARTUP_SET: 'desktop:startup:set',
@@ -301,6 +307,8 @@ export const DESKTOP_IPC_INPUT_CONTRACT = Object.freeze({
   [DESKTOP_IPC.DESKTOP_ANALYTICS_LOCAL]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_SETTINGS_GET]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_SETTINGS_SAVE]: input('handle', ['dashboard'], 'reject'),
+  [DESKTOP_IPC.DESKTOP_TUNNEL_SAVE]: input('handle', ['dashboard'], 'reject'),
+  [DESKTOP_IPC.DESKTOP_TUNNEL_REMOVE]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_LIFECYCLE_GET]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_LIFECYCLE_ACK_CONNECTOR_REFRESH]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_STARTUP_SET]: input('handle', ['dashboard'], 'reject'),

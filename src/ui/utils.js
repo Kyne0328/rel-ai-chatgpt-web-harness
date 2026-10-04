@@ -1,14 +1,4 @@
-// Shared UI helpers for dashboard sections.
-export function esc(v) {
-  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;'
-  })[c]);
-}
-
+// Shared UI time helpers for dashboard sections.
 export function timeAgo(v, now = Date.now()) {
   const ts = typeof v === 'number' && Number.isFinite(v) ? v : Date.parse(String(v || ''));
   if (!Number.isFinite(ts)) return '';

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BROWSER_HANDOFF_TTL_MS } from '../src/browser/browserHandoffPolicy.ts';
 import { createBrowserRuntime, normalizeBrowserUrl } from '../src/browser/browserRuntime.ts';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-browser-runtime-unit-'));
@@ -80,6 +81,24 @@ const resumed = await runtime.resume(workspace, { sessionId, work_id: context.ta
 assert.equal(resumed.status, 'ready');
 assert.equal(resumed.handoff, null);
 assert.deepEqual(fake.state.controlChanges.at(-1), { owner: 'ai', reason: '' });
+
+const expiringHandoff = await runtime.handoff(workspace, { sessionId, tabId: firstTabId, reason: 'sign_in', work_id: context.taskId }, context);
+assert.ok(Date.parse(expiringHandoff.handoff?.expiresAt || '') - Date.parse(expiringHandoff.handoff?.startedAt || '') === BROWSER_HANDOFF_TTL_MS,
+  'runtime handoff state must carry the same short-lived expiry as MCP elicitation state');
+const realDateNow = Date.now;
+Date.now = () => Date.parse(expiringHandoff.handoff.expiresAt) + 1;
+try {
+  await assert.rejects(
+    () => runtime.resume(workspace, { sessionId, work_id: context.taskId }, context),
+    error => error?.code === 'BROWSER_HANDOFF_EXPIRED'
+  );
+  const refreshedHandoff = await runtime.handoff(workspace, { sessionId, tabId: firstTabId, reason: 'sign_in', work_id: context.taskId }, context);
+  assert.ok(Date.parse(refreshedHandoff.handoff?.expiresAt || '') > Date.parse(expiringHandoff.handoff?.expiresAt || ''),
+    'requesting a new handoff after expiry must create a fresh resumable window');
+} finally {
+  Date.now = realDateNow;
+}
+await runtime.resume(workspace, { sessionId, work_id: context.taskId }, context);
 
 const screenshot = await runtime.screenshot(workspace, { sessionId, tabId: firstTabId, work_id: context.taskId }, context);
 assert.equal(screenshot.image.mimeType, 'image/png');

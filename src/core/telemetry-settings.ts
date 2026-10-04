@@ -5,9 +5,16 @@ function telemetrySettings(config = readConfig()): Record<string, unknown> {
   const status = telemetryStatus(config);
   return {
     usageReportingRequired: true,
-    usageReportingActive: status.usageReportingEnabled === true,
+    usageReportingConfigured: status.usageReportingEnabled === true,
+    usageReportingActive: status.usageInitialized === true,
+    usageLastAttemptAt: status.usageLastAttemptAt,
+    usageLastSuccessAt: status.usageLastSuccessAt,
+    usageLastFailureAt: status.usageLastFailureAt,
     diagnosticsEnabled: config.telemetry?.diagnosticsEnabled !== false,
-    diagnosticsActive: status.diagnosticsEnabled === true,
+    diagnosticsActive: status.initialized === true,
+    diagnosticsLastAttemptAt: status.diagnosticsLastAttemptAt,
+    diagnosticsLastSuccessAt: status.diagnosticsLastSuccessAt,
+    diagnosticsLastFailureAt: status.diagnosticsLastFailureAt,
     endpointConfigured: status.endpointConfigured === true,
     sampleRatio: status.sampleRatio
   };

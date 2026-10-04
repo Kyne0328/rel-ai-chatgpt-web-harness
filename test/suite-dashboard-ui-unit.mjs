@@ -420,7 +420,7 @@ async function case_dashboard_clock_unit() {
   assert.equal(formatDuration((2 * 60 * 60 + 1 * 60 + 1) * 1000, { historical: true }), '2h 1m', 'historical durations must omit seconds');
   assert.equal(formatDuration((66 * 60 * 60 + 25 * 60 + 53) * 1000, { historical: true }), '2d 18h 25m', 'historical durations must use days instead of unbounded hours');
   assert.equal(elapsedAt(0, '', (1 * 60 * 60 + 2 * 60 + 3) * 1000), '1h 2m 3s', 'live elapsed durations keep seconds');
-  const sessionsUi = await import('../src/ui/features/sessions/index.js');
+  const sessionsUi = await import('../src/ui/features/sessions/model.js');
   assert.equal(typeof sessionsUi.isOngoingSession, 'function', 'Sessions must expose its live-state predicate for regression coverage');
   assert.equal(sessionsUi.isOngoingSession({ status: 'inactive' }), false, 'inactive history must not use the live seconds clock');
   assert.equal(sessionsUi.isOngoingSession({ status: 'validation_failed' }), false, 'validation-failed history must not use the live seconds clock');
@@ -518,6 +518,13 @@ async function case_dashboard_clock_unit() {
   assert.equal(clock.isRunning(), false);
   assert.equal(timers.size, 0);
   assert.equal(documentRef.listeners.has('visibilitychange'), false);
+
+  now = Date.parse('2026-07-28T10:04:10.000Z');
+  clock.start();
+  assert.equal(clock.isRunning(), true, 'a stopped dashboard clock must restart after page restoration');
+  assert.equal(timers.size, 1, 'restarting the dashboard clock must recreate exactly one shared interval');
+  assert.equal(relativeNode.textContent, '5m ago', 'restart must immediately catch relative labels up to wall-clock time');
+  clock.stop();
   
   console.log('Shared dashboard clock updates elapsed and relative time without backend events.');
 }
@@ -894,7 +901,7 @@ async function case_ui_list_ordering_unit() {
     const __m1 = await import("../src/ui/features/tools/index.js");
     const { orderToolsForCatalog } = __m1;
   
-    const __m2 = await import("../src/ui/features/sessions/index.js");
+    const __m2 = await import("../src/ui/features/sessions/model.js");
     const { orderChangedFiles, orderSessionsForDisplay } = __m2;
   
     const __m3 = await import("../src/ui/features/sessions/model.js");

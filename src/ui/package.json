@@ -17,7 +17,6 @@
     "chart.js": "^4.5.1",
     "lucide-react": "^1.48.0",
     "react-chartjs-2": "^5.3.1",
-    "react-router-dom": "^7.18.4",
     "zustand": "^5.0.15"
   }
 }

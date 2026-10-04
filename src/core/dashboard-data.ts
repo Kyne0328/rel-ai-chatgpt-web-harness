@@ -1,6 +1,7 @@
 import { listManagedProcesses } from '../processManager.js';
 import * as crypto from 'node:crypto';
 import { createDashboardSnapshot } from '../contracts/dashboard.ts';
+import type { ManagedProcessDto } from '../contracts/processes.ts';
 import { createEmptyTaskActivity } from '../contracts/tasks.ts';
 import * as connection from '../connectionProfile.js';
 import * as productUx from '../productUx.js';
@@ -15,6 +16,7 @@ import { buildWorkspaceStates } from '../workspaceState.js';
 import { runtimeCompatibility } from '../runtimeCompatibility.js';
 import { mcpConnectionManager } from '../mcp/connectionManager.js';
 import { readMcpAuthenticationStatus } from '../mcp/authenticationStatus.js';
+import { activeFallbackWorkIds } from '../mcp/fallbackExecutions.js';
 import { getOnboardingStatus } from '../onboardingState.js';
 type JsonRecord = Record<string, unknown>;
 interface DashboardTaskActivity extends JsonRecord {
@@ -63,7 +65,12 @@ function buildDashboardPayload(
   const connectionProjection = buildDashboardConnectionProjection(config, options);
   const limit = Math.min(500, Math.max(1, Math.floor(Number(options.limit || 100))));
   const base = productUx.dashboardData(config, { limit });
-  const persistedTasks: TaskRecord[] = readTaskHistory(config, taskActivity, { limit, summary: true, maintain: false });
+  const persistedTasks: TaskRecord[] = readTaskHistory(config, taskActivity, {
+    limit,
+    summary: true,
+    maintain: false,
+    activeTaskIds: activeFallbackWorkIds()
+  });
   const persistedActivityEvents = readRecentTaskHistoryEvents(config, limit * 2);
   const tasks = persistedTasks.map(summarizeDashboardTask);
   const liveActivityTasks = Array.isArray(taskActivity.tasks) ? taskActivity.tasks : [];
@@ -97,8 +104,27 @@ function buildDashboardPayload(
     auditTail,
     tasks,
     workspaceStates,
-    managedProcesses: listManagedProcesses(config, { limit: 200, activeOnly: true, includeTail: true, tailBytes: 16 * 1024 }).processes
+    managedProcesses: dashboardManagedProcesses(config)
   };
+}
+
+function dashboardManagedProcesses(config: CoreConfig): ManagedProcessDto[] {
+  const outputOptions = {
+    includeTail: true,
+    includeTailOffsets: true,
+    tailBytes: 16 * 1024
+  };
+  const active = listManagedProcesses(config, {
+    ...outputOptions,
+    limit: 200,
+    activeOnly: true
+  }).processes;
+  const recentTerminal = listManagedProcesses(config, {
+    ...outputOptions,
+    limit: 5,
+    terminalOnly: true
+  }).processes;
+  return [...active, ...recentTerminal];
 }
 
 function buildDashboardTaskDelta(
@@ -277,6 +303,7 @@ function sanitizeTaskActivity(activity: TaskActivity = {}): TaskActivity {
 export {
   buildDashboardConnectionProjection,
   buildDashboardPayload,
+  dashboardManagedProcesses,
   buildDashboardTaskDelta,
   mergeDashboardActivity,
   summarizeDashboardTask

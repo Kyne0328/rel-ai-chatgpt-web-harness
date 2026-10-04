@@ -64,6 +64,9 @@ async function completedTaskCall(id, name, args) {
     const status = structuredContentOf(await client.waitFor(statusId));
     const operation = status.backgroundOperation;
     if (operation?.status && operation.status !== 'running') {
+      if (args.complete === true && operation.status === 'completed' && operation.result) {
+        return operation.result;
+      }
       const replayId = followupId++;
       taskCall(replayId, name, args);
       return structuredContentOf(await client.waitFor(replayId));

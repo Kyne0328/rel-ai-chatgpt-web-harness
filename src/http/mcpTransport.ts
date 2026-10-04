@@ -10,13 +10,14 @@ import { toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
 import {
   LEGACY_LIFECYCLE_METHODS,
   MCP_PROTOCOL_VERSION,
-  TASK_METHODS,
+  acknowledgeMcpFallbackCompletionDelivery,
   beginMcpRequest,
   createMcpRequestContext,
   createMcpServerForRequest,
   finishMcpRequest,
   finishMcpSpanTimings,
-  handleMcpTaskRequest,
+  handleMcpFallbackRequest,
+  handleMcpEventsRequest,
   measureMcpPhase,
   measureMcpPhaseSync,
   noteMcpAuthenticationFailure,
@@ -216,6 +217,10 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
       return;
     }
 
+    if (message?.method === 'tools/call' && message.id != null) {
+      ctx.res.once('finish', () => { acknowledgeMcpFallbackCompletionDelivery(requestContext, message.id); });
+    }
+
     await measureMcpPhase(
       'mcp.manifest',
       () => observeMcpRequestManifest(requestContext, String(message?.method || ''))
@@ -230,7 +235,7 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
     }, async () => {
       const requestAbort = createHttpRequestAbortScope(ctx.req, ctx.res);
       try {
-        const transportResponse = await handleMcpTaskRequest(requestContext, message, {
+        const transportResponse = await handleMcpFallbackRequest(requestContext, message, {
           envelope: meta,
           authInfo,
           requestHeaders: ctx.req.headers,
@@ -239,6 +244,15 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
         if (transportResponse) {
           finishRequest(!transportResponse.body?.error);
           sendTransportResponse(ctx, transportResponse);
+          return;
+        }
+        const eventResponse = await handleMcpEventsRequest(
+          requestContext,
+          message as JsonRecord
+        );
+        if (eventResponse) {
+          finishRequest(!eventResponse.error);
+          sendTransportResponse(ctx, { status: 200, body: eventResponse });
           return;
         }
         await getCoreNodeHandler()(ctx.req as unknown as Parameters<CoreNodeHandler>[0], ctx.res, message);
@@ -292,14 +306,14 @@ async function handleUnsupportedHttpMethod(ctx: HttpRouteContext): Promise<void>
     return;
   }
   ctx.res.setHeader('allow', 'POST');
-  sendMcpProtocolError(ctx.res, 405, -32600, 'Method not allowed. MCP 2026-07-28 uses stateless POST requests only.');
+  sendMcpProtocolError(ctx.res, 405, -32600, `Method not allowed. MCP ${MCP_PROTOCOL_VERSION} uses stateless POST requests only.`);
 }
 
 function validateMcpRequestHeaders(headers: IncomingHttpHeaders, message: JsonRpcRequest): HeaderValidation {
   const envelope = validateMcpRequestEnvelope(message);
   if (!envelope.ok) return rejection(400, envelope.code ?? -32600, envelope.error || 'Invalid request.', envelope.data);
   if (headerValue(headers, 'mcp-session-id')) {
-    return rejection(400, -32600, 'Mcp-Session-Id is not supported by MCP 2026-07-28.');
+    return rejection(400, -32600, `Mcp-Session-Id is not supported by MCP ${MCP_PROTOCOL_VERSION}.`);
   }
   if (LEGACY_LIFECYCLE_METHODS.includes(message.method)) {
     return rejection(400, -32601, `Initialize lifecycle methods are not valid inside a modern MCP request envelope: ${message.method}.`);
@@ -364,10 +378,10 @@ function sendTransportResponse(ctx: HttpRouteContext, response: McpTransportResp
 
 function expectedMcpName(method: string, params: JsonRecord = {}): string {
   if (method === 'tools/call' || method === 'prompts/get') return String(params.name || '');
+  if (['events/subscribe', 'events/unsubscribe'].includes(method)) return String(params.name || '');
   if (['resources/read', 'resources/subscribe', 'resources/unsubscribe'].includes(method)) {
     return String(params.uri || '');
   }
-  if (TASK_METHODS.includes(method)) return String(params.taskId || '');
   return '';
 }
 

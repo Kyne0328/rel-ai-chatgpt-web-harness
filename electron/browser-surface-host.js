@@ -691,6 +691,10 @@ function createBrowserSurfaceHost(options = {}) {
       publishState();
     });
     wc.on('page-title-updated', () => publishState());
+    wc.on('blur', () => {
+      if (page.closing || record.control !== 'user' || record.activePageId !== page.nativePageId) return;
+      void applyControl(record, 'ai').catch(onError);
+    });
     wc.on('before-input-event', event => {
       if (record.control === 'ai' && page.aiInputDepth === 0) event.preventDefault();
     });
@@ -1447,4 +1451,4 @@ function delay(ms, signal) {
   }), signal);
 }
 
-export { DOWNLOAD_TEMP_ROOT, createBrowserSurfaceHost };
+export { createBrowserSurfaceHost };

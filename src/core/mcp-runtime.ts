@@ -3,16 +3,18 @@ import { readConfig } from '../config.js';
 import { scheduleLocalTransportEvent } from '../localAnalytics.ts';
 import { createRelaiCoreRuntime } from './runtime.ts';
 import { createLocalAdminPolicy } from '../mcp/authorizationPolicy.ts';
+import { MCP_AUTH_MODE, type McpAuthMode } from '../contracts/mcp.ts';
 import { mcpConnectionManager } from '../mcp/connectionManager.js';
 import {
   LEGACY_LIFECYCLE_METHODS,
   MCP_PROTOCOL_VERSION,
-  TASK_METHODS,
   validateJsonRpcRequestEnvelope
 } from '../mcp/protocol.js';
-import { createHttpTaskPrincipal, createStdioTaskPrincipal } from '../mcp/principal.ts';
+import { createHttpPrincipal, createStdioPrincipal, principalFingerprint } from '../mcp/principal.ts';
+import { handleMcpEventRequest } from '../mcp/events.ts';
 import { buildToolManifest } from '../mcp/toolManifest.js';
-import { createTaskAwareStdioTransport, handleTransportTaskRequest } from '../mcp/transportTasks.ts';
+import { acknowledgeFallbackCompletionDelivery } from '../mcp/fallbackExecutions.js';
+import { createFallbackAwareStdioTransport, handleTransportFallbackRequest } from '../mcp/transportFallback.ts';
 import { createRelaiMcpServer, SERVER_INSTANCE_ID } from '../mcpServer.ts';
 import {
   measurePerformancePhase,
@@ -22,9 +24,7 @@ import {
 } from '../performanceObservability.ts';
 import { runSpan, setSpanAttributes } from '../telemetry.ts';
 
-export { LEGACY_LIFECYCLE_METHODS, MCP_PROTOCOL_VERSION, SERVER_INSTANCE_ID, TASK_METHODS };
-
-export type McpAuthMode = 'static_bearer' | 'local_no_auth';
+export { LEGACY_LIFECYCLE_METHODS, MCP_PROTOCOL_VERSION, SERVER_INSTANCE_ID };
 
 export interface McpAuthorization {
   authMode: McpAuthMode;
@@ -64,21 +64,20 @@ export function createMcpServerForRequest(
   authInfo: Record<string, unknown>,
   era: string
 ): ReturnType<typeof createRelaiMcpServer> {
-  const authMode = String(authInfo.authMode || 'static_bearer');
+  const authMode = String(authInfo.authMode || MCP_AUTH_MODE.STATIC_BEARER);
   return createRelaiMcpServer({
     config: readConfig(),
     publicHttpOnly: true,
     transportType: 'streamable-http',
-    nativeTasks: era === 'modern',
     legacyCompatibility: era === 'legacy',
-    principal: createHttpTaskPrincipal(authInfo, authMode)
+    principal: createHttpPrincipal(authInfo, authMode)
   });
 }
 
 export function createMcpRequestContext(authInfo: Record<string, unknown>, authMode: string): CoreMcpRequestContext {
   return Object.freeze({
     config: readConfig(),
-    principal: createHttpTaskPrincipal(authInfo, authMode)
+    principal: createHttpPrincipal(authInfo, authMode)
   });
 }
 
@@ -111,16 +110,30 @@ export function observeMcpRequestManifest(context: CoreMcpRequestContext, method
   return mcpConnectionManager.observeManifest(buildToolManifest(context.config), method);
 }
 
-export function handleMcpTaskRequest(
+export function handleMcpFallbackRequest(
   context: CoreMcpRequestContext,
   message: unknown,
   options: Record<string, unknown>
 ): Promise<McpTransportResponse | null | undefined> {
-  return handleTransportTaskRequest(context.config, message, {
+  return handleTransportFallbackRequest(context.config, message, {
     ...options,
     principal: context.principal,
     transportType: 'streamable-http'
   }) as Promise<McpTransportResponse | null | undefined>;
+}
+
+export function acknowledgeMcpFallbackCompletionDelivery(
+  context: CoreMcpRequestContext,
+  requestId: unknown
+): boolean {
+  return acknowledgeFallbackCompletionDelivery(principalFingerprint(context.principal), requestId);
+}
+
+export function handleMcpEventsRequest(
+  context: CoreMcpRequestContext,
+  message: Record<string, unknown>
+): Promise<Record<string, unknown> | null> {
+  return handleMcpEventRequest(context.config, context.principal, message);
 }
 
 export function withMcpPerformanceBreakdown<T>(operation: () => T): T {
@@ -155,8 +168,8 @@ export async function startMcpStdio(): Promise<unknown> {
   const coreRuntime = createRelaiCoreRuntime();
   coreRuntime.start();
   const config = coreRuntime.config;
-  const principal = createStdioTaskPrincipal();
-  const transport: ReturnType<typeof createTaskAwareStdioTransport> = createTaskAwareStdioTransport({ config, principal });
+  const principal = createStdioPrincipal();
+  const transport: ReturnType<typeof createFallbackAwareStdioTransport> = createFallbackAwareStdioTransport({ config, principal });
   const cleanup = (): Promise<unknown> => coreRuntime.shutdown();
 
   process.once('SIGINT', () => { void cleanup().finally(() => process.exit(0)); });
@@ -167,7 +180,6 @@ export async function startMcpStdio(): Promise<unknown> {
     () => createRelaiMcpServer({
       config,
       transportType: 'stdio',
-      nativeTasks: true,
       principal
     }),
     {

@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { Worker } from 'node:worker_threads';
+import { once } from 'node:events';
+import { openStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
+import { relaiVerify } from '../src/bridge/validation.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,6 +42,7 @@ const fail = 'node -e "process.exit(1)"';
 const slow = 'node -e "setTimeout(() => process.exit(0), 5000)"';
 
 try {
+  await verifyPolicyContention();
   const { callTool: rawCallTool } = await import('../src/tools.js');
   const callTool = (name, args, context = {}) => rawCallTool(name, args, { principal: 'local:trusted', ...context });
   const { getToolActivity, onToolActivity, resetToolActivity } = await import('../src/toolActivity.js');
@@ -141,8 +146,48 @@ try {
   }, context);
   assert.equal(timedOut.validationStatus, 'failed');
   assert.equal(timedOut.results[0].timedOut, true);
+  assert.equal(timedOut.cancelled, false);
+  assert.equal(timedOut.timedOut, true);
   assert.notEqual(getToolActivity().tasks.find(task => task.taskId === timeoutTask.work_id).progress.percentage, 100, 'timed-out validation must not present as successful 100% completion');
   await cancel(timeoutTask.work_id);
+
+
+  const lateDeadlineTask = await startTask('Deadline after successful check');
+  const lateDeadlineController = new AbortController();
+  const stopDeadlineListener = onToolActivity(event => {
+    if (event.taskId === lateDeadlineTask.work_id && event.phase === 'progress'
+        && event.activityEvent?.metadata?.passedCount === 1) {
+      lateDeadlineController.abort(new DOMException('Deadline before final verification.', 'TimeoutError'));
+    }
+  });
+  let lateDeadline;
+  try {
+    lateDeadline = await callTool('relai_validate', { action: 'checks',
+      workspace: 'app', work_id: lateDeadlineTask.work_id, checks: [pass]
+    }, { ...context, signal: lateDeadlineController.signal });
+  } finally {
+    stopDeadlineListener();
+  }
+  assert.equal(lateDeadlineController.signal.aborted, true, 'fixture must interrupt after the successful check');
+  assert.equal(lateDeadline.results[0].ok, true, 'completed child evidence stays truthful');
+  assert.equal(lateDeadline.ok, false, 'an aborted aggregate must not claim successful final verification');
+  assert.equal(lateDeadline.validationStatus, 'failed');
+  assert.equal(lateDeadline.timedOut, true);
+  assert.equal(lateDeadline.cancelled, false);
+  await cancel(lateDeadlineTask.work_id);
+
+
+  const inheritedTask = await startTask('Inherited validation deadline');
+  const inheritedTimeout = await callTool('relai_validate', { action: 'checks',
+    workspace: 'app', work_id: inheritedTask.work_id, checks: [slow], timeoutMs: 10000
+  }, { ...context, deadlineAtMs: Date.now() + 1000 });
+  assert.equal(inheritedTimeout.validationStatus, 'failed');
+  assert.equal(inheritedTimeout.timedOut, true);
+  assert.equal(inheritedTimeout.cancelled, false);
+  assert.equal(inheritedTimeout.results[0].timedOut, true);
+  assert.notEqual(inheritedTimeout.results[0].cancelled, true);
+  assert.equal(inheritedTimeout.results[0].terminationConfirmed, true);
+  await cancel(inheritedTask.work_id);
 
   const cancelledTask = await startTask('Cancelled validation');
   events.length = 0;
@@ -158,6 +203,7 @@ try {
   assert.equal(cancellation.endedAt, undefined, 'nonterminal cancellation must not publish a terminal timestamp');
   const cancelledValidation = await runningCancellation;
   assert.equal(cancelledValidation.validationStatus, 'cancelled');
+  assert.notEqual(cancelledValidation.timedOut, true);
   assert.equal(cancelledValidation.completedUnits, 0);
   assert.equal(cancelledValidation.totalUnits, 1);
   const terminalCancellation = await cancel(cancelledTask.work_id, 'Confirm cancelled validation');
@@ -222,6 +268,80 @@ try {
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
   fs.rmSync(temp, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 });
+}
+
+
+async function verifyPolicyContention() {
+  const corruptConfig = { stateDir: path.join(temp, 'policy-contention-corrupt') };
+  fs.mkdirSync(corruptConfig.stateDir);
+  fs.writeFileSync(stateDatabasePath(corruptConfig), 'not a sqlite database');
+  const corruptMarker = path.join(temp, 'policy-check-corrupt');
+  const corruptCommand = 'node -e ' + JSON.stringify('require("node:fs").writeFileSync(' + JSON.stringify(corruptMarker) + ',"ran")');
+  const corruptStarted = Date.now();
+  await assert.rejects(
+    relaiVerify({ alias: 'app', path: workspace }, corruptConfig, { checks: [corruptCommand] }),
+    error => error.errcode === 26,
+    'non-busy SQLite errors must propagate without retry or replacement'
+  );
+  assert.ok(Date.now() - corruptStarted < 250, 'non-busy errors must not consume the busy retry budget');
+  assert.equal(fs.existsSync(corruptMarker), false, 'a non-busy policy error must not launch a check');
+
+  for (const mode of ['transient', 'deadline', 'abort', 'held', 'expired']) {
+    const config = { stateDir: path.join(temp, 'policy-contention-' + mode) };
+    const database = openStateDatabase(config);
+    database.exec('PRAGMA journal_mode=DELETE');
+    database.close();
+    const writer = new Worker(`
+      const { parentPort, workerData } = require('node:worker_threads');
+      const { DatabaseSync } = require('node:sqlite');
+      const db = new DatabaseSync(workerData);
+      db.exec('BEGIN IMMEDIATE');
+      parentPort.postMessage('locked');
+      parentPort.once('message', delay => {
+        setTimeout(() => { db.exec('COMMIT'); db.close(); }, delay);
+      });
+    `, { eval: true, execArgv: [], workerData: stateDatabasePath(config) });
+    const exited = once(writer, 'exit');
+    try {
+      await once(writer, 'message');
+      const marker = path.join(temp, 'policy-check-' + mode);
+      const command = 'node -e ' + JSON.stringify('require("node:fs").writeFileSync(' + JSON.stringify(marker) + ',"ran")');
+      const controller = new AbortController();
+      const abortReason = new Error('Stop policy contention');
+      const context = { signal: controller.signal };
+      if (mode === 'deadline') context.deadlineAtMs = Date.now() + 60;
+      if (mode === 'expired') context.deadlineAtMs = Date.now() - 1;
+      let timerFired = false;
+      const serviceTimer = setTimeout(() => { timerFired = true; }, 10);
+      const abortTimer = mode === 'abort' ? setTimeout(() => controller.abort(abortReason), 30) : null;
+      if (mode === 'transient') writer.postMessage(150);
+      const started = Date.now();
+      try {
+        const result = relaiVerify({ alias: 'app', path: workspace }, config, { checks: [command] }, context);
+        if (mode === 'transient') {
+          assert.equal((await result).ok, true, 'validation must recover after transient policy initialization contention');
+          assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
+          assert.ok(timerFired, 'SQLite policy waiting must yield to service timers');
+        } else {
+          await assert.rejects(result, error => mode === 'abort'
+            ? error === abortReason
+            : mode === 'held'
+              ? error.errcode === 5 || error.code === 'SQLITE_BUSY'
+              : error.name === 'TimeoutError');
+          assert.equal(fs.existsSync(marker), false, 'policy failure must not launch a check');
+          assert.ok(Date.now() - started < (mode === 'held' ? 1500 : 250), 'contention must honor its deadline and cancellation bound');
+          if (mode === 'held') assert.ok(Date.now() - started >= 900, 'persistent contention must exhaust only the bounded asynchronous budget');
+        }
+      } finally {
+        clearTimeout(serviceTimer);
+        if (abortTimer) clearTimeout(abortTimer);
+      }
+      if (mode !== 'transient') writer.postMessage(0);
+      await exited;
+    } finally {
+      await writer.terminate();
+    }
+  }
 }
 
 async function waitFor(predicate, timeoutMs = 5000) {

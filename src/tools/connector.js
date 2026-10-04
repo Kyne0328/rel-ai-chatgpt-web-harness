@@ -59,6 +59,7 @@ function compactBackgroundOperation(value) {
     workspace: value.workspace,
     tool: value.tool,
     status: value.status,
+    phase: value.phase,
     updatedAt: value.updatedAt,
     completedAt: value.completedAt,
     revision: value.revision,
@@ -120,6 +121,7 @@ function compactForConnector(name, value, args = {}) {
           task: value.task,
           activeRelatedWork: value.activeRelatedWork,
           backgroundOperation: compactBackgroundOperation(value.backgroundOperation),
+          backgroundOperations: value.backgroundOperations?.map(compactBackgroundOperation),
           runtimeCompatibility: compatibility
         });
       }
@@ -140,6 +142,7 @@ function compactForConnector(name, value, args = {}) {
         task: value.task,
         activeRelatedWork: value.activeRelatedWork,
         backgroundOperation: value.backgroundOperation,
+        backgroundOperations: value.backgroundOperations,
         state: workspace && value.workspace ? policySentence(value.workspace.policy) : null,
         workspaceCount: value.workspaceCount,
         workspaceAliases: value.workspaceAliases
@@ -164,6 +167,7 @@ function compactForConnector(name, value, args = {}) {
         reusedChecks: value.reusedChecks,
         totalUnits: value.totalUnits,
         failedCheck: value.failedCheck,
+        timedOut: value.timedOut,
         cancelled: value.cancelled,
         validated: value.validated,
         validationStatus: value.validationStatus,
@@ -222,8 +226,8 @@ function compactForConnector(name, value, args = {}) {
         stderrTruncated: value.stderrTruncated === true ? true : undefined,
         stdoutOutputRef: value.stdoutOutputRef || undefined,
         stderrOutputRef: value.stderrOutputRef || undefined,
-        stdoutSpillTruncated: value.stdoutOutputRef ? value.stdoutSpillTruncated === true : undefined,
-        stderrSpillTruncated: value.stderrOutputRef ? value.stderrSpillTruncated === true : undefined,
+        stdoutSpillTruncated: value.stdoutSpillTruncated != null ? value.stdoutSpillTruncated === true : undefined,
+        stderrSpillTruncated: value.stderrSpillTruncated != null ? value.stderrSpillTruncated === true : undefined,
         timedOut: value.timedOut === true ? true : undefined,
         cancelled: value.cancelled === true ? true : undefined,
         terminationConfirmed: value.terminationConfirmed != null ? value.terminationConfirmed === true : undefined,

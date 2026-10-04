@@ -57,7 +57,8 @@ function hasPriorConfigEvidence() {
   return false;
 }
 
-function isReturningUserLifecycle(status = {}) {
+/** @knipdynamic Imported by the startup-recovery audit across the Electron workspace boundary. */
+export function isReturningUserLifecycle(status = {}) {
   if (!status || typeof status !== 'object') return false;
   if (status.updated === true) return true;
   const prev = String(status.previousVersion || '').trim();
@@ -82,4 +83,4 @@ function readGuiConfig() {
   };
 }
 
-export { normalizePort, normalizeTunnelId, hasExistingConfig, hasPriorConfigEvidence, isManualUpdateInstall, isReturningUserLifecycle, readGuiConfig };
+export { normalizePort, normalizeTunnelId, hasExistingConfig, isManualUpdateInstall, readGuiConfig };

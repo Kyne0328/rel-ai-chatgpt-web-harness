@@ -21,6 +21,7 @@ import {
 import { launchBrowserDriver, type BrowserPageDriver, type LocalBrowserDriver } from './browserDriver.ts';
 import { browserProfileDirectory, clearPersistentBrowserProfile, normalizeBrowserProfileMode, preparePersistentBrowserProfile, recordPersistentBrowserSite, type BrowserProfileMode } from './browserProfile.ts';
 import type { StructuredInteractionArgs } from './playwrightPrimitives.ts';
+import { BROWSER_HANDOFF_TTL_MS, browserHandoffExpired } from './browserHandoffPolicy.ts';
 
 const MAX_ACTIVE_BROWSER_SESSIONS = 8;
 const MAX_ACTIVE_BROWSER_TABS_PER_SESSION = 8;
@@ -63,7 +64,7 @@ type BrowserSessionRecord = {
   profileMode: BrowserProfileMode;
   profileDirectory: string;
   profileKey: string;
-  handoff: Readonly<{ active: true; reason: string; startedAt: string }> | null;
+  handoff: Readonly<{ active: true; reason: string; startedAt: string; expiresAt: string }> | null;
 };
 
 type BrowserRuntimeDependencies = Readonly<{
@@ -350,8 +351,14 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     const reason = normalizeHandoffReason(args.reason);
     const tab = requireTab(record, args.tabId);
     record.activeTabId = tab.tabId;
-    if (!record.handoff) {
-      record.handoff = Object.freeze({ active: true, reason, startedAt: new Date().toISOString() });
+    if (!record.handoff || browserHandoffExpired(record.handoff)) {
+      const startedAtMs = Date.now();
+      record.handoff = Object.freeze({
+        active: true,
+        reason,
+        startedAt: new Date(startedAtMs).toISOString(),
+        expiresAt: new Date(startedAtMs + BROWSER_HANDOFF_TTL_MS).toISOString()
+      });
     }
     await record.driver.setControl?.('user', reason);
     return sessionResult(record, 'handoff', { tabId: tab.tabId, status: 'user_input_required', ...(await tab.page.describe()) });
@@ -363,6 +370,9 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     context: BrowserContext = {}
   ): Promise<Record<string, unknown>> {
     const record = requireSession(workspace, args, context);
+    if (record.handoff?.active && browserHandoffExpired(record.handoff)) {
+      throw taskError('BROWSER_HANDOFF_EXPIRED', 'This browser handoff expired. Request it again before resuming AI control.');
+    }
     await record.driver.setControl?.('ai');
     record.handoff = null;
     return sessionResult(record, 'resume', { status: 'ready' });
@@ -627,4 +637,3 @@ async function stopAllBrowserSessions(): Promise<{ stopped: number }> {
 }
 
 export { browserRuntime, createBrowserRuntime, normalizeBrowserUrl, stopAllBrowserSessions };
-export type { BrowserArgs, BrowserContext, BrowserOperationOptions, BrowserRuntime };

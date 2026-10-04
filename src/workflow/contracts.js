@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import { stableJson } from '../stableJson.js';
 import { WORKFLOW_INTENTS } from '../contracts/analyticsTaxonomy.js';
 
 function deterministicActionId(action = {}) {
@@ -8,10 +9,4 @@ function deterministicActionId(action = {}) {
   return `${tool}:${name}:${digest}`;
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (!value || typeof value !== 'object') return JSON.stringify(value);
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
-}
-
-export { WORKFLOW_INTENTS, deterministicActionId, stableJson };
+export { WORKFLOW_INTENTS, deterministicActionId };

@@ -225,11 +225,6 @@ function isExecutableFile(file: string): boolean {
 }
 
 export {
-  performStructuredInteraction,
-  publicTarget,
-  resolveChromiumRuntime,
-  safeTitle,
-  screenshotPage,
-  targetLocator
+  performStructuredInteraction, resolveChromiumRuntime, safeTitle, screenshotPage, targetLocator
 };
-export type { ChromiumRuntime, StructuredInteractionArgs, StructuredTarget };
+export type { StructuredInteractionArgs };

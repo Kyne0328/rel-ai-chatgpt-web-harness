@@ -380,9 +380,12 @@ function projectLocalUsageSnapshot(config: AnalyticsConfig, month: string, docum
 }
 
 function readDocument(config: AnalyticsConfig, month: string): AnalyticsDocument {
-  closeAnalyticsWriteDatabases(config);
   migrateLegacyLocalAnalytics(config);
-  return withStateDatabase(config, (db: StateDatabase) => readDocumentFromDatabase(db, month)) as AnalyticsDocument;
+  return withStateDatabase(
+    config,
+    (db: StateDatabase) => readDocumentFromDatabase(db, month),
+    { readonly: true, missingValue: emptyDocument(month) }
+  ) as AnalyticsDocument;
 }
 
 async function readDocumentFresh(config: AnalyticsConfig, month: string): Promise<AnalyticsDocument> {
@@ -529,11 +532,24 @@ function parseDocument(text: string, month: string): AnalyticsDocument {
 }
 
 function migrateLegacyLocalAnalytics(config: AnalyticsConfig = {}): void {
+  if (legacyLocalAnalyticsMigrationComplete(config)) return;
   let migrated = false;
   withStateDatabase(config, (db: StateDatabase) => {
     migrated = migrateLegacyLocalAnalyticsInDatabase(db, config);
   }, { transaction: true });
   if (migrated) removeLegacyAnalyticsDirectory(config);
+}
+
+function legacyLocalAnalyticsMigrationComplete(config: AnalyticsConfig): boolean {
+  try {
+    return withStateDatabase(
+      config,
+      (db: StateDatabase) => stateMetaValue(db, LEGACY_MIGRATION_KEY, '') === '1',
+      { readonly: true, missingValue: false }
+    ) === true;
+  } catch {
+    return false;
+  }
 }
 
 function migrateLegacyLocalAnalyticsInDatabase(db: StateDatabase, config: AnalyticsConfig = {}): boolean {

@@ -48,13 +48,5 @@ export const FALLBACK_EXECUTION_STATUS = Object.freeze({
 } as const);
 
 export const TRANSPORT_OPERATION = Object.freeze({
-  TOOL_CALL: 'tools/call',
-  TASK_GET: 'tasks/get',
-  TASK_UPDATE: 'tasks/update',
-  TASK_CANCEL: 'tasks/cancel'
-} as const);
-
-export const MCP_RESULT_TYPE = Object.freeze({
-  COMPLETE: 'complete',
-  TASK: 'task'
+  TOOL_CALL: 'tools/call'
 } as const);

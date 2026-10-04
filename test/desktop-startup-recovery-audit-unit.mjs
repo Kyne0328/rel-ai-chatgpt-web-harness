@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -132,12 +133,58 @@ assert.match(
   'routeInitialWindow must check hasExistingConfig and apiKeyConfigured to avoid launching unconfigured desktop'
 );
 
+// A first-ever launch must surface the UI even if the process was invoked by a background/login path.
+const routeSource = desktopHostSource.slice(
+  desktopHostSource.indexOf('  function routeInitialWindow(lifecycleStatus = {}) {'),
+  desktopHostSource.indexOf('  async function launchConfiguredDesktop(launchOptions = {}) {')
+);
+const configuredLaunches = [];
+const routeInitialWindow = runInNewContext(`${routeSource}\nrouteInitialWindow`, {
+  hasExistingConfig: () => true,
+  tunnelCredentials: { status: () => ({ apiKeyConfigured: true }) },
+  runtimeLogs: { append() {} },
+  launchConfiguredDesktop: options => { configuredLaunches.push(options); },
+  isManualUpdateInstall: () => false,
+  setupWindowManager: { create() { throw new Error('configured launch must not open setup'); } },
+  app: { getVersion: () => '1.1.4' }
+});
+routeInitialWindow({ firstLaunch: true, openedAtLogin: true });
+routeInitialWindow({ firstLaunch: false, openedAtLogin: true });
+assert.equal(configuredLaunches[0]?.background, false, 'the first-ever configured launch must open the dashboard instead of staying hidden');
+assert.equal(configuredLaunches[1]?.background, true, 'later launch-at-login starts must continue running in the background');
+
 // 3E. desktop-host focusActiveWindow routes unconfigured requests to setup window
 assert.match(
   desktopHostSource,
   /function focusActiveWindow[\s\S]*?const isConfigured = hasExistingConfig\(\) && tunnelCredentials\.status\(\)\.apiKeyConfigured;[\s\S]*?if \(!isConfigured\) \{[\s\S]*?setupWindowManager\.create\(\);/,
   'focusActiveWindow must check isConfigured and create setup window rather than dumping to recovery'
 );
+
+// Reopening a stopped service must recover regardless of the retained window.
+const focusSource = desktopHostSource.slice(
+  desktopHostSource.indexOf('  function focusActiveWindow() {'),
+  desktopHostSource.indexOf('  function currentDashboardStatus() {')
+);
+for (const surface of ['dashboard', 'recovery']) {
+  let dashboardOpenCalls = 0;
+  let staleWindowShowCalls = 0;
+  const focus = runInNewContext(`${focusSource}\nfocusActiveWindow`, {
+    taskbarCompletionBadge: { clear() {} },
+    dashboardWindowManager: { getWindow: () => surface === 'dashboard' ? {
+      show() { staleWindowShowCalls += 1; }, focus() {}
+    } : null },
+    recoveryWindowManager: { getWindow: () => surface === 'recovery' ? { isVisible: () => true } : null,
+      show() { staleWindowShowCalls += 1; } },
+    setupWindowManager: { getWindow: () => null, create() {} },
+    hasExistingConfig: () => true,
+    tunnelCredentials: { status: () => ({ apiKeyConfigured: true }) },
+    serviceRuntime: { isListening: () => false },
+    openDashboardWindow: async () => { dashboardOpenCalls += 1; }
+  });
+  focus();
+  assert.equal(dashboardOpenCalls, 1, `reopening a stopped ${surface} must use the service startup path`);
+  assert.equal(staleWindowShowCalls, 0, `reopening a stopped ${surface} must not only reveal the stale window`);
+}
 
 // 3F. desktop-host logout strips background and hidden flags on relaunch
 assert.match(

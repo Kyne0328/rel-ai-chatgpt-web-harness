@@ -124,6 +124,18 @@ try {
     assert.equal(interaction.hitTarget.ownsControl, true, `${interaction.selector} is covered by another element`);
     assert.equal(interaction.opened, true, `${interaction.selector} did not open ${interaction.hash}`);
   }
+  assert.equal(result.skipLinkInteractions.length, 4, 'skip link must cover keyboard and pointer activation on clean and dirty pages');
+  for (const { activation, dirty, before, after } of result.skipLinkInteractions) {
+    const context = JSON.stringify({ activation, dirty, before, after });
+    assert.equal(after.focused, 'main', context);
+    assert.equal(after.hash, before.hash, context);
+    assert.equal(after.historyLength, before.historyLength, context);
+    assert.equal(after.title, before.title, context);
+    assert.equal(after.sameRouteNode, true, context);
+    assert.equal(after.dialog, false, context);
+    assert.equal(after.dirty, String(dirty), context);
+    assert.equal(after.draft, 'unsaved draft', context);
+  }
   assert.equal(result.modalInteractions.editDeleteCancelPreserved, true, JSON.stringify(result.modalInteractions));
   assert.equal(result.modalInteractions.dirtyClosePrompted, true, JSON.stringify(result.modalInteractions));
   assert.equal(result.modalInteractions.dirtyCancelPreserved, true, JSON.stringify(result.modalInteractions));
@@ -156,10 +168,18 @@ try {
   assert.ok(result.taskInteraction.detailText.length > 100);
   assert.equal(result.taskInteraction.workSessionId, true);
   assert.ok(result.taskInteraction.eventLinks > 0, JSON.stringify(result.taskInteraction));
+  assert.equal(result.taskSelectionStability.immediate, 'acceptance-running');
+  assert.equal(result.taskSelectionStability.afterRefresh.selected, 'acceptance-running', 'live task refresh must preserve the clicked task instead of restoring the old completed deep link');
+  assert.equal(result.taskSelectionStability.afterRefresh.routeTask, 'acceptance-running', 'mouse selection must update the task deep link');
+  assert.equal(result.taskSelectionStability.afterRefresh.activeTab, 'activity', 'live task refresh must preserve the inspector tab');
+  assert.equal(result.taskSelectionStability.keyboard.routeTask, result.taskSelectionStability.nextId, 'keyboard selection must update the task deep link');
+  assert.equal(result.taskSelectionStability.keyboard.focused, result.taskSelectionStability.nextId, 'changing task parameters must preserve keyboard focus in the task list');
   assert.equal(result.clock.changed, true, `the live task clock did not advance without interaction: ${JSON.stringify(result.clock)}`);
   assert.notEqual(result.keyboard.afterFocus.tag, 'BODY');
   assert.equal(result.activityInteraction.expanded, true);
   assert.equal(result.activityInteraction.selectedRow, true);
+  assert.equal(result.activitySelectionStability.selected, result.activitySelectionStability.expected, 'refreshing activity must preserve the newly selected event instead of restoring the original deep link');
+  assert.equal(result.activitySelectionStability.routeEvent, result.activitySelectionStability.expected, 'activity selection must update the event deep link');
   assert.equal(result.activityInteraction.copyButton, true);
   assert.equal(result.activityInteraction.errorWrapped, true);
   assert.deepEqual(result.activityDesktopGeometry.visibleHeaders, ['Time', 'Activity'], JSON.stringify(result.activityDesktopGeometry));
@@ -170,6 +190,8 @@ try {
   assert.ok(result.activityDesktopGeometry.messageText.length > 0, JSON.stringify(result.activityDesktopGeometry));
   assert.ok(result.activityDesktopGeometry.measuredMessageRows >= 2, JSON.stringify(result.activityDesktopGeometry));
   assert.ok(result.activityDesktopGeometry.maxMessageLeftAlignmentError <= 1, `Activity messages must share the same left edge: ${JSON.stringify(result.activityDesktopGeometry)}`);
+  assert.ok(result.activityDesktopGeometry.measuredStatusRows >= 2, JSON.stringify(result.activityDesktopGeometry));
+  assert.ok(result.activityDesktopGeometry.maxStatusLeftAlignmentError <= 1, `Activity status chips must share the same left edge: ${JSON.stringify(result.activityDesktopGeometry)}`);
   assert.ok(Math.abs(result.activityDesktopGeometry.tableWidth - result.activityDesktopGeometry.wrapWidth) <= 1, JSON.stringify(result.activityDesktopGeometry));
   assert.ok(Math.abs(result.activityDesktopGeometry.visibleHeaderWidth - result.activityDesktopGeometry.wrapWidth) <= 1, JSON.stringify(result.activityDesktopGeometry));
   assert.ok(result.activityDesktopGeometry.trailingWidthGap <= 1, JSON.stringify(result.activityDesktopGeometry));

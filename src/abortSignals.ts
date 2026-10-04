@@ -11,4 +11,8 @@ function combineAbortSignals(...values: AbortSignalInput[]): AbortSignal | undef
   return AbortSignal.any(signals);
 }
 
-export { combineAbortSignals };
+function isTimeoutAbort(signal?: AbortSignal | null): boolean {
+  return signal?.aborted === true && signal.reason?.name === 'TimeoutError';
+}
+
+export { combineAbortSignals, isTimeoutAbort };

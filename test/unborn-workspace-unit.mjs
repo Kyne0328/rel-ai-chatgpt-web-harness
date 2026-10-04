@@ -104,7 +104,7 @@ try {
   await flushLocalAnalytics();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
 console.log('Guarded work sessions and edits support repositories with no commits.');

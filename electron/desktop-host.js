@@ -32,7 +32,9 @@ import { createTaskCodeIdeLauncher } from './task-code-ide.js';
 import { createTaskbarCompletionBadge } from './taskbar-completion-badge.js';
 import { taskActivityBlockReason } from './tool-sleep-blocker.js';
 import { configureTunnelSafeStorage, createTunnelCredentialStore } from './tunnel-credentials.js';
+import { createTunnelConnectionStore } from './tunnel-connections.js';
 import { createTunnelRecoverySupervisor } from './tunnel-recovery-supervisor.js';
+import { createTunnelRuntimePool } from './tunnel-runtime-pool.js';
 import { createUpdateSupportPolicy } from './update-support-policy.js';
 import { fitWindowToContent, WINDOW_SIZE_LIMITS } from './window-size.js';
 import { removeControllerRuntimeMarker, writeControllerRuntimeMarker } from './controller-runtime.js';
@@ -118,6 +120,7 @@ async function createDesktopHost(options = {}) {
     onLog: (message, logOptions) => runtimeLogs.append(message, logOptions)
   });
   const tunnelCredentials = createTunnelCredentialStore({ safeStorage });
+  const tunnelConnections = createTunnelConnectionStore({ safeStorage });
   const taskCodeIde = createTaskCodeIdeLauncher({ shell });
   const recoveryWindowManager = createRecoveryWindowManager({
     BrowserWindow,
@@ -161,6 +164,15 @@ async function createDesktopHost(options = {}) {
       }
     },
     onStatus: handleTunnelStatus
+  });
+  const additionalTunnelRuntime = createTunnelRuntimePool({
+    createRuntime: createSecureTunnelRuntime,
+    runtimeOptions: {
+      stopProcess: terminateProcessTree,
+      makeEnvironment: makeTunnelProcessEnvironment
+    },
+    onLog: entry => publicConnectionLog('openai-tunnel', entry),
+    onStatus: status => setStatus({ additionalTunnelStatuses: status.connections })
   });
   const desktopLifecycle = createDesktopLifecycleManager({
     app,
@@ -306,6 +318,8 @@ async function createDesktopHost(options = {}) {
     dashboardWindowManager,
     runtimeLogs,
     secureTunnelRuntime,
+    additionalTunnelRuntime,
+    tunnelConnections,
     tunnelCredentials,
     buildStatus,
     errorCodes: ERROR_CODES,
@@ -388,7 +402,7 @@ async function createDesktopHost(options = {}) {
     BrowserWindow,
     clipboard,
     shell,
-    saveLauncherConfig: options.saveLauncherConfig,
+    saveLauncherConfig: savePrimaryLauncherConfig,
     getWizardWindow: setupWindowManager.getWindow,
     closeWizard: setupWindowManager.close,
     getFallbackWindow: recoveryWindowManager.getWindow,
@@ -424,6 +438,8 @@ async function createDesktopHost(options = {}) {
     openDashboardWindow,
     getDesktopSettings: currentDesktopSettings,
     saveDesktopSettings: updateDesktopSettings,
+    saveAdditionalTunnel,
+    removeAdditionalTunnel,
     getLocalUsage: serviceProcessClient.getLocalUsage,
     getUpdateStatus: combinedUpdateStatus,
     checkForUpdates: checkApplicationUpdates,
@@ -544,16 +560,32 @@ async function createDesktopHost(options = {}) {
     }
   }
 
+  function savePrimaryLauncherConfig(config = {}) {
+    const requestedTunnelId = String(config?.tunnelId || '').trim();
+    if (requestedTunnelId && tunnelConnections.list().some(connection => connection.tunnelId === requestedTunnelId)) {
+      throw new Error('This Tunnel ID is already configured as an additional ChatGPT tunnel. Remove it there before making it the primary connection.');
+    }
+    return options.saveLauncherConfig(config);
+  }
+
   function currentDesktopSettings() {
-    return readDesktopSettings({
-      tunnelApiKeyConfigured: tunnelCredentials.status().apiKeyConfigured,
-      notificationsEnabled: desktopNotifications.getPreferences().enabled,
-      tunnelErrorCode: currentStatus.errorCode,
-      tunnelError: currentStatus.error
-    });
+    return {
+      ...readDesktopSettings({
+        tunnelApiKeyConfigured: tunnelCredentials.status().apiKeyConfigured,
+        notificationsEnabled: desktopNotifications.getPreferences().enabled,
+        tunnelErrorCode: currentStatus.errorCode,
+        tunnelError: currentStatus.error
+      }),
+      additionalTunnels: tunnelConnections.list(),
+      additionalTunnelStatuses: additionalTunnelRuntime.snapshot().connections
+    };
   }
 
   function updateDesktopSettings(settings) {
+    const requestedTunnelId = String(settings?.tunnelId || '').trim();
+    if (requestedTunnelId && tunnelConnections.list().some(connection => connection.tunnelId === requestedTunnelId)) {
+      throw new Error('This Tunnel ID is already configured as an additional ChatGPT tunnel. Remove it there before making it the primary connection.');
+    }
     return saveDesktopSettings(settings, {
       setNotificationsEnabled: desktopNotifications.setEnabled,
       getNotificationsEnabled: () => desktopNotifications.getPreferences().enabled,
@@ -565,6 +597,39 @@ async function createDesktopHost(options = {}) {
       restartConnection,
       restartDesktop: () => launchConfiguredDesktop({ restart: true })
     });
+  }
+
+  async function saveAdditionalTunnel(input = {}) {
+    const primaryTunnelId = currentDesktopSettings().tunnelId;
+    if (String(input.tunnelId || '').trim() === primaryTunnelId) {
+      throw new Error('This Tunnel ID is already the primary ChatGPT connection.');
+    }
+    const connection = tunnelConnections.upsert(input);
+    const runtime = await serviceRuntime.restartAdditionalTunnels();
+    const status = runtime.connections?.find(item => item.tunnelId === connection.tunnelId) || null;
+    const ok = !runtime.error && (connection.enabled === false || Boolean(status && status.state !== 'failed'));
+    return {
+      ok,
+      saved: true,
+      error: ok ? '' : 'Additional Secure MCP Tunnel connections could not be synchronized. Check the connection status and try again.',
+      connection,
+      status,
+      connections: tunnelConnections.list(),
+      statuses: runtime.connections || []
+    };
+  }
+
+  async function removeAdditionalTunnel(tunnelId) {
+    const removed = tunnelConnections.remove(tunnelId);
+    const runtime = serviceRuntime.isListening()
+      ? await serviceRuntime.restartAdditionalTunnels()
+      : { connections: [] };
+    return {
+      ok: true,
+      ...removed,
+      connections: tunnelConnections.list(),
+      statuses: runtime.connections || []
+    };
   }
 
   async function setKeepAwake(enabled) {
@@ -614,14 +679,9 @@ async function createDesktopHost(options = {}) {
   function focusActiveWindow() {
     taskbarCompletionBadge.clear();
     const dashboardWindow = dashboardWindowManager.getWindow();
-    if (dashboardWindow) {
+    if (dashboardWindow && serviceRuntime.isListening()) {
       dashboardWindow.show();
       dashboardWindow.focus();
-      return;
-    }
-    const fallbackWindow = recoveryWindowManager.getWindow();
-    if (fallbackWindow?.isVisible()) {
-      recoveryWindowManager.show();
       return;
     }
     const setupWindow = setupWindowManager.getWindow();
@@ -927,7 +987,7 @@ async function createDesktopHost(options = {}) {
       if (lifecycleStatus.updated === true && lifecycleStatus.previousVersion) {
         runtimeLogs.append(`Rel.AI MCP updated from ${lifecycleStatus.previousVersion} to ${lifecycleStatus.currentVersion}. Existing connection restored.`, { source: 'desktop-lifecycle' });
       }
-      void launchConfiguredDesktop({ background: lifecycleStatus.openedAtLogin });
+      void launchConfiguredDesktop({ background: lifecycleStatus.openedAtLogin === true && lifecycleStatus.firstLaunch !== true });
       return { mode: 'configured', hasConfig: true };
     }
     if (isManualUpdateInstall({ lifecycleStatus, hasConfig })) {
@@ -1008,6 +1068,7 @@ async function createDesktopHost(options = {}) {
       if (!cleared?.ok) throw new Error(cleared?.error || 'Rel.AI local data could not be cleared.');
     } else {
       tunnelCredentials.clear();
+      tunnelConnections.clear();
       connection.clearConnectionState();
     }
     const cleanArgs = process.argv.slice(1).filter(arg => arg !== '--background' && arg !== '--hidden');
@@ -1045,7 +1106,7 @@ async function createDesktopHost(options = {}) {
     return { ok: true, timing };
   }
 
-  return Object.freeze({ start, completeApplicationUpdate });
+  return Object.freeze({ start, completeApplicationUpdate, openDashboardWindow });
 }
 
 function requireDesktopDependencies(options) {

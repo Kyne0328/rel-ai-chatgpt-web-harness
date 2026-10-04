@@ -13,6 +13,7 @@ fs.writeFileSync(outputPath, JSON.stringify({ stage: 'script_started', argv: pro
 
 let app;
 let BrowserWindow;
+const failures = [];
 try {
   ({ app, BrowserWindow } = await import('electron'));
 } catch (error) {
@@ -37,7 +38,6 @@ app.whenReady().then(async () => {
       backgroundThrottling: true
     }
   });
-  const failures = [];
   let delayedDashboardRequest = false;
   if (dashboardDelayMs > 0) {
     win.webContents.session.webRequest.onBeforeRequest({ urls: ['http://*/*'] }, (details, callback) => {
@@ -147,6 +147,7 @@ app.whenReady().then(async () => {
   })()`);
 
   await win.webContents.executeJavaScript(`localStorage.setItem('relai_debug', '1')`);
+  const skipLinkInteractions = await exerciseSkipLink(win);
   const navigationInteractions = await exerciseNavigationControls(win, failures);
   const modalInteractions = await exerciseModalInteractions(win);
   accessibility.push(await auditAccessibility(win, axePath, 'workspaces'));
@@ -190,6 +191,7 @@ app.whenReady().then(async () => {
     };
   })()`);
   taskInteraction.immediate = taskDetailImmediate;
+  const taskSelectionStability = await exerciseTaskSelectionStability(win);
 
   await win.webContents.setZoomFactor(1);
   win.setSize(1600, 900);
@@ -208,15 +210,17 @@ app.whenReady().then(async () => {
     const cellRect = messageCell?.getBoundingClientRect();
     const wrapRect = wrap?.getBoundingClientRect();
     const visibleHeaderWidth = headers.reduce((sum, item) => sum + item.width, 0);
-    const messageLeftErrors = [...document.querySelectorAll('.activity-data-row')].slice(0, 12).map(row => {
-      const cell = row.querySelector('.activity-message-cell');
-      const copy = row.querySelector('.activity-message-copy');
-      if (!cell || !copy) return 0;
-      const cellBox = cell.getBoundingClientRect();
-      const copyBox = copy.getBoundingClientRect();
-      const paddingLeft = parseFloat(getComputedStyle(cell).paddingLeft) || 0;
-      return Math.abs((copyBox.left - cellBox.left) - paddingLeft);
-    });
+    const measuredRows = [...document.querySelectorAll('.activity-data-row')].slice(0, 12);
+    const messageLefts = measuredRows
+      .map(row => row.querySelector('.activity-message-copy')?.getBoundingClientRect().left)
+      .filter(Number.isFinite);
+    const messageLeftOrigin = messageLefts[0] ?? 0;
+    const messageLeftErrors = messageLefts.map(left => Math.abs(left - messageLeftOrigin));
+    const statusLefts = measuredRows
+      .map(row => row.querySelector('.activity-row-status')?.getBoundingClientRect().left)
+      .filter(Number.isFinite);
+    const statusLeftOrigin = statusLefts[0] ?? 0;
+    const statusLeftErrors = statusLefts.map(left => Math.abs(left - statusLeftOrigin));
     return {
       viewportWidth: innerWidth,
       tableWidth: table?.getBoundingClientRect().width || 0,
@@ -230,7 +234,9 @@ app.whenReady().then(async () => {
       cellVisible: Boolean(messageCell && getComputedStyle(messageCell).display !== 'none' && cellRect && wrapRect && cellRect.width > 0 && cellRect.right > wrapRect.left && cellRect.left < wrapRect.right),
       messageText: messageCell?.querySelector('.activity-message-copy')?.textContent.trim() || '',
       measuredMessageRows: messageLeftErrors.length,
-      maxMessageLeftAlignmentError: messageLeftErrors.length ? Math.max(...messageLeftErrors) : 0
+      maxMessageLeftAlignmentError: messageLeftErrors.length ? Math.max(...messageLeftErrors) : 0,
+      measuredStatusRows: statusLeftErrors.length,
+      maxStatusLeftAlignmentError: statusLeftErrors.length ? Math.max(...statusLeftErrors) : 0
     };
   })()`);
   const activityLiveStability = await win.webContents.executeJavaScript(`(async () => {
@@ -284,6 +290,7 @@ app.whenReady().then(async () => {
       errorWrapped: errorValue ? getComputedStyle(errorValue).overflowWrap !== 'normal' : false
     };
   })()`);
+  const activitySelectionStability = await exerciseActivitySelectionStability(win);
   await waitFor(win, `!document.querySelector('#__relai-drawer-backdrop')`);
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
@@ -446,11 +453,14 @@ app.whenReady().then(async () => {
     initial,
     liveToolUpdate,
     navigationInteractions,
+    skipLinkInteractions,
     modalInteractions,
     projectPersistence,
     passiveRouteStability,
     taskInteraction,
+    taskSelectionStability,
     activityInteraction,
+    activitySelectionStability,
     activityDesktopGeometry,
     activityLiveStability,
     keyboard: { beforeFocus, afterFocus },
@@ -463,9 +473,98 @@ app.whenReady().then(async () => {
   await win.close();
   app.quit();
 }).catch(error => {
-  fs.writeFileSync(outputPath, JSON.stringify({ error: error?.stack || String(error) }, null, 2));
+  fs.writeFileSync(outputPath, JSON.stringify({ error: `${error?.stack || String(error)}\n${failures.join('\n')}` }, null, 2));
   app.exit(1);
 });
+
+async function exerciseActivitySelectionStability(win) {
+  const ids = await win.webContents.executeJavaScript(`(() => {
+    const rows = [...document.querySelectorAll('[data-activity-event-id]')];
+    return {
+      original: rows.find(row => row.textContent.includes('completed task'))?.dataset.activityEventId || '',
+      selected: rows.find(row => row.textContent.includes('Extremely long task title'))?.dataset.activityEventId || ''
+    };
+  })()`);
+  if (!ids.original || !ids.selected) throw new Error('Activity selection fixtures are missing.');
+  await win.webContents.executeJavaScript(`location.hash = '#activity?time=all&event=' + ${JSON.stringify(encodeURIComponent(ids.original))}`);
+  await waitFor(win, `document.querySelector('tr.is-selected')?.dataset.activityEventId === ${JSON.stringify(ids.original)}`);
+  await win.webContents.executeJavaScript(`(() => {
+    [...document.querySelectorAll('[data-activity-event-id]')].find(row => row.dataset.activityEventId === ${JSON.stringify(ids.selected)})?.querySelector('.activity-row-trigger')?.click();
+    window.__relaiActivityOriginalFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const response = await window.__relaiActivityOriginalFetch(...args);
+      if (!String(args[0]).includes('/api/dashboard/v10')) return response;
+      const data = await response.json();
+      data.auditTail.entries = data.auditTail.entries.map(entry => entry.taskId === 'acceptance-running'
+        ? { ...entry, summary: 'Activity selection refresh received' } : entry);
+      return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+    };
+    window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
+  })()`);
+  await waitFor(win, `[...document.querySelectorAll('[data-activity-event-id]')].some(row => row.dataset.activityEventId === ${JSON.stringify(ids.selected)} && row.textContent.includes('Activity selection refresh received'))`);
+  await delay(50);
+  return win.webContents.executeJavaScript(`(() => {
+    window.fetch = window.__relaiActivityOriginalFetch;
+    delete window.__relaiActivityOriginalFetch;
+    return {
+      expected: ${JSON.stringify(ids.selected)},
+      selected: document.querySelector('tr.is-selected')?.dataset.activityEventId || '',
+      routeEvent: new URLSearchParams(location.hash.split('?')[1] || '').get('event')
+    };
+  })()`);
+}
+
+async function exerciseTaskSelectionStability(win) {
+  await win.webContents.executeJavaScript(`location.hash = '#tasks?task=acceptance-completed'`);
+  await waitFor(win, `document.querySelector('.task-row.is-selected')?.dataset.taskId === 'acceptance-completed'`);
+  const immediate = await win.webContents.executeJavaScript(`(() => {
+    document.querySelector('[data-task-id="acceptance-running"]')?.click();
+    document.querySelector('[data-session-tab="activity"]')?.click();
+    return document.querySelector('.task-row.is-selected')?.dataset.taskId || '';
+  })()`);
+  // Confirm that an aggregate refresh actually changes task data before checking
+  // selection. A timer alone could pass without exercising the live-data effect.
+  await win.webContents.executeJavaScript(`(() => {
+    window.__relaiSelectionOriginalFetch = window.fetch;
+    window.fetch = async (...args) => {
+      const response = await window.__relaiSelectionOriginalFetch(...args);
+      if (!String(args[0]).includes('/api/dashboard/v10')) return response;
+      const data = await response.json();
+      data.tasks = data.tasks.map(task => task.id === 'acceptance-completed'
+        ? { ...task, title: 'Completed task after selection refresh' } : task);
+      return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+    };
+    window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
+  })()`);
+  await waitFor(win, `document.querySelector('[data-task-id="acceptance-completed"]')?.textContent.includes('Completed task after selection refresh')`);
+  await delay(50);
+  const afterRefresh = await win.webContents.executeJavaScript(`(() => {
+    window.fetch = window.__relaiSelectionOriginalFetch;
+    delete window.__relaiSelectionOriginalFetch;
+    return {
+      selected: document.querySelector('.task-row.is-selected')?.dataset.taskId || '',
+      routeTask: new URLSearchParams(location.hash.split('?')[1] || '').get('task'),
+      activeTab: document.querySelector('[data-session-tab][aria-selected="true"]')?.dataset.sessionTab || ''
+    };
+  })()`);
+  await win.webContents.executeJavaScript(`location.hash = '#tasks?task=acceptance-queued'`);
+  await waitFor(win, `document.querySelector('.task-row.is-selected')?.dataset.taskId === 'acceptance-queued'`);
+  const nextId = await win.webContents.executeJavaScript(`(() => {
+    const current = document.querySelector('.task-row.is-selected');
+    const rows = [...document.querySelectorAll('.task-row')];
+    current.focus();
+    return rows[rows.indexOf(current) + 1]?.dataset.taskId || '';
+  })()`);
+  win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Down' });
+  win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Down' });
+  await waitFor(win, `document.querySelector('.task-row.is-selected')?.dataset.taskId === ${JSON.stringify(nextId)}`);
+  const keyboard = await win.webContents.executeJavaScript(`({
+    selected: document.querySelector('.task-row.is-selected')?.dataset.taskId || '',
+    focused: document.activeElement?.dataset.taskId || '',
+    routeTask: new URLSearchParams(location.hash.split('?')[1] || '').get('task')
+  })`);
+  return { immediate, afterRefresh, keyboard, nextId };
+}
 
 async function auditAccessibility(win, runtimePath, route) {
   if (!await win.webContents.executeJavaScript(`Boolean(window.axe?.run)`)) {
@@ -755,13 +854,81 @@ async function exerciseNavigationControls(win, failures) {
   return results;
 }
 
+
+async function exerciseSkipLink(win) {
+  win.show();
+  win.focus();
+  const results = [];
+  for (const dirty of [false, true]) {
+    for (const activation of ['keyboard', 'pointer']) {
+      await win.webContents.executeJavaScript(`location.hash = '#tasks?workspace=app'`);
+      await waitFor(win, `location.hash === '#tasks?workspace=app' && document.querySelector('.sessions-page')`);
+      const before = await win.webContents.executeJavaScript(`(() => {
+        const main = document.getElementById('main');
+        const form = document.createElement('form');
+        form.id = '__skip-link-draft';
+        form.dataset.unsavedChanges = ${JSON.stringify(String(dirty))};
+        const input = document.createElement('input');
+        input.value = 'unsaved draft';
+        form.appendChild(input);
+        main.appendChild(form);
+        window.__skipLinkRouteNode = document.querySelector('.sessions-page');
+        const link = document.querySelector('.skip-link');
+        link.focus();
+        return { hash: location.hash, historyLength: history.length, title: document.title };
+      })()`);
+      if (activation === 'keyboard') {
+        win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+        win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+      } else {
+        await waitFor(win, `(() => {
+          const rect = document.querySelector('.skip-link')?.getBoundingClientRect();
+          return rect && rect.top >= 0 && rect.bottom <= innerHeight;
+        })()`);
+        const target = await win.webContents.executeJavaScript(`(() => {
+          const link = document.querySelector('.skip-link');
+          const rect = link.getBoundingClientRect();
+          const x = Math.round(rect.left + rect.width / 2);
+          const y = Math.round(rect.top + rect.height / 2);
+          const hit = document.elementFromPoint(x, y);
+          return { x, y, reachable: hit === link || link.contains(hit) };
+        })()`);
+        if (!target.reachable) throw new Error('Focused skip link must be reachable by pointer.');
+        win.webContents.sendInputEvent({ type: 'mouseDown', x: target.x, y: target.y, button: 'left', clickCount: 1 });
+        win.webContents.sendInputEvent({ type: 'mouseUp', x: target.x, y: target.y, button: 'left', clickCount: 1 });
+      }
+      await delay(100);
+      const after = await win.webContents.executeJavaScript(`(() => {
+        const form = document.getElementById('__skip-link-draft');
+        const state = { hash: location.hash, historyLength: history.length, title: document.title,
+          focused: document.activeElement?.id || '',
+          sameRouteNode: document.querySelector('.sessions-page') === window.__skipLinkRouteNode,
+          dirty: form?.dataset.unsavedChanges, draft: form?.querySelector('input')?.value,
+          dialog: Boolean(document.querySelector('[role="dialog"], [role="alertdialog"]')) };
+        form?.remove();
+        delete window.__skipLinkRouteNode;
+        return state;
+      })()`);
+      const result = { activation, dirty, before, after };
+      results.push(result);
+      if (after.focused !== 'main' || after.hash !== before.hash || after.historyLength !== before.historyLength
+        || after.title !== before.title || !after.sameRouteNode || after.dialog
+        || after.dirty !== String(dirty) || after.draft !== 'unsaved draft') {
+        throw new Error(`Skip to content must preserve the current route and draft: ${JSON.stringify(result)}`);
+      }
+    }
+  }
+  return results;
+}
+
 async function waitFor(win, expression, timeoutMs = 10000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     if (await win.webContents.executeJavaScript(`Boolean(${expression})`)) return;
     await delay(50);
   }
-  throw new Error(`Timed out waiting for: ${expression}`);
+  const state = await win.webContents.executeJavaScript(`({ hash: location.hash, text: document.body.innerText.slice(0, 2000) })`);
+  throw new Error(`Timed out waiting for: ${expression}; renderer=${JSON.stringify(state)}`);
 }
 
 function delay(ms) {

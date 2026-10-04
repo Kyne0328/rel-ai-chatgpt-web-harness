@@ -107,10 +107,10 @@ const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
   OP.VALIDATE_DIAGNOSTICS, OP.VALIDATE_CHECKS, OP.PUBLISH_PUSH
 ]);
-// These operations use Native MCP Tasks when the connected client explicitly negotiates
-// the Tasks capability. Clients without it keep the same public operations, but long work
-// can continue under work_id after the tool response returns; no legacy operation names are retained.
-const NATIVE_TASK_ELIGIBLE_TOOLS: ReadonlySet<string> = new Set([
+// These operations may outlive the safe synchronous response window. Short bounded calls
+// complete directly; longer calls continue through Rel.AI's principal- and workspace-scoped
+// background fallback so ChatGPT Web can keep working without polling.
+const BACKGROUND_FALLBACK_ELIGIBLE_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_CONTEXT,
   OP.SEARCH_SEMANTIC,
   OP.INSPECT,
@@ -149,7 +149,7 @@ function annotationsFor(name: string): ToolAnnotations {
 }
 
 function executionClassFor(name: string): ToolBehavior['executionClass'] {
-  if (NATIVE_TASK_ELIGIBLE_TOOLS.has(name)) return EXECUTION_CLASS.NATIVE_TASK_ELIGIBLE;
+  if (BACKGROUND_FALLBACK_ELIGIBLE_TOOLS.has(name)) return EXECUTION_CLASS.BACKGROUND_FALLBACK_ELIGIBLE;
   if (PERSISTENT_PROCESS_TOOLS.has(name)) return EXECUTION_CLASS.PERSISTENT_PROCESS;
   if (ALWAYS_IMMEDIATE_TOOLS.has(name)) return EXECUTION_CLASS.ALWAYS_IMMEDIATE;
   return EXECUTION_CLASS.BOUNDED_SYNCHRONOUS;
@@ -161,9 +161,6 @@ function defineTool(definition: ToolDefinitionInput): CatalogToolDefinition {
     connectorStrip: [...(definition.connectorStrip || [])],
     groups: [...(definition.groups || [])],
     annotations: Object.freeze(annotationsFor(definition.name)),
-    ...(NATIVE_TASK_ELIGIBLE_TOOLS.has(definition.name)
-      ? { execution: Object.freeze({ taskSupport: 'optional' as const }) }
-      : {}),
     outputSchema: Object.freeze(definition.outputSchema || outputSchemaFor(definition.name)) as JsonSchema,
     behavior: Object.freeze({
       ...DEFAULT_BEHAVIOR,
@@ -193,8 +190,9 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Durable goal lifecycle. Every meaningful durable Rel.AI goal starts with a non-empty plan on begin and keeps that plan updated. Projectless one-shot utility/control work runs directly without a durable task. context is optional continuity/bootstrap; status is recovery rather than polling; stop/finish/cancel manage lifecycle.',
-    annotations: annotations(false, false, false, false),
+    description: 'Durable goal lifecycle. Every durable Rel.AI goal starts with a non-empty plan on begin. One work_id can own multiple background operations: status lists them, or retrieves one by operationId. stop with operationId targets one command; task-wide stop/cancel covers all. context recovers continuity. Keep the plan current and finish after outstanding operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
+    // stop/cancel can terminate running work; the aggregate descriptor covers every action.
+    annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
     dashboard: { category: 'Workflow', capabilities: ['workflow'] }
   },

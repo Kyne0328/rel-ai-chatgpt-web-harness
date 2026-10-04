@@ -15,7 +15,7 @@ import {
   writeSqliteValidationStamp
 } from './sqliteDurability.ts';
 
-const STATE_SCHEMA_VERSION = 3;
+const STATE_SCHEMA_VERSION = 5;
 const STATE_VALIDATION_KEY = `state-v${STATE_SCHEMA_VERSION}`;
 
 interface StateDatabaseConfig extends Record<string, unknown> {
@@ -61,22 +61,6 @@ CREATE TABLE IF NOT EXISTS session_policies(
 ) STRICT;
 CREATE INDEX IF NOT EXISTS session_policies_workspace_idx
   ON session_policies(workspace, updated_at_ms DESC);
-CREATE TABLE IF NOT EXISTS native_tasks(
-  task_id TEXT PRIMARY KEY,
-  updated_at_ms INTEGER NOT NULL,
-  payload TEXT NOT NULL
-) STRICT;
-CREATE INDEX IF NOT EXISTS native_tasks_updated_idx
-  ON native_tasks(updated_at_ms DESC);
-CREATE TABLE IF NOT EXISTS native_task_quarantine(
-  id INTEGER PRIMARY KEY,
-  task_id TEXT NOT NULL,
-  quarantined_at_ms INTEGER NOT NULL,
-  reason TEXT NOT NULL,
-  payload TEXT NOT NULL
-) STRICT;
-CREATE INDEX IF NOT EXISTS native_task_quarantine_age_idx
-  ON native_task_quarantine(quarantined_at_ms);
 CREATE TABLE IF NOT EXISTS analytics_months(
   month TEXT PRIMARY KEY,
   updated_at_ms INTEGER NOT NULL,
@@ -261,10 +245,195 @@ INSERT INTO state_meta(key,value) VALUES('task_history_event_index_v1','1')
   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 `;
 
+const SCHEMA_V4_SQL = `
+DROP TABLE IF EXISTS native_task_quarantine;
+DROP TABLE IF EXISTS native_tasks;
+`;
+
+const SCHEMA_V5_SQL = `
+DROP TRIGGER IF EXISTS task_history_events_after_insert;
+DROP TRIGGER IF EXISTS task_history_events_after_update;
+DROP TRIGGER IF EXISTS task_history_events_after_delete;
+CREATE INDEX IF NOT EXISTS task_history_events_task_recent_idx
+  ON task_history_events(task_id,event_timestamp DESC,task_updated_at_ms DESC,event_index DESC);
+DELETE FROM task_history_events;
+INSERT INTO task_history_events(
+  task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+)
+SELECT
+  task.id,
+  CASE
+    WHEN COALESCE(
+      NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+      NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+      NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),'')
+    ) IS NOT NULL
+      THEN 'id:' || COALESCE(
+        NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),'')
+      )
+    ELSE 'snapshot-index:' || CAST(event.key AS TEXT)
+  END,
+  CAST(event.key AS INTEGER),
+  task.updated_at_ms,
+  COALESCE(
+    CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+    CAST(json_extract(event.value,'$.ts') AS TEXT),
+    CAST(json_extract(event.value,'$.at') AS TEXT),
+    CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+    CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+    ''
+  ),
+  COALESCE(
+    CAST(json_extract(event.value,'$.workspace') AS TEXT),
+    CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.workspace') AS TEXT) END,
+    ''
+  ),
+  COALESCE(
+    CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+    CASE WHEN json_valid(task.payload) THEN CAST(json_extract(task.payload,'$.sessionId') AS TEXT) END,
+    task.id
+  ),
+  event.value
+FROM task_history AS task
+CROSS JOIN json_each(
+  CASE WHEN json_valid(task.payload) THEN task.payload ELSE '{"events":[]}' END,
+  '$.events'
+) AS event
+WHERE event.type='object'
+ON CONFLICT(task_id,event_key) DO UPDATE SET
+  event_index=excluded.event_index,
+  task_updated_at_ms=excluded.task_updated_at_ms,
+  event_timestamp=excluded.event_timestamp,
+  workspace=excluded.workspace,
+  session_id=excluded.session_id,
+  payload=excluded.payload;
+CREATE TRIGGER task_history_events_after_insert
+AFTER INSERT ON task_history
+BEGIN
+  DELETE FROM task_history_events WHERE task_id=NEW.id AND event_key LIKE 'snapshot-index:%';
+  INSERT INTO task_history_events(
+    task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+  )
+  SELECT
+    NEW.id,
+    CASE
+      WHEN COALESCE(
+        NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),'')
+      ) IS NOT NULL
+        THEN 'id:' || COALESCE(
+          NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),'')
+        )
+      ELSE 'snapshot-index:' || CAST(event.key AS TEXT)
+    END,
+    CAST(event.key AS INTEGER),
+    NEW.updated_at_ms,
+    COALESCE(
+      CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+      CAST(json_extract(event.value,'$.ts') AS TEXT),
+      CAST(json_extract(event.value,'$.at') AS TEXT),
+      CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+      CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.workspace') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
+      NEW.id
+    ),
+    event.value
+  FROM json_each(
+    CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
+    '$.events'
+  ) AS event
+  WHERE event.type='object'
+  ON CONFLICT(task_id,event_key) DO UPDATE SET
+    event_index=excluded.event_index,
+    task_updated_at_ms=excluded.task_updated_at_ms,
+    event_timestamp=excluded.event_timestamp,
+    workspace=excluded.workspace,
+    session_id=excluded.session_id,
+    payload=excluded.payload;
+END;
+CREATE TRIGGER task_history_events_after_update
+AFTER UPDATE OF updated_at_ms,payload ON task_history
+BEGIN
+  DELETE FROM task_history_events WHERE task_id=NEW.id AND event_key LIKE 'snapshot-index:%';
+  INSERT INTO task_history_events(
+    task_id,event_key,event_index,task_updated_at_ms,event_timestamp,workspace,session_id,payload
+  )
+  SELECT
+    NEW.id,
+    CASE
+      WHEN COALESCE(
+        NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+        NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),'')
+      ) IS NOT NULL
+        THEN 'id:' || COALESCE(
+          NULLIF(CAST(json_extract(event.value,'$.eventId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.operationId') AS TEXT),''),
+          NULLIF(CAST(json_extract(event.value,'$.id') AS TEXT),'')
+        )
+      ELSE 'snapshot-index:' || CAST(event.key AS TEXT)
+    END,
+    CAST(event.key AS INTEGER),
+    NEW.updated_at_ms,
+    COALESCE(
+      CAST(json_extract(event.value,'$.timestamp') AS TEXT),
+      CAST(json_extract(event.value,'$.ts') AS TEXT),
+      CAST(json_extract(event.value,'$.at') AS TEXT),
+      CAST(json_extract(event.value,'$.createdAt') AS TEXT),
+      CAST(json_extract(event.value,'$.startedAt') AS TEXT),
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.workspace') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.workspace') AS TEXT) END,
+      ''
+    ),
+    COALESCE(
+      CAST(json_extract(event.value,'$.sessionId') AS TEXT),
+      CASE WHEN json_valid(NEW.payload) THEN CAST(json_extract(NEW.payload,'$.sessionId') AS TEXT) END,
+      NEW.id
+    ),
+    event.value
+  FROM json_each(
+    CASE WHEN json_valid(NEW.payload) THEN NEW.payload ELSE '{"events":[]}' END,
+    '$.events'
+  ) AS event
+  WHERE event.type='object'
+  ON CONFLICT(task_id,event_key) DO UPDATE SET
+    event_index=excluded.event_index,
+    task_updated_at_ms=excluded.task_updated_at_ms,
+    event_timestamp=excluded.event_timestamp,
+    workspace=excluded.workspace,
+    session_id=excluded.session_id,
+    payload=excluded.payload;
+END;
+CREATE TRIGGER task_history_events_after_delete
+AFTER DELETE ON task_history
+BEGIN
+  DELETE FROM task_history_events WHERE task_id=OLD.id;
+END;
+`;
+
 const STATE_MIGRATIONS: readonly StateMigration[] = Object.freeze([
   { version: 1, apply: db => db.exec(SCHEMA_V1_SQL) },
   { version: 2, apply: db => db.exec(SCHEMA_V2_SQL) },
-  { version: 3, apply: db => db.exec(SCHEMA_V3_SQL) }
+  { version: 3, apply: db => db.exec(SCHEMA_V3_SQL) },
+  { version: 4, apply: db => db.exec(SCHEMA_V4_SQL) },
+  { version: 5, apply: db => db.exec(SCHEMA_V5_SQL) }
 ]);
 
 function stateDatabasePath(config: StateDatabaseConfig = {}): string {
@@ -402,29 +571,8 @@ function setStateMeta(db: DatabaseSync, key: unknown, value: unknown): void {
     ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(String(key), String(value));
 }
 
-function isSqliteBusyError(error: unknown): boolean {
-  const code = errorCode(error);
-  const message = errorMessage(error);
-  return code === 'SQLITE_BUSY'
-    || code === 'SQLITE_LOCKED'
-    || /database is (?:busy|locked)/i.test(message)
-    || /SQLITE_(?:BUSY|LOCKED)/i.test(message);
-}
-
-function errorCode(error: unknown): string {
-  if (!error || typeof error !== 'object') return '';
-  if ('code' in error && error.code != null) return String(error.code);
-  if ('errcode' in error && error.errcode != null) return String(error.errcode);
-  return '';
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error || '');
-}
-
 export {
   initializeStateDatabase,
-  isSqliteBusyError,
   maintainStateDatabase,
   openStateDatabase,
   setStateMeta,

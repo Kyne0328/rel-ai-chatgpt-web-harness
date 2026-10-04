@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
-import { createLocalMcpAuthorization, type McpAuthorization, type McpAuthMode } from '../core/mcp-runtime.ts';
+import { createLocalMcpAuthorization, type McpAuthorization } from '../core/mcp-runtime.ts';
+import { MCP_AUTH_MODE, type McpAuthMode } from '../contracts/mcp.ts';
 import { isAuthorized, sendJson } from './io.ts';
 import type { ResolvedHttpServerOptions } from './types.ts';
 
@@ -9,10 +10,10 @@ function mcpAuthorization(
   options: Pick<ResolvedHttpServerOptions, 'token' | 'allowNoAuth'>
 ): McpAuthorization | null {
   if (isAuthorized(req, { ...options, allowNoAuth: false })) {
-    return localAuthorization('static_bearer', 'secure-tunnel');
+    return localAuthorization(MCP_AUTH_MODE.STATIC_BEARER, 'secure-tunnel');
   }
   if (!options.token && options.allowNoAuth === true) {
-    return localAuthorization('local_no_auth', 'local-no-auth');
+    return localAuthorization(MCP_AUTH_MODE.LOCAL_NO_AUTH, 'local-no-auth');
   }
   return null;
 }

@@ -57,15 +57,6 @@ function analyticsUseCaseForOperation(value: unknown): AnalyticsUseCase {
 }
 
 export {
-  ANALYTICS_TASK_INTENTS,
-  ANALYTICS_USE_CASES,
-  WORKFLOW_INTENTS,
-  analyticsTaskIntentLabel,
-  analyticsUseCaseForOperation,
-  analyticsUseCaseLabel,
-  analyticsUseCaseShortLabel,
-  isPrimaryAnalyticsUseCase,
-  normalizeAnalyticsTaskIntent,
-  normalizeAnalyticsUseCase
+  ANALYTICS_USE_CASES, analyticsTaskIntentLabel, analyticsUseCaseForOperation, analyticsUseCaseLabel, analyticsUseCaseShortLabel, isPrimaryAnalyticsUseCase, normalizeAnalyticsTaskIntent, normalizeAnalyticsUseCase
 };
 export type { AnalyticsTaskIntent, AnalyticsUseCase };

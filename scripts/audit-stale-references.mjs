@@ -26,7 +26,7 @@ const IMMUTABLE_HISTORY = new Set(['CHANGELOG.md']);
 const TARGETED_RUNTIME_GUIDANCE = new Set([
   'src/bridge/codeIntelligence.js', 'src/bridge/search.js', 'src/bridge/validation.js',
   'src/bridge/validationPlan.js', 'src/bridge/writeGuidance.js', 'src/localRepoBridge.js',
-  'src/processManager.js', 'src/release.js', 'src/toolActivity.js', 'src/tools/actionDefinitions.js',
+  'src/processManager.js', 'src/release.js', 'src/toolActivity.js', 'src/tools/actionDefinitions.ts',
   'src/tools/completion.js', 'src/tools/task.js', 'src/ui/features/onboarding/index.js'
 ]);
 
@@ -49,7 +49,7 @@ const SOURCE_INVARIANTS = Object.freeze([
   ['src/config.js', /\b(?:toolMode|trustedLocalAgent|cleanupOlderThanHours)\b/, 'removed-hard-cutover-config'],
   ['src/httpServer.ts', /\/api\/(?:settings|history\/reset|mcp\/(?:recovery|connection)|health-monitor|caution-summary|readiness)\b/, 'removed-dashboard-http-surface'],
   ['src/mcp/connectionManager.js', /\b(?:retryConnection|connectedClientCount|connectedPrincipalCount|activeSessions|recentSessions|reconnectAttemptCount|lastRecoveryResult|manualRecoveryRequired|capabilityMismatches|reconnectStarted|reconnectSucceeded|reconnectFailed)\b/, 'removed-stateful-mcp-residue'],
-  ['src/mcp/principal.js', /authMode\s*=\s*['"]oauth['"]|authMode[^\n]*\|\|\s*['"]oauth['"]/, 'removed-oauth-principal-fallback'],
+  ['src/mcp/principal.ts', /authMode\s*=\s*['"]oauth['"]|authMode[^\n]*\|\|\s*['"]oauth['"]/, 'removed-oauth-principal-fallback'],
   ['src/processManager.js', /authMode[^\n]*\|\|\s*['"]oauth['"]/, 'removed-oauth-principal-fallback'],
   ['src/ui/task-identity.js', /\b(?:oauthRecovery|connectorRecovery|clientTasksCapability|nativeTasksSupported|clientAdvertisedTasks|taskExecutionMode)\b|issuer_disagreement|corrupt_oauth_state|connector_reregistration_required/, 'removed-dashboard-recovery-compatibility'],
   ['src/ui/preferences.js', /relai:appearance-change/, 'unconsumed-ui-event'],

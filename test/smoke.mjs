@@ -16,11 +16,7 @@ try {
   const discovery = await client.waitFor(1);
   if (!discovery.result?.capabilities?.tools) throw new Error('server/discover did not advertise tools capability');
   if (!discovery.result?.capabilities?.resources) throw new Error('server/discover did not advertise resources capability');
-  if (!discovery.result?.supportedVersions?.includes(MCP_VERSION)) throw new Error('server/discover did not advertise MCP 2026-07-28');
-  if (!discovery.result?.capabilities?.extensions?.['io.modelcontextprotocol/tasks']) {
-    throw new Error('stdio must advertise native Tasks support through the task-aware transport');
-  }
-  const serverInstructions = String(discovery.result?.instructions || '');
+  if (!discovery.result?.supportedVersions?.includes(MCP_VERSION)) throw new Error('server/discover did not advertise MCP 2026-07-28');  const serverInstructions = String(discovery.result?.instructions || '');
   if (!/work_id is durable task attribution/i.test(serverInstructions)
       || !/meaningful project goal/i.test(serverInstructions)
       || !/begin relai_work.*non-empty steps/i.test(serverInstructions)

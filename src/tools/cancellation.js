@@ -40,10 +40,12 @@ async function stopTaskOperations(config, args = {}) {
     initiator: 'connector_client'
   });
   const fallbackStopped = fallback?.cancelled === true || fallback?.stopping === true;
-  const fallbackOperationId = fallbackStopped ? String(fallback?.record?.operationId || '').trim() : '';
+  const fallbackOperationIds = fallbackStopped
+    ? (fallback.records || [fallback.record]).map(record => String(record?.operationId || '')).filter(Boolean)
+    : [];
   const stoppedOperationIds = [...new Set([
     ...stopped.stoppedOperationIds,
-    ...(fallbackOperationId ? [fallbackOperationId] : [])
+    ...fallbackOperationIds
   ])];
   const stoppedOperationCount = stoppedOperationIds.length;
   return {

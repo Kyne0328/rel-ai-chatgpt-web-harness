@@ -1,7 +1,16 @@
-const MAX_CLIPBOARD_TEXT_BYTES = 64 * 1024;
+import { importResourceModule } from './resource-path.js';
+
+const { MAX_DESKTOP_CLIPBOARD_BYTES } = await importResourceModule('src/contracts/desktopValidation.js');
+
+const MAX_CLIPBOARD_TEXT_BYTES = MAX_DESKTOP_CLIPBOARD_BYTES;
 
 function createWindowGuards(BrowserWindow) {
-  const isSenderWindow = (event, getWindow) => BrowserWindow.fromWebContents(event?.sender) === getWindow();
+  const isSenderWindow = (event, getWindow) => {
+    if (!event?.sender) return false;
+    const expectedWindow = getWindow();
+    if (!expectedWindow || expectedWindow.isDestroyed?.()) return false;
+    return BrowserWindow.fromWebContents(event.sender) === expectedWindow;
+  };
   const isSenderAllowed = (event, getters) => getters.some(getWindow => isSenderWindow(event, getWindow));
   const windowOnly = (event, getWindow, label, action) => {
     if (!isSenderWindow(event, getWindow)) throw new Error(`${label} is not available to this renderer.`);

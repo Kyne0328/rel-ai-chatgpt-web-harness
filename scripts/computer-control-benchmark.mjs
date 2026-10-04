@@ -2,8 +2,8 @@ import { performance } from 'node:perf_hooks';
 import sharp from 'sharp';
 
 import { runComputerAction } from '../src/computerManager.js';
-import { createMidsceneComputerAdapter } from '../src/computer/midsceneAdapter.js';
-import { createWindowsUiaAdapter } from '../src/computer/windowsUiaAdapter.js';
+import { createMidsceneComputerAdapter } from '../src/computer/midsceneAdapter.ts';
+import { createWindowsUiaAdapter } from '../src/computer/windowsUiaAdapter.ts';
 
 const live = process.argv.includes('--live');
 const enforceThresholds = process.argv.includes('--enforce-thresholds');

@@ -114,10 +114,5 @@ function assertContained(root, candidate, relativePath) {
 }
 
 export {
-  BUILD_ID_LENGTH,
-  PROVENANCE_SCHEMA_VERSION,
-  buildIdFromFingerprint,
-  createBuildProvenance,
-  normalizeBuildProvenance,
-  readRepositoryBuildState
+  buildIdFromFingerprint, createBuildProvenance, normalizeBuildProvenance, readRepositoryBuildState
 };

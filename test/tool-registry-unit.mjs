@@ -92,10 +92,13 @@ for (const schema of publicSchemas) {
     assert.equal(schema.inputSchema[keyword], undefined, `${schema.name} discovery must not use root ${keyword}`);
   }
   assert.equal(schema.inputSchema.additionalProperties, false, `${schema.name} discovery must reject unknown fields`);
-  assert.deepEqual(schema.annotations, schemaByName.get(schema.name)?.annotations, `${schema.name} must preserve truthful canonical annotations`);
+  const canonicalAnnotations = schemaByName.get(schema.name)?.annotations;
+  assert.deepEqual(schema.annotations, canonicalAnnotations, `${schema.name} discovery must preserve canonical behavior hints`);
+  assert.equal(schema.annotations?.readOnlyHint, ['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect'].includes(schema.name), `${schema.name} read-only hint must reflect all exposed actions`);
+  assert.equal(schema.annotations?.destructiveHint, !['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect', 'relai_publish'].includes(schema.name), `${schema.name} destructive hint must cover potentially destructive actions`);
   assert.deepEqual(schema._meta?.securitySchemes, [{ type: 'noauth' }], `${schema.name} must advertise local noauth through ChatGPT compatibility metadata`);
-  assert.equal(schema._meta?.ui, undefined, `${schema.name} must stay iframe-free`);
-  assert.equal(schema._meta?.['openai/outputTemplate'], undefined, `${schema.name} must not attach a ChatGPT output template`);
+  assert.equal(schema._meta?.ui, undefined, `${schema.name} must stay model-facing and UI-free`);
+  assert.equal(schema._meta?.['openai/outputTemplate'], undefined, `${schema.name} must not auto-mount an MCP App`);
   assert.ok(String(schema.description || '').trim().length > 0, `${schema.name} must have a concise connector description`);
   if (!capabilityRoutingDescriptions.has(schema.name)) {
     assert.doesNotMatch(schema.description || '', /\b(?:use when|use for|use to|do not|prefer|should|must)\b/i, `${schema.name} connector description must stay declarative unless it owns host/local capability routing`);
@@ -321,11 +324,7 @@ assert.equal(resolveToolOperation('relai_validate', { action: 'http', work_id: '
 
 const metadata = getToolMetadata(config);
 const validateMetadata = metadata.find(item => item.name === 'relai_validate');
-assert.equal(validateMetadata.taskSupport, 'optional');
-assert.equal(validateMetadata.actions.find(item => item.action === 'checks').taskSupport, 'optional');
-assert.equal(validateMetadata.actions.find(item => item.action === 'diagnostics').taskSupport, 'optional');
-assert.equal(validateMetadata.actions.find(item => item.action === 'http').taskSupport, 'optional');
-assert.equal(validateMetadata.actions.find(item => item.action === 'http').executionClass, 'native_task_eligible');
+assert.equal(validateMetadata.actions.find(item => item.action === 'http').executionClass, 'background_fallback_eligible');
 assert.ok(validateMetadata.actions.find(item => item.action === 'http').fields.includes('route'));
 const processMetadata = metadata.find(item => item.name === 'relai_process');
 assert.ok(processMetadata.actions.find(item => item.action === 'start').required.includes('kind'));

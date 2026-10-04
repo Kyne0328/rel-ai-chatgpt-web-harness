@@ -431,7 +431,9 @@ async function case_output_spill_unit() {
     const activeWriters = Array.from({ length: 101 }, (_, index) => createOutputSpillWriter(config, `active-${index}`));
     for (const [index, writer] of activeWriters.entries()) writer.start(`active-spill-${index}`);
     const activeResults = await Promise.all(activeWriters.map(writer => writer.finish()));
-    assert.equal(activeResults.filter(Boolean).length, 100, 'the file cap must refuse a new spill rather than unlink an active writer');
+    assert.equal(activeResults.filter(result => result?.outputRef).length, 100, 'the file cap must refuse a new spill rather than unlink an active writer');
+    assert.equal(activeResults[100]?.spillTruncated, true, 'a refused spill must report output loss without a fabricated reference');
+    assert.equal(activeResults[100]?.outputRef, '');
     const firstActive = activeResults[0];
     assert.ok(firstActive?.outputRef);
     const firstActiveSpill = readOutputSpill(config, 'active-0', firstActive.outputRef);

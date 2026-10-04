@@ -141,13 +141,14 @@ function verifyPackageContracts() {
   assert.equal(electronPackage.allowScripts?.['node-pty@1.1.0'], true, 'Electron installs must explicitly approve the pinned node-pty native build under npm 12');
   assert.match(String(rootPackage.scripts.check || ''), /verify:node-pty[\s\S]*verify:generated/, 'the static parent gate must verify the native PTY runtime before generated assets');
   assert.match(String(rootPackage.scripts['test:all'] || ''), /npm run check[\s\S]*npm run test:security[\s\S]*npm run test:electron[\s\S]*npm run test:integration[\s\S]*npm run test:unit/, 'the aggregate source gate must preserve static, security, Electron, integration, and everyday regression parents');
-  assert.match(String(rootPackage.scripts['test:integration'] || ''), /test:native-tasks-release-gate[\s\S]*run-repository-intelligence-tests\.mjs/, 'the integration parent must preserve native Tasks and Repository Intelligence coverage');
-  assert.match(String(rootPackage.scripts['test:release'] || ''), /test:all[\s\S]*release-workflow-smoke\.mjs[\s\S]*knip:production[\s\S]*audit:production[\s\S]*audit:packaging/, 'the release source parent must preserve source, workflow, production reachability, and dependency audit gates');
+  assert.match(String(rootPackage.scripts['test:integration'] || ''), /run-repository-intelligence-tests\.mjs/, 'the integration parent must preserve Repository Intelligence coverage');
+  assert.match(String(rootPackage.scripts['test:release'] || ''), /test:all[\s\S]*release-workflow-smoke\.mjs[\s\S]*audit:production[\s\S]*audit:packaging/, 'the release source parent must preserve source, workflow, and dependency audit gates');
+  assert.match(String(rootPackage.scripts.check || ''), /knip:production/, 'the release source parent must retain production reachability through test:all -> check');
   assert.doesNotMatch(String(rootPackage.scripts['test:release'] || ''), /release:check/, 'finalized release metadata belongs to the dedicated preflight gate and must not be rerun by the source release parent');
   assert.deepEqual(
     electronPackage.build.extraResources.find(resource => resource.to === 'src')?.filter,
-    ['**/*.js', '**/*.ts', '**/*.ps1'],
-    'Electron packaging must include JavaScript, TypeScript, and the Windows UI Automation PowerShell helper'
+    ['**/*.js', '**/*.ts', '**/*.html', '**/*.ps1'],
+    'Electron packaging must include JavaScript, TypeScript, HTML runtime resources, and the Windows UI Automation PowerShell helper'
   );
   const packagedNodeModules = electronPackage.build.extraResources.find(resource => resource.to === 'node_modules')?.filter || [];
   assert.ok(packagedNodeModules.includes('yallist/**'), 'Electron packaging must include yallist because the bundled semver dependency resolves it through lru-cache at runtime');

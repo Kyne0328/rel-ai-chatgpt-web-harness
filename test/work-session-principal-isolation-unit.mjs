@@ -49,7 +49,7 @@ try {
   localAnalyticsModule = await import('../src/localAnalytics.ts');
   auditModule = await import('../src/audit.js');
   const { readTaskHistorySession, readTaskHistorySessionRecord } = taskHistoryStore;
-  const { createLocalAdminPolicy } = await import('../src/mcp/authorizationPolicy.js');
+  const { createLocalAdminPolicy } = await import('../src/mcp/authorizationPolicy.ts');
   const authorizationPolicy = createLocalAdminPolicy();
   const owner = {
     conversationId: 'work-continuity-regression',

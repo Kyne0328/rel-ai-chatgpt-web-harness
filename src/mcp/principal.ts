@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import type { Principal, PrincipalIdentity } from '../contracts/authorization.ts';
+import { canonicalJson, stableJson } from '../stableJson.js';
 import { PRINCIPAL_KIND } from './contracts.ts';
 
 type PrincipalKind = typeof PRINCIPAL_KIND[keyof typeof PRINCIPAL_KIND];
@@ -44,7 +45,7 @@ const PRINCIPAL_FIELDS = Object.freeze([
   ['scopes', ['scopes', 'scope']]
 ] as const);
 
-function createHttpTaskPrincipal(authInfo: HttpAuthInfo = {}, authMode = ''): Readonly<PrincipalIdentity> {
+function createHttpPrincipal(authInfo: HttpAuthInfo = {}, authMode = ''): Readonly<PrincipalIdentity> {
   const principal: MutablePrincipalIdentity = {};
   assignText(principal, 'issuer', authInfo.issuer);
   assignText(principal, 'clientId', authInfo.clientId ?? authInfo.client_id ?? 'unknown-client');
@@ -60,7 +61,7 @@ function createHttpTaskPrincipal(authInfo: HttpAuthInfo = {}, authMode = ''): Re
   return Object.freeze(principal);
 }
 
-function createStdioTaskPrincipal(): Readonly<PrincipalIdentity> {
+function createStdioPrincipal(): Readonly<PrincipalIdentity> {
   return Object.freeze({
     clientId: `stdio:${crypto.randomUUID()}`,
     authMode: LOCAL_SESSION_AUTH_MODE
@@ -137,26 +138,13 @@ function boundedText(value: unknown, maxChars: number): string {
   return String(value == null ? '' : value).trim().slice(0, maxChars);
 }
 
-function stableJson(value: unknown): string {
-  return JSON.stringify(canonicalJson(value)) ?? 'null';
-}
-
-function canonicalJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJson);
-  if (!isRecord(value)) return value;
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) result[key] = canonicalJson(value[key]);
-  return result;
-}
-
 function isRecord(value: unknown): value is PrincipalRecord {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export {
-  createHttpTaskPrincipal,
-  createStdioTaskPrincipal,
-  normalizePrincipalKey,
+  createHttpPrincipal,
+  createStdioPrincipal,
   principalFingerprint,
   principalForContext,
   principalIdentity,

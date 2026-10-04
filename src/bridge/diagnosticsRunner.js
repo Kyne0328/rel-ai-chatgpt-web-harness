@@ -4,7 +4,7 @@ import { runProcess, summarizeCommand } from '../process.js';
 import { detectVerifyChecks } from './checkDetection.js';
 import { clampNumber } from './limits.js';
 import { runSpan } from '../telemetry.js';
-import { nativeToolTaskSignal } from '../mcp/nativeToolTasks.js';
+
 import { combineAbortSignals } from '../abortSignals.js';
 import { resolveOneShotTimeoutMs } from '../executionControl.js';
 import { getCurrentTaskAbortSignal, updateCurrentToolActivity } from '../toolActivity.js';
@@ -24,7 +24,7 @@ async function relaiDiagnosticsRun(workspace, config, args = {}, context = {}) {
   const diagnosticsByIndex = new Array(commands.length);
   const signal = combineAbortSignals(
     getCurrentTaskAbortSignal(),
-    args._operationTaskId ? nativeToolTaskSignal(args._operationTaskId) : undefined,
+
     context.signal
   );
   const stopOnFailure = args.stopOnFailure !== false;
@@ -48,7 +48,7 @@ async function relaiDiagnosticsRun(workspace, config, args = {}, context = {}) {
         try {
           result = await runSpan(config, 'relai.validation.diagnostics', {
           'relai.workspace': workspace.alias,
-          'relai.diagnostics.command': command.slice(0, 300),
+          'relai.diagnostics.command': command,
           'relai.diagnostics.parallel_safe': policy.parallelSafe === true,
           'relai.diagnostics.kind': policy.kind
         }, () => runProcess(command, [], {

@@ -2,7 +2,7 @@
 import * as crypto from 'node:crypto';
 import { getCurrentToolActivityContext, getToolActivity, taskError } from '../toolActivity.js';
 import { findTaskReuseCandidates, readTaskHistory, readTaskHistorySessionRecord } from '../taskHistoryStore.ts';
-import { principalFingerprint } from '../mcp/principal.js';
+import { principalFingerprint } from '../mcp/principal.ts';
 import { isTerminalTaskStatus } from '../taskState.js';
 import { classifyTaskIntent } from '../workflow/intent.js';
 import { buildTaskBootstrap } from '../context/context-builder.js';

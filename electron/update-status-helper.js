@@ -85,8 +85,5 @@ function cleanError(error) {
 }
 
 export {
-  launchUpdateStatusHelper,
-  updateStatusHelperPath,
-  updateStatusHelperSourcePath,
-  windowsPowerShellPath
+  launchUpdateStatusHelper
 };

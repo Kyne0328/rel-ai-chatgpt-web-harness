@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { runProcess, summarizeCommand } from '../process.js';
 import { selectValidationLevel } from '../validationStrategy.js';
 import { resolvePolicy } from '../policyResolver.js';
@@ -7,12 +8,12 @@ import { readTaskIntegrity, readWorkspaceIntegrity, taskOwnedChangedFiles } from
 import { readRecentWorkflowEvidence, recordWorkflowEvidenceBatch } from '../taskHistoryStore.ts';
 import { buildWorkflowEvidenceReceipt, checkEvidenceReusable } from '../workflow/evidence.js';
 import { sanitizeDisplayText } from '../taskObservability.js';
-import { combineAbortSignals } from '../abortSignals.js';
+import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
 import { resolveOneShotTimeoutMs } from '../executionControl.js';
 import { finalizeValidationResult, normalizeCompletionSummary } from '../tools/completion.js';
 import { createValidationFingerprint, createValidationPlan, readValidationPlan } from './validationPlan.js';
 import { runSpan } from '../telemetry.js';
-import { nativeToolTaskSignal } from '../mcp/nativeToolTasks.js';
+
 import { parallel, runPlan, sequence, step } from '../executionPlan.js';
 import { recordExecutionPlanMetrics } from '../executionObservability.js';
 import { buildCheckExecutionStages } from '../workflow/checkExecution.js';
@@ -28,13 +29,45 @@ import {
 
 const CHECK_OUTPUT_TAIL_DEFAULT = 4000;
 const CHECK_OUTPUT_TAIL_FULL = 40000;
+
+async function resolveValidationPolicy(workspace, config, context, signal) {
+  // SQLite access stays fail-fast on the service thread. Only this pre-execution
+  // policy read may yield briefly while another connection finishes its work.
+  const contextDeadline = Number(context?.deadlineAtMs);
+  const hasDeadline = Number.isFinite(contextDeadline) && contextDeadline > 0;
+  const budgetMs = hasDeadline ? Math.min(1000, Math.max(0, contextDeadline - Date.now())) : 1000;
+  const retryDeadline = performance.now() + budgetMs;
+  let busyError;
+  while (true) {
+    signal?.throwIfAborted();
+    if (hasDeadline && Date.now() >= contextDeadline) {
+      throw new DOMException('Validation policy deadline expired.', 'TimeoutError');
+    }
+    if (busyError && performance.now() >= retryDeadline) throw busyError;
+    try {
+      return resolvePolicy(workspace, config);
+    } catch (error) {
+      if (error?.errcode !== 5 && error?.code !== 'SQLITE_BUSY') throw error;
+      busyError = error;
+    }
+    const remainingMs = retryDeadline - performance.now();
+    if (remainingMs <= 0) continue;
+    try {
+      await delay(Math.min(20, remainingMs), undefined, { signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    }
+  }
+}
+
 async function relaiVerify(workspace, config, args = {}, context = {}) {
   const completionRetryCount = Math.max(0, Number(context.completionRetryCount || 0));
   const currentTaskId = String(getCurrentToolActivityContext()?.taskId || context.taskId || args.work_id || '').trim();
   const logicalWorkspaceAlias = String(workspace.alias || '').trim();
   const signal = combineAbortSignals(
     getCurrentTaskAbortSignal(),
-    args._operationTaskId ? nativeToolTaskSignal(args._operationTaskId) : undefined,
+
     context.signal
   );
   const suppliedChangedFiles = Array.isArray(args.changedFiles)
@@ -91,7 +124,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const normalized = normalizeVerifyChecks(effectiveArgs, workspace.path, level);
   const { checks, checkUnits, skippedChecks, aliasNormalizations } = normalized;
   const { level: validationLevel, reason: validationLevelReason, changedFiles } = selectValidationLevel(workspace.path, workspace, args.validationLevel, validationScope);
-  const policy = resolvePolicy(workspace, config);
+  const policy = await resolveValidationPolicy(workspace, config, context, signal);
 
   if (checks.length === 0) {
     return noChecksValidationResult(workspace, config, {
@@ -185,7 +218,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
         try {
           result = await runSpan(config, 'relai.validation.step', {
           'relai.workspace': workspace.alias,
-          'relai.validation.command': displayCommand,
+          'relai.validation.command': command,
           'relai.validation.index': index + 1,
           'relai.validation.total': checks.length,
           'relai.validation.plan_id': String(args.planId || ''),
@@ -254,18 +287,20 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const results = visibleResults();
   const reusedChecks = reusedCheckIds.filter(Boolean);
 
-  const cancelled = signal?.aborted === true || results.some(item => item.cancelled === true);
-  const finalFingerprint = cancelled
+  const interrupted = signal?.aborted === true;
+  const timedOut = isTimeoutAbort(signal) || results.some(item => item.timedOut === true);
+  const cancelled = (interrupted && !isTimeoutAbort(signal)) || results.some(item => item.cancelled === true);
+  const finalFingerprint = interrupted || cancelled
     ? currentFingerprint
     : await createValidationFingerprint(workspace, config, { paths: fingerprintScope, signal });
-  const scopeChanged = !cancelled && finalFingerprint.fingerprint !== currentFingerprint.fingerprint;
+  const scopeChanged = !interrupted && !cancelled && finalFingerprint.fingerprint !== currentFingerprint.fingerprint;
   if (scopeChanged && complete && !cancelled && completionRetryCount < 1) {
     return relaiVerify(workspace, config, args, {
       ...context,
       completionRetryCount: completionRetryCount + 1
     });
   }
-  const ok = !cancelled && !scopeChanged && results.length === checks.length && results.every(item => item.ok);
+  const ok = !interrupted && !timedOut && !cancelled && !scopeChanged && results.length === checks.length && results.every(item => item.ok);
   const failedCheck = results.find(item => !item.ok)?.command || '';
   const validationStatus = cancelled ? 'cancelled' : scopeChanged ? 'stale' : ok ? 'passed' : 'failed';
   publishValidationProgress({
@@ -304,6 +339,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     policy,
     validated: results.length > 0,
     validationStatus,
+    ...(timedOut ? { timedOut: true } : {}),
     validationFingerprint,
     validationScope: finalFingerprint.scopePaths || fingerprintScope,
     cancelled,
@@ -320,7 +356,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   };
   if (!ok) return validationResult;
   if (!complete) return validationResult;
-  return finalizeValidationResult(config, workspace, validationResult, completionSummary, { signal });
+  return finalizeValidationResult(config, workspace, validationResult, completionSummary, { signal, fallbackOperationId: context.fallbackOperationId });
 }
 
 function resolveCompletionSummary(args = {}, context = {}) {

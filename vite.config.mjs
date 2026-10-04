@@ -78,8 +78,11 @@ function dashboardDevAliases() {
     enforce: 'pre',
     resolveId(source, importer) {
       if (!importer || normalize(importer.split('?')[0]) !== normalizedDashboard) return null;
-      if (source === './dashboard-react.js') return dashboardEntry;
-      if (source.startsWith('./ui/')) return path.join(uiRoot, source.slice('./ui/'.length));
+      // Vite resolves normal imports with forward slashes. Returning Windows
+      // paths here creates a second module instance for shared state such as
+      // the router, separating navigation from React's route subscription.
+      if (source === './dashboard-react.js') return normalize(dashboardEntry);
+      if (source.startsWith('./ui/')) return normalize(path.join(uiRoot, source.slice('./ui/'.length)));
       return null;
     }
   };

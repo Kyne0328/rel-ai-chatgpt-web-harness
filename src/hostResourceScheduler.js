@@ -263,9 +263,5 @@ function hostResourceStats() {
 }
 
 export {
-  HOST_PERSISTENT_QUEUE_TIMEOUT_MS,
-  HOST_PERSISTENT_PROCESS_LIMIT,
-  acquireHostResource,
-  createFairResourceScheduler,
-  hostResourceStats
+  HOST_PERSISTENT_PROCESS_LIMIT, acquireHostResource, createFairResourceScheduler, hostResourceStats
 };

@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { LOCAL_ANALYTICS_RETENTION_DAYS, clearLocalAnalytics, flushLocalAnalytics, pruneLocalAnalytics, recordLocalTaskCompletion, recordLocalToolOutcome, recordLocalTransportEvent, readLocalUsageSnapshot, readLocalUsageSnapshotAsync } from '../src/localAnalytics.js';
 import { failureCategoryFromCode } from '../src/analyticsFailureCategory.js';
-import { stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
+import { openStateDatabase, stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-analytics-'));
 const config = { stateDir };
@@ -72,6 +72,19 @@ try {
   withStateDatabase(config, db => db.prepare('UPDATE analytics_months SET updated_at_ms=?,payload=? WHERE month=?').run(Date.now() + 1, JSON.stringify(external), '2026-08'), { transaction: true });
   assert.equal(readLocalUsageSnapshot(config, '2026-08').totals.toolCalls, 9, 'SQLite analytics reads must observe another process durable update immediately');
   assert.equal((await readLocalUsageSnapshotAsync(config, '2026-08')).totals.toolCalls, 9);
+
+  const contendingWriter = openStateDatabase(config, { timeoutMs: 0 });
+  try {
+    contendingWriter.exec('BEGIN IMMEDIATE');
+    assert.equal(
+      (await readLocalUsageSnapshotAsync(config, '2026-08')).totals.toolCalls,
+      9,
+      'analytics reads must remain available while another committed-state writer transaction is active'
+    );
+  } finally {
+    try { contendingWriter.exec('ROLLBACK'); } catch {}
+    contendingWriter.close();
+  }
 
   recordLocalToolOutcome(config, { tool: 'relai_read', workspace: 'repo', ok: true, durationMs: 1, at: '2025-01-15T00:00:00Z' });
   const pruned = await pruneLocalAnalytics(config, { now: new Date('2026-09-04T00:00:00Z') });

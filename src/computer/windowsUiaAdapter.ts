@@ -446,12 +446,5 @@ function boundedInteger(value: unknown, min: number, max: number, fallback: numb
 
 export { createWindowsUiaAdapter };
 export type {
-  ComputerSemanticAdapter,
-  SemanticActivation,
-  SemanticObservation,
-  SemanticPerception,
-  SemanticSource,
-  SemanticTarget,
-  SemanticWarmup,
-  SemanticWindow
+  ComputerSemanticAdapter, SemanticPerception, SemanticTarget
 };

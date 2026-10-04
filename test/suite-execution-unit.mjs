@@ -22,9 +22,6 @@ async function case_deferred_operation_unit() {
     const __m5 = await import("./helpers/mcp-client.mjs");
     const { startMcpClient } = __m5;
   
-    const __m6 = await import("../src/mcp/protocol.js");
-    const { TASKS_EXTENSION_REVISION } = __m6;
-  
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-deferred-operation-cutover-'));
   const workspaceRoot = path.join(temp, 'workspace');
@@ -64,12 +61,7 @@ async function case_deferred_operation_unit() {
   
   try {
     client.initialize(++requestId);
-    const discovery = await client.waitFor(requestId);
-    assert.deepEqual(
-      discovery.result.capabilities.extensions?.['io.modelcontextprotocol/tasks'],
-      { revision: TASKS_EXTENSION_REVISION }
-    );
-  
+    await client.waitFor(requestId);
     client.send(++requestId, 'tools/list');
     const listed = await client.waitFor(requestId);
     const tools = listed.result.tools;
@@ -1021,7 +1013,6 @@ async function case_process_discovery_guidance_unit() {
   for (const field of ['command', 'executable', 'argv', 'input', 'reuseExisting']) {
     assert.ok(startAction.fields.includes(field), `relai_process start must expose ${field}`);
   }
-  assert.equal(startAction.taskSupport, 'forbidden');
   assert.equal(startAction.executionClass, 'persistent_process');
   
   console.log('Managed-process direct startup discovery guidance passed.');

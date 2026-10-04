@@ -143,9 +143,9 @@ export async function createHttpMcpSession(base, options = {}) {
 
 function expectedName(method, params) {
   if (method === 'tools/call' || method === 'prompts/get') return String(params?.name || '');
+  if (['events/subscribe', 'events/unsubscribe'].includes(method)) return String(params?.name || '');
   if (['resources/read', 'resources/subscribe', 'resources/unsubscribe'].includes(method)) {
     return String(params?.uri || '');
   }
-  if (['tasks/get', 'tasks/update', 'tasks/cancel'].includes(method)) return String(params?.taskId || '');
   return '';
 }

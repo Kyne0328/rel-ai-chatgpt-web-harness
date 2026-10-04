@@ -21,6 +21,8 @@ function registerDesktopSettingsIpc({
   channels,
   getDesktopSettings,
   saveDesktopSettings,
+  saveAdditionalTunnel,
+  removeAdditionalTunnel,
   getLifecycleStatus,
   acknowledgeConnectorRefresh,
   setLaunchAtLogin,
@@ -33,6 +35,8 @@ function registerDesktopSettingsIpc({
 }) {
   ipc.handle(channels.DESKTOP_SETTINGS_GET, 'Desktop settings', () => getDesktopSettings());
   ipc.handle(channels.DESKTOP_SETTINGS_SAVE, 'Desktop settings', (_event, settings) => saveDesktopSettings(settings));
+  ipc.handle(channels.DESKTOP_TUNNEL_SAVE, 'Additional Secure MCP Tunnel', (_event, connection) => saveAdditionalTunnel(connection));
+  ipc.handle(channels.DESKTOP_TUNNEL_REMOVE, 'Additional Secure MCP Tunnel', (_event, tunnelId) => removeAdditionalTunnel(tunnelId));
   ipc.handle(channels.DESKTOP_LIFECYCLE_GET, 'Desktop lifecycle', () => getLifecycleStatus());
   ipc.handle(channels.DESKTOP_LIFECYCLE_ACK_CONNECTOR_REFRESH, 'Connector refresh acknowledgement', () => acknowledgeConnectorRefresh());
   ipc.handle(channels.DESKTOP_STARTUP_SET, 'Launch at login', (_event, enabled) => setLaunchAtLogin(enabled));

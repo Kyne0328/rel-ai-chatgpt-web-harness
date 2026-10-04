@@ -14,8 +14,26 @@
 .connection-account-switch-body { padding: 14px; }
 .connection-account-switch-body ol { display: grid; gap: 8px; margin: 0; padding-left: 20px; color: var(--ui-text-secondary); font-size: 12px; line-height: 1.55; }
 .connection-account-switch-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.additional-tunnels { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); background: var(--ui-surface-primary); }
+.additional-tunnels-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.additional-tunnels-heading > div { min-width: 0; }
+.additional-tunnels-heading > div > strong { display: block; font-size: 12px; }
+.additional-tunnels-heading .settings-help { margin-top: 4px; max-width: 720px; }
+.additional-tunnel-list { display: grid; overflow: hidden; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
+.additional-tunnel-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border-bottom: 1px solid var(--ui-border-subtle); }
+.additional-tunnel-row:last-child { border-bottom: 0; }
+.additional-tunnel-copy { display: grid; min-width: 0; gap: 3px; }
+.additional-tunnel-copy > strong { font-size: 12px; }
+.additional-tunnel-copy > span, .additional-tunnel-copy > small { overflow-wrap: anywhere; font-size: 12px; color: var(--ui-text-secondary); }
+.additional-tunnel-error { color: var(--ui-status-danger-foreground) !important; }
+.additional-tunnel-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
+.additional-tunnel-form { display: grid; gap: 14px; padding-top: 4px; }
+.additional-tunnel-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.additional-tunnels-empty { margin: 0; }
 @media (max-width: 640px) {
   .workspace-validation-preference-row { flex-direction: column; }
+  .additional-tunnels-heading, .additional-tunnel-row { align-items: stretch; flex-direction: column; }
+  .additional-tunnel-actions, .additional-tunnel-form-actions { justify-content: flex-start; }
 }
 
 @layer components {

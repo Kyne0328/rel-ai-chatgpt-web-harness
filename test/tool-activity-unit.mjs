@@ -156,6 +156,26 @@ finishSecondFileEdit({
 fileTask = fileTracker.getToolActivity().tasks[0];
 assert.deepEqual(fileTask?.changedFiles, ['src/a.js', 'src/b.js', 'src/c.js']);
 assert.equal(fileTask?.changedFileCount, 3, 'live task snapshots must retain cumulative changed files across tool calls');
+const bulkProjectFiles = Array.from({ length: 250 }, (_, index) => `src/generated/file-${String(index).padStart(3, '0')}.js`);
+const finishBulkFileEdit = fileTracker.beginConnectorToolCall({ tool: 'relai_edit', workspace: 'repo', scopeId: 'files-live', taskId: fileTaskId });
+finishBulkFileEdit({
+  ok: true,
+  activity: {
+    status: 'succeeded',
+    title: 'Update repository files',
+    summary: 'Updated many files.',
+    metadata: {
+      changedFiles: [...bulkProjectFiles, 'tools/helper.jar'],
+      changedFileCount: bulkProjectFiles.length + 1
+    }
+  }
+});
+fileTask = fileTracker.getToolActivity().tasks[0];
+assert.equal(fileTask?.changedFiles.length, 200, 'task snapshots must keep the changed-file preview bounded');
+assert.equal(fileTask?.changedFileCount, 254, 'task snapshots must preserve the exact unique changed-file total beyond the preview cap');
+assert.equal(fileTask?.productChangedFileCount, 253, 'task snapshots must preserve the exact project-file count beyond the preview cap');
+assert.equal(fileTask?.supportArtifactCount, 1, 'task snapshots must preserve support-artifact counts separately');
+assert.equal(fileTask?.changedFilesTruncated, true, 'task snapshots must disclose when the changed-file preview is truncated');
 fileTracker.reset();
 
 const blockedTracker = createToolActivityTracker({ idleMs: 60_000 });

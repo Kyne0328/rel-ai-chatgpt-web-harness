@@ -1,5 +1,5 @@
 import * as crypto from 'node:crypto';
-import { stableJson } from './contracts.js';
+import { stableJson } from '../stableJson.js';
 import { OPERATION_IDS as OP } from '../tools/operationIds.js';
 
 function buildWorkflowEvidenceReceipt({ tool = '', args = {}, result = {}, auditEntry = {}, repositoryFingerprint = '', commandId = '' } = {}) {

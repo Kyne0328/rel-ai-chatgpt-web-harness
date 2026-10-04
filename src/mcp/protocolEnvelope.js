@@ -30,4 +30,4 @@ function envelopeError(code, error, data) {
   return { ok: false, code, error, id: null, ...(data === undefined ? {} : { data }) };
 }
 
-export { isPlainObject, validateJsonRpcRequestEnvelope, validJsonRpcId };
+export { validateJsonRpcRequestEnvelope, validJsonRpcId };

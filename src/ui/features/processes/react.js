@@ -1,12 +1,13 @@
-import React, { memo, useMemo, useState } from 'react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
-import { postJson, requestDashboardRefresh } from '../../api.js';
+import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { processListView } from './index.js';
 
 const h = React.createElement;
-const PROCESS_STORE_KEYS = Object.freeze(['managedProcesses', 'nativeTasks']);
+const PROCESS_STORE_KEYS = Object.freeze(['managedProcesses']);
+const PROCESS_OUTPUT_CHUNK_BYTES = 256 * 1024;
 
 export function createProcessesRoute(useDashboardSlices) {
   return function ProcessesRoute() {
@@ -114,27 +115,162 @@ const ProcessRow = memo(function ProcessRow({ row }) {
           h('div', null, state.recovery)
         )
       : null,
-    h(ProcessOutput, { output: row.output, active: state.active })
+    h(ProcessOutput, { processId: row.processId, output: row.output, active: state.active })
   );
 });
 
-function ProcessOutput({ output, active = false }) {
+function ProcessOutput({ processId, output, active = false }) {
+  const stdoutVisible = output.stdout.trim() || output.stdoutMeta.totalBytes > 0;
+  const stderrVisible = output.stderr.trim() || output.stderrMeta.totalBytes > 0;
   return h('details', { className: 'process-output', open: active && output.hasOutput },
     h('summary', null, active ? 'Live output' : 'Recent output'),
     output.hasOutput
       ? h(React.Fragment, null,
-          output.stdout.trim() ? h(OutputBlock, { stream: 'stdout', value: output.stdout }) : null,
-          output.stderr.trim() ? h(OutputBlock, { stream: 'stderr', value: output.stderr }) : null
+          stdoutVisible ? h(OutputBlock, { processId, stream: 'stdout', value: output.stdout, meta: output.stdoutMeta, active }) : null,
+          stderrVisible ? h(OutputBlock, { processId, stream: 'stderr', value: output.stderr, meta: output.stderrMeta, active }) : null
         )
       : h('div', { className: 'process-output-empty', role: 'status' }, output.message)
   );
 }
 
-function OutputBlock({ stream, value }) {
+function OutputBlock({ processId, stream, value, meta, active }) {
+  const [history, setHistory] = useState(null);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
+  const [error, setError] = useState('');
+  const followingRef = useRef(false);
+  useEffect(() => {
+    setHistory(null);
+    setLoadingEarlier(false);
+    setError('');
+    followingRef.current = false;
+  }, [processId, stream]);
+
+  const startOffset = history?.startOffset ?? meta.tailStartOffset;
+  const nextOffset = history?.nextOffset ?? meta.totalBytes;
+  const visible = history?.text ?? value;
+  const canLoadEarlier = startOffset > meta.retainedFromOffset;
+  const latestTailOnly = !history && meta.tailTruncated;
+
+  useEffect(() => {
+    if (!history || followingRef.current || history.nextOffset >= meta.totalBytes) return undefined;
+    let cancelled = false;
+    const offset = history.nextOffset;
+    const remaining = Math.max(0, meta.totalBytes - offset);
+    if (!remaining) return undefined;
+    followingRef.current = true;
+    void readProcessOutputRange(processId, stream, {
+      offset,
+      maxBytes: Math.min(PROCESS_OUTPUT_CHUNK_BYTES, remaining)
+    }).then(range => {
+      if (cancelled) return;
+      setHistory(current => {
+        if (!current || current.nextOffset !== offset) return current;
+        const gapBytes = Math.max(0, Number(range.offset || 0) - current.nextOffset);
+        const gap = gapBytes ? `\n[${formatBytes(gapBytes)} of ${stream} output was no longer retained before it could be loaded]\n` : '';
+        return {
+          ...current,
+          text: `${current.text}${gap}${String(range.text || '')}`,
+          nextOffset: Number(range.nextOffset || current.nextOffset),
+          gap: current.gap || gapBytes > 0
+        };
+      });
+      setError('');
+    }).catch(nextError => {
+      if (!cancelled) setError(errorMessage(nextError));
+    }).finally(() => {
+      followingRef.current = false;
+    });
+    return () => { cancelled = true; };
+  }, [history, meta.totalBytes, processId, stream]);
+
+  const loadEarlier = async () => {
+    if (loadingEarlier || !canLoadEarlier) return;
+    setLoadingEarlier(true);
+    setError('');
+    try {
+      const range = await readProcessOutputRange(processId, stream, {
+        beforeOffset: startOffset,
+        maxBytes: PROCESS_OUTPUT_CHUNK_BYTES
+      });
+      setHistory(current => {
+        const base = current || {
+          text: value,
+          startOffset: meta.tailStartOffset,
+          nextOffset: meta.totalBytes,
+          gap: false
+        };
+        const rangeStart = Number(range.offset || 0);
+        const rangeEnd = Number(range.nextOffset || rangeStart);
+        if (rangeStart >= base.startOffset || !range.text) return base;
+        const gapBytes = Math.max(0, base.startOffset - rangeEnd);
+        const gap = gapBytes ? `\n[${formatBytes(gapBytes)} of ${stream} output is no longer retained]\n` : '';
+        return {
+          ...base,
+          text: `${String(range.text || '')}${gap}${base.text}`,
+          startOffset: rangeStart,
+          gap: base.gap || gapBytes > 0
+        };
+      });
+    } catch (nextError) {
+      setError(errorMessage(nextError));
+    } finally {
+      setLoadingEarlier(false);
+    }
+  };
+
+  const shownBytes = Math.max(0, nextOffset - startOffset);
   return h('div', { className: 'process-output-block' },
-    h('span', null, stream),
-    h('pre', { tabIndex: 0, 'aria-label': `Recent ${stream} output` }, String(value || '').trim())
+    h('div', { className: 'process-output-block-head' },
+      h('span', null, stream),
+      h('small', null, `${formatBytes(shownBytes)} shown of ${formatBytes(meta.totalBytes)}`)
+    ),
+    latestTailOnly ? h('div', { className: 'process-output-notice' },
+      `Showing the latest ${formatBytes(meta.totalBytes - meta.tailStartOffset)}. Earlier retained output is available.`
+    ) : null,
+    meta.retentionTruncated ? h('div', { className: 'process-output-notice warning' },
+      `The first ${formatBytes(meta.retainedFromOffset)} is no longer retained by Rel.AI.`
+    ) : null,
+    meta.droppedBytes > 0 ? h('div', { className: 'process-output-notice warning' },
+      `${formatBytes(meta.droppedBytes)} was dropped while Rel.AI was capturing this ${stream} stream.`
+    ) : null,
+    history?.gap ? h('div', { className: 'process-output-notice warning' }, 'A gap in this output could not be recovered from retained logs.') : null,
+    error ? h('div', { className: 'process-output-error', role: 'alert' }, error) : null,
+    h('pre', { tabIndex: 0, 'aria-label': `Recent ${stream} output` }, String(visible || '').trim()),
+    canLoadEarlier ? h('div', { className: 'process-output-actions' },
+      h('button', {
+        className: 'secondary compact-button',
+        type: 'button',
+        disabled: loadingEarlier,
+        'aria-label': `Load earlier ${stream} output`,
+        onClick: () => { void loadEarlier(); }
+      }, loadingEarlier ? 'Loading earlier output…' : 'Load earlier output'),
+      h('span', null, `${formatBytes(startOffset - meta.retainedFromOffset)} earlier retained`)
+    ) : active && history ? h('div', { className: 'process-output-following', role: 'status' }, 'Full retained history loaded · following new output') : null
   );
+}
+
+async function readProcessOutputRange(processId, stream, { offset, beforeOffset, maxBytes }) {
+  const params = new URLSearchParams({
+    processId,
+    stream,
+    maxBytes: String(maxBytes)
+  });
+  if (offset !== undefined) params.set('offset', String(offset));
+  if (beforeOffset !== undefined) params.set('beforeOffset', String(beforeOffset));
+  const result = await fetchJson(`/api/processes/output?${params.toString()}`, { cache: 'no-store', pauseTimeoutWhenHidden: false });
+  if (result?.ok === false || !result?.range) throw new Error(result?.error || 'Process output could not be loaded.');
+  return result.range;
+}
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MiB`;
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error || 'Process output could not be loaded.');
 }
 
 

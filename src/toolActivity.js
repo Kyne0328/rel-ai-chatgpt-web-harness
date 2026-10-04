@@ -21,9 +21,12 @@ import { isTerminalTaskStatus, transitionTaskStatus } from './taskState.js';
 import { TASK_RUNTIME_TERMINAL_PHASES } from './taskEvents.js';
 import { DEFAULT_TASK_ACTIVITY_IDLE_MS, MAX_TASK_ACTIVITY_IDLE_MS, MIN_TASK_ACTIVITY_IDLE_MS } from './taskTiming.js';
 import { canonicalTaskSnapshot, lifecycleChangedFields } from './taskLifecycle.js';
+import { classifyTaskChangedFiles } from './taskSemanticProgress.js';
 import { classifyTaskIntent } from './workflow/intent.js';
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
+import { publishActivityLifecycleEvent } from './core/lifecycleEvents.ts';
 const DEFAULT_TASK_IDLE_MS = DEFAULT_TASK_ACTIVITY_IDLE_MS;
+const MAX_TASK_CHANGED_FILE_PREVIEW = 200;
 const activityContext = new AsyncLocalStorage();
 
 function createToolActivityTracker(options = {}) {
@@ -66,7 +69,7 @@ function createToolActivityTracker(options = {}) {
     cancelCompletion(task);
 
     const connectorCall = details.connector !== false;
-    const operationId = crypto.randomUUID();
+    const operationId = String(details.executionOperationId || '') || crypto.randomUUID();
     const operationAbortController = new AbortController();
     const internalOperation = String(details.internalOperation || details.tool || '');
     if (task.cancellationRequestedAt && !isCancellationControlOperation(internalOperation, details.input)) {
@@ -163,12 +166,13 @@ function createToolActivityTracker(options = {}) {
         return { taskId: task.id, scopeId: task.scopeId, duplicate: true };
       }
       assertCompletionAvailable();
+      recordTaskChangedFiles(task, completion.changedFiles);
       task.completionRequest = {
         summary: sanitizeCompletionSummary(completion.summary, 2000),
         validationStatus: String(completion.validationStatus || 'passed'),
         validationLevel: String(completion.validationLevel || ''),
         validationAt: String(completion.validationAt || ''),
-        changedFiles: Array.isArray(completion.changedFiles) ? completion.changedFiles.map(String).filter(Boolean).slice(0, 200) : [],
+        changedFiles: mergeTaskChangedFiles(completion.changedFiles),
         residualChangedFiles: Array.isArray(completion.residualChangedFiles) ? completion.residualChangedFiles.map(String).filter(Boolean).slice(0, 200) : [],
         residualState: String(completion.residualState || 'clean')
       };
@@ -189,6 +193,7 @@ function createToolActivityTracker(options = {}) {
       if (patch.summary != null) current.detail = sanitizeDisplayText(patch.summary, 500);
       if (patch.workspace != null) current.workspace = sanitizeDisplayText(patch.workspace, 200);
       if (patch.tool != null) current.tool = sanitizeDisplayText(patch.tool, 200);
+      recordTaskChangedFiles(task, patch.changedFiles, patch.metadata?.changedFiles, patch.activity?.metadata?.changedFiles);
       applyActivityPatch(current.activity, patch.activity && typeof patch.activity === 'object' ? patch.activity : patch);
       task.workspace = current.workspace || task.workspace;
       task.lastTool = current.tool || task.lastTool;
@@ -244,6 +249,18 @@ function createToolActivityTracker(options = {}) {
             operation: current.label,
             phase: 'complete'
           });
+      const rawChangedFiles = uniqueTaskChangedFiles(
+        result.changedFiles,
+        result.taskOwnedChangedFiles,
+        result.activity?.changedFiles,
+        result.activity?.metadata?.changedFiles
+      );
+      const reportedChangedFileCount = Math.max(
+        0,
+        Number(result.changedFileCount || 0),
+        Number(result.activity?.metadata?.changedFileCount || 0),
+        rawChangedFiles.length
+      );
       applyActivityPatch(current.activity, completionActivity);
       const terminalLabel = sanitizeDisplayText(completionActivity.title || current.activity?.title, 200);
       if (terminalLabel) {
@@ -251,7 +268,8 @@ function createToolActivityTracker(options = {}) {
         task.lastOperation = terminalLabel;
         if (current.activity?.tool) current.activity.tool.operation = terminalLabel;
       }
-      task.changedFiles = mergeTaskChangedFiles(task.changedFiles, current.activity?.metadata?.changedFiles);
+      recordTaskChangedFiles(task, rawChangedFiles, current.activity?.metadata?.changedFiles);
+      task.changedFileCount = Math.max(Number(task.changedFileCount || 0), reportedChangedFileCount);
       current.activity.status = terminalBeforeFinish && task.status === 'cancelled' && current.internalOperation !== OP.WORK_CANCEL
         ? 'cancelled'
         : completedActivityStatus(result, completionActivity);
@@ -360,7 +378,7 @@ function createToolActivityTracker(options = {}) {
     const startedAt = now();
     const connectorCall = details.connector !== false;
     const scopeId = resolveScopeId(details);
-    const operationId = crypto.randomUUID();
+    const operationId = String(details.executionOperationId || '') || crypto.randomUUID();
     const internalOperation = String(details.internalOperation || details.tool || '');
     const initialActivity = buildToolActivityDetails(
       internalOperation,
@@ -483,6 +501,8 @@ function createToolActivityTracker(options = {}) {
     const sequence = Math.max(calls, ...events.map(event => Math.max(0, Number(event?.sequence || 0))));
     const resumedStartedAt = Date.parse(String(resumed?.startedAtIso || resumed?.startedAt || ''));
     const plan = resumed?.plan ? normalizeTaskPlan(resumed.plan) : undefined;
+    const resumedChangedFiles = uniqueTaskChangedFiles(resumed?.changedFiles);
+    const resumedChangedFileClasses = classifyTaskChangedFiles(resumedChangedFiles);
     return {
       id,
       scopeId,
@@ -511,7 +531,11 @@ function createToolActivityTracker(options = {}) {
       failures,
       sequence,
       events,
-      changedFiles: mergeTaskChangedFiles(resumed?.changedFiles),
+      changedFiles: resumedChangedFiles.slice(0, MAX_TASK_CHANGED_FILE_PREVIEW),
+      changedFileSet: new Set(resumedChangedFiles),
+      changedFileCount: Math.max(Number(resumed?.changedFileCount || 0), resumedChangedFiles.length),
+      productChangedFileCount: Math.max(Number(resumed?.productChangedFileCount || 0), resumedChangedFileClasses.productChangedFileCount),
+      supportArtifactCount: Math.max(Number(resumed?.supportArtifactCount || 0), resumedChangedFileClasses.supportArtifactCount),
       errorSummary: String(resumed?.errorSummary || ''),
       workspace: String(details.workspace || resumed?.workspace || ''),
       lastTool: String(resumed?.lastTool || details.tool || ''),
@@ -729,6 +753,7 @@ function createToolActivityTracker(options = {}) {
     const resumeStatus = task.status;
     const status = transitionTaskStatus(task, 'inactive');
     removeTask(task);
+    const fileStats = taskChangedFileStats(task);
     lastTask = sanitizeTaskRecord({
       taskId: task.id,
       sessionId: task.id,
@@ -748,8 +773,7 @@ function createToolActivityTracker(options = {}) {
       successfulToolCallCount: task.successes,
       failedToolCallCount: task.failures,
       failures: task.failures,
-      changedFiles: mergeTaskChangedFiles(task.changedFiles),
-      changedFileCount: mergeTaskChangedFiles(task.changedFiles).length,
+      ...fileStats,
       workspace: task.workspace,
       lastTool: task.lastTool,
       operation: task.lastOperation,
@@ -781,7 +805,8 @@ function createToolActivityTracker(options = {}) {
     const completion = task.completionRequest;
     const status = transitionTaskStatus(task, 'completed');
     removeTask(task);
-    const changedFiles = mergeTaskChangedFiles(task.changedFiles, completion.changedFiles);
+    recordTaskChangedFiles(task, completion.changedFiles);
+    const fileStats = taskChangedFileStats(task);
     lastTask = sanitizeTaskRecord({
       taskId: task.id,
       sessionId: task.id,
@@ -802,8 +827,7 @@ function createToolActivityTracker(options = {}) {
       validationStatus: completion.validationStatus,
       validationLevel: completion.validationLevel,
       validationAt: completion.validationAt,
-      changedFiles,
-      changedFileCount: changedFiles.length,
+      ...fileStats,
       residualChangedFiles: completion.residualChangedFiles,
       residualState: completion.residualState,
       calls: task.calls,
@@ -881,6 +905,7 @@ function createToolActivityTracker(options = {}) {
       .map(item => ({ ...item }))
       .sort((left, right) => left.startedAt - right.startedAt);
     const current = currentOperations[0] || null;
+    const fileStats = taskChangedFileStats(task);
     return canonicalTaskSnapshot({
       id: task.id,
       taskId: task.id,
@@ -903,8 +928,7 @@ function createToolActivityTracker(options = {}) {
       successfulToolCallCount: task.successes,
       failedToolCallCount: task.failures,
       failures: task.failures,
-      changedFiles: mergeTaskChangedFiles(task.changedFiles),
-      changedFileCount: mergeTaskChangedFiles(task.changedFiles).length,
+      ...fileStats,
       workspace: task.workspace,
       tool: current?.tool || task.lastTool,
       lastTool: task.lastTool,
@@ -971,6 +995,7 @@ function createToolActivityTracker(options = {}) {
       ...(eventTask ? { task: eventTask } : {}),
       ...extras
     });
+    publishActivityLifecycleEvent(snapshot);
     for (const listener of listeners) {
       try {
         listener(snapshot);
@@ -1005,8 +1030,42 @@ function createToolActivityTracker(options = {}) {
   };
 }
 
+function uniqueTaskChangedFiles(...sources) {
+  return [...new Set(sources.flatMap(files => Array.isArray(files) ? files : []).map(String).filter(Boolean))];
+}
+
 function mergeTaskChangedFiles(...sources) {
-  return [...new Set(sources.flatMap(files => Array.isArray(files) ? files : []).map(String).filter(Boolean))].slice(0, 200);
+  return uniqueTaskChangedFiles(...sources).slice(0, MAX_TASK_CHANGED_FILE_PREVIEW);
+}
+
+function recordTaskChangedFiles(task, ...sources) {
+  if (!task) return;
+  if (!(task.changedFileSet instanceof Set)) task.changedFileSet = new Set(uniqueTaskChangedFiles(task.changedFiles));
+  for (const file of uniqueTaskChangedFiles(...sources)) task.changedFileSet.add(file);
+  const files = [...task.changedFileSet];
+  const classified = classifyTaskChangedFiles(files);
+  task.changedFiles = files.slice(0, MAX_TASK_CHANGED_FILE_PREVIEW);
+  task.changedFileCount = Math.max(Number(task.changedFileCount || 0), files.length);
+  task.productChangedFileCount = Math.max(Number(task.productChangedFileCount || 0), classified.productChangedFileCount);
+  task.supportArtifactCount = Math.max(Number(task.supportArtifactCount || 0), classified.supportArtifactCount);
+}
+
+function taskChangedFileStats(task) {
+  const files = task?.changedFileSet instanceof Set
+    ? [...task.changedFileSet]
+    : uniqueTaskChangedFiles(task?.changedFiles);
+  const classified = classifyTaskChangedFiles(files);
+  const changedFileCount = Math.max(Number(task?.changedFileCount || 0), files.length);
+  const productChangedFileCount = Math.max(Number(task?.productChangedFileCount || 0), classified.productChangedFileCount);
+  const supportArtifactCount = Math.max(Number(task?.supportArtifactCount || 0), classified.supportArtifactCount);
+  const changedFiles = files.slice(0, MAX_TASK_CHANGED_FILE_PREVIEW);
+  return {
+    changedFiles,
+    changedFileCount,
+    changedFilesTruncated: changedFileCount > changedFiles.length,
+    productChangedFileCount,
+    supportArtifactCount
+  };
 }
 
 function completedActivityStatus(result = {}, completionActivity = {}) {

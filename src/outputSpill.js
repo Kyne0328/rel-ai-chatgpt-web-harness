@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getStateDir } from './statePaths.js';
-import { principalFingerprint } from './mcp/principal.js';
+import { principalFingerprint } from './mcp/principal.ts';
 
 const OUTPUT_SPILL_DIR = 'output-spills';
 const OUTPUT_REF_PATTERN = /^spill_[A-Za-z0-9_-]{20,80}$/;
@@ -59,26 +59,22 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
       return;
     }
     const directory = path.join(root, taskDirectoryName(owner));
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    outputRef = `spill_${crypto.randomBytes(18).toString('base64url')}`;
-    file = path.join(directory, `${outputRef}.log`);
     try {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      outputRef = `spill_${crypto.randomBytes(18).toString('base64url')}`;
+      file = path.join(directory, `${outputRef}.log`);
       fd = fs.openSync(file, 'wx', 0o600);
-      activeSpills(root, true).add(file);
-      activeReservations(root).files += 1;
-      spillUsageByRoot.set(root, { bytes: usage.bytes, files: usage.files + 1 });
-      append(initial);
-    } catch (error) {
-      if (fd !== null) {
-        try { fs.closeSync(fd); } catch {}
-        fd = null;
-      }
-      activeSpills(root)?.delete(file);
-      try { fs.rmSync(file, { force: true }); } catch {}
+    } catch {
+      // Optional storage failure must preserve the command result and bounded tail.
+      spillTruncated = true;
       outputRef = '';
       file = '';
-      throw error;
+      return;
     }
+    activeSpills(root, true).add(file);
+    activeReservations(root).files += 1;
+    spillUsageByRoot.set(root, { bytes: usage.bytes, files: usage.files + 1 });
+    append(initial);
   }
 
   function append(value) {
@@ -168,7 +164,7 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
   }
 
   async function finish() {
-    if (finished && fd === null) return outputRef ? { outputRef, bytes, spillTruncated } : null;
+    if (finished && fd === null) return outputRef || spillTruncated ? { outputRef, bytes, spillTruncated } : null;
     finished = true;
     await flush();
     if (fd !== null) {
@@ -178,11 +174,13 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
     const active = activeSpills(root);
     active?.delete(file);
     if (active?.size === 0) activeSpillsByRoot.delete(root);
-    const reservations = activeReservations(root);
-    reservations.files = Math.max(0, reservations.files - 1);
-    reservations.bytes = Math.max(0, reservations.bytes - bytes);
-    if (!reservations.files) activeReservationsByRoot.delete(root);
-    if (!outputRef) return null;
+    if (outputRef) {
+      const reservations = activeReservations(root);
+      reservations.files = Math.max(0, reservations.files - 1);
+      reservations.bytes = Math.max(0, reservations.bytes - bytes);
+      if (!reservations.files) activeReservationsByRoot.delete(root);
+    }
+    if (!outputRef && !spillTruncated) return null;
     return { outputRef, bytes, spillTruncated };
   }
 

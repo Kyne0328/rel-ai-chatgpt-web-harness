@@ -11,3 +11,18 @@ export interface McpToolResultDto<T extends Record<string, unknown> = Record<str
   isError: boolean;
   _meta?: Record<string, unknown>;
 }
+
+export const MCP_PROTOCOL_VERSION = '2026-07-28';
+export const MCP_LEGACY_PROTOCOL_VERSIONS = Object.freeze(['2025-11-25']);
+
+export const MCP_AUTH_MODE = Object.freeze({
+  STATIC_BEARER: 'static_bearer',
+  LOCAL_NO_AUTH: 'local_no_auth'
+} as const);
+
+const MCP_AUTH_MODES = Object.freeze(Object.values(MCP_AUTH_MODE));
+export type McpAuthMode = typeof MCP_AUTH_MODE[keyof typeof MCP_AUTH_MODE];
+
+export function isMcpAuthMode(value: unknown): value is McpAuthMode {
+  return MCP_AUTH_MODES.includes(String(value) as McpAuthMode);
+}

@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { stableJson } from './stableJson.js';
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { readConfig, publicConfigSummary, allWorkspaceAliases, resolveWorkspace } from "./config.js";
@@ -118,12 +119,6 @@ function resourceRevision(config, uri) {
   return hash.digest('base64url').slice(0, 24);
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (!value || typeof value !== 'object') return JSON.stringify(value);
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
-}
-
 function helpMarkdown(config, workspaceSummary) {
   const workspaces = (workspaceSummary?.workspaces || []).map(item => `- ${item.alias}: ${item.path}`).join('\n') || '- No workspaces are configured yet.';
   return `# Rel.AI MCP connector
@@ -136,7 +131,7 @@ Prefer the AI host's own capabilities for public-web research, cloud/SaaS connec
 
 For each meaningful durable project goal that Rel.AI works on, start or reuse one \`relai_work\` session and carry its \`work_id\` through the goal. New work starts with a non-empty ordered \`steps\` plan on \`begin\`; update individual steps with compact \`taskProgress\` patches, and use \`relai_work plan\` only when the plan structure changes. A projectless one-shot utility/control request runs directly without a durable task or invented workspace when the operation supports it. Taskless calls also remain available for isolated control, recovery, observation, and resource operations. Omitting \`work_id\` never selects another task, and Rel.AI never guesses task ownership. Use \`relai_work context\` only when deeper historical continuity or repository bootstrap materially helps. Use \`relai_process\` for persistent commands and \`relai_validate\` for checks, diagnostics, or local HTTP probes.
 
-Use \`relai_edit\` as the single file mutation tool. Destructive operations may return \`input_required\`; retry with the accepted response and integrity-protected requestState. Native asynchronous work is returned only when the current request advertises \`io.modelcontextprotocol/tasks\`, then polled with \`tasks/get\` and controlled with \`tasks/update\` or \`tasks/cancel\`. Without that capability, eligible long work may continue under \`work_id\`: keep doing useful independent work instead of polling and consume any later \`completedOperations\` notice; use \`relai_work status\` only for explicit recovery/retrieval.
+Use \`relai_edit\` as the single file mutation tool. Destructive operations may return \`input_required\`; retry with the accepted response and integrity-protected requestState. Eligible long work may continue safely in the background under \`work_id\`: keep doing useful independent work instead of polling and consume any later \`completedOperations\` notice; use \`relai_work status\` only for explicit recovery/retrieval.
 
 Validation is factual evidence chosen by the agent, not generic execution permission. \`relai_validate\` action \`checks\` may run with or without a work session. With an explicit durable \`work_id\`, successful checks record evidence and leave the session open by default; pass \`complete:true\` only when that successful validation should atomically close the task.
 

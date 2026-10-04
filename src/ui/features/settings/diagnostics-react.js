@@ -6,23 +6,21 @@ import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { getWorkspaceFilter } from '../../router.js';
-import { clientCapabilityViews } from '../../task-identity.js';
+
 import { timeAgo } from '../../utils.js';
 import { restartConnection } from './connection-recovery.js';
 
 const h = React.createElement;
-const DIAGNOSTICS_STORE_KEYS = Object.freeze(['mcpConnection']);
 const LIVE_TAIL_REFRESH_DELAY_MS = 160;
 const DEFAULT_FILTERS = Object.freeze({ search: '', scope: 'all', severity: 'all', source: 'all' });
 
-export function createDiagnosticsRoute(useDashboardSlices) {
+export function createDiagnosticsRoute() {
   return function DiagnosticsRoute() {
-    const data = useDashboardSlices(DIAGNOSTICS_STORE_KEYS);
-    return h(DiagnosticsView, { data });
+    return h(DiagnosticsView);
   };
 }
 
-function DiagnosticsView({ data = {} }) {
+function DiagnosticsView() {
   const [report, setReport] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -222,8 +220,7 @@ function DiagnosticsView({ data = {} }) {
         report.tunnelHealth ? h(TunnelHealthSummary, { health: report.tunnelHealth }) : null,
         tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null,
         h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),
-        h(DiagnosticLogs, { report, view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } }),
-        h(ClientCapability, { data })
+        h(DiagnosticLogs, { report, view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } })
       ) : null
     )
   );
@@ -525,18 +522,6 @@ function DiagnosticFinding({ finding, onReload }) {
   );
 }
 function findingSeverityLabel(severity) { return severity === 'error' ? 'Blocking' : severity === 'warning' ? 'Warning' : 'Recommendation'; }
-
-function ClientCapability({ data }) {
-  const capability = clientCapabilityViews({ mcpConnection: data.mcpConnection || {} })[0];
-  const supported = capability.capabilityState === 'supported' ? 'true' : capability.capabilityState === 'not_advertised' ? 'false' : 'unknown';
-  return h('details', { className: 'card connector-details diagnostic-client-capability', 'data-diagnostic-region': 'client-capability' },
-    h('summary', { className: 'connector-details-summary' }, h('span', null, h('strong', null, 'Technical MCP details'))),
-    h('div', { className: 'card-body connection-status-body' },
-      h('div', { className: 'connection-status-copy' }, h('strong', null, capability.capabilityLabel), h('p', null, capability.description), h('p', null, capability.executionLabel)),
-      h('div', { className: 'connection-field' }, h('span', { className: 'field-caption' }, 'Observed MCP Tasks capability'), h('code', { className: 'connector-endpoint' }, `Tasks extension advertised: ${supported}`))
-    )
-  );
-}
 
 function DiagnosticLogs({ report, view, registerLog }) {
   const runtime = report.logs?.runtime || { available: false, entries: [] };

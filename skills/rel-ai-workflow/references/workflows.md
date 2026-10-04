@@ -18,6 +18,10 @@ Do not stop after ordinary task boundaries merely to ask whether to continue. St
 
 When a bounded operation continues after a response, keep doing independent work and consume its later `completedOperations` notice instead of polling `relai_work status` unless the result blocks useful progress.
 
+One durable work session can contain multiple background operations. Keep each returned `operationId`: task status lists retained operations, while operation status retrieves one exact result. Conflicting operations wait in the existing resource queue; an identical running request reuses its operation instead of starting another process. When a result blocks progress, stay in the active turn and retrieve that operation at the returned `pollAfterMs` interval. An accepted background command or a completion notification does not itself guarantee another assistant turn. After a host execution limit, recover the same work session, consume outstanding results, and continue its unfinished plan. Stop one command by its operation ID; task-wide stop/cancel covers all operations. Finish only after its queued and running operations have settled.
+
+When the user asks to continue a specific `work_id`, retrieve its status before claiming that its execution session is unavailable. An inactive task is resumable. Reuse its plan, reconcile recorded operations and current files, and request deeper `context` only when necessary. If recovery fails, report the actual connection, ownership, or lifecycle error returned by the tools.
+
 `relai_validate` records evidence and leaves durable work open by default. Use `complete:true` only for the final successful validation when closure should be atomic. Failed, cancelled, or stale validation never closes the goal; continue and revalidate, or explicitly finish with truthful residual risk when the objective is complete despite that evidence.
 
 ## Managed processes
@@ -33,7 +37,7 @@ Tests, builds, linters, source checks, package gates, and release validation are
 
 For a browser-rendered local app, retain the development-server `processId`, then create a workspace-scoped `relai_ui` session against its loopback port; `work_id` is optional attribution. Start with an accessibility snapshot when locating controls, prefer semantic targets for interaction, capture a screenshot when visual evidence matters, inspect console/network failures when relevant, and stop the UI session before the persistent service is no longer needed.
 
-Retain `processId`. Read logs with byte offsets and reuse `metadataRevision` after the first read to avoid unchanged metadata. Stop the process when it is no longer required. A process handle is separate from `work_id` and native MCP Task IDs.
+Retain `processId`. Read logs with byte offsets and reuse `metadataRevision` after the first read to avoid unchanged metadata. Stop the process when it is no longer required. A process handle is separate from both `work_id` and any fallback `operationId`.
 
 ## Change review and publishing
 

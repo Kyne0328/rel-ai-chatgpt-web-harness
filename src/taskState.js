@@ -1,16 +1,8 @@
 'use strict';
 
-import { CANONICAL_TASK_STATUSES, NATIVE_TASK_STATUSES } from './contracts/tasks.ts';
+import { CANONICAL_TASK_STATUSES } from './contracts/tasks.ts';
 
 const CANONICAL_TASK_STATUS_SET = new Set(CANONICAL_TASK_STATUSES);
-const NATIVE_TASK_STATUS_SET = new Set(NATIVE_TASK_STATUSES);
-const NATIVE_TASK_TRANSITIONS = Object.freeze({
-  working: Object.freeze(['working', 'input_required', 'completed', 'failed', 'cancelled']),
-  input_required: Object.freeze(['input_required', 'working', 'completed', 'failed', 'cancelled']),
-  completed: Object.freeze(['completed']),
-  failed: Object.freeze(['failed']),
-  cancelled: Object.freeze(['cancelled'])
-});
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const TASK_TRANSITIONS = Object.freeze({
   queued: Object.freeze(['planning', 'running', 'inactive', 'cancelled']),
@@ -32,21 +24,6 @@ function normalizeStatusToken(value) {
 
 function isCanonicalTaskStatus(value) {
   return CANONICAL_TASK_STATUS_SET.has(normalizeStatusToken(value));
-}
-
-function normalizeNativeTaskStatus(value) {
-  const status = normalizeStatusToken(value);
-  return NATIVE_TASK_STATUS_SET.has(status) ? status : '';
-}
-
-function isNativeTaskStatus(value) {
-  return Boolean(normalizeNativeTaskStatus(value));
-}
-
-function canTransitionNativeTaskStatus(from, to) {
-  const current = normalizeNativeTaskStatus(from);
-  const next = normalizeNativeTaskStatus(to);
-  return Boolean(current && next && NATIVE_TASK_TRANSITIONS[current]?.includes(next));
 }
 
 function isTerminalTaskStatus(value) {
@@ -88,21 +65,8 @@ function normalizeLiveTaskStatus(value, record = {}, options = {}) {
   return normalizeHistoricalTaskStatus(status, record);
 }
 
-function nativeStatusToInternalStatus(value) {
-  const status = normalizeStatusToken(value);
-  if (status === 'working') return 'running';
-  if (status === 'input_required') return 'blocked';
-  if (TERMINAL_TASK_STATUSES.has(status)) return status;
-  return '';
-}
-
 function internalStatusToDashboardStatus(value, record = {}) {
   return normalizeHistoricalTaskStatus(value, record);
-}
-
-function isTerminalNativeTaskStatus(value) {
-  const internal = nativeStatusToInternalStatus(value);
-  return Boolean(internal) && isTerminalTaskStatus(internal);
 }
 
 function isTerminalDashboardTaskStatus(value, record = {}) {
@@ -156,22 +120,15 @@ function hasFailureEvidence(record = {}) {
 
 export {
   CANONICAL_TASK_STATUSES,
-  NATIVE_TASK_STATUSES,
-  NATIVE_TASK_TRANSITIONS,
   TASK_TRANSITIONS,
   activeLogicalTaskCount,
   assertTaskStatusTransition,
-  canTransitionNativeTaskStatus,
   canTransitionTaskStatus,
   internalStatusToDashboardStatus,
   isCanonicalTaskStatus,
-  isNativeTaskStatus,
   isTerminalDashboardTaskStatus,
-  isTerminalNativeTaskStatus,
   isTerminalTaskStatus,
-  nativeStatusToInternalStatus,
   normalizeHistoricalTaskStatus,
   normalizeLiveTaskStatus,
-  normalizeNativeTaskStatus,
   transitionTaskStatus
 };

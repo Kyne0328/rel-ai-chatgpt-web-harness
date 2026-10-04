@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import { stableJson } from '../stableJson.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { writeJsonAtomic } from '../durableState.ts';
@@ -305,12 +306,6 @@ function normalizePaths(values) {
 
 function normalizePath(value) {
   return String(value || '').trim().replaceAll('\\', '/').replace(/^\.\//, '');
-}
-
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (!value || typeof value !== 'object') return JSON.stringify(value);
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
 }
 
 export { createValidationFingerprint, createValidationPlan, readValidationPlan,  };

@@ -1,6 +1,5 @@
 export const CHATGPT_CONNECTOR_CREATE_URL = 'https://chatgpt.com/plugins#settings/Connectors?create-connector=true';
-export const RELAI_CONNECTOR_ICON_URL = '/public/assets/favicon.png';
-export const RELAI_CONNECTOR_ICON_FILENAME = 'relai-mcp.png';
+const RELAI_CONNECTOR_ICON_FILENAME = 'relai-mcp.png';
 const CHATGPT_REFRESH_GROUPS = Object.freeze([
   Object.freeze({
     label: 'Go / Plus / Pro',
@@ -23,16 +22,6 @@ const CHATGPT_REFRESH_GROUPS = Object.freeze([
   })
 ]);
 const CHATGPT_REFRESH_BUSINESS_NOTE = 'Business: published custom apps cannot update tools or metadata in place. Recreate and republish the app when the Rel.AI ChatGPT actions change.';
-
-export function downloadRelaiConnectorIcon() {
-  const link = document.createElement('a');
-  link.href = RELAI_CONNECTOR_ICON_URL;
-  link.download = RELAI_CONNECTOR_ICON_FILENAME;
-  link.hidden = true;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
 
 export function chatGptFirstPrompt(workspaceAlias = 'myapp') {
   const alias = String(workspaceAlias || 'myapp').trim() || 'myapp';

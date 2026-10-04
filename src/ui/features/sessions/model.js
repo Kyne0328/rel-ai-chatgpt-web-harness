@@ -83,10 +83,14 @@ export function semanticProgressFor(session = {}, options = {}) {
 
 export function semanticFileCounts(session = {}, semantic = semanticProgressFor(session)) {
   const classified = classifyTaskChangedFiles(session.changedFiles || []);
-  const product = Number.isFinite(Number(semantic?.productChangedFileCount))
+  const product = Number.isFinite(Number(session?.productChangedFileCount))
+    ? Math.max(0, Number(session.productChangedFileCount))
+    : Number.isFinite(Number(semantic?.productChangedFileCount))
     ? Math.max(0, Number(semantic.productChangedFileCount))
     : classified.productChangedFileCount;
-  const support = Number.isFinite(Number(semantic?.supportArtifactCount))
+  const support = Number.isFinite(Number(session?.supportArtifactCount))
+    ? Math.max(0, Number(session.supportArtifactCount))
+    : Number.isFinite(Number(semantic?.supportArtifactCount))
     ? Math.max(0, Number(semantic.supportArtifactCount))
     : classified.supportArtifactCount;
   return { product, support };

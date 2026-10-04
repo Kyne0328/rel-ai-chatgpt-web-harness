@@ -1,21 +1,16 @@
-import { nativeTaskCollection, processOutputView, processStateView } from '../../task-identity.js';
+import { processOutputView, processStateView } from '../../task-identity.js';
 import { formatDuration, timeAgo } from '../../utils.js';
 
 export function processListView(data = {}, now = Date.now()) {
-  const nativeTasks = nativeTaskCollection(data).tasks;
-  const processes = orderProcesses(data.managedProcesses || [], nativeTasks);
-  const rows = processes.map(process => processRowView(process, nativeTasks, now));
+  const processes = orderProcesses(data.managedProcesses || []);
+  const rows = processes.map(process => processRowView(process, now));
   const running = rows.filter(row => row.state.active).length;
   const finished = rows.filter(row => row.state.terminal).length;
-  return {
-    rows,
-    running,
-    finished
-  };
+  return { rows, running, finished };
 }
 
-function processRowView(process = {}, nativeTasks = [], now = Date.now()) {
-  const state = processStateView(process, nativeTasks);
+function processRowView(process = {}, now = Date.now()) {
+  const state = processStateView(process);
   const output = processOutputView(process);
   const processId = String(process.processId || 'unknown');
   return {
@@ -44,9 +39,9 @@ function durationFor(process = {}, active = false, now = Date.now()) {
   return 'Unavailable';
 }
 
-function orderProcesses(items = [], nativeTasks = []) {
+function orderProcesses(items = []) {
   return [...(Array.isArray(items) ? items : [])].sort((left, right) => {
-    const activeDifference = Number(processStateView(right, nativeTasks).active) - Number(processStateView(left, nativeTasks).active);
+    const activeDifference = Number(processStateView(right).active) - Number(processStateView(left).active);
     if (activeDifference) return activeDifference;
     return timestamp(right) - timestamp(left) || String(left?.processId || '').localeCompare(String(right?.processId || ''));
   });

@@ -35,7 +35,9 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
       commitSource: '',
       truncated: false
     }),
-    diff: async (_taskId, requestedPath) => ({
+    diff: async (_taskId, requestedPath) => {
+      await new Promise(resolve => setTimeout(resolve, 75));
+      return {
       ok: true,
       work_id: 'probe-task',
       workspace: 'app',
@@ -48,7 +50,8 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
       readOnly: true,
       historyMode: 'live',
       commitHead: ''
-    }),
+      };
+    },
     openIde: async () => ({ ok: true, editor: { label: 'Probe IDE' } })
   }
 });

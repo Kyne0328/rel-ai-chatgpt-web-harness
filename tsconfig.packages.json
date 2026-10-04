@@ -3,6 +3,7 @@
   "references": [
     { "path": "./src/contracts" },
     { "path": "./src/core" },
-    { "path": "./src/repository/intelligence" }
+    { "path": "./src/repository/intelligence" },
+    { "path": "./src/ui" }
   ]
 }

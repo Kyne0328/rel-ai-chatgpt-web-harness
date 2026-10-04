@@ -293,9 +293,9 @@ async function case_desktop_manager_unit() {
     const path = __m3.default;
   
     const __m4 = await import("../src/desktopManager.ts");
-    const { MAX_DESKTOP_CLIPBOARD_BYTES,
-    configureDesktopNativeBridge,
+    const { configureDesktopNativeBridge,
     runDesktopAction } = __m4;
+    const { MAX_DESKTOP_CLIPBOARD_BYTES } = await import("../src/contracts/desktopValidation.js");
   
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-desktop-manager-'));
   const outside = path.join(path.dirname(root), `outside-${path.basename(root)}.txt`);
@@ -1096,7 +1096,7 @@ async function case_windows_uia_adapter_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/computer/windowsUiaAdapter.js");
+    const __m1 = await import("../src/computer/windowsUiaAdapter.ts");
     const { createWindowsUiaAdapter } = __m1;
   
   const target = {
@@ -1199,3 +1199,265 @@ async function case_windows_uia_adapter_unit() {
   console.log('Windows UI Automation adapter warms once, normalizes hybrid targets, and exposes native semantic actions.');
 }
 await case_windows_uia_adapter_unit();
+
+// Native multi-tunnel connection storage and runtime pooling.
+async function case_multi_tunnel_connection_unit() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const os = (await import('node:os')).default;
+  const path = (await import('node:path')).default;
+  const { createTunnelConnectionStore } = await import('../electron/tunnel-connections.js');
+  const { createTunnelRuntimePool } = await import('../electron/tunnel-runtime-pool.js');
+
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-multi-tunnel-'));
+  const safeStorage = {
+    isEncryptionAvailable: () => true,
+    encryptString: value => Buffer.from(`encrypted:${value}`, 'utf8'),
+    decryptString: value => Buffer.from(value).toString('utf8').replace(/^encrypted:/, '')
+  };
+
+  try {
+    const store = createTunnelConnectionStore({ stateDir, safeStorage });
+    assert.deepEqual(store.list(), []);
+
+    const stored = store.upsert({
+      label: 'School',
+      tunnelId: 'tunnel_school123456',
+      apiKey: 'sk-runtime-school-123456'
+    });
+    assert.deepEqual(stored, {
+      tunnelId: 'tunnel_school123456',
+      label: 'School',
+      enabled: true,
+      apiKeyConfigured: true
+    });
+    assert.doesNotMatch(fs.readFileSync(store.statePath(), 'utf8'), /sk-runtime-school-123456/);
+    assert.equal(store.runtimeConnections()[0].apiKey, 'sk-runtime-school-123456');
+
+    store.upsert({ label: 'School account', tunnelId: 'tunnel_school123456' });
+    assert.equal(store.list()[0].label, 'School account');
+    assert.equal(store.runtimeConnections()[0].apiKey, 'sk-runtime-school-123456', 'updating metadata must preserve the encrypted runtime key');
+
+    const starts = [];
+    const stops = [];
+    const createRuntime = options => {
+      let state = { state: 'stopped', tunnelId: '' };
+      return {
+        async start(config) {
+          starts.push({ ...config, instanceId: options.instanceId });
+          state = { state: 'running', tunnelId: config.tunnelId, healthUrl: `http://127.0.0.1/${config.tunnelId}` };
+          options.onStatus(state);
+          return { ok: true, ...state };
+        },
+        async stop() {
+          stops.push(state.tunnelId);
+          state = { ...state, state: 'stopped' };
+          options.onStatus(state);
+          return { stopped: true, exited: true };
+        },
+        snapshot() { return { ...state }; }
+      };
+    };
+
+    const pool = createTunnelRuntimePool({ createRuntime });
+    const first = await pool.sync({
+      connections: [
+        { tunnelId: 'tunnel_accountA123', label: 'Account A', enabled: true, apiKey: 'sk-account-a-123456' },
+        { tunnelId: 'tunnel_accountB123', label: 'Account B', enabled: true, apiKey: 'sk-account-b-123456' }
+      ],
+      port: 3333,
+      localToken: 'shared-local-token'
+    });
+    assert.equal(first.connections.length, 2);
+    assert.equal(starts.length, 2);
+    assert.deepEqual(new Set(starts.map(start => start.localToken)), new Set(['shared-local-token']));
+    assert.deepEqual(new Set(starts.map(start => start.port)), new Set([3333]));
+    assert.deepEqual(new Set(starts.map(start => start.apiKey)), new Set(['sk-account-a-123456', 'sk-account-b-123456']));
+    assert.deepEqual(new Set(starts.map(start => start.instanceId)), new Set(['tunnel_accountA123', 'tunnel_accountB123']));
+
+    const second = await pool.sync({
+      connections: [
+        { tunnelId: 'tunnel_accountB123', label: 'Account B', enabled: true, apiKey: 'sk-account-b-123456' }
+      ],
+      port: 3333,
+      localToken: 'shared-local-token'
+    });
+    assert.deepEqual(second.connections.map(connection => connection.tunnelId), ['tunnel_accountB123'], 'removed tunnels must disappear from the pool status');
+    assert.ok(stops.includes('tunnel_accountA123'));
+    assert.ok(stops.includes('tunnel_accountB123'));
+
+    await pool.stop();
+    assert.equal(pool.snapshot().connections[0].state, 'stopped');
+
+    assert.equal(store.remove('tunnel_school123456').removed, true);
+    assert.deepEqual(store.list(), []);
+  } finally {
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+
+  console.log('Additional Secure MCP Tunnel storage and shared-local-service pooling passed.');
+}
+await case_multi_tunnel_connection_unit();
+
+
+// Credential preparation must isolate failures without exposing credential material.
+async function case_additional_tunnel_failure_isolation() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const os = (await import('node:os')).default;
+  const path = (await import('node:path')).default;
+  const { createTunnelConnectionStore } = await import('../electron/tunnel-connections.js');
+  const { createTunnelRuntimePool } = await import('../electron/tunnel-runtime-pool.js');
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-tunnel-isolation-'));
+  const healthyId = 'tunnel_healthy123456';
+  const brokenId = 'tunnel_broken123456';
+  const disabledId = 'tunnel_disabled123456';
+  const keys = ['sk-healthy-fixture-123456', 'sk-broken-fixture-123456', 'sk-disabled-fixture-123456'];
+  const rejected = new Set();
+  const decrypted = [];
+  const created = [];
+  const started = [];
+  const stopped = [];
+  const observed = [];
+  let available = true;
+  const store = createTunnelConnectionStore({
+    stateDir,
+    safeStorage: {
+      isEncryptionAvailable: () => available,
+      encryptString: value => Buffer.from('encrypted:' + value),
+      decryptString: value => {
+        const plaintext = Buffer.from(value).toString().replace(/^encrypted:/, '');
+        decrypted.push(plaintext);
+        if (rejected.has(plaintext)) throw new Error('private decrypt cause ' + plaintext);
+        return plaintext;
+      }
+    }
+  });
+  const pool = createTunnelRuntimePool({
+    onLog: entry => observed.push(entry),
+    onStatus: status => observed.push(status),
+    createRuntime: options => {
+      created.push(options.instanceId);
+      let state = { state: 'stopped', tunnelId: options.instanceId };
+      return {
+        async start(config) {
+          started.push(config.tunnelId);
+          state = { state: 'running', tunnelId: config.tunnelId };
+          options.onStatus(state);
+          return state;
+        },
+        async stop() {
+          stopped.push(options.instanceId);
+          state = { ...state, state: 'stopped' };
+          options.onStatus(state);
+        },
+        snapshot: () => state
+      };
+    }
+  });
+  const synchronize = () => pool.sync({ connections: store.runtimeConnections(), port: 3333, localToken: 'isolated-fixture-token' });
+  try {
+    store.upsert({ tunnelId: healthyId, label: 'Healthy', apiKey: keys[0] });
+    store.upsert({ tunnelId: brokenId, label: 'Broken', apiKey: keys[1] });
+    await synchronize();
+    assert.deepEqual(new Set(started), new Set([healthyId, brokenId]));
+    store.upsert({ tunnelId: disabledId, label: 'Disabled', enabled: false, apiKey: keys[2] });
+    rejected.add(keys[1]);
+    rejected.add(keys[2]);
+    decrypted.length = 0;
+    created.length = 0;
+    started.length = 0;
+    const persisted = fs.readFileSync(store.statePath());
+    const prepared = store.runtimeConnections();
+    assert.deepEqual(decrypted, [keys[0], keys[1]], 'disabled credentials must never be decrypted');
+    assert.equal(Object.hasOwn(prepared.find(item => item.tunnelId === disabledId), 'apiKey'), false);
+    assert.equal(Object.hasOwn(prepared.find(item => item.tunnelId === brokenId), 'apiKey'), false);
+    const result = await pool.sync({ connections: prepared, port: 3333, localToken: 'isolated-fixture-token' });
+    assert.deepEqual(created, [healthyId], 'failed credentials must not create a runtime');
+    assert.deepEqual(started, [healthyId], 'healthy peers must still start');
+    assert.ok(stopped.includes(brokenId), 'a previously running failed connection must be stopped');
+    assert.equal(result.connections.find(item => item.tunnelId === healthyId).state, 'running');
+    const failure = result.connections.find(item => item.tunnelId === brokenId);
+    assert.equal(failure.state, 'failed');
+    assert.equal(failure.errorCode, 'additional_tunnel_credentials_unavailable');
+    assert.equal(result.results.find(item => item.tunnelId === brokenId).ok, false);
+    assert.equal(result.connections.some(item => item.tunnelId === disabledId), false);
+    assert.deepEqual(fs.readFileSync(store.statePath()), persisted, 'preparation and sync must not rewrite credentials');
+    const publicOutput = JSON.stringify([result, observed]);
+    for (const key of keys) {
+      assert.equal(publicOutput.includes(key), false);
+      assert.equal(publicOutput.includes(Buffer.from('encrypted:' + key).toString('base64')), false);
+    }
+    assert.equal(publicOutput.includes('private decrypt cause'), false);
+    assert.equal(publicOutput.includes('isolated-fixture-token'), false);
+
+    available = false;
+    decrypted.length = 0;
+    created.length = 0;
+    const unavailable = await synchronize();
+    assert.deepEqual(decrypted, [], 'unavailable storage must not attempt decryption');
+    assert.deepEqual(created, [], 'unavailable credentials must not create runtimes');
+    assert.equal(unavailable.connections.length, 2);
+    assert.ok(unavailable.connections.every(item => item.state === 'failed'));
+    assert.deepEqual(fs.readFileSync(store.statePath()), persisted);
+    store.upsert({ tunnelId: healthyId, enabled: false });
+    store.upsert({ tunnelId: brokenId, enabled: false });
+    assert.equal((await synchronize()).connections.length, 0, 'disabled-only configuration needs no secure storage');
+
+    const valid = fs.readFileSync(store.statePath(), 'utf8');
+    const invalid = JSON.parse(valid);
+    invalid.connections.push(invalid.connections[0]);
+    fs.writeFileSync(store.statePath(), JSON.stringify(invalid));
+    assert.throws(() => store.runtimeConnections(), /settings are corrupted/, 'document validation must remain fail-closed');
+    fs.writeFileSync(store.statePath(), valid);
+  } finally {
+    await pool.stop();
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+  console.log('Additional tunnel credential failures are isolated, fail closed, and remain secret-safe.');
+}
+
+async function case_additional_tunnel_save_failure() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const { runInNewContext } = await import('node:vm');
+  const source = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
+  const start = source.indexOf('  async function saveAdditionalTunnel(input = {}) {');
+  const end = source.indexOf('  async function removeAdditionalTunnel(tunnelId) {', start);
+  assert.ok(start >= 0 && end > start, 'desktop save handler must be available for behavioral testing');
+  const tunnelId = 'tunnel_saved123456';
+  const cases = [
+    { enabled: true, connections: [], error: 'private-sync-cause', ok: false },
+    { enabled: true, connections: [{ tunnelId, state: 'running' }], error: 'private-sync-cause', ok: false },
+    { enabled: true, connections: [], ok: false },
+    { enabled: true, connections: [{ tunnelId, state: 'failed' }], ok: false },
+    { enabled: true, connections: [{ tunnelId, state: 'running' }], ok: true },
+    { enabled: true, connections: [{ tunnelId, state: 'degraded' }], ok: true },
+    { enabled: false, connections: [], ok: true },
+    { enabled: false, connections: [], error: 'private-sync-cause', ok: false }
+  ];
+  for (const scenario of cases) {
+    const connection = { tunnelId, enabled: scenario.enabled };
+    const save = runInNewContext(source.slice(start, end) + '\nsaveAdditionalTunnel', {
+      currentDesktopSettings: () => ({ tunnelId: 'tunnel_primary123456' }),
+      tunnelConnections: { upsert: () => connection, list: () => [connection] },
+      serviceRuntime: { restartAdditionalTunnels: async () => scenario }
+    });
+    const result = await save({ tunnelId });
+    assert.equal(result.ok, scenario.ok, 'save success must reflect synchronization and the requested enabled status');
+    assert.equal(result.saved, true);
+    if (!scenario.ok) assert.ok(result.error, 'failed synchronization must have an observable error');
+    assert.equal(JSON.stringify(result).includes('private-sync-cause'), false);
+  }
+  console.log('Additional tunnel saves report global, missing-status, and per-connection failures accurately.');
+}
+
+const additionalTunnelRegressionResults = await Promise.allSettled([
+  case_additional_tunnel_failure_isolation(),
+  case_additional_tunnel_save_failure()
+]);
+const additionalTunnelRegressionFailures = additionalTunnelRegressionResults.filter(result => result.status === 'rejected');
+if (additionalTunnelRegressionFailures.length) {
+  throw new AggregateError(additionalTunnelRegressionFailures.map(result => result.reason), 'Additional tunnel failure-isolation regressions failed.');
+}
+

@@ -17,7 +17,7 @@ Root package (ESM)
     └── resource-path.js         development/packaged ESM resource resolution
 ```
 
-`src/packageMetadata.js` owns root package metadata and package-relative paths. Runtime code reads `package.json` through that module rather than JSON import attributes or CommonJS loaders. `electron/resource-path.js` owns development and packaged resource resolution and converts filesystem paths to file URLs before importing backend modules.
+`src/packageMetadata.js` owns root package metadata and package-relative paths. Runtime code reads `package.json` through that module rather than JSON import attributes or CommonJS loaders. `electron/resource-path.js` owns development and packaged resource resolution and converts filesystem paths to file URLs before importing backend modules. First-party ESM imports name their real extension, including `.ts` when importing canonical TypeScript modules.
 
 ## Electron preload boundary
 
@@ -58,16 +58,19 @@ The ESM cutover removes:
 - the removed CommonJS color module and any color-manifest bridge;
 - dashboard path aliases such as `#reference`, `#settings/connector`, `#settings/desktop`, and `#settings/dashboard`.
 
-Only canonical dashboard routes are supported. Removed or unknown routes fall back to Overview instead of silently redirecting.
+When a same-name `.js` sibling is retained beside a migrated `.ts` module, the boundary checker requires that sibling to be a pure re-export facade. Keep facades only while a runtime or dynamic consumer needs the JavaScript path; migrate consumers to the `.ts` module and remove the facade after the last consumer moves. Facades that were used only by tests have been removed after migrating those tests to their canonical modules.
+
+Only canonical dashboard routes are supported. Removed or unknown routes fall back to Overview instead of redirecting.
 
 ## Contributor requirements
 
-- Node.js `>=22.13.0`; CI covers the Node.js 22 and 24 LTS lines.
+- Node.js `26.8.2` from `.node-version`; npm `12.0.2` from `packageManager`.
 - npm lockfiles are authoritative for the root and Electron packages.
+- `npm run typecheck` builds the shared package projects and the UI project. The UI project checks the canonical hash-router module with `@ts-check`; the remaining legacy React JavaScript is not yet under checked-JavaScript coverage. The repository-intelligence package also retains `checkJs: false` while its JavaScript migration is pending.
 - Electron is owned by `electron/package.json`; current source targets Electron 43.
-- Use explicit `.js` extensions for relative ESM imports.
+- Use explicit extensions for relative ESM imports: `.js` for JavaScript and `.ts` for canonical TypeScript modules.
 - Prefer static imports. Use `import()` only for a real runtime boundary such as loading packaged resources by file URL.
-- Do not add `createRequire`, compatibility re-exports, duplicate `.cjs` implementations, or extensionless first-party imports.
+- Do not add `createRequire`, duplicate `.cjs` implementations, or extensionless first-party imports. Keep required migration facades pure and temporary as described above.
 - Run `node test/esm-hard-cutover-unit.mjs`, `npm run verify:color-tokens`, and `npm run test:all` before proposing a release change.
 
 ## Build and release workflow

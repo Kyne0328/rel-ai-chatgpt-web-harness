@@ -1,9 +1,12 @@
-import { requireApprovalIfNeeded } from './approval.js';
+import { requireApprovalIfNeeded } from './approval.ts';
 import { toolResult } from './results.js';
 import { callTool } from '../tools.js';
 import { serializeToolError } from '../tools/errors.js';
-import { acknowledgeFallbackCompletionNotice, consumeFallbackCompletionNotices } from './fallbackExecutions.js';
-import { principalFingerprint } from './principal.js';
+import {
+  peekFallbackCompletionNotices,
+  registerFallbackCompletionDelivery
+} from './fallbackExecutions.js';
+import { principalFingerprint } from './principal.ts';
 import { browserHandoffOperationArgs, requestBrowserHandoff } from './browserHandoff.ts';
 
 async function invokeRelaiTool(options = {}) {
@@ -49,10 +52,14 @@ function enrichWithFallbackCompletions(config, name, args, output, context) {
   const workspace = completionWorkspace(args, output);
   if (!workspace) return output;
   const noticeScope = principalFingerprint(context?.principal);
-  if (name === 'relai_work' && args?.action === 'status' && output?.backgroundOperation?.status && output.backgroundOperation.status !== 'running') {
-    acknowledgeFallbackCompletionNotice(config, args.operationId || args.work_id, { noticeScope, workspace });
+  const completedOperations = peekFallbackCompletionNotices(config, { noticeScope, workspace });
+  if (completedOperations.length) {
+    registerFallbackCompletionDelivery(config, completedOperations, {
+      noticeScope,
+      workspace,
+      requestId: context?.requestId
+    });
   }
-  const completedOperations = consumeFallbackCompletionNotices(config, { noticeScope, workspace });
   return completedOperations.length ? { ...output, completedOperations } : output;
 }
 
@@ -60,7 +67,7 @@ function completionWorkspace(args, output) {
   const direct = typeof output?.workspace === 'string'
     ? output.workspace
     : output?.workspace?.alias;
-  return String(direct || output?.backgroundOperation?.workspace || args?.workspace || '').trim();
+  return String(direct || output?.backgroundOperation?.workspace || output?.backgroundOperations?.[0]?.workspace || args?.workspace || '').trim();
 }
 
 export { enrichWithFallbackCompletions, invokeRelaiTool };

@@ -23,14 +23,29 @@
   ],
   "ratelimits": [
     {
-      "name": "USAGE_RATE_LIMITER",
+      "name": "USAGE_IP_RATE_LIMITER",
       "namespace_id": "53101",
-      "simple": { "limit": 6, "period": 60 }
+      "simple": { "limit": 120, "period": 60 }
+    },
+    {
+      "name": "ENROLL_RATE_LIMITER",
+      "namespace_id": "53104",
+      "simple": { "limit": 20, "period": 60 }
+    },
+    {
+      "name": "USAGE_RATE_LIMITER",
+      "namespace_id": "53105",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "TRACE_IP_RATE_LIMITER",
+      "namespace_id": "53106",
+      "simple": { "limit": 600, "period": 60 }
     },
     {
       "name": "TRACE_RATE_LIMITER",
       "namespace_id": "53102",
-      "simple": { "limit": 120, "period": 60 }
+      "simple": { "limit": 240, "period": 60 }
     },
     {
       "name": "ADMIN_RATE_LIMITER",

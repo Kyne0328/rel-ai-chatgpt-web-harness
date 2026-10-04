@@ -4,10 +4,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  clientCapabilityViews,
-  nativeTaskCollection,
-  nativeTaskStatusView,
-  nativeTaskView,
   processOutputView,
   processStateView,
   workSessionStateView
@@ -16,125 +12,11 @@ import { taskProgressView } from '../src/ui/components/task-progress.js';
 import { activeTaskList } from '../src/ui/features/home/index.js';
 import { processListView } from '../src/ui/features/processes/index.js';
 
-const TASKS_EXTENSION_ID = 'io.modelcontextprotocol/tasks';
-
-const supported = clientCapabilityViews({
-  mcpConnection: {
-    recentEvents: [{
-      type: 'mcp_request_received',
-      requestId: 'request-supported',
-      timestamp: '2026-08-01T05:00:00.000Z',
-      clientInfo: { name: 'Compatible host', version: '1.0' },
-      clientCapabilities: { extensions: { [TASKS_EXTENSION_ID]: {} } }
-    }]
-  }
-})[0];
-assert.equal(supported.capabilityState, 'supported');
-assert.equal(supported.capabilityLabel, 'Native MCP Tasks: Supported');
-assert.equal(supported.executionLabel, 'Eligible long work: Native MCP task');
-
-const unsupported = clientCapabilityViews({
-  mcpConnection: {
-    recentEvents: [{
-      type: 'mcp_request_received',
-      requestId: 'request-unsupported',
-      clientCapabilities: { extensions: {} }
-    }]
-  }
-})[0];
-assert.equal(unsupported.capabilityState, 'not_advertised');
-assert.equal(unsupported.capabilityLabel, 'Native MCP Tasks: Not advertised by client');
-assert.equal(unsupported.executionLabel, 'Eligible long work: Same Rel.AI task');
-assert.match(unsupported.description, /continue in the same Rel\.AI task/i);
-
-const unknown = clientCapabilityViews({ mcpConnection: { recentEvents: [] } })[0];
-assert.equal(unknown.capabilityState, 'unknown');
-assert.equal(unknown.capabilityLabel, 'Native MCP Tasks: Unknown');
-assert.equal(unknown.executionLabel, 'Eligible long work: Capability unknown');
-const malformedCapability = clientCapabilityViews({
-  mcpConnection: {
-    recentEvents: [{ type: 'mcp_request_received', clientCapabilities: { extensions: null } }]
-  }
-})[0];
-assert.equal(malformedCapability.capabilityState, 'unknown');
-
-const working = nativeTaskStatusView('working');
-assert.equal(working.active, true);
-assert.equal(working.showSpinner, true);
-assert.equal(working.terminal, false);
-
-const inputRequired = nativeTaskStatusView('input_required');
-assert.equal(inputRequired.waitingForInput, true);
-assert.equal(inputRequired.showSpinner, false);
-assert.match(inputRequired.description, /waiting for the client/i);
-
-for (const status of ['completed', 'failed', 'cancelled']) {
-  const view = nativeTaskStatusView(status, { cancellationConfirmed: status === 'cancelled' });
-  assert.equal(view.terminal, true, `${status} must be terminal`);
-  assert.equal(view.showSpinner, false, `${status} must not animate`);
-}
-
-const cancellationRequested = nativeTaskStatusView('working', { cancelRequested: true });
-assert.equal(cancellationRequested.label, 'Cancellation requested');
-assert.equal(cancellationRequested.terminal, false);
-assert.equal(cancellationRequested.showSpinner, false);
-const cancellationConfirmed = nativeTaskStatusView('cancelled', { cancellationConfirmed: true });
-assert.equal(cancellationConfirmed.label, 'Cancelled (confirmed)');
-
-const missingCollection = nativeTaskCollection({});
-assert.equal(missingCollection.available, false);
-assert.equal(missingCollection.requiredField, 'nativeTasks');
-assert.deepEqual(missingCollection.tasks, []);
-
-const taskWithoutOptionalFields = nativeTaskView({ taskId: 'task-minimal', status: 'working' });
-assert.equal(taskWithoutOptionalFields.taskId, 'task-minimal');
-assert.equal(taskWithoutOptionalFields.operation, 'Asynchronous MCP operation');
-assert.equal(taskWithoutOptionalFields.canCancel, false);
-assert.equal(taskWithoutOptionalFields.logicalTaskId, '');
-assert.equal(taskWithoutOptionalFields.processId, '');
-
-const explicitCancellableTask = nativeTaskView({
-  taskId: 'task-cancellable',
-  status: 'working',
-  actions: { cancel: { available: true, url: '/api/native-tasks/task-cancellable/cancel' } }
-});
-assert.equal(explicitCancellableTask.canCancel, true);
-const inputRequiredCancellableTask = nativeTaskView({
-  taskId: 'task-input',
-  status: 'input_required',
-  actions: { cancel: { available: true, url: '/api/native-tasks/task-input/cancel' } }
-});
-assert.equal(inputRequiredCancellableTask.canCancel, true);
-const cancellationAlreadyRequestedTask = nativeTaskView({
-  taskId: 'task-cancelling',
-  status: 'working',
-  cancelRequested: true,
-  actions: { cancel: { available: true, url: '/api/native-tasks/task-cancelling/cancel' } }
-});
-assert.equal(cancellationAlreadyRequestedTask.canCancel, false);
-const unknownStatusTask = nativeTaskView({
-  taskId: 'task-unknown',
-  status: 'future_status',
-  actions: { cancel: { available: true, url: '/api/native-tasks/task-unknown/cancel' } }
-});
-assert.equal(unknownStatusTask.canCancel, false);
-const completedTask = nativeTaskView({
-  taskId: 'task-startup',
-  status: 'completed',
-  origin: { name: 'relai_process', logicalTaskId: 'work-session-1' },
-  result: { processId: 'proc-persistent' }
-});
-assert.equal(completedTask.canCancel, false);
-assert.equal(completedTask.processId, 'proc-persistent');
-assert.equal(completedTask.logicalTaskId, 'work-session-1');
-
 const persistentProcess = processStateView({
   processId: 'proc-persistent',
-  status: 'running',
-  originatingTaskId: 'task-startup'
-}, [{ taskId: 'task-startup', status: 'completed' }]);
-assert.equal(persistentProcess.independent, true);
-assert.equal(persistentProcess.label, 'Running independently');
+  status: 'running'
+});
+assert.equal(persistentProcess.label, 'Running');
 assert.equal(persistentProcess.canStop, true);
 assert.equal(persistentProcess.terminal, false);
 
@@ -183,6 +65,17 @@ assert.match(emptyIncludedOutput.message, /No recent stdout or stderr output was
 const includedOutput = processOutputView({ stdoutTail: 'ready\n', stderrTail: '' });
 assert.equal(includedOutput.hasOutput, true);
 assert.equal(includedOutput.stdout, 'ready\n');
+const truncatedOutput = processOutputView({
+  stdoutTail: 'latest output\n',
+  stderrTail: '',
+  stdoutBytes: 64 * 1024,
+  stdoutRetainedFromOffset: 4096,
+  stdoutTailStartOffset: 48 * 1024,
+  stdoutDroppedBytes: 512
+});
+assert.equal(truncatedOutput.stdoutMeta.tailTruncated, true, 'dashboard output must know when it is only showing the live tail');
+assert.equal(truncatedOutput.stdoutMeta.retentionTruncated, true, 'dashboard output must distinguish retention loss from tail-only display');
+assert.equal(truncatedOutput.stdoutMeta.droppedBytes, 512, 'dashboard output must surface capture drops separately from retention');
 
 for (const status of ['blocked', 'validating', 'validation_failed', 'completed', 'failed', 'cancelled', 'expired']) {
   const view = workSessionStateView({ status });
@@ -257,8 +150,15 @@ assert.doesNotMatch(processesSource, /Cancel task|data-cancel-native-task/);
 assert.match(processesSource, /'aria-label': `Recent \$\{stream\} output`/);
 assert.match(processesSource, /active \? 'Live output' : 'Recent output'/, 'running commands must identify output as live');
 assert.match(processesSource, /open: active && output\.hasOutput/, 'running command output must be visible as soon as output arrives');
-assert.match(dashboardDataSource, /includeTail: true, tailBytes: 16 \* 1024/, 'dashboard bootstrap must include bounded managed-process output tails');
-assert.match(dashboardRuntimeSource, /includeTail: true, tailBytes: 16 \* 1024/, 'live process updates must include bounded managed-process output tails');
+assert.match(dashboardDataSource, /includeTail: true/, 'dashboard process projection must include managed-process output tails');
+assert.match(dashboardDataSource, /tailBytes: 16 \* 1024/, 'dashboard process output tails must stay bounded');
+assert.match(dashboardDataSource, /includeTailOffsets: true/, 'dashboard process projection must expose exact live-tail offsets');
+assert.match(dashboardDataSource, /terminalOnly: true/, 'dashboard process projection must include a bounded recently-ended process tail');
+assert.match(dashboardRuntimeSource, /managedProcesses: dashboardManagedProcesses\(config\)/, 'live process updates must reuse the same process projection as dashboard bootstrap');
+assert.match(processesSource, /\/api\/processes\/output/, 'Running Commands must be able to retrieve retained output beyond the live tail');
+assert.match(processesSource, /Load earlier output/, 'Running Commands must offer access to earlier retained output');
+assert.match(processesSource, /no longer retained by Rel\.AI/, 'Running Commands must disclose when older output is permanently unavailable');
+assert.match(processesSource, /dropped while Rel\.AI was capturing/, 'Running Commands must disclose capture drops');
 assert.doesNotMatch(taskIdentitySource, /Required backend fields|stdoutTail and stderrTail/);
 const connectionPageSource = settingsSource.match(/function ConnectionPage[\s\S]*?function DesktopConnectionSettings/)?.[0] || '';
 assert.doesNotMatch(connectionPageSource, /Native MCP Tasks|Execution mode|connector-technical-details/);
@@ -269,4 +169,4 @@ assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress \.task-plan-mar
 assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{\s*display:\s*none;/, 'reduced-motion users must not receive the active plan heartbeat');
 assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)/);
 
-console.log('Dashboard capability, work-session, native-task, process, accessibility, and missing-field observability contracts passed.');
+console.log('Dashboard work-session, process, accessibility, and missing-field observability contracts passed.');

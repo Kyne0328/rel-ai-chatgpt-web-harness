@@ -1,4 +1,3 @@
-const MAX_COMMAND_LENGTH = 20_000;
 const AUDIT_COMMAND_LENGTH = 180;
 
 interface CommandDisplayInvocation {
@@ -20,7 +19,7 @@ function redactCommandSecrets(value: unknown): string {
 }
 
 function redactCommandForDisplay(value: unknown): string {
-  return redactCommandSecrets(value).slice(0, MAX_COMMAND_LENGTH);
+  return redactCommandSecrets(value);
 }
 
 function redactCommandForAudit(value: unknown): string {
@@ -55,4 +54,4 @@ function commandDisplayForInvocation(args: CommandDisplayInvocation = {}): strin
   return executable ? redactCommandForDisplay(directCommandDisplay(executable, Array.isArray(args.argv) ? args.argv : [])) : '';
 }
 
-export { commandDisplayForInvocation, directCommandDisplay, redactCommandForAudit, redactCommandForDisplay };
+export { commandDisplayForInvocation, directCommandDisplay, redactCommandForAudit, redactCommandForDisplay, redactCommandSecrets };

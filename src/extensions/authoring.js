@@ -414,14 +414,5 @@ function errorMessage(error) {
 }
 
 export {
-  EXTENSIONS_DIRECTORY,
-  PUBLISHER_CATALOG_FILENAME,
-  PUBLISHER_CONFIG_FILENAME,
-  createPublisherExtension,
-  initializePublisherRepository,
-  normalizeExtensionSlug,
-  publisherConfigSchema,
-  readPublisherConfig,
-  syncPublisherRepository,
-  validatePublisherRepository
+  PUBLISHER_CATALOG_FILENAME, PUBLISHER_CONFIG_FILENAME, createPublisherExtension, initializePublisherRepository, normalizeExtensionSlug, readPublisherConfig, syncPublisherRepository, validatePublisherRepository
 };

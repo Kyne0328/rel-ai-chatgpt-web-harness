@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { sessionSummary } from '../src/ui/features/sessions/index.js';
+import { sessionSummary } from '../src/ui/features/sessions/model.js';
 
 assert.equal(sessionSummary([
   { status: 'running' },

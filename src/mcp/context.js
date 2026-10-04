@@ -13,7 +13,7 @@ import {
 import { getStateDir } from '../statePaths.js';
 import { writeTextAtomic } from '../durableState.ts';
 import { MCP_PROTOCOL_VERSION } from './protocol.js';
-import { principalIdentity } from './principal.js';
+import { principalIdentity } from './principal.ts';
 
 const SERVER_INSTANCE_ID = crypto.randomUUID();
 const OPENAI_SESSION_META_KEY = 'openai/session';

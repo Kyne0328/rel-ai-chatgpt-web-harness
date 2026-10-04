@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { readJsonFile, writeJsonAtomic } from '../durableState.ts';
 import { getStateDir } from '../statePaths.js';
 import { requestStateKey } from './context.js';
-import { stableJson } from './toolManifest.js';
+import { stableJson } from '../stableJson.js';
 
 function resolveConnectionGenerations(config, options = {}) {
   const file = options.file || path.join(getStateDir(config), 'connection-generations.json');

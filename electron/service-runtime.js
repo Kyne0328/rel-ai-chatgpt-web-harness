@@ -18,6 +18,8 @@ function createDesktopServiceRuntime(deps) {
     dashboardWindowManager,
     runtimeLogs,
     secureTunnelRuntime,
+    additionalTunnelRuntime = null,
+    tunnelConnections = null,
     tunnelCredentials,
     buildStatus = {},
     errorCodes,
@@ -106,6 +108,7 @@ function createDesktopServiceRuntime(deps) {
           }));
           break;
         } catch (error) {
+          if (runToken !== lifecycleToken) return getCurrentStatus();
           const retryable = attempt < LOCAL_START_MAX_ATTEMPTS && isRetryableLocalStartupError(error);
           if (!retryable) throw error;
           runtimeLogs.append?.('Local service process did not spawn. Rel.AI is retrying once with a fresh service process.', {
@@ -121,12 +124,16 @@ function createDesktopServiceRuntime(deps) {
           await delay(LOCAL_START_RETRY_DELAY_MS);
         }
       }
+      if (runToken !== lifecycleToken) return getCurrentStatus();
       actualPort = Number(localService.port || guiConfig.port);
       await timing.measure('desktop.readiness', () => waitForLocalApplicationReady(fetchImpl, actualPort, guiConfig.token));
+      if (runToken !== lifecycleToken) return getCurrentStatus();
       activePort = actualPort;
       activeToken = guiConfig.token;
     } catch (error) {
+      if (runToken !== lifecycleToken) return getCurrentStatus();
       await serviceProcessClient.stop().catch(() => {});
+      if (runToken !== lifecycleToken) return getCurrentStatus();
       activePort = 0;
       activeToken = '';
       const portInUse = error?.code === 'EADDRINUSE';
@@ -202,7 +209,14 @@ function createDesktopServiceRuntime(deps) {
     }
 
     const runToken = ++lifecycleToken;
-    await secureTunnelRuntime.stop().catch(() => {});
+    const stopAdditionalTunnels = additionalTunnelRuntime?.stop
+      ? additionalTunnelRuntime.stop().catch(() => {})
+      : Promise.resolve();
+    await Promise.all([
+      secureTunnelRuntime.stop().catch(() => {}),
+      stopAdditionalTunnels
+    ]);
+    if (runToken !== lifecycleToken || stopPromise || !isListening() || !activePort) return getCurrentStatus();
     const localUrl = `http://127.0.0.1:${activePort}`;
     setStatus({
       serverRunning: true,
@@ -258,6 +272,7 @@ function createDesktopServiceRuntime(deps) {
           localUrl
         }
       ));
+      void syncAdditionalTunnels(actualPort, guiConfig.token);
       return getCurrentStatus();
     }
     if (runToken !== lifecycleToken || result.cancelled) return getCurrentStatus();
@@ -278,7 +293,34 @@ function createDesktopServiceRuntime(deps) {
       errorCode: degraded ? (result.errorCode || 'tunnel_connection_interrupted') : '',
       localUrl
     });
+    void syncAdditionalTunnels(actualPort, guiConfig.token);
     return getCurrentStatus();
+  }
+
+  async function syncAdditionalTunnels(port = activePort, localToken = activeToken) {
+    if (!additionalTunnelRuntime?.sync || !tunnelConnections?.runtimeConnections) {
+      return { connections: [], results: [] };
+    }
+    if (!port || !localToken) return { connections: [], results: [] };
+    try {
+      const connections = tunnelConnections.runtimeConnections();
+      return await additionalTunnelRuntime.sync({ connections, port, localToken });
+    } catch (error) {
+      runtimeLogs.append?.('Additional Secure MCP Tunnel connections could not be started.', {
+        level: 'warning',
+        source: 'openai-tunnel',
+        code: 'additional_tunnel_start_failed',
+        details: { message: formatError(error) }
+      });
+      return { connections: additionalTunnelRuntime.snapshot?.().connections || [], results: [], error: formatError(error) };
+    }
+  }
+
+  async function restartAdditionalTunnels() {
+    if (!isListening() || !activePort || !activeToken) {
+      throw new Error('Start the Rel.AI connection before changing additional tunnels.');
+    }
+    return syncAdditionalTunnels(activePort, activeToken);
   }
 
   async function runTunnelDoctor() {
@@ -315,6 +357,9 @@ function createDesktopServiceRuntime(deps) {
   }
 
   async function waitUntilListening(timeoutMs = 10_000) {
+    if (stopPromise) {
+      try { await stopPromise; } catch {}
+    }
     if (isListening() && activePort) return getCurrentStatus();
     const pending = localReadyPromise || startPromise;
     if (!pending) return getCurrentStatus();
@@ -353,7 +398,10 @@ function createDesktopServiceRuntime(deps) {
       const startupSettled = await waitForPromise(pendingLocalReady, startupStopTimeoutMs);
       if (!startupSettled) await serviceProcessClient.dispose({ stop: false }).catch(() => {});
     }
-    const [localRuntime, secureTunnel] = await Promise.all([
+    const stopAdditionalTunnels = additionalTunnelRuntime?.stop
+      ? additionalTunnelRuntime.stop().catch(error => ({ stopped: false, error: formatError(error) }))
+      : Promise.resolve({ stopped: true, connections: [] });
+    const [localRuntime, secureTunnel, additionalSecureTunnels] = await Promise.all([
       serviceProcessClient.stop().catch(error => ({
         ok: false,
         cleanup: {
@@ -362,7 +410,8 @@ function createDesktopServiceRuntime(deps) {
           localService: { closed: false, forced: false, error: formatError(error) }
         }
       })),
-      secureTunnelRuntime.stop().catch(error => ({ stopped: false, exited: false, error: formatError(error) }))
+      secureTunnelRuntime.stop().catch(error => ({ stopped: false, exited: false, error: formatError(error) })),
+      stopAdditionalTunnels
     ]);
     activePort = 0;
     activeToken = '';
@@ -372,9 +421,13 @@ function createDesktopServiceRuntime(deps) {
     replaceCurrentStatus(nextStatus, { silent: options.silent === true });
     const runtimeCleanup = localRuntime.cleanup || {};
     const cleanup = {
-      clean: runtimeCleanup.clean !== false && secureTunnel.stopped !== false && secureTunnel.exited !== false,
+      clean: runtimeCleanup.clean !== false
+        && secureTunnel.stopped !== false
+        && secureTunnel.exited !== false
+        && additionalSecureTunnels.stopped !== false,
       managedProcesses: runtimeCleanup.managedProcesses || { attempted: 0, stopped: 0, orphaned: 0 },
       secureTunnel,
+      additionalSecureTunnels,
       localService: runtimeCleanup.localService || { closed: true, forced: false }
     };
     return { ...nextStatus, cleanup };
@@ -391,7 +444,7 @@ function createDesktopServiceRuntime(deps) {
     };
   }
 
-  return { startServer, restartConnection, stopServer, isListening, waitUntilListening, buildDashboardConnection, runTunnelDoctor };
+  return { startServer, restartConnection, restartAdditionalTunnels, stopServer, isListening, waitUntilListening, buildDashboardConnection, runTunnelDoctor };
 }
 
 async function waitForLocalApplicationReady(fetchImpl, port, token, timeoutMs = LOCAL_READY_TIMEOUT_MS) {

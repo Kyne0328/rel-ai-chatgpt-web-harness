@@ -11,6 +11,7 @@ import { clearWorkspaceValidationAffinity } from '../knowledgeStore.js';
 import { removeWorkspaceLocalAnalytics } from '../localAnalytics.js';
 import { readMcpAuthenticationStatus } from '../mcp/authenticationStatus.js';
 import { mcpConnectionManager } from '../mcp/connectionManager.js';
+import { activeFallbackWorkIds } from '../mcp/fallbackExecutions.js';
 import { buildToolManifest } from '../mcp/toolManifest.js';
 import { getOnboardingStatus, readOnboardingState, writeOnboardingState } from '../onboardingState.js';
 import { resolvePolicy } from '../policyResolver.js';
@@ -19,13 +20,26 @@ import * as release from '../release.js';
 import { getReleaseNotes } from '../releaseNotes.js';
 import { repositoryIntelligence } from '../repository/intelligence/service.js';
 import { withStateDatabase } from '../stateDatabase.ts';
-import { clearWorkspaceTaskHistory, readTaskHistory, readTaskHistorySession } from '../taskHistoryStore.ts';
+import {
+  clearWorkspaceTaskHistory,
+  readRecentTaskHistoryEventsPage,
+  readTaskHistory,
+  readTaskHistoryPage,
+  readTaskHistorySession
+} from '../taskHistoryStore.ts';
 import { describeTaskCodeWorkspace, readTaskCodeDiff } from '../taskCodeWorkspace.js';
 import { getToolActivity, onToolActivity } from '../toolActivity.js';
 import { getToolMetadata } from '../tools.js';
-import { listManagedProcesses, managedProcessStateRevision, onManagedProcessChange } from '../processManager.js';
+import { managedProcessStateRevision, onManagedProcessChange } from '../processManager.js';
 import { onWorkspaceStateChange, workspaceStateRevision } from '../workspaceState.js';
-import { buildDashboardConnectionProjection, buildDashboardPayload, buildDashboardTaskDelta, mergeDashboardActivity } from './dashboard-data.ts';
+import {
+  buildDashboardConnectionProjection,
+  buildDashboardPayload,
+  buildDashboardTaskDelta,
+  dashboardManagedProcesses,
+  mergeDashboardActivity,
+  summarizeDashboardTask
+} from './dashboard-data.ts';
 import { createDashboardTaskEventBatcher, type DashboardTaskBatch } from './dashboard-event-batcher.ts';
 import { workspacePathPreflight } from './dashboard-actions.ts';
 
@@ -206,14 +220,34 @@ export async function dashboardTaskCodeDiff(taskId: string, path: string): Promi
   return await readTaskCodeDiff(readConfig(), { taskId, path }) as JsonRecord;
 }
 
-export function dashboardTaskSession(taskId: string): JsonRecord | null {
+export function dashboardTaskSession(taskId: string, request: JsonRecord = {}): JsonRecord | null {
   const config = readConfig();
-  const session = readTaskHistorySession(config, taskId);
+  const session = readTaskHistorySession(config, taskId, {
+    reconcileInactive: true,
+    activeTaskIds: dashboardActiveTaskIds()
+  });
   if (!session) return null;
+  const activityPage = readRecentTaskHistoryEventsPage(config, {
+    limit: Math.min(500, Math.max(1, Math.floor(Number(request.activityLimit || 200)))),
+    cursor: normalizeActivityHistoryCursor(request.activityCursor),
+    taskId
+  });
+  const activity = {
+    entries: activityPage.entries,
+    page: {
+      hasMore: activityPage.hasMore,
+      nextCursor: activityPage.cursor
+    }
+  };
+  if (request.activityOnly === true) return { ok: true, activity };
   const audit = readAudit(config, { taskId, limit: 10000 });
   return {
     ok: true,
-    session,
+    session: {
+      ...session,
+      events: mergeTaskActivityEvents(session.events, activityPage.entries)
+    },
+    activity: activity.page,
     trace: {
       source: 'local_audit',
       diagnosticOnly: true,
@@ -225,12 +259,93 @@ export function dashboardTaskSession(taskId: string): JsonRecord | null {
   };
 }
 
-export function dashboardLogs(options: DashboardRuntimeOptions = {}, limit = 100): JsonRecord {
+export function dashboardTaskHistory(request: JsonRecord = {}): JsonRecord {
   const config = readConfig();
-  const taskActivity = typeof options.getTaskActivity === 'function' ? options.getTaskActivity() : {};
+  const page = readTaskHistoryPage(config, {
+    limit: Math.min(500, Math.max(1, Math.floor(Number(request.limit || 100)))),
+    cursor: normalizeTaskHistoryCursor(request.cursor),
+    workspace: String(request.workspace || '').trim(),
+    activeTaskIds: dashboardActiveTaskIds()
+  });
+  return {
+    ok: true,
+    tasks: page.tasks.map(task => summarizeDashboardTask(task)),
+    page: {
+      hasMore: page.hasMore,
+      nextCursor: page.cursor
+    }
+  };
+}
+
+function dashboardActiveTaskIds(): string[] {
+  const activity = getToolActivity();
+  const foreground = (Array.isArray(activity?.tasks) ? activity.tasks : [])
+    .filter((task: JsonRecord) => String(task?.status || '').toLowerCase() !== 'inactive')
+    .map((task: JsonRecord) => String(task?.id || task?.taskId || '').trim())
+    .filter(Boolean);
+  return [...new Set([...foreground, ...activeFallbackWorkIds()])];
+}
+
+export function dashboardLogs(options: DashboardRuntimeOptions = {}, limit = 100, cursor: unknown = null): JsonRecord {
+  const config = readConfig();
   const requestedLimit = Math.min(500, Math.max(1, Math.floor(Number(limit || 100))));
-  const tasks = readTaskHistory(config, taskActivity, { limit: requestedLimit, summary: true, maintain: false });
-  return mergeDashboardActivity(productUx.liveLogTail(config, { limit: requestedLimit }), tasks, requestedLimit);
+  const normalizedCursor = normalizeActivityHistoryCursor(cursor);
+  const page = readRecentTaskHistoryEventsPage(config, {
+    limit: requestedLimit,
+    cursor: normalizedCursor
+  });
+  const auditTail = normalizedCursor
+    ? { entries: [] }
+    : productUx.liveLogTail(config, { limit: requestedLimit });
+  const merged = mergeDashboardActivity(
+    auditTail,
+    [{ events: page.entries }],
+    normalizedCursor ? requestedLimit : requestedLimit * 2
+  );
+  return {
+    ok: true,
+    ...merged,
+    page: {
+      hasMore: page.hasMore,
+      nextCursor: page.cursor
+    }
+  };
+}
+
+function mergeTaskActivityEvents(...groups: unknown[]): JsonRecord[] {
+  const byId = new Map<string, JsonRecord>();
+  let fallback = 0;
+  for (const group of groups) {
+    if (!Array.isArray(group)) continue;
+    for (const value of group) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const event = value as JsonRecord;
+      const stableId = String(event.eventId || event.operationId || event.id || '').trim();
+      const key = stableId || `anonymous:${fallback++}`;
+      byId.set(key, { ...(byId.get(key) || {}), ...event });
+    }
+  }
+  return [...byId.values()];
+}
+
+function normalizeTaskHistoryCursor(value: unknown): { updatedAtMs: number; id: string } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as JsonRecord;
+  const updatedAtMs = Math.max(0, Math.floor(Number(record.updatedAtMs || 0)));
+  const id = String(record.id || '').trim();
+  return updatedAtMs && id ? { updatedAtMs, id } : null;
+}
+
+function normalizeActivityHistoryCursor(value: unknown): { eventTimestamp: string; taskUpdatedAtMs: number; taskId: string; eventIndex: number } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as JsonRecord;
+  const eventTimestamp = String(record.eventTimestamp || '').trim();
+  const taskUpdatedAtMs = Math.max(0, Math.floor(Number(record.taskUpdatedAtMs || 0)));
+  const taskId = String(record.taskId || '').trim();
+  const eventIndex = Math.floor(Number(record.eventIndex ?? -1));
+  return eventTimestamp && taskUpdatedAtMs && taskId && eventIndex >= 0
+    ? { eventTimestamp, taskUpdatedAtMs, taskId, eventIndex }
+    : null;
 }
 
 export function dashboardReleaseNotes(): JsonRecord {
@@ -312,7 +427,7 @@ export function createDashboardEventSubscription(
     try {
       const config = readConfigCached();
       sendDomain(DASHBOARD_LIVE_EVENTS.PROCESS_UPDATED, 'process', event.revision, {
-        managedProcesses: listManagedProcesses(config, { limit: 200, activeOnly: true, includeTail: true, tailBytes: 16 * 1024 }).processes
+        managedProcesses: dashboardManagedProcesses(config)
       });
     } catch (error) {
       sink.onError(error);

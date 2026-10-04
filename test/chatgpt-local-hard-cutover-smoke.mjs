@@ -51,8 +51,8 @@ try {
   assert.deepEqual(listed.result.tools.filter(tool => tool.name.startsWith('relai_app_')).map(tool => tool.name), []);
   const listedByName = new Map(listed.result.tools.map(tool => [tool.name, tool]));
   for (const tool of listed.result.tools.filter(tool => getToolSurfaceManifest({ workspaces: {} }).tools.some(item => item.name === tool.name))) {
-    assert.equal(tool._meta?.ui, undefined, `${tool.name} must keep the canonical tool surface iframe-free`);
-    assert.equal(tool._meta?.['openai/outputTemplate'], undefined, `${tool.name} must not attach a ChatGPT output template`);
+    assert.equal(tool._meta?.ui, undefined, `${tool.name} must keep the stdio model surface UI-free`);
+    assert.equal(tool._meta?.['openai/outputTemplate'], undefined, `${tool.name} must not auto-mount an MCP App`);
   }
   assert.equal(listedByName.has('relai_approval'), false);
   assert.ok(listed.result.tools.every(tool => tool.outputSchema));

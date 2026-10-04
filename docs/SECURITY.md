@@ -2,11 +2,11 @@
 
 ## How the ChatGPT connection is secured
 
-Rel.AI supports one ChatGPT connection: **OpenAI Secure MCP Tunnel**.
+Rel.AI supports one ChatGPT transport: **OpenAI Secure MCP Tunnel**. The desktop can supervise a primary tunnel plus additional independent tunnels for other ChatGPT accounts; every tunnel forwards to the same authenticated local MCP service.
 
-The Electron desktop starts the private local MCP service and supervises the bundled OpenAI `tunnel-client`. Two credentials have separate responsibilities:
+The Electron desktop starts the private local MCP service and supervises one bundled OpenAI `tunnel-client` process per configured tunnel. Two credential types have separate responsibilities:
 
-- **OpenAI tunnel runtime API key** — authorizes `tunnel-client` to operate the configured Secure MCP Tunnel. Electron stores this value through `safeStorage`; the renderer receives only whether a key is configured.
+- **OpenAI tunnel runtime API key** — authorizes one `tunnel-client` to operate its configured Secure MCP Tunnel. Electron stores every runtime key through `safeStorage`; the renderer receives only whether a key is configured.
 - **Rel.AI local bearer token** — authenticates requests arriving at the private local `/mcp` service. The tunnel client injects this header when forwarding MCP traffic. It is not a ChatGPT credential and is not shown in the normal connection UI.
 
 The local MCP service requires `Authorization: Bearer <REL_AI_MCP_TOKEN>`. A no-auth mode exists only for explicit local testing and is rejected on non-local binds.

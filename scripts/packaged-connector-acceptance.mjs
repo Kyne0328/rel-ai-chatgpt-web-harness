@@ -41,7 +41,6 @@ let primarySession = null;
 let reconnectSession = null;
 let dashboardCookie = '';
 let stderr = '';
-let nativeTaskRequestId = 10000;
 
 fs.mkdirSync(workspace, { recursive: true });
 fs.writeFileSync(path.join(workspace, 'acceptance.txt'), 'packaged connector acceptance\n');
@@ -104,6 +103,7 @@ try {
   assert.ok(discovered.result?.supportedVersions?.includes(mcpProtocolVersion));
   assert.ok(discovered.result?.capabilities?.tools);
   assert.ok(discovered.result?.capabilities?.resources);
+  assert.deepEqual(discovered.result?.capabilities?.events, {}, 'packaged modern HTTP connector must advertise MCP Events');
   assert.equal(discovered.result?.capabilities?.experimental?.relai?.toolSurfaceVersion, toolSurfaceVersion);
   assert.equal(discovered.result?.capabilities?.experimental?.relai?.toolCount, toolCount);
   assert.equal(Object.hasOwn(discovered.result?.capabilities?.experimental?.relai || {}, 'appToolCount'), false,
@@ -117,11 +117,13 @@ try {
     assert.equal(toolNames.has(requiredTool), true, `Packaged tool surface is missing ${requiredTool}.`);
   }
   assert.equal(toolNames.has('relai_native_tasks_probe'), false);
-  assert.deepEqual(tools.result.tools.filter(tool => tool.name.startsWith('relai_app_')).map(tool => tool.name), []);
+  assert.deepEqual(tools.result.tools.filter(tool => tool.name.startsWith('relai_app_')).map(tool => tool.name), [], 'packaged connector must not expose MCP Apps helper tools');
   const toolByName = new Map(tools.result.tools.map(tool => [tool.name, tool]));
   for (const tool of tools.result.tools) {
-    assert.equal(tool._meta?.ui, undefined, `${tool.name} must stay iframe-free in the packaged connector`);
-    assert.equal(tool._meta?.['openai/outputTemplate'], undefined, `${tool.name} must not attach a ChatGPT output template`);
+    assert.equal(tool._meta?.ui, undefined, `${tool.name} must stay model-facing and UI-free in the packaged connector`);
+    assert.equal(tool._meta?.['openai/outputTemplate'], undefined, `${tool.name} must not auto-mount an MCP App`);
+    assert.equal(tool.annotations?.readOnlyHint, ['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect'].includes(tool.name), `${tool.name} read-only hint must reflect all exposed actions`);
+    assert.equal(tool.annotations?.destructiveHint, !['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect', 'relai_publish'].includes(tool.name), `${tool.name} destructive hint must cover potentially destructive actions`);
   }
   assert.deepEqual(toolByName.get('relai_publish')?.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
   assert.equal(toolNames.has('relai_approval'), false);
@@ -131,15 +133,14 @@ try {
   const resourcesList = await mcp(primarySession, 12, 'resources/list', {});
   assert.ok(resourcesList.result?.resources?.some(item => item.uri === 'relai://server/tool-surface'));
   assert.ok(resourcesList.result?.resources?.some(item => item.uri === 'relai://server/workspaces'));
-  assert.equal(resourcesList.result?.resources?.some(item => item.uri === 'ui://relai/approval/v1.html'), false);
+  assert.equal(resourcesList.result?.resources?.some(item => item.uri === 'relai://server/live-status'), false, 'packaged connector must not expose panel-only live status');
+  assert.equal(resourcesList.result?.resources?.some(item => String(item.uri || '').startsWith('ui://relai/')), false, 'packaged connector must not expose MCP Apps resources');
   const surface = await readResource(primarySession, 13, 'relai://server/tool-surface');
   assert.equal(surface.toolSurfaceVersion, toolSurfaceVersion);
   assert.equal(surface.toolCount, toolCount);
   const surfaceByName = new Map(surface.tools.map(tool => [tool.name, tool]));
-  assert.equal(surfaceByName.get('relai_exec').executionClass, 'native_task_eligible');
-  assert.equal(surfaceByName.get('relai_exec').taskSupport, 'optional');
+  assert.equal(surfaceByName.get('relai_exec').executionClass, 'background_fallback_eligible');
   assert.equal(surfaceByName.get('relai_process').executionClass, 'persistent_process');
-  assert.equal(surfaceByName.get('relai_process').taskSupport, 'forbidden');
   assert.equal(Object.hasOwn(surface, 'compatibilityAliases'), false);
   const help = await readResourceText(primarySession, 14, 'relai://server/help');
   assert.ok(help.includes(`version: ${applicationVersion}`));
@@ -165,7 +166,7 @@ try {
     oldText: 'packaged connector acceptance\n',
     newText: 'packaged connector acceptance verified\n',
     returnDiff: true
-  }, { expectNativeTask: true });
+  });
   assert.equal(edited.changed, true);
   assert.ok(edited.changedFiles?.includes('acceptance.txt'));
   assert.equal(fs.readFileSync(path.join(workspace, 'acceptance.txt'), 'utf8'), 'packaged connector acceptance verified\n');
@@ -177,19 +178,34 @@ try {
   assert.ok(status.workspace?.repository?.changedFiles?.includes('acceptance.txt'));
 
   const activeDashboard = await dashboard();
+
+  for (const prefix of ['/ui/', '/public/ui/']) {
+    for (const [relativePath, contentType] of [
+      ['colorTokens.mjs', 'application/javascript; charset=utf-8'],
+      ['status-tone.js', 'application/javascript; charset=utf-8'],
+      ['styles/color-tokens.css', 'text/css; charset=utf-8']
+    ]) {
+      const route = prefix + relativePath;
+      const response = await freshFetch(`${base}${route}`, { headers: { cookie: dashboardCookie } });
+      assert.equal(response.status, 200, `${route} must serve the packaged raw UI asset`);
+      assert.equal(response.headers.get('content-type'), contentType, `${route} must retain a browser-compatible MIME type`);
+      assert.equal(await response.text(), fs.readFileSync(path.join(resources, 'src', 'ui', relativePath), 'utf8'),
+        `${route} must return the exact packaged asset content`);
+    }
+  }
   assert.equal(activeDashboard.application?.version, applicationVersion);
   const activeTask = activeDashboard.tasks?.find(item => item.id === taskId || item.taskId === taskId);
   assert.ok(activeTask, 'dashboard task history must contain the active packaged acceptance task');
   assert.ok(activeDashboard.auditTail?.entries?.some(item => item.taskId === taskId && (item.publicTool || item.tool) === 'relai_edit' && item.ok !== false));
 
-  const completed = await callTool(primarySession, 20, 'relai_validate', {
+  const completed = await callToolSettled(primarySession, 20, 'relai_validate', {
     action: 'checks',
     workspace: 'acceptance',
     work_id: taskId,
     check: 'npm run check',
     complete: true,
     summary: 'Packaged ESM connector accepted after guarded write, validation, activity inspection, and reconnect verification.'
-  }, { expectNativeTask: true });
+  });
   assert.equal(completed.validationStatus, 'passed');
   assert.equal(completed.completionKnown, true);
   assert.equal(completed.completionSource, 'relai_validate:checks');
@@ -473,7 +489,7 @@ async function initializeMcp(bearerToken, clientVersion) {
   const session = {
     bearerToken,
     clientInfo: { name: 'packaged-chatgpt-acceptance', version: clientVersion },
-    clientCapabilities: { extensions: { 'io.modelcontextprotocol/tasks': { revision: mcpProtocolVersion } } },
+    clientCapabilities: {},
     discovery: null,
     closed: false
   };
@@ -501,8 +517,6 @@ async function mcp(session, id, method, params) {
     ? String(params?.name || '')
     : method === 'resources/read'
       ? String(params?.uri || '')
-      : ['tasks/get', 'tasks/update', 'tasks/cancel'].includes(method)
-        ? String(params?.taskId || '')
       : '';
   const response = await freshFetch(`${base}/mcp`, {
     method: 'POST',
@@ -533,31 +547,40 @@ function mcpBody(session, id, method, params = {}) {
   });
 }
 
-async function callTool(session, id, name, args, options = {}) {
+async function callTool(session, id, name, args) {
   const response = await mcp(session, id, 'tools/call', { name, arguments: args });
-  if (response.result?.resultType === 'task') {
-    assert.equal(options.expectNativeTask, true, `${name} unexpectedly returned a native task.`);
-    const taskId = response.result.taskId;
-    assert.match(taskId || '', /^task_[A-Za-z0-9_-]{32,160}$/);
-    const task = await waitForNativeToolResult(session, taskId);
-    assert.equal(task.status, 'completed', `${name} native task ended as ${task.status}: ${JSON.stringify(task.error)}`);
-    assert.equal(task.result?.isError, false, `${name} native task failed: ${JSON.stringify(task.result?.structuredContent || task.error)}`);
-    return task.result?.structuredContent;
-  }
-  assert.notEqual(options.expectNativeTask, true, `${name} did not return the negotiated native task handle.`);
   assert.equal(response.result?.isError, false, `${name} failed: ${JSON.stringify(response.result?.structuredContent || response.error)}`);
   return response.result?.structuredContent;
 }
 
-async function waitForNativeToolResult(session, taskId) {
-  for (let attempt = 0; attempt < 240; attempt += 1) {
-    const response = await mcp(session, nativeTaskRequestId++, 'tasks/get', { taskId });
-    assert.equal(response.error, undefined, JSON.stringify(response));
-    const task = response.result;
-    if (['completed', 'failed', 'cancelled'].includes(task?.status)) return task;
-    await new Promise(resolve => setTimeout(resolve, Math.max(25, Number(task?.pollIntervalMs) || 25)));
+async function callToolSettled(session, id, name, args, timeoutMs = 120_000) {
+  let result = await callTool(session, id, name, args);
+  if (result?.status !== 'running' || !result.operationId) return result;
+  const operationId = String(result.operationId);
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  let pollAfterMs = Math.max(25, Number(result.pollAfterMs || 50));
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(1000, pollAfterMs)));
+    attempt += 1;
+    const status = await callTool(session, `${id}-status-${attempt}`, 'relai_work', {
+      action: 'status',
+      workspace: args.workspace,
+      operationId,
+      detail: 'compact'
+    });
+    const operation = status?.backgroundOperation;
+    if (!operation || String(operation.operationId || '') !== operationId) continue;
+    if (operation.status === 'running') {
+      pollAfterMs = Math.max(25, Number(operation.pollAfterMs || pollAfterMs));
+      continue;
+    }
+    if (operation.status === 'completed' && operation.result && typeof operation.result === 'object') {
+      return operation.result;
+    }
+    throw new Error(`${name} background operation ${operationId} ended with status ${operation.status}: ${operation.error || operation.result?.error || 'no result'}`);
   }
-  throw new Error(`Native task ${taskId} did not reach a terminal state.`);
+  throw new Error(`${name} background operation ${operationId} did not finish within ${timeoutMs}ms.`);
 }
 
 async function readMcpResponse(response) {

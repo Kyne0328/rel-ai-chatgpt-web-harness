@@ -15,7 +15,6 @@ import { createPortal, flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
-import { HashRouter, useLocation } from 'react-router-dom';
 import { Icon } from '../components/icons.js';
 import { StatusPill } from '../components/pill.js';
 import { connectionLayerViews, connectionSummary } from '../connection-state.js';
@@ -36,6 +35,7 @@ import {
 import { getOverlaySnapshot, removeToastOverlay, subscribeOverlay } from '../overlay-store.js';
 import { getUiPreferences, setThemePreference } from '../preferences.js';
 import { normalizeRouteKey } from '../route-policy.js';
+import { getRouteSnapshot, initRouter, subscribeRoute } from '../router.js';
 export { initConnectorRefreshModal } from '../connector-refresh-modal.js';
 export { initUpdateAvailableModal } from '../update-available-modal.js';
 export { applyLiveEvent, getSnapshot, init, patchLocalConnection, subscribe } from '../store.js';
@@ -47,6 +47,13 @@ const SHELL_STORE_KEYS = Object.freeze(['ok', 'config', 'connectionState', 'task
 const DashboardStoreContext = createContext(null);
 const reactRouteComponents = new Map();
 const reactRoutePreloads = new Map();
+const reactRoutePreloadPromises = new Map();
+const reactRouteWarmups = new Map([
+  ['usage', () => Promise.all([
+    import('../components/sparkline.js'),
+    import('../components/charts.js')
+  ])]
+]);
 const uiListeners = new Set();
 let foundationRoot = null;
 let foundationOptions = {};
@@ -150,9 +157,24 @@ function createLazyRoute(load, factoryName, storeHook, section) {
 }
 
 export function preloadReactRoutes(section = 'home') {
-  const load = reactRoutePreloads.get(section);
-  if (load) return Promise.allSettled([load()]);
-  return Promise.allSettled([]);
+  const id = String(section || '').trim() || 'home';
+  const load = reactRoutePreloads.get(id);
+  if (!load) return Promise.allSettled([]);
+  const existing = reactRoutePreloadPromises.get(id);
+  if (existing) return existing;
+  const warmup = reactRouteWarmups.get(id);
+  const pending = Promise.allSettled([
+    Promise.resolve().then(load),
+    ...(warmup ? [Promise.resolve().then(warmup)] : [])
+  ]).then(results => {
+    if (results.some(result => result.status === 'rejected')) reactRoutePreloadPromises.delete(id);
+    return results;
+  }).catch(() => {
+    reactRoutePreloadPromises.delete(id);
+    return [];
+  });
+  reactRoutePreloadPromises.set(id, pending);
+  return pending;
 }
 
 export function preloadReactRoute(section) {
@@ -161,13 +183,14 @@ export function preloadReactRoute(section) {
 
 export function mountReactFoundation(element, store, options = {}) {
   if (!element || !validStore(store)) return null;
+  initRouter();
   foundationOptions = { ...options };
   foundationRoot ||= createRoot(element);
   flushSync(() => {
     foundationRoot.render(h(
       DashboardStoreContext.Provider,
       { value: store },
-      h(HashRouter, null, h(DashboardShell, foundationOptions))
+      h(DashboardShell, foundationOptions)
     ));
   });
   return foundationRoot;
@@ -246,10 +269,9 @@ function updateUi(patch, { sync = false } = {}) {
 }
 
 function useRoutePresentation() {
-  const routerLocation = useLocation();
+  const routeSnapshot = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
   return useMemo(() => {
-    const pathname = String(routerLocation.pathname || '').replace(/^\/+/, '') || 'home';
-    const routeKey = normalizeRouteKey(`${pathname}${routerLocation.search || ''}`);
+    const routeKey = routeSnapshot.key;
     const path = routeKey.split('?')[0] || 'home';
     const section = path.split('/')[0] || 'home';
     const metadata = routeMetadata(path);
@@ -265,7 +287,7 @@ function useRoutePresentation() {
       section,
       title
     });
-  }, [routerLocation.pathname, routerLocation.search]);
+  }, [routeSnapshot]);
 }
 
 function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
@@ -281,7 +303,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(() => readDeveloperFeatureEnabled('extensions'));
   const paletteOpener = useRef(null);
-  const previousRouteKey = useRef(route.key);
+  const previousRoutePath = useRef(route.path);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
 
   useEffect(() => {
@@ -291,8 +313,10 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   }, [route.owner, route.path, route.title]);
 
   useEffect(() => {
-    const shouldFocusHeading = previousRouteKey.current !== route.key;
-    previousRouteKey.current = route.key;
+    // Parameter changes select content within the page. Preserve the task
+    // inspector or keyboard row focus instead of moving it to the page title.
+    const shouldFocusHeading = previousRoutePath.current !== route.path;
+    previousRoutePath.current = route.path;
     if (shouldFocusHeading) document.getElementById('pageTitle')?.focus({ preventScroll: true });
     window.dispatchEvent(new CustomEvent('relai:route-mounted', {
       detail: { section: route.section, path: route.path, params: new URLSearchParams(route.key.split('?')[1] || '') }
@@ -344,7 +368,14 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
 
   return h(React.Fragment, null,
     h(WindowTitlebar, { desktop, title: route.title }),
-    h('a', { href: '#main', className: 'skip-link' }, 'Skip to content'),
+    h('a', {
+      href: '#main',
+      className: 'skip-link',
+      onClick: event => {
+        event.preventDefault();
+        document.getElementById('main')?.focus();
+      }
+    }, 'Skip to content'),
     h('div', {
       className: 'sr-only',
       id: 'routeAnnouncer',
@@ -542,6 +573,7 @@ function MobileNavigation({ extensionsEnabled, open, route, setOpen }) {
 }
 
 function NavLink({ item, active, onClick }) {
+  const preload = () => preloadReactNavigationTarget(item.href);
   return h('a', {
     href: item.href,
     'data-nav-id': item.id,
@@ -549,8 +581,18 @@ function NavLink({ item, active, onClick }) {
     'aria-current': active ? 'page' : undefined,
     title: item.label,
     className: active ? 'active' : undefined,
+    onPointerEnter: preload,
+    onPointerDown: preload,
+    onFocus: preload,
     onClick
   }, h(NavIcon, { item }), h('span', { className: 'nav-label' }, item.label));
+}
+
+function preloadReactNavigationTarget(href) {
+  const raw = String(href || '').replace(/^#/, '');
+  const key = normalizeRouteKey(raw || 'home');
+  const section = key.split('?')[0].split('/')[0] || 'home';
+  void preloadReactRoute(section);
 }
 
 function NavIcon({ item }) {
@@ -939,9 +981,15 @@ function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onCl
                       role: 'option',
                       'aria-selected': index === safeIndex ? 'true' : 'false',
                       'data-command-index': String(index),
-                      onMouseEnter: () => { if (index !== safeIndex) setActiveIndex(index); },
+                      onMouseEnter: () => {
+                        if (index !== safeIndex) setActiveIndex(index);
+                        preloadReactNavigationTarget(command.href);
+                      },
                       onClick: () => execute(command),
-                      onTouchStart: () => { if (index !== safeIndex) setActiveIndex(index); }
+                      onTouchStart: () => {
+                        if (index !== safeIndex) setActiveIndex(index);
+                        preloadReactNavigationTarget(command.href);
+                      }
                     },
                     h('span', { className: 'command-option-copy' }, h('strong', null, command.label), h('small', null, command.description)),
                     h('span', { className: 'command-group' }, command.group)

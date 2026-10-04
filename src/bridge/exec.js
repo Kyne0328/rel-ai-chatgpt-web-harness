@@ -3,9 +3,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { runProcess } from '../process.js';
-import { nativeToolTaskSignal } from '../mcp/nativeToolTasks.js';
+
 import { getCurrentTaskAbortSignal } from '../toolActivity.js';
 import { combineAbortSignals } from '../abortSignals.js';
+import { updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { isPersistentAdbInvocation, resolveOneShotTimeoutMs } from '../executionControl.js';
 import { outputSpillOwner } from '../outputSpill.js';
 import { runSpan } from '../telemetry.js';
@@ -33,6 +34,12 @@ function throwIfAborted(signal) {
   const error = new Error(String(signal.reason || 'Operation cancelled.'));
   error.name = 'AbortError';
   throw error;
+}
+
+function executionDeadlineExpired(context = {}, signal) {
+  const deadlineAtMs = Number(context?.deadlineAtMs);
+  if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= 0) return false;
+  return Date.now() >= deadlineAtMs || signal?.reason?.name === 'TimeoutError';
 }
 
 async function readGitStatusMap(workspace, config, signal) {
@@ -180,7 +187,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   const maxOutputBytes = clampNumber(args.maxOutputBytes, 1000, 16 * 1024 * 1024, 2 * 1024 * 1024);
   const signal = combineAbortSignals(
     getCurrentTaskAbortSignal(),
-    args._operationTaskId ? nativeToolTaskSignal(args._operationTaskId) : undefined,
+
     context.signal
   );
   const trackMutation = context.mutationTrackingRequired !== false;
@@ -193,6 +200,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       filesystemBefore = !statusBefore ? await readFilesystemStatusMap(workspace, signal) : null;
     } catch (error) {
       if (!signal?.aborted) throw error;
+      const timedOut = executionDeadlineExpired(context, signal);
       return {
         ok: true,
         executed: false,
@@ -211,10 +219,12 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
         stderrBytes: 0,
         stdoutTruncated: false,
         stderrTruncated: false,
-        timedOut: false,
-        cancelled: true,
+        timedOut,
+        cancelled: !timedOut,
         terminationConfirmed: true,
-        error: signal.reason instanceof Error ? signal.reason.message : String(signal.reason || 'Operation cancelled.'),
+        error: timedOut
+          ? `Timed out after ${Number(args.timeoutMs)}ms`
+          : signal.reason instanceof Error ? signal.reason.message : String(signal.reason || 'Operation cancelled.'),
         changedFiles: [],
         changedFilesTruncated: false,
         mutationTracking: 'cancelled-before-execution',
@@ -222,11 +232,12 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       };
     }
   }
+  updateFallbackExecutionPhase(context.fallbackOperationId, 'running', config);
   const result = await runSpan(config, 'relai.process.exec', {
     'relai.workspace': workspace.alias,
-    'relai.process.command': commandSummary,
+    'relai.process.command': displayCommand,
     'relai.process.execution_mode': command ? 'shell' : 'direct',
-    'relai.operation_task.id': String(args._operationTaskId || '')
+
   }, () => runProcess(
     processExecutable,
     processArgv,
@@ -278,7 +289,10 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       mutationUnknown = true;
     }
   }
-  const commandSucceeded = result.exitCode === 0 && result.timedOut !== true && result.cancelled !== true;
+  const deadlineTimedOut = executionDeadlineExpired(context, signal);
+  const timedOut = result.timedOut === true || deadlineTimedOut;
+  const cancelled = result.cancelled === true && !deadlineTimedOut;
+  const commandSucceeded = result.exitCode === 0 && !timedOut && !cancelled;
   return {
     ok: true,
     executed: true,
@@ -297,15 +311,19 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     stderrBytes: result.stderrBytes || 0,
     stdoutTruncated: result.stdoutTruncated === true,
     stderrTruncated: result.stderrTruncated === true,
-    ...(result.stdoutOutputRef ? { stdoutOutputRef: result.stdoutOutputRef, stdoutSpillTruncated: result.stdoutSpillTruncated === true } : {}),
-    ...(result.stderrOutputRef ? { stderrOutputRef: result.stderrOutputRef, stderrSpillTruncated: result.stderrSpillTruncated === true } : {}),
-    timedOut: result.timedOut === true,
+    ...(result.stdoutOutputRef ? { stdoutOutputRef: result.stdoutOutputRef } : {}),
+    ...(result.stdoutSpillTruncated != null ? { stdoutSpillTruncated: result.stdoutSpillTruncated === true } : {}),
+    ...(result.stderrOutputRef ? { stderrOutputRef: result.stderrOutputRef } : {}),
+    ...(result.stderrSpillTruncated != null ? { stderrSpillTruncated: result.stderrSpillTruncated === true } : {}),
+    timedOut,
     queueTimedOut: result.queueTimedOut === true,
-    cancelled: result.cancelled === true,
+    cancelled,
     ...(result.terminationConfirmed != null ? { terminationConfirmed: result.terminationConfirmed === true } : {}),
     ...(result.forcedTermination != null ? { forcedTermination: result.forcedTermination === true } : {}),
     ...(result.signal ? { signal: result.signal } : {}),
-    ...(result.error ? { error: result.error } : {}),
+    ...(deadlineTimedOut
+      ? { error: `Timed out after ${Number(args.timeoutMs)}ms` }
+      : result.error ? { error: result.error } : {}),
     ...(Object.keys(env).length ? { environmentKeys: Object.keys(env).sort((left, right) => left.localeCompare(right)) } : {}),
     changedFiles: changed.files,
     changedFilesTruncated: changed.truncated,

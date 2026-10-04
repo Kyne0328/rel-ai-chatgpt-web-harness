@@ -8,7 +8,6 @@ Rel.AI deliberately uses more than one persistence mechanism. Storage is chosen 
 | --- | --- | --- |
 | Task history | `durable-state.sqlite` | Authoritative task lifecycle history; transactional with other task state. |
 | Task session policy | `durable-state.sqlite` | Machine-owned policy state keyed by workspace/task. |
-| Native tasks and quarantine | `durable-state.sqlite` | Authoritative task records need locking, atomic updates, and quarantine. |
 | Local analytics | `durable-state.sqlite` | Small structured machine-owned counters; no separate JSON engine. |
 | Task/workspace integrity ownership | `durable-state.sqlite` | Safety-critical ownership and validation generations can change together and must commit atomically. |
 | Learned validation affinity | `knowledge/knowledge.sqlite` | Durable learned state with a specialized lifecycle; remains independent of core task state. |

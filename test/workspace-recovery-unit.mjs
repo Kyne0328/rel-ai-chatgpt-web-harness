@@ -22,7 +22,7 @@ fs.writeFileSync(configPath, JSON.stringify({
 process.env.REL_AI_MCP_CONFIG = configPath;
 
 const { callTool: rawCallTool } = await import('../src/tools.js');
-const { CAPABILITIES, createConsentPolicy } = await import('../src/mcp/authorizationPolicy.js');
+const { CAPABILITIES, createConsentPolicy } = await import('../src/mcp/authorizationPolicy.ts');
 const { serializeToolError } = await import('../src/tools/errors.js');
 const { toolResult } = await import('../src/mcpServer.js');
 

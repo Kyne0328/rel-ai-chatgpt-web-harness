@@ -21,7 +21,11 @@
         "scripts/knip-production-runtime.mjs!",
         "bin/**/*.js!",
         "src/**/*.{js,ts,tsx,css}!",
-        "public/**/*.js!"
+        "public/dashboard.js!"
+      ],
+      "ignore": [
+        "public/dashboard-react.js",
+        "public/dashboard-chunks/**"
       ],
       "paths": {
         "./ui/*": [
@@ -42,6 +46,7 @@
         "service-process.js!",
         "renderer/status.js!",
         "renderer/wizard.js!",
+        "renderer/pulse.js!",
         "build/after-pack.js!",
         "scripts/verify-fuses.js!"
       ],

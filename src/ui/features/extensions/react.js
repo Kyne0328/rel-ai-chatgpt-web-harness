@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import './styles.css';
 import * as Dialog from '@radix-ui/react-dialog';
-import { fetchJson, postJson } from '../../api.js';
+import { fetchJson, invalidateCache, postJson } from '../../api.js';
 import { copyText } from '../../clipboard.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
@@ -10,6 +10,8 @@ import { toast } from '../../components/toast.js';
 const h = React.createElement;
 import { EXTENSION_SCHEMA_URL, PERMISSION_METADATA, TABS, TEMPLATES } from './metadata.js';
 const EXTENSIONS_REPOSITORY_URL = 'https://github.com/Kyne0328/rel-ai-extensions';
+const EXTENSIONS_LOAD_TIMEOUT_MS = 30 * 1000;
+const EXTENSIONS_CACHE_TTL_MS = 15 * 1000;
 
 function createExtensionsRoute() {
   return function ExtensionsRoute() {
@@ -23,7 +25,10 @@ function createExtensionsRoute() {
     const [filterStatus, setFilterStatus] = useState('all');
 
     const load = async ({ refresh = false } = {}) => {
-      const result = await fetchJson(`/api/extensions${refresh ? '?refresh=1' : ''}`, { cache: 'no-store' });
+      const url = `/api/extensions${refresh ? '?refresh=1' : ''}`;
+      const result = await fetchJson(url, refresh
+        ? { cache: 'no-store', timeout: EXTENSIONS_LOAD_TIMEOUT_MS }
+        : { cacheTtlMs: EXTENSIONS_CACHE_TTL_MS, timeout: EXTENSIONS_LOAD_TIMEOUT_MS });
       if (!result?.ok) {
         setError(result?.error || 'Extensions could not be loaded.');
         return null;
@@ -100,6 +105,7 @@ function createExtensionsRoute() {
       } else {
         toast(action === 'update' ? `${entry.name} updated.` : `${entry.name} installed successfully.`, { variant: 'success' });
       }
+      invalidateCache('/api/extensions');
       await load();
       if (inspectedExtension?.id === entry.id) {
         setInspectedExtension(null);
@@ -171,6 +177,7 @@ function createExtensionsRoute() {
         return;
       }
       toast(`${extension.name} removed.`, { variant: 'success' });
+      invalidateCache('/api/extensions');
       await load();
       if (inspectedExtension?.id === extension.id) {
         setInspectedExtension(null);

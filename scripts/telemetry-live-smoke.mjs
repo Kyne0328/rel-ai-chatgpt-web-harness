@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { diag, DiagLogLevel } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
@@ -14,7 +15,12 @@ try {
 }
 
 const base = String(process.env.REL_AI_TELEMETRY_BASE_URL || 'https://relai-telemetry.kynemcp.workers.dev').replace(/\/$/, '');
-const testInstallationId = '11111111-1111-4111-8111-111111111111';
+const testInstallationId = crypto.randomUUID();
+const testIngestToken = crypto.randomBytes(32).toString('base64url');
+const ingestHeaders = {
+  authorization: `Bearer ${testIngestToken}`,
+  'x-relai-installation-id': testInstallationId
+};
 
 const health = await fetch(`${base}/health`);
 assert.equal(health.status, 200, `telemetry health failed with HTTP ${health.status}`);
@@ -31,7 +37,7 @@ const presenceBody = {
 
 const firstPresence = await fetch(`${base}/api/v1/installation/presence`, {
   method: 'POST',
-  headers: { 'content-type': 'application/json' },
+  headers: { 'content-type': 'application/json', authorization: ingestHeaders.authorization },
   body: JSON.stringify(presenceBody)
 });
 assert.equal(firstPresence.status, 202);
@@ -39,7 +45,7 @@ assert.equal((await firstPresence.json()).ok, true);
 
 const secondPresence = await fetch(`${base}/api/v1/installation/presence`, {
   method: 'POST',
-  headers: { 'content-type': 'application/json' },
+  headers: { 'content-type': 'application/json', authorization: ingestHeaders.authorization },
   body: JSON.stringify(presenceBody)
 });
 assert.equal(secondPresence.status, 202);
@@ -56,7 +62,7 @@ diag.setLogger({
   verbose: () => {}
 }, DiagLogLevel.ERROR);
 
-const exporter = new OTLPTraceExporter({ url: `${base}/v1/traces` });
+const exporter = new OTLPTraceExporter({ url: `${base}/v1/traces`, headers: ingestHeaders });
 const provider = new NodeTracerProvider({
   resource: resourceFromAttributes({
     'service.name': 'rel-ai-mcp-live-smoke',
@@ -101,7 +107,13 @@ const cleanupSqlPath = '.relai-live-smoke-cleanup.sql';
 fs.writeFileSync(cleanupSqlPath, `DELETE FROM installations WHERE installation_id = '${testInstallationId}';\n`, 'utf8');
 let cleanup;
 try {
-  cleanup = spawnSync('npx', [
+  const npmCli = String(process.env.npm_execpath || '');
+  assert.ok(npmCli, 'npm_execpath is required for live-smoke D1 cleanup');
+  cleanup = spawnSync(process.execPath, [
+    npmCli,
+    'exec',
+    '--yes',
+    '--',
     'wrangler',
     'd1',
     'execute',
@@ -111,7 +123,7 @@ try {
     'cloud/telemetry-worker/wrangler.jsonc',
     '--file',
     cleanupSqlPath
-  ], { encoding: 'utf8', shell: true });
+  ], { encoding: 'utf8' });
 } finally {
   fs.rmSync(cleanupSqlPath, { force: true });
 }

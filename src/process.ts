@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { execa, type Options as ExecaOptions } from 'execa';
 import { resolveGitExecutable } from './gitExecutable.js';
+import { isTimeoutAbort } from './abortSignals.js';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
 import { getStateDir } from './statePaths.js';
@@ -15,6 +16,7 @@ import { clearCurrentMutationProcess, recordCurrentMutationProcess } from './mut
 const TASKKILL_EXE = String.raw`C:\Windows\System32\taskkill.exe`;
 const DEFAULT_TERMINATION_GRACE_MS = 1000;
 const DEFAULT_FORCE_WAIT_MS = 2000;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const DISABLED_GIT_HOOKS_PATH = `.disabled-git-hooks-${process.pid}-${crypto.randomBytes(12).toString('hex')}`;
 
@@ -71,7 +73,8 @@ interface RunProcessOptions {
   readonly preserveOutputWhitespace?: boolean;
 }
 
-interface RunProcessResult {
+/** Process outcomes are part of the exported process API contract. */
+export interface RunProcessResult {
   readonly exitCode: number;
   readonly signal?: string;
   readonly stdout: string;
@@ -310,13 +313,22 @@ async function signalWindowsProcessTree(target: ProcessTarget, force = false): P
   if (!pid || !isProcessAlive(target)) return false;
   return new Promise<boolean>(resolve => {
     let settled = false;
+    let killer: ReturnType<typeof spawn> | null = null;
     const finish = (value: boolean): void => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       resolve(value);
     };
+    // taskkill itself can hang. Its lifetime must not defeat the process
+    // termination deadline or leave a workspace mutation awaiting it forever.
+    const timer = setTimeout(() => {
+      try { killer?.kill(); } catch {}
+      killer?.unref?.();
+      finish(!isProcessAlive(target));
+    }, WINDOWS_TASKKILL_TIMEOUT_MS);
     try {
-      const killer = spawn(TASKKILL_EXE, [...(force ? ['/f'] : []), '/t', '/pid', String(pid)], {
+      killer = spawn(TASKKILL_EXE, [...(force ? ['/f'] : []), '/t', '/pid', String(pid)], {
         stdio: 'ignore',
         windowsHide: true
       });
@@ -380,6 +392,14 @@ function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolea
 }
 
 async function runProcess(command: string, args: readonly string[] = [], options: RunProcessOptions = {}, config: ProcessRuntimeConfig = {}): Promise<RunProcessResult> {
+  if (options.signal?.aborted) {
+    return terminalQueueResult({
+      error: errorMessage(options.signal.reason || 'Operation cancelled before process start.'),
+      timedOut: isTimeoutAbort(options.signal),
+      cancelled: !isTimeoutAbort(options.signal),
+      queueWaitMs: 0
+    });
+  }
   const resourceClass = String(options.resourceClass || '').trim();
   const queueStartedAt = Date.now();
   let resourceLease: ResourceLease | null = null;
@@ -394,8 +414,9 @@ async function runProcess(command: string, args: readonly string[] = [], options
       const queueWaitMs = Date.now() - queueStartedAt;
       if (errorCode(error) === 'HOST_RESOURCE_ABORTED') {
         return terminalQueueResult({
-          error: 'Operation cancelled while waiting for host resources.',
-          cancelled: true,
+          error: errorMessage(options.signal?.reason || 'Operation cancelled while waiting for host resources.'),
+          timedOut: isTimeoutAbort(options.signal),
+          cancelled: !isTimeoutAbort(options.signal),
           queueWaitMs
         });
       }
@@ -412,6 +433,14 @@ async function runProcess(command: string, args: readonly string[] = [], options
 
   try {
     const queueWaitMs = resourceLease?.waitMs || 0;
+    if (options.signal?.aborted) {
+      return terminalQueueResult({
+        error: errorMessage(options.signal.reason || 'Operation cancelled before process start.'),
+        timedOut: isTimeoutAbort(options.signal),
+        cancelled: !isTimeoutAbort(options.signal),
+        queueWaitMs
+      });
+    }
     let stdoutBytes = 0;
     let stderrBytes = 0;
     const configuredMaxOutputBytes = Number(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
@@ -469,22 +498,29 @@ async function runProcess(command: string, args: readonly string[] = [], options
       ...(options.input != null ? { input: String(options.input) } : {})
     };
 
+    const processStartedAt = Date.now();
     const subprocess = execa(file, shell ? [] : processArgs, execaOptions);
     const subprocessClose = observeSubprocessClose(subprocess.nodeChildProcess);
     const windowsTermination = {
       kind: '' as 'timeout' | 'cancel' | '',
       promise: null as Promise<ProcessTreeTerminationResult> | null
     };
+    let notifyWindowsTermination: (outcome: ProcessTreeTerminationResult) => void = () => {};
+    const windowsTerminationSettled = new Promise<ProcessTreeTerminationResult>(resolve => {
+      notifyWindowsTermination = resolve;
+    });
     let windowsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let windowsAbortListener: (() => void) | null = null;
     const requestWindowsTermination = (kind: 'timeout' | 'cancel'): void => {
       if (!ownsWindowsTermination || windowsTermination.promise) return;
       windowsTermination.kind = kind;
-      windowsTermination.promise = terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs });
+      windowsTermination.promise = terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
+        .catch(error => ({ exited: false, forced: true, error: errorMessage(error) }));
+      void windowsTermination.promise.then(notifyWindowsTermination);
     };
     if (ownsWindowsTermination) {
       if (options.signal) {
-        windowsAbortListener = () => requestWindowsTermination('cancel');
+        windowsAbortListener = () => requestWindowsTermination(isTimeoutAbort(options.signal) ? 'timeout' : 'cancel');
         if (options.signal.aborted) windowsAbortListener();
         else options.signal.addEventListener('abort', windowsAbortListener, { once: true });
       }
@@ -515,8 +551,34 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBackpressure.release();
     });
     let result;
+    let windowsTerminationOutcome: ProcessTreeTerminationResult | null = null;
     try {
-      result = await subprocess;
+      const settled = ownsWindowsTermination
+        ? await Promise.race([
+            subprocess.then(value => ({ kind: 'process' as const, value })),
+            windowsTerminationSettled.then(value => ({ kind: 'termination' as const, value }))
+          ])
+        : { kind: 'process' as const, value: await subprocess };
+      if (settled.kind === 'process') {
+        result = settled.value;
+      } else {
+        // Execa cancellation is disabled on Windows because we own tree
+        // termination. A failed kill must still settle this caller, preserve
+        // mutation ownership, and report uncertainty for workspace quarantine.
+        windowsTerminationOutcome = settled.value;
+        result = {
+          exitCode: subprocess.nodeChildProcess?.exitCode ?? -1,
+          signal: undefined,
+          timedOut: windowsTermination.kind === 'timeout',
+          isCanceled: windowsTermination.kind === 'cancel',
+          isForcefullyTerminated: settled.value.forced,
+          failed: true,
+          durationMs: Date.now() - processStartedAt,
+          originalMessage: '',
+          shortMessage: '',
+          message: ''
+        };
+      }
     } finally {
       if (windowsTimeoutTimer) clearTimeout(windowsTimeoutTimer);
       if (windowsAbortListener) options.signal?.removeEventListener('abort', windowsAbortListener);
@@ -527,20 +589,26 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stdoutBackpressure.release();
       stderrBackpressure.release();
     }
-    const windowsTerminationOutcome = windowsTermination.promise ? await windowsTermination.promise : null;
-    const timedOut = windowsTermination.kind === 'timeout' || result.timedOut === true;
-    const cancelled = windowsTermination.kind === 'cancel' || result.isCanceled === true;
+    windowsTerminationOutcome ||= windowsTermination.promise ? await windowsTermination.promise : null;
+    const signalTimedOut = isTimeoutAbort(options.signal)
+      && (windowsTermination.kind === 'timeout' || result.isCanceled === true);
+    const timedOut = windowsTermination.kind === 'timeout' || result.timedOut === true || signalTimedOut;
+    const cancelled = !timedOut && (windowsTermination.kind === 'cancel' || result.isCanceled === true);
     const terminationOutcome = windowsTerminationOutcome || ((timedOut || cancelled)
       ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
       : null);
-    if (terminationOutcome?.exited === true) {
+    if (terminationOutcome) {
+      // Release only our stdio/child handles. This does not assert that the
+      // process tree stopped; unconfirmed mutations retain their durable owner.
       await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
     }
     if (mutationProcessRecorded && (!timedOut && !cancelled || terminationOutcome?.exited === true)) {
       clearCurrentMutationProcess(subprocess.pid);
     }
     if (timedOut) {
-      stderrBuffer.append(`\n[rel-ai-mcp timed out after ${timeoutMs}ms]\n`);
+      stderrBuffer.append(signalTimedOut
+        ? '\n[rel-ai-mcp execution deadline timed out]\n'
+        : `\n[rel-ai-mcp timed out after ${timeoutMs}ms]\n`);
     } else if (cancelled) {
       stderrBuffer.append('\n[rel-ai-mcp operation cancelled]\n');
     }
@@ -556,7 +624,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       && !cancelled
       && (result.exitCode == null || (process.platform === 'win32' && !shell && !windowsExecutableExists(executable, options.cwd, childEnvironment)));
     const error = timedOut
-      ? `Timed out after ${timeoutMs}ms`
+      ? (signalTimedOut ? errorMessage(options.signal?.reason) : `Timed out after ${timeoutMs}ms`)
       : cancelled
         ? errorMessage(options.signal?.reason || 'Operation cancelled.')
         : spawnError
@@ -582,8 +650,14 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBytes,
       stdoutTruncated: stdoutBuffer.truncated,
       stderrTruncated: stderrBuffer.truncated,
-      ...(stdoutSpillResult ? { stdoutOutputRef: stdoutSpillResult.outputRef, stdoutSpillTruncated: stdoutSpillResult.spillTruncated } : {}),
-      ...(stderrSpillResult ? { stderrOutputRef: stderrSpillResult.outputRef, stderrSpillTruncated: stderrSpillResult.spillTruncated } : {})
+      ...(stdoutSpillResult ? {
+        ...(stdoutSpillResult.outputRef ? { stdoutOutputRef: stdoutSpillResult.outputRef } : {}),
+        stdoutSpillTruncated: stdoutSpillResult.spillTruncated === true
+      } : {}),
+      ...(stderrSpillResult ? {
+        ...(stderrSpillResult.outputRef ? { stderrOutputRef: stderrSpillResult.outputRef } : {}),
+        stderrSpillTruncated: stderrSpillResult.spillTruncated === true
+      } : {})
     };
   } finally {
     resourceLease?.release();
@@ -678,15 +752,15 @@ function armPostExitPipeDrain(
   };
 }
 
-function terminalQueueResult(options: { readonly error: string; readonly cancelled?: boolean; readonly queueTimedOut?: boolean; readonly queueWaitMs: number }): RunProcessResult {
+function terminalQueueResult(options: { readonly error: string; readonly cancelled?: boolean; readonly timedOut?: boolean; readonly queueTimedOut?: boolean; readonly queueWaitMs: number }): RunProcessResult {
   return {
     exitCode: -1,
     stdout: '',
     stderr: '',
     error: options.error,
     cancelled: options.cancelled === true,
-    ...(options.cancelled === true ? { terminationConfirmed: true, forcedTermination: false } : {}),
-    timedOut: false,
+    ...((options.cancelled === true || options.timedOut === true) ? { terminationConfirmed: true, forcedTermination: false } : {}),
+    timedOut: options.timedOut === true,
     queueTimedOut: options.queueTimedOut === true,
     queueWaitMs: options.queueWaitMs,
     durationMs: 0,
@@ -817,7 +891,7 @@ function appendLimited(current: string, next: string, maxBytes: number): string 
 
 function summarizeCommand(result: Partial<RunProcessResult> & Pick<RunProcessResult, 'exitCode'>): Record<string, unknown> {
   return {
-    ok: result.exitCode === 0,
+    ok: result.exitCode === 0 && result.timedOut !== true && result.cancelled !== true,
     exitCode: result.exitCode,
     ...(result.signal ? { signal: result.signal } : {}),
     ...(result.error ? { error: result.error } : {}),
@@ -879,16 +953,8 @@ function debugKill(label: string, error: unknown): void {
 }
 
 export {
-  appendLimited,
-  isProcessTreeAlive,
-  killProcessTree,
-  readProcessCreationIdentity,
-  runProcess,
-  summarizeCommand,
-  terminateProcessTree
+  appendLimited, isProcessTreeAlive, readProcessCreationIdentity, runProcess, summarizeCommand, terminateProcessTree
 };
 export type {
-  ProcessTreeTerminationResult,
-  RunProcessOptions,
-  RunProcessResult
+  ProcessTreeTerminationResult
 };

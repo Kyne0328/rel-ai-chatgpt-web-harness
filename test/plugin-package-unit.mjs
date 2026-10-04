@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 import { packPlugin } from '../scripts/pack-plugin.mjs';
 import { validatePlugin } from '../scripts/validate-plugin.mjs';
 import { getMcpToolSchemas } from '../src/tools/schema.js';
-import { TASKS_EXTENSION_REVISION } from '../src/mcp/protocol.js';
 import { startMcpClient, structuredContentOf } from './helpers/mcp-client.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -42,7 +41,7 @@ try {
     'skills/PROVENANCE.md',
     ...expectedSkills.flatMap(skill => [`skills/${skill}/SKILL.md`, `skills/${skill}/agents/openai.yaml`]),
     'skills/rel-ai-workflow/references/workflows.md', 'skills/rel-ai-workflow/references/safety.md',
-    'src/mcp/appUi.js', 'src/mcp/localDeveloperMode.js',
+    'src/mcp/localDeveloperMode.js',
     'bin/rel-ai-mcp.js', 'bin/relai-extension.js', 'package.json'
   ];
   const packedFiles = new Set(metadata.files.map(item => item.path.replaceAll('\\', '/')));
@@ -72,11 +71,6 @@ try {
     client.initialize(1);
     const discovery = await client.waitFor(1);
     assert.equal(discovery.result?.capabilities?.tools != null, true, 'installed MCP server must advertise tools');
-    assert.deepEqual(
-      discovery.result?.capabilities?.extensions?.['io.modelcontextprotocol/tasks'],
-      { revision: TASKS_EXTENSION_REVISION }
-    );
-
     client.send(2, 'tools/list');
     const listed = await client.waitFor(2);
     assert.deepEqual(listed.result.tools, getMcpToolSchemas(config), 'source and extracted MCP tools/list must match, including native ChatGPT status metadata');

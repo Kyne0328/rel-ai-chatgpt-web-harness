@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Hono, type Context } from 'hono';
 
 import { ERROR_CODES, errorPayload } from '../contracts/errors.ts';
+import { MCP_PROTOCOL_VERSION } from '../contracts/mcp.ts';
 import { isDashboardAuthorized } from './auth.ts';
 import { handleDashboard, handleFavicon, handleStaticAsset } from './dashboardShell.ts';
 import { handleHealth } from './health.ts';
@@ -20,6 +21,7 @@ const NOT_FOUND_PAYLOAD = {
     health: 'GET /health',
     dashboard: 'GET /dashboard',
     dashboardV10Api: 'GET /api/dashboard/v10',
+    taskHistoryApi: 'GET /api/tasks/history',
     logsApi: 'GET /api/logs',
     diagnosticsApi: 'GET /api/diagnostics',
     diagnosticsResetApi: 'POST /api/diagnostics/reset',
@@ -30,7 +32,7 @@ const NOT_FOUND_PAYLOAD = {
     updateWorkspacesApi: 'POST /api/workspaces',
     workspacePreflightApi: 'GET /api/workspace/preflight?workspace=...',
     events: 'GET /events',
-    streamableHttp: 'POST /mcp (MCP 2026-07-28; Authentication: private Bearer token)'
+    streamableHttp: `POST /mcp (MCP ${MCP_PROTOCOL_VERSION}; Authentication: private Bearer token)`
   }
 } as const;
 
@@ -86,6 +88,7 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/browser/preview': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleBrowserPreview') },
   '/api/tasks/files': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskCodeWorkspace') },
   '/api/tasks/diff': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskCodeDiff') },
+  '/api/tasks/history': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskHistory') },
   '/api/tasks/session': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleTaskSession') },
   '/api/logs': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiLogs') },
   '/api/diagnostics': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnostics') },
@@ -94,6 +97,7 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/computer': { auth: authDashboard, handler: lazyRoute(loadDashboardComputer, 'handleApiComputer') },
   '/api/release-notes': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleReleaseNotes') },
   '/api/workspace/preflight': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleWorkspacePreflight') },
+  '/api/processes/output': { auth: authDashboard, handler: lazyRoute(loadDashboardProcesses, 'handleApiProcessOutput') },
   '/events': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleEvents') }
 });
 

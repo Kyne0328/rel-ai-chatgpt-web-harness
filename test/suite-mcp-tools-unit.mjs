@@ -7,14 +7,16 @@ async function case_approval_broker_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/mcp/approval.js");
+    const __m1 = await import("../src/mcp/approval.ts");
     const { approvalRequirement } = __m1;
   
-    const __m2 = await import("../src/mcp/approvalBroker.js");
+    const __m2 = await import("../src/mcp/approvalBroker.ts");
     const { APPROVAL_TTL_MS,
     approvalDigest,
-    requestApproval,
-    supportsNativeApproval } = __m2;
+    requestApproval } = __m2;
+
+    const __mElicitation = await import("../src/mcp/elicitation.ts");
+    const { supportsFormElicitation } = __mElicitation;
   
   const principal = { clientId: 'chatgpt-session-a', authMode: 'local_session' };
   const otherPrincipal = { clientId: 'chatgpt-session-b', authMode: 'local_session' };
@@ -36,9 +38,9 @@ async function case_approval_broker_unit() {
   const browserClearApproval = approvalRequirement('relai_browser', { action: 'clear_profile', workspace: 'repo' });
   assert.ok(browserClearApproval, 'clearing saved browser sign-ins must require explicit user approval');
   assert.match(browserClearApproval.message, /saved browser sign-ins and site data/i);
-  assert.equal(supportsNativeApproval({}), false);
-  assert.equal(supportsNativeApproval({ elicitation: {} }), true);
-  assert.equal(supportsNativeApproval({ elicitation: { form: {} } }), true);
+  assert.equal(supportsFormElicitation({}), false);
+  assert.equal(supportsFormElicitation({ elicitation: {} }), true);
+  assert.equal(supportsFormElicitation({ elicitation: { form: {} } }), true);
   
   assert.notEqual(approvalDigest('relai_changes', baseArgs), approvalDigest('relai_changes', { ...baseArgs, work_id: 'work-b' }));
   assert.notEqual(approvalDigest('relai_changes', baseArgs), approvalDigest('relai_changes', { ...baseArgs, removeUntracked: false }));
@@ -187,7 +189,7 @@ async function case_authorization_policy_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/mcp/authorizationPolicy.js");
+    const __m1 = await import("../src/mcp/authorizationPolicy.ts");
     const { CAPABILITIES,
     assertAuthorizedToolCall,
     createConsentPolicy,
@@ -198,7 +200,7 @@ async function case_authorization_policy_unit() {
     const __m2 = await import("../src/tools/operationIds.js");
     const { OPERATION_IDS: OP } = __m2;
   
-    const __m3 = await import("../src/mcp/approval.js");
+    const __m3 = await import("../src/mcp/approval.ts");
     const { approvalDigest } = __m3;
   
   const grant = createConsentPolicy({
@@ -238,11 +240,6 @@ async function case_authorization_policy_unit() {
     approvalDigest('relai_changes', destructiveApproval),
     approvalDigest('relai_changes', { ...destructiveApproval, removeUntracked: false }),
     'approval state must bind the destructive cleanup scope instead of relying on a model-supplied confirmation token'
-  );
-  assert.equal(
-    approvalDigest('relai_changes', { ...destructiveApproval, _operationTaskId: 'transport-a' }),
-    approvalDigest('relai_changes', { ...destructiveApproval, _operationTaskId: 'transport-b' }),
-    'ephemeral transport task identifiers are not approval boundaries'
   );
   
   assert.throws(
@@ -938,13 +935,6 @@ async function case_mcp_2026_header_unit() {
   );
   assert.equal(
     validateMcpRequestHeaders({
-      ...headers('tasks/get', 'task_wrong'),
-      'mcp-session-id': 'legacy-session'
-    }, message('tasks/get', { taskId: 'task_wrong' })).code,
-    -32600
-  );
-  assert.equal(
-    validateMcpRequestHeaders({
       ...headers('tools/list'),
       'mcp-param-extra': 'undeclared'
     }, message('tools/list')).code,
@@ -960,22 +950,18 @@ async function case_mcp_2026_header_unit() {
   assert.equal(validateMcpRequestHeaders(headers(), []).code, -32600);
   assert.equal(expectedMcpName('tools/call', { name: 'relai_work' }), 'relai_work');
   assert.equal(expectedMcpName('resources/read', { uri: 'relai://server/help' }), 'relai://server/help');
-  assert.equal(expectedMcpName('tasks/get', { taskId: 'task_abc' }), 'task_abc');
   
   console.log('Strict MCP 2026-07-28 protocol headers, metadata, names, and session rejection matrix passed.');
 }
 await case_mcp_2026_header_unit();
 
-// Formerly mcp-app-ui-unit.mjs
-async function case_mcp_app_ui_unit() {
+// Canonical model-facing tool presentation contract.
+async function case_mcp_tool_presentation_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
     const __m1 = await import("@modelcontextprotocol/core");
     const { ToolSchema } = __m1;
-  
-    const __m2 = await import("../src/mcp/appUi.js");
-    const { toolUiMetadata } = __m2;
   
     const __m3 = await import("../src/mcp/context.js");
     const { openAiConversationId, toolContext } = __m3;
@@ -1018,19 +1004,18 @@ async function case_mcp_app_ui_unit() {
   ]);
   
   for (const schema of publicSchemas) {
-    assert.deepEqual(schema.annotations, canonicalByName.get(schema.name)?.annotations, `${schema.name} must preserve truthful canonical annotations`);
+    const canonicalAnnotations = canonicalByName.get(schema.name)?.annotations;
+    assert.deepEqual(schema.annotations, canonicalAnnotations, `${schema.name} discovery must preserve canonical behavior hints`);
+    assert.equal(schema.annotations?.readOnlyHint, ['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect'].includes(schema.name), `${schema.name} read-only hint must reflect all exposed actions`);
+    assert.equal(schema.annotations?.destructiveHint, !['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect', 'relai_publish'].includes(schema.name), `${schema.name} destructive hint must cover potentially destructive actions`);
     assert.deepEqual(schema._meta?.securitySchemes, LOCAL_DEVELOPER_SECURITY_SCHEMES, `${schema.name} must advertise noauth compatibility metadata`);
     const expected = invocationLabels.get(schema.name);
     assert.deepEqual([
       schema._meta?.['openai/toolInvocation/invoking'],
       schema._meta?.['openai/toolInvocation/invoked']
     ], expected, `${schema.name} must retain concise native invocation labels`);
-    assert.deepEqual(toolUiMetadata(schema.name), {
-      'openai/toolInvocation/invoking': expected[0],
-      'openai/toolInvocation/invoked': expected[1]
-    });
-    assert.equal(schema._meta?.ui, undefined, `${schema.name} must stay iframe-free`);
-    assert.equal(schema._meta?.['openai/outputTemplate'], undefined, `${schema.name} must not attach a ChatGPT output template`);
+    assert.equal(schema._meta?.ui, undefined, `${schema.name} must stay model-facing and UI-free`);
+    assert.equal(schema._meta?.['openai/outputTemplate'], undefined, `${schema.name} must not auto-mount an MCP App`);
     assert.ok(expected.every(label => label.length <= 64));
   }
   
@@ -1044,9 +1029,9 @@ async function case_mcp_app_ui_unit() {
   assert.equal(openAiConversationId(openAiEnvelope), 'chat-session-regression');
   assert.equal(toolContext({ mcpReq: { id: 42, _meta: openAiEnvelope, envelope: {} } }).conversationId, 'chat-session-regression');
   
-  console.log('Canonical tools keep native status labels without mounting an MCP approval card.');
+  console.log('Canonical tools stay UI-free and retain concise native invocation labels.');
 }
-await case_mcp_app_ui_unit();
+await case_mcp_tool_presentation_unit();
 
 // Formerly mcp-authentication-status-unit.mjs
 async function case_mcp_authentication_status_unit() {
@@ -1086,201 +1071,6 @@ async function case_mcp_authentication_status_unit() {
 }
 await case_mcp_authentication_status_unit();
 
-// Formerly mcp-execution-mode-unit.mjs
-async function case_mcp_execution_mode_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("@modelcontextprotocol/server");
-    const { MissingRequiredClientCapabilityError,
-    ProtocolErrorCode } = __m1;
-  
-    const __m2 = await import("../src/mcp/protocol.js");
-    const { INVALID_TASKS_CAPABILITY_CODE,
-    MISSING_TASKS_CAPABILITY_CODE,
-    TASK_EXECUTION_MODE,
-    TASKS_EXTENSION_ID,
-    TASKS_EXTENSION_REVISION,
-    clientSupportsNativeTasks,
-    createMissingTasksCapabilityError,
-    negotiateTasksCapability } = __m2;
-  
-    const __m3 = await import("../src/mcp/executionMode.js");
-    const { BOUNDED_SYNCHRONOUS_CLEANUP,
-    DEFAULT_SYNCHRONOUS_EXECUTION_BOUNDS,
-    EXECUTION_ABORTED_CODE,
-    SYNCHRONOUS_EXECUTION_LIMIT_CODE,
-    TASK_ELIGIBILITY,
-    UNSUPPORTED_EXECUTION_MODE,
-    assessSynchronousExecution,
-    selectExecutionMode } = __m3;
-  
-  const tasksCapability = { extensions: { [TASKS_EXTENSION_ID]: { revision: TASKS_EXTENSION_REVISION } } };
-  
-  assert.equal(MISSING_TASKS_CAPABILITY_CODE, ProtocolErrorCode.MissingRequiredClientCapability);
-  assert.equal(MISSING_TASKS_CAPABILITY_CODE, -32021);
-  const missingCapabilityError = createMissingTasksCapabilityError();
-  assert.ok(missingCapabilityError instanceof MissingRequiredClientCapabilityError);
-  assert.equal(missingCapabilityError.code, -32021);
-  assert.deepEqual(missingCapabilityError.data, {
-    requiredCapabilities: { extensions: { [TASKS_EXTENSION_ID]: { revision: TASKS_EXTENSION_REVISION } } }
-  });
-  
-  assert.deepEqual(negotiateTasksCapability(tasksCapability), {
-    mode: TASK_EXECUTION_MODE.NATIVE_TASKS,
-    supported: true,
-    valid: true,
-    reason: 'capability_present'
-  });
-  assert.equal(clientSupportsNativeTasks(tasksCapability), true);
-  assert.deepEqual(negotiateTasksCapability({}), {
-    mode: TASK_EXECUTION_MODE.BOUNDED_SYNCHRONOUS,
-    supported: false,
-    valid: true,
-    reason: 'capability_absent'
-  });
-  assert.deepEqual(negotiateTasksCapability([]), {
-    mode: TASK_EXECUTION_MODE.BOUNDED_SYNCHRONOUS,
-    supported: false,
-    valid: false,
-    reason: 'malformed_capabilities'
-  });
-  assert.equal(negotiateTasksCapability({ extensions: [] }).valid, false);
-  assert.equal(negotiateTasksCapability({ extensions: { [TASKS_EXTENSION_ID]: true } }).valid, false);
-  
-  const heuristicOnly = negotiateTasksCapability({
-    clientName: 'ChatGPT',
-    transport: 'http',
-    protocolVersion: '2026-07-28'
-  });
-  assert.equal(heuristicOnly.mode, TASK_EXECUTION_MODE.BOUNDED_SYNCHRONOUS);
-  assert.equal(heuristicOnly.supported, false);
-  
-  const native = selectExecutionMode({
-    clientCapabilities: tasksCapability,
-    taskEligibility: TASK_ELIGIBILITY.ELIGIBLE,
-    canCompleteSynchronously: false
-  });
-  assert.equal(native.ok, true);
-  assert.equal(native.mode, TASK_EXECUTION_MODE.NATIVE_TASKS);
-  
-  const fast = selectExecutionMode({
-    clientCapabilities: tasksCapability,
-    taskEligibility: TASK_ELIGIBILITY.FAST,
-    canCompleteSynchronously: true,
-    estimatedDurationMs: 25
-  });
-  assert.equal(fast.ok, true);
-  assert.equal(fast.mode, TASK_EXECUTION_MODE.BOUNDED_SYNCHRONOUS);
-  assert.deepEqual(fast.cleanup, BOUNDED_SYNCHRONOUS_CLEANUP);
-  
-  const immediate = selectExecutionMode({
-    clientCapabilities: tasksCapability,
-    taskEligibility: TASK_ELIGIBILITY.IMMEDIATE,
-    canCompleteSynchronously: true
-  });
-  assert.equal(immediate.mode, TASK_EXECUTION_MODE.BOUNDED_SYNCHRONOUS);
-  
-  const supportedButSafe = selectExecutionMode({
-    clientCapabilities: tasksCapability,
-    taskEligibility: TASK_ELIGIBILITY.ELIGIBLE,
-    canCompleteSynchronously: true
-  });
-  assert.equal(supportedButSafe.mode, TASK_EXECUTION_MODE.BOUNDED_SYNCHRONOUS);
-  
-  const unsupportedButSafe = selectExecutionMode({
-    clientCapabilities: {},
-    taskEligibility: TASK_ELIGIBILITY.ELIGIBLE,
-    canCompleteSynchronously: true,
-    estimatedDurationMs: DEFAULT_SYNCHRONOUS_EXECUTION_BOUNDS.maxDurationMs
-  });
-  assert.equal(unsupportedButSafe.ok, true);
-  assert.equal(unsupportedButSafe.mode, TASK_EXECUTION_MODE.BOUNDED_SYNCHRONOUS);
-  
-  const malformedButOtherwiseSafe = selectExecutionMode({
-    clientCapabilities: { extensions: [] },
-    taskEligibility: TASK_ELIGIBILITY.ELIGIBLE,
-    canCompleteSynchronously: true,
-    estimatedDurationMs: 1
-  });
-  assert.equal(malformedButOtherwiseSafe.ok, false);
-  assert.equal(malformedButOtherwiseSafe.mode, UNSUPPORTED_EXECUTION_MODE);
-  assert.equal(malformedButOtherwiseSafe.error.code, INVALID_TASKS_CAPABILITY_CODE);
-  assert.equal(malformedButOtherwiseSafe.error.reason, 'invalid_client_capabilities');
-  assert.equal(malformedButOtherwiseSafe.error.data.capabilityReason, 'malformed_extensions');
-  
-  const tasksRequired = selectExecutionMode({
-    clientCapabilities: {},
-    taskEligibility: TASK_ELIGIBILITY.ELIGIBLE,
-    canCompleteSynchronously: false
-  });
-  assert.equal(tasksRequired.ok, false);
-  assert.equal(tasksRequired.mode, UNSUPPORTED_EXECUTION_MODE);
-  assert.equal(tasksRequired.error.code, MISSING_TASKS_CAPABILITY_CODE);
-  assert.equal(tasksRequired.error.reason, 'native_tasks_required');
-  
-  const overLimit = selectExecutionMode({
-    clientCapabilities: {},
-    taskEligibility: TASK_ELIGIBILITY.INELIGIBLE,
-    canCompleteSynchronously: true,
-    estimatedDurationMs: DEFAULT_SYNCHRONOUS_EXECUTION_BOUNDS.maxDurationMs + 1
-  });
-  assert.equal(overLimit.ok, false);
-  assert.equal(overLimit.mode, UNSUPPORTED_EXECUTION_MODE);
-  assert.equal(overLimit.error.code, SYNCHRONOUS_EXECUTION_LIMIT_CODE);
-  assert.deepEqual(overLimit.synchronous.violations, ['maximum_duration_exceeded']);
-  assert.deepEqual(overLimit.error.data.cleanup, BOUNDED_SYNCHRONOUS_CLEANUP);
-  
-  assert.deepEqual(assessSynchronousExecution({
-    canCompleteSynchronously: false,
-    bounds: DEFAULT_SYNCHRONOUS_EXECUTION_BOUNDS
-  }).violations, ['operation_not_synchronously_safe']);
-  
-  const alreadyAborted = new AbortController();
-  alreadyAborted.abort('request closed');
-  const aborted = selectExecutionMode({
-    clientCapabilities: tasksCapability,
-    taskEligibility: TASK_ELIGIBILITY.ELIGIBLE,
-    canCompleteSynchronously: false,
-    abortSignals: [alreadyAborted.signal]
-  });
-  assert.equal(aborted.ok, false);
-  assert.equal(aborted.error.code, EXECUTION_ABORTED_CODE);
-  assert.equal(aborted.error.reason, 'execution_aborted');
-  
-  const requestController = new AbortController();
-  const connectionController = new AbortController();
-  const cancellable = selectExecutionMode({
-    clientCapabilities: {},
-    taskEligibility: TASK_ELIGIBILITY.FAST,
-    canCompleteSynchronously: true,
-    abortSignals: [requestController.signal, connectionController.signal]
-  });
-  assert.equal(cancellable.signal.aborted, false);
-  connectionController.abort('connection closed');
-  assert.equal(cancellable.signal.aborted, true);
-  assert.equal(BOUNDED_SYNCHRONOUS_CLEANUP.abortOnRequestClose, true);
-  assert.equal(BOUNDED_SYNCHRONOUS_CLEANUP.abortOnConnectionClose, false, 'accepted HTTP work must not advertise connection-close cancellation after transport loss is detached from execution');
-  assert.equal(BOUNDED_SYNCHRONOUS_CLEANUP.terminateSubprocessTree, true);
-  assert.equal(BOUNDED_SYNCHRONOUS_CLEANUP.awaitSubprocessExit, true);
-  
-  assert.throws(
-    () => selectExecutionMode({ taskEligibility: 'client_name_based', canCompleteSynchronously: true }),
-    /taskEligibility must be one of/
-  );
-  assert.throws(
-    () => selectExecutionMode({
-      taskEligibility: TASK_ELIGIBILITY.FAST,
-      canCompleteSynchronously: true,
-      synchronousBounds: { maxDurationMs: 0 }
-    }),
-    /maxDurationMs must be a positive finite number/
-  );
-  
-  console.log('Canonical MCP Tasks capability negotiation and execution-mode policy passed.');
-}
-await case_mcp_execution_mode_unit();
-
 // Formerly mcp-legacy-adapter-unit.mjs
 async function case_mcp_legacy_adapter_unit() {
   const __m0 = await import("node:assert/strict");
@@ -1316,538 +1106,15 @@ async function case_mcp_legacy_adapter_unit() {
 }
 await case_mcp_legacy_adapter_unit();
 
-// Formerly mcp-transport-tasks-unit.mjs
-async function case_mcp_transport_tasks_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("node:events");
-    const { EventEmitter } = __m1;
-  
-    const __m2 = await import("node:fs");
-    const fs = __m2.default;
-  
-    const __m3 = await import("node:os");
-    const os = __m3.default;
-  
-    const __m4 = await import("node:path");
-    const path = __m4.default;
-  
-    const __m5 = await import("node:stream");
-    const { Readable } = __m5;
-  
-    const __m6 = await import("@modelcontextprotocol/server");
-    const { CLIENT_CAPABILITIES_META_KEY,
-    CLIENT_INFO_META_KEY,
-    PROTOCOL_VERSION_META_KEY } = __m6;
-  
-    const __m7 = await import("../src/http/io.ts");
-    const { DEFAULT_MAX_BODY_BYTES, normalizeMaxBodyBytes, readRawBody, sendJson } = __m7;
-  
-    const __m8 = await import("../src/http/mcpTransport.ts");
-    const { createHttpRequestAbortScope, expectedMcpName } = __m8;
-  
-    const __m9 = await import("../src/httpServer.ts");
-    const { resolveHttpRequestTimeoutMs } = __m9;
-  
-    const __m10 = await import("../src/mcp/nativeTaskService.js");
-    const { createNativeTask,
-    getNativeTask,
-    requestNativeTaskInput } = __m10;
-  
-    const __m11 = await import("../src/mcp/protocol.js");
-    const { MCP_PROTOCOL_VERSION,
-    TASKS_EXTENSION_ID,
-    TASKS_EXTENSION_REVISION } = __m11;
-  
-    const __m12 = await import("../src/mcp/transportTasks.js");
-    const { createTaskAwareStdioTransport,
-    handleTransportTaskRequest,
-    isTransportTaskRequestCandidate,
-    runBoundedExecution } = __m12;
-  
-  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-transport-tasks-'));
-  const config = { stateDir: sandbox };
-  const owner = { clientId: 'client-a', authMode: 'oauth' };
-  const otherOwner = { clientId: 'client-b', authMode: 'oauth' };
-  const localOwner = { clientId: 'stdio:session-a', authMode: 'local_session' };
-  const localOtherOwner = { clientId: 'stdio:session-b', authMode: 'local_session' };
-  const tasksCapabilities = { extensions: { [TASKS_EXTENSION_ID]: { revision: TASKS_EXTENSION_REVISION } } };
-  
-  function request(id, method, params = {}, capabilities = tasksCapabilities) {
-    return {
-      jsonrpc: '2.0',
-      id,
-      method,
-      params: {
-        ...params,
-        _meta: {
-          [PROTOCOL_VERSION_META_KEY]: MCP_PROTOCOL_VERSION,
-          [CLIENT_INFO_META_KEY]: { name: 'transport-test', version: '1.0.0' },
-          [CLIENT_CAPABILITIES_META_KEY]: capabilities
-        }
-      }
-    };
-  }
-  
-  class FakeTransport {
-    constructor() {
-      this.sent = [];
-      this.closed = false;
-    }
-  
-    async start() {}
-  
-    async close() {
-      if (this.closed) return;
-      this.closed = true;
-      this.onclose?.();
-    }
-  
-    async send(message) {
-      this.sent.push(message);
-    }
-  
-    receive(message) {
-      this.onmessage?.(message);
-    }
-  }
-  
-  async function waitForSent(transport, count) {
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (transport.sent.length >= count) return transport.sent[count - 1];
-      await new Promise(resolve => setTimeout(resolve, 5));
-    }
-    throw new Error(`Timed out waiting for stdio response ${count}.`);
-  }
-  
-  try {
-    const editTaskCandidate = request(99, 'tools/call', {
-      name: 'relai_edit',
-      arguments: { work_id: 'work-session', path: 'README.md', oldText: 'before', newText: 'after' }
-    }, tasksCapabilities);
-    assert.equal(isTransportTaskRequestCandidate(config, editTaskCandidate), true, 'ordinary relai_edit must use recoverable long-call execution');
-    const editChecksTaskCandidate = request(98, 'tools/call', {
-      name: 'relai_edit',
-      arguments: { work_id: 'work-session', path: 'README.md', oldText: 'before', newText: 'after', runChecks: true }
-    }, tasksCapabilities);
-    assert.equal(isTransportTaskRequestCandidate(config, editChecksTaskCandidate), true, 'relai_edit with post-checks must use recoverable long-call execution');
-    const editWithoutTasks = await handleTransportTaskRequest(config, request(94, 'tools/call', {
-      name: 'relai_edit',
-      arguments: { workspace: 'app', work_id: 'edit-no-tasks', path: 'README.md', oldText: 'before', newText: 'after' }
-    }, {}), {
-      principal: owner,
-      transportType: 'streamable-http',
-      synchronousFallbackGraceMs: 0,
-      executeToolResult: async () => ({ isError: false, structuredContent: { ok: true, changed: true } })
-    });
-    assert.equal(editWithoutTasks.body.result?.structuredContent?.status, 'running', 'ordinary edits must detach safely when the client does not advertise Tasks');
-    for (const candidate of [
-      request(97, 'tools/call', { name: 'relai_search', arguments: { action: 'semantic', work_id: 'work-session', query: 'target' } }, tasksCapabilities),
-      request(96, 'tools/call', { name: 'relai_inspect', arguments: { action: 'architecture', work_id: 'work-session' } }, tasksCapabilities),
-      request(95, 'tools/call', { name: 'relai_validate', arguments: { action: 'http', work_id: 'work-session', route: '/health' } }, tasksCapabilities)
-    ]) {
-      assert.equal(isTransportTaskRequestCandidate(config, candidate), true, `${candidate.params.name} long operation must reach capability negotiation`);
-    }
-    for (const [id, name, args] of [
-      [93, 'relai_search', { action: 'semantic', workspace: 'app', query: 'target' }],
-      [92, 'relai_inspect', { action: 'architecture', workspace: 'app' }],
-      [91, 'relai_validate', { action: 'http', workspace: 'app', route: '/health' }]
-    ]) {
-      const taskless = await handleTransportTaskRequest(config, request(id, 'tools/call', {
-        name,
-        arguments: args
-      }, {}), {
-        principal: owner,
-        transportType: 'streamable-http',
-        synchronousFallbackGraceMs: 100,
-        executeToolResult: async (_config, calledName, calledArgs) => ({
-          isError: false,
-          structuredContent: { ok: true, tool: calledName, workspace: calledArgs.workspace }
-        })
-      });
-      assert.equal(taskless.body.result?.structuredContent?.ok, true, `${name} must execute without a logical work_id when its action is task-optional`);
-      assert.equal(taskless.body.result?.structuredContent?.tool, name);
-    }
-    const timeout = await runBoundedExecution(
-      signal => signal.aborted
-        ? Promise.resolve({ stopped: true })
-        : new Promise(resolve => signal.addEventListener('abort', () => resolve({ stopped: true }), { once: true })),
-      { bounds: { maxDurationMs: 20 } }
-    );
-    assert.equal(timeout.ok, false);
-    assert.equal(timeout.error.code, -32024);
-    assert.equal(timeout.error.reason, 'synchronous_timeout');
-  
-    const largeOutput = await runBoundedExecution(
-      async () => ({ value: 'x'.repeat(3 * 1024 * 1024) }),
-      { bounds: { maxDurationMs: 1000 } }
-    );
-    assert.equal(largeOutput.ok, true, 'transport execution must not impose a second output-size policy after the tool has shaped its result');
-    assert.equal(largeOutput.value.value.length, 3 * 1024 * 1024);
-  
-    const splitUtf8 = Readable.from([
-      Buffer.from([0xf0, 0x9f]),
-      Buffer.from([0x98, 0x80])
-    ]);
-    splitUtf8.headers = { 'content-length': '4' };
-    assert.equal(await readRawBody(splitUtf8, 4), '😀', 'request decoding must preserve UTF-8 split across chunks');
-  
-    let preflightResumed = false;
-    let preflightDestroyed = false;
-    const oversizedDeclaredBody = new EventEmitter();
-    oversizedDeclaredBody.headers = { 'content-length': '128' };
-    oversizedDeclaredBody.resume = () => { preflightResumed = true; };
-    oversizedDeclaredBody.destroy = () => { preflightDestroyed = true; };
-    await assert.rejects(readRawBody(oversizedDeclaredBody, 64), error => error?.status === 413);
-    assert.equal(preflightResumed, true, 'oversized request bodies should be drained so the connection can return a structured 413');
-    assert.equal(preflightDestroyed, false, 'oversized request bodies must not be force-destroyed before the HTTP response is sent');
-    assert.equal(normalizeMaxBodyBytes(undefined), DEFAULT_MAX_BODY_BYTES);
-    assert.equal(normalizeMaxBodyBytes('not-a-number'), DEFAULT_MAX_BODY_BYTES, 'invalid body limits must fail closed to the bounded default instead of becoming unbounded');
-    assert.equal(normalizeMaxBodyBytes(-1), DEFAULT_MAX_BODY_BYTES);
-    assert.equal(normalizeMaxBodyBytes(12 * 1024 * 1024), 12 * 1024 * 1024, 'valid configured limits must not be arbitrarily clamped');
-    assert.equal(resolveHttpRequestTimeoutMs(DEFAULT_MAX_BODY_BYTES), 300_000, 'default payloads should retain Node\'s normal finite request-receive window');
-    assert.equal(resolveHttpRequestTimeoutMs(DEFAULT_MAX_BODY_BYTES * 2), 600_000, 'larger configured request bodies must receive a proportionally larger transport window');
-    assert.equal(resolveHttpRequestTimeoutMs(Math.floor(DEFAULT_MAX_BODY_BYTES / 2)), 300_000, 'smaller body limits must not reduce the baseline request-receive protection window');
-  
-    let streamedOversizeResumed = false;
-    const streamedOversize = new EventEmitter();
-    streamedOversize.headers = {};
-    streamedOversize.complete = false;
-    streamedOversize.resume = () => { streamedOversizeResumed = true; };
-    const streamedOversizeRead = readRawBody(streamedOversize, 64);
-    streamedOversize.emit('data', Buffer.alloc(40));
-    streamedOversize.emit('data', Buffer.alloc(40));
-    await assert.rejects(streamedOversizeRead, error => error?.status === 413);
-    assert.equal(streamedOversizeResumed, true, 'streaming bodies that cross the limit must continue draining for a structured 413 response');
-    assert.equal(streamedOversize.listenerCount('data'), 0, 'rejected bodies must release buffered data listeners immediately');
-    streamedOversize.emit('end');
-    assert.equal(streamedOversize.listenerCount('end'), 0);
-    assert.equal(streamedOversize.listenerCount('error'), 0);
-    assert.equal(streamedOversize.listenerCount('close'), 0);
-  
-    const abortedBody = new EventEmitter();
-    abortedBody.headers = {};
-    abortedBody.complete = false;
-    abortedBody.aborted = false;
-    const abortedBodyRead = readRawBody(abortedBody, 64);
-    abortedBody.emit('data', Buffer.alloc(32));
-    abortedBody.aborted = true;
-    abortedBody.emit('aborted');
-    await assert.rejects(abortedBodyRead, /aborted before completion/i);
-    abortedBody.emit('close');
-    assert.equal(abortedBody.listenerCount('data'), 0);
-    assert.equal(abortedBody.listenerCount('end'), 0);
-    assert.equal(abortedBody.listenerCount('error'), 0);
-    assert.equal(abortedBody.listenerCount('aborted'), 0);
-    assert.equal(abortedBody.listenerCount('close'), 0, 'aborted request bodies must not leave transport listeners behind');
-  
-    let jsonStatus = 0;
-    let jsonHeaders = null;
-    let jsonBody = null;
-    const jsonResponse = {
-      headersSent: false,
-      writableEnded: false,
-      destroyed: false,
-      writeHead(status, headers) { jsonStatus = status; jsonHeaders = headers; },
-      end(body) { jsonBody = body; this.writableEnded = true; }
-    };
-    sendJson(jsonResponse, 200, { ok: true, value: '😀' });
-    assert.equal(jsonStatus, 200);
-    assert.equal(typeof jsonBody, 'string', 'JSON responses should avoid a second full payload Buffer allocation');
-    assert.equal(jsonHeaders['Content-Length'], Buffer.byteLength(jsonBody, 'utf8'));
-    assert.doesNotThrow(() => sendJson({
-      headersSent: false,
-      writableEnded: true,
-      destroyed: false,
-      writeHead() { throw new Error('closed response must not be written'); },
-      end() { throw new Error('closed response must not be ended'); }
-    }, 200, { ok: true }), 'late transport errors must not try to write a second response');
-  
-    const externalAbort = new AbortController();
-    const aborted = runBoundedExecution(
-      signal => signal.aborted
-        ? Promise.resolve({ stopped: true })
-        : new Promise(resolve => signal.addEventListener('abort', () => resolve({ stopped: true }), { once: true })),
-      { bounds: { maxDurationMs: 1000 }, signal: externalAbort.signal }
-    );
-    externalAbort.abort(new Error('client disconnected'));
-    const abortedResult = await aborted;
-    assert.equal(abortedResult.ok, false);
-    assert.equal(abortedResult.error.code, -32800);
-    assert.equal(abortedResult.error.reason, 'execution_aborted');
-  
-    const execTaskCandidate = request(100, 'tools/call', {
-      name: 'relai_exec',
-      arguments: {
-        work_id: 'work-session',
-        command: 'echo ordinary execution',
-        timeoutMs: 90_000,
-        maxOutputBytes: 60_000
-      }
-    }, tasksCapabilities);
-    assert.equal(isTransportTaskRequestCandidate(config, execTaskCandidate), true, 'task-eligible relai_exec calls must reach capability negotiation');
-    const synchronousFallback = await handleTransportTaskRequest(config, request(100, 'tools/call', {
-      name: 'relai_exec',
-      arguments: {
-        work_id: 'work-session',
-        command: 'echo ordinary execution',
-        timeoutMs: 90_000,
-        maxOutputBytes: 60_000
-      }
-    }, {}), {
-      principal: owner,
-      transportType: 'streamable-http',
-      executeToolResult: async () => ({ isError: false, structuredContent: { ok: true, exitCode: 0 } })
-    });
-    assert.equal(synchronousFallback.body.result?.resultType, undefined, 'clients without Tasks capability must keep the synchronous result path');
-    assert.equal(synchronousFallback.body.result?.structuredContent?.exitCode, 0);
-  
-    const safeWithoutTasks = await handleTransportTaskRequest(config, request(101, 'tools/call', {
-      name: 'relai_exec',
-      arguments: {
-        work_id: 'short-no-tasks',
-        command: 'echo bounded execution',
-        timeoutMs: 7_500,
-        maxOutputBytes: 64 * 1024
-      }
-    }, {}), {
-      principal: owner,
-      transportType: 'streamable-http',
-      synchronousFallbackGraceMs: 0,
-      executeToolResult: async () => ({ isError: false, structuredContent: { ok: true, exitCode: 7 } })
-    });
-    assert.equal(safeWithoutTasks.body.result?.structuredContent?.exitCode, 7, 'short bounded calls must stay synchronous even when the client does not advertise Tasks');
-    assert.equal(safeWithoutTasks.body.result?.structuredContent?.status, undefined, 'safe calls must not force a follow-up status request');
-  
-    const longWithoutTasks = await handleTransportTaskRequest(config, request(102, 'tools/call', {
-      name: 'relai_exec',
-      arguments: {
-        work_id: 'long-no-tasks',
-        command: 'echo detached execution',
-        timeoutMs: 15_000,
-        maxOutputBytes: 64 * 1024
-      }
-    }, {}), {
-      principal: owner,
-      transportType: 'streamable-http',
-      synchronousFallbackGraceMs: 0,
-      executeToolResult: async () => ({ isError: false, structuredContent: { ok: true, exitCode: 0 } })
-    });
-    assert.equal(longWithoutTasks.body.result?.structuredContent?.status, 'running', 'calls outside the safe synchronous envelope must remain detachable for clients without Tasks');
-  
-    let directArguments = null;
-    const directResult = await handleTransportTaskRequest(config, request(102, 'tools/call', {
-      name: 'relai_exec',
-      arguments: {
-        work_id: 'work-session',
-        command: 'echo bounded execution',
-        timeoutMs: 5_000,
-        maxOutputBytes: 8 * 1024 * 1024
-      }
-    }, tasksCapabilities), {
-      principal: owner,
-      transportType: 'streamable-http',
-      executeToolResult: async (_config, _name, args) => {
-        directArguments = args;
-        return { isError: false, structuredContent: { ok: true, exitCode: 0 } };
-      }
-    });
-    assert.equal(directResult.body.result?.structuredContent?.exitCode, 0);
-    assert.equal(directArguments.timeoutMs, 5_000, 'transport must preserve the tool timeout selected by the caller');
-    assert.equal(directArguments.maxOutputBytes, 8 * 1024 * 1024, 'transport must preserve tool-owned output limits instead of silently clamping them');
-    const req = new EventEmitter();
-    const socket = new EventEmitter();
-    req.socket = socket;
-    req.aborted = false;
-    const res = new EventEmitter();
-    res.writableEnded = false;
-    res.destroyed = false;
-    const httpAbort = createHttpRequestAbortScope(req, res);
-    req.emit('aborted');
-    assert.equal(httpAbort.signal.aborted, true);
-    assert.match(String(httpAbort.signal.reason?.message || ''), /aborted by the client/i);
-    httpAbort.dispose();
-    assert.equal(req.listenerCount('aborted'), 0);
-    assert.equal(res.listenerCount('close'), 0);
-    assert.equal(socket.listenerCount('close'), 0);
-  
-    const disconnectedReq = new EventEmitter();
-    disconnectedReq.aborted = false;
-    const disconnectedRes = new EventEmitter();
-    disconnectedRes.writableEnded = false;
-    disconnectedRes.destroyed = false;
-    const disconnectedScope = createHttpRequestAbortScope(disconnectedReq, disconnectedRes);
-    disconnectedRes.emit('close');
-    assert.equal(disconnectedScope.signal.aborted, false, 'losing the response connection must not be treated as client cancellation after Rel.AI accepted the request');
-    disconnectedScope.dispose();
-  
-    assert.equal(expectedMcpName('tasks/get', { taskId: 'task-1' }), 'task-1');
-    assert.equal(expectedMcpName('tasks/update', { taskId: 'task-2' }), 'task-2');
-    assert.equal(expectedMcpName('tasks/cancel', { taskId: 'task-3' }), 'task-3');
-  
-    const missingCapability = await handleTransportTaskRequest(
-      config,
-      request(1, 'tasks/get', { taskId: 'task-missing' }, {}),
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(missingCapability.body.error.code, -32021);
-    assert.deepEqual(missingCapability.body.error.data.requiredCapabilities, tasksCapabilities);
-  
-    const malformedCapability = await handleTransportTaskRequest(
-      config,
-      request(101, 'tasks/get', { taskId: 'task-missing' }, { extensions: [] }),
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(malformedCapability.body.error.code, -32602);
-    assert.deepEqual(malformedCapability.body.error.data, {
-      reason: 'invalid_client_capabilities',
-      capabilityReason: 'malformed_extensions',
-      expectedCapabilities: tasksCapabilities
-    });
-  
-    const unsupportedRevision = await handleTransportTaskRequest(
-      config,
-      request(102, 'tasks/get', { taskId: 'task-missing' }, {
-        extensions: { [TASKS_EXTENSION_ID]: { revision: '1900-01-01' } }
-      }),
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(unsupportedRevision.body.error.code, -32602);
-    assert.equal(unsupportedRevision.body.error.data.capabilityReason, 'unsupported_tasks_revision');
-  
-    const invalidId = await handleTransportTaskRequest(
-      config,
-      { ...request(103, 'tasks/get', { taskId: 'task-missing' }), id: { invalid: true } },
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(invalidId.body.id, null);
-    assert.equal(invalidId.body.error.code, -32600);
-  
-    const taskController = new AbortController();
-    const task = createNativeTask(config, {
-      principal: owner,
-      method: 'tools/call',
-      name: 'input-test',
-      executor: { controller: taskController, resume() {} }
-    });
-    requestNativeTaskInput(config, task.taskId, {
-      approval: {
-        responseSchema: {
-          type: 'object',
-          required: ['approved'],
-          additionalProperties: false,
-          properties: { approved: { type: 'boolean' } }
-        }
-      }
-    }, { principal: owner });
-  
-    const updated = await handleTransportTaskRequest(
-      config,
-      request(2, 'tasks/update', {
-        taskId: task.taskId,
-        inputResponses: { approval: { approved: true } }
-      }),
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(updated.body.error, undefined);
-    assert.equal(getNativeTask(config, task.taskId, { principal: owner }).status, 'working');
-  
-    const replayedUpdate = await handleTransportTaskRequest(
-      config,
-      request(3, 'tasks/update', {
-        taskId: task.taskId,
-        inputResponses: { approval: { approved: true } }
-      }),
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(replayedUpdate.body.error, undefined);
-    assert.equal(replayedUpdate.body.result.resultType, 'complete');
-  
-    const denied = await handleTransportTaskRequest(
-      config,
-      request(4, 'tasks/get', { taskId: task.taskId }),
-      { principal: otherOwner, transportType: 'streamable-http' }
-    );
-    assert.equal(denied.body.error.code, -32602);
-    assert.match(denied.body.error.message, /not available to this client/i);
-  
-    const cancelled = await handleTransportTaskRequest(
-      config,
-      request(5, 'tasks/cancel', { taskId: task.taskId }),
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(cancelled.body.error, undefined);
-    const cancellationRequested = getNativeTask(config, task.taskId, { principal: owner });
-    assert.equal(cancellationRequested.status, 'working');
-    assert.equal(taskController.signal.aborted, true);
-  
-    const malformed = await handleTransportTaskRequest(
-      config,
-      request(6, 'tasks/get'),
-      { principal: owner, transportType: 'streamable-http' }
-    );
-    assert.equal(malformed.body.error.code, -32602);
-  
-    const stdioTask = createNativeTask(config, {
-      principal: localOwner,
-      method: 'tools/call',
-      name: 'stdio-isolation-test',
-      executor: { controller: new AbortController() }
-    });
-    const stdioWire = new FakeTransport();
-    const stdio = createTaskAwareStdioTransport({ config, principal: localOwner, transport: stdioWire });
-    await stdio.start();
-    stdioWire.receive(request(7, 'tasks/get', { taskId: stdioTask.taskId }, {}));
-    const stdioMissing = await waitForSent(stdioWire, 1);
-    assert.deepEqual(stdioMissing.error, missingCapability.body.error);
-  
-    stdioWire.receive(request(8, 'tasks/get', { taskId: stdioTask.taskId }));
-    const stdioOwned = await waitForSent(stdioWire, 2);
-    assert.equal(stdioOwned.result.taskId, stdioTask.taskId);
-    assert.equal(stdioOwned.result.status, 'working');
-  
-    let delegatedInvalid = null;
-    stdio.onmessage = message => { delegatedInvalid = message; };
-    const invalidEligibleCall = request(81, 'tools/call', {
-      name: 'relai_exec',
-      arguments: { work_id: 'work-session', command: 'echo invalid', defer: true }
-    });
-    stdioWire.receive(invalidEligibleCall);
-    const invalidEligibleResponse = await waitForSent(stdioWire, 3);
-    assert.equal(delegatedInvalid, null, 'invalid long-running tool arguments must stay inside the task-aware tool-result boundary');
-    assert.equal(invalidEligibleResponse.id, 81);
-    assert.equal(invalidEligibleResponse.result?.isError, true);
-    assert.equal(invalidEligibleResponse.result?.structuredContent?.errorCode, 'INVALID_TOOL_ARGUMENTS');
-    assert.match(invalidEligibleResponse.result?.structuredContent?.error || '', /invalid arguments|defer/i);
-  
-    const otherWire = new FakeTransport();
-    const otherStdio = createTaskAwareStdioTransport({ config, principal: localOtherOwner, transport: otherWire });
-    await otherStdio.start();
-    otherWire.receive(request(9, 'tasks/get', { taskId: stdioTask.taskId }));
-    const stdioDenied = await waitForSent(otherWire, 1);
-    assert.equal(stdioDenied.error.code, denied.body.error.code);
-    assert.equal(stdioDenied.error.message, denied.body.error.message);
-  
-    await stdio.close();
-    await otherStdio.close();
-  
-    console.log('HTTP and stdio Tasks routing, identity isolation, cancellation, abort, timeout, and output-limit tests passed.');
-  } finally {
-    fs.rmSync(sandbox, { recursive: true, force: true });
-  }
-}
-await case_mcp_transport_tasks_unit();
-
 // Formerly tool-action-catalog-parity-unit.mjs
 async function case_tool_action_catalog_parity_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/mcp/approval.js");
+    const __m1 = await import("../src/mcp/approval.ts");
     const { approvalRequirement } = __m1;
   
-    const __m2 = await import("../src/mcp/authorizationPolicy.js");
+    const __m2 = await import("../src/mcp/authorizationPolicy.ts");
     const { requiredCapability } = __m2;
   
     const __m3 = await import("../src/tools/actionCatalog.js");
@@ -2059,14 +1326,15 @@ async function case_tool_action_contract_unit() {
     const __m2 = await import("@modelcontextprotocol/server");
     const { fromJsonSchema } = __m2;
   
-    const __m3 = await import("../src/mcp/approval.js");
+    const __m3 = await import("../src/mcp/approval.ts");
     const { approvalRequirement } = __m3;
   
-    const __m4 = await import("../src/mcp/authorizationPolicy.js");
+    const __m4 = await import("../src/mcp/authorizationPolicy.ts");
     const { requiredCapability } = __m4;
   
     const __m5 = await import("../src/mcp/toolManifest.js");
-    const { buildToolManifest, stableJson } = __m5;
+    const { buildToolManifest } = __m5;
+    const { stableJson } = await import("../src/stableJson.js");
   
     const __m6 = await import("../src/tools/actionCatalog.js");
     const { catalogApprovalRequirement, getToolActionCatalog } = __m6;
@@ -2197,7 +1465,6 @@ async function case_tool_action_contract_unit() {
       : publicMetadata.actions.find(item => item.action === entry.action);
     assert.ok(actionMetadata, `${entry.publicTool}:${entry.action} must have public action metadata`);
     assert.equal(actionMetadata.executionClass, entry.behavior.executionClass);
-    assert.equal(actionMetadata.taskSupport, entry.execution?.taskSupport || 'forbidden');
     if (entry.action !== 'default') {
       assert.deepEqual(actionMetadata.annotations, resolved.executionDefinition.annotations);
       assert.equal(actionMetadata.taskScope, entry.behavior.taskScope);
@@ -2211,7 +1478,6 @@ async function case_tool_action_contract_unit() {
       : manifestTool.actions.find(item => item.action === entry.action);
     assert.ok(manifestAction, `${entry.publicTool}:${entry.action} must be present in the tool-surface manifest`);
     assert.equal(manifestAction.executionClass, entry.behavior.executionClass);
-    assert.equal(manifestAction.taskSupport, entry.execution?.taskSupport || 'forbidden');
   
     assert.deepEqual(
       catalogApprovalRequirement(entry.publicTool, args),

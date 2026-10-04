@@ -325,4 +325,4 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), Math.max(min, max));
 }
 
-export { PULSE_EXPANDED_HEIGHT, PULSE_EXPANDED_WIDTH, PULSE_HEIGHT, PULSE_UNLINKED_SHOW_DELAY_MS, PULSE_WIDTH, createPulseWindowManager, pulseBounds };
+export { createPulseWindowManager, pulseBounds };

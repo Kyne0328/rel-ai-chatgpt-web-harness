@@ -1,0 +1,3 @@
+const TOOL_SCHEMA_VERSION = 7;
+
+export { TOOL_SCHEMA_VERSION };

@@ -22,6 +22,8 @@ try {
   let localStartCalls = 0;
   let localStopCalls = 0;
   let tunnelStopCalls = 0;
+  let tunnelStartCalls = 0;
+  let tunnelStopGate = null;
   let doctorArgs = null;
   let dashboardCloseCalls = 0;
   let localStopGate = null;
@@ -69,10 +71,11 @@ try {
     fetchImpl: async url => ({ ok: url.endsWith('/health'), status: url.endsWith('/mcp') ? 405 : 200 }),
     secureTunnelRuntime: {
       snapshot: () => ({ state: currentStatus.tunnelStatus || 'stopped', processOwned: currentStatus.tunnelStatus === 'running' }),
-      start: () => tunnelStart.promise,
+      start: () => { tunnelStartCalls += 1; return tunnelStart.promise; },
       doctor: args => { doctorArgs = args; return { ok: true, result: 'pass' }; },
       async stop() {
         tunnelStopCalls += 1;
+        if (tunnelStopGate) await tunnelStopGate.promise;
         tunnelStart.resolve({ cancelled: true });
         return { stopped: true, exited: true };
       }
@@ -136,12 +139,19 @@ try {
     racingStartSettled = true;
     return status;
   });
+  let racingReadinessSettled = false;
+  const racingReadiness = runtime.waitUntilListening(0).then(status => {
+    racingReadinessSettled = true;
+    return status;
+  });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(racingStartSettled, false, 'a start requested during shutdown must wait for the stop transition instead of being lost');
+  assert.equal(racingReadinessSettled, false, 'reopening during shutdown must wait for the replacement service instead of returning stale readiness');
   assert.equal(localStartCalls, 1, 'the replacement local service must not start until the previous stop finishes');
   localStopGate.resolve();
   await racingStop;
   await racingStart;
+  assert.equal((await racingReadiness).serverRunning, true, 'foreground readiness must belong to the replacement service');
   assert.equal(localStartCalls, 2, 'the deferred start must run after shutdown completes');
   const doctor = await runtime.runTunnelDoctor();
   assert.equal(doctor.ok, true);
@@ -152,8 +162,23 @@ try {
     apiKey: 'test-api-key'
   }, 'tunnel diagnostics must use the active local MCP endpoint and encrypted tunnel credential');
 
+  const startsBeforeReconnectStop = tunnelStartCalls;
+  tunnelStopGate = deferred();
+  const reconnecting = runtime.restartConnection();
+  await new Promise(resolve => setImmediate(resolve));
+  const stoppingReconnect = runtime.stopServer({ preserveDashboard: true });
+  await new Promise(resolve => setImmediate(resolve));
+  tunnelStopGate.resolve();
+  await Promise.all([reconnecting, stoppingReconnect]);
+  tunnelStopGate = null;
+  assert.equal(tunnelStartCalls, startsBeforeReconnectStop,
+    'reconnect invalidated while stopping its old tunnel must not start a replacement');
+  assert.equal(listening, false);
+  assert.equal(currentStatus.serverRunning, false);
+
   let hungDisposeCalls = 0;
   let hungStopCalls = 0;
+  let hungTunnelStartCalls = 0;
   let hungStatus = { serverRunning: false, tunnelStatus: 'stopped' };
   const neverStartingLocalService = deferred();
   const hungRuntime = createDesktopServiceRuntime({
@@ -179,10 +204,10 @@ try {
     },
     dashboardWindowManager: { async close() {} },
     runtimeLogs: { snapshot: () => ({ available: true, revision: 0, count: 0, entries: [] }) },
-    fetchImpl: async () => ({ ok: true, status: 200 }),
+    fetchImpl: async url => ({ ok: url.endsWith('/health'), status: url.endsWith('/mcp') ? 405 : 200 }),
     secureTunnelRuntime: {
       snapshot: () => ({ state: 'stopped', processOwned: false }),
-      async start() { return { cancelled: true }; },
+      async start() { hungTunnelStartCalls += 1; return { cancelled: true }; },
       async stop() { return { stopped: true, exited: true }; }
     },
     tunnelCredentials: { getApiKey: () => 'test-api-key' },
@@ -199,7 +224,7 @@ try {
     pushStatus() {},
     startupStopTimeoutMs: 20
   });
-  void hungRuntime.startServer();
+  const hungStart = hungRuntime.startServer();
   await new Promise(resolve => setImmediate(resolve));
   const hungStopStartedAt = Date.now();
   const hungStopped = await hungRuntime.stopServer({ preserveDashboard: true });
@@ -207,6 +232,12 @@ try {
   assert.equal(hungDisposeCalls, 1, 'expired startup wait must force-dispose the utility process generation');
   assert.equal(hungStopCalls, 1, 'shutdown must continue through the normal local cleanup path after forced invalidation');
   assert.equal(hungStopped.cleanup.clean, true);
+  hungStatus = { serverRunning: true, tunnelStatus: 'running', launch: 'replacement' };
+  neverStartingLocalService.resolve({ ok: true, port: 4999 });
+  await hungStart;
+  assert.deepEqual(hungStatus, { serverRunning: true, tunnelStatus: 'running', launch: 'replacement' },
+    'a late response from the cancelled startup must not overwrite the replacement launch');
+  assert.equal(hungTunnelStartCalls, 0, 'a cancelled startup must not restart its tunnel after shutdown');
 
   let retryListening = false;
   let retryStartCalls = 0;

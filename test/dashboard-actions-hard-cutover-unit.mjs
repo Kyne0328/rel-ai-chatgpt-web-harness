@@ -77,8 +77,8 @@ try {
   assert.equal(committedCancellation.status, 'cancelled');
   assert.equal(committedCancellation.duplicate, true);
 
-  const { createLocalAdminPolicy } = await import('../src/mcp/authorizationPolicy.js');
-  const { principalFingerprint } = await import('../src/mcp/principal.js');
+  const { createLocalAdminPolicy } = await import('../src/mcp/authorizationPolicy.ts');
+  const { principalFingerprint } = await import('../src/mcp/principal.ts');
   const { readTaskHistorySessionRecord } = await import('../src/taskHistoryStore.ts');
   const clientPrincipal = {
     clientId: 'dashboard-control-client',

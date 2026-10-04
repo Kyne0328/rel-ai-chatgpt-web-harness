@@ -4,8 +4,8 @@ import * as path from 'node:path';
 
 import { resolveWorkspace } from './config.js';
 import { requestStateKey } from './mcp/context.js';
-import { principalFingerprint } from './mcp/principal.js';
-import { assertAuthorizedToolCall } from './mcp/authorizationPolicy.js';
+import { principalFingerprint } from './mcp/principal.ts';
+import { assertAuthorizedToolCall } from './mcp/authorizationPolicy.ts';
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
 import { resolveWorkspaceSourcePath } from './workspaceSources.js';
 

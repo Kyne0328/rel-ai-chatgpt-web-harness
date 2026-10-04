@@ -229,7 +229,7 @@ async function runPostActions(workspace: PlannerWorkspace, config: PlannerConfig
     level: args.level,
     complete: false,
     ...(args.work_id ? { work_id: args.work_id } : {}),
-    ...(args._operationTaskId ? { _operationTaskId: args._operationTaskId } : {}),
+
     ...(Array.isArray(changedFiles) && changedFiles.length ? { changedFiles } : {})
   };
   const runChecks = async (extra: PlannerRecord = {}): Promise<PlannerResult> => {

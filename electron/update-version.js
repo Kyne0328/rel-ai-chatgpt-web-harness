@@ -34,10 +34,5 @@ function compareVersions(left, right) {
 }
 
 export {
-  compareUpdateVersions,
-  compareVersions,
-  isStableVersion,
-  isUpdateVersion,
-  parseStableVersion,
-  parseUpdateVersion
+  compareUpdateVersions, compareVersions, isStableVersion, isUpdateVersion, parseStableVersion
 };

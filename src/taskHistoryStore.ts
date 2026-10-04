@@ -13,13 +13,15 @@ import { canonicalTaskSnapshot, mergeTaskLifecycleSnapshots, reduceTaskLifecycle
 import { DEFAULT_TASK_STALE_MS } from './taskTiming.js';
 import { clamp, cleanTaskId, eventIdentityKey, eventTime, eventTimestampMs, isCurrentTaskEvent, timestampMs } from './taskEvents.js';
 import {
-  MAX_SESSIONS,
+  MAX_HISTORY_QUERY_SESSIONS,
   clearTaskHistory as clearStoredTaskHistory,
   ensureCurrentHistory,
   findSessionsContaining,
   getTaskHistoryDir,
+  listRecentSessionEventPage,
   listRecentSessionEvents,
   listSessionSummaries,
+  listSessionSummaryPage,
   listSessions,
   pruneSessions,
   readSession,
@@ -27,6 +29,8 @@ import {
   removeWorkspaceSessions,
   writeSession,
   writeSessionAsync,
+  type EventPageCursor,
+  type SessionPageCursor,
   type StoredTaskSession,
   type TaskHistoryConfig
 } from './taskHistoryStorage.ts';
@@ -60,6 +64,20 @@ interface ReadHistoryOptions {
   limit?: number;
   summary?: boolean;
   maintain?: boolean;
+  activeTaskIds?: Set<string> | string[];
+}
+
+interface TaskHistoryPageOptions {
+  limit?: number;
+  cursor?: SessionPageCursor | null;
+  workspace?: unknown;
+  activeTaskIds?: Set<string> | string[];
+}
+
+interface ActivityHistoryPageOptions {
+  limit?: number;
+  cursor?: EventPageCursor | null;
+  taskId?: unknown;
 }
 
 interface EpisodeOptions {
@@ -186,8 +204,17 @@ function recordTaskBackgroundOperation(config: TaskHistoryConfig, taskId: unknow
   const session = readWorkingSession(directory, id);
   if (!session) return null;
   const next = { ...session } as TaskRecord;
-  if (operation && typeof operation === 'object') next.backgroundOperation = operation;
-  else delete next.backgroundOperation;
+  if (operation && typeof operation === 'object') {
+    const record = operation as Record<string, any>;
+    const operations = taskBackgroundOperations(session);
+    const merged = [...operations.filter(item => item.operationId !== record.operationId), record];
+    const retainedIds = new Set(merged.filter(item => item.status !== 'running').slice(-100).map(item => item.operationId));
+    next.backgroundOperations = merged.filter(item => item.status === 'running' || retainedIds.has(item.operationId));
+    next.backgroundOperation = record;
+  } else {
+    delete next.backgroundOperation;
+    delete next.backgroundOperations;
+  }
   persistSession(directory, next, options);
   return (sanitizeTaskRecord({ status: 'planning', backgroundOperation: next.backgroundOperation }) as TaskRecord | null)?.backgroundOperation || null;
 }
@@ -205,6 +232,19 @@ function readTaskBackgroundOperation(config: TaskHistoryConfig, taskId: unknown)
   }
 }
 
+function taskBackgroundOperations(session: TaskRecord): Record<string, any>[] {
+  if (Array.isArray(session.backgroundOperations)) return session.backgroundOperations;
+  return session.backgroundOperation ? [session.backgroundOperation] : [];
+}
+
+function readTaskBackgroundOperations(config: TaskHistoryConfig, taskId: unknown): Record<string, any>[] {
+  const id = cleanTaskId(taskId);
+  if (!id) return [];
+  ensureCurrentHistory(config);
+  const session = readWorkingSession(getTaskHistoryDir(config), id);
+  return session ? taskBackgroundOperations(session) : [];
+}
+
 function readRecentWorkflowEvidence(config: TaskHistoryConfig, taskId: unknown, limit = 50): WorkflowReceipt[] {
   const id = cleanTaskId(taskId);
   if (!id) return [];
@@ -220,8 +260,8 @@ function readRecentWorkflowEvidence(config: TaskHistoryConfig, taskId: unknown, 
   }
 }
 
-function readTaskHistorySession(config: TaskHistoryConfig, taskId: unknown): TaskRecord | null {
-  const session = readTaskHistorySessionRecord(config, taskId);
+function readTaskHistorySession(config: TaskHistoryConfig, taskId: unknown, options: ReadSessionOptions = {}): TaskRecord | null {
+  const session = readTaskHistorySessionRecord(config, taskId, options);
   return session ? publicSession(session) : null;
 }
 
@@ -233,9 +273,7 @@ function readTaskHistorySessionRecord(config: TaskHistoryConfig, taskId: unknown
     const directory = getTaskHistoryDir(config);
     const session = readWorkingSession(directory, id);
     if (!session) return null;
-    const activeIds = options.activeTaskIds instanceof Set
-      ? options.activeTaskIds
-      : new Set(Array.isArray(options.activeTaskIds) ? options.activeTaskIds.map(String) : []);
+    const activeIds = activeTaskIdSet(options.activeTaskIds);
     const reconciled = options.reconcileInactive === true
       ? reconcileInactiveStoredSession(session, activeIds)
       : session;
@@ -248,13 +286,16 @@ function readTaskHistorySessionRecord(config: TaskHistoryConfig, taskId: unknown
 }
 
 function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapshot = {}, options: ReadHistoryOptions = {}): TaskRecord[] {
-  const limit = clamp(options.limit || 100, 1, MAX_SESSIONS);
+  const limit = clamp(options.limit || 100, 1, MAX_HISTORY_QUERY_SESSIONS);
   const active = (Array.isArray(activity?.tasks) ? activity.tasks : [])
     .map((task: TaskDto | Record<string, any>) => canonicalTaskSnapshot(task, { eventsAlreadySanitized: true }) as TaskRecord)
-    .slice(0, MAX_SESSIONS);
-  const activeIds = new Set(active.filter((session: TaskRecord) => session.status !== 'inactive').map((session: TaskRecord) => session.id).filter(Boolean));
+    .slice(0, MAX_HISTORY_QUERY_SESSIONS);
+  const activeIds = activeTaskIdSet(options.activeTaskIds);
+  for (const session of active) {
+    if (session.status !== 'inactive' && session.id) activeIds.add(session.id);
+  }
   const maintain = options.maintain !== false;
-  const storedLimit = Math.min(MAX_SESSIONS, Math.max(limit, active.length));
+  const storedLimit = Math.min(MAX_HISTORY_QUERY_SESSIONS, Math.max(limit, active.length));
   const directory = getTaskHistoryDir(config);
   let persisted: TaskRecord[] = [];
   try {
@@ -305,6 +346,57 @@ function readRecentTaskHistoryEvents(config: TaskHistoryConfig, limit = 200): Hi
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] recent task history event read:', error);
     return [];
+  }
+}
+
+function readTaskHistoryPage(config: TaskHistoryConfig, options: TaskHistoryPageOptions = {}): { tasks: TaskRecord[]; cursor: SessionPageCursor | null; hasMore: boolean } {
+  try {
+    ensureCurrentHistory(config);
+    const directory = getTaskHistoryDir(config);
+    const activeIds = activeTaskIdSet(options.activeTaskIds);
+    const page = listSessionSummaryPage(directory, {
+      limit: clamp(options.limit || 100, 1, 500),
+      cursor: options.cursor || null,
+      workspace: String(options.workspace || '').trim()
+    });
+    const tasks = page.items.map((summary: StoredTaskSession) => {
+      const currentSummary = canonicalTaskSnapshot(summary, { eventsAlreadySanitized: true }) as TaskRecord;
+      const needsFullRecord = currentSummary.status !== 'inactive' && !isTerminalTaskStatus(currentSummary.status);
+      const current = needsFullRecord
+        ? readWorkingSession(directory, currentSummary.id) || currentSummary
+        : currentSummary;
+      const reconciled = reconcileInactiveStoredSession(current, activeIds);
+      if (reconciled !== current) persistSession(directory, reconciled, { defer: true });
+      return publicSession(canonicalTaskSnapshot(reconciled, { eventsAlreadySanitized: true }) as TaskRecord);
+    });
+    return {
+      tasks,
+      cursor: page.cursor,
+      hasMore: page.hasMore
+    };
+  } catch (error) {
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history page read:', error);
+    return { tasks: [], cursor: null, hasMore: false };
+  }
+}
+
+function readRecentTaskHistoryEventsPage(config: TaskHistoryConfig, options: ActivityHistoryPageOptions = {}): { entries: HistoryEvent[]; cursor: EventPageCursor | null; hasMore: boolean } {
+  try {
+    const page = listRecentSessionEventPage(getTaskHistoryDir(config), {
+      limit: clamp(options.limit || 500, 1, 500),
+      cursor: options.cursor || null,
+      taskId: cleanTaskId(options.taskId)
+    });
+    return {
+      entries: page.items
+        .map((event: HistoryEvent) => sanitizeActivityEventRecord(event) as HistoryEvent)
+        .filter((event: HistoryEvent | null): event is HistoryEvent => Boolean(event)),
+      cursor: page.cursor,
+      hasMore: page.hasMore
+    };
+  } catch (error) {
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history event page read:', error);
+    return { entries: [], cursor: null, hasMore: false };
   }
 }
 
@@ -364,8 +456,8 @@ function retrievalCandidateSessions(config: TaskHistoryConfig, workspaceAlias: s
   const exactNeedles = uniqueStrings([...signature.identifiers, ...signature.paths, ...signature.pathScopes])
     .filter(value => value.length >= 4)
     .slice(0, 12);
-  if (!exactNeedles.length) return readTaskHistory(config, {}, { limit: MAX_SESSIONS, summary: true });
-  const exactLimit = Math.min(MAX_SESSIONS, Math.max(24, exactNeedles.length * 8));
+  if (!exactNeedles.length) return readTaskHistory(config, {}, { limit: MAX_HISTORY_QUERY_SESSIONS, summary: true });
+  const exactLimit = Math.min(MAX_HISTORY_QUERY_SESSIONS, Math.max(24, exactNeedles.length * 8));
   let exact: StoredTaskSession[] = [];
   try {
     exact = findSessionsContaining(getTaskHistoryDir(config), exactNeedles, {
@@ -499,11 +591,12 @@ function discardStoredSession(directory: string, id: string): void {
 }
 
 function reconcileInactiveStoredSession(session: TaskRecord, activeIds: Set<string>, timestamp = Date.now()): TaskRecord {
-  if (!session?.id || activeIds.has(session.id)) return session;
+  if (!session?.id) return session;
   if (!isTerminalTaskStatus(session.status) && hasExplicitCompletionEvidence(session)) {
     return recoverCompletedSession(session, { endReason: 'explicit_completion', completionSource: session.completionSource || 'relai_work:finish' });
   }
   if (isTerminalTaskStatus(session.status) || session.status === 'inactive') return session;
+  if (activeIds.has(session.id)) return session;
   const lastActivityMs = storedSessionActivityMs(session);
   if (!lastActivityMs || timestamp - lastActivityMs < DEFAULT_TASK_IDLE_MS) return session;
   const inactiveMs = lastActivityMs + DEFAULT_TASK_IDLE_MS;
@@ -527,6 +620,12 @@ function reconcileInactiveStoredSession(session: TaskRecord, activeIds: Set<stri
     completedAt: null,
     cancelledAt: null
   } as TaskRecord;
+}
+
+function activeTaskIdSet(value: Set<string> | string[] | undefined): Set<string> {
+  return new Set((value instanceof Set ? [...value] : Array.isArray(value) ? value : [])
+    .map(item => String(item || '').trim())
+    .filter(Boolean));
 }
 
 function storedSessionActivityMs(session: TaskRecord): number {
@@ -716,7 +815,7 @@ function scheduleTaskHistoryPrune(directory: string): void {
   if (pendingPrunes.has(directory)) return;
   const timer = setTimeout(() => {
     pendingPrunes.delete(directory);
-    try { pruneSessions(directory, MAX_SESSIONS); }
+    try { pruneSessions(directory); }
     catch (error) { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history prune:', error); }
   }, TASK_HISTORY_PRUNE_DELAY_MS);
   timer.unref?.();
@@ -748,7 +847,7 @@ async function flushTaskHistoryPersistence(): Promise<{ ok: boolean; failed: num
   for (const [directory, timer] of [...pendingPrunes.entries()]) {
     clearTimeout(timer);
     pendingPrunes.delete(directory);
-    try { pruneSessions(directory, MAX_SESSIONS); }
+    try { pruneSessions(directory); }
     catch (error) { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history prune flush:', error); }
   }
   return { ok: failed.size === 0, failed: failed.size, pending: pendingSessions.size };
@@ -860,10 +959,13 @@ export {
   readConversationContinuity,
   readCrossWorkspaceTaskEpisodes,
   readRecentTaskHistoryEvents,
+  readRecentTaskHistoryEventsPage,
   readRecentWorkflowEvidence,
   readRelevantTaskEpisodes,
   readTaskBackgroundOperation,
+  readTaskBackgroundOperations,
   readTaskHistory,
+  readTaskHistoryPage,
   readTaskHistorySession,
   readTaskHistorySessionRecord,
   recordTaskActivityEvent,

@@ -84,6 +84,8 @@ function registerIpcHandlers(deps) {
     channels: DESKTOP_IPC,
     getDesktopSettings: deps.getDesktopSettings,
     saveDesktopSettings: deps.saveDesktopSettings,
+    saveAdditionalTunnel: deps.saveAdditionalTunnel,
+    removeAdditionalTunnel: deps.removeAdditionalTunnel,
     getLifecycleStatus: deps.getLifecycleStatus,
     acknowledgeConnectorRefresh: deps.acknowledgeConnectorRefresh,
     setLaunchAtLogin: deps.setLaunchAtLogin,

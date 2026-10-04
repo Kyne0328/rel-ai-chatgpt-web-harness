@@ -10,5 +10,16 @@
   "references": [
     { "path": "../contracts" }
   ],
-  "include": ["./**/*.js"]
+  "files": [
+    "./router.js"
+  ],
+  "include": [
+    "./router.js",
+    "./interaction-safety.js",
+    "./components/confirm-dialog.js",
+    "./components/modal.js",
+    "./route-policy.js",
+    "./overlay-store.js",
+    "../contracts/dashboard-route.js"
+  ]
 }

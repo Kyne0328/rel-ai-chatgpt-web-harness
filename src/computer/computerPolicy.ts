@@ -210,17 +210,7 @@ function assertComputerTierAllowed(value: unknown, action: string): void {
 }
 
 export {
-  approveComputerApp,
-  assertComputerAppApproved,
-  assertComputerControlEnabled,
-  assertComputerTierAllowed,
-  computerControlSettings,
-  isComputerAppApproved,
-  listComputerApprovedApps,
-  normalizeAppName,
-  revokeComputerApp,
-  tierForComputerApp,
-  warningForComputerApp
+  approveComputerApp, assertComputerAppApproved, assertComputerControlEnabled, assertComputerTierAllowed, computerControlSettings, listComputerApprovedApps, normalizeAppName, revokeComputerApp, tierForComputerApp, warningForComputerApp
 };
-export type { ComputerAppTier, ComputerControlConfig };
-export { ComputerAppApprovalRequiredError, ComputerSessionLockedError, ComputerTierRestrictedError };
+export type { ComputerControlConfig };
+export { ComputerSessionLockedError };

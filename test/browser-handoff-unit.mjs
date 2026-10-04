@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { fromJsonSchema } from '@modelcontextprotocol/server';
-import { browserHandoffOperationArgs, requestBrowserHandoff, supportsBrowserHandoff } from '../src/mcp/browserHandoff.ts';
+import { browserHandoffOperationArgs, requestBrowserHandoff } from '../src/mcp/browserHandoff.ts';
+import { supportsFormElicitation } from '../src/mcp/elicitation.ts';
 import { resolveToolOperation } from '../src/tools/actionCatalog.ts';
 import { outputSchemaFor } from '../src/tools/outputSchemas.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
@@ -13,9 +14,9 @@ const args = {
   reason: 'sign_in'
 };
 
-assert.equal(supportsBrowserHandoff({ elicitation: {} }), true);
-assert.equal(supportsBrowserHandoff({ elicitation: { form: {} } }), true);
-assert.equal(supportsBrowserHandoff({}), false);
+assert.equal(supportsFormElicitation({ elicitation: {} }), true);
+assert.equal(supportsFormElicitation({ elicitation: { form: {} } }), true);
+assert.equal(supportsFormElicitation({}), false);
 
 const resumeArgs = browserHandoffOperationArgs({
   ...args,

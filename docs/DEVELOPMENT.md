@@ -77,7 +77,7 @@ Run the smallest checks that prove the change, then the complete gate before rel
 npm run check
 npm run lint
 npm run typecheck
-npm run knip:dependencies
+npm run knip:check
 node test/run-tests.mjs
 ```
 
@@ -95,13 +95,13 @@ For frontend work, choose tests by ownership: store/SSE/router/model tests for d
 
 The dashboard runtime is intentionally split by ownership:
 
-- `src/http/dashboard.js` emits a minimal HTML shell plus initial dashboard JSON and owns the authenticated dashboard/API/SSE server boundary.
+- `src/http/dashboard.ts` emits a minimal HTML shell plus initial dashboard JSON and owns the authenticated dashboard/API/SSE server boundary.
 - `public/dashboard.js` is the browser coordinator for startup, authoritative refresh/recovery, Electron status, hash-router initialization, and SSE-to-store delivery. Do not add feature markup there.
 - `src/ui/store.js` is canonical revision-aware dashboard client state. Aggregate snapshots replace state; typed live events update their owned domain only.
 - `src/ui/events.js` owns the one dashboard `EventSource`, reconnection/backoff, visibility restart, and typed event delivery.
 - `src/ui/react/main.js` owns the React application shell, route registration and route-body rendering, page identity/focus/announcements, shared shell chrome, command palette, recovery/dashboard state presentation, overlays/toasts, and store provider.
 - `src/ui/navigation-catalog.js` owns route and navigation metadata.
-- `src/ui/route-policy.js` owns route normalization/allowed parameters; `src/ui/router.js` owns hash navigation state, route parameter helpers, unsaved-change protection, and route-change dispatch.
+- `src/ui/route-policy.js` owns route normalization/allowed parameters; `src/ui/router.js` owns the committed hash-route snapshot, route parameter helpers, unsaved-change protection, and route-change dispatch. React renders from that committed snapshot, so an unresolved discard prompt cannot change the visible page.
 - `src/ui/features/` owns feature-local React components, models/helpers, forms, and styles.
 - `src/ui/components/` owns controls and behavior that are actually reused across features.
 - `src/ui/styles/app.css` is the CSS source entry; its imports are the current list of feature/shared style inputs.
@@ -110,7 +110,7 @@ Backend projection stays backend-owned. Do not move task completion, authorizati
 
 Use local React state for unsaved form values and other UI-only state. Put canonical dashboard data in `src/ui/store.js`, and consume only the slices a feature actually needs when possible. Do not open feature-specific SSE connections.
 
-Keep route metadata centralized. Compatibility redirects may remain in `route-policy.js`, but removed routes must not return as visible destinations.
+Keep route metadata centralized. The route policy accepts canonical destinations only; removed and unknown destinations fall back to Overview without redirecting to a similar route.
 
 ### Adding or changing a dashboard feature
 
@@ -132,6 +132,8 @@ Keep route metadata centralized. Compatibility redirects may remain in `route-po
 - `electron/preload.cjs` exposes narrow, surface-specific bridges. The dashboard uses `window.relaiDesktop`; application/recovery renderers use `window.electronAPI`.
 - `electron/ipc-handlers.js` and dashboard-specific IPC handlers validate renderer requests and sender ownership.
 - the React dashboard is the routine application surface; the status window is recovery-only.
+
+The referenced UI TypeScript project checks `src/ui/router.js` with `@ts-check`; the remaining legacy React JavaScript stays outside that checked boundary.
 
 The wizard owns the minimal installed-app connection setup: Tunnel ID, write-only runtime API key, optional advanced local port, and a single action to start the secure connection.
 

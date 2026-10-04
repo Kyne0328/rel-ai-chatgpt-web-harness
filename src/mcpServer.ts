@@ -3,9 +3,7 @@ import { readConfig } from './config.js';
 import { createRelaiRequestStateCodec, SERVER_INSTANCE_ID, toolContext } from './mcp/context.js';
 import {
   MCP_LEGACY_PROTOCOL_VERSIONS,
-  MCP_PROTOCOL_VERSION,
-  TASKS_EXTENSION_ID,
-  TASKS_EXTENSION_REVISION
+  MCP_PROTOCOL_VERSION
 } from './mcp/protocol.js';
 import { PUBLIC_MCP_SERVER_INSTRUCTIONS } from './mcp/serverInstructions.js';
 import { toolResult } from './mcp/results.js';
@@ -19,7 +17,6 @@ import { ARTIFACT_RESOURCE_TEMPLATE } from './artifactResources.js';
 interface RelaiMcpServerOptions {
   config?: Record<string, unknown>;
   legacyCompatibility?: boolean;
-  nativeTasks?: boolean;
   principal?: unknown;
   publicHttpOnly?: boolean;
   transportType?: string;
@@ -41,10 +38,8 @@ function createRelaiMcpServer(options: RelaiMcpServerOptions = {}): McpServer {
   const requestStateCodec = createRelaiRequestStateCodec(config, options.principal);
   const capabilities = {
     tools: {},
-    resources: { subscribe: false },
-    ...(options.nativeTasks === true ? {
-      extensions: { [TASKS_EXTENSION_ID]: { revision: TASKS_EXTENSION_REVISION } }
-    } : {}),
+    resources: {},
+    ...(options.transportType === 'streamable-http' && !legacyCompatibility ? { events: {} } : {}),
     experimental: {
       relai: {
         targetProtocolVersion: MCP_PROTOCOL_VERSION,
@@ -87,7 +82,7 @@ function createRelaiMcpServer(options: RelaiMcpServerOptions = {}): McpServer {
       description: resource.description,
       mimeType: resource.mimeType,
       cacheHint: resourceCacheHint(resource.uri)
-    }, async (uri: URL) => readResource(uri.href));
+    }, async (uri: URL) => readResource(uri.href, { principal: options.principal }));
   }
   server.registerResource(
     'Rel.AI Artifact',

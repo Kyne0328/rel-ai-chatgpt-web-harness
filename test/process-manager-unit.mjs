@@ -5,11 +5,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { dashboardManagedProcesses } from '../src/core/dashboard-data.ts';
 import {
   activeProcessesForWorkSession,
   listManagedProcesses,
   onManagedProcessChange,
   readManagedProcess,
+  readManagedProcessLogRange,
   startManagedProcess,
   stopAllManagedProcesses,
   stopManagedProcess,
@@ -27,7 +29,7 @@ const workspace = { alias: 'app', path: workspaceRoot };
 const otherWorkspace = { alias: 'other', path: path.join(root, 'other-workspace') };
 const principalA = { clientId: 'client-a', authMode: 'oauth' };
 const principalB = { clientId: 'client-b', authMode: 'oauth' };
-const ownerStart = { taskId: 'work-session-a', nativeTaskId: 'native-start-a', principal: principalA, workspace: 'app' };
+const ownerStart = { taskId: 'work-session-a', principal: principalA, workspace: 'app' };
 const ownerLater = { taskId: 'work-session-a', principal: principalA, workspace: 'app' };
 const otherSession = { taskId: 'work-session-b', principal: principalA, workspace: 'app' };
 const otherPrincipal = { taskId: 'work-session-c', principal: principalB, workspace: 'app' };
@@ -85,7 +87,6 @@ try {
   assert.equal(started.kind, 'service');
   assert.match(started.purpose, /persistent process lifecycle/);
   assert.match(started.metadataRevision, /^[A-Za-z0-9_-]{16}$/);
-  assert.equal(started.originatingTaskId, ownerStart.nativeTaskId);
   assert.equal(started.workSessionId, ownerStart.taskId);
   assert.equal(started.readiness.verified, true);
   assert.equal(started.status, 'running');
@@ -172,10 +173,12 @@ try {
   const listedWithOutput = listManagedProcesses(config, {
     workspace: 'app',
     includeTail: true,
+    includeTailOffsets: true,
     tailBytes: 8192
   }, ownerLater);
   const listedProcessWithOutput = listedWithOutput.processes.find(item => item.processId === started.processId);
   assert.match(listedProcessWithOutput?.stdoutTail || '', /ECHO:hello/);
+  assert.ok(Number.isSafeInteger(listedProcessWithOutput?.stdoutTailStartOffset), 'dashboard process tails must expose an exact retained byte offset');
   const listedWithoutOutput = listManagedProcesses(config, { workspace: 'app' }, ownerLater);
   const listedProcessWithoutOutput = listedWithoutOutput.processes.find(item => item.processId === started.processId);
   assert.equal(Object.hasOwn(listedProcessWithoutOutput || {}, 'stdoutTail'), false, 'public process listings must stay compact unless output tails are explicitly requested');
@@ -193,6 +196,15 @@ try {
     noisy.stdout.totalBytes - noisy.stdoutRetainedFromOffset <= maxLogBytes,
     'retained stdout must stay within the configured log cap'
   );
+  const earlierRange = readManagedProcessLogRange(config, {
+    processId: started.processId,
+    stream: 'stdout',
+    beforeOffset: noisy.stdout.totalBytes,
+    maxBytes: 4096
+  }, ownerLater);
+  assert.equal(earlierRange.stream, 'stdout');
+  assert.equal(earlierRange.range.nextOffset, noisy.stdout.totalBytes, 'backward dashboard reads must end exactly at the requested byte boundary');
+  assert.ok(earlierRange.range.offset >= noisy.stdoutRetainedFromOffset, 'backward dashboard reads must never cross the retained-log boundary');
 
   const cursor = noisy.stdout.totalBytes;
   await writeManagedProcess(config, {
@@ -238,6 +250,11 @@ try {
   assert.equal(activeAfterStop.processes.some(item => item.processId === started.processId), false);
   const historyAfterStop = listManagedProcesses(config, { workspace: 'app', includeTerminal: true }, ownerLater);
   assert.equal(historyAfterStop.processes.some(item => item.processId === started.processId), true);
+  const terminalAfterStop = listManagedProcesses(config, { workspace: 'app', terminalOnly: true }, ownerLater);
+  assert.equal(terminalAfterStop.processes.some(item => item.processId === started.processId), true, 'terminal-only process projection must expose recently ended processes');
+  assert.equal(terminalAfterStop.processes.every(item => ['stopped', 'exited', 'failed'].includes(item.status)), true);
+  assert.equal(dashboardManagedProcesses(config).some(item => item.processId === started.processId), true,
+    'dashboard projection must retain a bounded recently-ended process tail instead of dropping terminal processes');
 
   const cancellationController = new AbortController();
   const cancelledStart = startManagedProcess(workspace, config, {

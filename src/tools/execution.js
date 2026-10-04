@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { combineAbortSignals } from '../abortSignals.ts';
 import { hasAgentCancellationHandle, isClearlyWorkspaceReadOnlyAdb } from '../executionControl.js';
 import { resolveWorkspace } from '../config.js';
-import { fallbackExecutionStatus } from '../mcp/fallbackExecutions.js';
+import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
 import { claimTaskChangedFiles, ensureTaskBaseline } from '../taskIntegrity.ts';
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
@@ -28,7 +28,6 @@ const READ_ONLY_INSPECTION_EXECUTABLES = new Set([
 const READ_ONLY_FIND_UNSAFE_OPTIONS = new Set([
   '-delete', '-exec', '-execdir', '-ok', '-okdir', '-fls', '-fprint', '-fprint0', '-fprintf'
 ]);
-const BACKGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 10_000;
 const DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 30_000;
 const WORK_FINISH_QUEUE_TIMEOUT_MS = 2_000;
 const DEFAULT_MUTATION_WATCHDOG_MS = 5 * 60_000;
@@ -36,15 +35,21 @@ const MUTATION_WATCHDOG_TERMINATION_GRACE_MS = 15_000;
 
 async function executeToolCall({ config, name, executionName = name, effectiveArgs, context, requestTaskContext = null, finishActivity, definition, workspaceOverride = null }) {
   let sessionStart = { started: false, alias: '' };
+  const spanTaskId = String(finishActivity?.taskId || requestTaskContext?.taskId || effectiveArgs?.work_id || '').trim();
   const value = await runWithToolActivity(finishActivity, () => runSpan(config,
     executionName === OP.WORK_BEGIN ? 'relai.logical_task.start' : 'relai.tool.call',
-    spanAttributes(name, effectiveArgs, context),
+    spanAttributes(name, effectiveArgs, context, spanTaskId),
     async () => {
       const taskId = String(finishActivity?.taskId || effectiveArgs?.work_id || '').trim();
       const backgroundReference = String(effectiveArgs?.operationId || taskId || '').trim();
-      const backgroundStatusMode = executionName === OP.WORK_STATUS
+      // Compact connector status is control-plane work even when the requested
+      // operation is completed, unknown, or not represented by a fallback record.
+      const compactStatusMode = executionName === OP.WORK_STATUS
+        && context?.publicHttpOnly === true
+        && effectiveArgs?.detail !== 'full';
+      const backgroundStatusMode = compactStatusMode || (executionName === OP.WORK_STATUS
         && Boolean(backgroundReference)
-        && fallbackExecutionStatus(backgroundReference, { config })?.status === 'running';
+        && fallbackExecutionsStatus(backgroundReference, { config, workId: taskId }).some(record => record.status === 'running'));
       const workspace = workspaceOverride || (effectiveArgs?.workspace ? resolveWorkspace(config, effectiveArgs.workspace) : null);
       const directFilesystem = workspace?.directFilesystem === true;
       const branchChange = isExplicitBranchChange(executionName, effectiveArgs);
@@ -52,8 +57,17 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       const queueMode = queueModeFor(executionName, definition, readOnlyExec);
       const queueScope = queueScopeFor(executionName, definition, branchChange, readOnlyExec);
       const queueTaskId = taskId || detachedQueueTaskId(context, queueScope);
+      const requestedTimeoutMs = Number(effectiveArgs?.timeoutMs);
+      const inheritedDeadlineAtMs = Number(context?.deadlineAtMs);
+      const deadlineAtMs = Number.isFinite(inheritedDeadlineAtMs) && inheritedDeadlineAtMs > 0
+        ? Math.floor(inheritedDeadlineAtMs)
+        : Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+          ? Date.now() + Math.floor(requestedTimeoutMs)
+          : 0;
+      const deadlineSignal = deadlineAtMs > 0 ? AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now())) : undefined;
+      const requestSignal = combineAbortSignals(context?.signal, deadlineSignal);
 
-      const invokeHandler = async (args, signal = context?.signal) => {
+      const invokeHandler = async (args, signal = requestSignal) => {
         if (typeof definition?.handler !== 'function') throw new Error(`Tool '${name}' has no executable handler.`);
         const handled = await measurePerformancePhase('tool.execution', () => definition.handler(config, args || {}, {
           connector: Boolean(context?.publicHttpOnly),
@@ -63,13 +77,15 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           conversationId: context?.conversationId,
           transportSessionId: context?.transportSessionId,
           signal,
+          ...(deadlineAtMs > 0 ? { deadlineAtMs } : {}),
           principal: context?.principal,
-          nativeTaskId: context?.nativeTaskId,
+
           transportType: context?.transportType,
           executionMode: context?.executionMode || '',
           cancel: context?.cancel || null,
           requestTaskContext,
           backgroundStatusMode,
+          fallbackOperationId: context?.fallbackOperationId || '',
           mutationTrackingRequired: executionName !== OP.EXEC || !readOnlyExec,
           workspaceOverride: workspaceOverride || undefined
         }));
@@ -89,19 +105,21 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       };
 
       if (executionName === OP.WORK_FINISH) finishActivity?.assertCompletionAvailable?.();
-      const operationSignal = combineAbortSignals(context?.signal, finishActivity?.signal);
+      const operationSignal = combineAbortSignals(requestSignal, finishActivity?.signal);
+      updateFallbackExecutionPhase(context?.fallbackOperationId, 'queued', config);
       const result = await runWorkspaceOperation(
         executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || backgroundStatusMode
           ? ''
           : workspaceOverride?.alias || effectiveArgs?.workspace,
         async () => {
+          updateFallbackExecutionPhase(context?.fallbackOperationId, 'preparing', config);
           const watchdog = createMutationWatchdog(
             queueScope,
             executionName,
             effectiveArgs,
-            combineAbortSignals(context?.signal, getCurrentTaskAbortSignal()),
+            combineAbortSignals(requestSignal, getCurrentTaskAbortSignal()),
             workspace?.alias,
-            hasAgentCancellationHandle(effectiveArgs, { taskId, nativeTaskId: context?.nativeTaskId })
+            hasAgentCancellationHandle(effectiveArgs, { taskId })
           );
           try {
             if (workspace && !directFilesystem && isMutationScope(queueScope)) {
@@ -125,6 +143,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
               'tool.session',
               () => maybeStartSession(config, executionName, effectiveArgs || {}, { taskId })
             );
+            if (executionName !== OP.EXEC) updateFallbackExecutionPhase(context?.fallbackOperationId, 'running', config);
             const handled = await (workspace && !directFilesystem && isMutationScope(queueScope)
               ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal))
               : invokeHandler(effectiveArgs, watchdog.signal));
@@ -146,13 +165,15 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           queueScope,
           queueTaskId,
           operationSignal,
-          context?.backgroundFallbackExecution === true
-            ? BACKGROUND_WORKSPACE_QUEUE_TIMEOUT_MS
-            : executionName === OP.WORK_FINISH
-              ? WORK_FINISH_QUEUE_TIMEOUT_MS
-              : queueMode === 'write' && isMutationScope(queueScope)
-                ? positiveMilliseconds(process.env.REL_AI_MCP_WORKSPACE_QUEUE_TIMEOUT_MS, DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS)
-                : 0,
+          deadlineAtMs > 0
+            ? Math.max(1, deadlineAtMs - Date.now())
+            : context?.backgroundFallbackExecution === true
+              ? positiveMilliseconds(process.env.REL_AI_MCP_WORKSPACE_QUEUE_TIMEOUT_MS, DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS)
+              : executionName === OP.WORK_FINISH
+                ? WORK_FINISH_QUEUE_TIMEOUT_MS
+                : queueMode === 'write' && isMutationScope(queueScope)
+                  ? positiveMilliseconds(process.env.REL_AI_MCP_WORKSPACE_QUEUE_TIMEOUT_MS, DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS)
+                  : 0,
           {
             taskId,
             operationId: String(finishActivity?.operationId || ''),
@@ -380,8 +401,8 @@ function isExplicitBranchChange(executionName, args = {}) {
 }
 
 function detachedQueueTaskId(context = {}, queueScope = '') {
-  const nativeTaskId = String(context?.nativeTaskId || '').trim();
-  if (nativeTaskId) return nativeTaskId;
+
+
   if (context?.backgroundFallbackExecution !== true && queueScope !== 'mutation') return '';
   return String(context?.requestId || '').trim();
 }
@@ -414,10 +435,11 @@ function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = n
   };
 }
 
-function spanAttributes(name, args, context) {
+function spanAttributes(name, args, context, workId = '') {
   return {
     'relai.tool.name': name,
     'relai.workspace': String(args?.workspace || ''),
+    'relai.work.id': String(workId || ''),
     'relai.transport': String(context?.transportType || ''),
     'relai.client.name': String(context?.clientName || ''),
     'relai.client.version': String(context?.clientVersion || '')

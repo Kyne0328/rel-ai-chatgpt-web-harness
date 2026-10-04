@@ -59,7 +59,7 @@ const modal = read('src/ui/components/modal.js');
 const drawer = read('src/ui/components/drawer.js');
 
 assert.match(browserReact, /Sign-ins are remembered unless ChatGPT explicitly starts a private session/, 'Browser empty state must explain persistent login behavior');
-assert.match(browserReact, /Sign-ins remembered/, 'Active persistent browser sessions must visibly identify remembered sign-ins');
+assert.doesNotMatch(browserReact, /Sign-ins remembered/, 'Active persistent browser sessions must not show a redundant remembered-sign-ins status pill');
 assert.match(browserReact, /Private session/, 'Ephemeral browser sessions must visibly identify private mode');
 assert.match(browserReact, /Enter passwords and verification codes here, not in ChatGPT/, 'Browser handoff must direct sensitive sign-in input to the local browser');
 assert.match(browserReact, /Allow for this session/, 'Site permission requests must require an explicit session-scoped user decision');
@@ -153,8 +153,7 @@ assert.match(settingsReact, /Quit Rel\.AI MCP/, 'App settings must provide a gra
 assert.match(settingsReact.match(/function ConnectionPage[\s\S]*?function connectionPrimaryAction/)?.[0] || '', /LogoutRow/, 'Log out must live with the saved OpenAI connection');
 assert.doesNotMatch(settingsReact.match(/function ApplicationPage[\s\S]*?function DeveloperOptions/)?.[0] || '', /LogoutRow|ComputerControlSettings|TelemetrySettings|LocalDataSettings/, 'App settings must stay focused on lifecycle, updates, developer options, and quit');
 assert.doesNotMatch(settingsReact.match(/function ConnectionPage[\s\S]*?function DesktopConnectionSettings/)?.[0] || '', /clientCapabilityViews|Native MCP Tasks|Execution mode/, 'Connection page must keep protocol capability details out of the normal connection UI');
-assert.match(diagnosticsReact, /clientCapabilityViews/);
-assert.match(diagnosticsReact, /Tasks extension advertised: \$\{supported\}/, 'Troubleshooting must show the observed MCP Tasks capability without stale internal field names');
+assert.doesNotMatch(diagnosticsReact, /clientCapabilityViews|Tasks extension advertised|Native MCP Tasks/, 'Troubleshooting must not expose removed MCP Tasks capability diagnostics');
 assert.match(homeReact, /className: 'buttonlike secondary compact-button', href: routeMetadata\('workspaces'\)\.href/, 'Inline empty-state navigation must have a non-color link affordance');
 assert.match(homeReact, /function ActiveTasksSummary/);
 assert.match(homeReact, /tasks\.slice\(0, 3\)/, 'Overview must cap the active-task summary instead of becoming a second Tasks page');
@@ -175,6 +174,7 @@ assert.doesNotMatch(workspacesReact, /className: 'workspace-direct-access card'/
 assert.match(workspaceModalsReact, /primary project folder/, 'workspace setup must describe the primary project folder before Git-specific capabilities');
 assert.match(activityReact, /const fileLocation = activityFileLocation\(entry\)/, 'Activity details must derive the successful local file destination');
 assert.match(activityReact, /readableSection\('File location', fileLocationText\)/, 'Activity details must expose successful local file destinations without requiring Technical details');
+assert.match(activityReact, /command \? h\(CommandDetail, \{ command \}\) : null/, 'Activity details must expose the full recorded command without requiring Technical details');
 assert.match(modal, /openModalOverlay\(\{/, 'shared modals must render through the React overlay store');
 assert.match(drawer, /openDrawerOverlay\(\{/, 'shared drawers must render through the React overlay store');
 assert.doesNotMatch(modal, /innerHTML|insertAdjacentHTML/, 'shared modals must not render content through imperative HTML injection');

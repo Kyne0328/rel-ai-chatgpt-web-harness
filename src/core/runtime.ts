@@ -2,7 +2,6 @@ import { performance } from 'node:perf_hooks';
 
 import { readConfig } from '../config.js';
 import { initializeKnowledgeDatabase, maintainKnowledgeDatabase } from '../knowledgeStore.js';
-import { pruneNativeToolTasks } from '../mcp/nativeToolTasks.js';
 import { initializeStateDatabase, maintainStateDatabase } from '../stateDatabase.ts';
 import { initializeTelemetry } from '../telemetry.js';
 
@@ -45,9 +44,6 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
     const telemetryStarted = performance.now();
     const telemetry = isolated ? false : initializeTelemetry(config);
     const telemetrySetupMs = performance.now() - telemetryStarted;
-    const pruneStarted = performance.now();
-    if (!isolated) pruneNativeToolTasks(config);
-    const nativeTaskPruneMs = performance.now() - pruneStarted;
     startup = {
       config,
       isolated,
@@ -57,8 +53,7 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
       startupTimings: {
         stateDatabaseMs,
         knowledgeDatabaseMs,
-        telemetrySetupMs,
-        nativeTaskPruneMs
+        telemetrySetupMs
       }
     };
     return startup;

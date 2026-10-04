@@ -124,7 +124,7 @@ assert.doesNotMatch(statusJs, /notificationToggleBtn|desktop notification settin
 assert.doesNotMatch(statusJs, /updateUI\(\{\s*error:[\s\S]{0,160}tunnelStatus:\s*'failed'/, 'recovery action failures must not falsify the tunnel connection state');
 assert.doesNotMatch(statusJs, /currentStatus\.mcpUrl|approval token|ngrok|gateway/i);
 
-for (const channel of ['desktop:settings:get','desktop:settings:save','desktop:analytics:local','desktop:update:get','desktop:update:check','desktop:update:download','desktop:update:install','desktop:lifecycle:get','desktop:lifecycle:acknowledge-connector-refresh','desktop:startup:set','desktop:keep-awake:set','desktop:notifications:get','desktop:notifications:set','desktop:notification-preferences:get','desktop:notification-preferences:set','desktop:diagnostics:export','desktop:diagnostics:open-folder','desktop:window:get-state','desktop:window:minimize','desktop:window:toggle-maximize','desktop:window:close','desktop:restart-connection','desktop:reload-dashboard','desktop:relaunch','desktop:logout','desktop:quit','recovery:restart-connection','recovery:relaunch']) {
+for (const channel of ['desktop:settings:get','desktop:settings:save','desktop:tunnels:save','desktop:tunnels:remove','desktop:analytics:local','desktop:update:get','desktop:update:check','desktop:update:download','desktop:update:install','desktop:lifecycle:get','desktop:lifecycle:acknowledge-connector-refresh','desktop:startup:set','desktop:keep-awake:set','desktop:notifications:get','desktop:notifications:set','desktop:notification-preferences:get','desktop:notification-preferences:set','desktop:diagnostics:export','desktop:diagnostics:open-folder','desktop:window:get-state','desktop:window:minimize','desktop:window:toggle-maximize','desktop:window:close','desktop:restart-connection','desktop:reload-dashboard','desktop:relaunch','desktop:logout','desktop:quit','recovery:restart-connection','recovery:relaunch']) {
   assert.match(preload, new RegExp(channel.replaceAll(':', '\\:')));
   assert.match(desktopIpcContract, new RegExp(channel.replaceAll(':', '\\:')));
 }
@@ -156,15 +156,17 @@ assert.match(settingsReact, /saved key is encrypted on this computer\. Rel\.AI d
 assert.match(settingsReact, /replacementKeyPresent: Boolean\(String\(value\?\.tunnelApiKey \|\| ''\)\.trim\(\)\)/, 'React dirty-state tracking may record only whether a replacement key is present');
 assert.doesNotMatch(settingsReact, /replacementKey:\s*String\(value\?\.tunnelApiKey/, 'React dirty-state snapshots must not serialize the runtime API key');
 assert.match(settingsReact, /Save connection settings/);
-assert.match(settingsReact, /Use a different OpenAI account or workspace/);
-assert.match(settingsReact, /update the existing Rel\.AI connector/);
+assert.match(settingsReact, /Additional ChatGPT tunnels/);
+assert.match(settingsReact, /same Rel\.AI service and the same configured workspaces/);
+assert.match(settingsReact, /saveTunnel/);
+assert.match(settingsReact, /removeTunnel/);
 assert.match(settingsReact, /function SettingsField/);
 assert.match(settingsReact, /function validateConnectionSettings/);
 assert.match(settingsReact, /'aria-invalid': validation\?\.field === 'tunnelId'/);
 assert.doesNotMatch(settingsReact, /if \(issue\) return toast\(/, 'connection validation must stay beside the owning field');
 assert.doesNotMatch(settingsReact, /ngrok|gateway|pairing|approval token/i);
 
-for (const file of ['desktop-host.js','desktop-power.js','secure-tunnel-runtime.js','tunnel-recovery-supervisor.js','tunnel-credentials.js','service-runtime.js','desktop-settings.js']) assert.ok(electronPackage.build.files.includes(file));
+for (const file of ['desktop-host.js','desktop-power.js','secure-tunnel-runtime.js','tunnel-runtime-pool.js','tunnel-recovery-supervisor.js','tunnel-credentials.js','tunnel-connections.js','service-runtime.js','desktop-settings.js']) assert.ok(electronPackage.build.files.includes(file));
 for (const removed of ['managed-ngrok.js','ngrok-token.js','public-connection-runtime.js','gateway-client.js','gateway-actions.js','gateway-device-identity.js','approval-token.js']) assert.equal(electronPackage.build.files.includes(removed), false);
 assert.ok(electronPackage.build.win.extraResources.some(item => item.from === '../vendor/tunnel-client' && item.to === 'bin/tunnel-client'));
 assert.equal(electronPackage.build.win.extraResources.some(item => /ngrok|gateway/i.test(String(item.from || ''))), false);

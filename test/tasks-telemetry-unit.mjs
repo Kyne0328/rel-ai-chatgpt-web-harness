@@ -5,37 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 
-import {
-  completeNativeToolTask,
-  createNativeToolTask
-} from '../src/mcp/nativeToolTasks.js';
-import { getNativeTask, getNativeTaskRecord } from '../src/mcp/nativeTaskService.js';
 import { initializeTelemetry, runSpan, sanitizeAttributes, shutdownTelemetry, summarizeCommandForTelemetry, telemetrySampleRatio, telemetryStatus } from '../src/telemetry.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-tool-task-'));
-const config = { stateDir: root };
 try {
-  const created = createNativeToolTask(config, {
-    method: 'tools/call',
-    name: 'relai_validate',
-    workspace: 'app',
-    logicalTaskId: 'logical-task',
-    principal: 'client-a'
-  });
-  assert.equal(created.status, 'working');
-  assert.match(created.taskId, /^task_/);
-  assert.equal(getNativeTaskRecord(config, created.taskId, { principal: 'client-a' }).internal.workspace, 'app');
-  assert.throws(
-    () => getNativeTask(config, created.taskId, { principal: 'client-b' }),
-    /not available/
-  );
-
-  const completed = await completeNativeToolTask(config, created.taskId, { ok: true });
-  assert.equal(completed.status, 'completed');
-  assert.deepEqual(getNativeTask(config, created.taskId, { principal: 'client-a' }).result, { ok: true });
-  assert.equal(fs.existsSync(path.join(root, 'operation-tasks')), false);
-  assert.equal(fs.existsSync(path.join(root, 'native-tasks')), false, 'native tasks must not create a JSON/lock directory');
-
   const attributes = sanitizeAttributes({
     'relai.workspace': 'app',
     authorization: 'Bearer secret',
@@ -47,9 +20,15 @@ try {
   assert.equal(attributes.authorization, '[redacted]');
   assert.equal(attributes.approval_token, '[redacted]');
   assert.equal(attributes['command.env.PASSWORD'], '[redacted]');
-  assert.equal(attributes['relai.process.command'], 'npm [4 args]');
+  assert.equal(attributes['relai.process.command'], 'npm run test -- --watch');
   assert.equal(attributes['safe.number'], 2);
-  assert.equal(summarizeCommandForTelemetry('git status --short'), 'git [2 args]');
+  assert.equal(summarizeCommandForTelemetry('git status --short'), 'git status --short');
+  assert.equal(
+    summarizeCommandForTelemetry('npm run deploy -- --token super-secret --password=also-secret --region apac'),
+    'npm run deploy -- --token [REDACTED] --password [REDACTED] --region apac'
+  );
+  const longCommand = `node script.js ${'x'.repeat(25_000)}`;
+  assert.equal(summarizeCommandForTelemetry(longCommand), longCommand, 'telemetry must not truncate complete command text');
   assert.equal(telemetrySampleRatio({ telemetry: { sampleRatio: 0.25 } }), 0.25);
   assert.equal(telemetrySampleRatio({ telemetry: { sampleRatio: 2 } }), 1);
   assert.equal(telemetrySampleRatio({ telemetry: { sampleRatio: -1 } }), 0);
@@ -78,6 +57,8 @@ try {
       requests.push({
         path: request.url,
         contentType: request.headers['content-type'] || '',
+        authorization: request.headers.authorization || '',
+        installationId: request.headers['x-relai-installation-id'] || '',
         body: Buffer.concat(chunks)
       });
       response.statusCode = 200;
@@ -100,12 +81,14 @@ try {
     const identityPath = path.join(root, 'telemetry-identity.json');
     const firstIdentityState = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
     assert.match(firstIdentityState.installationId, /^[0-9a-f-]{36}$/i, 'usage reporting must persist a pseudonymous installation ID');
+    assert.match(firstIdentityState.ingestToken, /^[A-Za-z0-9_-]{40,128}$/, 'usage reporting must persist a random installation-scoped ingest credential');
     assert.match(firstIdentityState.lastReportedAt, /^\d{4}-\d{2}-\d{2}T/, 'successful usage reporting must persist the last report time');
     assert.equal(firstIdentityState.lastReportedVersion, '1.1.4', 'successful usage reporting must persist the reported app version');
 
     const usageRequests = requests.filter(request => request.path === '/api/v1/installation/presence');
     assert.equal(usageRequests.length, 1, 'initialization must send one presence event');
     assert.match(usageRequests[0].contentType, /^application\/json/i);
+    assert.equal(usageRequests[0].authorization, `Bearer ${firstIdentityState.ingestToken}`);
     const presence = JSON.parse(usageRequests[0].body.toString('utf8'));
     assert.deepEqual(Object.keys(presence).sort(), ['arch', 'installationId', 'platform', 'schemaVersion', 'version']);
     assert.equal(presence.schemaVersion, 1);
@@ -126,27 +109,43 @@ try {
     assert.equal(
       requests.filter(request => request.path === '/api/v1/installation/presence').length,
       1,
-      'successful usage reporting must not repeat within 24 hours across restarts'
+      'successful usage reporting must not repeat before the 12-hour refresh interval across restarts'
     );
 
     fs.writeFileSync(identityPath, JSON.stringify({
       ...secondIdentityState,
-      lastReportedVersion: '1.1.3'
+      lastReportedAt: new Date(Date.now() - 13 * 60 * 60 * 1000).toISOString()
     }, null, 2));
     initializeTelemetry(usageOnlyConfig);
     await shutdownTelemetry();
     assert.equal(
       requests.filter(request => request.path === '/api/v1/installation/presence').length,
       2,
-      'an app version change must report immediately even when the previous presence was less than 24 hours ago'
+      'presence must refresh when the persisted success is older than 12 hours even after a restart'
+    );
+
+    const refreshedIdentityState = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
+    fs.writeFileSync(identityPath, JSON.stringify({
+      ...refreshedIdentityState,
+      lastReportedVersion: '1.1.3'
+    }, null, 2));
+    initializeTelemetry(usageOnlyConfig);
+    await shutdownTelemetry();
+    assert.equal(
+      requests.filter(request => request.path === '/api/v1/installation/presence').length,
+      3,
+      'an app version change must report immediately even when the previous presence is recent'
     );
     const upgradedIdentityState = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
     assert.equal(upgradedIdentityState.lastReportedVersion, '1.1.4');
 
     const secret = 'SECRET_EXCEPTION_MARKER';
     const privatePath = 'C:\\private\\project\\file.js';
+    const diagnosticCommand = 'npm test -- --runInBand --coverage --reporter spec';
     await assert.rejects(
-      () => runSpan({ stateDir: root, telemetry: { diagnosticsEnabled: true, sampleRatio: 1 } }, 'relai.test.privacy', {}, async () => {
+      () => runSpan({ stateDir: root, telemetry: { diagnosticsEnabled: true, sampleRatio: 1 } }, 'relai.test.privacy', {
+        'relai.process.command': diagnosticCommand
+      }, async () => {
         const error = new Error(`${secret} ${privatePath}`);
         error.name = 'SECRET_ERROR_NAME';
         throw error;
@@ -161,6 +160,10 @@ try {
         .map(request => request.body)
     );
     assert.ok(diagnosticPayload.length > 0, 'enabled diagnostics must export OTLP spans');
+    assert.equal(diagnosticPayload.includes(Buffer.from(diagnosticCommand)), true, 'OTLP payloads must retain the complete diagnostic command');
+    const diagnosticRequest = requests.find(request => request.path === '/v1/traces');
+    assert.equal(diagnosticRequest?.authorization, `Bearer ${upgradedIdentityState.ingestToken}`, 'maintainer diagnostics must authenticate with the installation-scoped credential');
+    assert.equal(diagnosticRequest?.installationId, upgradedIdentityState.installationId, 'maintainer diagnostics must identify the installation without adding it to the trace payload');
     assert.equal(diagnosticPayload.includes(Buffer.from(secret)), false, 'OTLP payloads must never include raw exception messages');
     assert.equal(diagnosticPayload.includes(Buffer.from(privatePath)), false, 'OTLP payloads must never include raw local paths from exceptions');
   } finally {
@@ -176,4 +179,4 @@ try {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-console.log('Native tool-task ownership and telemetry redaction tests passed.');
+console.log('Telemetry privacy, reporting, and redaction tests passed.');

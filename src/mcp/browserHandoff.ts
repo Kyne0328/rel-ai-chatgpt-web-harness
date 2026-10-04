@@ -1,9 +1,10 @@
 import { acceptedContent, inputRequired } from '@modelcontextprotocol/server';
+import { supportsFormElicitation } from './elicitation.ts';
+import { BROWSER_HANDOFF_TTL_MS } from '../browser/browserHandoffPolicy.ts';
 import { principalFingerprint } from './principal.ts';
 import { toolResult } from './results.js';
 
 const BROWSER_HANDOFF_STATE_KIND = 'browser_handoff_v1';
-const BROWSER_HANDOFF_TTL_MS = 10 * 60 * 1000;
 
 type BrowserHandoffResponse = Readonly<{ completed?: boolean }>;
 type BrowserHandoffContext = Readonly<{
@@ -34,13 +35,6 @@ function browserHandoffOperationArgs(args: Record<string, unknown>, action: 'han
     delete next.tabId;
   }
   return next;
-}
-
-function supportsBrowserHandoff(capabilities: unknown): boolean {
-  if (!isRecord(capabilities)) return false;
-  const elicitation = capabilities.elicitation;
-  if (!isRecord(elicitation)) return false;
-  return Object.keys(elicitation).length === 0 || Boolean(elicitation.form);
 }
 
 async function requestBrowserHandoff({
@@ -81,7 +75,7 @@ async function requestBrowserHandoff({
   };
   const requestState = await codec.mint(claims, rawContext);
 
-  if (!supportsBrowserHandoff(context.clientCapabilities)) {
+  if (!supportsFormElicitation(context.clientCapabilities)) {
     return toolResult({
       ...started,
       userInputRequired: true,
@@ -157,9 +151,5 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export {
-  BROWSER_HANDOFF_STATE_KIND,
-  BROWSER_HANDOFF_TTL_MS,
-  browserHandoffOperationArgs,
-  requestBrowserHandoff,
-  supportsBrowserHandoff
+  browserHandoffOperationArgs, requestBrowserHandoff
 };

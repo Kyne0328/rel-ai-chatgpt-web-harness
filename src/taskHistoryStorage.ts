@@ -9,7 +9,10 @@ import { setStateMeta, stateMetaValue, withStateDatabase } from './stateDatabase
 import { normalizeTaskProgress, sanitizeTaskRecord } from './taskObservability.js';
 import { upsertTaskHistorySession } from './taskHistoryPersistence.ts';
 
-const MAX_SESSIONS = 500;
+const MAX_HISTORY_QUERY_SESSIONS = 500;
+const MAX_HISTORY_PAGE_SIZE = 500;
+const TASK_HISTORY_RETENTION_DAYS = 180;
+const TASK_HISTORY_STORAGE_BUDGET_BYTES = 1024 * 1024 * 1024;
 const TASK_HISTORY_VERSION = 3;
 const HISTORY_FORMAT_MARKER = '.task-history-v3';
 const LEGACY_MIGRATION_KEY = 'task_history_legacy_migrated_v1';
@@ -33,7 +36,40 @@ interface TaskHistoryEventRow {
   workspace?: string;
   task_id?: string;
   session_id?: string;
+  event_timestamp?: string;
+  task_updated_at_ms?: number;
+  event_index?: number;
   payload: string;
+}
+
+interface SessionPageCursor {
+  updatedAtMs: number;
+  id: string;
+}
+
+interface SessionPageOptions {
+  limit?: number;
+  cursor?: SessionPageCursor | null;
+  workspace?: string;
+}
+
+interface EventPageCursor {
+  eventTimestamp: string;
+  taskUpdatedAtMs: number;
+  taskId: string;
+  eventIndex: number;
+}
+
+interface EventPageOptions {
+  limit?: number;
+  cursor?: EventPageCursor | null;
+  taskId?: string;
+}
+
+interface TaskHistoryRetentionOptions {
+  retentionDays?: number;
+  storageBudgetBytes?: number;
+  nowMs?: number;
 }
 
 interface SessionTextSearchOptions {
@@ -54,22 +90,23 @@ function ensureCurrentHistory(config: TaskHistoryConfig = {}): void {
   migrateLegacyTaskHistory(config);
 }
 
-function listSessions(directory: string, limit = MAX_SESSIONS): StoredTaskSession[] {
+function listSessions(directory: string, limit = MAX_HISTORY_QUERY_SESSIONS): StoredTaskSession[] {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
-    const rows = db.prepare('SELECT id,payload FROM task_history ORDER BY updated_at_ms DESC,id ASC LIMIT ?')
+    const rows = db.prepare('SELECT id,updated_at_ms,payload FROM task_history ORDER BY updated_at_ms DESC,id ASC LIMIT ?')
       .all(Math.max(0, Math.floor(Number(limit) || 0))) as unknown as TaskHistoryRow[];
     return parseSessionRows(db, rows);
   }, { transaction: true }) as StoredTaskSession[];
 }
 
-function listSessionSummaries(directory: string, limit = MAX_SESSIONS): StoredTaskSession[] {
+function listSessionSummaries(directory: string, limit = MAX_HISTORY_QUERY_SESSIONS): StoredTaskSession[] {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
     const rows = db.prepare(`
       SELECT id,
+        updated_at_ms,
         CASE
           WHEN json_valid(payload) THEN json_set(
             json_remove(payload, '$.events', '$.workflowEvidence'),
@@ -113,9 +150,9 @@ function findSessionsContaining(directory: string, values: unknown, options: Ses
       filters.push("COALESCE(json_extract(payload, '$.workspace'), '') <> ?");
       parameters.push(excludeWorkspace);
     }
-    const limit = Math.min(MAX_SESSIONS, Math.max(1, Math.floor(Number(options.limit) || 40)));
+    const limit = Math.min(MAX_HISTORY_QUERY_SESSIONS, Math.max(1, Math.floor(Number(options.limit) || 40)));
     parameters.push(limit);
-    const rows = db.prepare(`SELECT id,payload FROM task_history
+    const rows = db.prepare(`SELECT id,updated_at_ms,payload FROM task_history
       WHERE ${filters.join(' AND ')}
       ORDER BY updated_at_ms DESC,id ASC
       LIMIT ?`).all(...parameters) as unknown as TaskHistoryRow[];
@@ -123,25 +160,108 @@ function findSessionsContaining(directory: string, values: unknown, options: Ses
   }, { transaction: true }) as StoredTaskSession[];
 }
 
-function listRecentSessionEvents(directory: string, limit = MAX_SESSIONS): Record<string, any>[] {
+function listSessionSummaryPage(directory: string, options: SessionPageOptions = {}): { items: StoredTaskSession[]; cursor: SessionPageCursor | null; hasMore: boolean } {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
+    const pageSize = Math.min(MAX_HISTORY_PAGE_SIZE, Math.max(1, Math.floor(Number(options.limit) || 100)));
+    const filters: string[] = [];
+    const parameters: Array<string | number> = [];
+    const workspace = String(options.workspace || '').trim();
+    if (workspace) {
+      filters.push("COALESCE(json_extract(payload, '$.workspace'), '') = ?");
+      parameters.push(workspace);
+    }
+    const cursorUpdatedAtMs = Math.max(0, Math.floor(Number(options.cursor?.updatedAtMs || 0)));
+    const cursorId = String(options.cursor?.id || '').trim();
+    if (cursorUpdatedAtMs && cursorId) {
+      filters.push('(updated_at_ms < ? OR (updated_at_ms = ? AND id > ?))');
+      parameters.push(cursorUpdatedAtMs, cursorUpdatedAtMs, cursorId);
+    }
+    parameters.push(pageSize + 1);
+    const rows = db.prepare(`
+      SELECT id,updated_at_ms,
+        CASE
+          WHEN json_valid(payload) THEN json_set(
+            json_remove(payload, '$.events', '$.workflowEvidence'),
+            '$.events', json('[]')
+          )
+          ELSE payload
+        END AS payload
+      FROM task_history
+      ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
+      ORDER BY updated_at_ms DESC,id ASC
+      LIMIT ?
+    `).all(...parameters) as unknown as TaskHistoryRow[];
+    const hasMore = rows.length > pageSize;
+    const pageRows = rows.slice(0, pageSize);
+    const items = parseSessionRows(db, pageRows);
+    const last = pageRows.at(-1);
+    return {
+      items,
+      cursor: last ? { updatedAtMs: Number(last.updated_at_ms || 0), id: String(last.id || '') } : null,
+      hasMore
+    };
+  }, { transaction: false }) as { items: StoredTaskSession[]; cursor: SessionPageCursor | null; hasMore: boolean };
+}
+
+function listRecentSessionEvents(directory: string, limit = MAX_HISTORY_QUERY_SESSIONS): Record<string, any>[] {
+  return listRecentSessionEventPage(directory, { limit }).items;
+}
+
+function listRecentSessionEventPage(directory: string, options: EventPageOptions = {}): { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean } {
+  const config = configForDirectory(directory);
+  migrateLegacyTaskHistory(config);
+  return withStateDatabase(config, (db: DatabaseSync) => {
+    const pageSize = Math.min(MAX_HISTORY_PAGE_SIZE, Math.max(1, Math.floor(Number(options.limit) || 100)));
+    const filters: string[] = [];
+    const parameters: Array<string | number> = [];
+    const taskIdFilter = String(options.taskId || '').trim();
+    if (taskIdFilter) {
+      filters.push('task_id = ?');
+      parameters.push(taskIdFilter);
+    }
+    const cursor = options.cursor;
+    const eventTimestamp = String(cursor?.eventTimestamp || '').trim();
+    const taskUpdatedAtMs = Math.max(0, Math.floor(Number(cursor?.taskUpdatedAtMs || 0)));
+    const taskId = String(cursor?.taskId || '').trim();
+    const eventIndex = Math.floor(Number(cursor?.eventIndex ?? -1));
+    if (eventTimestamp && taskUpdatedAtMs && taskId && eventIndex >= 0) {
+      filters.push(`(
+        event_timestamp < ?
+        OR (event_timestamp = ? AND task_updated_at_ms < ?)
+        OR (event_timestamp = ? AND task_updated_at_ms = ? AND task_id > ?)
+        OR (event_timestamp = ? AND task_updated_at_ms = ? AND task_id = ? AND event_index < ?)
+      )`);
+      parameters.push(
+        eventTimestamp,
+        eventTimestamp, taskUpdatedAtMs,
+        eventTimestamp, taskUpdatedAtMs, taskId,
+        eventTimestamp, taskUpdatedAtMs, taskId, eventIndex
+      );
+    }
+    parameters.push(pageSize + 1);
     const rows = db.prepare(`
       SELECT
         task_id AS id,
         workspace,
         session_id,
+        event_timestamp,
+        task_updated_at_ms,
+        event_index,
         payload
       FROM task_history_events
+      ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
       ORDER BY
         event_timestamp DESC,
         task_updated_at_ms DESC,
         task_id ASC,
         event_index DESC
       LIMIT ?
-    `).all(Math.max(0, Math.floor(Number(limit) || 0))) as unknown as TaskHistoryEventRow[];
-    return rows.flatMap(row => {
+    `).all(...parameters) as unknown as TaskHistoryEventRow[];
+    const hasMore = rows.length > pageSize;
+    const pageRows = rows.slice(0, pageSize);
+    const items = pageRows.flatMap(row => {
       try {
         const event = JSON.parse(String(row.payload || '')) as Record<string, any>;
         if (!event || typeof event !== 'object' || Array.isArray(event)) return [];
@@ -155,7 +275,18 @@ function listRecentSessionEvents(directory: string, limit = MAX_SESSIONS): Recor
         return [];
       }
     });
-  }, { transaction: false }) as Record<string, any>[];
+    const last = pageRows.at(-1);
+    return {
+      items,
+      cursor: last ? {
+        eventTimestamp: String(last.event_timestamp || ''),
+        taskUpdatedAtMs: Number(last.task_updated_at_ms || 0),
+        taskId: String(last.task_id || last.id || ''),
+        eventIndex: Number(last.event_index || 0)
+      } : null,
+      hasMore
+    };
+  }, { transaction: false }) as { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean };
 }
 
 function parseSessionRows(db: DatabaseSync, rows: TaskHistoryRow[]): StoredTaskSession[] {
@@ -163,7 +294,7 @@ function parseSessionRows(db: DatabaseSync, rows: TaskHistoryRow[]): StoredTaskS
   const invalid: string[] = [];
   for (const row of rows) {
     const session = parseStoredSession(row.payload);
-    if (session) sessions.push(session);
+    if (session) sessions.push({ ...session, historyUpdatedAtMs: Number(row.updated_at_ms || 0) });
     else invalid.push(String(row.id));
   }
   if (invalid.length) {
@@ -255,32 +386,61 @@ async function writeSessionAsync(directory: string, session: StoredTaskSession |
   await enqueueWorkerWrite(config, sanitized);
 }
 
-function pruneSessions(directory: string, limit = MAX_SESSIONS): void {
+function pruneSessions(directory: string, options: TaskHistoryRetentionOptions = {}): void {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
+  const retentionDays = Math.max(1, Math.floor(Number(options.retentionDays || TASK_HISTORY_RETENTION_DAYS)));
+  const storageBudgetBytes = Math.max(0, Math.floor(Number(options.storageBudgetBytes ?? TASK_HISTORY_STORAGE_BUDGET_BYTES)));
+  const nowMs = Math.max(0, Math.floor(Number(options.nowMs || Date.now())));
+  const cutoffMs = nowMs - retentionDays * 24 * 60 * 60 * 1000;
   withStateDatabase(config, (db: DatabaseSync) => {
-    const max = Math.max(0, Math.floor(Number(limit) || 0));
-    const row = db.prepare('SELECT COUNT(*) AS count FROM task_history').get() as { count?: unknown } | undefined;
-    const excess = Math.max(0, Number(row?.count || 0) - max);
-    if (!excess) {
-      retireObsoleteTaskIntegrity(db, []);
-      return;
-    }
-    const rows = db.prepare(`SELECT id FROM task_history
-      WHERE CASE
+    const prunedIds: string[] = [];
+    const removeHistory = db.prepare('DELETE FROM task_history WHERE id=?');
+    const expired = db.prepare(`SELECT id FROM task_history
+      WHERE updated_at_ms < ? AND CASE
         WHEN json_valid(payload) THEN lower(COALESCE(json_extract(payload, '$.status'), '')) IN ('completed','failed','cancelled')
         ELSE 1
       END
       ORDER BY updated_at_ms ASC,id DESC
-      LIMIT ?
-    `).all(excess) as unknown as Array<{ id: string }>;
-    const prunedIds = rows.map(row => String(row.id || '')).filter(Boolean);
-    if (prunedIds.length) {
-      const removeHistory = db.prepare('DELETE FROM task_history WHERE id=?');
-      for (const taskId of prunedIds) removeHistory.run(taskId);
+    `).all(cutoffMs) as unknown as Array<{ id: string }>;
+    for (const row of expired) {
+      const taskId = String(row.id || '');
+      if (!taskId) continue;
+      removeHistory.run(taskId);
+      prunedIds.push(taskId);
     }
-    retireObsoleteTaskIntegrity(db, prunedIds);
+
+    let retainedBytes = taskHistoryStorageBytes(db);
+    if (retainedBytes > storageBudgetBytes) {
+      const candidates = db.prepare(`
+        SELECT history.id,
+          length(CAST(history.payload AS BLOB)) + COALESCE(SUM(length(CAST(events.payload AS BLOB))), 0) AS bytes
+        FROM task_history AS history
+        LEFT JOIN task_history_events AS events ON events.task_id=history.id
+        WHERE CASE
+          WHEN json_valid(history.payload) THEN lower(COALESCE(json_extract(history.payload, '$.status'), '')) IN ('completed','failed','cancelled')
+          ELSE 1
+        END
+        GROUP BY history.id,history.updated_at_ms
+        ORDER BY history.updated_at_ms ASC,history.id DESC
+      `).all() as unknown as Array<{ id: string; bytes?: number }>;
+      for (const candidate of candidates) {
+        if (retainedBytes <= storageBudgetBytes) break;
+        const taskId = String(candidate.id || '');
+        if (!taskId) continue;
+        removeHistory.run(taskId);
+        prunedIds.push(taskId);
+        retainedBytes = Math.max(0, retainedBytes - Math.max(0, Number(candidate.bytes || 0)));
+      }
+    }
+    retireObsoleteTaskIntegrity(db, [...new Set(prunedIds)]);
   }, { transaction: true });
+}
+
+function taskHistoryStorageBytes(db: DatabaseSync): number {
+  const history = db.prepare('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes FROM task_history').get() as { bytes?: unknown } | undefined;
+  const events = db.prepare('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes FROM task_history_events').get() as { bytes?: unknown } | undefined;
+  return Math.max(0, Number(history?.bytes || 0)) + Math.max(0, Number(events?.bytes || 0));
 }
 
 function retireObsoleteTaskIntegrity(db: DatabaseSync, prunedTaskIds: string[]): void {
@@ -479,13 +639,15 @@ function errorCode(error: unknown): string {
 }
 
 export {
-  MAX_SESSIONS,
+  MAX_HISTORY_QUERY_SESSIONS,
   clearTaskHistory,
   ensureCurrentHistory,
   findSessionsContaining,
   getTaskHistoryDir,
+  listRecentSessionEventPage,
   listRecentSessionEvents,
   listSessionSummaries,
+  listSessionSummaryPage,
   listSessions,
   pruneSessions,
   readSession,
@@ -498,4 +660,4 @@ export {
   writeSessionAsync
 };
 
-export type { StoredTaskSession, TaskHistoryConfig };
+export type { EventPageCursor, SessionPageCursor, StoredTaskSession, TaskHistoryConfig };

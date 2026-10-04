@@ -9,7 +9,17 @@ Rel.AI is a local harness for ChatGPT Web connected through **OpenAI Secure MCP 
 3. Keep Rel.AI running until Connection reports the Secure MCP Tunnel as **Connected**.
 4. Follow the highlighted ChatGPT connector guide on **Overview**, then add at least one local workspace before asking ChatGPT to inspect repository files.
 
-Rel.AI encrypts the saved runtime API key with Electron `safeStorage`. The key is never returned to the renderer after storage; entering a new value replaces it.
+Rel.AI encrypts saved runtime API keys with Electron `safeStorage`. Keys are never returned to the renderer after storage.
+
+### Connect multiple ChatGPT accounts
+
+Keep the first tunnel as the primary connection. For every additional ChatGPT account:
+
+1. sign in to that account's OpenAI Platform context and create its own Secure MCP Tunnel and runtime API key;
+2. in Rel.AI, open **Settings → Connection → Additional ChatGPT tunnels** and add that Tunnel ID and runtime API key;
+3. in that ChatGPT account, create or reconnect **Rel.AI MCP** with **Connection: Tunnel**, select that account's tunnel, and use **Authentication: No authentication**.
+
+Rel.AI runs one tunnel-client process per configured Tunnel ID. All of those processes forward to the same private local `/mcp` service, so the accounts see the same Rel.AI workspaces and local task system. A failed additional tunnel does not replace the primary tunnel or require another Rel.AI installation.
 
 ## Connect ChatGPT
 
@@ -47,9 +57,9 @@ The public Rel.AI runtime no longer exposes a local OAuth authorization server. 
 
 ## MCP protocol requirement
 
-Modern MCP behavior targets `2026-07-28`. HTTP retains only the SDK-supported stateless ChatGPT `2025-11-25` startup lifecycle (`initialize` and `notifications/initialized`); all tool, resource, prompt, and task requests use `2026-07-28`. Rel.AI does not issue `MCP-Session-Id`; JSON-RPC batches, removed tool aliases, and initialize-based stdio are not supported.
+Modern MCP behavior targets `2026-07-28`. HTTP retains only the SDK-supported stateless ChatGPT `2025-11-25` startup lifecycle (`initialize` and `notifications/initialized`); all ordinary tool, resource, prompt, and Events requests use `2026-07-28`. Rel.AI does not issue `MCP-Session-Id`; JSON-RPC batches, removed tool aliases, and initialize-based stdio are not supported.
 
-Native MCP Tasks are negotiated independently through `io.modelcontextprotocol/tasks`. Short bounded operations complete directly. When a client does not advertise Tasks, longer eligible operations can return a running result and continue under the same Rel.AI `work_id`. Continue independent work instead of polling while useful work remains: a later Rel.AI call in the same authorized principal/workspace can receive newly finished background work once under `completedOperations`. Use `relai_work` with `action:"status"` when the result is actually needed or no other useful independent work remains. This continuation path is current capability fallback, not legacy MCP protocol compatibility.
+Short bounded operations complete directly. Longer eligible operations can return a running result and continue safely in Rel.AI's background fallback under the same authorized principal/workspace and, when present, the same `work_id`. Continue independent work instead of polling while useful work remains: a later Rel.AI call can receive newly finished background work once under `completedOperations`, while matching MCP Events subscriptions can receive completion webhook events. Use `relai_work` with `action:"status"` when the result is actually needed or no other useful independent work remains.
 
 ## Reconnects and tool changes
 

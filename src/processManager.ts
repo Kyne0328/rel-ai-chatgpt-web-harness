@@ -11,7 +11,7 @@ import { redactCommandForAudit } from './commandDisplay.ts';
 import { isProcessTreeAlive, readProcessCreationIdentity, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
-import { createHttpTaskPrincipal, principalFingerprint } from './mcp/principal.ts';
+import { createHttpPrincipal, principalFingerprint } from './mcp/principal.ts';
 import { getStateDir } from './statePaths.js';
 import { readTaskHistorySession } from './taskHistoryStore.ts';
 import { runSpan, addSpanEvent, traceContextEnvironment } from './telemetry.ts';
@@ -20,6 +20,7 @@ import type { TelemetryConfig } from './telemetry.types.ts';
 import { getCurrentTaskAbortSignal, taskError } from './toolActivity.js';
 import { isActiveProcessStatus, isTerminalProcessStatus, normalizeProcessLifecycleStatus } from './runtimeLifecycle.js';
 import { HOST_PERSISTENT_PROCESS_LIMIT, acquireHostResource, hostResourceStats } from './hostResourceScheduler.js';
+import { publishProcessLifecycleEvent } from './core/lifecycleEvents.ts';
 
 type LogStream = 'stdout' | 'stderr';
 type StartupWaitResult = 'ready' | 'closed' | 'aborted';
@@ -49,7 +50,7 @@ interface ManagedProcessArgs extends GenericRecord {
   readonly cwd?: unknown;
   readonly env?: unknown;
   readonly work_id?: unknown;
-  readonly _operationTaskId?: unknown;
+
   readonly reuseExisting?: unknown;
   readonly label?: unknown;
   readonly maxLogBytes?: unknown;
@@ -65,8 +66,10 @@ interface ManagedProcessArgs extends GenericRecord {
   readonly workspace?: unknown;
   readonly status?: unknown;
   readonly includeTerminal?: unknown;
+  readonly terminalOnly?: unknown;
   readonly activeOnly?: unknown;
   readonly includeTail?: unknown;
+  readonly includeTailOffsets?: unknown;
   readonly tailBytes?: unknown;
   readonly limit?: unknown;
   readonly taskId?: unknown;
@@ -74,7 +77,7 @@ interface ManagedProcessArgs extends GenericRecord {
 
 interface ManagedProcessContext extends GenericRecord {
   readonly taskId?: unknown;
-  readonly nativeTaskId?: unknown;
+
   readonly signal?: AbortSignal;
   readonly principal?: unknown;
   readonly workspace?: unknown;
@@ -126,7 +129,7 @@ interface ManagedProcessRecord extends GenericRecord {
   processId: string;
   workspaceId: string;
   workspacePath: string;
-  originatingTaskId: string;
+
   workSessionId: string;
   principalKey: string;
   reuseFingerprint: string;
@@ -182,7 +185,16 @@ interface ManagedProcessRecord extends GenericRecord {
 
 interface ProcessSnapshotOptions {
   readonly includeTail?: boolean;
+  readonly includeTailOffsets?: boolean;
   readonly tailBytes?: number;
+}
+
+interface ManagedProcessLogRangeArgs extends GenericRecord {
+  readonly processId?: unknown;
+  readonly stream?: unknown;
+  readonly offset?: unknown;
+  readonly beforeOffset?: unknown;
+  readonly maxBytes?: unknown;
 }
 
 interface ProcessAccessOptions {
@@ -291,7 +303,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
   const cwd = resolveCommandCwd(workspace, args.cwd, 'relai_process start');
   const env = normalizeCommandEnv(args.env, 'relai_process start');
   const workSessionId = String(context.taskId || args.work_id || '').trim();
-  const originatingTaskId = String(context.nativeTaskId || args._operationTaskId || '').trim();
+
   const principalKey = principalKeyForContext(context);
   const environmentKeys = Object.keys(env).sort();
   const reuseFingerprint = managedProcessReuseFingerprint({
@@ -342,7 +354,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     processId,
     workspaceId: workspace.alias,
     workspacePath: workspace.path,
-    originatingTaskId,
+
     workSessionId,
     principalKey,
     reuseFingerprint,
@@ -408,7 +420,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
 
   return await runSpan(config, 'relai.process.start', {
     'relai.workspace': workspace.alias,
-    'relai.process.command': record.commandSummary,
+    'relai.process.command': record.command,
     'relai.process.pty': pty
   }, async () => {
     const { childEnvironment, startupSignal } = measurePerformancePhaseSync('process.setup', () => {
@@ -842,6 +854,38 @@ function readManagedProcess(config: ManagedProcessConfig, args: ManagedProcessAr
   return { ...processSnapshot(record), ...output };
 }
 
+function readManagedProcessLogRange(
+  config: ManagedProcessConfig,
+  args: ManagedProcessLogRangeArgs = {},
+  context: ManagedProcessContext = {}
+) {
+  const record = requireProcess(config, args.processId);
+  assertProcessAccess(config, record, args, context, { requireSession: false });
+  const stream = String(args.stream || '').trim();
+  if (stream !== 'stdout' && stream !== 'stderr') throw new Error('Process output stream must be stdout or stderr.');
+  const maxBytes = clampNumber(args.maxBytes, 1000, 1024 * 1024, 256 * 1024);
+  let range: LogRange;
+  if (args.beforeOffset !== undefined) {
+    const totalBytes = Number(record[`${stream}Bytes`] || 0);
+    const retainedFromOffset = Number(record[`${stream}StartOffset`] || 0);
+    const requestedBefore = Number(args.beforeOffset);
+    const beforeOffset = Number.isFinite(requestedBefore)
+      ? Math.min(totalBytes, Math.max(retainedFromOffset, Math.floor(requestedBefore)))
+      : totalBytes;
+    const startOffset = Math.max(retainedFromOffset, beforeOffset - maxBytes);
+    range = readLogRange(record, stream, startOffset, Math.max(0, beforeOffset - startOffset));
+  } else {
+    range = readLogRange(record, stream, args.offset, maxBytes);
+  }
+  return {
+    ok: !['failed', 'orphaned'].includes(record.status),
+    processId: record.processId,
+    status: record.status,
+    stream,
+    range
+  };
+}
+
 async function writeManagedProcess(config: ManagedProcessConfig, args: ManagedProcessArgs = {}, context: ManagedProcessContext = {}) {
   const record = requireProcess(config, args.processId);
   assertProcessAccess(config, record, args, context);
@@ -965,18 +1009,26 @@ function listManagedProcesses(config: ManagedProcessConfig, args: ManagedProcess
   assertRequestedWorkspaceBoundary(config, args, context, requestedWorkspace);
   const status = String(args.status || '').trim();
   const explicitTerminalStatus = TERMINAL_STATUSES.has(status);
-  const includeTerminal = args.includeTerminal === true || explicitTerminalStatus;
-  const activeOnly = args.activeOnly !== false && !includeTerminal;
+  const terminalOnly = args.terminalOnly === true;
+  const includeTerminal = args.includeTerminal === true || terminalOnly || explicitTerminalStatus;
+  const activeOnly = !terminalOnly && args.activeOnly !== false && !includeTerminal;
   const items = [...processes.values()]
     .filter(item => canAccessProcess(config, item, args, context, { requireSession: false }))
     .filter(item => !requestedWorkspace || workspaceMatches(item, requestedWorkspace))
     .filter(item => !status || item.status === status)
     .filter(item => !activeOnly || ACTIVE_STATUSES.has(item.status) || item.status === 'orphaned')
+    .filter(item => !terminalOnly || TERMINAL_STATUSES.has(item.status))
     .filter(item => includeTerminal || !TERMINAL_STATUSES.has(item.status))
-    .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt))
+    .sort((left, right) => terminalOnly
+      ? Date.parse(String(right.endedAt || right.startedAt || '')) - Date.parse(String(left.endedAt || left.startedAt || ''))
+      : Date.parse(right.startedAt) - Date.parse(left.startedAt))
     .slice(0, clampNumber(args.limit, 1, 500, 100))
     .map(item => processSnapshot(item, args.includeTail === true
-      ? { includeTail: true, tailBytes: clampNumber(args.tailBytes, 1024, 64 * 1024, 8192) }
+      ? {
+          includeTail: true,
+          includeTailOffsets: args.includeTailOffsets === true,
+          tailBytes: clampNumber(args.tailBytes, 1024, 64 * 1024, 8192)
+        }
       : {}));
   return createManagedProcessList(items);
 }
@@ -1108,7 +1160,7 @@ function principalKeyForContext(context: ManagedProcessContext = {}): string {
     || ''
   ).trim();
   if (clientId) {
-    return principalFingerprint(createHttpTaskPrincipal({ ...authInfo, clientId }, String(authInfo.authMode || context.authMode || '')));
+    return principalFingerprint(createHttpPrincipal({ ...authInfo, clientId }, String(authInfo.authMode || context.authMode || '')));
   }
 
   const fallback = context.connector === true ? 'connector:anonymous' : context.taskId ? 'local:stdio' : '';
@@ -1150,7 +1202,7 @@ function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotO
     status: record.status,
     metadataRevision: processMetadataRevision(record),
     lifecycle: record.lifecycle || 'persistent',
-    originatingTaskId: record.originatingTaskId || null,
+
     workSessionId: record.workSessionId || null,
     startedAt: record.startedAt,
     endedAt: record.endedAt || null,
@@ -1171,8 +1223,14 @@ function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotO
   }
   if (record.error) result.error = record.error;
   if (options.includeTail) {
-    result.stdoutTail = readLogTail(record, 'stdout', options.tailBytes || 8192);
-    result.stderrTail = readLogTail(record, 'stderr', options.tailBytes || 8192);
+    const stdoutTail = readLogTailRange(record, 'stdout', options.tailBytes || 8192);
+    const stderrTail = readLogTailRange(record, 'stderr', options.tailBytes || 8192);
+    result.stdoutTail = stdoutTail.text;
+    result.stderrTail = stderrTail.text;
+    if (options.includeTailOffsets) {
+      result.stdoutTailStartOffset = stdoutTail.offset;
+      result.stderrTailStartOffset = stderrTail.offset;
+    }
   }
   return result;
 }
@@ -1339,7 +1397,7 @@ function metadataRecord(record: ManagedProcessRecord): GenericRecord {
     processId: record.processId,
     workspaceId: record.workspaceId,
     workspacePath: record.workspacePath,
-    originatingTaskId: record.originatingTaskId || '',
+
     workSessionId: record.workSessionId || '',
     principalKey: record.principalKey || '',
     reuseFingerprint: record.reuseFingerprint || '',
@@ -1438,7 +1496,7 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       processId,
       workspaceId: String(metadata.workspaceId || metadata.workspace || ''),
       workspacePath: String(metadata.workspacePath || ''),
-      originatingTaskId: String(metadata.originatingTaskId || ''),
+
       workSessionId: String(metadata.workSessionId || metadata.logicalTaskId || ''),
       principalKey: String(metadata.principalKey || ''),
       reuseFingerprint: String(metadata.reuseFingerprint || ''),
@@ -1684,9 +1742,13 @@ function decodeLogBuffer(buffer: Buffer): { text: string; invalidUtf8: boolean }
 }
 
 function readLogTail(record: ManagedProcessRecord, stream: LogStream, maxBytes: number): string {
+  return readLogTailRange(record, stream, maxBytes).text;
+}
+
+function readLogTailRange(record: ManagedProcessRecord, stream: LogStream, maxBytes: number): LogRange {
   const totalBytes = Number(record[`${stream}Bytes`] || 0);
   const start = Math.max(Number(record[`${stream}StartOffset`] || 0), totalBytes - maxBytes);
-  return readLogRange(record, stream, start, maxBytes).text;
+  return readLogRange(record, stream, start, maxBytes);
 }
 
 function fileSize(file: string): number {
@@ -1879,13 +1941,19 @@ function managedProcessStateRevision(): number {
   return processStateVersion;
 }
 
-function notifyProcessState(record: Pick<ManagedProcessRecord, 'processId' | 'status'> | { processId: string; status: string }): void {
+function notifyProcessState(record: Omit<Partial<ManagedProcessRecord>, 'status'> & { processId: string; status: string }): void {
   processStateVersion += 1;
   const event = {
     revision: processStateVersion,
     processId: String(record?.processId || ''),
-    status: String(record?.status || '')
+    status: String(record?.status || ''),
+    workspace: String(record?.workspaceId || ''),
+    workId: String(record?.workSessionId || ''),
+    principalFingerprint: String(record?.principalKey || ''),
+    label: String(record?.label || record?.purpose || ''),
+    exitCode: record?.exitCode ?? null
   };
+  publishProcessLifecycleEvent(event);
   for (const listener of processStateListeners) {
     try { listener(event); }
     catch (error) { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] process state listener:', error); }
@@ -1959,6 +2027,7 @@ export {
   onManagedProcessChange,
   pruneManagedProcesses,
   readManagedProcess,
+  readManagedProcessLogRange,
   startManagedProcess,
   stopAllManagedProcesses,
   stopManagedProcess,

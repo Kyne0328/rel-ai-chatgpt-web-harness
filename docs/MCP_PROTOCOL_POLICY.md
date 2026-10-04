@@ -15,7 +15,7 @@ The startup shim is protected by the HTTP/ChatGPT smoke tests, while stdio tests
 ## Supported model
 
 - Stateless `server/discover` negotiation for modern HTTP and stdio clients.
-- Stateless HTTP `initialize` and `notifications/initialized` compatibility for ChatGPT startup only. All tool, resource, prompt, and task operations require modern MCP `2026-07-28` requests.
+- Stateless HTTP `initialize` and `notifications/initialized` compatibility for ChatGPT startup only. All ordinary tool, resource, prompt, and Events operations require modern MCP `2026-07-28` requests.
 - Stdio through the MCP SDK.
 - Bearer-authenticated private HTTP MCP at `POST /mcp`.
 - `MCP-Protocol-Version`, `Mcp-Method`, and matching per-request `_meta` on modern requests.
@@ -23,22 +23,20 @@ The startup shim is protected by the HTTP/ChatGPT smoke tests, while stdio tests
 - No `MCP-Session-Id` or HTTP transport-session persistence.
 - Host/Origin validation for the private local HTTP service.
 - One principal-bound Rel.AI `work_id` per independent repository objective.
-- Native MCP Tasks advertisement/routing through `io.modelcontextprotocol/tasks` on the modern protocol route only.
-- Direct completion for clearly bounded operations, native tasks for long/indeterminate eligible work when Tasks are advertised, and work-session continuation under the same `work_id` when a non-Tasks client outlives the direct response window.
+- Direct completion for clearly bounded operations and safe background continuation for long or indeterminate eligible work that outlives the direct response window.
+- MCP Events on modern authenticated HTTP through `events/list`, `events/subscribe`, and `events/unsubscribe`; webhook callbacks are public HTTPS endpoints, verified before storage, signed with Standard Webhooks headers, and used only for high-signal terminal work/operation/process events.
+- No MCP Apps helper tools, `ui://relai/*` resources, or in-chat task dashboard. The 15 coding tools remain the complete MCP tool surface; the Rel.AI desktop app owns human-facing task/process observability and control.
+- Client implementation metadata is observational only. ChatGPT, Codex, Responses API, Agents API, or any future client name must not select a different tool surface or authorization path.
 
-### Native Tasks capability policy
+### Long-operation continuation policy
 
-Rel.AI keeps one current tool surface regardless of whether a connected MCP client advertises the Tasks extension. Clients that do not advertise `io.modelcontextprotocol/tasks` receive direct results when the operation fits the safe response window; longer eligible operations continue under the same repository `work_id`. Their completion is persisted and may be delivered once as `completedOperations` on a later Rel.AI call from the same authorized principal/workspace, so agents should continue useful independent work instead of polling. Work-session status remains the explicit retrieval path when the result is needed. There are no legacy tool aliases, compatibility operation names, or client-name heuristics.
-
-Native Tasks activate only when the request explicitly advertises the supported Tasks capability. The eligibility metadata describes which current operations may use that execution mode. Protocol-version negotiation remains transport interoperability, not a second or legacy tool API.
-
-Keep `nativeTaskService`, `nativeToolTasks`, `transportTasks`, task eligibility metadata, and their protocol tests while Rel.AI supports Native MCP Tasks.
+Rel.AI keeps one current model-facing tool surface. Operations that fit the safe response window return directly; longer eligible operations continue through the principal- and workspace-scoped background fallback and preserve `work_id` when one was supplied. Completion is persisted. When the same principal/workspace has an exact active MCP Events subscription whose filters match the terminal event, the webhook can deliver that event; otherwise the one-time `completedOperations` fallback remains available on a later Rel.AI call. Agents should continue useful independent work instead of polling. Work-session status remains the explicit retrieval path when the result itself is needed. There are no legacy tool aliases, compatibility operation names, or client-name heuristics.
 
 Transport connections deliver requests but do not retain work-session identity. They never select, merge, replay, or complete repository work.
 
 ## Secure MCP Tunnel boundary
 
-OpenAI Secure MCP Tunnel is transport, not an alternate MCP implementation.
+OpenAI Secure MCP Tunnel is transport, not an alternate MCP implementation. The same canonical local server may be associated with supported OpenAI surfaces such as ChatGPT, Codex, or the Responses API; product identity does not create another Rel.AI protocol implementation.
 
 1. ChatGPT sends MCP traffic through the configured OpenAI tunnel.
 2. The bundled `tunnel-client` forwards the `main` channel to the private local Rel.AI `/mcp` service.
@@ -46,9 +44,11 @@ OpenAI Secure MCP Tunnel is transport, not an alternate MCP implementation.
 4. The normal MCP authorization, request validation, tool policy, task ownership, and workspace boundaries execute locally.
 5. Results return through the same tunnel transport.
 
-The tunnel ID, tunnel-client process, ChatGPT conversation, Rel.AI `work_id`, native MCP `taskId`, and managed-process `processId` remain independent identifiers.
+The tunnel ID, tunnel-client process, ChatGPT conversation, Rel.AI `work_id`, fallback `operationId`, and managed-process `processId` remain independent identifiers.
 
 A transport reconnect may restore connectivity but may not replay an ambiguous mutation. The local task-integrity model remains authoritative about mutation ownership and completion evidence.
+
+Agents API sessions use the same canonical MCP behavior when their execution environment can reach or launch Rel.AI. Environment-origin HTTP and stdio are compatible local/private deployment models. A service-origin connection is not a substitute for Secure MCP Tunnel and must not be pointed at the loopback-only Rel.AI listener.
 
 ## Unsupported compatibility surfaces
 
@@ -59,7 +59,6 @@ A transport reconnect may restore connectivity but may not replay an ambiguous m
 - JSON-RPC request batches.
 - Removed tool aliases.
 - Transport- or conversation-derived repository work identity.
-- Native task handles without explicit per-request Tasks capability negotiation.
 - Legacy `2025-11-25` tool, resource, prompt, or task operations; the retained compatibility surface is startup lifecycle only.
 - Responses to JSON-RPC notifications.
 

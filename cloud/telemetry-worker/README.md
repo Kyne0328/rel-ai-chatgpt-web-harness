@@ -2,10 +2,10 @@
 
 This Cloudflare Worker is the public telemetry edge for official Rel.AI builds.
 
-- `POST /api/v1/installation/presence` accepts the mandatory privacy-bounded installation presence event and stores one durable row per installation in D1.
-- `POST /v1/traces` proxies optional OTLP diagnostic traces to Axiom without exposing the Axiom credential to desktop clients.
-- `GET /admin` is the private product-analytics surface. Sign in with username `admin`; the password is verified against the salted hash configured in `wrangler.jsonc` and is independent from Axiom credentials.
+- `POST /api/v1/installation/presence` accepts the mandatory privacy-bounded installation presence event. Official clients authenticate with a random installation-scoped bearer credential; D1 stores only its one-way hash.
+- `POST /v1/traces` accepts authenticated optional OTLP diagnostic batches and proxies them to Axiom without exposing the Axiom credential to desktop clients.
+- `GET /admin` is the private product-analytics surface. Sign in with username `admin`; the password hash and salt are Cloudflare Worker secrets and are independent from Axiom credentials.
 - `GET /health` reports whether D1 is reachable.
-- A daily cron stores small aggregate snapshots for long-term trend history.
+- A daily cron prunes expired telemetry state and stores small rolling-window aggregate snapshots for trend history.
 
-The only Worker secret is `AXIOM_TOKEN`. Configure it with `wrangler secret put AXIOM_TOKEN`. Never commit the token or a local `.env` file.
+Worker secrets are `AXIOM_TOKEN`, `ADMIN_PASSWORD_SALT`, and `ADMIN_PASSWORD_HASH`. New admin password hashes use PBKDF2-SHA256; the verifier keeps legacy salted-SHA256 compatibility only so an existing deployment can be rotated without an outage. Never commit secret values or a local `.env` file.

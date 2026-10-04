@@ -16,6 +16,7 @@ const diagnostics = read('src/ui/features/settings/diagnostics-react.js');
 const processesReact = read('src/ui/features/processes/react.js');
 const toolsReact = read('src/ui/features/tools/react.js');
 const usageReact = read('src/ui/features/usage/react.js');
+const usageData = read('src/ui/features/usage/data.js');
 const workspacesReact = read('src/ui/features/workspaces/react.js');
 const workspaceModals = read('src/ui/features/workspaces/react-modals.js');
 
@@ -69,6 +70,12 @@ assert.match(reactMain, /from ['"]\.\.\/store\.js['"]/, 'the Vite-built dashboar
 assert.match(reactMain, /function RouteOutlet\(/, 'the React shell must own the active route outlet');
 assert.match(reactMain, /reactRouteComponents\.get\(route\.section\)/, 'the active React feature must be selected directly from the canonical route registry');
 assert.doesNotMatch(reactMain, /preloadRemainingReactRoutes/, 'the dashboard must not eagerly preload every inactive route in the background');
+assert.match(reactMain, /reactRouteWarmups[\s\S]*\['usage'[\s\S]*components\/charts\.js/, 'Usage navigation intent must warm the chart chunk before the route needs it');
+assert.match(reactMain, /function NavLink[\s\S]*onPointerEnter:\s*preload[\s\S]*onPointerDown:\s*preload[\s\S]*onFocus:\s*preload/, 'navigation links must warm lazy route code from pointer and keyboard intent');
+assert.match(reactMain, /function preloadReactNavigationTarget[\s\S]*preloadReactRoute\(section\)/, 'navigation intent must resolve the target section and invoke the existing route preloader');
+assert.match(read('src/ui/features/activity/react.js'), /cacheTtlMs:\s*15_000/, 'Activity history must reuse a short-lived read cache across route remounts');
+assert.match(read('src/ui/features/tools/react.js'), /TOOL_CATALOG_CACHE_TTL_MS = 60 \* 1000[\s\S]*cacheTtlMs:\s*TOOL_CATALOG_CACHE_TTL_MS/, 'the read-only tool catalog must reuse its cached result across route remounts');
+assert.match(read('src/ui/api.js'), /res\.ok && data\?\.ok !== false/, 'application-level error payloads must never be retained in the GET cache');
 const routerActivationSource = functionSource(dashboard, 'activateRouter');
 assert.match(routerActivationSource, /void preloadReactRoutes\(initialSection\)/, 'the dashboard must warm the initial lazy route after the router becomes usable');
 assert.match(routerActivationSource, /relai:route-change[\s\S]*preloadReactRoute\(section\)/, 'route changes must warm only the requested route');
@@ -84,13 +91,16 @@ assert.match(homeReact, /data-home-react/, 'Overview React route must own the re
 assert.doesNotMatch(homeReact, /dangerouslySetInnerHTML|pillHtml|taskProgressHtml/, 'Overview React must render status and progress as React elements instead of legacy HTML strings');
 assert.match(homeReact, /loadAnalyticsData/, 'Overview React route must retain the analytics preview');
 assert.doesNotMatch(homeReact, /relai:clock-tick/, 'Overview must not duplicate the shared dashboard clock with per-second React state updates');
+const clockBootSource = functionSource(dashboard, 'boot');
+assert.match(clockBootSource, /pagehide[\s\S]*_dashboardClock\?\.stop\(\)/, 'pagehide must suspend the shared dashboard clock');
+assert.match(clockBootSource, /pageshow[\s\S]*_dashboardClock\?\.start\(\)/, 'pageshow must restart the shared dashboard clock after page restoration');
+assert.doesNotMatch(clockBootSource, /pagehide[\s\S]{0,120}once:\s*true/, 'page lifecycle handling must remain repeatable across multiple hide/show cycles');
 assert.match(homeReact, /data-clock-elapsed-start/, 'Overview active elapsed time must remain owned by the shared dashboard clock');
 assert.match(homeReact, /data-clock-relative/, 'Overview relative time must remain owned by the shared dashboard clock');
 assert.match(workspaceModals, /data-clock-relative/, 'Project details relative times must be owned by the shared dashboard clock');
 assert.match(diagnostics, /data-clock-relative/, 'Troubleshooting relative times must be owned by the shared dashboard clock');
 assert.doesNotMatch(diagnostics, /function relativeTime\(/, 'Troubleshooting must not keep a private render-only relative-time formatter');
 assert.match(reactMain, /registerReactSection\('home'/, 'Overview must be registered as a canonical React route');
-const sessions = read('src/ui/features/sessions/index.js');
 const sessionsModel = read('src/ui/features/sessions/model.js');
 const sessionsReact = read('src/ui/features/sessions/react.js');
 const processes = read('src/ui/features/processes/index.js');
@@ -105,7 +115,7 @@ assert.match(desktopStatusSource, /patchLocalConnection/, 'desktop status pushes
 assert.doesNotMatch(desktopStatusSource, /initStore/, 'desktop status pushes must not replace the whole dashboard store');
 assert.doesNotMatch(desktopStatusSource, /syncLiveView|renderViewIfChanged|rerender/, 'desktop status pushes must rely on canonical store subscription instead of a second render path');
 assert.doesNotMatch(home, /updateHomeLiveState/, 'Overview must not expose a legacy live DOM updater after React ownership');
-assert.doesNotMatch(sessions, /mountTasks|updateTaskSessions|innerHTML|replaceChildren/, 'Sessions compatibility entrypoint must contain no legacy DOM renderer');
+assert.doesNotMatch(sessionsModel, /mountTasks|updateTaskSessions|innerHTML|replaceChildren/, 'Sessions model must contain no legacy DOM renderer');
 assert.match(sessionsReact, /export function createSessionsRoute/, 'Tasks must expose one React route factory');
 assert.match(reactMain, /registerReactSection\('tasks'/, 'Tasks must be registered as a canonical React route');
 assert.match(sessionsReact, /data-sessions-react/, 'Tasks React route must own the rendered feature root');
@@ -161,6 +171,8 @@ assert.match(sessionsReact, /steps resolved/, 'skipped steps must be described a
 assert.match(sessionsReact, /const ordered = orderSessionEvents\(session\.events \|\| \[\]\)/, 'open task Activity must render canonical task events instead of raw audit trace rows');
 assert.doesNotMatch(sessionsReact, /mergeSessionEvents\(traceEvents/, 'raw audit trace rows must not inflate the user-facing task Activity timeline');
 assert.match(sessionsReact, /data-show-older-events/, 'older task events must expand in the existing trace');
+assert.match(sessionsReact, /data-load-older-task-activity/, 'long-running tasks must offer paged access to activity older than the bounded task snapshot');
+assert.match(sessionsReact, /events: mergeSessionEvents\(previous\.session\?\.events \|\| \[\], response\.activity\.entries\)/, 'loading older task activity must merge retained events instead of replacing the visible timeline');
 assert.match(sessionsReact, /event\.command/, 'recorded commands must remain attached to their activity event for traceability');
 assert.match(sessionsReact, /task-event-command/, 'recorded commands must be visible in the activity trace');
 assert.match(sessionsReact, /olderExpanded/, 'live task refreshes must preserve expanded older-event state');
@@ -179,7 +191,10 @@ assert.match(toolsReact, /result\?\.ok === false \|\| payload == null/, 'Tool AP
 assert.match(reactMain, /registerReactSection\('tools'/, 'Tools must be registered as a React route');
 assert.match(usageReact, /export function createUsageRoute/, 'Analytics must expose one React route factory');
 assert.match(usageReact, /loadAnalyticsData/, 'Analytics must retain the canonical local analytics loader');
-assert.match(usageReact, /taskRevision/, 'Analytics must refresh from canonical live task revisions');
+assert.doesNotMatch(usageReact, /taskRevision/, 'Analytics must not re-read monthly history on every live task revision');
+assert.doesNotMatch(homeReact, /HomeAnalytics, \{ taskRevision:/, 'Overview analytics must not re-read monthly history on every live task revision');
+assert.doesNotMatch(workspacesReact, /useWorkspaceAnalytics\(analyticsAliases, Number\(data\.live/, 'Project analytics must not re-read monthly history on every live task revision');
+assert.match(usageData, /inFlightUsageRequests/, 'Concurrent analytics consumers must share identical in-flight monthly reads');
 assert.match(reactMain, /registerReactSection\('usage'/, 'Analytics must remain registered as a canonical React route');
 assert.match(diagnostics, /export function createDiagnosticsRoute/, 'Troubleshooting must expose one React route factory');
 assert.match(diagnostics, /visibilitychange/, 'Live Troubleshooting must reconcile feature-local report state after returning from a hidden window');
@@ -283,5 +298,94 @@ assert.match(functionSource(dashboard, 'bufferLiveEventDuringRefresh'), /MAX_REF
 assert.match(api, /export function requestDashboardRefresh\(\)/, 'dashboard refresh helper must expose one canonical refresh signal');
 assert.doesNotMatch(api, /structural/, 'dashboard refresh must not carry obsolete structural-render intent');
 assert.match(settingsReact, /saveSettings\(\{ port: form\.port, tunnelId: form\.tunnelId, tunnelApiKey: form\.tunnelApiKey \}\)[\s\S]*requestDashboardRefresh\(\)/, 'Secure tunnel configuration changes must refresh canonical dashboard state');
+
+
+function dashboardRefreshHarness() {
+  let state = { live: { streamId: 'a', revisions: { tasks: 1 } } };
+  const requests = [];
+  const queued = [];
+  const context = {
+    fetchJson: () => new Promise(resolve => requests.push(resolve)),
+    invalidateCache() {}, DASHBOARD_DATA_URL: '/data',
+    getStore: () => state,
+    initStore: value => { state = value; },
+    withConnectionState: value => value,
+    patchLocalConnection() {}, updateShell() {}, clearShellDashboardState() {},
+    setShellLastEventAt() {}, clearRecoveryNotice() {}, syncDesktopSetupState() {},
+    activateRouter() {}, replayLiveEventsDuringRefresh() {},
+    renderRefreshFailure: value => value,
+    dashboardHidden: () => false,
+    queueMicrotask: callback => queued.push(callback),
+    surface: 'browser'
+  };
+  vm.runInNewContext(`
+    let _refreshPromise = null, _refreshLiveEvents = null, _refreshLiveEventOverflow = false;
+    let _liveReadyTarget = null, _liveReadyVersion = 0;
+    let _liveState = 'live', _lastEventAt = null, _routerReady = true;
+    let _hiddenViewDirty = false, _hiddenCatchUpRequired = false;
+    ${functionSource(dashboard, 'liveCatchUpRequired')}
+    ${functionSource(dashboard, 'performRefresh')}
+    ${functionSource(dashboard, 'doRefresh')}
+    ${functionSource(dashboard, 'liveStateChange')}
+    globalThis.refresh = doRefresh;
+    globalThis.ready = liveStateChange;
+  `, context);
+  return { context, requests, queued, state: () => state };
+}
+
+for (const streamId of ['a', 'b']) {
+  const h = dashboardRefreshHarness();
+  const first = h.context.refresh();
+  h.context.ready({ state: 'live', streamId, revisions: { tasks: 4 } });
+  h.context.ready({ state: 'live' }); // Ordinary events must retain the ready target.
+  h.requests.shift()({ live: { streamId: 'a', revisions: { tasks: 1 } } });
+  await first;
+  assert.equal(h.queued.length, 1, 'a newer ready target must survive an older in-flight fetch');
+  h.queued.shift()();
+  const trailing = h.context.refresh();
+  h.requests.shift()({ live: { streamId, revisions: { tasks: 4 } } });
+  await trailing;
+  assert.equal(h.state().live.streamId, streamId);
+  assert.equal(h.state().live.revisions.tasks, 4);
+  assert.equal(h.queued.length, 0, 'a caught-up snapshot must not start a refresh loop');
+}
+{
+  const h = dashboardRefreshHarness();
+  const first = h.context.refresh();
+  h.context.ready({ state: 'live', streamId: 'a', revisions: { tasks: 4 } });
+  h.requests.shift()({ live: { streamId: 'a', revisions: { tasks: 4 } } });
+  await first;
+  assert.equal(h.queued.length, 0, 'a snapshot already meeting the target needs no trailing fetch');
+}
+{
+  const h = dashboardRefreshHarness();
+  const first = h.context.refresh();
+  h.context.ready({ state: 'live', streamId: 'b', revisions: { tasks: 4 } });
+  h.requests.shift()({ live: { streamId: 'a', revisions: { tasks: 1 } } });
+  await first;
+  h.queued.shift()();
+  const trailing = h.context.refresh();
+  h.requests.shift()({ ok: false, error: 'offline' });
+  await trailing;
+  assert.equal(h.queued.length, 0, 'failed catch-up must not create an unbounded microtask retry loop');
+}
+{
+  const h = dashboardRefreshHarness();
+  const first = h.context.refresh();
+  h.context.ready({ state: 'live', streamId: 'b', revisions: { tasks: 4 } });
+  h.requests.shift()({ live: { streamId: 'a', revisions: { tasks: 1 } } });
+  await first;
+  h.queued.shift()();
+  const second = h.context.refresh();
+  h.context.ready({ state: 'live', streamId: 'c', revisions: { tasks: 8 } });
+  h.requests.shift()({ live: { streamId: 'b', revisions: { tasks: 4 } } });
+  await second;
+  assert.equal(h.queued.length, 1, 'a new target during catch-up must receive its own trailing fetch');
+  h.queued.shift()();
+  const third = h.context.refresh();
+  h.requests.shift()({ live: { streamId: 'c', revisions: { tasks: 8 } } });
+  await third;
+  assert.equal(h.queued.length, 0);
+}
 
 console.log('Dashboard live rendering contracts passed.');

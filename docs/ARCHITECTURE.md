@@ -22,7 +22,7 @@ The Rel.AI harness has three executable composition roots plus one external tran
 | --- | --- | --- |
 | Electron desktop | `electron/main.js` -> `electron/desktop-host.js` | `main.js` is the composition root. The desktop host owns windows, tray, updater, Secure MCP Tunnel supervision, encrypted tunnel credentials, notifications, OS integration, utility-process lifecycle, and shutdown order; Rel.AI business operations execute behind the service utility-process boundary. |
 | HTTP MCP service | `bin/rel-ai-mcp-http.js` -> `src/httpServer.ts` | Owns the authenticated local HTTP server, dashboard/API routes, modern and compatible stateless MCP routing, process cleanup, and telemetry lifecycle. |
-| Stdio MCP service | `bin/rel-ai-mcp.js` -> `src/server.js` | Owns modern stdio MCP, connection-scoped principal state, native Task routing, process cleanup, and telemetry lifecycle. |
+| Stdio MCP service | `bin/rel-ai-mcp.js` -> `src/server.js` | Owns modern stdio MCP, connection-scoped principal state, bounded/background fallback routing, process cleanup, and telemetry lifecycle. |
 | OpenAI Secure MCP Tunnel | external service + bundled `tunnel-client` | Provides the private transport between ChatGPT and the selected desktop. It does not own repository state or Rel.AI task lifecycle. |
 
 Composition roots construct resource owners. Pure validation, mapping, formatting, catalog, and projection functions are imported directly.
@@ -32,7 +32,7 @@ Composition roots construct resource owners. Pure validation, mapping, formattin
 The routine dashboard is a React application backed by server-owned projections. The current path is:
 
 ```text
-src/http/dashboard.js
+src/http/dashboard.ts
   -> minimal HTML shell + initial dashboard JSON
   -> public/dashboard.js coordinator
   -> src/ui/store.js canonical client state
@@ -40,7 +40,7 @@ src/http/dashboard.js
   -> src/ui/features/* feature-local React UI
 ```
 
-`src/http/dashboard.js` owns authenticated dashboard/API/SSE delivery and the initial read model. It does not generate application navigation or feature markup. Backend projection and lifecycle authority stay in backend modules such as `src/http/dashboardData.js`; React presents those contracts but does not become a second task, connection, process, or workspace authority.
+`src/http/dashboard.ts` owns authenticated dashboard/API/SSE delivery and the initial read model. It does not generate application navigation or feature markup. Backend projection and lifecycle authority stay in backend modules; React presents those contracts but does not become a second task, connection, process, or workspace authority.
 
 `public/dashboard.js` is the browser coordinator. It initializes the canonical store, mounts the React foundation, connects Electron status when available, owns refresh/recovery coordination, and initializes hash navigation. It must not grow feature-specific rendering logic.
 
@@ -67,18 +67,18 @@ Frontend behavior is protected at several levels: focused model/store/router/SSE
 
 ## Secure tunnel ownership
 
-`electron/secure-tunnel-runtime.js` is the sole owner of the bundled OpenAI tunnel-client child process. It:
+`electron/secure-tunnel-runtime.js` owns one bundled OpenAI tunnel-client child process. The primary connection uses one runtime directly; `electron/tunnel-runtime-pool.js` creates the same runtime once per additional ChatGPT tunnel. Each runtime:
 
 - resolves the reviewed platform binary from packaged resources;
-- passes the configured tunnel ID and control-plane key;
-- maps the tunnel's `main` channel to the private local `/mcp` service;
-- injects the Rel.AI bearer token only on the local forwarding hop;
-- binds tunnel-client health to a local ephemeral health address;
+- passes its configured tunnel ID and control-plane key;
+- maps the tunnel's `main` channel to the same private local `/mcp` service;
+- injects the same Rel.AI bearer token only on the local forwarding hop;
+- binds tunnel-client health to its own local ephemeral health address and health-file identity;
 - treats `/healthz` as the local child-liveness boundary, consumes v0.0.15 structured control-plane and response-delivery health, and keeps a live child in place while remote readiness/routing recovers;
 - uses `/readyz` for the ready/running decision without turning prolonged OpenAI-side backoff into an outer process restart; and
 - terminates the child only for explicit restart/shutdown, child exit, fatal tunnel errors, or sustained local-liveness failure.
 
-`electron/tunnel-credentials.js` owns tunnel runtime API-key persistence through Electron `safeStorage`. The renderer sees only whether a key exists.
+`electron/tunnel-credentials.js` retains the primary runtime API key for backward-compatible setup. `electron/tunnel-connections.js` stores additional Tunnel IDs, labels, enablement, and encrypted runtime keys. Both credential paths use Electron `safeStorage`; renderer-facing state never contains decrypted keys.
 
 The canonical request path is:
 
@@ -96,7 +96,7 @@ The transport cannot select a repository by absolute path, bypass tool authoriza
 
 ## Canonical tool and action catalog
 
-`src/tools/actionDefinitions.js` owns immutable tool definitions. `src/tools/actionCatalog.js` is the single owner of action mapping, authorization capability, approval policy, catalog construction, operation resolution, schemas, annotations, task scope, concurrency scope, execution class, dashboard metadata, and tool-surface version.
+`src/tools/actionDefinitions.ts` owns immutable tool definitions. `src/tools/actionCatalog.js` is the single owner of action mapping, authorization capability, approval policy, catalog construction, operation resolution, schemas, annotations, task scope, concurrency scope, execution class, dashboard metadata, and tool-surface version.
 
 The public tool count is derived from the canonical runtime manifest (`release-manifest.json` records 14 for the current release). `src/tools/runtimeRegistry.js` contains executable function references only and deliberately does not become a second schema or policy source.
 
@@ -110,7 +110,7 @@ Modern MCP behavior targets protocol `2026-07-28`.
 - `src/http/mcpTransport.ts` serves stateless HTTP MCP with strict protocol, method, name, capability, Host/Origin, and `_meta` validation.
 - `src/http/mcpAuth.ts` accepts the private Rel.AI bearer token used by tunnel-client and explicit local clients.
 - HTTP retains only the SDK-supported stateless `2025-11-25` startup lifecycle (`initialize` and `notifications/initialized`) required by supported ChatGPT clients; all ordinary MCP operations are modern-only.
-- Native Task interception is owned by `src/mcp/transportTasks.js` before ordinary modern SDK dispatch.
+- `src/mcp/transportFallback.ts` owns bounded direct execution and safe background continuation before ordinary modern SDK dispatch.
 
 The HTTP service does not expose the removed OAuth authorization server. `/register`, `/authorize`, `/token`, legacy `/sse`, and legacy `/messages` are absent.
 
@@ -123,12 +123,15 @@ The task systems answer different lifecycle questions and remain separate:
 | Live logical-task activity | `src/toolActivity.js` |
 | Repository mutation generations, ownership/conflicts, and validation-evidence freshness | `src/taskIntegrity.ts` |
 | Durable logical-task history | `src/taskHistoryStore.ts` and `src/taskHistoryStorage.ts` |
-| Native MCP Task lifecycle | `src/mcp/nativeTaskService.js` |
 | Canonical status mappings | `src/taskState.js` |
 | Safe progress/event normalization | `src/taskObservability.js` and `src/taskEvents.js` |
 | Dashboard read model | `src/http/dashboardData.js` |
 
 Display state and 100% progress are never completion authority. For an explicit durable work session, completion is an explicit lifecycle record; Rel.AI records whether validation is passed, failed, stale, not run, or not required without using that evidence as a universal permission gate.
+
+Background execution has one identity per operation, with multiple operations attributed to the same `work_id`. Task history owns the retained operation records; work-bound files in `fallback-executions` index `operationId` to its task rather than duplicating execution state. Legacy single-operation records remain readable. Status returns the retained operation collection and supports exact operation lookup. Resource conflicts remain governed by `workspaceOperationQueue`; background requests wait there cooperatively instead of failing because their logical task already has another command. Exact retries reuse running or undelivered terminal operations. Stopping one operation leaves its siblings open, while task-wide stop/cancel reaches all operations and completion waits for all outstanding work.
+
+Raw command output stays outside task history. Background results retain authorized output-spill references so diagnostic retrieval survives runtime restart, within the existing output storage limits and retention period. Result delivery is separate from background acceptance and completion-notice delivery; observing a running acknowledgement does not release its result replay identity. The harness persists results and exposes notifications, but an automatic model wake-up requires explicit client support.
 
 ### Repository facts do not form a second planner
 
@@ -141,7 +144,7 @@ Rel.AI restrictions must protect a concrete resource or failure mode. A `work_id
 - Treat `work_id` as optional durable attribution, not a permission token. Repository edits, one-shot commands, validation, process creation/input, local UI interaction, and computer control can use their authorized workspace/resource boundary without a synthetic task. If a caller explicitly supplies `work_id`, it must identify a valid compatible durable task; Rel.AI never silently drops or guesses it.
 - Require `work_id` only when the requested semantics actually refer to a logical task: finish/cancel, `scope:"task"` review/checkpoints, session-owned tidy, task-owned default commit scope, and other explicitly task-relative operations.
 - Resource operations use the narrowest real identity: managed processes use authenticated principal + workspace + `processId`; local UI uses principal + workspace + `sessionId`; taskless large command output uses principal + workspace + `outputRef`; taskless fallback continuation uses `operationId`.
-- Native MCP Tasks and fallback operation IDs are transport/execution mechanisms. They must never be converted into fake logical `work_id` requirements.
+- Fallback operation IDs are transport/execution identities. They must never be converted into fake logical `work_id` requirements.
 - Approval is reserved for the destructive/high-risk operation itself. Workspace reset and real Git push remain approval-gated. Do not add model-supplied magic confirmation strings as a second pseudo-consent layer when native approval already binds the exact request.
 - Validation is factual, risk-proportional evidence. A passed check becomes stale after relevant mutation, but stale/failed/not-run evidence is reported rather than converted into a generic prohibition on agent completion.
 - Recovery should use the narrowest real identity. Observation, interaction, output recovery, and cleanup should not force users to resurrect an unrelated or completed logical task when principal, workspace, and resource/session identity are sufficient.
@@ -177,7 +180,7 @@ Compatibility code must remain isolated and tested. The `2025-11-25` shim is sta
 
 | Metric | Current contract |
 | --- | ---: |
-| Public tools | Derived from canonical manifest (14 in current release) |
+| Public tools | Derived from canonical manifest (15 in current release) |
 | Public actions | Derived from the canonical action catalog |
 | Active public tool-schema source | 1 canonical catalog |
 | MCP protocol | `2026-07-28` |
@@ -189,6 +192,6 @@ Compatibility code must remain isolated and tested. The `2025-11-25` shim is sta
 
 ## Validation and release boundaries
 
-Architecture changes must preserve the public tool contract, local bearer authentication, tunnel-client provenance, optional durable work-session attribution, native Task parity, HTTP/stdio behavior, Electron sender isolation, managed-process cleanup, durable recovery, Git safeguards, and package integrity.
+Architecture changes must preserve the public tool contract, local bearer authentication, tunnel-client provenance, optional durable work-session attribution, fallback completion delivery, MCP Events behavior, HTTP/stdio behavior, Electron sender isolation, managed-process cleanup, durable recovery, Git safeguards, and package integrity.
 
 CI verifies source tests, generated assets, transport-removal contracts, tunnel-client provenance, Electron packaging, packaged bearer-authenticated MCP behavior, fuse policy, and release metadata. A real external Secure MCP Tunnel and logged-in ChatGPT integration require credentials and account state that are intentionally not embedded in CI; those remain explicit release acceptance evidence rather than something automated tests pretend to prove.

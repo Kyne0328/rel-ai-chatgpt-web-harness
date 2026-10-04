@@ -19,7 +19,7 @@ import { DeleteProjectModal, ProjectFormModal, RepairProjectModal } from './reac
 
 const h = React.createElement;
 const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
-const WORKSPACE_STORE_KEYS = Object.freeze(['config', 'health', 'live']);
+const WORKSPACE_STORE_KEYS = Object.freeze(['config', 'health']);
 
 export function createWorkspacesRoute(useDashboardSlices) {
   return function WorkspacesRoute() {
@@ -58,7 +58,7 @@ function WorkspacesView({ data = {} }) {
   const availableCount = views.filter(view => view.available).length;
   const [modal, setModal] = useState(null);
   const analyticsAliases = useMemo(() => views.map(view => view.alias), [views]);
-  const analyticsState = useWorkspaceAnalytics(analyticsAliases, Number(data.live?.revisions?.task || 0));
+  const analyticsState = useWorkspaceAnalytics(analyticsAliases);
 
   useLayoutEffect(() => {
     if (!focusAlias || focusRequest !== '1') return;
@@ -321,7 +321,7 @@ function WorkspaceAnalyticsState({ label, loading = false }) {
   );
 }
 
-function useWorkspaceAnalytics(aliases, taskRevision = 0) {
+function useWorkspaceAnalytics(aliases) {
   const key = aliases.join('\u0000');
   const previousKeyRef = useRef('');
   const [state, setState] = useState(() => ({ scopes: new Map(), status: 'loading' }));
@@ -350,7 +350,7 @@ function useWorkspaceAnalytics(aliases, taskRevision = 0) {
     }
     const timer = window.setTimeout(load, 180);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [aliases, key, taskRevision]);
+  }, [aliases, key]);
   return state;
 }
 

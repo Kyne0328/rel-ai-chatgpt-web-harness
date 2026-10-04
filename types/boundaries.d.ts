@@ -39,11 +39,7 @@ interface ToolAnnotations {
   openWorldHint: boolean;
 }
 
-type ToolExecutionClass = 'always_immediate' | 'bounded_synchronous' | 'native_task_eligible' | 'persistent_process';
-
-interface ToolExecution {
-  taskSupport: 'required' | 'optional' | 'forbidden';
-}
+type ToolExecutionClass = 'always_immediate' | 'bounded_synchronous' | 'background_fallback_eligible' | 'persistent_process';
 
 interface ToolBehavior {
   audit: AuditKind;

@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { relaiStatus } from "../src/tools/status.js";
 import { getToolSurfaceManifest } from '../src/tools/schema.js';
-import { CAPABILITIES, createConsentPolicy } from '../src/mcp/authorizationPolicy.js';
+import { CAPABILITIES, createConsentPolicy } from '../src/mcp/authorizationPolicy.ts';
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-status-aliases-'));
 const previousStateDir = process.env.REL_AI_MCP_STATE_DIR;
 process.env.REL_AI_MCP_STATE_DIR = stateDir;

@@ -9,7 +9,7 @@ import {
 import type { ActionMapping, ActionRegistry, CatalogToolDefinition, PublicActionContract } from './actionDefinitions.ts';
 import { ACTION_REGISTRY as RAW_ACTION_REGISTRY } from './actionRegistry.js';
 
-const TOOL_SURFACE_VERSION = 87;
+const TOOL_SURFACE_VERSION = 88;
 const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 
 type ToolActionCatalogEntry = Readonly<{
@@ -193,7 +193,7 @@ function normalizeOperationArguments(
   entry: ToolActionCatalogEntry,
   args: Record<string, unknown>
 ): Record<string, unknown> {
-  const allowed = new Set([...(entry.fields || []), '_operationTaskId']);
+  const allowed = new Set(entry.fields || []);
   if (entry.keepAction) allowed.add('action');
   const unsupported = Object.keys(args).filter(field => !allowed.has(field));
   if (unsupported.length) {

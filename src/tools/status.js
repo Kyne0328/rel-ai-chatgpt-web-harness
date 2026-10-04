@@ -13,8 +13,9 @@ import { readProjectInstructions, summarizeProjectInstructions } from '../projec
 import { workspaceGitStatus } from '../repo/gitOps.js';
 import { runtimeCompatibility } from '../runtimeCompatibility.js';
 import { getToolActivity } from '../toolActivity.js';
-import { fallbackExecutionStatus } from '../mcp/fallbackExecutions.js';
-import { authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.js';
+import { fallbackExecutionStatus, fallbackExecutionsStatus } from '../mcp/fallbackExecutions.js';
+import { principalFingerprint } from '../mcp/principal.ts';
+import { authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.ts';
 import { readTaskHistorySessionRecord } from '../taskHistoryStore.ts';
 import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
@@ -36,8 +37,11 @@ async function relaiStatus(config, args = {}, context = {}) {
     ? authorizedWorkspaceAliases(context.principal, configuredWorkspaceAliases)
     : configuredWorkspaceAliases;
   const backgroundReference = String(args.operationId || args.work_id || '').trim();
-  const backgroundOperation = backgroundReference ? fallbackExecutionStatus(backgroundReference, { config }) : null;
-  const compactConnectorStatus = context?.connector === true && args.detail !== 'full' && args.maxBytes == null;
+  const operationOptions = { config, workId: args.work_id, ...(context.connector ? { noticeScope: principalFingerprint(context.principal) } : {}) };
+  const backgroundOperation = backgroundReference ? fallbackExecutionStatus(backgroundReference, operationOptions) : null;
+  const backgroundOperations = args.work_id ? fallbackExecutionsStatus(args.work_id, operationOptions) : [];
+  // A response byte cap must not opt compact control-plane requests into repository inspection.
+  const compactConnectorStatus = context?.connector === true && args.detail !== 'full';
   let selectedWorkspace = null;
   if (args.workspace) {
     try {
@@ -95,6 +99,7 @@ async function relaiStatus(config, args = {}, context = {}) {
     ...(args.work_id ? { task: compactSessionSummary(taskSession || {}, { continuity: taskContinuity }) } : {}),
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
     ...(backgroundOperation ? { backgroundOperation } : {}),
+    ...(backgroundOperations.length ? { backgroundOperations } : {}),
     workspaceCount: workspaceAliases.length,
     workspaceAliases
   };

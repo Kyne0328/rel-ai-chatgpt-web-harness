@@ -8,12 +8,15 @@ import {
 } from './taskObservability.js';
 import { isTerminalTaskStatus, normalizeHistoricalTaskStatus } from './taskState.js';
 import { eventIdentityKey, eventTimestampMs, operationForTool, timestampMs, unique } from './taskEvents.js';
+import { classifyTaskChangedFiles } from './taskSemanticProgress.js';
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
 
 const MAX_SESSION_EVENTS = 200;
+const MAX_TASK_CHANGED_FILE_PREVIEW = 200;
 const DURABLE_FIELDS = Object.freeze([
-  'changedFiles', 'changedFileCount', 'validation', 'committed', 'commitHead', 'commitHeads', 'pushed', 'prDrafted',
-  'workflow', 'workflowEvidence', 'backgroundOperation', 'principalFingerprint', 'repairable', 'contextSummary'
+  'changedFiles', 'changedFileCount', 'changedFilesTruncated', 'productChangedFileCount', 'supportArtifactCount',
+  'validation', 'committed', 'commitHead', 'commitHeads', 'pushed', 'prDrafted',
+  'workflow', 'workflowEvidence', 'backgroundOperation', 'backgroundOperations', 'principalFingerprint', 'repairable', 'contextSummary'
 ]);
 
 function canonicalTaskSnapshot(record = {}, options = {}) {
@@ -30,6 +33,18 @@ function canonicalTaskSnapshot(record = {}, options = {}) {
     ? []
     : Array.isArray(sanitized.currentOperations) ? sanitized.currentOperations : [];
   const completionKnown = status === 'completed' || sanitized.completionKnown === true;
+  const allChangedFiles = unique((Array.isArray(sanitized.changedFiles) ? sanitized.changedFiles : []).map(String).filter(Boolean));
+  const classifiedChangedFiles = classifyTaskChangedFiles(allChangedFiles);
+  const changedFileCount = Number.isFinite(Number(sanitized.changedFileCount))
+    ? Math.max(0, Number(sanitized.changedFileCount), allChangedFiles.length)
+    : allChangedFiles.length;
+  const productChangedFileCount = Number.isFinite(Number(sanitized.productChangedFileCount))
+    ? Math.max(0, Number(sanitized.productChangedFileCount), classifiedChangedFiles.productChangedFileCount)
+    : classifiedChangedFiles.productChangedFileCount;
+  const supportArtifactCount = Number.isFinite(Number(sanitized.supportArtifactCount))
+    ? Math.max(0, Number(sanitized.supportArtifactCount), classifiedChangedFiles.supportArtifactCount)
+    : classifiedChangedFiles.supportArtifactCount;
+  const changedFiles = allChangedFiles.slice(0, MAX_TASK_CHANGED_FILE_PREVIEW);
   return sanitizeTaskRecord({
     ...sanitized,
     id,
@@ -47,10 +62,11 @@ function canonicalTaskSnapshot(record = {}, options = {}) {
     successfulToolCallCount: Math.max(0, Number(sanitized.successfulToolCallCount || 0)),
     failedToolCallCount: Math.max(0, Number(sanitized.failedToolCallCount ?? sanitized.failures ?? 0)),
     failures: Math.max(0, Number(sanitized.failures ?? sanitized.failedToolCallCount ?? 0)),
-    changedFiles: unique((Array.isArray(sanitized.changedFiles) ? sanitized.changedFiles : []).map(String).filter(Boolean)),
-    changedFileCount: Number.isFinite(Number(sanitized.changedFileCount))
-      ? Math.max(0, Number(sanitized.changedFileCount))
-      : Array.isArray(sanitized.changedFiles) ? unique(sanitized.changedFiles.map(String).filter(Boolean)).length : 0,
+    changedFiles,
+    changedFileCount,
+    changedFilesTruncated: sanitized.changedFilesTruncated === true || changedFileCount > changedFiles.length,
+    productChangedFileCount,
+    supportArtifactCount,
     endedAt: terminal ? sanitized.endedAt || sanitized.completedAt || sanitized.cancelledAt || sanitized.updatedAt || null : null,
     completedAt: status === 'completed' ? sanitized.completedAt || sanitized.endedAt || sanitized.updatedAt || null : null,
     cancelledAt: status === 'cancelled' ? sanitized.cancelledAt || sanitized.endedAt || sanitized.updatedAt || null : null
@@ -192,6 +208,13 @@ function mergeTaskLifecycleSnapshots(persisted, live, options = {}) {
   merged.successfulToolCallCount = Math.max(Number(durable.successfulToolCallCount || 0), Number(active.successfulToolCallCount || 0));
   merged.failedToolCallCount = Math.max(Number(durable.failedToolCallCount || 0), Number(active.failedToolCallCount || 0));
   merged.failures = Math.max(Number(durable.failures || 0), Number(active.failures || 0));
+  merged.changedFiles = unique([...(durable.changedFiles || []), ...(active.changedFiles || [])]).slice(0, MAX_TASK_CHANGED_FILE_PREVIEW);
+  merged.changedFileCount = Math.max(Number(durable.changedFileCount || 0), Number(active.changedFileCount || 0), merged.changedFiles.length);
+  merged.productChangedFileCount = Math.max(Number(durable.productChangedFileCount || 0), Number(active.productChangedFileCount || 0));
+  merged.supportArtifactCount = Math.max(Number(durable.supportArtifactCount || 0), Number(active.supportArtifactCount || 0));
+  merged.changedFilesTruncated = durable.changedFilesTruncated === true
+    || active.changedFilesTruncated === true
+    || merged.changedFileCount > merged.changedFiles.length;
   merged.completionKnown = durable.completionKnown === true || active.completionKnown === true;
   merged.events = mergeLifecycleEvents(durable.events || [], active.events || []);
   return canonicalTaskSnapshot(merged, { eventsAlreadySanitized: true });

@@ -302,9 +302,5 @@ function positiveInteger(value: unknown, label: string): number {
 
 export { createMidsceneComputerAdapter };
 export type {
-  ComputerAdapter,
-  ComputerImage,
-  ComputerPoint,
-  ComputerScreenshotOptions,
-  ScrollDirection
+  ComputerAdapter, ComputerImage, ComputerPoint, ScrollDirection
 };

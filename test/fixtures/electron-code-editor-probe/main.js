@@ -24,7 +24,7 @@ app.whenReady().then(async () => {
     if (/content security policy|refused to apply inline style/i.test(String(message || ''))) cspErrors.push(String(message));
   });
   win.webContents.session.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: new URL(details.url).pathname === '/public/dashboard.js' });
+    callback({ cancel: new URL(details.url).pathname === '/public/dashboard-app.js' });
   });
 
   try {
@@ -131,6 +131,24 @@ app.whenReady().then(async () => {
           workbench: rectFor('.code-workbench'),
           monaco: rectFor('.monaco-editor:not(.gutter)')
         }
+      };
+      // Navigate to another file without unmounting Changes. The URL and the
+      // rendered diff must agree even when the task itself has not changed.
+      location.hash = '#code?task=probe-task&file=src%2Fexample.js';
+      await wait(200);
+      result.sameTaskFileNavigation = {
+        heading: document.querySelector('[data-code-file-heading]')?.textContent.trim() || '',
+        routeFile: new URLSearchParams(location.hash.split('?')[1] || '').get('file')
+      };
+      document.querySelector('[data-code-file="src/new.js"]')?.click();
+      location.hash = '#activity?task=outside-task';
+      await wait(200);
+      result.routeAfterPendingDiff = location.hash;
+      location.hash = '#code?task=probe-task&file=missing.js';
+      await wait(250);
+      result.invalidFileFallback = {
+        heading: document.querySelector('[data-code-file-heading]')?.textContent.trim() || '',
+        routeFile: new URLSearchParams(location.hash.split('?')[1] || '').get('file')
       };
       location.hash = '#tasks?task=probe-task';
       for (let attempt = 0; attempt < 20 && !document.querySelector('[data-task-id="probe-task"]'); attempt += 1) await wait(25);

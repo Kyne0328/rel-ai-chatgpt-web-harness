@@ -48,9 +48,17 @@ async function case_activity_controller_contract_unit() {
     'message text must render before supporting task/project metadata regardless of JSX/object formatting');
   assert.match(activity, /className:\s*'activity-row-task'/, 'rows must retain task context as supporting metadata');
   assert.match(activity, /className:\s*'activity-row-project'/, 'rows must retain project context as supporting metadata');
+  assert.match(activity, /className:\s*'activity-row-status'/, 'Activity status chips must render in a dedicated row-status slot instead of flowing with secondary metadata');
+  assert.match(activityCss, /\.activity-row-trigger\s*\{[^}]*grid-template-columns:\s*92px\s+minmax\(0,\s*1fr\)/s, 'Activity rows must reserve a consistent leading status column');
+  assert.match(activityCss, /\.activity-row-status\s*\{[^}]*grid-row:\s*1\s*\/\s*span\s*2/s, 'Activity status chips must align across both message and metadata rows');
   assert.match(activity, /focus\(\{ preventScroll: true \}\)/, 'stacked inspector selection must move focus without an intermediate browser scroll');
   assert.match(activity, /scrollIntoView\(\{ block: 'start', inline: 'nearest' \}\)/, 'stacked inspector selection must reveal the inspector predictably');
   assert.match(activity, /Copy event JSON/, 'technical details must preserve the copy action');
+  assert.match(activity, /'aria-expanded': treeRevision\.open/, 'the raw JSON tree toggle must expose its expanded state to assistive technology');
+  assert.match(activity, /treeRevision\.open \? 'Collapse all' : 'Expand all'/, 'raw JSON controls must use one stateful expand/collapse toggle instead of duplicate opposite actions');
+  assert.match(activity, /command \? h\(CommandDetail, \{ command \}\) : null/, 'Activity details must render the recorded command as a first-class readable section');
+  assert.match(activity, /Copy command/, 'Activity command details must provide a dedicated copy action');
+  assert.match(activityCss, /\.activity-detail-command pre\s*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;/s, 'long commands must wrap instead of being visually clipped');
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw target'/, 'technical details must preserve raw target information');
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw result'/, 'technical details must preserve raw result information');
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw error'/, 'technical details must preserve raw error information');
@@ -113,9 +121,11 @@ async function case_activity_message_layout_unit() {
   
   assert.match(react, /h\('colgroup',[\s\S]{0,260}activity-col-time[\s\S]{0,180}activity-col-message/, 'React activity table must keep the canonical time + activity columns');
   assert.doesNotMatch(react, /activity-col-(?:tool|task|status|action)/, 'tool, task, status, and action belong in Activity metadata instead of duplicate table columns');
+  const statusIndex = react.indexOf("className: 'activity-row-status'");
   const metaIndex = react.indexOf("className: 'activity-row-meta'");
+  assert.ok(statusIndex >= 0 && metaIndex > statusIndex, 'Activity status must occupy a stable leading slot before secondary metadata');
   assert.ok(metaIndex >= 0, 'Activity rows must render a supporting metadata region');
-  for (const marker of ['ActivityRowStatus', 'activity-row-action', 'activity-row-task', 'activity-row-project']) {
+  for (const marker of ['activity-row-action', 'activity-row-task', 'activity-row-project']) {
     assert.ok(react.indexOf(marker, metaIndex) > metaIndex, `Activity metadata must retain ${marker} context`);
   }
   assert.match(react, /ActivityRowStatus[\s\S]{0,180}return h\(StatusPill, \{ value \}\)/, 'Activity rows must use the shared status pill for succeeded and failed states');
@@ -178,6 +188,21 @@ async function case_activity_model_unit() {
     assert.deepEqual(replaced.map(item => item.eventId), ['server-new']);
   });
   
+  test('paged history keeps every explicitly loaded entry beyond the old client cap', () => {
+    const firstPage = Array.from({ length: 1000 }, (_, index) => entry({
+      eventId: `event-${index}`,
+      timestamp: new Date(NOW - index).toISOString()
+    }));
+    const olderPage = Array.from({ length: 500 }, (_, index) => entry({
+      eventId: `event-${1000 + index}`,
+      timestamp: new Date(NOW - 1000 - index).toISOString()
+    }));
+    const replaced = replaceActivityHistory(firstPage);
+    const merged = mergeActivityEntries(replaced, olderPage);
+    assert.equal(merged.entries.length, 1500, 'loading an older page must not discard rows while the server cursor advances');
+    assert.equal(merged.entries.at(-1)?.eventId, 'event-1499');
+  });
+
   test('live merges report no-op snapshots and preserve useful message text', () => {
     const current = [entry()];
     const same = mergeActivityEntries(current, [entry()]);
@@ -296,7 +321,9 @@ async function case_activity_model_unit() {
     assert.deepEqual(parseActivityHistoryResponse({ ok: false, error: 'Request timed out.' }), {
       ok: false,
       entries: [],
-      error: 'Request timed out.'
+      error: 'Request timed out.',
+      nextCursor: null,
+      hasMore: false
     });
     assert.equal(parseActivityHistoryResponse({ ok: false, error: { message: 'Gateway unavailable.' } }).error, 'Gateway unavailable.');
   });
@@ -446,7 +473,7 @@ async function case_session_event_order_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/ui/features/sessions/index.js");
+    const __m1 = await import("../src/ui/features/sessions/model.js");
     const { orderSessionEvents } = __m1;
   
   const events = [

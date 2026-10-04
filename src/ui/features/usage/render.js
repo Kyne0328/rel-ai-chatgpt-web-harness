@@ -97,7 +97,7 @@ function percent(value) {
   return `${number.toFixed(number >= 10 ? 1 : 2)}%`;
 }
 
-export function duration(value) {
+function duration(value) {
   const ms = Number(value) || 0;
   if (ms < 1000) return `${Math.floor(ms).toLocaleString()} ms`;
   const seconds = ms / 1000;

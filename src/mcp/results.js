@@ -137,6 +137,17 @@ function appendSuccessSummary(lines, payload) {
   appendField(lines, 'Status', scalarText(payload.status || payload.validationStatus));
   appendField(lines, 'Summary', displayText(payload.summary, 1000));
   appendField(lines, 'Message', displayText(payload.message, 1000));
+  const operations = payload.backgroundOperations || (payload.backgroundOperation ? [payload.backgroundOperation] : []);
+  for (const operation of operations.slice(0, 10)) {
+    const result = operation.result || {};
+    const outcome = result.commandSucceeded === false || result.validationStatus === 'failed'
+      ? 'failed'
+      : operation.status === 'running' ? operation.phase || 'running' : operation.status;
+    const exit = result.exitCode != null ? `; exit code ${result.exitCode}` : '';
+    lines.push(`Operation ${scalarText(operation.operationId)}: ${scalarText(outcome)}${exit}`);
+    if (result.stdoutOutputRef) lines.push(`Stdout reference: ${scalarText(result.stdoutOutputRef)}`);
+    if (result.stderrOutputRef) lines.push(`Stderr reference: ${scalarText(result.stderrOutputRef)}`);
+  }
   if (payload.exitCode != null) appendField(lines, 'Exit code', scalarText(payload.exitCode));
   appendField(lines, 'Stdout tail', tailText(payload.stdout, 1600));
   appendField(lines, 'Stderr tail', tailText(payload.stderr, 1200));
@@ -233,10 +244,38 @@ function compactToolResult(payload, originalBytes) {
     nextAction: displayText(payload.nextAction, 2000),
     stdout: tailText(payload.stdout, 2000),
     stderr: tailText(payload.stderr, 4000),
+    operationId: payload.operationId,
+    stdoutOutputRef: payload.stdoutOutputRef,
+    stderrOutputRef: payload.stderrOutputRef,
+    backgroundOperation: compactOperationResult(payload.backgroundOperation),
+    backgroundOperations: Array.isArray(payload.backgroundOperations) ? payload.backgroundOperations.map(compactOperationResult) : undefined,
     results: compactDiagnosticResults(payload.results),
     completedOperations: Array.isArray(payload.completedOperations) ? payload.completedOperations.slice(0, 5) : undefined
   };
   return Object.fromEntries(Object.entries(compact).filter(([, value]) => value != null));
+}
+
+function compactOperationResult(operation) {
+  if (!operation || typeof operation !== 'object') return undefined;
+  const result = operation.result || {};
+  return {
+    operationId: operation.operationId,
+    work_id: operation.work_id,
+    workspace: operation.workspace,
+    tool: operation.tool,
+    status: operation.status,
+    phase: operation.phase,
+    revision: operation.revision,
+    error: displayText(operation.error, 1000),
+    result: {
+      commandSucceeded: result.commandSucceeded,
+      validationStatus: result.validationStatus,
+      exitCode: result.exitCode,
+      stdoutOutputRef: result.stdoutOutputRef,
+      stderrOutputRef: result.stderrOutputRef,
+      results: compactDiagnosticResults(result.results)
+    }
+  };
 }
 
 function compactDiagnosticResults(results) {
@@ -248,7 +287,9 @@ function compactDiagnosticResults(results) {
     timedOut: item?.timedOut === true,
     signal: item?.signal,
     stdout: tailText(item?.stdout, 2000),
-    stderr: tailText(item?.stderr, 4000)
+    stderr: tailText(item?.stderr, 4000),
+    stdoutOutputRef: item?.stdoutOutputRef,
+    stderrOutputRef: item?.stderrOutputRef
   }).filter(([, value]) => value != null)));
 }
 

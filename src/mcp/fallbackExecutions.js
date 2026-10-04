@@ -1,11 +1,14 @@
 import * as crypto from 'node:crypto';
+import { stableJson } from '../stableJson.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readJsonFile, writeJsonAtomic } from '../durableState.ts';
 import { getStateDir } from '../statePaths.js';
-import { readTaskBackgroundOperation, recordTaskBackgroundOperation } from '../taskHistoryStore.ts';
+import { readTaskBackgroundOperation, readTaskBackgroundOperations, recordTaskBackgroundOperation } from '../taskHistoryStore.ts';
 import { sanitizeTaskRecord } from '../taskObservability.js';
+import { createOutputSpillWriter } from '../outputSpill.js';
 import { FALLBACK_EXECUTION_STATUS } from './contracts.ts';
+import { publishMcpEvent } from './events.ts';
 
 const DEFAULT_FALLBACK_GRACE_MS = 1_000;
 const FALLBACK_RECORD_TTL_MS = 15 * 60_000;
@@ -16,31 +19,28 @@ const REPLAYABLE_FALLBACK_STATUSES = new Set([
   FALLBACK_EXECUTION_STATUS.FAILED,
   FALLBACK_EXECUTION_STATUS.CANCELLED
 ]);
-const executionsByWorkId = new Map();
 const executionsByOperationId = new Map();
+const pendingCompletionDeliveries = new Map();
 
-function startFallbackExecution({ config = null, workId = '', scopeId = '', noticeScope = '', tool, workspace = '', signature = '', run, persist = true, now = Date.now }) {
+function activeFallbackWorkIds() {
+  return [...new Set([...executionsByOperationId.values()]
+    .filter(record => record.status === FALLBACK_EXECUTION_STATUS.RUNNING && record.workId)
+    .map(record => record.workId))];
+}
+
+function startFallbackExecution({ config = null, workId = '', scopeId = '', noticeScope = '', tool, workspace = '', signature = '', deadlineAtMs = 0, run, persist = true, now = Date.now }) {
   const work = String(workId || '').trim();
   const id = work || String(scopeId || '').trim();
   if (!id) throw new Error('Fallback execution requires a durable work_id or authorized workspace execution scope.');
   if (typeof run !== 'function') throw new TypeError('Fallback execution requires a run function.');
   pruneFallbackExecutions(now);
 
-  let existing = executionsByWorkId.get(id) || null;
-  if (!existing && config) {
-    const persisted = recoverPersistedFallback(config, id, now);
-    if (persisted && persisted.deliveryAcknowledged !== true && REPLAYABLE_FALLBACK_STATUSES.has(persisted.status)) {
-      existing = hydratePersistedRecord(persisted);
-    }
-  }
-  if (existing?.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
-    if (existing.signature === signature) return { record: existing, reused: true };
-    const error = new Error('Another long-running operation is already active for this work session. Check relai_work status before starting another operation.');
-    error.code = 'TASK_OPERATION_IN_PROGRESS';
-    error.retryable = true;
-    throw error;
-  }
-  if (existing && existing.signature === signature && REPLAYABLE_FALLBACK_STATUSES.has(existing.status)) {
+  recoverExecutionRecords(id, { config, now, noticeScope });
+  const existing = recordsForReference(id).findLast(record => record.signature === signature
+    && (!noticeScope || record.noticeScope === noticeScope)
+    && (record.status === FALLBACK_EXECUTION_STATUS.RUNNING
+      || (record.deliveryAcknowledged !== true && REPLAYABLE_FALLBACK_STATUSES.has(record.status))));
+  if (existing) {
     return { record: existing, reused: true };
   }
 
@@ -57,6 +57,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
     noticeEnabled: false,
     signature,
     status: FALLBACK_EXECUTION_STATUS.RUNNING,
+    phase: 'starting',
+    deadlineAtMs: Number.isFinite(Number(deadlineAtMs)) && Number(deadlineAtMs) > 0 ? Math.floor(Number(deadlineAtMs)) : 0,
     startedAt,
     startedAtMs,
     updatedAt: startedAt,
@@ -76,35 +78,57 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
   };
 
   record.promise = Promise.resolve()
-    .then(() => run(controller.signal))
-    .then(result => {
+    .then(() => run(controller.signal, record.operationId))
+    .then(async result => {
+      await retainFallbackOutput(config, record, result);
       if (controller.signal.aborted) {
+        // Cancellation stays terminal, but the handler may hold the only evidence
+        // that a subprocess is still alive or its mutations are unknown.
+        const structured = result?.structuredContent || result?.result || {};
+        const reason = controller.signal.reason instanceof Error
+          ? controller.signal.reason.message : String(controller.signal.reason || 'Work session cancelled by request.');
+        record.result = {
+          ...result,
+          isError: true,
+          content: [{ type: 'text', text: reason + (structured.terminationConfirmed === false
+            ? ' Process termination was not confirmed; mutations may still be in progress.' : '') }],
+          structuredContent: {
+            ...structured,
+            ok: false,
+            status: 'cancelled',
+            cancelled: true,
+            ...(Object.hasOwn(structured, 'commandSucceeded') ? { commandSucceeded: false } : {}),
+            ...(structured.error ? {} : { error: reason }),
+            ...(structured.errorCode ? {} : { errorCode: 'CANCELLED' }),
+            cancellationReason: reason
+          }
+        };
+        record.isError = true;
         settleCancelledRecord(record, now, controller.signal.reason);
         persistFallbackRecord(config, record);
-        return { ok: false, cancelled: true, error: controller.signal.reason };
+        deliverFallbackCompletion(config, record);
+        return { ok: false, cancelled: true, error: controller.signal.reason, result: record.result };
       }
       settleRecord(record, result?.isError === true ? FALLBACK_EXECUTION_STATUS.FAILED : FALLBACK_EXECUTION_STATUS.COMPLETED, now);
       record.result = result || null;
       record.isError = result?.isError === true;
       persistFallbackRecord(config, record);
-      releaseDeliveredExecutionScope(record);
-      if (record.noticeEnabled) enqueueFallbackCompletionNotice(config, record);
+      deliverFallbackCompletion(config, record);
       return { ok: true, result };
     }, error => {
       if (controller.signal.aborted) {
         settleCancelledRecord(record, now, controller.signal.reason || error);
         persistFallbackRecord(config, record);
+        deliverFallbackCompletion(config, record);
         return { ok: false, cancelled: true, error: controller.signal.reason || error };
       }
       settleRecord(record, FALLBACK_EXECUTION_STATUS.FAILED, now);
       record.error = error instanceof Error ? error.message : String(error);
       persistFallbackRecord(config, record);
-      releaseDeliveredExecutionScope(record);
-      if (record.noticeEnabled) enqueueFallbackCompletionNotice(config, record);
+      deliverFallbackCompletion(config, record);
       return { ok: false, error };
     });
 
-  executionsByWorkId.set(id, record);
   executionsByOperationId.set(record.operationId, record);
   persistFallbackRecord(config, record);
   pruneFallbackExecutions(now);
@@ -119,7 +143,22 @@ function cancelFallbackExecution(workId, options = {}) {
   const reason = options.reason instanceof Error
     ? options.reason
     : new Error(String(options.reason || 'Work session cancelled by request.'));
-  let record = executionsByOperationId.get(id) || executionsByWorkId.get(id) || null;
+  recoverExecutionRecords(id, options);
+  const records = recordsForReference(id);
+  if (records.length > 1) {
+    const results = records.map(record => cancelFallbackExecution(record.operationId, options));
+    const settlements = results.map(result => result.settlement).filter(Boolean);
+    return {
+      cancelled: results.some(result => result.cancelled),
+      stopping: results.some(result => result.stopping),
+      duplicate: results.every(result => result.duplicate),
+      mismatch: results.some(result => result.mismatch),
+      record: results.at(-1)?.record || null,
+      records: results.filter(result => result.stopping).map(result => result.record),
+      settlement: settlements.length ? Promise.allSettled(settlements) : null
+    };
+  }
+  let record = records[0] || null;
   if (!record && options.config) {
     const persisted = recoverPersistedFallback(options.config, id, now);
     if (!persisted) return { cancelled: false, duplicate: false, record: null };
@@ -131,6 +170,7 @@ function cancelFallbackExecution(workId, options = {}) {
   if (expectedWorkId && String(record?.workId || '') !== expectedWorkId) {
     return { cancelled: false, duplicate: false, mismatch: true, record: null };
   }
+  if (!record) return { cancelled: false, duplicate: false, record: null };
   if (record.status !== FALLBACK_EXECUTION_STATUS.RUNNING) return { cancelled: false, duplicate: true, record: publicFallbackRecord(record, now) };
   if (record.cancellationRequestedAt) {
     return { cancelled: false, duplicate: true, record: publicFallbackRecord(record, now), settlement: record.promise || null };
@@ -138,6 +178,7 @@ function cancelFallbackExecution(workId, options = {}) {
   const requestedAt = new Date(timeValue(now)).toISOString();
   record.cancellationRequestedAt = requestedAt;
   record.cancellationReason = reason.message;
+  record.phase = 'stopping';
   record.updatedAt = requestedAt;
   record.revision = Math.max(1, Number(record.revision || 1)) + 1;
   if (!record.controller.signal.aborted) record.controller.abort(reason);
@@ -154,61 +195,102 @@ function cancelFallbackExecution(workId, options = {}) {
 function enableFallbackCompletionNotice(config, record) {
   if (!record) return;
   record.noticeEnabled = true;
-  if (record.status !== FALLBACK_EXECUTION_STATUS.RUNNING) enqueueFallbackCompletionNotice(config, record);
+  if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) enqueueFallbackCompletionIntent(config, record);
+  else enqueueFallbackCompletionNotice(config, record);
 }
 
 function acknowledgeFallbackDelivery(config, reference) {
   const id = String(reference || '').trim();
   if (!id) return false;
-  const record = executionsByOperationId.get(id) || executionsByWorkId.get(id) || null;
+  const record = recordsForReference(id).at(-1) || null;
   if (!record) return false;
+  // Delivery of a running acknowledgement confirms acceptance, not receipt of
+  // the eventual result. Keep the replay identity until a terminal result arrives.
+  if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) return true;
   record.deliveryAcknowledged = true;
   persistFallbackRecord(config, record);
-  if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
-    return true;
-  }
-  executionsByWorkId.delete(record.executionKey || record.operationId);
-  if (!record.workId) {
-    executionsByOperationId.delete(record.operationId);
-    if (config && record.operationId) {
-      try { fs.rmSync(tasklessFallbackFile(config, record.operationId), { force: true }); } catch {}
-    }
-  }
   return true;
 }
 
-function releaseDeliveredExecutionScope(record) {
-  if (!record || record.deliveryAcknowledged !== true) return;
-  executionsByWorkId.delete(record.executionKey || record.operationId);
+function recordsForReference(reference) {
+  const exact = executionsByOperationId.get(reference);
+  if (exact) return [exact];
+  return [...executionsByOperationId.values()].filter(record => (record.executionKey || record.workId) === reference);
+}
+
+function recoverExecutionRecords(reference, options = {}) {
+  if (!options.config) return;
+  const persisted = reference.startsWith('fallback_')
+    ? [readPersistedFallback(options.config, reference, options.workId)].filter(Boolean)
+    : readTaskBackgroundOperations(options.config, reference);
+  for (const record of persisted) {
+    if (!record?.operationId) continue;
+    if (executionsByOperationId.has(record.operationId)) continue;
+    if (options.noticeScope && record.noticeScope && record.noticeScope !== options.noticeScope) continue;
+    if (options.workId && record.workId !== options.workId) continue;
+    const recovered = recoverPersistedFallback(options.config, record.operationId, options.now || Date.now, record);
+    if (recovered) executionsByOperationId.set(recovered.operationId, hydratePersistedRecord(recovered));
+  }
+}
+
+function fallbackExecutionsStatus(reference, options = {}) {
+  const id = String(reference || '').trim();
+  if (!id) return [];
+  const now = options.now || Date.now;
+  pruneFallbackExecutions(now);
+  recoverExecutionRecords(id, options);
+  return recordsForReference(id)
+    .filter(record => !options.noticeScope || !record.noticeScope || record.noticeScope === options.noticeScope)
+    .filter(record => !options.workId || record.workId === options.workId)
+    .map(record => publicFallbackRecord(record, now));
+}
+
+function updateFallbackExecutionPhase(operationId, phase, config) {
+  const record = executionsByOperationId.get(String(operationId || ''));
+  if (!record || record.status !== FALLBACK_EXECUTION_STATUS.RUNNING || record.phase === phase) return;
+  record.phase = phase;
+  record.updatedAt = new Date().toISOString();
+  record.revision += 1;
+  persistFallbackRecord(config, record);
+}
+
+function assertFallbackCompletionAvailable(workId, options = {}) {
+  const pending = fallbackExecutionsStatus(workId, options).filter(record =>
+    record.status === FALLBACK_EXECUTION_STATUS.RUNNING && record.operationId !== options.excludeOperationId);
+  if (!pending.length) return;
+  const error = new Error('Cannot complete this task while background operations are still queued or running.');
+  error.code = 'TASK_COMPLETION_IN_PROGRESS';
+  error.retryable = true;
+  throw error;
 }
 
 function fallbackExecutionStatus(reference, options = {}) {
-  const now = options.now || Date.now;
-  pruneFallbackExecutions(now);
-  const id = String(reference || '').trim();
-  const record = executionsByOperationId.get(id) || executionsByWorkId.get(id);
-  if (record) return publicFallbackRecord(record, now);
-  if (!options.config || !id) return null;
-  const persisted = recoverPersistedFallback(options.config, id, now);
-  if (!persisted) return null;
-  const hydrated = hydratePersistedRecord(persisted);
-  if (hydrated.operationId) executionsByOperationId.set(hydrated.operationId, hydrated);
-  if (hydrated.executionKey || hydrated.workId) executionsByWorkId.set(hydrated.executionKey || hydrated.workId, hydrated);
-  return publicFallbackRecord(hydrated, now);
+  const records = fallbackExecutionsStatus(reference, options);
+  return records.findLast(record => record.status === FALLBACK_EXECUTION_STATUS.RUNNING) || records.at(-1) || null;
 }
 
 function publicFallbackRecord(record, now = Date.now) {
   if (!record) return null;
   const structured = record.result?.structuredContent || record.persistedResult || record.result?.result || null;
   const running = record.status === FALLBACK_EXECUTION_STATUS.RUNNING;
+  const currentMs = timeValue(now);
+  const startedAtMs = Number(record.startedAtMs || Date.parse(record.startedAt) || currentMs);
+  const deadlineAtMs = Number(record.deadlineAtMs || 0);
   return {
     operationId: record.operationId,
+    ...(record.workId ? { work_id: record.workId } : {}),
     tool: record.tool,
     workspace: record.workspace,
     status: record.status,
+    ...(record.phase ? { phase: record.phase } : {}),
     startedAt: record.startedAt,
     updatedAt: record.updatedAt || record.startedAt,
     revision: Math.max(1, Number(record.revision || 1)),
+    elapsedMs: Math.max(0, currentMs - startedAtMs),
+    ...(deadlineAtMs > 0 ? {
+      deadlineAt: new Date(deadlineAtMs).toISOString(),
+      remainingMs: Math.max(0, deadlineAtMs - currentMs)
+    } : {}),
     ...(running ? { pollAfterMs: fallbackPollAfterMs(record, now) } : {}),
     ...(record.cancellationRequestedAt ? { cancellationRequestedAt: record.cancellationRequestedAt, stopping: true } : {}),
     ...(record.completedAt ? { completedAt: record.completedAt } : {}),
@@ -227,25 +309,102 @@ function fallbackPollAfterMs(record, now = Date.now) {
   return 120_000;
 }
 
-function consumeFallbackCompletionNotices(config, options = {}) {
+function peekFallbackCompletionNotices(config, options = {}) {
   const noticeScope = String(options.noticeScope || '').trim();
   const workspace = String(options.workspace || '').trim();
   if (!config || !noticeScope || !workspace) return [];
   const file = completionNoticeFile(config, noticeScope, workspace);
-  const notices = readCompletionNoticeFile(file)
-    .filter(notice => completionNoticeFresh(notice, options.now || Date.now));
-  if (!notices.length) {
-    try { fs.rmSync(file, { force: true }); } catch {}
-    return [];
+  const stored = readCompletionNoticeFile(file);
+  const now = options.now || Date.now;
+  const retained = [];
+  const ready = [];
+  let changed = false;
+
+  for (const notice of stored) {
+    if (notice.pending === true) {
+      const operationId = String(notice.operationId || '').trim();
+      const workId = String(notice.work_id || '').trim();
+      const live = executionsByOperationId.get(operationId) || null;
+      if (live?.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
+        retained.push(notice);
+        continue;
+      }
+      const persisted = live || recoverPersistedFallback(config, operationId, now, readPersistedFallback(config, operationId, workId));
+      if (persisted) {
+        const terminal = fallbackCompletionNotice(hydratePersistedRecord(persisted));
+        retained.push(terminal);
+        ready.push(terminal);
+        changed = true;
+        continue;
+      }
+      if (completionNoticeFresh(notice, now)) retained.push(notice);
+      else changed = true;
+      continue;
+    }
+    if (!completionNoticeFresh(notice, now)) {
+      changed = true;
+      continue;
+    }
+    retained.push(notice);
+    ready.push(notice);
+  }
+
+  if (changed) {
+    if (retained.length) writeCompletionNoticeFile(file, retained);
+    else {
+      try { fs.rmSync(file, { force: true }); } catch {}
+    }
   }
   const limit = Math.min(MAX_COMPLETION_NOTICES, Math.max(1, Number(options.limit || MAX_COMPLETION_NOTICES)));
-  const delivered = notices.slice(0, limit);
-  const remaining = notices.slice(delivered.length);
-  if (remaining.length) writeCompletionNoticeFile(file, remaining);
-  else {
-    try { fs.rmSync(file, { force: true }); } catch {}
+  return ready.slice(0, limit);
+}
+
+function registerFallbackCompletionDelivery(config, notices, options = {}) {
+  const noticeScope = String(options.noticeScope || '').trim();
+  const workspace = String(options.workspace || '').trim();
+  const requestId = options.requestId;
+  if (!config || !noticeScope || !workspace || requestId === undefined || requestId === null || !Array.isArray(notices) || !notices.length) return false;
+  prunePendingCompletionDeliveries();
+  const operationIds = [...new Set(notices.map(notice => String(notice?.operationId || '').trim()).filter(Boolean))];
+  if (!operationIds.length) return false;
+  pendingCompletionDeliveries.set(completionDeliveryKey(noticeScope, requestId), {
+    config,
+    noticeScope,
+    workspace,
+    operationIds,
+    expiresAt: Date.now() + FALLBACK_RECORD_TTL_MS
+  });
+  return true;
+}
+
+function acknowledgeFallbackCompletionDelivery(noticeScope, requestId) {
+  const scope = String(noticeScope || '').trim();
+  if (!scope || requestId === undefined || requestId === null) return false;
+  prunePendingCompletionDeliveries();
+  const key = completionDeliveryKey(scope, requestId);
+  const pending = pendingCompletionDeliveries.get(key);
+  if (!pending) return false;
+  pendingCompletionDeliveries.delete(key);
+  let acknowledged = false;
+  for (const operationId of pending.operationIds) {
+    const consumed = acknowledgeFallbackCompletionNotice(pending.config, operationId, {
+      noticeScope: pending.noticeScope,
+      workspace: pending.workspace
+    });
+    if (consumed) acknowledgeFallbackDelivery(pending.config, operationId);
+    acknowledged = consumed || acknowledged;
   }
-  return delivered;
+  return acknowledged;
+}
+
+function completionDeliveryKey(noticeScope, requestId) {
+  return `${noticeScope}\0${typeof requestId}:${String(requestId)}`;
+}
+
+function prunePendingCompletionDeliveries(now = Date.now()) {
+  for (const [key, pending] of pendingCompletionDeliveries) {
+    if (Number(pending.expiresAt || 0) <= now) pendingCompletionDeliveries.delete(key);
+  }
 }
 
 function acknowledgeFallbackCompletionNotice(config, reference, options = {}) {
@@ -264,19 +423,81 @@ function acknowledgeFallbackCompletionNotice(config, reference, options = {}) {
   return true;
 }
 
+function deliverFallbackCompletion(config, record) {
+  if (!config || !record || record.status === FALLBACK_EXECUTION_STATUS.RUNNING) return;
+
+  const noticeScope = String(record.noticeScope || '').trim();
+  const workspace = String(record.workspace || '').trim();
+  const status = String(record.status || '');
+  const name = status === FALLBACK_EXECUTION_STATUS.COMPLETED
+    ? 'operation.completed'
+    : status === FALLBACK_EXECUTION_STATUS.CANCELLED
+      ? 'operation.cancelled'
+      : 'operation.failed';
+  if (!noticeScope || !record.operationId) {
+    if (record.noticeEnabled) enqueueFallbackCompletionNotice(config, record);
+    return;
+  }
+  void publishMcpEvent(config, {
+    principalFingerprint: noticeScope,
+    name,
+    data: {
+      workspace,
+      work_id: String(record.workId || ''),
+      operation_id: String(record.operationId || ''),
+      tool: String(record.tool || ''),
+      status,
+      error: String(record.error || '').slice(0, 500)
+    }
+  }).then(delivered => {
+    if (!record.noticeEnabled) return;
+    if (delivered) acknowledgeFallbackCompletionNotice(config, record.operationId, { noticeScope, workspace });
+    else enqueueFallbackCompletionNotice(config, record);
+  }).catch(error => {
+    if (record.noticeEnabled) enqueueFallbackCompletionNotice(config, record);
+    if (process.env.REL_AI_MCP_DEBUG) {
+      console.error('[rel-ai-mcp] fallback MCP Event delivery:', error instanceof Error ? error.message : String(error));
+    }
+  });
+}
+
+function enqueueFallbackCompletionIntent(config, record) {
+  if (!config || !record || record.status !== FALLBACK_EXECUTION_STATUS.RUNNING) return;
+  const noticeScope = String(record.noticeScope || '').trim();
+  const workspace = String(record.workspace || '').trim();
+  if (!noticeScope || !workspace || !record.operationId) return;
+  upsertFallbackCompletionRecord(config, noticeScope, workspace, fallbackCompletionIntent(record));
+}
+
 function enqueueFallbackCompletionNotice(config, record) {
   if (!config || !record || record.status === FALLBACK_EXECUTION_STATUS.RUNNING) return;
   const noticeScope = String(record.noticeScope || '').trim();
   const workspace = String(record.workspace || '').trim();
   if (!noticeScope || !workspace || !record.operationId) return;
+  upsertFallbackCompletionRecord(config, noticeScope, workspace, fallbackCompletionNotice(record));
+}
+
+function upsertFallbackCompletionRecord(config, noticeScope, workspace, notice) {
   const file = completionNoticeFile(config, noticeScope, workspace);
   const existing = readCompletionNoticeFile(file)
-    .filter(notice => completionNoticeFresh(notice));
-  const notice = fallbackCompletionNotice(record);
+    .filter(item => completionNoticeFresh(item));
   const notices = [...existing.filter(item => item.operationId !== notice.operationId), notice]
-    .sort((left, right) => Date.parse(left.completedAt || '') - Date.parse(right.completedAt || ''))
+    .sort((left, right) => completionNoticeTime(left) - completionNoticeTime(right))
     .slice(-MAX_COMPLETION_NOTICES);
   writeCompletionNoticeFile(file, notices);
+}
+
+function fallbackCompletionIntent(record) {
+  return Object.fromEntries(Object.entries({
+    operationId: record.operationId,
+    work_id: record.workId || undefined,
+    tool: record.tool,
+    workspace: record.workspace,
+    status: FALLBACK_EXECUTION_STATUS.RUNNING,
+    startedAt: record.startedAt,
+    revision: Math.max(1, Number(record.revision || 1)),
+    pending: true
+  }).filter(([, value]) => value !== undefined && value !== ''));
 }
 
 function fallbackCompletionNotice(record) {
@@ -328,19 +549,24 @@ function writeCompletionNoticeFile(file, notices) {
   writeJsonAtomic(file, { version: 1, notices }, { mode: 0o600 });
 }
 
-function completionNoticeFresh(notice, now = Date.now) {
-  const completed = Date.parse(String(notice?.completedAt || ''));
-  return Number.isFinite(completed) && timeValue(now) - completed <= FALLBACK_RECORD_TTL_MS;
+function completionNoticeTime(notice) {
+  return Date.parse(String(notice?.completedAt || notice?.startedAt || '')) || 0;
 }
 
-function recoverPersistedFallback(config, reference, now = Date.now) {
-  const persisted = readPersistedFallback(config, reference);
+function completionNoticeFresh(notice, now = Date.now) {
+  const timestamp = completionNoticeTime(notice);
+  return timestamp > 0 && timeValue(now) - timestamp <= FALLBACK_RECORD_TTL_MS;
+}
+
+function recoverPersistedFallback(config, reference, now = Date.now, previous = null) {
+  const persisted = previous || readPersistedFallback(config, reference);
   if (!persisted) return null;
   if (persisted.status !== FALLBACK_EXECUTION_STATUS.RUNNING) return persisted;
   const timestamp = timeValue(now);
   const interrupted = {
     ...persisted,
     status: FALLBACK_EXECUTION_STATUS.INTERRUPTED,
+    phase: '',
     updatedAt: new Date(timestamp).toISOString(),
     completedAt: new Date(timestamp).toISOString(),
     revision: Math.max(1, Number(persisted.revision || 1)) + 1,
@@ -357,8 +583,11 @@ function hydratePersistedRecord(record) {
     workId: String(record.workId || ''),
     tool: String(record.tool || ''),
     workspace: String(record.workspace || ''),
+    noticeScope: String(record.noticeScope || ''),
     signature: String(record.signature || ''),
     status: String(record.status || ''),
+    phase: String(record.phase || ''),
+    deadlineAtMs: Number(record.deadlineAtMs || 0),
     startedAt: String(record.startedAt || ''),
     startedAtMs: Date.parse(record.startedAt) || 0,
     updatedAt: String(record.updatedAt || record.startedAt || ''),
@@ -385,8 +614,11 @@ function persistentFallbackRecord(record) {
     workId: record.workId,
     tool: record.tool,
     workspace: record.workspace,
+    noticeScope: record.noticeScope,
     signature: record.signature,
     status: record.status,
+    ...(record.phase ? { phase: record.phase } : {}),
+    ...(Number(record.deadlineAtMs) > 0 ? { deadlineAtMs: Math.floor(Number(record.deadlineAtMs)) } : {}),
     startedAt: record.startedAt,
     updatedAt: record.updatedAt || record.startedAt,
     revision: Math.max(1, Number(record.revision || 1)),
@@ -400,13 +632,18 @@ function persistentFallbackRecord(record) {
   };
 }
 
-function readPersistedFallback(config, reference) {
+function readPersistedFallback(config, reference, workId = '') {
   const id = String(reference || '').trim();
   try {
     if (id.startsWith('fallback_')) {
-      return readJsonFile(tasklessFallbackFile(config, id), {
-        validate: value => Boolean(value && typeof value === 'object' && value.operationId === id)
-      });
+      let stored = null;
+      try {
+        stored = readJsonFile(tasklessFallbackFile(config, id), {
+          validate: value => Boolean(value && typeof value === 'object' && value.operationId === id)
+        });
+      } catch {}
+      const taskId = stored?.workId || workId;
+      return taskId ? readTaskBackgroundOperations(config, taskId).find(record => record.operationId === id) || null : stored;
     }
     return readTaskBackgroundOperation(config, id);
   } catch (error) {
@@ -420,14 +657,43 @@ function persistFallbackRecord(config, record) {
   persistFallbackSnapshot(config, persistentFallbackRecord(record));
 }
 
+async function retainFallbackOutput(config, record, result) {
+  if (!config || record.persist === false || (record.workId && !readTaskBackgroundOperation(config, record.workId))) return;
+  const owner = record.workId || (record.workspace && record.noticeScope ? `workspace:${record.workspace}:principal:${record.noticeScope}` : '');
+  if (!owner) return;
+  async function retain(value, depth = 0) {
+    if (!value || typeof value !== 'object' || depth > 5) return;
+    for (const stream of ['stdout', 'stderr']) {
+      const refKey = `${stream}OutputRef`;
+      if (typeof value[stream] !== 'string' || !value[stream] || value[refKey]) continue;
+      const writer = createOutputSpillWriter(config, owner);
+      writer.start(value[stream]);
+      const retained = await writer.finish();
+      if (retained?.outputRef) value[refKey] = retained.outputRef;
+      if (retained?.spillTruncated) value[`${stream}SpillTruncated`] = true;
+    }
+    for (const child of Object.values(value)) {
+      if (child && typeof child === 'object') await retain(child, depth + 1);
+    }
+  }
+  try { await retain(result?.structuredContent); }
+  catch (error) {
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback output retention:', error);
+  }
+}
+
 function persistFallbackSnapshot(config, record) {
   try {
     if (record.workId) {
       recordTaskBackgroundOperation(config, record.workId, record);
-      return;
+      // Work-bound records also need direct operationId lookup after restart.
+      if (!readTaskBackgroundOperation(config, record.workId)) return;
     }
     const file = tasklessFallbackFile(config, record.operationId);
-    const sanitized = sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
+    // Task history is authoritative for work-bound operations; the file is an
+    // operationId lookup index, not a second copy of the execution state.
+    const sanitized = record.workId ? { operationId: record.operationId, workId: record.workId }
+      : sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     writeJsonAtomic(file, sanitized, { mode: 0o600 });
     pruneTasklessFallbackFiles(config);
@@ -453,6 +719,9 @@ function pruneTasklessFallbackFiles(config) {
   }).filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs);
   files.forEach((entry, index) => {
     if (entry.mtimeMs >= cutoff && index < MAX_FALLBACK_RECORDS) return;
+    const record = readPersistedFallback(config, path.basename(entry.file, '.json'));
+    if (record?.status === FALLBACK_EXECUTION_STATUS.RUNNING) return;
+    if (record?.workId) return;
     try { fs.rmSync(entry.file, { force: true }); } catch {}
   });
 }
@@ -460,6 +729,7 @@ function pruneTasklessFallbackFiles(config) {
 function settleRecord(record, status, now = Date.now) {
   const completedAtMs = timeValue(now);
   record.status = status;
+  record.phase = '';
   record.completedAtMs = completedAtMs;
   record.completedAt = new Date(completedAtMs).toISOString();
   record.updatedAt = record.completedAt;
@@ -490,8 +760,6 @@ function pruneFallbackExecutions(now = Date.now) {
 function removeFallbackExecutionRecord(record) {
   if (!record) return;
   if (record.operationId) executionsByOperationId.delete(record.operationId);
-  const executionKey = String(record.executionKey || record.workId || record.operationId || '').trim();
-  if (executionKey && executionsByWorkId.get(executionKey) === record) executionsByWorkId.delete(executionKey);
 }
 
 function timeValue(now = Date.now) {
@@ -504,25 +772,25 @@ function fallbackSignature(tool, args = {}) {
   return crypto.createHash('sha256').update(stableJson([String(tool || ''), args])).digest('base64url');
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (!value || typeof value !== 'object') return JSON.stringify(value);
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
-}
-
 function resetFallbackExecutions() {
-  executionsByWorkId.clear();
   executionsByOperationId.clear();
+  pendingCompletionDeliveries.clear();
 }
 
 export {
   DEFAULT_FALLBACK_GRACE_MS,
+  acknowledgeFallbackCompletionDelivery,
   acknowledgeFallbackCompletionNotice,
   acknowledgeFallbackDelivery,
+  activeFallbackWorkIds,
   cancelFallbackExecution,
-  consumeFallbackCompletionNotices,
+  peekFallbackCompletionNotices,
+  registerFallbackCompletionDelivery,
   enableFallbackCompletionNotice,
   fallbackExecutionStatus,
+  fallbackExecutionsStatus,
+  updateFallbackExecutionPhase,
+  assertFallbackCompletionAvailable,
   fallbackSignature,
   resetFallbackExecutions,
   startFallbackExecution

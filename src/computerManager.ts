@@ -34,7 +34,7 @@ import {
   type SemanticPerception,
   type SemanticTarget
 } from './computer/windowsUiaAdapter.ts';
-import { principalFingerprint } from './mcp/principal.js';
+import { principalFingerprint } from './mcp/principal.ts';
 
 const COMPUTER_ACTIONS = new Set([
   'status', 'displays', 'observe', 'activate', 'set_value', 'screenshot', 'wait_for_change', 'wait_for_stable', 'move', 'click', 'double_click', 'right_click',

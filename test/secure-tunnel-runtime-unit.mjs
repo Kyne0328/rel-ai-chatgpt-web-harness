@@ -368,6 +368,58 @@ try {
   assert.equal(unavailableRuntime.snapshot().state, 'failed');
   assert.equal(unavailableRuntime.snapshot().errorCode, 'tunnel_runtime_unavailable', 'missing local tunnel runtime must be terminal instead of entering automatic reconnect');
 
+
+  for (const startReplacement of [false, true]) {
+    let releaseExecutable;
+    const executableReady = new Promise(resolve => { releaseExecutable = resolve; });
+    let resolveCalls = 0;
+    let spawnCalls = 0;
+    let replacementChild = null;
+    const cancelledStartupRuntime = createSecureTunnelRuntime({
+      spawnImpl(executable, args, options) {
+        spawnCalls += 1;
+        replacementChild = fakeSpawn(executable, args, options);
+        return replacementChild;
+      },
+      fetchImpl: fetchTunnel,
+      stopProcess: async child => { child.exitCode = 0; return { exited: true, forced: false }; },
+      resolveExecutable: () => ++resolveCalls === 1 ? executableReady : process.execPath,
+      makeEnvironment: makeTunnelProcessEnvironment,
+      stateDir: path.join(stateDir, startReplacement ? 'cancel-replace' : 'cancel-stop')
+    });
+    const cancelledStart = cancelledStartupRuntime.start({
+      tunnelId: 'tunnel_example123456', port: 3333,
+      localToken: 'local-secret', apiKey: 'test-cancelled-start', timeoutMs: 1000
+    });
+    const cancelledStop = await cancelledStartupRuntime.stop();
+    assert.equal(cancelledStop.exited, true);
+    assert.equal(spawnCalls, 0, 'stopping during executable resolution must happen before any child exists');
+    try {
+      if (startReplacement) {
+        await cancelledStartupRuntime.start({
+          tunnelId: 'tunnel_example123456', port: 3333,
+          localToken: 'local-secret', apiKey: 'test-replacement-start', timeoutMs: 1000
+        });
+      }
+      releaseExecutable(process.execPath);
+      const cancelledResult = await cancelledStart;
+      assert.equal(cancelledResult.cancelled, true);
+      assert.equal(spawnCalls, startReplacement ? 1 : 0,
+        'a cancelled preparation must never spawn after stop or duplicate a replacement');
+      assert.equal(cancelledStartupRuntime.snapshot().state, startReplacement ? 'running' : 'stopped');
+      assert.equal(cancelledStartupRuntime.snapshot().processOwned, startReplacement);
+      if (startReplacement) assert.equal(replacementChild.exitCode, null,
+        'late cancelled startup must not terminate the replacement child');
+    } finally {
+      releaseExecutable(process.execPath);
+      await cancelledStartupRuntime.stop();
+      await cancelledStart;
+      const attemptDir = path.join(stateDir, startReplacement ? 'cancel-replace' : 'cancel-stop');
+      const remaining = fs.existsSync(attemptDir) ? fs.readdirSync(attemptDir) : [];
+      assert.equal(remaining.filter(name => name.endsWith('.url')).length, 0, 'stopped attempts must not leave per-generation health files');
+    }
+  }
+
   console.log('secure-tunnel-runtime-unit: ok');
 } finally {
   fs.rmSync(stateDir, { recursive: true, force: true });

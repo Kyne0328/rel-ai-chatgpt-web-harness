@@ -79,52 +79,57 @@ if (updateLaunchGuard.blocked) {
 }
 
 if (shouldStartDesktop) {
-  const [{ default: electronUpdater }, { createDesktopHost }] = await Promise.all([
-    import('electron-updater'),
-    import('./desktop-host.js')
-  ]);
-  const { autoUpdater } = electronUpdater;
-  const desktop = await createDesktopHost({
-  app,
-  BrowserWindow,
-  WebContentsView,
-  ipcMain,
-  Tray,
-  Menu,
-  clipboard,
-  shell,
-  nativeImage,
-  nativeTheme,
-  powerMonitor,
-  powerSaveBlocker,
-  Notification,
-  dialog,
-  screen,
-  protocol,
-  session,
-  safeStorage,
-  utilityProcess,
-  autoUpdater,
-  saveLauncherConfig
-});
+  const hasSingleInstanceLock = app.requestSingleInstanceLock();
+  if (!hasSingleInstanceLock) {
+    app.quit();
+  } else {
+    const [{ default: electronUpdater }, { createDesktopHost }] = await Promise.all([
+      import('electron-updater'),
+      import('./desktop-host.js')
+    ]);
+    const { autoUpdater } = electronUpdater;
+    const desktop = await createDesktopHost({
+      app,
+      BrowserWindow,
+      WebContentsView,
+      ipcMain,
+      Tray,
+      Menu,
+      clipboard,
+      shell,
+      nativeImage,
+      nativeTheme,
+      powerMonitor,
+      powerSaveBlocker,
+      Notification,
+      dialog,
+      screen,
+      protocol,
+      session,
+      safeStorage,
+      utilityProcess,
+      autoUpdater,
+      saveLauncherConfig
+    });
 
-// Electron waits for ESM evaluation before emitting ready. Do not await a
-// startup promise that itself waits for app.whenReady() at module scope.
-  void desktop.start().then(result => {
-    if (result?.ok && updateLaunchGuard.reason === 'updated_launch') {
-      void desktop.completeApplicationUpdate(updateLaunchGuard.marker).catch(error => {
-        console.error('[rel-ai-mcp] Update completion recording failed:', error);
-      });
-    }
-  }).catch(async error => {
-    if (updateLaunchGuard.reason === 'updated_launch') {
-      await markUpdateInstallPhase(app, 'failed', {
-        message: 'The updated files were installed, but Rel.AI could not start. Try opening Rel.AI again.'
-      }).catch(() => {});
-    }
-    console.error('[rel-ai-mcp] Desktop startup failed:', error);
-    app.exit(1);
-  });
+    // Electron waits for ESM evaluation before emitting ready. Do not await a
+    // startup promise that itself waits for app.whenReady() at module scope.
+    void desktop.start().then(result => {
+      if (result?.ok && updateLaunchGuard.reason === 'updated_launch') {
+        void desktop.completeApplicationUpdate(updateLaunchGuard.marker).catch(error => {
+          console.error('[rel-ai-mcp] Update completion recording failed:', error);
+        });
+      }
+    }).catch(async error => {
+      if (updateLaunchGuard.reason === 'updated_launch') {
+        await markUpdateInstallPhase(app, 'failed', {
+          message: 'The updated files were installed, but Rel.AI could not start. Try opening Rel.AI again.'
+        }).catch(() => {});
+      }
+      console.error('[rel-ai-mcp] Desktop startup failed:', error);
+      app.exit(1);
+    });
+  }
 }
 
 export { normalizeWizardConfig, saveLauncherConfig };

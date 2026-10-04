@@ -2,6 +2,159 @@
 // Pure and self-contained checks share one process; tests requiring process/global isolation remain standalone.
 // Add related regression checks here instead of creating another one-off test file.
 
+// Recursive Electron runtime parity, including declared vendor additions.
+async function case_packaged_runtime_parity_unit() {
+  const { default: assert } = await import('node:assert/strict');
+  const { default: fs } = await import('node:fs');
+  const { default: os } = await import('node:os');
+  const { default: path } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { assertRuntimeResourceMappings, assertPackagedRuntimeParity } = await import('../scripts/packaged-runtime-parity.mjs');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-runtime-parity-'));
+  const sourceRoot = path.join(temp, 'source');
+  const resourcesRoot = path.join(temp, 'resources');
+  const rootPackage = { files: ['src/', 'bin/', 'public/', 'skills/', 'examples/', 'types/', 'vendor/tree-sitter/'] };
+  const electronPackage = { build: {
+    extraResources: ['src', 'bin', 'public', 'skills'].map(relative => ({ from: `../${relative}`, to: relative, filter: ['**/*'] })),
+    win: { extraResources: [
+      { from: '../vendor/tunnel-client', to: 'bin/tunnel-client', filter: ['manifest.json', 'win32/**'] },
+      { from: '../vendor/zoekt', to: 'bin/zoekt', filter: ['manifest.json', 'LICENSE', 'win32/**'] }
+    ] }
+  } };
+  electronPackage.build.extraResources.push({ from: '../vendor/tree-sitter', to: 'vendor/tree-sitter', filter: ['manifest.json', '**/*.wasm'] });
+  const files = {
+    'src/nested/token.mjs': 'export const color = 1;\n',
+    'src/nested/theme.css': 'body { color: red; }\n',
+    'src/nested/package.json': '{"type":"module"}\n',
+    'src/README.md': 'runtime notes\n',
+    'src/nested/.runtime-config': 'hidden runtime fixture\n',
+    'bin/entry.js': 'entry\n',
+    'public/nested/asset.css': 'asset\n',
+    'skills/nested/SKILL.md': 'skill\n',
+    'examples/sample.js': 'example\n',
+    'types/index.d.ts': 'types\n',
+    'vendor/tunnel-client/manifest.json': '{"version":"fixture"}\n',
+    'vendor/tunnel-client/win32/tunnel-client.exe': 'tunnel\n',
+    'vendor/tunnel-client/linux/tunnel-client': 'other-platform\n',
+    'vendor/zoekt/manifest.json': '{"version":"fixture"}\n',
+    'vendor/zoekt/LICENSE': 'license\n',
+    'vendor/zoekt/win32/zoekt.exe': 'search\n',
+    'vendor/zoekt/win32/zoekt-index.exe': 'index\n',
+    'vendor/tree-sitter/manifest.json': '{"grammars":{"fixture":{"file":"nested/grammar.wasm"}}}\n',
+    'vendor/tree-sitter/nested/grammar.wasm': 'wasm-bytes\n',
+    'vendor/tree-sitter/README.md': 'unselected source note\n'
+  };
+  const write = (base, relative, content) => {
+    const file = path.join(base, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+  };
+  const options = { sourceRoot, resourcesRoot, rootPackage, electronPackage, platform: 'win32' };
+  const verify = () => assertPackagedRuntimeParity(options);
+  try {
+    for (const [relative, content] of Object.entries(files)) write(sourceRoot, relative, content);
+    for (const relative of ['src', 'bin', 'public', 'skills']) {
+      fs.cpSync(path.join(sourceRoot, relative), path.join(resourcesRoot, relative), { recursive: true });
+    }
+    for (const name of ['tunnel-client', 'zoekt']) {
+      for (const relative of ['manifest.json', ...(name === 'zoekt' ? ['LICENSE'] : []), 'win32']) {
+        fs.cpSync(path.join(sourceRoot, 'vendor', name, relative), path.join(resourcesRoot, 'bin', name, relative), { recursive: true });
+      }
+    }
+    for (const relative of ['manifest.json', 'nested/grammar.wasm']) {
+      write(resourcesRoot, `vendor/tree-sitter/${relative}`, files[`vendor/tree-sitter/${relative}`]);
+    }
+    assert.deepEqual(verify(), [
+      { root: 'src', files: 5 }, { root: 'bin', files: 7 }, { root: 'public', files: 1 }, { root: 'skills', files: 1 },
+      { root: 'vendor/tree-sitter', files: 2 }
+    ]);
+    for (const relative of ['src/nested/token.mjs', 'src/nested/theme.css', 'src/nested/package.json']) {
+      fs.rmSync(path.join(resourcesRoot, relative));
+      assert.throws(verify, /Packaged runtime file set differs: src/, `Missing nested ${relative} must fail.`);
+      write(resourcesRoot, relative, files[relative]);
+    }
+    write(resourcesRoot, 'src/nested/token.mjs', files['src/nested/token.mjs'].replace('1', '2'));
+    assert.throws(verify, /SHA-256 differs: src\/nested\/token.mjs/, 'Same-size byte changes must fail.');
+    write(resourcesRoot, 'src/nested/token.mjs', files['src/nested/token.mjs']);
+    for (const relative of ['src/nested/unexpected.txt', 'bin/unexpected.exe', 'bin/tunnel-client/win32/unexpected.exe', 'bin/tunnel-client/linux/tunnel-client']) {
+      write(resourcesRoot, relative, 'unexpected\n');
+      assert.throws(verify, /Packaged runtime file set differs/, `Unexpected ${relative} must fail.`);
+      fs.rmSync(path.join(resourcesRoot, relative));
+    }
+    const vendorFile = 'bin/zoekt/win32/zoekt.exe';
+    write(resourcesRoot, vendorFile, 'Search\n');
+    assert.throws(verify, /SHA-256 differs: bin\/zoekt\/win32\/zoekt.exe/, 'Vendor additions are hashed, not ignored.');
+    write(resourcesRoot, vendorFile, files['vendor/zoekt/win32/zoekt.exe']);
+    fs.rmSync(path.join(resourcesRoot, 'bin/tunnel-client/manifest.json'));
+    assert.throws(verify, /Packaged runtime file set differs: bin/);
+    write(resourcesRoot, 'bin/tunnel-client/manifest.json', files['vendor/tunnel-client/manifest.json']);
+    for (const relative of ['vendor/tree-sitter/manifest.json', 'vendor/tree-sitter/nested/grammar.wasm']) {
+      write(resourcesRoot, relative, files[relative].toUpperCase());
+      assert.throws(verify, /SHA-256 differs: vendor\/tree-sitter/);
+      write(resourcesRoot, relative, files[relative]);
+    }
+    write(resourcesRoot, 'vendor/tree-sitter/README.md', files['vendor/tree-sitter/README.md']);
+    assert.throws(verify, /Packaged runtime file set differs: vendor\/tree-sitter/);
+    fs.rmSync(path.join(resourcesRoot, 'vendor/tree-sitter/README.md'));
+    rootPackage.files.push('new-runtime/');
+    write(sourceRoot, 'new-runtime/nested/runtime.json', '{}\n');
+    assert.throws(verify, /Declared runtime root needs exactly one Electron mapping: new-runtime/);
+    electronPackage.build.extraResources.push({ from: '../new-runtime', to: 'new-runtime', filter: ['**/*'] });
+    fs.cpSync(path.join(sourceRoot, 'new-runtime'), path.join(resourcesRoot, 'new-runtime'), { recursive: true });
+    assert.equal(verify().at(-1).root, 'new-runtime');
+    rootPackage.files[rootPackage.files.length - 1] = 'new-runtime';
+    assert.equal(verify().at(-1).root, 'new-runtime', 'Directory declarations without a trailing slash are guarded too.');
+    const srcResource = electronPackage.build.extraResources[0];
+    srcResource.filter = ['**/*.js', '**/*.ts', '**/*.html', '**/*.ps1'];
+    assert.throws(verify, /complete-tree contract: src/, 'The former extension allowlist must be rejected.');
+    srcResource.filter = ['**/*'];
+    const vendorResource = electronPackage.build.win.extraResources[0];
+    vendorResource.filter.push('linux/**');
+    assert.throws(verify, /Unexpected vendor packaging filter: tunnel-client/);
+    vendorResource.filter.pop();
+    electronPackage.build.extraResources.push({ from: '../other', to: 'bin/other', filter: ['**/*'] });
+    assert.throws(verify, /Unreviewed resource overlaps runtime root bin/);
+    electronPackage.build.extraResources.pop();
+    electronPackage.build.extraResources.push({ from: '../examples', to: 'examples', filter: ['**/*'] });
+    assert.throws(verify, /Non-Electron package root must stay explicitly excluded: examples/);
+    electronPackage.build.extraResources.pop();
+    rootPackage.files.push('../escape/');
+    assert.throws(verify, /literal contained path/);
+    rootPackage.files.pop();
+    srcResource.to = 'src/../src';
+    assert.throws(verify, /literal contained path/);
+    srcResource.to = 'src';
+    const outside = path.join(temp, 'outside');
+    fs.mkdirSync(outside);
+    for (const base of [sourceRoot, resourcesRoot]) {
+      const link = path.join(base, 'src', 'escape');
+      fs.symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+      assert.throws(verify, /must not contain symbolic links/);
+      fs.unlinkSync(link);
+    }
+    for (const key of ['sourceRoot', 'resourcesRoot']) {
+      const alias = path.join(temp, `${key}-alias`);
+      fs.symlinkSync(options[key], alias, process.platform === 'win32' ? 'junction' : 'dir');
+      assert.throws(() => assertPackagedRuntimeParity({ ...options, [key]: alias }), /Runtime root must be a real directory/);
+      fs.unlinkSync(alias);
+    }
+    verify();
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    for (const platform of ['win32', 'linux', 'darwin']) {
+      assertRuntimeResourceMappings({
+        sourceRoot: root,
+        rootPackage: JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')),
+        electronPackage: JSON.parse(fs.readFileSync(path.join(root, 'electron/package.json'), 'utf8')),
+        platform
+      });
+    }
+    console.log('Packaged runtime exact-tree, SHA-256, vendor, containment, and mapping regression tests passed.');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+await case_packaged_runtime_parity_unit();
+
 // Formerly app-metadata-unit.mjs
 async function case_app_metadata_unit() {
   const __m0 = await import("node:assert/strict");
@@ -426,6 +579,7 @@ async function case_knip_production_model_unit() {
     'service-process.js!',
     'renderer/status.js!',
     'renderer/wizard.js!',
+    'renderer/pulse.js!',
     'build/after-pack.js!',
     'scripts/verify-fuses.js!'
   ], 'Electron production analysis must model concrete runtime and packaging entry points');
@@ -581,7 +735,9 @@ async function case_packaged_runtime_dependencies_unit() {
   }
   
   try {
-    for (const name of ['ajv', 'piscina', 'vscode-jsonrpc']) copyDependency(name);
+    for (const name of ['zod', 'piscina', 'vscode-jsonrpc', '7zip-bin', 'tar', 'yauzl']) copyDependency(name);
+    fs.copyFileSync(path.join(repo, 'src/extensions/toolBundle.js'), path.join(staging, 'toolBundle.mjs'));
+    await import(pathToFileURL(path.join(staging, 'toolBundle.mjs')).href);
     const probe = path.join(staging, 'probe.mjs');
     const worker = path.join(staging, 'worker.mjs');
     fs.writeFileSync(worker, 'export default value => value + 1;');
@@ -589,8 +745,8 @@ async function case_packaged_runtime_dependencies_unit() {
     const __m4 = await import("node:assert/strict");
     const assert = __m4.default;
   
-    const __m5 = await import("ajv/dist/ajv.js");
-    const Ajv = __m5.default;
+    const __m5 = await import("zod");
+    const { z } = __m5;
   
     const __m6 = await import("piscina");
     const Piscina = __m6.default;
@@ -601,9 +757,9 @@ async function case_packaged_runtime_dependencies_unit() {
     const __m8 = await import("node:url");
     const { fileURLToPath } = __m8;
   
-  const validate = new Ajv().compile({ type: 'integer' });
-  assert.equal(validate(1), true);
-  assert.equal(validate('1'), false);
+  const integerSchema = z.number().int();
+  assert.equal(integerSchema.safeParse(1).success, true);
+  assert.equal(integerSchema.safeParse('1').success, false);
   assert.equal(typeof createMessageConnection, 'function');
   const pool = new Piscina({ filename: fileURLToPath(new URL('./worker.mjs', import.meta.url)), minThreads: 1, maxThreads: 1 });
   try {

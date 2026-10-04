@@ -13,7 +13,7 @@ const MAX_TASK_PLAN_STEPS = 50;
 const TASK_PLAN_STEP_STATUSES = new Set(['pending', 'in_progress', 'completed', 'blocked', 'skipped']);
 const ALLOWED_METADATA_KEYS = new Set([
   'waitMs', 'queueMode', 'queued', 'pathCount', 'matchCount', 'returnedFileCount', 'returnedRangeCount',
-  'returnedBytes', 'changedFileCount', 'changedFiles', 'validationStatus', 'validationLevel', 'validationLevelReason',
+  'returnedBytes', 'changedFileCount', 'changedFiles', 'changedFilesTruncated', 'validationStatus', 'validationLevel', 'validationLevelReason',
   'checkCount', 'passedCount', 'failedCount', 'skippedCount', 'exitCode', 'durationMs', 'stdoutBytes', 'stderrBytes',
   'stdoutTruncated', 'stderrTruncated', 'timedOut', 'commit', 'commitHead', 'branch', 'remote', 'processId', 'pid', 'status',
   'affectedItemCount', 'warningCount', 'retryable', 'errorCode', 'cacheHit', 'operationTaskId', 'progress',
@@ -105,8 +105,9 @@ function buildToolActivityDetails(name, args = {}, value = null, error = null, o
       returnedFileCount: value?.returnedFileCount,
       returnedRangeCount: value?.returnedRangeCount,
       returnedBytes: value?.returnedBytes,
-      changedFileCount: changedFiles(value).length,
+      changedFileCount: Math.max(changedFiles(value).length, Number(value?.changedFileCount || 0)),
       changedFiles: changedFiles(value),
+      changedFilesTruncated: value?.changedFilesTruncated,
       validationStatus: value?.validationStatus,
       validationLevel: value?.validationLevel,
       validationLevelReason: value?.validationLevelReason,
@@ -673,6 +674,7 @@ function sanitizeTaskRecord(record, options = {}) {
   }
   if (value.correlation && typeof value.correlation === 'object') value.correlation = sanitizeStructuredValue(value.correlation, 0);
   if (value.backgroundOperation && typeof value.backgroundOperation === 'object') value.backgroundOperation = sanitizeStructuredValue(value.backgroundOperation, 0);
+  if (Array.isArray(value.backgroundOperations)) value.backgroundOperations = value.backgroundOperations.map(item => sanitizeStructuredValue(item, 0)).filter(Boolean);
   delete value.workflow;
   return value;
 }
@@ -684,8 +686,11 @@ function sanitizeTaskRecordForProjection(record, options = {}) {
   delete projected.workflowEvidence;
   delete projected.workflow;
   if (projected.backgroundOperation && typeof projected.backgroundOperation === 'object') {
-    const { signature: _signature, ...backgroundOperation } = projected.backgroundOperation;
+    const { signature: _signature, noticeScope: _noticeScope, ...backgroundOperation } = projected.backgroundOperation;
     projected.backgroundOperation = backgroundOperation;
+  }
+  if (Array.isArray(projected.backgroundOperations)) {
+    projected.backgroundOperations = projected.backgroundOperations.map(({ signature: _signature, noticeScope: _noticeScope, ...operation }) => operation);
   }
   return projected;
 }
@@ -697,6 +702,14 @@ function sanitizeStructuredValue(value, depth = 0) {
   if (typeof value !== 'object') return undefined;
   const output = {};
   for (const [key, item] of Object.entries(value)) {
+    if (['stdoutOutputRef', 'stderrOutputRef'].includes(key) && typeof item === 'string' && /^spill_[A-Za-z0-9_-]{20,80}$/.test(item)) {
+      output[key] = item;
+      continue;
+    }
+    if (/^(stdout|stderr)(SpillTruncated|Truncated)$/.test(key) && typeof item === 'boolean') {
+      output[key] = item;
+      continue;
+    }
     if (isSensitiveKey(key)) continue;
     const sanitized = sanitizeStructuredValue(item, depth + 1);
     if (sanitized !== undefined) output[key] = sanitized;

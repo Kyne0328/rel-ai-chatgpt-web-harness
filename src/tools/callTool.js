@@ -4,9 +4,9 @@ import * as path from 'node:path';
 import { safeLogAudit } from '../audit.js';
 import { createValidationFingerprint } from '../bridge/validationPlan.js';
 import { readConfig, resolveWorkspace, resolveWorkspaceInput } from '../config.js';
-import { principalFingerprint, principalForContext, principalKind } from '../mcp/principal.js';
+import { principalFingerprint, principalForContext, principalKind } from '../mcp/principal.ts';
 import { PRINCIPAL_KIND } from '../mcp/contracts.ts';
-import { assertAuthorizedToolCall, authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.js';
+import { assertAuthorizedToolCall, authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.ts';
 import { clearSessionPolicy } from '../policyResolver.js';
 import { readTaskIntegrity, recordTaskIntegrityEvent } from '../taskIntegrity.ts';
 import { bindTaskHistoryActivityPersistence, recordWorkflowEvidence } from '../taskHistoryStore.ts';
@@ -225,6 +225,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       workspace: effectiveArgs?.workspace,
       scopeId: requestedTaskId ? `task:${requestedTaskId}` : (connector ? 'mcp:request' : 'local:default'),
       taskId: requestedTaskId,
+      executionOperationId: context?.fallbackOperationId,
       createTask: operationName === OP.WORK_BEGIN && !knownTask,
       trackTask: context?.trackTaskActivity !== false
         && (operationName !== OP.WORK_STATUS || resumedStatusRead)

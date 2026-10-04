@@ -1,9 +1,9 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import './styles.css';
 import { fetchJson } from '../../api.js';
 import { toast } from '../../components/toast.js';
 import { Icon } from '../../components/icons.js';
-import { getRouteParams, replaceRouteParams, routeHref } from '../../router.js';
+import { currentRoutePath, getRouteParams, getRouteSnapshot, replaceRouteParams, routeHref, subscribeRoute } from '../../router.js';
 import { classifyTaskChangedFiles } from '../../../taskSemanticProgress.js';
 
 const h = React.createElement;
@@ -35,7 +35,7 @@ function ChangesRoute({ data = {} }) {
 }
 
 function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
-  const { selectedTaskId, selectTask } = useRouteTaskId(tasks);
+  const { selectedTaskId, requestedFilePath, selectTask } = useRouteTaskId(tasks);
   const selectedTask = tasks.find(task => task.id === selectedTaskId) || null;
   const [workspace, setWorkspace] = useState(null);
   const [workspaceError, setWorkspaceError] = useState('');
@@ -53,6 +53,7 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
   const diffRequestRef = useRef(0);
   const taskIdRef = useRef(selectedTaskId);
   const filePathRef = useRef(filePath);
+  const pendingDiffPathRef = useRef('');
 
   taskIdRef.current = selectedTaskId;
   filePathRef.current = filePath;
@@ -62,9 +63,12 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
     const normalizedPath = String(path || '').trim();
     if (!normalizedTaskId || !normalizedPath) return false;
     const request = ++diffRequestRef.current;
+    pendingDiffPathRef.current = normalizedPath;
     try {
       const file = await bridge.diff(normalizedTaskId, normalizedPath);
       if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId) return false;
+      if (currentRoutePath() !== 'code' || readRequestedTaskId() !== normalizedTaskId) return false;
+      if (readRequestedFilePath() && readRequestedFilePath() !== normalizedPath) return false;
       filePathRef.current = normalizedPath;
       setFilePath(normalizedPath);
       replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
@@ -78,6 +82,8 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
       setViewerMessage(messageFor(error));
       setViewerTone('error');
       return false;
+    } finally {
+      if (request === diffRequestRef.current) pendingDiffPathRef.current = '';
     }
   }, [bridge]);
 
@@ -104,9 +110,9 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
         setViewerTone('');
       }
 
-      const nextPath = currentStillExists
-        ? currentPath
-        : (changedFiles.includes(requestedPath) ? requestedPath : (changedFiles[0] || ''));
+      const nextPath = changedFiles.includes(requestedPath)
+        ? requestedPath
+        : (currentStillExists ? currentPath : (changedFiles[0] || ''));
       if (!nextPath) {
         diffRequestRef.current += 1;
         filePathRef.current = '';
@@ -116,7 +122,8 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
         setViewerTone('');
         return;
       }
-      if (!currentStillExists || refreshCurrent) await loadDiff(normalizedTaskId, nextPath);
+      if (requestedPath && !changedFiles.includes(requestedPath)) replaceRouteParams({ file: nextPath });
+      if (nextPath !== currentPath || refreshCurrent) await loadDiff(normalizedTaskId, nextPath);
     } catch (error) {
       if (request !== workspaceRequestRef.current || taskIdRef.current !== normalizedTaskId) return;
       diffRequestRef.current += 1;
@@ -139,6 +146,11 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
     setViewerMessage('Loading task changes…');
     setViewerTone('');
   }, [selectedTaskId]);
+
+  useEffect(() => () => {
+    workspaceRequestRef.current += 1;
+    diffRequestRef.current += 1;
+  }, []);
 
   useEffect(() => {
     void refreshWorkspace(selectedTaskId);
@@ -169,6 +181,11 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
   }, [bridge, canOpenIde]);
 
   const changedFiles = useMemo(() => changedTextFiles(workspace), [workspace]);
+  useEffect(() => {
+    if (!requestedFilePath || !changedFiles.includes(requestedFilePath)) return;
+    if (requestedFilePath === filePathRef.current || requestedFilePath === pendingDiffPathRef.current) return;
+    void loadDiff(selectedTaskId, requestedFilePath);
+  }, [changedFiles, loadDiff, requestedFilePath, selectedTaskId]);
   const visibleFiles = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return changedFiles.filter(file => !normalized || file.toLowerCase().includes(normalized));
@@ -444,30 +461,25 @@ function currentMonacoTheme() {
 }
 
 function useRouteTaskId(tasks) {
-  const [requestedTaskId, setRequestedTaskId] = useState(readRequestedTaskId);
+  const route = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
+  const params = new URLSearchParams(route.search);
+  const requestedTaskId = String(params.get('task') || '').trim();
+  const requestedFilePath = String(params.get('file') || '').trim();
   const taskIds = useMemo(() => tasks.map(task => task.id), [tasks]);
   const selectedTaskId = taskIds.includes(requestedTaskId) ? requestedTaskId : (taskIds[0] || '');
 
   useEffect(() => {
-    const sync = () => setRequestedTaskId(readRequestedTaskId());
-    window.addEventListener('hashchange', sync);
-    return () => window.removeEventListener('hashchange', sync);
-  }, []);
-
-  useEffect(() => {
     if (!selectedTaskId || requestedTaskId === selectedTaskId) return;
     replaceRouteParams({ task: selectedTaskId, file: null });
-    setRequestedTaskId(selectedTaskId);
   }, [requestedTaskId, selectedTaskId]);
 
   const selectTask = taskId => {
     const next = String(taskId || '').trim();
     if (!taskIds.includes(next) || next === selectedTaskId) return;
-    setRequestedTaskId(next);
     replaceRouteParams({ task: next, file: null });
   };
 
-  return { selectedTaskId, selectTask };
+  return { selectedTaskId, requestedFilePath, selectTask };
 }
 
 function readRequestedTaskId() {

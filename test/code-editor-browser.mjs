@@ -59,6 +59,9 @@ try {
   assert.deepEqual(result.taskOptions, ['probe-task'], 'Changes must exclude tasks with no project-file changes and support-only artifacts');
   assert.equal(result.taskReturnHref, '#tasks?workspace=app&task=probe-task', 'Changes must provide a contextual link back to the selected task');
   assert.equal(result.selectedFileHeading, 'src/new.js', 'task file links must be able to deep-link to the exact changed file');
+  assert.deepEqual(result.sameTaskFileNavigation, { heading: 'src/example.js', routeFile: 'src/example.js' }, 'same-task file navigation must update the displayed diff');
+  assert.equal(result.routeAfterPendingDiff, '#activity?task=outside-task', 'a delayed diff must not overwrite another page after leaving Changes');
+  assert.deepEqual(result.invalidFileFallback, { heading: 'src/example.js', routeFile: 'src/example.js' }, 'a missing-file deep link must resolve to a valid changed file');
   assert.deepEqual(result.taskFileHrefs, [
     '#code?task=probe-task&file=src%2Fexample.js',
     '#code?task=probe-task&file=src%2Fnew.js'

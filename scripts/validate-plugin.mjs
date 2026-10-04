@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH, MIN_SKILL_DESCRIPTION_LENGTH, SKILL_NAME_PATTERN } from '../src/skillValidation.js';
+import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH, MIN_SKILL_DESCRIPTION_LENGTH, SKILL_NAME_PATTERN } from './skill-validation.mjs';
 
 // Bundled OpenAI skills intentionally use the minimal name/description frontmatter profile.
 const ALLOWED_SKILL_FRONTMATTER_FIELDS = new Set(['name', 'description']);

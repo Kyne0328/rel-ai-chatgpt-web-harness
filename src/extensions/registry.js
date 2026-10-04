@@ -1439,24 +1439,5 @@ function errorMessage(error) {
 }
 
 export {
-  CATALOG_URL,
-  MANIFEST_FILENAME,
-  MAX_EXTENSION_FILE_BYTES,
-  MAX_EXTENSION_TOTAL_BYTES,
-  PERMISSIONS,
-  configuredExtensionSources,
-  extensionCatalogSchema,
-  extensionDashboard,
-  extensionManifestSchema,
-  extensionSkillRecords,
-  extensionSourceId,
-  extensionsRoot,
-  fetchExtensionCatalog,
-  installExtension,
-  installLocalExtension,
-  listInstalledExtensions,
-  parseExtensionCatalog,
-  parseExtensionManifest,
-  removeExtension,
-  validateExtensionSource
+  MAX_EXTENSION_FILE_BYTES, MAX_EXTENSION_TOTAL_BYTES, PERMISSIONS, configuredExtensionSources, extensionCatalogSchema, extensionDashboard, extensionSkillRecords, extensionSourceId, extensionsRoot, installExtension, installLocalExtension, listInstalledExtensions, parseExtensionCatalog, parseExtensionManifest, removeExtension, validateExtensionSource
 };

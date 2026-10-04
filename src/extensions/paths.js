@@ -112,11 +112,5 @@ function normalizeManagedRelativePath(value) {
 }
 
 export {
-  extensionBinRoot,
-  extensionCommandPathEntries,
-  extensionManagedToolRoot,
-  managedExtensionBundleCommandPath,
-  managedExtensionCommandFilename,
-  managedExtensionCommandMetadataPath,
-  managedExtensionCommandPath
+  extensionBinRoot, extensionCommandPathEntries, managedExtensionBundleCommandPath, managedExtensionCommandMetadataPath, managedExtensionCommandPath
 };

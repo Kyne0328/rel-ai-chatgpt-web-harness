@@ -15,6 +15,7 @@ import {
 } from './index.js';
 
 const h = React.createElement;
+const TOOL_CATALOG_CACHE_TTL_MS = 60 * 1000;
 
 export function createToolsRoute() {
   return function ToolsRoute() {
@@ -27,7 +28,7 @@ export function createToolsRoute() {
     useEffect(() => {
       let active = true;
       setLoadState({ status: 'loading', error: '' });
-      void fetchJson('/api/tools', { cache: 'no-store' }).then(result => {
+      void fetchJson('/api/tools', { cacheTtlMs: TOOL_CATALOG_CACHE_TTL_MS }).then(result => {
         if (!active) return;
         const payload = toolsFromPayload(result);
         if (result?.ok === false || payload == null) {

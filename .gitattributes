@@ -1,6 +1,7 @@
 # Keep generated/source files stable across Windows/macOS/Linux.
 * text=auto
 *.js text eol=lf
+public/dashboard-chunks/*.js whitespace=-blank-at-eol
 *.mjs text eol=lf
 *.json text eol=lf
 *.md text eol=lf

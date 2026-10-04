@@ -25,6 +25,8 @@ let _lastEventAt = null;
 let _dashboardClock = null;
 let _liveState = 'connecting';
 let _refreshPromise = null;
+let _liveReadyTarget = null;
+let _liveReadyVersion = 0;
 let _refreshLiveEvents = null;
 let _refreshLiveEventOverflow = false;
 let _hiddenViewDirty = false;
@@ -69,7 +71,8 @@ async function boot() {
       window.dispatchEvent(new CustomEvent('relai:clock-tick', { detail: { now: currentTime } }));
     }
   }).start();
-  window.addEventListener('pagehide', () => _dashboardClock?.stop(), { once: true });
+  window.addEventListener('pagehide', () => _dashboardClock?.stop());
+  window.addEventListener('pageshow', () => _dashboardClock?.start());
   const initialPayload = readInitialPayload();
   const initial = initialPayload == null
     ? null
@@ -149,13 +152,18 @@ function applyDesktopStatus(status) {
 
 async function doRefresh(options = {}) {
   if (_refreshPromise) return _refreshPromise;
+  const readyVersion = _liveReadyVersion;
   _refreshLiveEvents = [];
   _refreshLiveEventOverflow = false;
   _refreshPromise = performRefresh(options);
   try {
     return await _refreshPromise;
   } finally {
-    const needsCatchUp = _refreshLiveEventOverflow;
+    // Only a ready notification received during this request may schedule a
+    // trailing fetch. A stale/failed response alone must not create a retry loop.
+    const needsCatchUp = _refreshLiveEventOverflow
+      || (_liveReadyVersion !== readyVersion && _liveReadyTarget
+        && liveCatchUpRequired(getStore().live, _liveReadyTarget));
     _refreshPromise = null;
     _refreshLiveEvents = null;
     _refreshLiveEventOverflow = false;
@@ -378,6 +386,11 @@ async function liveOnEvent(event) {
 }
 
 function liveStateChange(detail) {
+  // Ordinary live events omit ready metadata. Do not discard the latest target.
+  if (detail.state === 'live' && (detail.streamId || detail.revisions)) {
+    _liveReadyTarget = { streamId: detail.streamId, revisions: { ...detail.revisions } };
+    _liveReadyVersion += 1;
+  }
   const catchUpRequired = detail.state === 'live' && liveCatchUpRequired(getStore().live, detail);
   const reconnectProbeRequired = surface === 'desktop'
     && detail.state === 'reconnecting'

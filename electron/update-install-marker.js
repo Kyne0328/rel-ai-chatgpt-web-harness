@@ -227,15 +227,5 @@ function cleanMessage(value) {
 }
 
 export {
-  INSTALLING_STALE_UPDATE_MARKER_MS,
-  STALE_UPDATE_MARKER_MS,
-  UPDATE_INSTALL_PHASES,
-  clearUpdateInstallMarker,
-  clearUpdateInstallMarkerSync,
-  createUpdateInstallMarker,
-  markUpdateInstallPhase,
-  readUpdateInstallMarker,
-  updateInstallLaunchGuard,
-  updateInstallMarkerPath,
-  updateInstallTiming
+  INSTALLING_STALE_UPDATE_MARKER_MS, STALE_UPDATE_MARKER_MS, clearUpdateInstallMarker, clearUpdateInstallMarkerSync, createUpdateInstallMarker, markUpdateInstallPhase, readUpdateInstallMarker, updateInstallLaunchGuard, updateInstallMarkerPath, updateInstallTiming
 };

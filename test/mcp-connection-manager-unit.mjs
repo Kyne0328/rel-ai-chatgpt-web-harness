@@ -98,7 +98,7 @@ const requestId = manager.beginRequest({
   clientInfo: { name: 'test-client', version: '1.0.0' },
   clientCapabilities: {
     extensions: {
-      'io.modelcontextprotocol/tasks': { secret: 'must-not-be-retained' }
+      'example/private-extension': { secret: 'must-not-be-retained' }
     }
   }
 });

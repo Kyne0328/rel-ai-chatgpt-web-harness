@@ -133,5 +133,5 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || 'unknown error');
 }
 
-export { downloadBrowserFile, normalizeSuggestedFilename, uploadAuthorizedBrowserFile };
-export type { BrowserLocalIoArgs, BrowserLocalIoOptions, BrowserLocalIoWorkspace };
+export { downloadBrowserFile, uploadAuthorizedBrowserFile };
+export type { BrowserLocalIoWorkspace };

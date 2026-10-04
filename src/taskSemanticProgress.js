@@ -266,6 +266,12 @@ function buildTaskSemanticProgress(task = {}, options = {}) {
     .slice(-MAX_MILESTONES)
     .map(({ key: _key, ...item }) => item);
   const files = classifyTaskChangedFiles(task.changedFiles || []);
+  const productChangedFileCount = Number.isFinite(Number(task.productChangedFileCount))
+    ? Math.max(files.productChangedFileCount, Number(task.productChangedFileCount))
+    : files.productChangedFileCount;
+  const supportArtifactCount = Number.isFinite(Number(task.supportArtifactCount))
+    ? Math.max(files.supportArtifactCount, Number(task.supportArtifactCount))
+    : files.supportArtifactCount;
   const latest = latestRunning || latestMeaningful || milestones[milestones.length - 1] || null;
   const terminal = ['completed', 'failed', 'cancelled', 'expired'].includes(String(task.status || '').toLowerCase());
   const waiting = !terminal && Number(task.activeCalls || 0) === 0;
@@ -283,7 +289,9 @@ function buildTaskSemanticProgress(task = {}, options = {}) {
     currentStage,
     currentActivity,
     milestones,
-    ...files
+    ...files,
+    productChangedFileCount,
+    supportArtifactCount
   };
 }
 

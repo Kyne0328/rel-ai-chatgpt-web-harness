@@ -23,6 +23,7 @@ const {
 
 await verifyRoundRobinFairness();
 await verifyQueueCancellation();
+await verifyProcessDeadlineQueue();
 await verifyUnboundedHeavyAdmission();
 await verifyDefaultPersistentQueueTimeout();
 await verifyRepositoryQueryTimeoutExcludesQueueWait();
@@ -62,6 +63,30 @@ async function verifyQueueCancellation() {
   assert.equal(scheduler.stats().heavy.queued, 0, 'cancelled tickets must leave no queue residue');
   first.release();
   assert.equal(scheduler.stats().heavy.active, 0);
+}
+
+
+async function verifyProcessDeadlineQueue() {
+  const first = await acquireHostResource('persistent', 'deadline-blocker-a');
+  const second = await acquireHostResource('persistent', 'deadline-blocker-b');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-process-queue-deadline-'));
+  const marker = path.join(root, 'must-not-start');
+  try {
+    const result = await runProcess(process.execPath,
+      ['-e', 'require("node:fs").writeFileSync(process.argv[1], "started")', marker],
+      { cwd: root, resourceClass: 'persistent', resourceOwner: 'deadline-waiter', signal: AbortSignal.timeout(50) });
+    assert.equal(result.timedOut, true);
+    assert.equal(result.cancelled, false);
+    assert.equal(result.terminationConfirmed, true);
+    assert.equal(result.forcedTermination, false);
+    assert.equal(result.durationMs, 0);
+    assert.equal(fs.existsSync(marker), false, 'queued deadline must not launch a child');
+    assert.equal(hostResourceStats().persistent.queued, 0);
+  } finally {
+    first.release();
+    second.release();
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 }
 
 async function verifyUnboundedHeavyAdmission() {

@@ -5,16 +5,17 @@ import type { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { readJsonFile, writeJsonAtomic } from './durableState.ts';
 import { packageMetadata as pkg } from './packageMetadata.js';
 import { getStateDir } from './stateLayout.js';
+import { redactCommandSecrets } from './commandDisplay.js';
 import type { TelemetryConfig, TelemetryStatus } from './telemetry.types.ts';
 
 const REDACTED_ATTRIBUTE = '[redacted]';
 const MAX_ATTRIBUTE_CHARS = 1000;
-const TELEMETRY_IDENTITY_SCHEMA_VERSION = 1;
-const USAGE_HEARTBEAT_MS = 24 * 60 * 60 * 1000;
+const TELEMETRY_IDENTITY_SCHEMA_VERSION = 2;
+const USAGE_REPORT_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const USAGE_RETRY_MS = 5 * 60 * 1000;
 const USAGE_REQUEST_TIMEOUT_MS = 5000;
 let diagnosticsProvider: NodeTracerProvider | null = null;
-let usageHeartbeat: ReturnType<typeof setInterval> | null = null;
+let usageHeartbeat: ReturnType<typeof setTimeout> | null = null;
 let usageRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let usageRequestPromise: Promise<boolean> | null = null;
 let usageReportingStarted = false;
@@ -23,6 +24,12 @@ let initializationPromise: Promise<boolean> | null = null;
 let runtimeDiagnosticsEnabledOverride: boolean | null = null;
 let initializedDiagnosticsEndpoint = '';
 let initializedSampleRatio: number | null = null;
+let usageLastAttemptAt = '';
+let usageLastSuccessAt = '';
+let usageLastFailureAt = '';
+let diagnosticsLastAttemptAt = '';
+let diagnosticsLastSuccessAt = '';
+let diagnosticsLastFailureAt = '';
 
 type SafeAttributeScalar = string | number | boolean;
 type SafeAttributeValue = SafeAttributeScalar | SafeAttributeScalar[];
@@ -98,13 +105,27 @@ function initializeTelemetry(config: TelemetryConfig = {}): boolean {
 function startUsageReporter(config: TelemetryConfig, endpoint: string): void {
   usageReportingStarted = true;
   void reportInstallationPresence(config, endpoint).then(success => {
-    if (!success) scheduleUsageRetry(config, endpoint);
+    if (success) scheduleNextUsageReport(config, endpoint);
+    else scheduleUsageRetry(config, endpoint);
   });
-  usageHeartbeat = setInterval(() => {
+}
+
+function scheduleNextUsageReport(config: TelemetryConfig, endpoint: string): void {
+  if (usageHeartbeat) clearTimeout(usageHeartbeat);
+  const identity = usageIdentity(config);
+  const lastReportedAt = Date.parse(String(identity.state.lastReportedAt || ''));
+  const lastReportedVersion = String(identity.state.lastReportedVersion || '');
+  const elapsed = lastReportedVersion === pkg.version && Number.isFinite(lastReportedAt)
+    ? Math.max(0, Date.now() - lastReportedAt)
+    : USAGE_REPORT_INTERVAL_MS;
+  const delay = Math.max(1000, USAGE_REPORT_INTERVAL_MS - elapsed);
+  usageHeartbeat = setTimeout(() => {
+    usageHeartbeat = null;
     void reportInstallationPresence(config, endpoint).then(success => {
-      if (!success) scheduleUsageRetry(config, endpoint);
+      if (success) scheduleNextUsageReport(config, endpoint);
+      else scheduleUsageRetry(config, endpoint);
     });
-  }, USAGE_HEARTBEAT_MS);
+  }, delay);
   usageHeartbeat.unref?.();
 }
 
@@ -113,7 +134,8 @@ function scheduleUsageRetry(config: TelemetryConfig, endpoint: string): void {
   usageRetryTimer = setTimeout(() => {
     usageRetryTimer = null;
     void reportInstallationPresence(config, endpoint).then(success => {
-      if (!success) scheduleUsageRetry(config, endpoint);
+      if (success) scheduleNextUsageReport(config, endpoint);
+      else scheduleUsageRetry(config, endpoint);
     });
   }, USAGE_RETRY_MS);
   usageRetryTimer.unref?.();
@@ -123,6 +145,7 @@ async function reportInstallationPresence(config: TelemetryConfig, endpoint: str
   if (usageRequestPromise) return usageRequestPromise;
   const pending = reportInstallationPresenceRuntime(config, endpoint)
     .catch(error => {
+      usageLastFailureAt = new Date().toISOString();
       if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] usage reporting:', error);
       return false;
     });
@@ -141,12 +164,16 @@ async function reportInstallationPresenceRuntime(config: TelemetryConfig, endpoi
   if (
     lastReportedVersion === pkg.version
     && Number.isFinite(lastReportedAt)
-    && now - lastReportedAt < USAGE_HEARTBEAT_MS
+    && now - lastReportedAt < USAGE_REPORT_INTERVAL_MS
   ) return true;
 
+  usageLastAttemptAt = new Date(now).toISOString();
   const response = await fetch(endpoint, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${identity.ingestToken}`
+    },
     body: JSON.stringify({
       schemaVersion: 1,
       installationId: identity.installationId,
@@ -156,13 +183,18 @@ async function reportInstallationPresenceRuntime(config: TelemetryConfig, endpoi
     }),
     signal: AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS)
   });
-  if (!response.ok) return false;
+  if (!response.ok) {
+    usageLastFailureAt = new Date().toISOString();
+    return false;
+  }
 
   const reportedAt = new Date(now).toISOString();
+  usageLastSuccessAt = reportedAt;
   writeJsonAtomic(identity.file, {
     ...identity.state,
     schemaVersion: TELEMETRY_IDENTITY_SCHEMA_VERSION,
     installationId: identity.installationId,
+    ingestToken: identity.ingestToken,
     createdAt: identity.state.createdAt || reportedAt,
     lastReportedAt: reportedAt,
     lastReportedVersion: pkg.version
@@ -181,7 +213,28 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
   runtimeApi = api;
   if (telemetryEnabled(config) && diagnosticsEndpoint && !diagnosticsProvider) {
     const sampleRatio = telemetrySampleRatio(config);
-    const diagnosticsExporter = new exporterModule.OTLPTraceExporter({ url: diagnosticsEndpoint });
+    const maintainerDiagnosticsEndpoint = configuredMaintainerDiagnosticsEndpoint();
+    const maintainerIdentity = diagnosticsEndpoint === maintainerDiagnosticsEndpoint ? usageIdentity(config) : null;
+    const baseExporter = new exporterModule.OTLPTraceExporter({
+      url: diagnosticsEndpoint,
+      ...(maintainerIdentity ? {
+        headers: {
+          authorization: `Bearer ${maintainerIdentity.ingestToken}`,
+          'x-relai-installation-id': maintainerIdentity.installationId
+        }
+      } : {})
+    });
+    const diagnosticsExporter = {
+      export(spans: Parameters<typeof baseExporter.export>[0], resultCallback: Parameters<typeof baseExporter.export>[1]) {
+        diagnosticsLastAttemptAt = new Date().toISOString();
+        baseExporter.export(spans, result => {
+          if (result?.code === 0) diagnosticsLastSuccessAt = new Date().toISOString();
+          else diagnosticsLastFailureAt = new Date().toISOString();
+          resultCallback(result);
+        });
+      },
+      shutdown: () => baseExporter.shutdown()
+    };
     diagnosticsProvider = new sdk.NodeTracerProvider({
       resource: resources.resourceFromAttributes({
         [conventions.ATTR_SERVICE_VERSION]: pkg.version,
@@ -203,25 +256,31 @@ function usageIdentity(config: TelemetryConfig = {}): {
   file: string;
   state: Record<string, unknown>;
   installationId: string;
+  ingestToken: string;
 } {
   const file = path.join(getStateDir(config as Record<string, unknown>), 'telemetry-identity.json');
   const stored = readJsonFile<Record<string, unknown>>(file, {
     validate: value => Boolean(value && typeof value === 'object' && !Array.isArray(value))
   }) || {};
   const existing = String(stored.installationId || '').trim();
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(existing)) {
-    return { file, state: stored, installationId: existing };
-  }
-
-  const createdAt = new Date().toISOString();
-  const installationId = crypto.randomUUID();
+  const existingToken = String(stored.ingestToken || '').trim();
+  const installationId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(existing)
+    ? existing
+    : crypto.randomUUID();
+  const ingestToken = /^[A-Za-z0-9_-]{40,128}$/.test(existingToken)
+    ? existingToken
+    : crypto.randomBytes(32).toString('base64url');
+  const createdAt = String(stored.createdAt || '').trim() || new Date().toISOString();
+  const needsWrite = installationId !== existing || ingestToken !== existingToken || stored.schemaVersion !== TELEMETRY_IDENTITY_SCHEMA_VERSION;
   const state = {
+    ...stored,
     schemaVersion: TELEMETRY_IDENTITY_SCHEMA_VERSION,
     installationId,
+    ingestToken,
     createdAt
   };
-  writeJsonAtomic(file, state, { mode: 0o600, backup: true });
-  return { file, state, installationId };
+  if (needsWrite) writeJsonAtomic(file, state, { mode: 0o600, backup: true });
+  return { file, state, installationId, ingestToken };
 }
 
 function installationId(config: TelemetryConfig = {}): string {
@@ -264,17 +323,7 @@ function sanitizeAttributes(attributes: Record<string, unknown> = {}): SafeAttri
 }
 
 function summarizeCommandForTelemetry(value: unknown): string {
-  const parts = String(value || '').replace(/[\r\n\t]+/g, ' ').trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '';
-  const executable = summarizeExecutable(parts[0]);
-  return parts.length === 1 ? executable : `${executable} [${parts.length - 1} args]`;
-}
-
-function summarizeExecutable(value: unknown): string {
-  const text = String(value || '').trim();
-  if (!text) return '';
-  const normalized = text.replaceAll('\\\\', '/').replaceAll('\\', '/');
-  return normalized.split('/').filter(Boolean).at(-1) || '[executable]';
+  return redactCommandSecrets(String(value == null ? '' : value).trim());
 }
 
 function sanitizeScalar(value: unknown): SafeAttributeScalar {
@@ -359,7 +408,7 @@ async function shutdownTelemetry(): Promise<void> {
   usageRequestPromise = null;
   usageReportingStarted = false;
   runtimeDiagnosticsEnabledOverride = null;
-  if (usageHeartbeat) clearInterval(usageHeartbeat);
+  if (usageHeartbeat) clearTimeout(usageHeartbeat);
   usageHeartbeat = null;
   if (usageRetryTimer) clearTimeout(usageRetryTimer);
   usageRetryTimer = null;
@@ -372,6 +421,9 @@ function telemetryStatus(config: TelemetryConfig = {}): TelemetryStatus {
   const endpointConfigured = Boolean(configuredDiagnosticsEndpoint(config));
   const diagnosticsEnabled = telemetryEnabled(config) && endpointConfigured;
   const usageReportingEnabled = Boolean(configuredMaintainerUsageEndpoint());
+  const persistedUsageSuccessAt = usageReportingEnabled
+    ? String(usageIdentity(config).state.lastReportedAt || '')
+    : '';
   return {
     enabled: diagnosticsEnabled,
     diagnosticsEnabled,
@@ -381,7 +433,13 @@ function telemetryStatus(config: TelemetryConfig = {}): TelemetryStatus {
     exporter: diagnosticsEnabled && diagnosticsProvider ? 'otlp-http' : '',
     endpointConfigured,
     endpoint: endpointConfigured && initializedDiagnosticsEndpoint ? '[configured]' : '',
-    sampleRatio: initializedSampleRatio ?? telemetrySampleRatio(config)
+    sampleRatio: initializedSampleRatio ?? telemetrySampleRatio(config),
+    usageLastAttemptAt,
+    usageLastSuccessAt: usageLastSuccessAt || persistedUsageSuccessAt,
+    usageLastFailureAt,
+    diagnosticsLastAttemptAt,
+    diagnosticsLastSuccessAt,
+    diagnosticsLastFailureAt
   };
 }
 

@@ -100,4 +100,4 @@ export {
   normalizeScreenshotProfile,
   prepareComputerObservation
 };
-export type { PreparedObservation, ScreenshotProfile };
+export type { ScreenshotProfile };

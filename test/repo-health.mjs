@@ -7,6 +7,15 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 
 const scripts = packageJson.scripts || {};
 const ciDir = path.join(root, '.github', 'workflows');
 const failures = [];
+const gitignore = fs.readFileSync(path.join(root, '.gitignore'), 'utf8');
+const cleanScript = fs.readFileSync(path.join(root, 'scripts', 'clean.mjs'), 'utf8');
+
+if (!/^\/\.rel-ai-temp\s*$/m.test(gitignore)) {
+  failures.push('.gitignore must exclude /.rel-ai-temp local recovery/probe artifacts.');
+}
+if (!cleanScript.includes("'.rel-ai-temp'")) {
+  failures.push('npm run clean must remove .rel-ai-temp local recovery/probe artifacts.');
+}
 
 const nodeEngine = String(packageJson.engines?.node || '');
 const npmEngine = String(packageJson.engines?.npm || '');

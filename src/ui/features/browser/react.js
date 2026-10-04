@@ -166,7 +166,6 @@ function createBrowserRoute() {
     const handoffReason = String(state.handoffReason || '');
     const permissions = Array.isArray(state.permissionRequests) ? state.permissionRequests : [];
     const permissionRequest = permissions[0] || null;
-    const profile = state.profile === 'ephemeral' ? 'ephemeral' : 'persistent';
     const sessions = Array.isArray(state.sessions) ? state.sessions : [];
     const tabs = Array.isArray(state.tabs) ? state.tabs : [];
     const activeIndex = Math.max(0, tabs.findIndex(tab => tab?.active === true || String(tab?.nativePageId || '') === state.nativePageId));
@@ -321,7 +320,7 @@ function createBrowserRoute() {
           ),
           state.loading ? h('div', { className: 'browser-loading-bar', 'aria-hidden': 'true' }, h('i', null)) : null,
           h(StatusPill, { label: userControl ? 'Your control' : 'AI control', tone: userControl ? 'warn' : 'working' }),
-          h(StatusPill, { label: profile === 'persistent' ? 'Sign-ins remembered' : 'Private session', tone: profile === 'persistent' ? 'good' : 'neutral' }),
+          state.profile === 'ephemeral' ? h(StatusPill, { label: 'Private session', tone: 'neutral' }) : null,
           viewportLabel ? h('span', { className: 'browser-viewport-pill mono', title: 'AI browser viewport' }, viewportLabel) : null,
           h('div', { className: 'browser-toolbar-actions' },
             h('button', {

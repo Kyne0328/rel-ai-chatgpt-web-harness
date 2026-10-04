@@ -15,7 +15,7 @@ export const TASK_SCOPE = Object.freeze({
 
 export const EXECUTION_CLASS = Object.freeze({
   BOUNDED_SYNCHRONOUS: 'bounded_synchronous',
-  NATIVE_TASK_ELIGIBLE: 'native_task_eligible',
+  BACKGROUND_FALLBACK_ELIGIBLE: 'background_fallback_eligible',
   PERSISTENT_PROCESS: 'persistent_process',
   ALWAYS_IMMEDIATE: 'always_immediate'
 } as const);

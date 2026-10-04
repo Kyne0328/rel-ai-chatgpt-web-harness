@@ -363,12 +363,5 @@ function yamlScalar(value) {
 }
 
 export {
-  CHECKSUM_ASSET_NAME,
-  LATEST_MAC_URL,
-  RELEASES_FEED_URL,
-  checksumFor,
-  createMacManualUpdater,
-  latestReleaseTagFromFeed,
-  parseMacMetadata,
-  parseRelease
+  CHECKSUM_ASSET_NAME, LATEST_MAC_URL, RELEASES_FEED_URL, checksumFor, createMacManualUpdater, parseRelease
 };

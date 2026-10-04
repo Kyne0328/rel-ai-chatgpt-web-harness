@@ -267,7 +267,9 @@ function DesktopConnectionSettings({ expanded = false }) {
         tunnelApiKey: '',
         tunnelApiKeyConfigured: settings.tunnelApiKeyConfigured === true,
         tunnelErrorCode: String(settings.tunnelErrorCode || ''),
-        tunnelError: String(settings.tunnelError || '')
+        tunnelError: String(settings.tunnelError || ''),
+        additionalTunnels: Array.isArray(settings.additionalTunnels) ? settings.additionalTunnels : [],
+        additionalTunnelStatuses: Array.isArray(settings.additionalTunnelStatuses) ? settings.additionalTunnelStatuses : []
       };
       setForm(next);
       setSaved(connectionSnapshot(next));
@@ -286,6 +288,16 @@ function DesktopConnectionSettings({ expanded = false }) {
     window.addEventListener('relai:connection-open-settings', handler);
     return () => window.removeEventListener('relai:connection-open-settings', handler);
   }, []);
+
+  useEffect(() => {
+    if (!desktop?.onStatus) return undefined;
+    return desktop.onStatus(status => {
+      if (!Array.isArray(status?.additionalTunnelStatuses)) return;
+      setForm(current => current && !current.loadError
+        ? { ...current, additionalTunnelStatuses: status.additionalTunnelStatuses }
+        : current);
+    });
+  }, [desktop]);
 
   if (!desktop?.getSettings || !desktop?.saveSettings) return h('div', { className: 'empty' }, 'Connection settings are available inside the installed Rel.AI desktop app.');
   if (!form) return h('div', { className: 'settings-loading', role: 'status' }, 'Loading connection settings…');
@@ -380,7 +392,16 @@ function DesktopConnectionSettings({ expanded = false }) {
         )
       ),
       credentialError ? h('div', { className: 'connection-key-error', role: 'alert' }, credentialError) : null,
-      h(AccountWorkspaceSwitch),
+      h(AdditionalTunnelConnections, {
+        connections: form.additionalTunnels,
+        statuses: form.additionalTunnelStatuses,
+        desktop,
+        onChange: ({ connections, statuses }) => setForm(current => ({
+          ...current,
+          additionalTunnels: connections,
+          additionalTunnelStatuses: statuses
+        }))
+      }),
       h('details', { className: 'settings-advanced connection-advanced-settings' },
         h('summary', null, 'Advanced local settings'),
         h('div', { className: 'settings-panel-body' },
@@ -402,23 +423,189 @@ function DesktopConnectionSettings({ expanded = false }) {
   );
 }
 
-function AccountWorkspaceSwitch() {
-  return h('details', { className: 'settings-advanced connection-account-switch' },
-    h('summary', null, 'Use a different OpenAI account or workspace'),
-    h('div', { className: 'settings-panel-body connection-account-switch-body' },
-      h('ol', null,
-        h('li', null, 'Sign in to the OpenAI account that you want to use.'),
-        h('li', null, 'Select or create a Secure MCP Tunnel in that organization.'),
-        h('li', null, 'Create a runtime API key for that tunnel.'),
-        h('li', null, 'Replace the Tunnel ID and runtime API key above. Then save the connection settings.'),
-        h('li', null, 'In ChatGPT, update the existing Rel.AI connector if it is available in that workspace. Create one connector only if the workspace does not have it.')
+function AdditionalTunnelConnections({ connections = [], statuses = [], desktop, onChange }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState({ label: '', tunnelId: '', apiKey: '' });
+  const [showSecret, setShowSecret] = useState(false);
+  const [busy, setBusy] = useState('');
+  const [validation, setValidation] = useState(null);
+
+  const statusFor = tunnelId => statuses.find(status => status.tunnelId === tunnelId) || null;
+  const updateDraft = patch => {
+    setValidation(null);
+    setDraft(current => ({ ...current, ...patch }));
+  };
+  const add = async () => {
+    const issue = validateAdditionalTunnel(draft);
+    if (issue) {
+      setValidation(issue);
+      setOpen(true);
+      return;
+    }
+    setBusy('add');
+    try {
+      const result = await desktop.saveTunnel({
+        label: draft.label,
+        tunnelId: draft.tunnelId,
+        apiKey: draft.apiKey
+      });
+      onChange?.({
+        connections: Array.isArray(result?.connections) ? result.connections : connections,
+        statuses: Array.isArray(result?.statuses) ? result.statuses : statuses
+      });
+      setDraft({ label: '', tunnelId: '', apiKey: '' });
+      setShowSecret(false);
+      requestDashboardRefresh();
+      if (result?.ok === false) {
+        toast(result?.status?.error || 'The tunnel was saved, but it could not connect.', { variant: 'error' });
+      } else {
+        toast('ChatGPT tunnel added.', { variant: 'success' });
+        setOpen(false);
+      }
+    } catch (error) {
+      toast(messageOf(error), { variant: 'error' });
+    } finally {
+      setBusy('');
+    }
+  };
+  const remove = async connection => {
+    const confirmed = await confirmAction({
+      title: `Remove ${connection.label}?`,
+      message: 'Remove this ChatGPT tunnel from Rel.AI?',
+      detail: 'This stops only this tunnel-client connection. The primary tunnel, local projects, tasks, and other ChatGPT tunnel connections are not changed.',
+      confirmLabel: 'Remove tunnel',
+      danger: true
+    });
+    if (!confirmed) return;
+    setBusy(connection.tunnelId);
+    try {
+      const result = await desktop.removeTunnel(connection.tunnelId);
+      onChange?.({
+        connections: Array.isArray(result?.connections) ? result.connections : [],
+        statuses: Array.isArray(result?.statuses) ? result.statuses : []
+      });
+      requestDashboardRefresh();
+      toast('ChatGPT tunnel removed.', { variant: 'success' });
+    } catch (error) {
+      toast(messageOf(error), { variant: 'error' });
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return h('section', { className: 'additional-tunnels', 'aria-labelledby': 'additionalTunnelsTitle' },
+    h('div', { className: 'additional-tunnels-heading' },
+      h('div', null,
+        h('strong', { id: 'additionalTunnelsTitle' }, 'Additional ChatGPT tunnels'),
+        h('p', { className: 'settings-help' }, 'Give each other ChatGPT account its own Secure MCP Tunnel. Every tunnel forwards to this same Rel.AI service and the same configured workspaces.')
       ),
-      h('div', { className: 'connection-account-switch-actions' },
+      h('button', {
+        className: 'secondary compact-button',
+        type: 'button',
+        onClick: () => setOpen(value => !value),
+        'aria-expanded': String(open),
+        'aria-controls': 'additionalTunnelForm'
+      }, open ? 'Cancel' : 'Add tunnel')
+    ),
+    connections.length ? h('div', { className: 'additional-tunnel-list' },
+      connections.map(connection => {
+        const status = statusFor(connection.tunnelId);
+        const view = additionalTunnelStatusView(status);
+        return h('div', { className: 'additional-tunnel-row', key: connection.tunnelId },
+          h('div', { className: 'additional-tunnel-copy' },
+            h('strong', null, connection.label),
+            h('span', { className: 'mono' }, connection.tunnelId),
+            status?.error ? h('small', { className: 'additional-tunnel-error' }, status.error) : null
+          ),
+          h('div', { className: 'additional-tunnel-actions' },
+            h(StatusPill, { label: view.label, tone: view.tone }),
+            h('button', {
+              className: 'secondary compact-button',
+              type: 'button',
+              disabled: Boolean(busy),
+              onClick: () => void remove(connection)
+            }, busy === connection.tunnelId ? 'Removing…' : 'Remove')
+          )
+        );
+      })
+    ) : h('p', { className: 'muted additional-tunnels-empty' }, 'No additional ChatGPT accounts are connected yet.'),
+    open ? h('div', { id: 'additionalTunnelForm', className: 'additional-tunnel-form' },
+      h(SettingsField, {
+        label: 'Connection name',
+        help: 'A local label such as Personal, School, or Account 2.',
+        error: validation?.field === 'label' ? validation.message : '',
+        inputId: 'additionalTunnelLabel'
+      }, h('input', {
+        id: 'additionalTunnelLabel',
+        type: 'text',
+        value: draft.label,
+        maxLength: 80,
+        autoComplete: 'off',
+        'aria-invalid': validation?.field === 'label' ? 'true' : undefined,
+        'aria-describedby': validation?.field === 'label' ? 'additionalTunnelLabelError additionalTunnelLabelHelp' : 'additionalTunnelLabelHelp',
+        onChange: event => updateDraft({ label: event.currentTarget.value })
+      })),
+      h(SettingsField, {
+        label: 'Tunnel ID',
+        help: 'Create this tunnel while signed in to the ChatGPT account that will use it.',
+        error: validation?.field === 'tunnelId' ? validation.message : '',
+        inputId: 'additionalTunnelId'
+      }, h('input', {
+        id: 'additionalTunnelId',
+        type: 'text',
+        value: draft.tunnelId,
+        autoComplete: 'off',
+        spellCheck: false,
+        'aria-invalid': validation?.field === 'tunnelId' ? 'true' : undefined,
+        'aria-describedby': validation?.field === 'tunnelId' ? 'additionalTunnelIdError additionalTunnelIdHelp' : 'additionalTunnelIdHelp',
+        onChange: event => updateDraft({ tunnelId: event.currentTarget.value.trim() })
+      })),
+      h(SettingsField, {
+        label: 'Runtime API key',
+        help: 'The runtime key for that account’s tunnel is encrypted on this computer.',
+        error: validation?.field === 'apiKey' ? validation.message : '',
+        inputId: 'additionalTunnelApiKey'
+      }, h('div', { className: 'password-field' },
+        h('input', {
+          id: 'additionalTunnelApiKey',
+          type: showSecret ? 'text' : 'password',
+          value: draft.apiKey,
+          placeholder: 'Paste runtime API key',
+          autoComplete: 'off',
+          spellCheck: false,
+          'aria-invalid': validation?.field === 'apiKey' ? 'true' : undefined,
+          'aria-describedby': validation?.field === 'apiKey' ? 'additionalTunnelApiKeyError additionalTunnelApiKeyHelp' : 'additionalTunnelApiKeyHelp',
+          onChange: event => updateDraft({ apiKey: event.currentTarget.value.trim() })
+        }),
+        h('button', {
+          className: 'secondary compact-button password-toggle',
+          type: 'button',
+          onClick: () => setShowSecret(value => !value)
+        }, showSecret ? 'Hide' : 'Show')
+      )),
+      h('div', { className: 'additional-tunnel-form-actions' },
         h('a', { className: 'buttonlike secondary compact-button', href: 'https://platform.openai.com/settings/organization/tunnels', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI Tunnels'),
-        h('a', { className: 'buttonlike secondary compact-button', href: 'https://platform.openai.com/settings/organization/api-keys', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI API Keys')
+        h('button', { className: 'primary', type: 'button', disabled: busy === 'add', onClick: () => void add() }, busy === 'add' ? 'Adding…' : 'Add ChatGPT tunnel')
       )
-    )
+    ) : null
   );
+}
+
+function validateAdditionalTunnel(value) {
+  if (String(value.label || '').trim().length > 80) return { field: 'label', message: 'Use a connection name of 80 characters or fewer.' };
+  if (!/^tunnel_[A-Za-z0-9_-]{8,200}$/.test(String(value.tunnelId || '').trim())) return { field: 'tunnelId', message: 'Enter a valid OpenAI Secure MCP Tunnel ID beginning with tunnel_.' };
+  if (String(value.apiKey || '').trim().length < 12 || /\s/.test(String(value.apiKey || '').trim())) return { field: 'apiKey', message: 'Enter the runtime API key for this tunnel with no spaces.' };
+  return null;
+}
+
+function additionalTunnelStatusView(status) {
+  const state = String(status?.state || '');
+  if (status?.retry?.scheduled || status?.retry?.inFlight) return { label: 'Reconnecting', tone: 'warn' };
+  if (state === 'running') return { label: 'Connected', tone: 'good' };
+  if (state === 'degraded') return { label: 'Reconnecting', tone: 'warn' };
+  if (state === 'failed') return { label: 'Failed', tone: 'bad' };
+  if (['starting', 'locally_ready', 'authenticating'].includes(state)) return { label: 'Connecting', tone: 'working' };
+  return { label: 'Stopped', tone: 'neutral' };
 }
 
 function validateConnectionSettings(value) {
@@ -843,6 +1030,17 @@ function TelemetrySettings() {
   }
 
   const diagnosticsEnabled = settings.diagnosticsEnabled !== false;
+  const lastDiagnosticSuccess = String(settings.diagnosticsLastSuccessAt || '');
+  const lastDiagnosticFailure = String(settings.diagnosticsLastFailureAt || '');
+  const diagnosticDelivery = !diagnosticsEnabled
+    ? 'Diagnostic export is off.'
+    : lastDiagnosticFailure && (!lastDiagnosticSuccess || Date.parse(lastDiagnosticFailure) > Date.parse(lastDiagnosticSuccess))
+      ? `Last delivery failed ${new Date(lastDiagnosticFailure).toLocaleString()}. Rel.AI will keep working and retry on later batches.`
+      : lastDiagnosticSuccess
+        ? `Last diagnostic batch delivered ${new Date(lastDiagnosticSuccess).toLocaleString()}.`
+        : settings.diagnosticsActive
+          ? 'Diagnostic exporter is ready. No successful batch has been recorded in this app session yet.'
+          : 'Diagnostic exporter is not currently active.';
   return h(Card, { title: 'Diagnostics' },
     h(ToggleRow, {
       label: 'Diagnostic telemetry',
@@ -851,9 +1049,10 @@ function TelemetrySettings() {
       busy,
       enabledLabel: 'Diagnostic telemetry on',
       disabledLabel: 'Diagnostic telemetry off',
-      help: 'Helps identify reliability and performance problems. It does not include prompts, file contents, command output, or raw error messages.',
+      help: 'Helps identify reliability and performance problems. Diagnostic traces can include tool and project identifiers, timings, and complete command text with common credential patterns redacted. Prompts, file contents, command output, and raw error messages are not added as telemetry fields.',
       onChange: value => void updateDiagnostics(value)
-    })
+    }),
+    h('p', { className: 'settings-help', role: 'status' }, diagnosticDelivery)
   );
 }
 

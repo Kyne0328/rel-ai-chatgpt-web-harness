@@ -6,7 +6,7 @@ import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { formatDuration, timeAgo } from '../../utils.js';
-import { getRouteParams, getWorkspaceFilter, routeHref, setWorkspaceFilter } from '../../router.js';
+import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref, setWorkspaceFilter } from '../../router.js';
 import { activityEventId } from '../../activity-event.js';
 import { orderWorkspacesAlphabetically } from '../../components/workspace-menu.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
@@ -17,6 +17,7 @@ import { statusPillClass } from '../../status-tone.js';
 import {
   isOngoingSession,
   mergeSessionDetail,
+  mergeSessionEvents,
   operationForTool,
   orderChangedFiles,
   orderSessionEvents,
@@ -36,6 +37,9 @@ const h = React.createElement;
 const SESSION_PAGE_SIZE = 50;
 const MOBILE_SESSION_PAGE_SIZE = 12;
 const MOBILE_SESSION_QUERY = '(max-width: 760px)';
+const TASK_HISTORY_PAGE_SIZE = 100;
+const TASK_ACTIVITY_PAGE_SIZE = 200;
+const TASK_HISTORY_URL = '/api/tasks/history';
 const TASK_SESSION_URL = '/api/tasks/session';
 const DETAIL_FILE_PREVIEW = 4;
 const DETAIL_EVENT_PREVIEW = 8;
@@ -50,8 +54,16 @@ export function createSessionsRoute(useDashboardSlices) {
 
 function SessionsPage({ data = {} }) {
   const workspace = getWorkspaceFilter();
+  const scopeKey = workspace || '__all__';
   const requestedId = String(getRouteParams().get('task') || '').trim();
-  const allSessions = useMemo(() => sessionsForDisplay(data, workspace), [data, workspace]);
+  const [olderSessions, setOlderSessions] = useState([]);
+  const [historyAvailability, setHistoryAvailability] = useState(() => new Map());
+  const [historyLoadingScope, setHistoryLoadingScope] = useState('');
+  const taskSource = useMemo(
+    () => mergeTaskSources(olderSessions, Array.isArray(data.tasks) ? data.tasks : []),
+    [data.tasks, olderSessions]
+  );
+  const allSessions = useMemo(() => sessionsForDisplay({ tasks: taskSource }, workspace), [taskSource, workspace]);
   const [taskQuery, setTaskQuery] = useState('');
   const [taskStatus, setTaskStatus] = useState('all');
   const sessions = useMemo(
@@ -63,10 +75,16 @@ function SessionsPage({ data = {} }) {
   const requestedIndex = requestedId ? sessions.findIndex(session => sessionIdentifier(session) === requestedId) : -1;
   const minimumVisible = Math.max(pageSize, requestedIndex >= 0 ? requestedIndex + 1 : 0);
   const [visibleByScope, setVisibleByScope] = useState(() => new Map());
-  const scopeKey = workspace || '__all__';
   const visibleCount = Math.max(minimumVisible, Number(visibleByScope.get(scopeKey) || pageSize));
   const visibleSessions = sessions.slice(0, visibleCount);
   const remaining = Math.max(0, sessions.length - visibleSessions.length);
+  const knownHistoryAvailability = historyAvailability.get(scopeKey);
+  const canLoadOlder = knownHistoryAvailability !== undefined
+    ? knownHistoryAvailability
+    : workspace
+      ? true
+      : taskSource.length >= 100;
+  const loadingOlder = historyLoadingScope === scopeKey;
   const openTaskCount = allSessions.reduce((count, session) => {
     const state = workSessionStateView(session);
     return count + (state.active === true || state.open === true ? 1 : 0);
@@ -76,6 +94,7 @@ function SessionsPage({ data = {} }) {
   const selectedIdRef = useRef('');
   selectedIdRef.current = selectedId;
   const [hydrated, setHydrated] = useState(null);
+  const [activityLoading, setActivityLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
   const [olderExpanded, setOlderExpanded] = useState(false);
   const hydrationRequest = useRef(0);
@@ -88,6 +107,9 @@ function SessionsPage({ data = {} }) {
 
   const selectSession = useCallback(id => {
     if (!id) return;
+    // Keep mouse and keyboard selections in the route so a later task-data
+    // refresh cannot restore the task from an older deep link.
+    if (getRouteParams().get('task') !== id) replaceRouteParams({ task: id });
     if (selectedIdRef.current !== id) {
       setHydrated(null);
       setActiveTab('overview');
@@ -117,9 +139,21 @@ function SessionsPage({ data = {} }) {
     void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}`, { cacheTtlMs: selectedHydrationCacheTtl })
       .then(response => {
         if (cancelled || request !== hydrationRequest.current || response?.ok === false || !response?.session) return;
-        setHydrated({
-          id: selectedId,
-          session: { ...response.session, ...(response.trace ? { trace: response.trace } : {}) }
+        setHydrated(previous => {
+          const sameTask = previous?.id === selectedId;
+          const previousEvents = sameTask ? previous.session?.events || [] : [];
+          const session = {
+            ...response.session,
+            ...(response.trace ? { trace: response.trace } : {}),
+            events: mergeSessionEvents(previousEvents, response.session.events || [])
+          };
+          return {
+            id: selectedId,
+            session,
+            activity: sameTask && previous.activity?.pagingStarted === true
+              ? previous.activity
+              : { ...(response.activity || {}), pagingStarted: false }
+          };
         });
       })
       .catch(error => {
@@ -131,13 +165,100 @@ function SessionsPage({ data = {} }) {
     };
   }, [selectedHydrationCacheTtl, selectedId, selectedSummary, selectedSummaryHasTrace]);
 
-  const showMore = useCallback(() => {
+  useEffect(() => {
+    if (!selectedId || hydrated?.id !== selectedId) return;
+    const liveEvents = (Array.isArray(data?.auditTail?.entries) ? data.auditTail.entries : [])
+      .filter(event => String(event?.taskId || event?.sessionId || '').trim() === selectedId);
+    if (!liveEvents.length) return;
+    setHydrated(previous => {
+      if (previous?.id !== selectedId) return previous;
+      return {
+        ...previous,
+        session: {
+          ...previous.session,
+          events: mergeSessionEvents(previous.session?.events || [], liveEvents)
+        }
+      };
+    });
+  }, [data?.auditTail?.entries, hydrated?.id, selectedId]);
+
+  const loadOlderActivity = useCallback(async () => {
+    if (activityLoading || hydrated?.id !== selectedId || hydrated?.activity?.hasMore !== true || !hydrated.activity.nextCursor) return;
+    setActivityLoading(true);
+    try {
+      const params = new URLSearchParams({
+        task: selectedId,
+        activityOnly: '1',
+        activityLimit: String(TASK_ACTIVITY_PAGE_SIZE),
+        activityCursor: JSON.stringify(hydrated.activity.nextCursor)
+      });
+      const response = await fetchJson(`${TASK_SESSION_URL}?${params.toString()}`, { pauseTimeoutWhenHidden: false });
+      if (response?.ok === false || !Array.isArray(response?.activity?.entries)) {
+        throw new Error(response?.error || 'Older task activity could not be loaded.');
+      }
+      setHydrated(previous => previous?.id === selectedId
+        ? {
+            ...previous,
+            session: {
+              ...previous.session,
+              events: mergeSessionEvents(previous.session?.events || [], response.activity.entries)
+            },
+            activity: { ...(response.activity.page || {}), pagingStarted: true }
+          }
+        : previous);
+      setOlderExpanded(true);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
+    } finally {
+      setActivityLoading(false);
+    }
+  }, [activityLoading, hydrated, selectedId]);
+
+  const showMoreVisible = useCallback(() => {
     setVisibleByScope(previous => {
       const next = new Map(previous);
       next.set(scopeKey, visibleCount + pageSize);
       return next;
     });
   }, [pageSize, scopeKey, visibleCount]);
+
+  const loadOlderTasks = useCallback(async () => {
+    if (historyLoadingScope) return;
+    setHistoryLoadingScope(scopeKey);
+    try {
+      const params = new URLSearchParams({ limit: String(TASK_HISTORY_PAGE_SIZE) });
+      if (workspace) params.set('workspace', workspace);
+      const cursor = taskHistoryCursor(allSessions);
+      if (cursor) params.set('cursor', JSON.stringify(cursor));
+      const response = await fetchJson(`${TASK_HISTORY_URL}?${params.toString()}`, { pauseTimeoutWhenHidden: false });
+      if (response?.ok === false || !Array.isArray(response?.tasks)) {
+        throw new Error(response?.error || 'Task history could not be loaded.');
+      }
+      setOlderSessions(previous => mergeTaskSources(previous, response.tasks));
+      setHistoryAvailability(previous => {
+        const next = new Map(previous);
+        next.set(scopeKey, response?.page?.hasMore === true);
+        return next;
+      });
+      setVisibleByScope(previous => {
+        const next = new Map(previous);
+        next.set(scopeKey, Math.max(Number(next.get(scopeKey) || pageSize), visibleCount + pageSize));
+        return next;
+      });
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
+    } finally {
+      setHistoryLoadingScope('');
+    }
+  }, [allSessions, historyLoadingScope, pageSize, scopeKey, visibleCount, workspace]);
+
+  const showMore = useCallback(() => {
+    if (remaining > 0) {
+      showMoreVisible();
+      return;
+    }
+    if (canLoadOlder) void loadOlderTasks();
+  }, [canLoadOlder, loadOlderTasks, remaining, showMoreVisible]);
 
   const onTaskListKeyDown = useCallback(event => {
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
@@ -204,9 +325,21 @@ function SessionsPage({ data = {} }) {
                 ))
               )
             : h('div', { className: 'empty' }, taskQuery || taskStatus !== 'all' ? 'No tasks match these filters.' : 'No tasks yet.'),
-          remaining > 0 && h('div', { className: 'session-list-footer' },
-            h('span', null, `${remaining} older task${remaining === 1 ? '' : 's'} hidden`),
-            h('button', { className: 'secondary', type: 'button', onClick: showMore, 'data-load-more-sessions': '' }, `Show ${Math.min(pageSize, remaining)} more`)
+          (remaining > 0 || canLoadOlder) && h('div', { className: 'session-list-footer' },
+            h('span', null, remaining > 0
+              ? `${remaining} older task${remaining === 1 ? '' : 's'} hidden`
+              : 'More retained task history is available'),
+            h('button', {
+              className: 'secondary',
+              type: 'button',
+              disabled: loadingOlder,
+              onClick: showMore,
+              'data-load-more-sessions': ''
+            }, loadingOlder
+              ? 'Loading…'
+              : remaining > 0
+                ? `Show ${Math.min(pageSize, remaining)} more`
+                : 'Load older tasks')
           )
         ),
         h('aside', { className: 'session-inspector', 'data-session-inspector': '' },
@@ -216,7 +349,10 @@ function SessionsPage({ data = {} }) {
                 activeTab,
                 setActiveTab,
                 olderExpanded,
-                setOlderExpanded
+                setOlderExpanded,
+                activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
+                activityLoading,
+                loadOlderActivity
               })
             : h('div', { className: 'inspector-empty' },
                 h('strong', null, 'Select a task'),
@@ -258,6 +394,31 @@ function sessionMatchesFilters(session, query, status) {
   if (status === 'completed') return state.status === 'completed';
   if (status === 'ended') return state.terminal === true && state.status !== 'completed' && !sessionNeedsAttention(session);
   return true;
+}
+
+function mergeTaskSources(existing = [], incoming = []) {
+  const byId = new Map();
+  for (const task of [...existing, ...incoming]) {
+    const id = sessionIdentifier(task);
+    if (!id) continue;
+    byId.set(id, { ...(byId.get(id) || {}), ...task });
+  }
+  return [...byId.values()];
+}
+
+function taskHistoryCursor(sessions = []) {
+  let candidate = null;
+  for (const session of sessions) {
+    const updatedAtMs = Math.max(0, Number(session?.historyUpdatedAtMs || 0));
+    const id = sessionIdentifier(session);
+    if (!updatedAtMs || !id) continue;
+    if (!candidate
+      || updatedAtMs < candidate.updatedAtMs
+      || (updatedAtMs === candidate.updatedAtMs && id > candidate.id)) {
+      candidate = { updatedAtMs, id };
+    }
+  }
+  return candidate;
 }
 
 function ProjectFilter({ workspaces = [], selected = '' }) {
@@ -320,7 +481,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, setOlderExpanded }) {
+function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -420,7 +581,7 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
       h(OriginalRequest, { objective: session.objective })
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-activity', role: 'tabpanel', 'aria-labelledby': 'session-tab-activity', tabIndex: 0, hidden: activeTab !== 'activity', 'data-session-panel': 'activity' },
-      h(TaskTraceSection, { session, olderExpanded, setOlderExpanded }),
+      h(TaskTraceSection, { session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }),
       h('div', { className: 'session-inline-actions' },
         h('a', { className: 'buttonlike secondary', href: routeHref('activity', { workspace: session.workspace, task: id, time: 'all' }) }, 'Open in Activity')
       )
@@ -599,7 +760,7 @@ function OriginalRequest({ objective }) {
   );
 }
 
-function TaskTraceSection({ session, olderExpanded, setOlderExpanded }) {
+function TaskTraceSection({ session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) {
   const ordered = orderSessionEvents(session.events || []);
   if (!ordered.length) return h('div', { className: 'inspector-empty compact' },
     h('strong', null, 'No activity recorded'),
@@ -615,7 +776,16 @@ function TaskTraceSection({ session, olderExpanded, setOlderExpanded }) {
       hidden.length && !olderExpanded
         ? h('button', { className: 'secondary task-event-more', type: 'button', onClick: () => setOlderExpanded(true), 'data-show-older-events': '' }, `Show ${hidden.length} older event${hidden.length === 1 ? '' : 's'}`)
         : null,
-      ...(olderExpanded ? hidden.map(event => h(EventRow, { key: activityEventId(event) || `${eventTimestampValue(event)}:${event.operation || event.tool || ''}`, event, session, older: true })) : [])
+      ...(olderExpanded ? hidden.map(event => h(EventRow, { key: activityEventId(event) || `${eventTimestampValue(event)}:${event.operation || event.tool || ''}`, event, session, older: true })) : []),
+      olderExpanded && activityHasMore
+        ? h('button', {
+            className: 'secondary task-event-more',
+            type: 'button',
+            disabled: activityLoading,
+            onClick: loadOlderActivity,
+            'data-load-older-task-activity': ''
+          }, activityLoading ? 'Loading…' : 'Load older activity')
+        : null
     )
   );
 }

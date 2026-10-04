@@ -482,7 +482,7 @@ async function case_computer_observation_unit() {
     const __m1 = await import("sharp");
     const sharp = __m1.default;
   
-    const __m2 = await import("../src/computer/computerObservation.js");
+    const __m2 = await import("../src/computer/computerObservation.ts");
     const { computerImageSha256,
     normalizeScreenshotProfile,
     prepareComputerObservation } = __m2;
@@ -539,7 +539,7 @@ async function case_midscene_computer_adapter_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/computer/midsceneAdapter.js");
+    const __m1 = await import("../src/computer/midsceneAdapter.ts");
     const { createMidsceneComputerAdapter } = __m1;
   
   const calls = [];

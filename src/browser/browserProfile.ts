@@ -149,17 +149,8 @@ function safeLstat(file: string): fs.Stats | null {
 }
 
 export {
-  BROWSER_PROFILE_MODES,
-  browserProfileDirectory,
-  clearPersistentBrowserProfile,
-  clearPersistentBrowserProfiles,
-  forgetPersistentBrowserSite,
-  normalizeBrowserProfileMode,
-  normalizePersistentBrowserSiteOrigin,
-  persistentBrowserProfileDirectories,
-  persistentBrowserProfileRoot,
-  preparePersistentBrowserProfile,
-  readPersistentBrowserSites,
-  recordPersistentBrowserSite
+  browserProfileDirectory, clearPersistentBrowserProfile, clearPersistentBrowserProfiles,
+  forgetPersistentBrowserSite, normalizeBrowserProfileMode, persistentBrowserProfileDirectories,
+  persistentBrowserProfileRoot, preparePersistentBrowserProfile, readPersistentBrowserSites, recordPersistentBrowserSite
 };
 export type { BrowserProfileMode };

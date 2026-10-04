@@ -5,7 +5,6 @@ import { getCatalogToolDefinition, getCatalogToolDefinitions, getCatalogTools } 
 import { executableInputSchema } from './executableSchema.js';
 import { getToolGroups, getToolMetadata, getToolSurfaceManifest } from './surface.js';
 import { compactPublicInputSchema } from './publicSchema.js';
-import { toolUiMetadata } from '../mcp/appUi.js';
 import { LOCAL_DEVELOPER_SECURITY_SCHEMES } from '../mcp/localDeveloperMode.js';
 
 type OutputJsonSchema = JsonSchema & { allOf?: JsonSchema[] };
@@ -25,6 +24,23 @@ const toolDefinitions = getCatalogToolDefinitions();
 const catalogToolByName = new Map<string, CatalogTool>(getCatalogTools().map(tool => [tool.definition.name, tool]));
 const TOOL_NAMES: readonly string[] = Object.freeze(toolDefinitions.map(definition => definition.name));
 const PUBLIC_DISCOVERY_OUTPUT_FIELDS: readonly string[] = Object.freeze(['ok']);
+const TOOL_INVOCATION_STATUS: Readonly<Record<string, readonly [string, string]>> = Object.freeze({
+  relai_work: ['Updating Rel.AI task…', 'Rel.AI task updated'],
+  relai_snapshot: ['Scanning repository…', 'Repository scanned'],
+  relai_read: ['Reading repository…', 'Repository read'],
+  relai_search: ['Searching repository…', 'Repository searched'],
+  relai_inspect: ['Inspecting code…', 'Code inspected'],
+  relai_edit: ['Applying changes…', 'Changes applied'],
+  relai_exec: ['Running command…', 'Command finished'],
+  relai_process: ['Managing process…', 'Process updated'],
+  relai_ui: ['Testing local UI…', 'Local UI tested'],
+  relai_browser: ['Using local browser…', 'Local browser updated'],
+  relai_desktop: ['Using local desktop…', 'Desktop action finished'],
+  relai_computer: ['Controlling computer… Press Esc to stop.', 'Computer action finished'],
+  relai_validate: ['Validating changes…', 'Validation finished'],
+  relai_changes: ['Reviewing changes…', 'Changes reviewed'],
+  relai_publish: ['Publishing changes…', 'Changes published']
+});
 // Keep schema object identity stable for the lifetime of the process. The MCP SDK
 // caches JSON-schema adapters by object identity, so rebuilding equivalent objects
 // on every stateless request defeats that cache and adds tens of milliseconds.
@@ -46,19 +62,27 @@ function getMcpToolSchemas(): readonly PublicToolSchema[] {
 
 function buildPublicToolSchema(definition: CatalogToolDefinition): PublicToolSchema {
   const schema = buildToolSchema(definition);
-  const uiMetadata = toolUiMetadata(schema.name) as Record<string, unknown> | null | undefined;
+  const invocationMetadata = toolInvocationMetadata(schema.name);
   const meta = Object.freeze({
     securitySchemes: LOCAL_DEVELOPER_SECURITY_SCHEMES,
-    ...(uiMetadata || {}),
+    ...(invocationMetadata || {}),
     ...(schema.name === 'relai_edit' ? { 'openai/fileParams': ['file'] } : {})
   });
   return {
     ...schema,
-    annotations: schema.annotations,
     _meta: meta,
     inputSchema: compactPublicInputSchema(schema.name, schema.inputSchema, catalogToolByName.get(schema.name)) as CatalogToolDefinition['inputSchema'],
     outputSchema: compactPublicOutputSchema(schema.outputSchema)
   };
+}
+
+function toolInvocationMetadata(name: string): Readonly<Record<string, unknown>> | undefined {
+  const status = TOOL_INVOCATION_STATUS[name];
+  if (!status) return undefined;
+  return Object.freeze({
+    'openai/toolInvocation/invoking': status[0],
+    'openai/toolInvocation/invoked': status[1]
+  });
 }
 
 function buildToolSchema(definition: CatalogToolDefinition): ToolSchema {

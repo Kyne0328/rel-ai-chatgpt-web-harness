@@ -98,5 +98,4 @@ function boundedTimeout(value: unknown, fallback: number): number {
   return Math.min(86_400_000, Math.max(1000, Math.floor(number)));
 }
 
-export { checkGitRepository, createGitClient, readGitStatus };
-export type { GitClientOptions };
+export { checkGitRepository, readGitStatus };

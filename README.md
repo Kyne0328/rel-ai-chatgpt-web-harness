@@ -108,14 +108,15 @@ Editing code does not automatically commit, push, reset, clean, or rewrite repos
 
 ## Quick start
 
-Rel.AI currently uses one supported ChatGPT connection: **OpenAI Secure MCP Tunnel**.
+Rel.AI uses one supported ChatGPT transport: **OpenAI Secure MCP Tunnel**. One Rel.AI desktop can run multiple independent tunnel connections so several ChatGPT accounts can reach the same local MCP service and configured workspaces.
 
 1. **Download Rel.AI MCP** from the [GitHub Releases page](https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases). Desktop packages are built for Windows, macOS, and Linux.
 2. **Create an OpenAI Secure MCP Tunnel** for the computer running Rel.AI and create the runtime API key required by the tunnel.
-3. **Open Rel.AI and finish first-run setup.** Enter the tunnel ID and runtime API key. Rel.AI stores the runtime key with Electron `safeStorage` and manages the bundled tunnel client.
+3. **Open Rel.AI and finish first-run setup.** Enter the first tunnel ID and runtime API key. Rel.AI stores runtime keys with Electron `safeStorage` and manages the bundled tunnel clients.
 4. **Add a workspace.** Choose a repository folder and assign a short alias such as `myapp`.
-5. **Connect ChatGPT.** Add or reconnect Rel.AI MCP using ChatGPT's **Tunnel** connection option, choose the same Secure MCP Tunnel, and use **No authentication** for the ChatGPT-side connection.
-6. **Ask ChatGPT to use the workspace alias.** Rel.AI resolves the real path locally.
+5. **Connect ChatGPT.** Add or reconnect Rel.AI MCP using ChatGPT's **Tunnel** connection option, choose the matching Secure MCP Tunnel, and use **No authentication** for the ChatGPT-side connection.
+6. **Optional: connect another ChatGPT account.** In **Settings → Connection → Additional ChatGPT tunnels**, add that account's own Tunnel ID and runtime API key. Each account keeps its own OpenAI tunnel while all tunnel clients forward to the same local Rel.AI service.
+7. **Ask ChatGPT to use the workspace alias.** Rel.AI resolves the real path locally.
 
 For the complete walkthrough, see [One-click setup](docs/ONE_CLICK_SETUP.md) and [Connecting to ChatGPT](docs/CONNECTING_TO_CHATGPT.md).
 
@@ -292,13 +293,17 @@ Recovery avoids automatically replaying destructive Git actions such as resets, 
 
 See [Workflow reliability](docs/WORKFLOW_RELIABILITY.md) and [Task observability](docs/TASK_OBSERVABILITY.md) for the detailed state model.
 
-## One supported ChatGPT connection
+## OpenAI client compatibility
 
-Rel.AI intentionally has one supported ChatGPT transport: **OpenAI Secure MCP Tunnel**. There is no second provider or legacy tunnel path to configure and keep in sync.
+Rel.AI keeps one canonical MCP runtime instead of adding product-specific server modes. The primary desktop connection remains **OpenAI Secure MCP Tunnel** for ChatGPT, and the same private tunnel can be associated with other supported OpenAI surfaces such as Codex and the Responses API without changing the local Rel.AI implementation.
 
-The desktop owns the local MCP service, bundled tunnel client, connection state, encrypted runtime key, and loopback bearer credential. ChatGPT owns the remote tunnel association. Keeping those responsibilities separate makes reconnects predictable without letting a connection change decide what happens to repository work.
+The desktop owns the local MCP service, bundled tunnel client, connection state, encrypted runtime key, and loopback bearer credential. OpenAI-side products own their tunnel association. Reconnecting or associating another supported OpenAI surface changes transport only; it does not select, replay, merge, or complete repository work.
 
-Rel.AI is currently built specifically for ChatGPT Web. It does not currently support Claude, Cursor, Gemini, or other AI clients. Supporting another client would require its own connection and compatibility contract rather than a provider-name switch.
+Agents API integrations use the same MCP contract but have a distinct deployment choice: use an environment-origin HTTP connection when the agent session environment can reach Rel.AI, or stdio when that environment is intended to launch Rel.AI. Rel.AI does not make its loopback listener public for service-origin Agents API connections.
+
+Compatibility remains capability-driven. Client implementation names do not select tool schemas or behavior. Rel.AI does not currently claim compatibility with Claude, Cursor, Gemini, or other non-OpenAI clients.
+
+See [OpenAI client compatibility](docs/OPENAI_CLIENT_COMPATIBILITY.md) for the tested boundaries and connection models.
 
 ## MCP tool surface
 
@@ -372,7 +377,7 @@ Rel.AI treats reconnection and repository-work recovery separately. Restoring th
 
 The Usage view measures **locally observed Rel.AI activity**, not ChatGPT model tokens or ChatGPT billing. It can report request counts, tool calls, outcomes, execution duration, active days, tools, and workspace aggregates from local Rel.AI records.
 
-Official release builds also send a minimal always-on installation-presence request to the maintainer so unique and active Rel.AI installations can be counted without treating every normal reinstall as a new installation. The request contains a random locally stored installation ID plus app version, platform, and architecture, and a successful report is suppressed locally for 24 hours. Diagnostic telemetry is separate, on by default, and can be turned off in Settings. Official diagnostics use OpenTelemetry through the maintainer's Cloudflare edge; the installation registry is stored separately in Cloudflare D1. See [PRIVACY.md](PRIVACY.md) for the exact data boundary.
+Official release builds also send a minimal always-on installation-presence request to the maintainer so recently seen Rel.AI installations can be counted without treating every normal reinstall as a new installation. The request contains a random locally stored installation ID plus app version, platform, and architecture and normally refreshes about every 12 hours. A separate random installation-scoped credential authenticates presence and diagnostic uploads; only its hash is stored by the telemetry service. Diagnostic telemetry is separate, on by default, and can be turned off in Settings. Official diagnostics use OpenTelemetry through the maintainer's Cloudflare edge; the installation registry is stored separately in Cloudflare D1. See [PRIVACY.md](PRIVACY.md) for the exact data boundary and retention policy.
 
 Keep tunnel runtime API keys, local bearer credentials, repository credentials, private keys, and other secrets out of public issues and unreviewed diagnostic exports.
 
@@ -421,6 +426,7 @@ See [Development](docs/DEVELOPMENT.md) for source architecture, generated assets
 | Review terms for official project services | [Terms of Use](TERMS.md) |
 | Review bundled third-party software notices | [Third-party notices](THIRD_PARTY_NOTICES.md) |
 | Understand MCP lifecycle and compatibility | [MCP protocol policy](docs/MCP_PROTOCOL_POLICY.md) |
+| Use Rel.AI from supported OpenAI client surfaces | [OpenAI client compatibility](docs/OPENAI_CLIENT_COMPATIBILITY.md) |
 | Understand recovery and completion authority | [Workflow reliability](docs/WORKFLOW_RELIABILITY.md) |
 | Understand sessions, activity, and observable evidence | [Task observability](docs/TASK_OBSERVABILITY.md) |
 | Build, test, package, or release Rel.AI | [Development](docs/DEVELOPMENT.md) |

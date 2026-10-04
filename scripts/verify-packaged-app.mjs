@@ -7,6 +7,7 @@ import { listPackage } from '@electron/asar';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { electronPlatformSpec, normalizeElectronArch, normalizeElectronPlatform } from './electron-platform.mjs';
 import { resolvePackagedDirectory } from './packaged-directory.mjs';
+import { assertPackagedRuntimeParity } from './packaged-runtime-parity.mjs';
 import { buildIdFromFingerprint, normalizeBuildProvenance } from '../src/buildProvenance.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -49,12 +50,6 @@ const zoektIndexRelativePath = resourcePath('bin', 'zoekt', platform, sourceZoek
 const requiredFiles = [
   spec.executableName,
   resourcePath('app.asar'),
-  resourcePath('src', 'httpServer.ts'),
-  resourcePath('src', 'computerManager.js'),
-  resourcePath('src', 'computer', 'midsceneAdapter.js'),
-  resourcePath('src', 'tools', 'actionCatalog.js'),
-  resourcePath('src', 'config.js'),
-  resourcePath('src', 'mcpServer.js'),
   resourcePath('node_modules', '@modelcontextprotocol', 'server', 'package.json'),
   resourcePath('node_modules', '@modelcontextprotocol', 'node', 'package.json'),
   resourcePath('node_modules', '@modelcontextprotocol', 'core', 'package.json'),
@@ -74,6 +69,13 @@ const requiredFiles = [
   resourcePath('node_modules', 'hono', 'package.json'),
   resourcePath('node_modules', 'zod', 'package.json'),
   resourcePath('node_modules', 'yauzl', 'package.json'),
+  resourcePath('node_modules', '7zip-bin', 'package.json'),
+  resourcePath('node_modules', '7zip-bin', 'index.js'),
+  resourcePath('node_modules', '7zip-bin', platform === 'win32' ? 'win' : platform === 'darwin' ? 'mac' : 'linux', targetArch, platform === 'win32' ? '7za.exe' : '7za'),
+  resourcePath('node_modules', 'tar', 'package.json'),
+  resourcePath('node_modules', '@isaacs', 'fs-minipass', 'package.json'),
+  resourcePath('node_modules', 'chownr', 'package.json'),
+  resourcePath('node_modules', 'minizlib', 'package.json'),
   resourcePath('node_modules', 'pend', 'package.json'),
   resourcePath('node_modules', 'web-tree-sitter', 'package.json'),
   resourcePath('node_modules', 'web-tree-sitter', 'web-tree-sitter.js'),
@@ -115,6 +117,8 @@ for (const relativePath of ['preload.cjs', 'startup-background.js', 'secure-tunn
 }
 
 const rootPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const electronPackage = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
+const runtimeParity = assertPackagedRuntimeParity({ sourceRoot: root, resourcesRoot, rootPackage, electronPackage, platform });
 const packagedPackage = JSON.parse(fs.readFileSync(path.join(resourcesRoot, 'package.json'), 'utf8')); 
 assert.equal(packagedPackage.name, rootPackage.name, 'Packaged package metadata has the wrong product name.');
 assert.equal(packagedPackage.version, rootPackage.version, 'Packaged package metadata has the wrong version.');
@@ -228,4 +232,4 @@ function assertExecutable(file, targetPlatform) {
   assert.notEqual(fs.statSync(file).mode & 0o111, 0, `${targetPlatform} packaged executable lacks execute permissions: ${file}`);
 }
 
-console.log(`Packaged ${platform} application layout verified for v${packagedPackage.version}: ${requiredFiles.length} required files are present.`);
+console.log(`Packaged ${platform} application layout verified for v${packagedPackage.version}: ${requiredFiles.length} required files are present; ${runtimeParity.reduce((total, entry) => total + entry.files, 0)} runtime files match their source SHA-256.`);

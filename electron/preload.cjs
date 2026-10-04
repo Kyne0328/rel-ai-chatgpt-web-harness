@@ -38,6 +38,8 @@ if (surface === 'dashboard') {
     openSettings: () => ipcRenderer.invoke('desktop:open-settings'),
     getSettings: () => ipcRenderer.invoke('desktop:settings:get'),
     saveSettings: settings => ipcRenderer.invoke('desktop:settings:save', settings),
+    saveTunnel: connection => ipcRenderer.invoke('desktop:tunnels:save', connection),
+    removeTunnel: tunnelId => ipcRenderer.invoke('desktop:tunnels:remove', tunnelId),
     getLocalUsage: month => ipcRenderer.invoke('desktop:analytics:local', month),
     getUpdateStatus: () => ipcRenderer.invoke('desktop:update:get'),
     checkForUpdates: () => ipcRenderer.invoke('desktop:update:check'),

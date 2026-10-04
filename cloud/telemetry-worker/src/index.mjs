@@ -1,7 +1,10 @@
 const MAX_PRESENCE_BYTES = 4096;
 const MAX_TRACE_BYTES = 1024 * 1024;
 const MAX_ADMIN_LOGIN_BYTES = 4096;
-const PRESENCE_MIN_INTERVAL_MS = 20 * 60 * 60 * 1000;
+const PRESENCE_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const INSTALLATION_RETENTION_DAYS = 400;
+const DAILY_METRICS_RETENTION_DAYS = 730;
+const ADMIN_PASSWORD_PBKDF2_ITERATIONS = 210_000;
 const ADMIN_SESSION_COOKIE = 'relai_admin_session';
 const ADMIN_SESSION_SECONDS = 12 * 60 * 60;
 const ADMIN_REMEMBER_SESSION_SECONDS = 7 * 24 * 60 * 60;
@@ -64,7 +67,25 @@ function encodeBase64Url(bytes) {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-async function hashAdminPassword(password, salt) {
+async function hashAdminPassword(password, salt, iterations = ADMIN_PASSWORD_PBKDF2_ITERATIONS) {
+  const rounds = Math.max(100_000, Math.min(1_000_000, Math.floor(Number(iterations) || ADMIN_PASSWORD_PBKDF2_ITERATIONS)));
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(String(password || '')),
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+  const bits = await crypto.subtle.deriveBits({
+    name: 'PBKDF2',
+    hash: 'SHA-256',
+    salt: new TextEncoder().encode(`relai-admin\0${salt}`),
+    iterations: rounds
+  }, key, 256);
+  return `pbkdf2-sha256$${rounds}$${encodeBase64Url(new Uint8Array(bits))}`;
+}
+
+async function hashLegacyAdminPassword(password, salt) {
   const bytes = new TextEncoder().encode(`${salt}\0${password}`);
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
   return encodeBase64Url(digest);
@@ -89,8 +110,24 @@ async function verifyAdminCredentials(username, password, env) {
   const salt = String(env.ADMIN_PASSWORD_SALT || '');
   const expectedHash = String(env.ADMIN_PASSWORD_HASH || '');
   if (!salt || !expectedHash || username !== expectedUsername || !password) return false;
-  const actualHash = await hashAdminPassword(password, salt);
-  return constantTimeEqual(actualHash, expectedHash);
+  if (expectedHash.startsWith('pbkdf2-sha256$')) {
+    const [, roundsText] = expectedHash.split('$');
+    const rounds = Number(roundsText);
+    if (!Number.isInteger(rounds) || rounds < 100_000 || rounds > 1_000_000) return false;
+    return constantTimeEqual(await hashAdminPassword(password, salt, rounds), expectedHash);
+  }
+  return constantTimeEqual(await hashLegacyAdminPassword(password, salt), expectedHash);
+}
+
+function readBearerToken(request) {
+  const header = String(request.headers.get('authorization') || '');
+  const match = /^Bearer\s+([A-Za-z0-9_-]{40,128})$/i.exec(header.trim());
+  return match?.[1] || '';
+}
+
+async function hashIngestToken(token) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
+  return encodeBase64Url(digest);
 }
 
 function readCookie(request, name) {
@@ -164,6 +201,13 @@ async function handlePresence(request, env) {
     return json({ ok: false, error: 'Content-Type must be application/json.' }, 415);
   }
 
+  const ingestToken = readBearerToken(request);
+  if (!ingestToken) return json({ ok: false, error: 'Installation credential required.' }, 401);
+  const actor = request.headers.get('cf-connecting-ip') || 'unknown';
+  if (!await allowRate(env.USAGE_IP_RATE_LIMITER, actor)) {
+    return json({ ok: false, error: 'Too many presence requests.' }, 429, { 'retry-after': '60' });
+  }
+
   let body;
   try {
     const bytes = await readLimitedBody(request, MAX_PRESENCE_BYTES);
@@ -181,8 +225,16 @@ async function handlePresence(request, env) {
   }
 
   const existing = await env.DB.prepare(
-    'SELECT last_seen_at, current_version, platform, architecture FROM installations WHERE installation_id = ?'
+    'SELECT last_seen_at, current_version, platform, architecture, ingest_token_hash FROM installations WHERE installation_id = ?'
   ).bind(presence.installationId).first();
+  const ingestTokenHash = await hashIngestToken(ingestToken);
+
+  if (existing?.ingest_token_hash && !constantTimeEqual(ingestTokenHash, existing.ingest_token_hash)) {
+    return json({ ok: false, error: 'Invalid installation credential.' }, 401);
+  }
+  if (!existing?.ingest_token_hash && !await allowRate(env.ENROLL_RATE_LIMITER, actor)) {
+    return json({ ok: false, error: 'Too many new installation registrations.' }, 429, { 'retry-after': '60' });
+  }
 
   const now = new Date();
   const nowIso = now.toISOString();
@@ -192,21 +244,25 @@ async function handlePresence(request, env) {
       || existing.platform !== presence.platform
       || existing.architecture !== presence.arch;
     if (!metadataChanged && Number.isFinite(lastSeen) && now.getTime() - lastSeen < PRESENCE_MIN_INTERVAL_MS) {
+      if (!existing.ingest_token_hash) {
+        await env.DB.prepare('UPDATE installations SET ingest_token_hash = ? WHERE installation_id = ?')
+          .bind(ingestTokenHash, presence.installationId).run();
+      }
       return json({ ok: true, updated: false }, 202);
     }
 
     await env.DB.prepare(
       `UPDATE installations
-       SET last_seen_at = ?, current_version = ?, platform = ?, architecture = ?
+       SET last_seen_at = ?, current_version = ?, platform = ?, architecture = ?, ingest_token_hash = ?
        WHERE installation_id = ?`
-    ).bind(nowIso, presence.version, presence.platform, presence.arch, presence.installationId).run();
+    ).bind(nowIso, presence.version, presence.platform, presence.arch, ingestTokenHash, presence.installationId).run();
     return json({ ok: true, updated: true }, 202);
   }
 
   await env.DB.prepare(
     `INSERT INTO installations
-      (installation_id, first_seen_at, last_seen_at, first_version, current_version, platform, architecture)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+      (installation_id, first_seen_at, last_seen_at, first_version, current_version, platform, architecture, ingest_token_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     presence.installationId,
     nowIso,
@@ -214,7 +270,8 @@ async function handlePresence(request, env) {
     presence.version,
     presence.version,
     presence.platform,
-    presence.arch
+    presence.arch,
+    ingestTokenHash
   ).run();
   return json({ ok: true, updated: true }, 202);
 }
@@ -226,7 +283,19 @@ async function handleTraces(request, env) {
   }
 
   const actor = request.headers.get('cf-connecting-ip') || 'unknown';
-  if (!await allowRate(env.TRACE_RATE_LIMITER, actor)) {
+  if (!await allowRate(env.TRACE_IP_RATE_LIMITER, actor)) {
+    return text('Too many trace requests.', 429, { 'retry-after': '60' });
+  }
+  const installationId = String(request.headers.get('x-relai-installation-id') || '').trim();
+  const ingestToken = readBearerToken(request);
+  if (!validUuidV4(installationId) || !ingestToken) return text('Installation credential required.', 401);
+  const installation = await env.DB.prepare(
+    'SELECT ingest_token_hash FROM installations WHERE installation_id = ?'
+  ).bind(installationId).first();
+  if (!installation?.ingest_token_hash || !constantTimeEqual(await hashIngestToken(ingestToken), installation.ingest_token_hash)) {
+    return text('Invalid installation credential.', 401);
+  }
+  if (!await allowRate(env.TRACE_RATE_LIMITER, installationId)) {
     return text('Too many trace requests.', 429, { 'retry-after': '60' });
   }
 
@@ -349,6 +418,19 @@ async function handleAdminLogout(request, env) {
 async function handleAdminSummary(request, env) {
   if (!await isAuthorizedAdmin(request, env)) return json({ ok: false, error: 'Authentication required.' }, 401);
   return json({ ok: true, summary: await aggregateSummary(env.DB) });
+}
+
+async function pruneRetainedTelemetry(db) {
+  await db.batch([
+    db.prepare(`DELETE FROM installations WHERE unixepoch(last_seen_at) < unixepoch('now', '-${INSTALLATION_RETENTION_DAYS} days')`),
+    db.prepare(`DELETE FROM daily_metrics WHERE day < date('now', '-${DAILY_METRICS_RETENTION_DAYS} days')`),
+    db.prepare("DELETE FROM admin_sessions WHERE unixepoch(expires_at) <= unixepoch('now')")
+  ]);
+}
+
+async function runDailyMaintenance(db) {
+  await pruneRetainedTelemetry(db);
+  await writeDailySnapshot(db);
 }
 
 async function writeDailySnapshot(db) {
@@ -1490,10 +1572,10 @@ a {
         <div class="kpi-icon" aria-hidden="true">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>
         </div>
-        <span class="kpi-badge">All-Time</span>
+        <span class="kpi-badge">400-day window</span>
       </div>
       <div class="kpi-value" id="kpi-total">0</div>
-      <div class="kpi-label">Total Installations</div>
+      <div class="kpi-label">Retained Installations</div>
       <div class="kpi-meta">Deduplicated client registry</div>
     </div>
 
@@ -1503,10 +1585,10 @@ a {
         <div class="kpi-icon" aria-hidden="true">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
         </div>
-        <span class="kpi-badge pulse">Live (DAU)</span>
+        <span class="kpi-badge pulse">Recent presence</span>
       </div>
       <div class="kpi-value" id="kpi-active1d">0</div>
-      <div class="kpi-label">Active 24 Hours</div>
+      <div class="kpi-label">Seen in Last 24 Hours</div>
       <div class="kpi-meta"><span id="kpi-active1d-pct">0%</span> of installations</div>
     </div>
 
@@ -1516,10 +1598,10 @@ a {
         <div class="kpi-icon" aria-hidden="true">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="M8 2v4"/><path d="M16 2v4"/></svg>
         </div>
-        <span class="kpi-badge">Weekly (WAU)</span>
+        <span class="kpi-badge">Recent presence</span>
       </div>
       <div class="kpi-value" id="kpi-active7d">0</div>
-      <div class="kpi-label">Active 7 Days</div>
+      <div class="kpi-label">Seen in Last 7 Days</div>
       <div class="kpi-meta"><span id="kpi-active7d-pct">0%</span> of installations</div>
     </div>
 
@@ -1529,10 +1611,10 @@ a {
         <div class="kpi-icon" aria-hidden="true">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/><path d="m19 3-.8 2.2a1 1 0 0 1-.7.7L15 6.5l2.2.8a1 1 0 0 1 .7.7l.8 2.2.8-2.2a1 1 0 0 1 .7-.7l2.2-.8-2.2-.8a1 1 0 0 1-.7-.7Z"/></svg>
         </div>
-        <span class="kpi-badge">Monthly (MAU)</span>
+        <span class="kpi-badge">Recent presence</span>
       </div>
       <div class="kpi-value" id="kpi-active30d">0</div>
-      <div class="kpi-label">Active 30 Days</div>
+      <div class="kpi-label">Seen in Last 30 Days</div>
       <div class="kpi-meta"><span id="kpi-active30d-pct">0%</span> of installations</div>
     </div>
 
@@ -1545,7 +1627,7 @@ a {
         <span class="kpi-badge">Growth</span>
       </div>
       <div class="kpi-value" id="kpi-new1d">+0</div>
-      <div class="kpi-label">New Installs Today</div>
+      <div class="kpi-label">New Installs · Last 24h</div>
       <div class="kpi-sub-pills">
         <span class="kpi-sub-pill" id="kpi-new7d">+0 in 7d</span>
         <span class="kpi-sub-pill" id="kpi-new30d">+0 in 30d</span>
@@ -1557,12 +1639,12 @@ a {
   <section class="chart-panel">
     <div class="chart-header">
       <div class="chart-title-group">
-        <h2>Adoption & Active Trend</h2>
-        <p>Daily active installations and new device registrations captured by daily cron snapshots.</p>
+        <h2>Adoption & Presence Trend</h2>
+        <p>Rolling 24-hour presence and new-install counts captured once per day at 00:15 UTC.</p>
       </div>
       <div class="chart-controls">
         <div class="chart-legend">
-          <div class="legend-item"><span class="legend-swatch swatch-active"></span><span>Active 24h</span></div>
+          <div class="legend-item"><span class="legend-swatch swatch-active"></span><span>Seen in 24h</span></div>
           <div class="legend-item"><span class="legend-swatch swatch-new"></span><span>New Installs</span></div>
         </div>
         <div class="range-tabs">
@@ -1627,12 +1709,12 @@ a {
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-6M6 20V10M18 20V4"/></svg>
       </div>
       <div class="insight-copy">
-        <strong>Stickiness & Engagement Ratio</strong>
-        <p>Proportion of monthly active installations returning daily (DAU / MAU ratio).</p>
+        <strong>Presence Recency Ratio</strong>
+        <p>Share of installations seen in the last 30 days that were also seen in the last 24 hours.</p>
       </div>
       <div class="insight-stat">
         <div class="insight-stat-num" id="stat-stickiness">—</div>
-        <div class="insight-stat-label">DAU / MAU</div>
+        <div class="insight-stat-label">24h / 30d</div>
       </div>
     </div>
 
@@ -2016,11 +2098,11 @@ a {
     let md = '### Rel.AI Operations — Developer Analytics\\n\\n' +
       '| Metric | Value |\\n' +
       '|:---|---:|\\n' +
-      '| Total Installations | ' + Number(t.installations || 0).toLocaleString() + ' |\\n' +
-      '| Active 24 Hours (DAU) | ' + Number(t.active1d || 0).toLocaleString() + ' |\\n' +
-      '| Active 7 Days (WAU) | ' + Number(t.active7d || 0).toLocaleString() + ' |\\n' +
-      '| Active 30 Days (MAU) | ' + Number(t.active30d || 0).toLocaleString() + ' |\\n' +
-      '| New Installs (Today) | +' + Number(t.new1d || 0).toLocaleString() + ' |\\n' +
+      '| Retained Installations (400d) | ' + Number(t.installations || 0).toLocaleString() + ' |\\n' +
+      '| Seen in Last 24 Hours | ' + Number(t.active1d || 0).toLocaleString() + ' |\\n' +
+      '| Seen in Last 7 Days | ' + Number(t.active7d || 0).toLocaleString() + ' |\\n' +
+      '| Seen in Last 30 Days | ' + Number(t.active30d || 0).toLocaleString() + ' |\\n' +
+      '| New Installs (Last 24h) | +' + Number(t.new1d || 0).toLocaleString() + ' |\\n' +
       '| New Installs (7d) | +' + Number(t.new7d || 0).toLocaleString() + ' |\\n' +
       '| New Installs (30d) | +' + Number(t.new30d || 0).toLocaleString() + ' |\\n\\n';
 
@@ -2146,9 +2228,9 @@ const handler = {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(writeDailySnapshot(env.DB));
+    ctx.waitUntil(runDailyMaintenance(env.DB));
   }
 };
 
-export { adminHtml, aggregateSummary, axiomTraceUrl, constantTimeEqual, hashAdminPassword, hashAdminSessionToken, isAuthorizedAdmin, readCookie, validatePresence, verifyAdminCredentials, writeDailySnapshot };
+export { adminHtml, aggregateSummary, axiomTraceUrl, constantTimeEqual, hashAdminPassword, hashAdminSessionToken, hashIngestToken, isAuthorizedAdmin, pruneRetainedTelemetry, readCookie, runDailyMaintenance, validatePresence, verifyAdminCredentials, writeDailySnapshot };
 export default handler;

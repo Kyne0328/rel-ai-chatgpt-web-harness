@@ -55,9 +55,11 @@
       "preload.cjs",
       "launcher-utils.js",
       "secure-tunnel-runtime.js",
+      "tunnel-runtime-pool.js",
       "tunnel-log-parser.js",
       "tunnel-recovery-supervisor.js",
       "tunnel-credentials.js",
+      "tunnel-connections.js",
       "ipc-handlers.js",
       "ipc-handlers-dashboard.js",
       "ipc-handlers-code.js",
@@ -118,9 +120,7 @@
         "from": "../src",
         "to": "src",
         "filter": [
-          "**/*.js",
-          "**/*.ts",
-          "**/*.ps1"
+          "**/*"
         ]
       },
       {
@@ -157,6 +157,11 @@
         "to": "node_modules",
         "filter": [
           "@modelcontextprotocol/core/**",
+          "7zip-bin/**",
+          "tar/**",
+          "@isaacs/fs-minipass/**",
+          "chownr/**",
+          "minizlib/**",
           "@modelcontextprotocol/node/**",
           "@modelcontextprotocol/server/**",
           "@midscene/**",
@@ -558,7 +563,26 @@
     "p-retry": "^8.0.1"
   },
   "overrides": {
-    "js-yaml": "4.3.2"
+    "@electron/get@5.0.0": {
+      "undici": "7.29.1"
+    },
+    "fast-uri": "3.1.8",
+    "js-yaml": "4.3.2",
+    "minimatch@3.1.5": {
+      "brace-expansion": "1.1.21"
+    },
+    "minimatch@5.1.9": {
+      "brace-expansion": "2.1.7"
+    },
+    "minimatch@9.0.9": {
+      "brace-expansion": "2.1.7"
+    },
+    "minimatch@10.2.6": {
+      "brace-expansion": "5.0.12"
+    },
+    "node-gyp@12.4.0": {
+      "undici": "6.28.1"
+    }
   },
   "allowScripts": {
     "electron-winstaller@5.4.0": true,

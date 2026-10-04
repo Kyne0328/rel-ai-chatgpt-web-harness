@@ -4,10 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SERVER_INFO_META_KEY } from '@modelcontextprotocol/server';
-import { TASKS_EXTENSION_REVISION } from '../src/mcp/protocol.js';
 import { recordTaskValidationAffinity, learnedValidationChecks } from '../src/knowledgeStore.js';
-import { readLocalUsageSnapshot, recordLocalTaskCompletion, recordLocalToolOutcome } from '../src/localAnalytics.js';
+import { flushLocalAnalytics, readLocalUsageSnapshot, recordLocalTaskCompletion, recordLocalToolOutcome } from '../src/localAnalytics.js';
 import { repositoryIndexPath } from '../src/repository/intelligence/database.js';
+import { contentTypeForStaticAsset } from '../src/http/io.ts';
 import { withStateDatabase } from '../src/stateDatabase.ts';
 import { getTaskHistoryDir, writeSession } from '../src/taskHistoryStorage.ts';
 import { readTaskHistorySessionRecord } from '../src/taskHistoryStore.ts';
@@ -53,7 +53,7 @@ config.stateDir = stateDir;
 config.auditLogPath = path.join(stateDir, 'audit.jsonl');
 config.workspaces = { repo: { ...(config.workspaces?.repo || {}), path: root } };
 fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-const { child, base } = await startHttpTestServer({
+const { child, base, getStderr } = await startHttpTestServer({
   root,
   configPath,
   token,
@@ -73,6 +73,26 @@ try {
   assert.match(dashboardCookie, /^relai_dashboard_session=/);
   await dashboardLogin.arrayBuffer();
   const dashboardHeaders = { cookie: dashboardCookie };
+
+  for (const prefix of ['/ui/', '/public/ui/']) {
+    for (const [relativePath, contentType] of [
+      ['colorTokens.mjs', 'application/javascript; charset=utf-8'],
+      ['status-tone.js', 'application/javascript; charset=utf-8'],
+      ['styles/color-tokens.css', 'text/css; charset=utf-8']
+    ]) {
+      const route = prefix + relativePath;
+      const response = await fetch(`${base}${route}`, { headers: dashboardHeaders });
+      assert.equal(response.status, 200, `${route} must serve the raw UI asset`);
+      assert.equal(response.headers.get('content-type'), contentType, `${route} must retain a browser-compatible MIME type`);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), fs.readFileSync(path.join(root, 'src', 'ui', relativePath)),
+        `${route} must return the exact source asset bytes`);
+    }
+  }
+  assert.equal(contentTypeForStaticAsset('example.MJS'), 'application/javascript');
+  assert.equal(contentTypeForStaticAsset('example.ts'), 'application/javascript');
+  for (const filePath of ['asset.unknown', 'asset.mjs.map', 'assetmjs', 'asset']) {
+    assert.equal(contentTypeForStaticAsset(filePath), 'application/octet-stream', `${filePath} must keep the unknown-extension fallback`);
+  }
 
   const telemetrySettings = await fetch(`${base}/api/telemetry`, { headers: dashboardHeaders }).then(response => response.json());
   assert.equal(telemetrySettings.ok, true);
@@ -125,11 +145,7 @@ try {
   assert.equal(discovery.body.result?.capabilities?.experimental?.relai?.toolCount, activeToolCount);
   assert.equal(Object.hasOwn(discovery.body.result?.capabilities?.experimental?.relai || {}, 'appToolCount'), false, 'native presentation must not advertise an app-only tool count');
   assert.equal(discovery.body.result?.capabilities?.experimental?.relai?.deploymentMode, 'local_developer');
-  assert.equal(discovery.body.result?.capabilities?.experimental?.relai?.statelessRequestModel, true);
-  assert.deepEqual(
-    discovery.body.result?.capabilities?.extensions?.['io.modelcontextprotocol/tasks'],
-    { revision: TASKS_EXTENSION_REVISION }
-  );
+  assert.equal(discovery.body.result?.capabilities?.experimental?.relai?.statelessRequestModel, true);  assert.deepEqual(discovery.body.result?.capabilities?.events, {}, 'modern HTTP clients must discover real MCP Events support');
   assert.equal(discovery.body.result?._meta?.[SERVER_INFO_META_KEY]?.name, 'rel-ai-mcp');
   assert.equal(discovery.body.result?._meta?.[SERVER_INFO_META_KEY]?.version, expectedVersion, 'HTTP discovery must report the canonical package version');
   const serverInstructions = discovery.body.result?.instructions || '';
@@ -170,8 +186,14 @@ try {
   const listedByName = new Map(listed.body.result.tools.map(tool => [tool.name, tool]));
   for (const name of activeToolNames) {
     assert.deepEqual(listedByName.get(name)?._meta?.securitySchemes, [{ type: 'noauth' }], `${name} must advertise noauth through ChatGPT compatibility metadata`);
-    assert.equal(listedByName.get(name)?._meta?.ui, undefined, `${name} must stay iframe-free`);
-    assert.equal(listedByName.get(name)?._meta?.['openai/outputTemplate'], undefined, `${name} must not attach a ChatGPT output template`);
+    assert.equal(listedByName.get(name)?._meta?.ui, undefined, `${name} must stay model-facing and UI-free`);
+    assert.equal(listedByName.get(name)?._meta?.['openai/outputTemplate'], undefined, `${name} must not auto-mount an MCP App`);
+  }
+  assert.deepEqual(names.filter(name => name.startsWith('relai_app_')), [], 'HTTP discovery must not expose MCP Apps helper tools');
+  for (const name of activeToolNames) {
+    const tool = listedByName.get(name);
+    assert.equal(tool.annotations?.readOnlyHint, ['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect'].includes(tool.name), `${tool.name} read-only hint must reflect all exposed actions`);
+    assert.equal(tool.annotations?.destructiveHint, !['relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect', 'relai_publish'].includes(tool.name), `${tool.name} destructive hint must cover potentially destructive actions`);
   }
   assert.deepEqual(listedByName.get('relai_publish')?.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true });
   assert.equal(listedByName.has('relai_approval'), false);
@@ -179,6 +201,24 @@ try {
   for (const expected of activeToolNames) assert.ok(names.includes(expected), `${expected} missing`);
   for (const legacy of ['relai_begin_work', 'relai_process_start', 'relai_run_checks', 'relai_git_push']) {
     assert.equal(names.includes(legacy), false, `${legacy} must not be exposed by the unified surface`);
+  }
+
+  for (const clientName of ['chatgpt', 'codex', 'responses-api', 'agents-api']) {
+    const compatibleClient = await createHttpMcpSession(base, {
+      token,
+      clientInfo: { name: clientName, version: '2026-09-30' }
+    });
+    assert.deepEqual(
+      compatibleClient.discovery.body.result?.supportedVersions,
+      [MCP_VERSION],
+      `${clientName} compatibility must negotiate the same modern MCP protocol`
+    );
+    const compatibleTools = await compatibleClient.request('tools/list');
+    assert.deepEqual(
+      compatibleTools.body.result.tools.map(tool => tool.name),
+      names,
+      `${clientName} compatibility must use the same canonical tool surface without client-name branches`
+    );
   }
   const inspect = listed.body.result.tools.find(tool => tool.name === 'relai_inspect');
   assert.ok(inspect.inputSchema.properties.action.enum.includes('trace'));
@@ -198,10 +238,10 @@ try {
     name: 'relai_work',
     arguments: { action: 'status', workspace: 'repo' }
   });
-  assert.equal(status.response.status, 200, JSON.stringify(status.body));
+  assert.equal(status.response.status, 200, `${JSON.stringify(status.body)}\n${getStderr()}`);
   assert.equal(status.body.result?.isError, false, JSON.stringify(status.body));
   assert.equal(status.body.result?.structuredContent?.ok, true);
-  assert.equal(status.body.result?._meta?.relai, undefined, 'native status results must not carry Rel.AI component hydration metadata');
+  assert.equal(status.body.result?._meta?.relai, undefined, 'relai_work status must not mount or hydrate an MCP App');
 
   const projectless = await client.request('tools/call', {
     name: 'relai_work',
@@ -224,7 +264,7 @@ try {
   });
   assert.equal(started.response.status, 200, JSON.stringify(started.body));
   assert.equal(started.body.result?.isError, false, JSON.stringify(started.body));
-  assert.equal(started.body.result?._meta?.relai, undefined, 'begin results must not request ChatGPT iframe hydration');
+  assert.equal(started.body.result?._meta?.relai, undefined, 'work.begin must not auto-mount or hydrate another MCP App');
   const workId = started.body.result?.structuredContent?.work_id;
   assert.match(workId || '', /^[0-9a-f-]{36}$/i, 'HTTP Apps transport must start work from a configured workspace path');
   const persistedTask = await waitForTaskCorrelation(workId, 'chat-session-regression');
@@ -423,9 +463,28 @@ try {
   assert.equal(fs.readFileSync(path.join(archivePath, 'keep.txt'), 'utf8'), 'project files must stay\n',
     'deleting a project must never delete source files regardless of history cleanup choice');
 
+  const events = await client.request('events/list');
+  assert.equal(events.response.status, 200, JSON.stringify(events.body));
+  const eventNames = events.body.result?.events?.map(item => item.name) || [];
+  for (const expectedEvent of ['work.completed', 'work.failed', 'work.cancelled', 'operation.completed', 'operation.failed', 'operation.cancelled', 'process.exited', 'process.failed', 'process.orphaned']) {
+    assert.ok(eventNames.includes(expectedEvent), `events/list is missing ${expectedEvent}`);
+  }
+  const unsafeEventSubscription = await client.request('events/subscribe', {
+    name: 'work.completed',
+    arguments: { workspace: 'repo' },
+    delivery: {
+      mode: 'webhook',
+      url: 'http://127.0.0.1:9999/callback',
+      secret: `whsec_${Buffer.alloc(32, 7).toString('base64')}`
+    }
+  });
+  assert.equal(unsafeEventSubscription.response.status, 200);
+  assert.equal(unsafeEventSubscription.body.error?.code, -32602, 'MCP Events must reject non-HTTPS/private callback endpoints before delivery');
+
   const resources = await client.request('resources/list');
   assert.ok(resources.body.result.resources.some(item => item.uri === 'relai://server/tool-surface'));
-  assert.equal(resources.body.result.resources.some(item => item.uri === 'ui://relai/approval/v1.html'), false, 'resource discovery must not advertise the removed approval card');
+  assert.equal(resources.body.result.resources.some(item => item.uri === 'relai://server/live-status'), false, 'resource discovery must not expose panel-only live status');
+  assert.equal(resources.body.result.resources.some(item => String(item.uri || '').startsWith('ui://relai/')), false, 'resource discovery must not expose MCP Apps resources');
   assert.equal(resources.body.result._meta?.['io.modelcontextprotocol/cache']?.cacheScope || resources.body.result.cacheScope || 'private', 'private');
 
   const surface = await client.request('resources/read', { uri: 'relai://server/tool-surface' });
@@ -436,15 +495,10 @@ try {
   assert.equal(manifest.toolCount, activeToolCount);
   assert.equal(manifest.toolCount, manifest.tools.length);
   const surfaceByName = new Map(manifest.tools.map(tool => [tool.name, tool]));
-  assert.equal(surfaceByName.get('relai_exec').executionClass, 'native_task_eligible');
-  assert.equal(surfaceByName.get('relai_exec').taskSupport, 'optional');
+  assert.equal(surfaceByName.get('relai_exec').executionClass, 'background_fallback_eligible');
   assert.equal(surfaceByName.get('relai_process').executionClass, 'persistent_process');
-  assert.equal(surfaceByName.get('relai_process').taskSupport, 'forbidden');
   const validateActions = new Map(surfaceByName.get('relai_validate').actions.map(item => [item.action, item]));
-  assert.equal(validateActions.get('checks').taskSupport, 'optional');
-  assert.equal(validateActions.get('diagnostics').taskSupport, 'optional');
-  assert.equal(validateActions.get('http').taskSupport, 'optional');
-  assert.equal(validateActions.get('http').executionClass, 'native_task_eligible');
+  assert.equal(validateActions.get('http').executionClass, 'background_fallback_eligible');
   assert.equal(manifest.cache.cacheScope, 'private');
   assert.ok(manifest.cache.revision);
 
@@ -465,9 +519,14 @@ try {
   const getMcp = await fetch(`${base}/mcp`, { headers: { authorization: `Bearer ${token}` } });
   assert.equal(getMcp.status, 405);
   assert.equal(getMcp.headers.get('allow'), 'POST');
+} catch (error) {
+  console.error('HTTP smoke primary failure:', error);
+  throw error;
 } finally {
   if (client) await client.close().catch(() => {});
   await stopHttpTestServer(child);
+  // Parent-side analytics writes retain SQLite handles until explicitly flushed.
+  await flushLocalAnalytics(config);
   assert.equal(fs.readFileSync(profile, 'utf8'), originalProfile);
   fs.rmSync(stateDir, {
     recursive: true,

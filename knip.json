@@ -13,7 +13,6 @@
         "scripts/**/*.mjs",
         "src/**/*.{js,mjs,ts,tsx,css}",
         "test/**/*.mjs",
-        "public/**/*.js",
         "types/**/*.d.ts"
       ],
       "paths": {

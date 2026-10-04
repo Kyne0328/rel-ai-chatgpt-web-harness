@@ -152,7 +152,8 @@ async function case_workflow_contract_unit() {
     const assert = __m0.default;
   
     const __m1 = await import("../src/workflow/contracts.js");
-    const { WORKFLOW_INTENTS, deterministicActionId, stableJson } = __m1;
+    const { WORKFLOW_INTENTS, deterministicActionId } = __m1;
+    const { stableJson } = await import("../src/stableJson.js");
   
   assert.deepEqual(WORKFLOW_INTENTS, ['auto', 'investigation', 'bugfix', 'feature', 'refactor', 'migration', 'cleanup', 'documentation', 'performance', 'review', 'release', 'other']);
   
@@ -208,7 +209,7 @@ async function case_workflow_dashboard_projection_unit() {
   assert.equal(inactiveValidationFailure.terminal, false);
   assert.equal(workSessionStateView({ status: 'inactive', validation: 'failed' }).label, 'Validation failed', 'existing inactive history with failed validation must recover useful context');
   
-  const ui = fs.readFileSync('src/ui/features/sessions/index.js', 'utf8');
+  const ui = fs.readFileSync('src/ui/features/sessions/model.js', 'utf8');
   assert.doesNotMatch(ui, /workflow\.stage|workflow\.recommendedAction/);
   
   console.log('Dashboard strips obsolete workflow guidance while preserving resumable inactivity state.');

@@ -32,7 +32,7 @@ export interface ManagedProcessDto {
   status: ManagedProcessStatus;
   metadataRevision: string;
   lifecycle: string;
-  originatingTaskId: string | null;
+
   workSessionId: string | null;
   startedAt: string;
   endedAt: string | null;

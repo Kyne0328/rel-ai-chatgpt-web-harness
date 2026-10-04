@@ -1,8 +1,9 @@
 import * as crypto from 'node:crypto';
+import { stableJson } from '../stableJson.js';
 import { getPublicToolSchemas, getToolDefinitions, getToolSurfaceManifest } from '../tools/schema.js';
+import { TOOL_SCHEMA_VERSION } from '../tools/schemaVersion.js';
 import { PUBLIC_MCP_SERVER_INSTRUCTIONS } from './serverInstructions.js';
 
-const MCP_SCHEMA_VERSION = 7;
 let cachedToolManifest = null;
 
 function buildToolManifest(config = {}) {
@@ -14,7 +15,7 @@ function buildToolManifest(config = {}) {
     .map(tool => canonicalTool(tool, definitionByName.get(tool.name), surfaceByName.get(tool.name)))
     .sort((left, right) => left.name.localeCompare(right.name));
   const canonical = {
-    schemaVersion: MCP_SCHEMA_VERSION,
+    schemaVersion: TOOL_SCHEMA_VERSION,
     toolSurfaceVersion: Number(surface.toolSurfaceVersion || 0),
     instructions: PUBLIC_MCP_SERVER_INSTRUCTIONS,
     tools
@@ -48,7 +49,6 @@ function canonicalTool(tool, definition, surfaceTool) {
 function executionMetadata(surfaceTool) {
   return {
     executionClass: String(surfaceTool?.executionClass || 'bounded_synchronous'),
-    taskSupport: String(surfaceTool?.taskSupport || 'forbidden'),
     ...(Array.isArray(surfaceTool?.executionClasses) ? { executionClasses: [...surfaceTool.executionClasses] } : {}),
     ...(Array.isArray(surfaceTool?.actions) ? { actions: canonicalValue(surfaceTool.actions) } : {})
   };
@@ -64,10 +64,4 @@ function canonicalValue(value) {
   return result;
 }
 
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (!value || typeof value !== 'object') return JSON.stringify(value);
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
-}
-
-export { buildToolManifest, stableJson };
+export { buildToolManifest };

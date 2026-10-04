@@ -466,6 +466,9 @@ function createHarness({
   assert.equal(webContents[0].debuggerCommands.findLast(([method]) => method === 'Input.setIgnoreInputEvents')?.[1]?.ignore, true, 'AI ownership must lock native page input after navigation');
   await host.setControl('user');
   assert.equal(webContents[0].debuggerCommands.findLast(([method]) => method === 'Input.setIgnoreInputEvents')?.[1]?.ignore, false, 'user takeover must enable native page input');
+  webContents[0].emit('blur');
+  assert.equal(host.getState().control, 'ai', 'clicking away or Alt+Tab from the active user-controlled browser page must immediately return control to AI');
+  await host.setControl('user');
   await host.setControl('ai');
   assert.equal(webContents[0].debuggerCommands.findLast(([method]) => method === 'Input.setIgnoreInputEvents')?.[1]?.ignore, true, 'returning control must lock native page input again');
 

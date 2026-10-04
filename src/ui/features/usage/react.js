@@ -18,7 +18,7 @@ const h = React.createElement;
 const SparkChart = lazy(() => import('../../components/sparkline.js').then(module => ({ default: module.SparkChart })));
 const AnalyticsTimelineChart = lazy(() => import('../../components/charts.js').then(module => ({ default: module.AnalyticsTimelineChart })));
 const AnalyticsBubbleMatrixChart = lazy(() => import('../../components/charts.js').then(module => ({ default: module.AnalyticsBubbleMatrixChart })));
-const USAGE_STORE_KEYS = Object.freeze(['live']);
+const USAGE_STORE_KEYS = Object.freeze([]);
 const CHART_METRICS = Object.freeze([
   ['toolCalls', 'Actions', 'activity'],
   ['recoverableFailures', 'Retryable problems', 'refresh'],
@@ -35,7 +35,7 @@ const METRIC_ICONS = Object.freeze({
 
 export function createUsageRoute(useDashboardSlices) {
   return function UsageRoute() {
-    const { live } = useDashboardSlices(USAGE_STORE_KEYS);
+    useDashboardSlices(USAGE_STORE_KEYS);
     const params = useMemo(() => getRouteParams(), []);
     const requestedRange = params.get('range');
     const defaults = useMemo(() => customDateDefaults(), []);
@@ -47,11 +47,9 @@ export function createUsageRoute(useDashboardSlices) {
     const [analytics, setAnalytics] = useState(null);
     const [refreshToken, setRefreshToken] = useState(0);
     const [status, setStatus] = useState('Loading analytics…');
-    const initialLoad = useRef(true);
     const loadingRef = useRef(false);
     const pendingLiveRefreshRef = useRef(false);
     const analyticsRef = useRef(null);
-    const taskRevision = Number(live?.revisions?.task || 0);
 
     const load = useCallback(async ({ silent = false } = {}) => {
       if (loadingRef.current) {
@@ -93,15 +91,6 @@ export function createUsageRoute(useDashboardSlices) {
     useEffect(() => {
       void load();
     }, [load, refreshToken]);
-
-    useEffect(() => {
-      if (initialLoad.current) {
-        initialLoad.current = false;
-        return undefined;
-      }
-      const timer = window.setTimeout(() => { void load({ silent: true }); }, 180);
-      return () => window.clearTimeout(timer);
-    }, [load, taskRevision]);
 
     useEffect(() => {
       const syncFromRoute = () => {

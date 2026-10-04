@@ -11,6 +11,7 @@ import {
   dashboardSnapshot,
   dashboardTaskCodeDiff,
   dashboardTaskCodeWorkspace,
+  dashboardTaskHistory,
   dashboardTaskSession,
   dashboardTools,
   dashboardWorkspacePreflight,
@@ -160,7 +161,11 @@ const handleTaskSession = (ctx: HttpRouteContext): void => {
     sendJson(ctx.res, 400, { ok: false, error: 'task is required.' });
     return;
   }
-  const result = dashboardTaskSession(taskId);
+  const result = dashboardTaskSession(taskId, {
+    activityOnly: ctx.parsed.searchParams.get('activityOnly') === '1',
+    activityLimit: Number(ctx.parsed.searchParams.get('activityLimit') || 200),
+    activityCursor: parseCursor(ctx.parsed.searchParams.get('activityCursor'))
+  });
   if (!result) {
     sendJson(ctx.res, 404, { ok: false, error: 'Work session not found.' });
     return;
@@ -168,15 +173,35 @@ const handleTaskSession = (ctx: HttpRouteContext): void => {
   sendJson(ctx.res, 200, result);
 };
 
+const handleTaskHistory = (ctx: HttpRouteContext): void => {
+  sendJson(ctx.res, 200, dashboardTaskHistory({
+    limit: Number(ctx.parsed.searchParams.get('limit') || 100),
+    workspace: String(ctx.parsed.searchParams.get('workspace') || ''),
+    cursor: parseCursor(ctx.parsed.searchParams.get('cursor'))
+  }));
+};
+
 const handleApiLogs = (ctx: HttpRouteContext): void => {
   const limit = Number(ctx.parsed.searchParams.get('limit') || 100);
-  sendJson(ctx.res, 200, dashboardLogs(ctx.options, limit));
+  sendJson(ctx.res, 200, dashboardLogs(ctx.options, limit, parseCursor(ctx.parsed.searchParams.get('cursor'))));
 };
 
 const handleReleaseNotes = (ctx: HttpRouteContext): void => sendJson(ctx.res, 200, dashboardReleaseNotes());
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function parseCursor(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export {
@@ -187,6 +212,7 @@ export {
   handleBrowserPreview,
   handleTaskCodeWorkspace,
   handleTaskCodeDiff,
+  handleTaskHistory,
   handleTaskSession,
   handleApiLogs,
   handleReleaseNotes,

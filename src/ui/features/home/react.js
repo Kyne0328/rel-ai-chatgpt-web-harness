@@ -36,7 +36,7 @@ function HomeView({ data = {} }) {
     activeCard ? h(TaskActivityCard, { model: activeCard }) : null,
     h(DesktopSetupChecklist, { setup }),
     h(ConnectionHero, { state: state.bridgeState }),
-    h(HomeAnalytics, { taskRevision: Number(data.live?.revisions?.task || 0), workspace }),
+    h(HomeAnalytics, { workspace }),
     h('div', { className: 'layout-grid' },
       h(WorkspaceSummaryCard, { workspaces: state.workspaces, findings: state.findings }),
       h(RecentTasksCard, { tasks: recentTasks })
@@ -224,7 +224,7 @@ function RecentTasksCard({ tasks }) {
   );
 }
 
-function HomeAnalytics({ taskRevision, workspace }) {
+function HomeAnalytics({ workspace }) {
   const [analytics, setAnalytics] = useState({ scope: null, error: false, loading: true });
   useEffect(() => {
     let active = true;
@@ -235,7 +235,7 @@ function HomeAnalytics({ taskRevision, workspace }) {
         .catch(() => { if (active) setAnalytics(current => ({ ...current, error: true, loading: false })); });
     }, 180);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [taskRevision, workspace]);
+  }, [workspace]);
   if (analytics.scope) return h(HomeAnalyticsContent, { scope: analytics.scope, refreshing: analytics.loading });
   return h('section', { className: 'card home-analytics-card compact-summary', 'data-home-analytics': '', 'aria-busy': analytics.loading ? 'true' : 'false' },
     h('div', { className: 'card-head home-analytics-head' },

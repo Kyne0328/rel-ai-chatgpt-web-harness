@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
-
-const AUTH_MODES = Object.freeze(['static_bearer', 'local_no_auth']);
+import { isMcpAuthMode } from '../contracts/mcp.ts';
+import { MCP_PROTOCOL_VERSION } from '../contracts/mcp.ts';
 const RECENT_ACTIVITY_MS = 2 * 60 * 1000;
 
 class McpConnectionManager {
@@ -84,7 +84,6 @@ class McpConnectionManager {
     this.metrics.requestsReceived += 1;
     if (this.lastRequestMethod === 'server/discover') this.metrics.discoveryRequests += 1;
     if (this.lastRequestMethod === 'tools/list') this.metrics.toolListRequests += 1;
-    if (this.lastRequestMethod.startsWith('tasks/')) this.metrics.taskRequests += 1;
     if (this.state === 'degraded') this.state = 'ready';
     this.record('mcp_request_received', {
       requestId,
@@ -172,7 +171,7 @@ class McpConnectionManager {
       status: this.state,
       activityStatus: this.activityStatus(),
       requestModel: 'stateless',
-      protocolVersion: '2026-07-28',
+      protocolVersion: MCP_PROTOCOL_VERSION,
       serverInstanceId: this.serverInstanceId,
       configurationGeneration: this.configurationGeneration,
       credentialGeneration: this.credentialGeneration,
@@ -278,7 +277,6 @@ function emptyMetrics() {
     requestRecoveries: 0,
     discoveryRequests: 0,
     toolListRequests: 0,
-    taskRequests: 0,
     toolManifestChanges: 0
   };
 }
@@ -290,7 +288,7 @@ function safeId(value) {
 
 function normalizeAuthMode(value) {
   const mode = String(value || '');
-  return AUTH_MODES.includes(mode) ? mode : '';
+  return isMcpAuthMode(mode) ? mode : '';
 }
 
 function safeClientCapabilities(value) {

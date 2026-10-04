@@ -109,6 +109,10 @@ try {
   legacyDb.exec(`
     CREATE TABLE state_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
     CREATE TABLE task_history(id TEXT PRIMARY KEY, updated_at_ms INTEGER NOT NULL, payload TEXT NOT NULL) STRICT;
+    CREATE TABLE native_tasks(task_id TEXT PRIMARY KEY, updated_at_ms INTEGER NOT NULL, payload TEXT NOT NULL) STRICT;
+    CREATE TABLE native_task_quarantine(id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, quarantined_at_ms INTEGER NOT NULL, reason TEXT NOT NULL, payload TEXT NOT NULL) STRICT;
+    INSERT INTO native_tasks(task_id,updated_at_ms,payload) VALUES('obsolete-native-task',1,'{}');
+    INSERT INTO native_task_quarantine(id,task_id,quarantined_at_ms,reason,payload) VALUES(1,'obsolete-native-task',1,'obsolete','{}');
     INSERT INTO state_meta(key,value) VALUES('schema_version','1');
     INSERT INTO task_history(id,updated_at_ms,payload) VALUES('task-old',1,'{"id":"task-old","workspace":"app","events":[{"eventId":"event-old","timestamp":"2026-01-01T00:00:00Z","workspace":"app"}]}');
   `);
@@ -116,7 +120,7 @@ try {
 
   const migratedDb = openStateDatabase(migrationConfig);
   try {
-    assert.equal(migratedDb.prepare("SELECT value FROM state_meta WHERE key='schema_version'").get().value, '3');
+    assert.equal(migratedDb.prepare("SELECT value FROM state_meta WHERE key='schema_version'").get().value, '5');
     assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM task_history WHERE id='task-old'").get().count, 1);
     assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_integrity_tasks'").get());
     assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_integrity'").get());
@@ -125,7 +129,11 @@ try {
     assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM task_history_events WHERE task_id='task-old'").get().count, 1,
       'schema v3 must backfill the indexed event projection for existing task history');
     assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger' AND name LIKE 'task_history_events_after_%'").get().count, 3,
-      'schema v3 must install task-history projection triggers once during migration');
+      'task-history activity projection must retain one insert/update/delete trigger set');
+    assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='task_history_events_task_recent_idx'").get(),
+      'schema v5 must index retained activity by task for Task inspector pagination');
+    assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('native_tasks','native_task_quarantine')").get().count, 0,
+      'schema v4 must remove obsolete native MCP Tasks persistence');
   } finally {
     migratedDb.close();
   }

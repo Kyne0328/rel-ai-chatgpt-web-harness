@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { getOperationDefinition } from '../src/tools/actionDefinitions.js';
+import { getOperationDefinition } from '../src/tools/actionDefinitions.ts';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { blockWorkspaceMutations, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations } from "../src/workspaceOperationQueue.js";
 

@@ -52,7 +52,11 @@ function compactCommandResult(result) {
     stderrBytes: result.stderrBytes || undefined,
     stdoutTruncated: result.stdoutTruncated === true ? true : undefined,
     stderrTruncated: result.stderrTruncated === true ? true : undefined,
-    timedOut: result.timedOut === true ? true : undefined,
+    timedOut: result.timedOut != null ? result.timedOut === true : undefined,
+    cancelled: result.cancelled != null ? result.cancelled === true : undefined,
+    terminationConfirmed: result.terminationConfirmed != null ? result.terminationConfirmed === true : undefined,
+    forcedTermination: result.forcedTermination != null ? result.forcedTermination === true : undefined,
+    mutationUnknown: result.mutationUnknown != null ? result.mutationUnknown === true : undefined,
     error: result.error
   });
 }

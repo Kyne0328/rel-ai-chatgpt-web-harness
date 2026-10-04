@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto';
 import { LRUCache } from 'lru-cache';
-import { stableJson } from '../workflow/contracts.js';
+import { stableJson } from '../stableJson.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 
 const REPEAT_WARNING_THRESHOLD = 3;

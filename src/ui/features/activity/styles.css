@@ -9,6 +9,8 @@
 .activity-live-tail > button { pointer-events: auto; box-shadow: 0 8px 22px -18px color-mix(in srgb, var(--ui-text-primary) 38%, transparent); }
 .activity-event-card .card-body { @apply p-0; flex: 1 0 auto; }
 .activity-event-card .table-wrap { width: 100%; min-width: 0; flex: 1 0 auto; overflow-x: auto; }
+.activity-history-footer { @apply flex min-h-12 items-center justify-between gap-3 px-3 py-2.5; border-top: 1px solid var(--ui-border-default); background: var(--ui-surface-secondary); }
+.activity-history-footer span { @apply text-[12px]; color: var(--ui-text-secondary); }
 .activity-inspector { min-width: 0; min-height: 0; overflow-y: auto; padding: 18px; scroll-margin-top: 78px; background: var(--ui-surface-primary); }
 .activity-inspector-head { display: grid; gap: 2px; margin-bottom: 8px; }
 .activity-inspector-head h2 { font-size: 17px; font-weight: 700; line-height: 1.25; overflow-wrap: anywhere; scroll-margin-top: 84px; }
@@ -23,11 +25,12 @@
 .activity-table tbody .activity-time-column { @apply align-top; }
 .activity-message-column { min-width: 0; overflow: hidden; }
 .activity-message-cell { @apply min-w-0 py-1.5; }
-.activity-row-trigger { @apply grid min-h-10 w-full min-w-0 gap-0.5 rounded-md text-left; justify-content: stretch; justify-items: stretch; padding: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.activity-row-trigger { display: grid; grid-template-columns: 92px minmax(0, 1fr); grid-template-rows: auto auto; min-height: 40px; width: 100%; min-width: 0; column-gap: 8px; row-gap: 2px; align-items: center; justify-content: stretch; justify-items: stretch; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .activity-row-trigger:hover .activity-message-copy { color: var(--ui-text-primary); }
-.activity-message-copy { width: 100%; max-width: 72ch; min-width: 12ch; overflow: hidden; color: var(--ui-text-primary); font-size: 13px; font-weight: 600; line-height: 1.45; white-space: nowrap; text-overflow: ellipsis; }
-.activity-row-meta { display: flex; min-width: 0; flex-wrap: nowrap; align-items: center; gap: 6px; overflow: hidden; color: var(--ui-text-secondary); font-size: 11px; line-height: 1.45; white-space: nowrap; }
-.activity-row-meta .status-pill { @apply min-h-6 px-1.5 text-[11px]; }
+.activity-row-status { grid-column: 1; grid-row: 1 / span 2; align-self: center; justify-self: start; min-width: 0; }
+.activity-row-status .status-pill { @apply min-h-6 px-1.5 text-[11px]; max-width: 100%; }
+.activity-message-copy { grid-column: 2; grid-row: 1; width: 100%; max-width: 72ch; min-width: 12ch; overflow: hidden; color: var(--ui-text-primary); font-size: 13px; font-weight: 600; line-height: 1.45; white-space: nowrap; text-overflow: ellipsis; }
+.activity-row-meta { grid-column: 2; grid-row: 2; display: flex; min-width: 0; flex-wrap: nowrap; align-items: center; gap: 6px; overflow: hidden; color: var(--ui-text-secondary); font-size: 11px; line-height: 1.45; white-space: nowrap; }
 .activity-row-action { @apply shrink-0 font-semibold; color: var(--ui-text-secondary); }
 .activity-row-task, .activity-row-project { min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-row-task { color: var(--ui-text-secondary); }
@@ -57,6 +60,10 @@
 .activity-detail-section { @apply grid gap-1.5; }
 .activity-detail-section > h3 { @apply text-[11px] font-bold; color: var(--ui-text-secondary); }
 .activity-detail-section > p { @apply m-0 text-[13px] leading-5; color: var(--ui-text-primary); }
+.activity-detail-command-head { @apply flex flex-wrap items-center justify-between gap-2; }
+.activity-detail-command-head h3 { @apply text-[11px] font-bold; color: var(--ui-text-secondary); }
+.activity-detail-command pre { margin: 0; max-height: 360px; overflow: auto; padding: 10px 12px; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.activity-detail-command code { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--ui-text-primary); }
 .activity-session-context { @apply flex flex-wrap items-center justify-between gap-2 border-y py-2.5; border-color: var(--ui-border-default); }
 .activity-session-copy { @apply grid min-w-0 gap-0.5; }
 .activity-session-copy > strong { @apply min-w-0 truncate text-[12px] font-semibold; }
@@ -101,6 +108,9 @@
 }
 
 @media (max-width: 760px) {
+  .activity-history-footer { @apply flex-col items-stretch; }
+  .activity-history-footer span { font-size: 0.8125rem; }
+  .activity-history-footer button { @apply w-full; }
   .activity-table { min-width: 0; }
   .activity-col-time { width: 84px; }
   .activity-page .data-table th, .activity-page .data-table td { @apply px-3; }
@@ -108,6 +118,7 @@
 
 @media (max-width: 520px) {
   .activity-page .data-table th, .activity-page .data-table td { @apply px-2; }
+  .activity-row-trigger { grid-template-columns: 84px minmax(0, 1fr); column-gap: 6px; }
   .activity-message-copy { font-size: 12px; }
   .activity-row-task, .activity-row-project { max-width: 18ch; }
   .activity-row-project { display: none; }
@@ -122,6 +133,7 @@
 }
 
 @media (max-width: 240px) {
+  .activity-row-trigger { grid-template-columns: 76px minmax(0, 1fr); column-gap: 4px; }
   .activity-row-meta { gap: 4px; }
   .activity-row-task, .activity-row-project { max-width: 16ch; }
   .activity-page .data-table th, .activity-page .data-table td { padding-inline: 4px; }

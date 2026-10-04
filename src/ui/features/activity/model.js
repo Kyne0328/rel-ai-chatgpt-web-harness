@@ -1,6 +1,5 @@
 import { eventTimestampMs, eventTimestampValue } from '../../../taskEvents.js';
 
-const MAX_ACTIVITY_ENTRIES = 1000;
 const RANGE_MS = {
   '15m': 15 * 60_000,
   '1h': 60 * 60_000,
@@ -16,7 +15,7 @@ export function sortActivityEntries(entries) {
 }
 
 export function replaceActivityHistory(entries) {
-  return sortActivityEntries(entries).slice(0, MAX_ACTIVITY_ENTRIES);
+  return sortActivityEntries(entries);
 }
 
 export function mergeActivityEntries(current, incoming) {
@@ -52,10 +51,7 @@ export function mergeActivityEntries(current, incoming) {
   }
   if (!changed) return { entries: currentEntries, changed: false };
   const ordered = orderChanged ? sortActivityEntries(next) : next;
-  return {
-    entries: ordered.length > MAX_ACTIVITY_ENTRIES ? ordered.slice(0, MAX_ACTIVITY_ENTRIES) : ordered,
-    changed: true
-  };
+  return { entries: ordered, changed: true };
 }
 
 export function activityMessage(entry) {
@@ -170,12 +166,22 @@ export function parseActivityHistoryResponse(data) {
     return {
       ok: false,
       entries: [],
-      error: displayText(data.error?.message || data.error) || 'Activity history could not be loaded.'
+      error: displayText(data.error?.message || data.error) || 'Activity history could not be loaded.',
+      nextCursor: null,
+      hasMore: false
     };
   }
-  if (Array.isArray(data)) return { ok: true, entries: data, error: '' };
-  if (data && Array.isArray(data.entries)) return { ok: true, entries: data.entries, error: '' };
-  return { ok: false, entries: [], error: 'Activity history could not be loaded.' };
+  if (Array.isArray(data)) return { ok: true, entries: data, error: '', nextCursor: null, hasMore: false };
+  if (data && Array.isArray(data.entries)) {
+    return {
+      ok: true,
+      entries: data.entries,
+      error: '',
+      nextCursor: data.page?.nextCursor && typeof data.page.nextCursor === 'object' ? data.page.nextCursor : null,
+      hasMore: data.page?.hasMore === true
+    };
+  }
+  return { ok: false, entries: [], error: 'Activity history could not be loaded.', nextCursor: null, hasMore: false };
 }
 
 export function activityAbsoluteTime(entry) {
@@ -218,7 +224,7 @@ function mergeActivityEntry(existing, incoming) {
   return { ...existing, ...patch };
 }
 
-function normalizeStatusFilter(value) {
+export function normalizeStatusFilter(value) {
   const status = String(value || '').trim().toLowerCase();
   if (status === 'ok') return 'succeeded';
   if (status === 'error') return 'failed';

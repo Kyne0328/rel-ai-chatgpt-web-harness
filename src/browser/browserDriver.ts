@@ -188,9 +188,6 @@ function objectValue(value: Record<string, unknown> | void): Record<string, unkn
 }
 
 export {
-  DOWNLOAD_TEMP_ROOT,
-  configureBrowserNativeBridge,
-  dispatchBrowserNativeEvent,
-  launchBrowserDriver
+  configureBrowserNativeBridge, dispatchBrowserNativeEvent, launchBrowserDriver
 };
-export type { BrowserDownloadHandle, BrowserPageDriver, LaunchBrowserDriverOptions, LocalBrowserDriver, NativeBrowserBridge };
+export type { BrowserPageDriver, LocalBrowserDriver };

@@ -8,6 +8,7 @@ import { createValidationFingerprint } from '../bridge/validationPlan.js';
 import { sanitizeCompletionSummary } from '../taskObservability.js';
 import { getCurrentTaskAbortSignal, getCurrentToolActivityContext, getToolActivity, requestCurrentTaskCompletion, taskError, normalizeTaskId } from '../toolActivity.js';
 import { runWorkspaceMutationBoundary } from '../workspaceOperationQueue.js';
+import { assertFallbackCompletionAvailable } from '../mcp/fallbackExecutions.js';
 
 const WORK_FINISH_SOURCE = 'relai_work:finish';
 const VALIDATE_CHECKS_SOURCE = 'relai_validate:checks';
@@ -35,6 +36,7 @@ async function completeTask(config, args = {}, handlerContext = {}) {
   }
 
   const summary = normalizeCompletionSummary(args.summary);
+  assertFallbackCompletionAvailable(requestedTaskId, { config, excludeOperationId: handlerContext.fallbackOperationId });
   if (!workspace) return finalizeProjectlessTask(summary);
   const authority = readTaskIntegrity(config, requestedTaskId, workspace.alias);
   const validation = await factualValidationState(config, workspace, authority, { signal });
@@ -141,6 +143,7 @@ async function finalizeValidationResult(config, workspace, validationResult, sum
   const activityContext = getCurrentToolActivityContext();
   const signal = executionContext.signal || getCurrentTaskAbortSignal();
   signal?.throwIfAborted?.();
+  assertFallbackCompletionAvailable(activityContext?.taskId || '', { config, excludeOperationId: executionContext.fallbackOperationId });
   const completion = await runWorkspaceMutationBoundary(workspace.alias, () => finalizeValidatedTask(config, workspace, {
     summary,
     validationStatus: 'passed',

@@ -138,4 +138,10 @@ export interface TelemetryStatus {
   endpointConfigured: boolean;
   endpoint: '' | '[configured]';
   sampleRatio: number;
+  usageLastAttemptAt: string;
+  usageLastSuccessAt: string;
+  usageLastFailureAt: string;
+  diagnosticsLastAttemptAt: string;
+  diagnosticsLastSuccessAt: string;
+  diagnosticsLastFailureAt: string;
 }

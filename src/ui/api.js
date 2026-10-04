@@ -157,7 +157,7 @@ export async function fetchJson(url, opts = {}) {
       headers: requestHeaders(fetchOpts)
     });
     const data = normalizeResponseData(res, await parseJsonResponse(res));
-    if (cacheKey && res.ok && cacheGeneration === _cacheGeneration) {
+    if (cacheKey && res.ok && data?.ok !== false && cacheGeneration === _cacheGeneration) {
       queryClient.setQueryData(cacheKey, data);
     }
     return data;

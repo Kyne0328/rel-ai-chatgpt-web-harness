@@ -1,7 +1,9 @@
 import * as crypto from 'node:crypto';
 import { acceptedContent, inputRequired } from '@modelcontextprotocol/server';
 import type { ApprovalRequirement, ApprovalResult } from '../contracts/authorization.ts';
+import { stableJson } from '../stableJson.js';
 import { APPROVAL_STATE_KIND, isApprovalState, type ApprovalState } from './contracts.ts';
+import { supportsFormElicitation } from './elicitation.ts';
 import { principalFingerprint } from './principal.ts';
 import { toolResult } from './results.js';
 
@@ -35,13 +37,6 @@ type ApprovalRequest = Readonly<{
 }>;
 
 type ApprovalResponse = Readonly<{ approved?: boolean }>;
-
-function supportsNativeApproval(capabilities: unknown = {}): boolean {
-  if (!isRecord(capabilities)) return false;
-  const elicitation = capabilities.elicitation;
-  if (!isRecord(elicitation)) return false;
-  return Object.keys(elicitation).length === 0 || Boolean(elicitation.form);
-}
 
 async function requestApproval({
   name,
@@ -83,7 +78,7 @@ async function requestApproval({
   };
   const grant = await codec.mint(claims, rawContext);
 
-  if (supportsNativeApproval(context.clientCapabilities)) {
+  if (supportsFormElicitation(context.clientCapabilities)) {
     return inputRequired({
       inputRequests: {
         approval: inputRequired.elicit({
@@ -152,19 +147,11 @@ function principalMismatchResult(): ApprovalResult {
 function approvalDigest(name: string, args: ApprovalArguments = {}): string {
   const safe: ApprovalArguments = { ...args };
   delete safe._deferredExecution;
-  delete safe._operationTaskId;
+
   if (isRecord(safe.sensitiveAuthorization)) {
     safe.sensitiveAuthorization = { ...safe.sensitiveAuthorization, reason: '[provided]' };
   }
   return crypto.createHash('sha256').update(name).update('\0').update(stableJson(safe)).digest('base64url');
-}
-
-function stableJson(value: Readonly<Record<string, unknown>> | readonly unknown[]): string;
-function stableJson(value: unknown): string | undefined;
-function stableJson(value: unknown): string | undefined {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (!isRecord(value)) return JSON.stringify(value);
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -175,7 +162,6 @@ export {
   APPROVAL_TTL_MS,
   approvalDigest,
   requestApproval,
-  supportsNativeApproval
 };
 export type {
   ApprovalArguments,
