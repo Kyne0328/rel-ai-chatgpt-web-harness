@@ -1583,7 +1583,6 @@ async function case_additional_tunnel_remove_failure() {
 }
 await case_additional_tunnel_remove_failure();
 
-await import('./update-install-marker-race-unit.mjs');
 
 
 async function case_mac_manual_update_shutdown_failure() {

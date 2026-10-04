@@ -1,6 +1,7 @@
 import * as crypto from 'node:crypto';
 import * as dns from 'node:dns/promises';
 import * as https from 'node:https';
+import type { IncomingMessage } from 'node:http';
 import * as net from 'node:net';
 import * as path from 'node:path';
 
@@ -45,6 +46,7 @@ const MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_TTL_MS = 5 * 60 * 1000;
 const CALLBACK_TIMEOUT_MS = 10_000;
 const MAX_EVENT_BYTES = 256 * 1024;
+const MAX_WEBHOOK_RESPONSE_BYTES = 64 * 1024;
 const VERIFICATION_CACHE_MS = 10 * 60 * 1000;
 const SECRET_ROTATION_WINDOW_MS = 10 * 60 * 1000;
 const RETRY_DELAYS_MS = Object.freeze([0, 250, 1_000, 3_000]);
@@ -274,7 +276,15 @@ async function deliverEvent(
   for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
     const delay = RETRY_DELAYS_MS[attempt] || 0;
     if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-    const response = await signedWebhookPost(url, subscription.id, eventId, secrets, body);
+    let response: WebhookResponse;
+    try {
+      response = await signedWebhookPost(url, subscription.id, eventId, secrets, body);
+    } catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? error.code : null;
+      if (code === -32602 || code === 'MCP_EVENT_RESPONSE_TOO_LARGE') return false;
+      if (attempt === RETRY_DELAYS_MS.length - 1) debug('event delivery failed after bounded retries');
+      continue;
+    }
     if (response.status >= 200 && response.status < 300) return true;
     if (response.status === 410) {
       removeSubscription(config, subscription);
@@ -328,38 +338,83 @@ async function signedWebhookPost(
     .map(secret => standardWebhookSignature(secret, webhookId, timestamp, body))
     .join(' ');
   return new Promise((resolve, reject) => {
-    const request = https.request(url, {
-      method: 'POST',
-      agent: false,
-      servername: url.hostname,
-      timeout: CALLBACK_TIMEOUT_MS,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': String(Buffer.byteLength(body)),
-        'webhook-id': webhookId,
-        'webhook-timestamp': timestamp,
-        'webhook-signature': signature,
-        'X-MCP-Subscription-Id': subscriptionId
-      },
-      lookup(_hostname, _options, callback) {
-        callback(null, address.address, address.family);
-      }
-    }, response => {
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      response.on('data', chunk => {
-        bytes += chunk.length;
-        if (bytes <= 64 * 1024) chunks.push(Buffer.from(chunk));
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let request: ReturnType<typeof https.request> | null = null;
+    let activeResponse: IncomingMessage | null = null;
+    const finish = (error: unknown, result?: WebhookResponse): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (result) resolve(result);
+      else reject(error);
+    };
+    const abort = (error: Error): void => {
+      if (settled) return;
+      finish(error);
+      activeResponse?.destroy(error);
+      request?.destroy(error);
+    };
+    try {
+      request = https.request(url, {
+        method: 'POST',
+        agent: false,
+        servername: url.hostname,
+        timeout: CALLBACK_TIMEOUT_MS,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': String(Buffer.byteLength(body)),
+          'webhook-id': webhookId,
+          'webhook-timestamp': timestamp,
+          'webhook-signature': signature,
+          'X-MCP-Subscription-Id': subscriptionId
+        },
+        lookup(_hostname, options, callback) {
+          if (options.all) callback(null, [address]);
+          else callback(null, address.address, address.family);
+        }
+      }, response => {
+        activeResponse = response;
+        response.once('error', abort);
+        response.once('aborted', () => abort(new Error('MCP Events callback response was aborted.')));
+        const status = Number(response.statusCode || 0);
+        if (status === 410 || status === 413) {
+          finish(null, { status, body: '' });
+          response.destroy();
+          request?.destroy();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        response.on('data', chunk => {
+          if (settled) return;
+          bytes += chunk.length;
+          if (bytes > MAX_WEBHOOK_RESPONSE_BYTES) {
+            const error = Object.assign(new Error('MCP Events callback response exceeded 64 KiB.'), { code: 'MCP_EVENT_RESPONSE_TOO_LARGE' });
+            abort(error);
+            return;
+          }
+          chunks.push(Buffer.from(chunk));
+        });
+        response.on('end', () => finish(null, {
+          status: Number(response.statusCode || 0),
+          body: Buffer.concat(chunks).toString('utf8')
+        }));
       });
-      response.once('error', reject);
-      response.on('end', () => resolve({
-        status: Number(response.statusCode || 0),
-        body: Buffer.concat(chunks).toString('utf8')
-      }));
-    });
-    request.once('timeout', () => request.destroy(new Error('MCP Events callback timed out.')));
-    request.once('error', reject);
-    request.end(body);
+      if (settled) return;
+      // Socket inactivity alone does not bound a peer that keeps streaming.
+      // Keep the complete HTTP request and response inside the same deadline.
+      timer = setTimeout(() => abort(new Error('MCP Events callback timed out.')), CALLBACK_TIMEOUT_MS);
+      request.once('timeout', () => abort(new Error('MCP Events callback timed out.')));
+      request.once('error', error => {
+        if (settled) return;
+        finish(error);
+        activeResponse?.destroy();
+      });
+      request.end(body);
+    } catch (error) {
+      abort(error instanceof Error ? error : new Error(String(error)));
+    }
   });
 }
 

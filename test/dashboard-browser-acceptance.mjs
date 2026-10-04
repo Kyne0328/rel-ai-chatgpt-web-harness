@@ -210,7 +210,8 @@ try {
     'window-640x720',
     'css-320-zoom-200',
     'css-375-zoom-200',
-    'zoom-400'
+    'zoom-400',
+    'css-320-zoom-400'
   ]);
   for (const scenario of result.responsive) {
     assert.equal(scenario.horizontalOverflow, false, `${scenario.name} has horizontal overflow`);
@@ -231,6 +232,15 @@ try {
     assert.equal(scenario.forcedColorsSupported, true, `${scenario.name} Chromium build lacks forced-color-adjust support`);
     assert.ok(Number.isFinite(scenario.devicePixelRatio) && scenario.devicePixelRatio >= 1);
     assert.equal(fs.existsSync(scenario.screenshot), true, `${scenario.name} screenshot is missing`);
+    assert.equal(scenario.captureState.hash, '#tasks', `${scenario.name} screenshot must match the committed route`);
+    assert.equal(scenario.captureState.title, 'Tasks', `${scenario.name} screenshot must have the committed title`);
+    assert.ok(scenario.captureState.activeNavigation.every(id => id === 'tasks'), `${scenario.name} screenshot must have matching navigation`);
+    // Keep the original 156-CSS-pixel stress case and report its measured limits.
+    // Standard reflow scenarios must show content between persistent controls.
+    if (scenario.captureState.viewportWidth >= 300) {
+      assert.ok(scenario.captureState.visibleTaskRows > 0, `${scenario.name} screenshot has no task row in the content viewport`);
+      assert.equal(scenario.captureState.navigationLabelsOverlap, false, `${scenario.name} navigation labels overlap`);
+    }
   }
   const responsive1024 = result.responsive.find(item => item.name === 'window-1024x768');
   assert.equal(responsive1024.activityStacked, true, JSON.stringify(responsive1024));
@@ -244,6 +254,9 @@ try {
   assert.ok(result.responsive.find(item => item.name === 'css-320-zoom-200').viewportWidth <= 320);
   assert.ok(result.responsive.find(item => item.name === 'css-375-zoom-200').viewportWidth <= 375);
   assert.equal(result.responsive.find(item => item.name === 'zoom-400').zoomFactor, 4);
+  const standard400 = result.responsive.find(item => item.name === 'css-320-zoom-400');
+  assert.equal(standard400.zoomFactor, 4);
+  assert.ok(standard400.viewportWidth >= 300 && standard400.viewportWidth <= 320, JSON.stringify(standard400));
   assert.equal(result.accessibility.length, 3, JSON.stringify(result.accessibility));
   const seriousAccessibilityViolations = result.accessibility.flatMap(audit => audit.violations
     .filter(violation => ['critical', 'serious'].includes(violation.impact))

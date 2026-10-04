@@ -30,7 +30,11 @@ function publishActivityLifecycleEvent(value: unknown): void {
   const activityEvent = asRecord(event.activityEvent);
   const phase = String(event.phase || '');
   const status = String(task.status || activityEvent.status || '');
-  const terminal = TERMINAL_TASK_PHASES.has(phase) || ['completed', 'cancelled', 'failed'].includes(status);
+  const changedStatus = Array.isArray(event.changedFields) && event.changedFields.includes('status');
+  // A cancellation transition is followed by its control call finishing with
+  // the same terminal task snapshot. Publish the transition only once.
+  const terminal = TERMINAL_TASK_PHASES.has(phase)
+    || (changedStatus && ['completed', 'cancelled', 'failed'].includes(status));
   const principalFingerprint = String(task.principalFingerprint || '');
   if (!terminal || !principalFingerprint) return;
 

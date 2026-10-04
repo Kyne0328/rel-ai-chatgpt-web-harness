@@ -162,7 +162,10 @@ try {
     const counter = path.join(boundary === 'claim' ? workspace : temp, `integrity-${boundary}-counter`);
     let injected = 0;
     DatabaseSync.prototype.prepare = function(sql, ...parameters) {
-      if (fs.existsSync(counter) && /^INSERT INTO (?:workspace_integrity|task_integrity_tasks)\b/.test(String(sql))) {
+      const postHandlerStatement = boundary === 'audit'
+        ? /^SELECT payload FROM (?:workspace_integrity|task_integrity_tasks)\b/
+        : /^INSERT INTO (?:workspace_integrity|task_integrity_tasks)\b/;
+      if (fs.existsSync(counter) && postHandlerStatement.test(String(sql))) {
         injected += 1;
         throw Object.assign(new Error('Injected post-handler SQLITE_BUSY'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
       }

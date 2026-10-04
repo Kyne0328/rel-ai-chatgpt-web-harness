@@ -206,6 +206,7 @@ try {
   taskCall(15, 'relai_changes', { action: 'restore', workspace: 'smoke', paths: ['README.md', 'src/index.js', 'obsolete.md'] });
   const restored = structuredContentOf(await client.waitFor(15));
   if (!restored.ok) throw new Error('Restore failed.');
+  if (restored.executed !== true) throw new Error('Restore must report that its Git command actually executed.');
 
   taskCall(16, 'relai_changes', { action: 'diff', workspace: 'smoke' });
   const clean = structuredContentOf(await client.waitFor(16));

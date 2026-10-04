@@ -5,8 +5,7 @@
       "entry": [
         "bin/*.js",
         "scripts/*.mjs",
-        "test/*.mjs",
-        "public/dashboard.js"
+        "test/*.mjs"
       ],
       "project": [
         "bin/**/*.js",
@@ -27,8 +26,7 @@
       "ignoreDependencies": [
         "monaco-editor",
         "pyright",
-        "typescript-language-server",
-        "tailwindcss"
+        "typescript-language-server"
       ]
     },
     "electron": {

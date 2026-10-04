@@ -107,10 +107,36 @@ try {
   assert.equal(largeFailure.truncated, true);
   assert.ok(largeFailure.originalBytes > 1200);
   assert.equal(largeFailure.validationStatus, 'failed');
+  assert.ok(Buffer.byteLength(JSON.stringify(largeFailure), 'utf8') <= 1200, 'actionable diagnostics must fit the configured byte cap');
   assert.equal(largeFailure.results[0].exitCode, 1);
   assert.match(largeFailure.results[0].stderr, /failure-detail-/);
   assert.match(largeFailure.nextAction, /failing (?:check|validation)/i);
   assert.match(largeFailure.nextAction, /rerun/i);
+
+  const escapedFailure = toolResult({
+    ok: false,
+    validationStatus: 'failed',
+    results: [{
+      command: 'fixture-check', ok: false, exitCode: 1, executed: true,
+      timedOut: false, cancelled: false, terminationConfirmed: false,
+      mutationUnknown: true, cleanupPending: true,
+      stdout: '\0\\"😀\n'.repeat(3000), stderr: '\0\\"😀\n'.repeat(3000),
+      stdoutOutputRef: 'spill_fixture_stdout', stderrOutputRef: 'spill_fixture_stderr'
+    }]
+  }, true).structuredContent;
+  assert.ok(Buffer.byteLength(JSON.stringify(escapedFailure), 'utf8') <= 1200, 'escaped UTF8 diagnostic output must honor the same byte cap');
+  assert.equal(escapedFailure.results.length, 1, 'a sole diagnostic must retain its outcome and safety facts');
+  assert.equal(escapedFailure.results[0].exitCode, 1);
+  assert.equal(escapedFailure.results[0].executed, true);
+  assert.equal(escapedFailure.results[0].timedOut, false);
+  assert.equal(escapedFailure.results[0].cancelled, false);
+  assert.equal(escapedFailure.results[0].terminationConfirmed, false);
+  assert.equal(escapedFailure.results[0].mutationUnknown, true);
+  assert.equal(escapedFailure.results[0].cleanupPending, true);
+  assert.equal(escapedFailure.results[0].stdoutOutputRef, 'spill_fixture_stdout');
+  assert.equal(escapedFailure.results[0].stderrOutputRef, 'spill_fixture_stderr');
+  assert.equal(escapedFailure.results[0].stdoutTruncated, true);
+  assert.equal(escapedFailure.results[0].stderrTruncated, true);
 
   console.log('Structured tool errors preserve actionable diagnostics, including truncated failures.');
 } finally {

@@ -5,7 +5,7 @@ import { detectVerifyChecks } from './checkDetection.js';
 import { clampNumber } from './limits.js';
 import { runSpan } from '../telemetry.js';
 
-import { combineAbortSignals } from '../abortSignals.js';
+import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
 import { resolveOneShotTimeoutMs } from '../executionControl.js';
 import { getCurrentTaskAbortSignal, updateCurrentToolActivity } from '../toolActivity.js';
 import { sanitizeDisplayText } from '../taskObservability.js';
@@ -92,9 +92,10 @@ async function relaiDiagnosticsRun(workspace, config, args = {}, context = {}) {
   const results = visibleResults();
   const diagnostics = diagnosticsByIndex.filter(Boolean).flat();
   const unique = deduplicateDiagnostics(diagnostics).slice(0, clampNumber(args.maxResults, 1, 5000, 500));
-  const cancelled = signal?.aborted === true || results.some(item => item.cancelled === true);
-  const ok = !cancelled && results.length === commands.length && results.every(item => item.ok);
-  publishDiagnosticsProgress(commands, results, results.at(-1)?.command || '', Math.min(results.length, commands.length), cancelled ? 'cancelled' : ok ? 'passed' : 'failed', true, []);
+  const timedOut = isTimeoutAbort(signal) || results.some(item => item.timedOut === true);
+  const cancelled = (signal?.aborted === true && !isTimeoutAbort(signal)) || results.some(item => item.cancelled === true);
+  const ok = !cancelled && !timedOut && results.length === commands.length && results.every(item => item.ok);
+  publishDiagnosticsProgress(commands, results, results.at(-1)?.command || '', Math.min(results.length, commands.length), cancelled ? 'cancelled' : timedOut ? 'timed_out' : ok ? 'passed' : 'failed', true, []);
   return {
     ok,
     workspace: workspace.alias,
@@ -106,6 +107,7 @@ async function relaiDiagnosticsRun(workspace, config, args = {}, context = {}) {
     totalUnits: commands.length,
     execution: execution.metrics,
     cancelled,
+    timedOut,
     truncated: diagnostics.length > unique.length
   };
 }

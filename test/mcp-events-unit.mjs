@@ -475,6 +475,13 @@ async function testWebhookLifecycle(liveSubscription) {
       let pinnedAddress;
       request.options.lookup('ignored.example', {}, (_error, address) => { pinnedAddress = address; });
       assert.equal(pinnedAddress, '8.8.8.8', 'each POST must retain the validated public-address pin');
+      let pinnedAddresses;
+      request.options.lookup('ignored.example', { all: true }, (error, addresses) => {
+        assert.equal(error, null);
+        pinnedAddresses = addresses;
+      });
+      assert.deepEqual(pinnedAddresses, [{ address: pinnedAddress, family: 4 }],
+        'Node auto-family lookup must receive the same validated pin in all-address form');
     }
     mock.assertNoTimers();
   });

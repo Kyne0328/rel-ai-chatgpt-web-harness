@@ -91,7 +91,6 @@ function getExecutableToolDefinition(
         ...publicDefinition,
         behavior: resolved.executionDefinition.behavior,
         annotations: resolved.executionDefinition.annotations,
-        execution: resolved.executionDefinition.execution,
         handler: resolved.executionDefinition.handler
       });
     }

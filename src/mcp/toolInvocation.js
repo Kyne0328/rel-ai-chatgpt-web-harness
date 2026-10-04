@@ -1,5 +1,6 @@
 import { requireApprovalIfNeeded } from './approval.ts';
 import { toolResult } from './results.js';
+import { outputSpillOwner, retainOutputStreams } from '../outputSpill.js';
 import { callTool } from '../tools.js';
 import { serializeToolError } from '../tools/errors.js';
 import {
@@ -41,7 +42,17 @@ async function invokeRelaiTool(options = {}) {
       await options.validateOutput(output);
     }
     const enriched = enrichWithFallbackCompletions(options.config, name, args, output, options.context || {});
-    return toolResult(enriched, enriched?.ok === false);
+    const result = toolResult(enriched, enriched?.ok === false);
+    if (result.structuredContent?.truncated === true && result.structuredContent?.originalBytes > 0) {
+      const owner = outputSpillOwner({
+        taskId: args.work_id || enriched.work_id,
+        workspace: completionWorkspace(args, enriched),
+        principal: options.context?.principal
+      });
+      await retainOutputStreams(options.config, owner, enriched, { signal: options.context?.signal });
+      return toolResult(enriched, enriched?.ok === false);
+    }
+    return result;
   } catch (error) {
     return toolResult(serializeToolError(name, error), true);
   }

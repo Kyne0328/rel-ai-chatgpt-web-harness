@@ -144,6 +144,7 @@ function createToolActivityTracker(options = {}) {
     });
 
     let finish;
+    let requestedCompletion = null;
     const assertCompletionAvailable = () => {
       if (finished) throw taskError('INVALID_TASK_STATE', 'Cannot complete a task after the tool call has finished.');
       if (task.cancellationRequestedAt) throw taskError('INVALID_TASK_STATE', 'Cannot complete a task after cancellation has been requested.');
@@ -176,6 +177,7 @@ function createToolActivityTracker(options = {}) {
         residualChangedFiles: Array.isArray(completion.residualChangedFiles) ? completion.residualChangedFiles.map(String).filter(Boolean).slice(0, 200) : [],
         residualState: String(completion.residualState || 'clean')
       };
+      requestedCompletion = task.completionRequest;
       notify('completion_requested', task, {
         tool: operation.tool,
         workspace: operation.workspace,
@@ -296,6 +298,7 @@ function createToolActivityTracker(options = {}) {
           ? sanitizeDisplayText(result.error || current.activity.error?.message || '', 500)
           : '';
       }
+      if (result.ok === false && requestedCompletion && task.completionRequest === requestedCompletion) task.completionRequest = null;
       if (!terminalBeforeFinish && task.activeCalls === 0 && !task.completionRequest) {
         const rejectedTaskStart = current.internalOperation === OP.WORK_BEGIN && result.ok === false && !blockedResult;
         if (task.cancellationRequestedAt) {
@@ -340,7 +343,6 @@ function createToolActivityTracker(options = {}) {
         durationMs: Math.max(0, finishedAt - startedAt),
         activityEvent: cloneActivityEvent(current.activity)
       });
-      if (result.ok === false && current.internalOperation === OP.WORK_FINISH) task.completionRequest = null;
       if (task.activeCalls === 0) {
         if (isTerminalTaskStatus(task.status)) {
           lastTask = buildTerminalTaskSnapshot(task);
@@ -809,6 +811,7 @@ function createToolActivityTracker(options = {}) {
     const fileStats = taskChangedFileStats(task);
     lastTask = sanitizeTaskRecord({
       taskId: task.id,
+      principalFingerprint: task.principalFingerprint,
       sessionId: task.id,
       id: task.id,
       title: task.title,

@@ -25,7 +25,6 @@ type ToolActionCatalogEntry = Readonly<{
   outputSchema: CatalogToolDefinition['outputSchema'];
   annotations: CatalogToolDefinition['annotations'];
   behavior: CatalogToolDefinition['behavior'];
-  execution: CatalogToolDefinition['execution'] | undefined;
   dashboard: CatalogToolDefinition['dashboard'];
   groups: CatalogToolDefinition['groups'];
   capability: string;
@@ -83,7 +82,6 @@ function buildCatalog(): ToolActionCatalogEntry[] {
         outputSchema: operationMetadata.outputSchema,
         annotations: operationMetadata.annotations,
         behavior: Object.freeze({ ...operationMetadata.behavior, ...(mapping.behavior || {}) }),
-        execution: operationMetadata.execution,
         dashboard: operationMetadata.dashboard,
         groups: operationMetadata.groups,
         capability,

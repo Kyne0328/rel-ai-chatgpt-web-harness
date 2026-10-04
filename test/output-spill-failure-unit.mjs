@@ -7,6 +7,8 @@ import { relaiExec } from '../src/bridge/exec.js';
 import { invokeRelaiTool } from '../src/mcp/toolInvocation.js';
 import { readConfig } from '../src/config.js';
 import { readOutputSpill } from '../src/outputSpill.js';
+import { flushAuditWrites } from '../src/audit.js';
+import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-spill-failure-'));
 const originalMkdir = fs.mkdirSync;
@@ -51,8 +53,8 @@ try {
     assert.equal(result.stderrSpillTruncated, true);
     assert.equal(result.stdoutOutputRef, undefined);
     assert.equal(result.stderrOutputRef, undefined);
-    assert.match(result.stdout, /STDOUT-END$/);
-    assert.match(result.stderr, /STDERR-END$/);
+    assert.match(result.stdout, /STDOUT-END\n$/);
+    assert.match(result.stderr, /STDERR-END\n$/);
     assert.ok(Buffer.byteLength(result.stdout) <= 1000);
     assert.ok(Buffer.byteLength(result.stderr) <= 1000);
     const recovered = await relaiExec(workspace, config, args, context);
@@ -150,6 +152,8 @@ try {
   fs.mkdirSync = originalMkdir;
   fs.openSync = originalOpen;
   syncBuiltinESMExports();
-  fs.rmSync(root, { recursive: true, force: true });
+  await flushAuditWrites();
+  await repositoryIntelligence.shutdown();
+  await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }
 console.log('Command results survive output-storage failures and recover on the next execution.');

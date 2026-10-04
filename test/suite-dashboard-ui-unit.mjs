@@ -1213,3 +1213,70 @@ async function case_browser_permission_origin_unit() {
   console.log('Browser permission origin labels and request routing passed.');
 }
 await case_browser_permission_origin_unit();
+
+async function case_pulse_load_recovery_unit() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const vm = (await import('node:vm')).default;
+  const source = fs.readFileSync(new URL('../src/ui/features/settings/react.js', import.meta.url), 'utf8');
+  const component = source.slice(source.indexOf('function PulsePreference()'), source.indexOf('function PrivacyDataPage'));
+  const messageHelper = source.match(/function messageOf\(error\) \{[^\n]+\}/)?.[0];
+  assert.ok(messageHelper);
+  for (const failure of [new Error('Fixture lifecycle status unavailable'), 'Fixture string rejection', null, new Error('')]) {
+    const slots = [];
+    const pending = [];
+    let cursor = 0;
+    let attempts = 0;
+    const desktop = {
+      async getLifecycleStatus() {
+        attempts += 1;
+        if (attempts === 1) throw failure;
+        return { pulseEnabled: false };
+      },
+      async setAppPreferences() { throw new Error('Loading a preference must not mutate it.'); }
+    };
+    const context = {
+      React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
+      window: { relaiDesktop: desktop }, Card: () => null, ToggleRow: () => null,
+      Error, toast: () => {},
+      useState(initial) {
+        const index = cursor++;
+        slots[index] ||= { value: initial };
+        return [slots[index].value, next => { slots[index].value = typeof next === 'function' ? next(slots[index].value) : next; }];
+      },
+      useEffect(effect, dependencies) {
+        const index = cursor++;
+        const previous = slots[index];
+        if (previous && dependencies.every((value, i) => Object.is(value, previous.dependencies[i]))) return;
+        pending.push(() => { previous?.cleanup?.(); slots[index] = { dependencies, cleanup: effect() }; });
+      }
+    };
+    vm.runInNewContext('const h = React.createElement;\n' + component + '\n' + messageHelper + '\nglobalThis.renderPulse = PulsePreference;', context);
+    const render = () => {
+      cursor = 0;
+      const tree = context.renderPulse();
+      while (pending.length) pending.shift()();
+      return tree;
+    };
+    const flatten = node => node == null ? [] : Array.isArray(node) ? node.flatMap(flatten)
+      : [node, ...(typeof node === 'object' ? (node.children || []).flatMap(flatten) : [])];
+    render();
+    await new Promise(resolve => setImmediate(resolve));
+    const failed = flatten(render());
+    assert.ok(failed.some(node => node?.props?.role === 'alert'), 'a failed Pulse preference read must be announced as an error, not permanent loading');
+    const expectedMessage = failure instanceof Error ? (failure.message || 'Pulse preference is unavailable.') : String(failure || 'The action failed.');
+    assert.ok(failed.some(node => typeof node === 'string' && node.includes(expectedMessage)), 'every rejection shape must produce a nonempty actionable error');
+    const retry = failed.find(node => node?.type === 'button' && node.children.includes('Try again'));
+    assert.ok(retry, 'Pulse preference read failures must offer a retry');
+    retry.props.onClick();
+    render();
+    await new Promise(resolve => setImmediate(resolve));
+    const recovered = flatten(render());
+    assert.equal(attempts, 2);
+    assert.ok(recovered.some(node => node?.props?.label === 'Show Rel.AI Pulse' && node.props.checked === false), 'a successful retry must show the actual saved disabled preference');
+    assert.equal(recovered.some(node => node?.props?.role === 'alert'), false);
+    slots.forEach(slot => slot?.cleanup?.());
+  }
+  console.log('Pulse preference loading failure and retry recovery passed.');
+}
+await case_pulse_load_recovery_unit();

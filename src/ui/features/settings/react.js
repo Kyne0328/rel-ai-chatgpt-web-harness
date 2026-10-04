@@ -683,15 +683,22 @@ function PulsePreference() {
   const desktop = window.relaiDesktop;
   const [enabled, setEnabled] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => {
     if (typeof desktop?.getLifecycleStatus !== 'function') return undefined;
     let active = true;
-    void desktop.getLifecycleStatus().then(status => { if (active) setEnabled(status?.pulseEnabled !== false); }).catch(() => { if (active) setEnabled(null); });
+    setLoadError('');
+    void desktop.getLifecycleStatus().then(status => { if (active) setEnabled(status?.pulseEnabled !== false); }).catch(error => { if (active) setLoadError(messageOf(error) || 'Pulse preference is unavailable.'); });
     return () => { active = false; };
-  }, [desktop]);
+  }, [desktop, loadAttempt]);
   if (typeof desktop?.getLifecycleStatus !== 'function' || typeof desktop?.setAppPreferences !== 'function') {
     return h(Card, { title: 'Rel.AI Pulse' }, h('p', { className: 'settings-help' }, 'Pulse settings are available only inside the installed Rel.AI desktop app.'));
   }
+  if (loadError) return h(Card, { title: 'Rel.AI Pulse' },
+    h('p', { className: 'settings-help', role: 'alert' }, `Pulse preference could not be loaded: ${loadError}`),
+    h('button', { className: 'secondary', type: 'button', onClick: () => { setLoadError(''); setLoadAttempt(attempt => attempt + 1); } }, 'Try again')
+  );
   if (enabled == null) return h(Card, { title: 'Rel.AI Pulse' }, h('div', { className: 'settings-loading', role: 'status' }, 'Loading Pulse preference…'));
   const update = async value => {
     if (busy) return;

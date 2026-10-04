@@ -35,7 +35,8 @@ app.whenReady().then(async () => {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: true
+      // Keep capture paint frames deterministic if another window becomes active.
+      backgroundThrottling: false
     }
   });
   let delayedDashboardRequest = false;
@@ -316,8 +317,10 @@ app.whenReady().then(async () => {
     { name: 'window-640x720', width: 640, height: 720, zoom: 1, theme: 'dark' },
     { name: 'css-320-zoom-200', width: 640, height: 720, zoom: 2, theme: 'light' },
     { name: 'css-375-zoom-200', width: 750, height: 720, zoom: 2, theme: 'dark' },
-    { name: 'zoom-400', width: 640, height: 720, zoom: 4, theme: 'light' }
+    { name: 'zoom-400', width: 640, height: 720, zoom: 4, theme: 'light' },
+    { name: 'css-320-zoom-400', width: 1280, height: 900, zoom: 4, theme: 'light' }
   ]) {
+    fs.writeFileSync(outputPath, JSON.stringify({ stage: 'responsive-start', scenario: scenario.name }));
     await win.webContents.setZoomFactor(scenario.zoom);
     win.setSize(scenario.width, scenario.height);
     win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'TAB' });
@@ -434,8 +437,56 @@ app.whenReady().then(async () => {
         };
       })()`));
     }
-    await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
-    await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
+    fs.writeFileSync(outputPath, JSON.stringify({ stage: 'responsive-navigation', scenario: scenario.name }));
+    await win.webContents.executeJavaScript(`(() => {
+      const link = [...document.querySelectorAll('a[data-nav-id="tasks"]')].find(node => node.getBoundingClientRect().width > 0 && getComputedStyle(node).visibility !== 'hidden');
+      if (!link) throw new Error('Visible Tasks navigation link is unavailable');
+      link.click();
+    })()`);
+    await waitFor(win, `location.hash === '#tasks' && document.getElementById('pageTitle')?.textContent === 'Tasks' && document.querySelector('[data-nav-id="tasks"][aria-current="page"]') && document.querySelectorAll('.task-row').length >= 9`);
+    // Route DOM availability precedes paint; preserve capture-time evidence before
+    // restoring the first row to the same readable position used by this scenario.
+    await waitForCapturePaint(win);
+    measurement.captureBeforeScroll = await win.webContents.executeJavaScript(`(() => {
+      const rows = [...document.querySelectorAll('.task-row')];
+      const visibleRows = rows.filter(row => {
+        const rect = row.getBoundingClientRect();
+        const top = Math.max(rect.top, document.querySelector('.topbar')?.getBoundingClientRect().bottom || 0);
+        const nav = document.querySelector('.mobile-nav');
+        const bottom = Math.min(rect.bottom, nav && getComputedStyle(nav).display !== 'none' ? nav.getBoundingClientRect().top : innerHeight);
+        return bottom > top && document.elementsFromPoint(rect.left + rect.width / 2, (top + bottom) / 2).some(node => node === row || row.contains(node));
+      });
+      return { trigger: 'visible Tasks link click', hash: location.hash, scrollY,
+        firstRow: rows[0]?.getBoundingClientRect().toJSON(), unobscuredTaskRows: visibleRows.length };
+    })()`);
+    const beforeScrollScreenshot = path.join(screenshotDir, scenario.name + '-before-scroll.png');
+    fs.writeFileSync(beforeScrollScreenshot, (await win.webContents.capturePage()).toPNG());
+    measurement.captureBeforeScroll.screenshot = beforeScrollScreenshot;
+    await win.webContents.executeJavaScript(`document.querySelector('.task-row')?.scrollIntoView({ block: 'center', inline: 'nearest' })`);
+    await waitForCapturePaint(win);
+    measurement.captureState = await win.webContents.executeJavaScript(`(() => {
+      const topbar = document.querySelector('.topbar')?.getBoundingClientRect();
+      const nav = document.querySelector('.mobile-nav');
+      const navVisible = nav && getComputedStyle(nav).display !== 'none';
+      const navRect = navVisible ? nav.getBoundingClientRect() : null;
+      const contentTop = Math.max(0, topbar?.bottom || 0);
+      const contentBottom = Math.min(innerHeight, navRect?.top ?? innerHeight);
+      const rows = [...document.querySelectorAll('.task-row')].map(row => row.getBoundingClientRect().toJSON());
+      const labels = navVisible ? [...nav.querySelectorAll(':scope > a .nav-label, :scope > details > summary .nav-label')].map(label => {
+        const range = document.createRange();
+        range.selectNodeContents(label);
+        return { text: label.textContent, bounds: range.getBoundingClientRect().toJSON() };
+      }) : [];
+      return {
+        hash: location.hash, title: document.getElementById('pageTitle')?.textContent,
+        activeNavigation: [...document.querySelectorAll('[data-nav-id][aria-current="page"]')].map(node => node.dataset.navId),
+        viewportWidth: innerWidth, viewportHeight: innerHeight, scrollY,
+        contentTop, contentBottom, firstRow: rows[0],
+        visibleTaskRows: rows.filter(rect => rect.bottom > contentTop && rect.top < contentBottom && rect.right > 0 && rect.left < innerWidth).length,
+        navigationLabels: labels,
+        navigationLabelsOverlap: labels.some((label, index) => index > 0 && label.bounds.left < labels[index - 1].bounds.right - 1)
+      };
+    })()`);
     measurement.name = scenario.name;
     measurement.zoomFactor = scenario.zoom;
     measurement.windowWidth = scenario.width;
@@ -919,6 +970,16 @@ async function exerciseSkipLink(win) {
     }
   }
   return results;
+}
+
+async function waitForCapturePaint(win) {
+  let timer;
+  try {
+    await Promise.race([
+      win.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Capture paint did not settle within 5 seconds.')), 5000); })
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
 async function waitFor(win, expression, timeoutMs = 10000) {

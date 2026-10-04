@@ -3,10 +3,11 @@ import { ToolSchema } from '@modelcontextprotocol/core';
 import { fromJsonSchema } from '@modelcontextprotocol/server';
 
 import { connectorInstructions } from '../src/mcpServer.js';
+import { summarizeCommand } from '../src/process.js';
 import { getToolDefinitions } from '../src/tools.js';
-import { getOperationDefinitions, resolveToolOperation } from '../src/tools/actionCatalog.js';
+import { getCatalogTools, getOperationDefinitions, resolveToolOperation } from '../src/tools/actionCatalog.js';
 import { OPERATION_IDS as OP, OPERATION_ID_VALUES } from '../src/tools/operationIds.js';
-import { validateExecutableOperationInput } from '../src/tools/runtimeRegistry.js';
+import { getExecutableToolDefinition, validateExecutableOperationInput } from '../src/tools/runtimeRegistry.js';
 import {
   TOOL_NAMES, getMcpToolSchemas, getPublicToolSchemas,
   getToolDefinitions as getDefinitionMetadata, getToolGroups, getToolMetadata,
@@ -30,6 +31,17 @@ assert.equal(new Set(TOOL_NAMES).size, TOOL_NAMES.length, 'public tool names mus
 for (const required of requiredTools) assert.ok(TOOL_NAMES.includes(required), `${required} must remain available`);
 assert.deepEqual(getDefinitionMetadata(config).map(item => item.name), [...TOOL_NAMES]);
 assert.equal(getToolDefinitions(config).length, TOOL_NAMES.length);
+
+for (const tool of getCatalogTools()) {
+  assert.equal(Object.hasOwn(tool.definition, 'execution'), false, 'removed native-task execution metadata must not return to definitions');
+  for (const action of tool.actions) {
+    assert.equal(Object.hasOwn(action, 'execution'), false, 'catalog actions must not retain obsolete execution placeholders');
+    assert.ok(action.behavior.executionClass, 'current execution classification must remain available');
+  }
+}
+const executableStatus = getExecutableToolDefinition('relai_work', config, { action: 'status' });
+assert.equal(Object.hasOwn(executableStatus, 'execution'), false, 'executable registry must not copy removed native-task metadata');
+assert.equal(typeof executableStatus.handler, 'function');
 
 const schemas = getToolSchemas(config);
 const publicSchemas = getPublicToolSchemas(config);
@@ -63,6 +75,17 @@ assert.doesNotMatch(connectorInstructions(config), /workspace-resolution error|f
 assert.doesNotMatch(connectorInstructions(config), /Inspect relevant files|Validate after changes|recovery guidance/i, 'discretionary workflow tactics belong to the workflow runtime/skills, not global MCP instructions');
 
 const manifest = getToolSurfaceManifest(config);
+const restoreOutputSchema = getOperationDefinitions().find(item => item.name === OP.CHANGES_RESTORE).outputSchema;
+const validateRestoreOutput = value => fromJsonSchema(restoreOutputSchema)['~standard'].validate(value);
+const restoredSummary = { workspace: 'repo', mode: 'paths', paths: ['tracked.txt'], ...summarizeCommand({ executed: true, exitCode: 0 }) };
+assert.equal((await validateRestoreOutput(restoredSummary)).issues, undefined, 'restore must accept the actual process execution fact');
+const cancelledRestore = { workspace: 'repo', mode: 'paths', paths: ['tracked.txt'], ...summarizeCommand({ executed: false, exitCode: -1, cancelled: true, terminationConfirmed: true, error: 'cancelled before spawn' }) };
+const cancelledRestoreOutput = await validateRestoreOutput(cancelledRestore);
+assert.equal(cancelledRestoreOutput.issues, undefined, 'a cancelled restore must retain executed:false');
+assert.equal(cancelledRestoreOutput.value.executed, false);
+assert.ok((await validateRestoreOutput({ ...restoredSummary, executed: 'true' })).issues, 'restore execution facts must remain booleans');
+assert.ok((await validateRestoreOutput({ ...restoredSummary, unknownRestoreField: true })).issues, 'restore success must reject unknown fields');
+
 const planOperation = getOperationDefinitions().find(item => item.name === OP.WORK_PLAN);
 assert.equal(planOperation?.outputSchema?.properties?.progress, undefined, 'work.plan must not advertise progress that its handler does not return');
 assert.ok(Number.isSafeInteger(manifest.schemaVersion) && manifest.schemaVersion > 0, 'manifest schema revision must remain a positive integer');

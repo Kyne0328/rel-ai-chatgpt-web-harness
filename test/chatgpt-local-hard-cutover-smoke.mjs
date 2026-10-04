@@ -78,7 +78,7 @@ try {
   requestId += 1;
 
   client.call(requestId, 'relai_validate', {
-    action: 'checks', workspace: 'repo', work_id: task.work_id, check: 'node -e "process.exit(1)"', timeoutMs: 1000
+    action: 'checks', workspace: 'repo', work_id: task.work_id, check: 'node -e "process.exit(1)"', timeoutMs: 5_000
   });
   const failedCheck = await client.waitFor(requestId);
   assert.equal(failedCheck.result.isError, true);

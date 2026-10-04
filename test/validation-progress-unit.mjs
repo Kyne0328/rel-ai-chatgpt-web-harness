@@ -197,7 +197,13 @@ try {
   // Observe a fast cancellation rejection immediately so Node does not treat the
   // expected concurrent promise as unhandled before the assertion below awaits it.
   void runningCancellation.catch(() => {});
-  await waitFor(() => events.some(event => event.phase === 'progress' && event.taskId === cancelledTask.work_id && event.task?.progress?.totalUnits === 1));
+  // Queue admission also publishes the task's one-step plan progress. Wait for
+  // the validation check itself so this case exercises active cancellation.
+  await waitFor(() => events.some(event => event.phase === 'progress'
+    && event.taskId === cancelledTask.work_id
+    && event.activityEvent?.metadata?.resultStatus === 'running'
+    && event.activityEvent?.metadata?.currentCheck === slow
+    && event.activityEvent?.metadata?.checkCount === 1));
   const cancellation = await cancel(cancelledTask.work_id, 'Cancel active validation');
   assert.equal(cancellation.status, 'cancelling', 'active validation must settle before task cancellation becomes terminal');
   assert.equal(cancellation.endedAt, undefined, 'nonterminal cancellation must not publish a terminal timestamp');

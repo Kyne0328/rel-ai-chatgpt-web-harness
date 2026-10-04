@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-- **Allow multiple ChatGPT accounts to share one Rel.AI desktop through independent Secure MCP Tunnels.** Connection settings can now store additional Tunnel IDs and encrypted runtime API keys, run one supervised tunnel-client per account against the same authenticated local MCP service, recover each tunnel independently, and remove one account connection without duplicating Rel.AI workspaces or local task state.
-
 ## [1.1.4] — 2026-10-02
+
+### Multiple ChatGPT accounts
+- **Allow multiple ChatGPT accounts to share one Rel.AI desktop through independent Secure MCP Tunnels.** Connection settings can now store additional Tunnel IDs and encrypted runtime API keys, run one supervised tunnel-client per account against the same authenticated local MCP service, recover each tunnel independently, and remove one account connection without duplicating Rel.AI workspaces or local task state.
 
 ### OpenAI coding clients and MCP Events
 - **Remove the ChatGPT MCP Apps task panel completely.** Rel.AI now exposes only the canonical 15 coding tools to MCP clients: no app-only helper tool, no `ui://relai/*` resource, no panel hydration, no live-status resource subscription, and no panel-specific `relai://` desktop protocol. The desktop application remains the human control and observability surface.
@@ -75,12 +76,20 @@
 - **Warn clearly before normal users rely on Beta releases.** The Release channel control now labels Beta as a developer/tester pre-release channel and shows a persistent accessible warning when Beta is active, explaining that severe bugs or incomplete changes can make Rel.AI unstable or unusable and recommending Stable for normal use.
 - **Harden desktop background updates and tunnel recovery.** Adds Windows background update status helper scripts, improves macOS manual updater resilience, and refines secure tunnel supervisor restart mechanisms during sustained connectivity issues.
 - **Automate release promotion and vendor dependency auditing.** Adds `scripts/promote-release.mjs` and workflow automation to promote candidate prereleases to stable channels, plus `scripts/check-vendor-updates.mjs` for upstream dependency tracking.
-- **Refresh compatible runtime, desktop, frontend, and tooling dependencies.** Updates the MCP TypeScript SDK packages to 2.1.0, Midscene Computer to 1.13.3, Electron to 44.4.5, and the current compatible Hono, LRU cache, Node types, ESLint, Knip, React Query, Lucide, and React Router releases. The MCP update brings bounded Streamable HTTP request-body and JSON-RPC batch handling, while the Midscene and Electron updates include upstream Windows, browser-engine, rendering, and desktop reliability fixes.
+- **Refresh compatible runtime, desktop, frontend, and tooling dependencies.** Updates the MCP TypeScript SDK to the peer-compatible `@modelcontextprotocol/server`/`core` 2.3.0 plus `@modelcontextprotocol/node` 2.1.1 set, Midscene Computer to 1.14.0, Hono to 4.13.13 with `@hono/node-server` 2.1.3, Monaco Editor to 0.57.0, Sharp to 0.35.5, TypeScript Language Server to 6.0.1, `vscode-jsonrpc` to 9.0.3, Vite to 8.3.2, React Query to 5.104.1, Lucide to 1.52.0, Node types to 26.6.4, Knip to 6.39.0, globals to 17.13.0, and `@electron/asar` to 4.3.1 while retaining Electron 44.4.5 and the canonical hash router. The MCP package family is kept version-aligned so clean npm installs pass strict peer-dependency resolution, and the refreshed runtime/frontend stack passes the existing compiler, runtime, startup, computer-control, LSP, and isolated production-build checks.
 - **Add visual regression and startup recovery test coverage.** Integrates dashboard visual regression tests with baseline image comparison and property-based boundary testing.
 - **Harden the final release gates against environment and timing-only failures.** Production/packaging npm audits ignore ambient user npm configuration that can change audit behavior, successful web-automation results retain required workspace identity, cross-process HTTP task-correlation coverage waits for the existing deferred history write instead of racing it, active-validation cancellation coverage observes the concurrent promise immediately, Windows dashboard screenshots pin their theme instead of inheriting the runner's system theme, and work-session cleanup drains local analytics before clearing the shared SQLite task-history state.
 
+### Validated reliability corrections
+- **Preserve execution and completion evidence across asynchronous failures.** Physical command deadlines, cancelled diagnostics, bounded connector serialization, terminal Events delivery, and post-command bookkeeping now preserve the actual outcome. Output-reference reads support byte offsets so clients can retrieve retained output without losing whitespace or UTF-8 boundaries.
+- **Keep telemetry opt-outs and incremental data updates consistent.** Existing disabled-diagnostics preferences survive upgrades, queued diagnostic exports recheck consent, pending local analytics respect clearing boundaries, and incremental import resolution refreshes supported relative-file and directory spellings.
+- **Honor browser handoff, profile-clear, and tunnel-stop ownership.** Declined or cancelled handoffs stay cancelled, window blur preserves explicit human sign-in control, profile clearing retains custody until native cleanup settles, and unconfirmed tunnel termination remains owned and retryable without automatic restart.
+- **Make dashboard controls reflect actual supported actions.** Process filters send the selected scope, connection summaries distinguish the primary tunnel, extension updates use the supported backend route, and browser forms preserve their shared-session editing contract.
+- **Align release promotion and source gates with their prerequisites.** The promotion CLI verifies a published prerelease and required update metadata before changing its channel, shallow source-gate checkouts fetch the actual 1.1.3 database compatibility baseline, and release smoke coverage follows the complete packaged source-tree contract.
+- **Keep detached Windows update status accurate and finite.** Timer callbacks retain their phase and terminal timestamps between ticks, and elapsed minute/hour labels no longer round into a larger unit before its boundary.
+
 ### Release metadata
-- **Bump Rel.AI MCP from 1.1.3 to 1.1.4 across release surfaces.** Root, Electron, workspace packages, lockfiles, desktop status UI, and the release manifest report 1.1.4. Protocol version 2026-07-28, schema version 7, and the 15-tool public connector remain stable; the repository tool surface reports version 88 with manifest hash `12xDNe6dT5QKDYcooeGuBq0u`.
+- **Bump Rel.AI MCP from 1.1.3 to 1.1.4 across release surfaces.** Root, Electron, workspace packages, lockfiles, desktop status UI, and the release manifest report 1.1.4. Protocol version 2026-07-28, schema version 7, and the 15-tool public connector remain stable; the repository tool surface reports version 88 with manifest hash `H4Co9GzVG1qkSwk5M4Y16XbL`.
 
 ## [1.1.3] — 2026-09-20
 

@@ -1306,6 +1306,124 @@ async function case_update_status_helper_unit() {
 }
 await case_update_status_helper_unit();
 
+// Execute the production PowerShell timer callback without creating a window or starting an updater.
+async function case_update_status_helper_tick_unit() {
+  if (process.platform !== 'win32') return;
+  const { default: assert } = await import('node:assert/strict');
+  const { default: path } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const { spawnSync } = await import('node:child_process');
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const powershell = path.join(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const probe = String.raw`try {
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Add-Type -AssemblyName System.Windows.Forms
+$source = [IO.File]::ReadAllText($env:REL_AI_UPDATE_HELPER_SOURCE)
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw 'Update helper has PowerShell parse errors.' }
+$formatter = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Format-Elapsed' }, $true))
+if ($formatter.Count -ne 1) { throw 'Expected exactly one elapsed formatter.' }
+Invoke-Expression $formatter[0].Extent.Text
+Write-Output ('Production formatter:119s=' + (Format-Elapsed ([TimeSpan]::FromSeconds(119))) + ';7199s=' + (Format-Elapsed ([TimeSpan]::FromSeconds(7199))))
+$tick = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $node.Member.Value -eq 'Add_Tick' }, $true))
+if ($tick.Count -ne 1) { throw 'Expected exactly one production timer callback.' }
+$body = $tick[0].Arguments[0].ScriptBlock.Extent.Text
+$body = $body.Substring(1, $body.Length - 2)
+if ([regex]::Matches($body, '\[DateTimeOffset\]::UtcNow').Count -ne 1) { throw 'Expected exactly one timer clock boundary.' }
+$body = $body.Replace('[DateTimeOffset]::UtcNow', '$simulation.now')
+$handler = [System.EventHandler]([ScriptBlock]::Create($body))
+$simulation = @{ now = [DateTimeOffset]::Parse('2026-10-04T00:00:00Z'); marker = $null }
+$form = [pscustomobject]@{ closeCount = 0 }
+$form | Add-Member -MemberType ScriptMethod -Name Close -Value { $this.closeCount++ }
+$title = [pscustomobject]@{ Text = '' }
+$status = [pscustomobject]@{ Text = '' }
+$progress = [pscustomobject]@{ Style = $null; MarqueeAnimationSpeed = 0; Value = 0 }
+$elapsed = [pscustomobject]@{ Text = '' }
+$hint = [pscustomobject]@{ Text = '' }
+function Read-UpdateMarker { return $simulation.marker }
+function Reset-Scenario([string]$phase) {
+  Set-Variable -Name lastPhase -Scope Script -Value ''
+  foreach ($name in @('startedAt', 'completeAt', 'failedAt', 'missingSince')) { Set-Variable -Name $name -Scope Script -Value $null }
+  $simulation.now = [DateTimeOffset]::Parse('2026-10-04T00:00:00Z')
+  $simulation.marker = if ($phase) { [pscustomobject]@{ phase = $phase; targetVersion = '1.2.3'; startedAt = '2026-10-04T00:00:00Z'; message = 'Fixture failure' } } else { $null }
+  $form.closeCount = 0
+  $status.Text = ''
+}
+function Invoke-Tick([int]$seconds) {
+  $simulation.now = [DateTimeOffset]::Parse('2026-10-04T00:00:00Z').AddSeconds($seconds)
+  $handler.Invoke($null, [System.EventArgs]::Empty)
+}
+function Assert-Equal($actual, $expected, [string]$label) { if ($actual -ne $expected) { throw "$label expected=$expected actual=$actual" } }
+
+$durations = [ordered]@{ '-1' = '0s'; '0' = '0s'; '59' = '59s'; '60' = '1m 0s'; '119' = '1m 59s'; '3599' = '59m 59s'; '3600' = '1h 0m 0s'; '7199' = '1h 59m 59s' }
+foreach ($case in $durations.GetEnumerator()) {
+  Assert-Equal (Format-Elapsed ([TimeSpan]::FromSeconds([double]$case.Key))) $case.Value "Elapsed boundary $($case.Key)"
+}
+
+Reset-Scenario 'complete'
+Invoke-Tick 0
+Assert-Equal $form.closeCount 0 'Completion remains visible initially'
+Invoke-Tick 3
+Assert-Equal $form.closeCount 1 'Completion closes after retained timestamp'
+
+Reset-Scenario 'failed'
+Invoke-Tick 0
+Assert-Equal $form.closeCount 0 'Failure remains visible initially'
+Invoke-Tick 16
+Assert-Equal $form.closeCount 1 'Failure closes after retained timestamp'
+Assert-Equal $status.Text 'Fixture failure' 'Failure message'
+
+Reset-Scenario 'starting'
+Invoke-Tick 0
+$simulation.marker = $null
+Invoke-Tick 1
+Assert-Equal $status.Text 'Update complete. Rel.AI MCP has restarted.' 'Missing marker retains starting phase'
+Invoke-Tick 4
+Assert-Equal $form.closeCount 1 'Completed handoff closes'
+
+Reset-Scenario 'installing'
+Invoke-Tick 0
+$simulation.marker = $null
+Invoke-Tick 1
+Assert-Equal $status.Text 'The update did not finish normally. Open Rel.AI MCP to continue or retry.' 'Missing marker retains incomplete phase'
+Invoke-Tick 17
+Assert-Equal $form.closeCount 1 'Interrupted handoff closes'
+
+Reset-Scenario ''
+Invoke-Tick 0
+Invoke-Tick 3
+Assert-Equal $form.closeCount 1 'Initially missing marker closes'
+
+foreach ($phase in @('preparing', 'stopping', 'closing', 'installing', 'starting')) {
+  Reset-Scenario $phase
+  Invoke-Tick 0
+  Invoke-Tick 3
+  Assert-Equal $form.closeCount 0 "Nonterminal $phase stays open"
+  Assert-Equal $lastPhase $phase "Retained $phase"
+}
+Write-Output 'Production update helper delegate state, terminal phases, and missing-marker regressions passed.'
+
+} catch {
+  [Console]::Error.WriteLine($_.Exception.ToString())
+  exit 1
+}
+exit 0
+`;
+  const result = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(probe, 'utf16le').toString('base64')], {
+    env: { ...process.env, REL_AI_UPDATE_HELPER_SOURCE: path.join(root, 'electron/build/update-status-helper.ps1') },
+    encoding: 'utf8',
+    timeout: 30_000,
+    windowsHide: true
+  });
+  assert.equal(result.error, undefined, `PowerShell timer probe could not run: ${result.error?.message}`);
+  assert.equal(result.status, 0, `PowerShell timer probe failed: ${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /Production update helper delegate state, terminal phases, and missing-marker regressions passed/);
+}
+await case_update_status_helper_tick_unit();
+
 // Formerly updater-artifact-contract-unit.mjs
 async function case_updater_artifact_contract_unit() {
   const __m0 = await import("node:assert/strict");

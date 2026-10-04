@@ -27,6 +27,7 @@ import { MCP_PROTOCOL_VERSION } from '../src/mcp/protocol.js';
 import { toolResult } from '../src/mcp/results.js';
 import { enrichWithFallbackCompletions } from '../src/mcp/toolInvocation.js';
 import { executeToolCall } from '../src/tools/execution.js';
+import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { runWorkspaceOperation } from '../src/workspaceOperationQueue.js';
 import { createHttpPrincipal, createStdioPrincipal, principalFingerprint } from '../src/mcp/principal.ts';
@@ -600,6 +601,9 @@ const acceptedProcessStart = await handleTransportFallbackRequest(transientConfi
 });
 assert.equal(acceptedProcessStart.body.result.structuredContent.status, 'running');
 assert.ok(acceptedProcessStart.body.result.structuredContent.operationId, 'slow managed-process startup must return a fallback operation identity');
+await assert.doesNotReject(() => validateToolOutput({}, 'relai_process', processStartMessage(1010).params.arguments,
+  acceptedProcessStart.body.result.structuredContent),
+'slow managed-process startup must satisfy the public output contract while background startup is still running');
 const retriedProcessStart = await handleTransportFallbackRequest(transientConfig, processStartMessage(1011), {
   principal: 'principal-resilient-process',
   transportType: 'streamable-http',
@@ -906,7 +910,11 @@ try {
     stdout: 'large unrelated output'.repeat(30_000)
   }, false).structuredContent;
   assert.equal(compactedStatus.truncated, true);
-  assert.deepEqual(compactedStatus.backgroundOperations.map(operation => operation.operationId), recoveredOperations.map(operation => operation.operationId));
+  assert.deepEqual(
+    compactedStatus.backgroundOperations.map(operation => operation.operationId).sort(),
+    recoveredOperations.map(operation => operation.operationId).sort(),
+    'result compaction may prioritize failures or unsafe operations, but must retain every operation identity'
+  );
   assert.equal(compactedStatus.backgroundOperations.find(operation => operation.operationId === secondOperation.record.operationId).result.stderrOutputRef, recoveredFailure.result.stderrOutputRef,
     'result compaction must preserve operation identity and recoverable diagnostics');
   assert.match(toolResult({ ok: true, backgroundOperations: recoveredOperations }, false).content[0].text, /failed; exit code 1/,
@@ -1211,8 +1219,8 @@ try {
   assert.equal(interruptedSession.backgroundOperation.status, 'interrupted');
   assert.equal(Object.hasOwn(interruptedSession.backgroundOperation.result, 'stdout'), false);
 } finally {
-  fs.rmSync(sandbox, { recursive: true, force: true });
-  fs.rmSync(transientSandbox, { recursive: true, force: true });
+  fs.rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  fs.rmSync(transientSandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   resetFallbackExecutions();
 }
 

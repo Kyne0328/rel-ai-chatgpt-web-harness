@@ -64,8 +64,15 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
         : Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
           ? Date.now() + Math.floor(requestedTimeoutMs)
           : 0;
-      const deadlineSignal = deadlineAtMs > 0 ? AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now())) : undefined;
-      const requestSignal = combineAbortSignals(context?.signal, deadlineSignal);
+      const remainingDeadlineMs = deadlineAtMs - Date.now();
+      const deadlineSignal = deadlineAtMs > 0
+        ? remainingDeadlineMs <= 0
+          ? AbortSignal.abort(new DOMException('Execution deadline expired before admission.', 'TimeoutError'))
+          : AbortSignal.timeout(remainingDeadlineMs)
+        : undefined;
+      // Already-requested cancellation is the first cause even when a deadline
+      // expired while synchronous preparation prevented timer delivery.
+      const requestSignal = combineAbortSignals(context?.signal, finishActivity?.signal, deadlineSignal);
       let taskBaselineStatusOutput;
 
       const invokeHandler = async (args, signal = requestSignal) => {
@@ -98,7 +105,19 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           && (executionName === OP.EDIT || executionName === OP.EXEC)
           && Array.isArray(handled?.changedFiles)
           && handled.changedFiles.length) {
-          claimTaskChangedFiles(config, taskId, workspace.alias, handled.changedFiles);
+          try {
+            claimTaskChangedFiles(config, taskId, workspace.alias, handled.changedFiles);
+          } catch (error) {
+            const code = String(error?.code || '');
+            if (code !== 'TASK_INTEGRITY_PERSISTENCE_FAILED' && code !== 'ERR_SQLITE_ERROR'
+              && !['EACCES', 'ENOSPC', 'EROFS', 'EMFILE', 'ENFILE', 'EIO'].includes(code)) throw error;
+            const failure = new Error(`Workspace/task integrity state could not be persisted for '${workspace.alias}'.`, { cause: error });
+            failure.code = 'TASK_INTEGRITY_PERSISTENCE_FAILED';
+            failure.retryable = false;
+            failure.handlerResultKnown = true;
+            failure.handlerResult = handled;
+            throw failure;
+          }
         }
         if (handled && typeof handled === 'object' && !Array.isArray(handled) && handled.ok === false && handled.error?.code === 'CANCELLED') {
           context?.cancel?.throwIfCancelled?.();

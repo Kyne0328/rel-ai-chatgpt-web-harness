@@ -9,7 +9,8 @@ const SHARED_ACTION_REQUIRED_FIELDS = Object.freeze({
 
 const PUBLIC_INPUT_DESCRIPTIONS = Object.freeze({
   relai_read: new Set([
-    'properties.asResource.description'
+    'properties.asResource.description',
+    'properties.byteOffset.description'
   ]),
   relai_edit: new Set([
     'description',

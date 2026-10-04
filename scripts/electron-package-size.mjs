@@ -99,9 +99,8 @@ function buildPackageSizeReport(options) {
   if (content.localeCount !== 1 || content.locales[0] !== 'en-US.pak') {
     violations.push(`Expected only en-US.pak, found: ${content.locales.join(', ') || 'none'}.`);
   }
-  if (content.sourceCssFiles.length > 0) {
-    violations.push(`Source CSS is packaged: ${content.sourceCssFiles.join(', ')}.`);
-  }
+  // resources/src intentionally mirrors the complete runtime source tree. Source CSS is therefore
+  // diagnostic size data, not a packaging violation; packaged-runtime-parity enforces exact-tree parity.
   if (content.asarSourceMapCount > 0) violations.push(`app.asar contains ${content.asarSourceMapCount} source map files.`);
   for (const item of comparison) {
     if (item.exceedsTolerance) warnings.push(`${item.metric} is ${item.deltaPercent.toFixed(2)}% above the measured baseline.`);

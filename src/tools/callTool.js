@@ -61,6 +61,9 @@ async function callToolObserved(name, args = {}, context = {}) {
   let completedTaskAnalytics = null;
   let taskProgressPatch = null;
   let workspaceOverride = null;
+  let handlerResultKnown = false;
+  let handlerResult;
+  let compactResponse = false;
   try {
     if (!isToolCallable(name, config)) {
       throw new Error(`Unknown tool '${name}'. Available tools: ${getToolNames(config).join(', ')}. Removed direct operation names are not callable; restart or reconnect if discovery is stale.`);
@@ -68,6 +71,7 @@ async function callToolObserved(name, args = {}, context = {}) {
     const resolved = resolveExecutableToolCall(name, publicArgs, config);
     if (!resolved) throw new Error(`Unknown tool '${name}'.`);
     const definition = resolved.executionDefinition;
+    compactResponse = connector && resolved.compact;
     operationName = resolved.operationName;
     resolvedAction = resolved.action || '';
     effectiveArgs = resolved.operationArgs;
@@ -254,6 +258,8 @@ async function callToolObserved(name, args = {}, context = {}) {
       config, name, executionName: operationName, effectiveArgs, context, requestTaskContext, finishActivity, definition, started, workspaceOverride
     });
     const value = execution.value;
+    handlerResult = value;
+    handlerResultKnown = true;
     sessionStart = execution.sessionStart;
     const valueOk = value?.ok !== false;
     if (!valueOk) analyticsFailureCode = analyticsErrorCodeFromValue(value);
@@ -348,11 +354,14 @@ async function callToolObserved(name, args = {}, context = {}) {
       effectivePrincipal,
       connector
     );
+    const knownResult = handlerResultKnown ? handlerResult : error?.handlerResult;
+    const postHandlerIntegrityFailure = enhanced.code === 'TASK_INTEGRITY_PERSISTENCE_FAILED' && (handlerResultKnown || error?.handlerResultKnown === true);
+    if (postHandlerIntegrityFailure) enhanced.retryable = false;
     analyticsFailureCode = String(enhanced.code || '');
     activityResult = {
       ok: false,
       error: enhanced.message,
-      activity: buildToolActivityDetails(operationName, effectiveArgs || {}, null, enhanced, {
+      activity: buildToolActivityDetails(operationName, effectiveArgs || {}, postHandlerIntegrityFailure ? knownResult : null, enhanced, {
         operation: finishActivity?.operation,
         phase: 'complete',
         metadata: { errorCode: enhanced.code, retryable: enhanced.retryable === true, publicTool: name }
@@ -360,6 +369,26 @@ async function callToolObserved(name, args = {}, context = {}) {
     };
     const failedWorkId = finishActivity?.taskId || requestedTaskId;
     if (failedWorkId) enhanced.taskId = failedWorkId;
+    // A failed post-handler write must not erase physical execution evidence
+    // or invite the caller to repeat an already-admitted mutation.
+    if (postHandlerIntegrityFailure) {
+      const response = compactResponse
+        ? serializeConnectorResult({ publicName: name, action: resolvedAction, operationName, value: knownResult, args: effectiveArgs || {}, workId: failedWorkId })
+        : withTaskIdentity(knownResult, failedWorkId);
+      return ok({
+        ...response,
+        ok: false,
+        operationOk: knownResult?.ok !== false,
+        handlerCompleted: true,
+        retryable: false,
+        ...(knownResult?.completionKnown === true ? { completionKnown: false } : {}),
+        ...(knownResult?.error ? { operationError: knownResult.error } : {}),
+        error: enhanced.message,
+        errorCode: enhanced.code,
+        errorDetails: { code: enhanced.code, source: 'rel-ai-mcp', operation: 'write', taskId: failedWorkId, retryable: false },
+        nextAction: 'The handler returned this result before task bookkeeping failed. Do not repeat the original operation to repair persistence. Reconcile the same work_id and operationId; a running operation may still be active.'
+      });
+    }
     const failedValue = { ok: false, errorCode: enhanced.code || '', commandSummary: effectiveArgs?.command || '' };
     const failedDraft = failedWorkId ? buildWorkflowEvidenceReceipt({
       tool: operationName,

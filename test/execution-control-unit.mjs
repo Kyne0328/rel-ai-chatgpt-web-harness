@@ -58,8 +58,8 @@ for (const cancellationSource of ['none', 'context', 'activity']) {
   const cancellation = new DOMException('User cancelled before admission.', 'AbortError');
   const finishActivity = () => {};
   if (cancellationSource === 'activity') finishActivity.signal = AbortSignal.abort(cancellation);
-  let observed;
-  const result = await executeToolCall({
+  let handlerCalls = 0;
+  await assert.rejects(() => executeToolCall({
     config: {}, name: OP.EXEC, executionName: OP.EXEC,
     effectiveArgs: { executable: process.execPath, argv: ['--version'] },
     context: {
@@ -67,15 +67,17 @@ for (const cancellationSource of ['none', 'context', 'activity']) {
       ...(cancellationSource === 'context' ? { signal: AbortSignal.abort(cancellation) } : {})
     },
     finishActivity,
-    definition: { handler: async (_config, _args, context) => {
-      observed = context.signal;
+    definition: { handler: async (_config, _args) => {
+      handlerCalls += 1;
       return { ok: true, executed: false };
     } }
+  }), error => {
+    assert.equal(error.code, 'WORKSPACE_OPERATION_ABORTED');
+    assert.equal(error.cause?.name, cancellationSource === 'none' ? 'TimeoutError' : 'AbortError');
+    if (cancellationSource !== 'none') assert.equal(error.cause, cancellation);
+    return true;
   });
-  assert.equal(result.value.executed, false);
-  assert.equal(observed.aborted, true, 'admitted exec must observe an already expired deadline synchronously');
-  assert.equal(observed.reason.name, cancellationSource === 'none' ? 'TimeoutError' : 'AbortError');
-  if (cancellationSource !== 'none') assert.equal(observed.reason, cancellation);
+  assert.equal(handlerCalls, 0, 'expired or cancelled requests must not reach the physical handler');
 }
 
 console.log('Agent-controlled one-shot timeout policy tests passed.');

@@ -133,6 +133,9 @@ function relaiRead(workspace: BridgeWorkspace, config: BridgeConfig, args: Bridg
 }
 
 async function relaiReadAsync(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs = {}, context: BridgeContext = {}) {
+  if (args.byteOffset !== undefined && (!args.outputRef || args.asResource === true)) {
+    throw new Error('relai_read byteOffset requires outputRef and cannot be combined with asResource.');
+  }
   if (args.asResource === true) return readArtifactLink(workspace, config, args, context);
   if (args.outputRef) return readSpilledOutput(workspace, config, args, context);
   if (args.skill) {
@@ -205,6 +208,43 @@ async function readSpilledOutput(workspace: BridgeWorkspace, config: BridgeConfi
   const spill = readOutputSpill(config, spillOwner, args.outputRef);
   const defaultMaxBytes = context.connector ? DEFAULT_CONNECTOR_READ_BYTES : DEFAULT_MAX_READ_BYTES;
   const maxBytes = clampNumber(args.maxBytes, 1000, 10 * 1024 * 1024, defaultMaxBytes);
+  if (args.byteOffset !== undefined) {
+    if (typeof args.byteOffset !== 'number' || !Number.isSafeInteger(args.byteOffset) || args.byteOffset < 0) {
+      throw new Error('relai_read byteOffset must be a non-negative safe integer.');
+    }
+    if (args.startLine !== undefined || args.endLine !== undefined) {
+      throw new Error('relai_read byteOffset cannot be combined with startLine or endLine.');
+    }
+    const byteOffset = Math.min(args.byteOffset, spill.bytes);
+    // A byte chunk remains below the MCP cap even with six-byte JSON escapes.
+    const length = Math.min(Math.floor(maxBytes), 64 * 1024, spill.bytes - byteOffset);
+    const buffer = Buffer.alloc(length);
+    const file = await fs.promises.open(spill.file, 'r');
+    let returnedBytes = 0;
+    try {
+      if (length) ({ bytesRead: returnedBytes } = await file.read(buffer, 0, length, byteOffset));
+    } finally { await file.close(); }
+    if (length > 0 && returnedBytes === 0) throw new Error('Output spill changed during this read; retry the read cursor.');
+    const data = buffer.subarray(0, returnedBytes);
+    let content: string;
+    let invalidUtf8 = false;
+    try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data); }
+    catch { content = data.toString('utf8'); invalidUtf8 = true; }
+    const nextOffset = byteOffset + returnedBytes;
+    const truncated = nextOffset < spill.bytes;
+    return {
+      ok: true,
+      workspace: workspace.alias,
+      items: [{
+        type: 'output', outputRef: spill.outputRef, bytes: spill.bytes,
+        byteOffset, nextOffset, returnedBytes, truncated, content, encoding: 'utf8',
+        ...(invalidUtf8 ? { invalidUtf8: true, base64: data.toString('base64') } : {}),
+        ...(truncated ? { hint: 'Continue relai_read with the same outputRef and byteOffset set to nextOffset. Decode base64 when invalidUtf8 is true for exact byte reconstruction.' } : {})
+      }],
+      skipped: [], requestedCount: 1, returnedCount: 1,
+      ...(truncated ? { truncated: true } : {})
+    };
+  }
   const data = await fs.promises.readFile(spill.file);
   const text = data.toString('utf8');
   const selection = selectReadContent(text, normalizeReadLineRange(args), maxBytes);
@@ -218,7 +258,7 @@ async function readSpilledOutput(workspace: BridgeWorkspace, config: BridgeConfi
       returnedBytes: selection.returnedBytes,
       lineCount: selection.totalLines,
       truncated: selection.truncated,
-      ...(selection.truncated ? { hint: `Output spill truncated for this read. Re-call relai_read with outputRef plus startLine/endLine (spill has ${selection.totalLines} lines).` } : {}),
+      ...(selection.truncated ? { hint: `Output spill truncated for this read. Re-call relai_read with outputRef plus startLine/endLine (spill has ${selection.totalLines} lines), or byteOffset: 0 for bounded byte chunks.` } : {}),
       ...(selection.lineRange ? { lineRange: selection.lineRange } : {}),
       content: selection.content
     }],

@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { runProcess } from '../process.js';
 
 import { getCurrentTaskAbortSignal } from '../toolActivity.js';
-import { combineAbortSignals } from '../abortSignals.js';
+import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
 import { updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { isPersistentAdbInvocation, resolveOneShotTimeoutMs } from '../executionControl.js';
 import { outputSpillOwner } from '../outputSpill.js';
@@ -37,6 +37,7 @@ function throwIfAborted(signal) {
 }
 
 function executionDeadlineExpired(context = {}, signal) {
+  if (signal?.aborted) return isTimeoutAbort(signal);
   const deadlineAtMs = Number(context?.deadlineAtMs);
   if (!Number.isFinite(deadlineAtMs) || deadlineAtMs <= 0) return false;
   return Date.now() >= deadlineAtMs || signal?.reason?.name === 'TimeoutError';
@@ -247,6 +248,8 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       cwd: cwd.absolutePath,
       env,
       timeout: timeoutMs,
+      deadlineAtMs: context.deadlineAtMs,
+      preserveOutputWhitespace: true,
       maxOutputBytes,
       signal,
       resourceClass: 'heavy',
@@ -267,7 +270,10 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   let mutationTracking = 'unavailable';
   let mutationUnknown = false;
   let changed;
-  if (!trackMutation) {
+  if (result.executed === false) {
+    changed = { files: [], truncated: false };
+    mutationTracking = 'not-executed';
+  } else if (!trackMutation) {
     changed = { files: [], truncated: false };
     mutationTracking = 'declared-read-only';
   } else {
@@ -297,7 +303,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   const commandSucceeded = result.exitCode === 0 && !timedOut && !cancelled;
   return {
     ok: true,
-    executed: true,
+    executed: result.executed === true,
     commandSucceeded,
     workspace: workspace.alias,
     command: commandSummary,

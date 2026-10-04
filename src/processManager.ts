@@ -1149,11 +1149,21 @@ async function acquireManagedProcessReuseReservation(
   const current = new Promise<void>(resolve => { releaseCurrent = resolve; });
   const tail = previous.then(() => current);
   processReuseReservations.set(reuseFingerprint, tail);
-  await waitForManagedProcessCoordination(previous, signal, 'Managed process startup was cancelled while waiting to reuse an existing process.');
+  try {
+    await waitForManagedProcessCoordination(previous, signal, 'Managed process startup was cancelled while waiting to reuse an existing process.');
+  } catch (error) {
+    // Settle only this wait node. Keep its predecessor in the shared chain
+    // until that startup finishes, so later callers cannot bypass it.
+    releaseCurrent();
+    void tail.then(() => {
+      if (processReuseReservations.get(reuseFingerprint) === tail) processReuseReservations.delete(reuseFingerprint);
+    });
+    throw error;
+  }
   if (signal?.aborted) {
     releaseCurrent();
     if (processReuseReservations.get(reuseFingerprint) === tail) processReuseReservations.delete(reuseFingerprint);
-    throw cancellationError('Managed process startup was cancelled while waiting to reuse an existing process.');
+    throw managedProcessCoordinationAbortError(signal, 'Managed process startup was cancelled while waiting to reuse an existing process.');
   }
   let released = false;
   return () => {
@@ -1611,13 +1621,14 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
 
 function reserveRestoredManagedProcessCapacity(config: ManagedProcessConfig, signal?: AbortSignal): Promise<void> {
   const previous = restoredCapacityReservation;
-  const next = waitForManagedProcessCoordination(
-    previous,
-    signal,
-    'Managed process startup was cancelled while restoring persistent-process capacity.'
-  ).then(() => reserveRestoredManagedProcessCapacityInternal(config, signal));
+  const message = 'Managed process startup was cancelled while restoring persistent-process capacity.';
+  // The queue tracks actual restoration, not the caller's cancellable wait.
+  const next = previous.then(() => {
+    if (signal?.aborted) throw managedProcessCoordinationAbortError(signal, message);
+    return reserveRestoredManagedProcessCapacityInternal(config, signal);
+  });
   restoredCapacityReservation = next.catch(() => undefined);
-  return next;
+  return waitForManagedProcessCoordination(next, signal, message);
 }
 
 async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProcessConfig, signal?: AbortSignal): Promise<void> {

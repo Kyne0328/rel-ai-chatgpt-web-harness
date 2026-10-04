@@ -119,7 +119,7 @@ try {
   resetToolActivity();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  fs.rmSync(temp, { recursive: true, force: true });
+  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 function percentile(values, quantile) {

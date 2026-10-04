@@ -10,17 +10,15 @@ import { CONCURRENCY_SCOPE, EXECUTION_CLASS, TASK_SCOPE } from './contracts.ts';
 type ToolAnnotations = ToolDefinitionMetadata['annotations'];
 type ToolBehavior = ToolDefinitionMetadata['behavior'];
 type ToolDashboardMetadata = ToolDefinitionMetadata['dashboard'];
-type ToolExecution = NonNullable<ToolDefinitionMetadata['execution']>;
 type ObjectJsonSchema = ToolDefinitionMetadata['inputSchema'];
 
 type CatalogToolDefinition = Readonly<
-  Omit<ToolDefinitionMetadata, 'annotations' | 'connectorStrip' | 'groups' | 'behavior' | 'dashboard' | 'execution'> & {
+  Omit<ToolDefinitionMetadata, 'annotations' | 'connectorStrip' | 'groups' | 'behavior' | 'dashboard'> & {
     annotations: Readonly<ToolAnnotations>;
     connectorStrip: readonly string[];
     groups: readonly ToolGroup[];
     behavior: Readonly<ToolBehavior>;
     dashboard: Readonly<ToolDashboardMetadata>;
-    execution?: Readonly<ToolExecution>;
   }
 >;
 

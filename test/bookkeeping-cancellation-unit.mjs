@@ -80,7 +80,8 @@ try {
       assert.equal(cancelled.executed, false, 'pre-command accounting cancellation must not start the requested command');
       assert.equal(cancelled.commandSucceeded, false);
       assert.equal(cancelled.cancelled, true);
-      assert.equal(cancelled.mutationUnknown, true);
+      // The requested command never started, so it cannot have unknown mutations.
+      assert.equal(cancelled.mutationUnknown, false);
       assert.match(cancelled.error || '', /cancel mutation accounting/);
       assert.equal(fs.existsSync(path.join(plainWorkspace, 'should-not-run.txt')), false);
     } finally {
@@ -236,7 +237,7 @@ try {
   const executionSource = fs.readFileSync(new URL('../src/tools/execution.js', import.meta.url), 'utf8');
   const completionSource = fs.readFileSync(new URL('../src/tools/completion.js', import.meta.url), 'utf8');
   const validationSource = fs.readFileSync(new URL('../src/bridge/validation.js', import.meta.url), 'utf8');
-  assert.match(executionSource, /ensureTaskBaseline\(config, taskId, workspace\.alias, \{ signal: watchdog\.signal \}\)/);
+  assert.match(executionSource, /ensureTaskBaseline\(config, taskId, workspace\.alias, \{\s*signal: watchdog\.signal(?:,|\s*\})/);
   assert.match(completionSource, /workspaceDirtyPaths\(workspace, config, changedFiles, \{ signal: options\.signal \}\)/);
   assert.match(validationSource, /createValidationFingerprint\(workspace, config, \{ paths: fingerprintScope, signal \}\)/);
 

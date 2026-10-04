@@ -63,6 +63,7 @@ interface RunProcessOptions {
   readonly maxOutputBytes?: unknown;
   readonly outputSpillTaskId?: unknown;
   readonly timeout?: unknown;
+  readonly deadlineAtMs?: unknown;
   readonly terminationGraceMs?: unknown;
   readonly forceWaitMs?: unknown;
   readonly shell?: boolean;
@@ -75,6 +76,7 @@ interface RunProcessOptions {
 
 /** Process outcomes are part of the exported process API contract. */
 export interface RunProcessResult {
+  readonly executed: boolean;
   readonly exitCode: number;
   readonly signal?: string;
   readonly stdout: string;
@@ -498,6 +500,20 @@ async function runProcess(command: string, args: readonly string[] = [], options
       ...(options.input != null ? { input: String(options.input) } : {})
     };
 
+    const deadlineAtMs = Number(options.deadlineAtMs);
+    const abortedBeforeSpawn = options.signal?.aborted === true;
+    if (abortedBeforeSpawn || (Number.isFinite(deadlineAtMs) && deadlineAtMs > 0 && Date.now() >= deadlineAtMs)) {
+      const reason = abortedBeforeSpawn
+        ? options.signal?.reason
+        : new DOMException('Execution deadline expired before process start.', 'TimeoutError');
+      const timedOut = abortedBeforeSpawn ? isTimeoutAbort(options.signal) : true;
+      return terminalQueueResult({
+        error: errorMessage(reason || 'Operation cancelled before process start.'),
+        timedOut,
+        cancelled: !timedOut,
+        queueWaitMs
+      });
+    }
     const processStartedAt = Date.now();
     const subprocess = execa(file, shell ? [] : processArgs, execaOptions);
     const subprocessClose = observeSubprocessClose(subprocess.nodeChildProcess);
@@ -632,6 +648,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
           : undefined;
 
     return {
+      executed: !spawnError && processPid(subprocess) > 0,
       exitCode: typeof result.exitCode === 'number' ? result.exitCode : -1,
       ...(result.signal ? { signal: result.signal } : {}),
       stdout: processOutputText(stdoutBuffer, options.preserveOutputWhitespace),
@@ -754,6 +771,7 @@ function armPostExitPipeDrain(
 
 function terminalQueueResult(options: { readonly error: string; readonly cancelled?: boolean; readonly timedOut?: boolean; readonly queueTimedOut?: boolean; readonly queueWaitMs: number }): RunProcessResult {
   return {
+    executed: false,
     exitCode: -1,
     stdout: '',
     stderr: '',
@@ -892,6 +910,7 @@ function appendLimited(current: string, next: string, maxBytes: number): string 
 function summarizeCommand(result: Partial<RunProcessResult> & Pick<RunProcessResult, 'exitCode'>): Record<string, unknown> {
   return {
     ok: result.exitCode === 0 && result.timedOut !== true && result.cancelled !== true,
+    ...(result.executed != null ? { executed: result.executed } : {}),
     exitCode: result.exitCode,
     ...(result.signal ? { signal: result.signal } : {}),
     ...(result.error ? { error: result.error } : {}),

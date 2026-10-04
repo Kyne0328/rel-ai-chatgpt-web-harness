@@ -194,6 +194,50 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
   };
 }
 
+async function retainOutputStreams(config, ownerId, value, options = {}) {
+  const owner = String(ownerId || '').trim();
+  if (!owner) return;
+  // A timeout/cancellation result may be the only remaining copy of output.
+  // Preserve it even when the execution signal was already aborted on entry.
+  const signal = options.signal?.aborted ? null : options.signal;
+  async function retain(current, depth = 0) {
+    if (!current || typeof current !== 'object' || depth > 5) return;
+    for (const stream of ['stdout', 'stderr']) {
+      const refKey = `${stream}OutputRef`;
+      if (typeof current[stream] !== 'string' || !current[stream] || current[refKey]) continue;
+      let sourceTruncated = current[`${stream}Truncated`] === true
+        || current[`${stream}SpillTruncated`] === true;
+      let writer = null;
+      try {
+        writer = createOutputSpillWriter(config, owner);
+        const bytes = Buffer.from(current[stream], 'utf8');
+        writer.start();
+        for (let offset = 0; offset < bytes.length; offset += SPILL_LOW_WATER_BYTES) {
+          if (signal?.aborted) {
+            sourceTruncated = true;
+            break;
+          }
+          writer.append(bytes.subarray(offset, offset + SPILL_LOW_WATER_BYTES));
+          await writer.waitForLowWatermark();
+        }
+        const retained = await writer.finish();
+        if (retained?.outputRef) current[refKey] = retained.outputRef;
+        if (sourceTruncated || retained?.spillTruncated === true || !retained?.outputRef) {
+          current[`${stream}SpillTruncated`] = true;
+        }
+      } catch (error) {
+        current[`${stream}SpillTruncated`] = true;
+        try { await writer?.finish(); } catch {}
+        if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] output retention:', error);
+      }
+    }
+    for (const child of Object.values(current)) {
+      if (child && typeof child === 'object') await retain(child, depth + 1);
+    }
+  }
+  await retain(value);
+}
+
 function writeChunk(fd, chunk) {
   return new Promise((resolve, reject) => {
     fs.write(fd, chunk, 0, chunk.length, null, (error, written) => {
@@ -317,4 +361,4 @@ function pruneOutputSpills(root) {
   };
 }
 
-export { createOutputSpillWriter, outputSpillOwner, readOutputSpill };
+export { createOutputSpillWriter, outputSpillOwner, readOutputSpill, retainOutputStreams };

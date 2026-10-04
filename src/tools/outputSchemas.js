@@ -174,6 +174,12 @@ const FIELD_SCHEMAS = Object.freeze({
   remoteChanged: BOOLEAN,
   warning: STRING,
   operationId: STRING,
+  updatedAt: STRING,
+  revision: NUMBER,
+  phase: STRING,
+  elapsedMs: NUMBER,
+  deadlineAt: STRING,
+  remainingMs: NUMBER,
   changed: BOOLEAN,
   oldSha256: STRING_NULL,
   newSha256: STRING_NULL,
@@ -448,7 +454,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.SEARCH_TEXT]: ['ok', 'workspace', 'work_id', 'pattern', 'queries', 'queryCount', 'uniqueFileCount', 'execution', 'glob', 'fixed', 'ignoreCase', 'matches', 'matchCount', 'mode', 'effectiveMode', 'autoTier', 'selectionStrategy', 'contextBefore', 'contextAfter', 'groupByFile', 'mergeOverlaps', 'maxFiles', 'maxRangesPerFile', 'maxRangeLines', 'files', 'results', 'resultCount', 'returnedFileCount', 'returnedRangeCount', 'contextMatchCount', 'returnedBytes', 'maxBytes', 'omittedFiles', 'omittedRanges', 'truncated', 'contextTruncated', 'next'],
   [OP.INSPECT]: ['ok', 'workspace', 'work_id', 'action', 'index', 'query', 'strategy', 'semanticEmbeddings', 'retrieval', 'fallbackResultKind', 'intelligence', 'files', 'matchCount', 'symbol', 'definitions', 'definitionCount', 'references', 'items', 'referenceCount', 'callCount', 'calls', 'seeds', 'maxDepth', 'impactedPaths', 'impactedPathCount', 'affectedTests', 'importEdges', 'definitionPaths', 'directCallers', 'importers', 'indirectImpact', 'relatedSymbols', 'uiSurfaces', 'registrationSurfaces', 'recommendedReadOrder', 'architecture', 'relationshipTypes', 'modules', 'entryPoints', 'hotspots', 'layers', 'cycles', 'communities', 'languages', 'diagnosticCommands', 'discoveryWarnings', 'validationCommands', 'configuredTestCommands', 'diagnostics', 'diagnosticCount', 'languageServers', 'diagnosticsExecuted', 'summary', 'truncated', 'next', 'readiness'],
   [OP.EXEC]: ['ok', 'executed', 'commandSucceeded', 'workspace', 'work_id', 'command', 'commandSummary', 'cwd', 'shell', 'durationMs', 'queueWaitMs', 'queueTimedOut', 'exitCode', 'stdout', 'stderr', 'stdoutBytes', 'stderrBytes', 'stdoutTruncated', 'stderrTruncated', 'stdoutOutputRef', 'stderrOutputRef', 'stdoutSpillTruncated', 'stderrSpillTruncated', 'timedOut', 'cancelled', 'terminationConfirmed', 'forcedTermination', 'signal', 'error', 'environmentKeys', 'changedFiles', 'changedFilesTruncated', 'mutationTracking', 'mutationUnknown'],
-  [OP.PROCESS_START]: ['ok', 'work_id', 'processId', 'pid', 'workspace', 'workspaceId', 'label', 'kind', 'purpose', 'pty', 'columns', 'rows', 'metadataRevision', 'commandSummary', 'cwd', 'status', 'reused', 'queueWaitMs', 'readiness', 'lifecycle', 'workSessionId', 'startedAt', 'endedAt', 'exitCode', 'signal', 'stdoutBytes', 'stderrBytes', 'stdoutDroppedBytes', 'stderrDroppedBytes', 'stdoutRetainedFromOffset', 'stderrRetainedFromOffset', 'environmentKeys', 'stdoutTail', 'stderrTail', 'readiness', 'error'],
+  [OP.PROCESS_START]: ['ok', 'work_id', 'processId', 'pid', 'workspace', 'workspaceId', 'label', 'kind', 'purpose', 'pty', 'columns', 'rows', 'metadataRevision', 'commandSummary', 'cwd', 'status', 'reused', 'queueWaitMs', 'readiness', 'lifecycle', 'workSessionId', 'startedAt', 'endedAt', 'exitCode', 'signal', 'stdoutBytes', 'stderrBytes', 'stdoutDroppedBytes', 'stderrDroppedBytes', 'stdoutRetainedFromOffset', 'stderrRetainedFromOffset', 'environmentKeys', 'stdoutTail', 'stderrTail', 'readiness', 'operationId', 'updatedAt', 'revision', 'phase', 'elapsedMs', 'deadlineAt', 'remainingMs', 'message', 'nextAction', 'error'],
   [OP.PROCESS_READ]: ['ok', 'work_id', 'processId', 'pid', 'workspace', 'workspaceId', 'label', 'kind', 'purpose', 'pty', 'columns', 'rows', 'metadataRevision', 'commandSummary', 'cwd', 'status', 'reused', 'readiness', 'lifecycle', 'workSessionId', 'startedAt', 'endedAt', 'exitCode', 'signal', 'stdoutBytes', 'stderrBytes', 'stdoutDroppedBytes', 'stderrDroppedBytes', 'stdoutRetainedFromOffset', 'stderrRetainedFromOffset', 'environmentKeys', 'stdout', 'stderr', 'error'],
   [OP.PROCESS_WRITE]: ['ok', 'work_id', 'processId', 'acceptedBytes', 'status', 'resized', 'columns', 'rows'],
   [OP.PROCESS_STOP]: ['ok', 'work_id', 'processId', 'pid', 'workspace', 'workspaceId', 'label', 'kind', 'purpose', 'pty', 'columns', 'rows', 'metadataRevision', 'commandSummary', 'cwd', 'status', 'reused', 'readiness', 'lifecycle', 'workSessionId', 'startedAt', 'endedAt', 'exitCode', 'signal', 'stdoutBytes', 'stderrBytes', 'stdoutDroppedBytes', 'stderrDroppedBytes', 'stdoutRetainedFromOffset', 'stderrRetainedFromOffset', 'environmentKeys', 'stdoutTail', 'stderrTail', 'duplicate', 'error'],
@@ -458,7 +464,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.DESKTOP]: ['ok', 'workspace', 'work_id', 'action', 'platform', 'path', 'kind', 'uri', 'application', 'text', 'textLength', 'present', 'percent', 'charging', 'state', 'message', 'error'],
   [OP.COMPUTER]: ['ok', 'workspace', 'work_id', 'action', 'platform', 'enabled', 'available', 'engine', 'displayId', 'screen', 'display', 'displays', 'count', 'image', 'observationId', 'previousObservationId', 'semanticObservationId', 'targetId', 'perception', 'semanticAvailable', 'semanticReason', 'ocrAvailable', 'ocrReason', 'window', 'elements', 'method', 'changed', 'stable', 'stableMs', 'profile', 'durationMs', 'executed', 'x', 'y', 'toX', 'toY', 'direction', 'distance', 'textLength', 'key', 'keys', 'message', 'error', 'app', 'tier', 'warning', 'approved', 'approvedApps', 'controlling', 'lockedBy', 'lockSince', 'banner', 'released', 'failed', 'results', 'skipped'],
   [OP.SEARCH_SEMANTIC]: ['ok', 'workspace', 'work_id', 'query', 'queries', 'queryCount', 'uniqueFileCount', 'execution', 'strategy', 'privacy', 'fingerprint', 'cacheHit', 'neuralEmbeddings', 'retrieval', 'results', 'resultCount', 'matchCount', 'returnedBytes', 'maxBytes', 'truncated', 'next'],
-  [OP.VALIDATE_DIAGNOSTICS]: ['ok', 'workspace', 'work_id', 'commands', 'results', 'diagnostics', 'diagnosticCount', 'completedUnits', 'totalUnits', 'execution', 'cancelled', 'truncated', 'message'],
+  [OP.VALIDATE_DIAGNOSTICS]: ['ok', 'workspace', 'work_id', 'commands', 'results', 'diagnostics', 'diagnosticCount', 'completedUnits', 'totalUnits', 'execution', 'cancelled', 'timedOut', 'truncated', 'message'],
   [OP.CHANGES_TIDY_PLAN]: ['ok', 'workspace', 'work_id', 'operation', 'mode', 'planId', 'expiresAt', 'ttlSeconds', 'candidateCount', 'skippedCount', 'candidates', 'skipped', 'reason', 'message', 'next'],
   [OP.CHANGES_TIDY_RUN]: ['ok', 'workspace', 'work_id', 'operation', 'planId', 'changed', 'changedFiles', 'appliedCount', 'applied', 'refused', 'message'],
   [OP.VALIDATE_CHECKS]: ['ok', 'workspace', 'work_id', 'duplicate', 'level', 'checks', 'commands', 'results', 'skippedChecks', 'completedUnits', 'executedUnits', 'reusedUnits', 'reusedChecks', 'totalUnits', 'execution', 'failedCheck', 'cancelled', 'summary', 'validated', 'validationStatus', 'validationLevel', 'validationLevelReason', 'validationFingerprint', 'validationScope', 'validationAt', 'completionKnown', 'completionSource', 'endReason', 'planId', 'planSelection', 'planCreatedAt', 'fullOutput', 'changedFiles', 'residualChangedFiles', 'residualState', 'aliasNormalizations', 'policy', 'message', 'nextAction'],
@@ -466,7 +472,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.CHANGES_DIFF]: ['ok', 'workspace', 'work_id', 'staged', 'redactSensitive', 'path', 'reviewScope', 'reviewedScope', 'reviewHash', 'reviewedFiles', 'excludedWorkspaceFiles', 'status', 'branch', 'aheadBehind', 'statusEntries', 'sessionChangedFiles', 'baselineChangedFiles', 'untrackedSessionFiles', 'untrackedBaselineFiles', 'baselineSource', 'diff', 'sensitiveReview', 'sensitiveValuesReturned', 'exitCode', 'stderr'],
   [OP.CHANGES_CHECKPOINT]: ['ok', 'workspace', 'work_id', 'checkpointId', 'payloadSha256', 'createdAt', 'replayed', 'staged', 'redactSensitive', 'path', 'reviewScope', 'reviewedScope', 'reviewHash', 'reviewedFiles', 'excludedWorkspaceFiles', 'status', 'branch', 'aheadBehind', 'statusEntries', 'sessionChangedFiles', 'baselineChangedFiles', 'untrackedSessionFiles', 'untrackedBaselineFiles', 'baselineSource', 'diff', 'sensitiveReview', 'sensitiveValuesReturned', 'exitCode', 'stderr'],
   [OP.CHANGES_REPLAY]: ['ok', 'workspace', 'work_id', 'checkpointId', 'payloadSha256', 'createdAt', 'replayed', 'staged', 'redactSensitive', 'path', 'reviewScope', 'reviewedScope', 'reviewHash', 'reviewedFiles', 'excludedWorkspaceFiles', 'status', 'branch', 'aheadBehind', 'statusEntries', 'sessionChangedFiles', 'baselineChangedFiles', 'untrackedSessionFiles', 'untrackedBaselineFiles', 'baselineSource', 'diff', 'sensitiveReview', 'sensitiveValuesReturned', 'exitCode', 'stderr'],
-  [OP.CHANGES_RESTORE]: ['ok', 'workspace', 'work_id', 'mode', 'paths', 'command', 'commandSummary', 'cwd', 'shell', 'durationMs', 'queueWaitMs', 'queueTimedOut', 'exitCode', 'stdout', 'stderr', 'stdoutBytes', 'stderrBytes', 'stdoutTruncated', 'stderrTruncated', 'timedOut', 'cancelled', 'terminationConfirmed', 'forcedTermination', 'signal', 'error'],
+  [OP.CHANGES_RESTORE]: ['ok', 'executed', 'workspace', 'work_id', 'mode', 'paths', 'command', 'commandSummary', 'cwd', 'shell', 'durationMs', 'queueWaitMs', 'queueTimedOut', 'exitCode', 'stdout', 'stderr', 'stdoutBytes', 'stderrBytes', 'stdoutTruncated', 'stderrTruncated', 'timedOut', 'cancelled', 'terminationConfirmed', 'forcedTermination', 'signal', 'error'],
   [OP.CHANGES_RESET]: ['ok', 'workspace', 'work_id', 'mode', 'removeUntracked', 'reset', 'clean'],
   [OP.WORK_STATUS]: ['ok', 'version', 'workspace', 'work_id', 'operationId', 'workspaceAliases', 'workspaceCount', 'toolSurface', 'tools', 'toolGroups', 'scripts', 'ci', 'runtime', 'repositoryRuntime', 'runtimeCompatibility', 'repository', 'readiness', 'state', 'task', 'activeRelatedWork', 'backgroundOperation', 'backgroundOperations'],
   [OP.WORK_STOP]: ['ok', 'workspace', 'work_id', 'status', 'duplicate', 'operationId', 'stoppedOperationIds', 'stoppedOperationCount', 'message'],
@@ -494,6 +500,7 @@ const SUCCESS_REQUIRED_FIELDS = Object.freeze({
 });
 
 const CLOSED_SUCCESS_TOOLS = new Set(Object.keys(TOOL_FIELDS));
+const FALLBACK_RUNNING_SUCCESS_TOOLS = new Set([OP.PROCESS_START]);
 const NON_EXCEPTION_FAILURE_TOOLS = new Set([OP.VALIDATE_DIAGNOSTICS, OP.VALIDATE_CHECKS]);
 const COMPACT_RESULT_FIELDS = Object.freeze([
   'ok', 'truncated', 'originalBytes', 'workspace', 'work_id', 'processId', 'status', 'duplicate',
@@ -509,17 +516,28 @@ function outputSchemaFor(name) {
   const properties = Object.fromEntries(fields.map(field => [field, FIELD_SCHEMAS[field] || OBJECT]));
   const successRequired = ['ok', ...(SUCCESS_REQUIRED_FIELDS[name] || [])];
   const failureRequired = NON_EXCEPTION_FAILURE_TOOLS.has(name) ? ['ok'] : ['ok', 'error'];
+  const successBranches = [
+    {
+      type: 'object',
+      properties: { ...properties, ok: { const: true } },
+      required: successRequired,
+      additionalProperties: !CLOSED_SUCCESS_TOOLS.has(name)
+    }
+  ];
+  if (FALLBACK_RUNNING_SUCCESS_TOOLS.has(name)) {
+    successBranches.push({
+      type: 'object',
+      properties: { ...properties, ok: { const: true }, status: { const: 'running' } },
+      required: ['ok', 'status', 'operationId'],
+      additionalProperties: false
+    });
+  }
   return {
     type: 'object',
     properties,
     required: ['ok'],
     oneOf: [
-      {
-        type: 'object',
-        properties: { ...properties, ok: { const: true } },
-        required: successRequired,
-        additionalProperties: !CLOSED_SUCCESS_TOOLS.has(name)
-      },
+      ...successBranches,
       {
         type: 'object',
         properties: {

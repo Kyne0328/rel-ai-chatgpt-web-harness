@@ -100,7 +100,7 @@ function conciseToolResultText(payload, options = {}) {
     appendCompletionNotices(lines, payload.completedOperations);
     appendSuccessSummary(lines, payload);
     if (options.structuredTruncated) {
-      lines.push(`Structured result compacted from ${Number(options.originalBytes || 0)} bytes. Re-call with narrower limits for complete bounded data.`);
+      lines.push(`Structured result compacted from ${Number(options.originalBytes || 0)} bytes. Use returned output references or narrower read-only requests for more detail.`);
     }
     return lines.join('\n');
   }
@@ -117,7 +117,7 @@ function conciseToolResultText(payload, options = {}) {
   appendField(lines, 'Stdout tail', tailText(payload.stdout, 1000));
   appendField(lines, 'Stderr tail', tailText(payload.stderr, 1600));
   if (options.structuredTruncated) {
-    lines.push(`Structured result compacted from ${Number(options.originalBytes || 0)} bytes. Re-call with narrower limits for complete bounded data.`);
+    lines.push(`Structured result compacted from ${Number(options.originalBytes || 0)} bytes. Use returned output references or narrower read-only requests for more detail.`);
   }
   return lines.join('\n');
 }
@@ -224,7 +224,7 @@ function compactToolResult(payload, originalBytes) {
     ok: payload.ok !== false,
     truncated: true,
     originalBytes,
-    workspace: payload.workspace || null,
+    workspace: boundedText(scalarText(payload.workspace), 512),
     work_id: payload.work_id || null,
     processId: payload.processId,
     status: payload.status,
@@ -232,11 +232,30 @@ function compactToolResult(payload, originalBytes) {
     mode: payload.mode,
     check: payload.check,
     exitCode: payload.exitCode,
+    executed: payload.executed,
+    commandSucceeded: payload.commandSucceeded,
+    timedOut: payload.timedOut,
+    cancelled: payload.cancelled,
+    terminationConfirmed: payload.terminationConfirmed,
+    forcedTermination: payload.forcedTermination,
+    mutationUnknown: payload.mutationUnknown,
+    cleanupPending: payload.cleanupPending,
+    queueTimedOut: payload.queueTimedOut,
+    stdoutBytes: payload.stdoutBytes,
+    stderrBytes: payload.stderrBytes,
+    stdoutTruncated: typeof payload.stdout === 'string' && payload.stdout.length > 2000 ? true : payload.stdoutTruncated,
+    stderrTruncated: typeof payload.stderr === 'string' && payload.stderr.length > 4000 ? true : payload.stderrTruncated,
+    stdoutSpillTruncated: payload.stdoutSpillTruncated,
+    stderrSpillTruncated: payload.stderrSpillTruncated,
     durationMs: payload.durationMs,
     diagnosticCount: payload.diagnosticCount,
     validationStatus: payload.validationStatus,
     completionKnown: payload.completionKnown,
-    message: displayText(payload.message, 2000) || 'Result was compacted. Re-call with narrower limits.',
+    operationOk: payload.operationOk,
+    handlerCompleted: payload.handlerCompleted,
+    retryable: payload.retryable,
+    operationError: displayText(payload.operationError, 2000),
+    message: displayText(payload.message, 2000) || 'Result was compacted. Use returned output references or narrower read-only requests for more detail.',
     error: displayText(payload.error, 4000),
     errorCode: payload.errorCode,
     level: payload.level,
@@ -248,49 +267,210 @@ function compactToolResult(payload, originalBytes) {
     stdoutOutputRef: payload.stdoutOutputRef,
     stderrOutputRef: payload.stderrOutputRef,
     backgroundOperation: compactOperationResult(payload.backgroundOperation),
-    backgroundOperations: Array.isArray(payload.backgroundOperations) ? payload.backgroundOperations.map(compactOperationResult) : undefined,
+    backgroundOperations: Array.isArray(payload.backgroundOperations) ? [] : undefined,
     results: compactDiagnosticResults(payload.results),
-    completedOperations: Array.isArray(payload.completedOperations) ? payload.completedOperations.slice(0, 5) : undefined
+    completedOperations: Array.isArray(payload.completedOperations) ? payload.completedOperations.slice(0, 5).map(notice => ({
+      operationId: boundedText(scalarText(notice?.operationId), 256),
+      work_id: boundedText(scalarText(notice?.work_id), 256),
+      status: boundedText(scalarText(notice?.status), 128),
+      summary: displayText(notice?.summary, 1000)
+    })) : undefined
   };
-  return Object.fromEntries(Object.entries(compact).filter(([, value]) => value != null));
+  const bounded = Object.fromEntries(Object.entries(compact).filter(([, value]) => value != null));
+  // Identity/status fields are scalars, never a second copy of workspace config
+  // or an arbitrary nested payload. Keep the fixed envelope bounded as well.
+  for (const [key, value] of Object.entries(bounded)) {
+    if (['backgroundOperation', 'backgroundOperations', 'results', 'completedOperations'].includes(key)) continue;
+    if (value && typeof value === 'object') bounded[key] = boundedText(scalarText(value), 512);
+    else if (typeof value === 'string' && !['message', 'error', 'summary', 'nextAction', 'stdout', 'stderr'].includes(key)) {
+      bounded[key] = boundedText(value, 512);
+    }
+  }
+  const diagnostics = Array.isArray(payload.results) ? payload.results : [];
+  if (diagnostics.length > (bounded.results?.length || 0)) bounded.omittedDiagnosticCount = diagnostics.length - (bounded.results?.length || 0);
+  const operations = Array.isArray(payload.backgroundOperations) ? payload.backgroundOperations : [];
+  const ordered = operations.map((operation, index) => ({ operation, index })).sort((left, right) =>
+    operationPriority(left.operation, payload.operationId) - operationPriority(right.operation, payload.operationId)
+    || operationTime(right.operation) - operationTime(left.operation)
+    || right.index - left.index
+  );
+  bounded.omittedOperationCount = operations.length;
+  bounded.omittedUnsafeOperationCount = operations.filter(operationNeedsAttention).length;
+  // Reserve space for omission metadata. At most twenty detailed candidates
+  // are considered so repeated JSON sizing stays bounded even for huge history.
+  const budget = Math.max(0, MAX_TOOL_RESULT_BYTES - Math.min(512, Math.ceil(MAX_TOOL_RESULT_BYTES / 32)));
+  if (ordered.length && Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget - 128 * 1024) {
+    if (bounded.backgroundOperation?.result?.results) bounded.backgroundOperation.result.results = bounded.backgroundOperation.result.results.map(withoutDiagnosticOutput);
+    if (bounded.results) bounded.results = bounded.results.map(withoutDiagnosticOutput);
+  }
+  if (ordered.length && Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget - 128 * 1024) {
+    omitDiagnosticDetails(bounded);
+    omitDiagnosticDetails(bounded.backgroundOperation?.result);
+  }
+  for (const { operation } of ordered.slice(0, 20)) {
+    const candidate = compactOperationResult(operation);
+    if (candidate?.operationId && candidate.operationId === bounded.backgroundOperation?.operationId && candidate.result.results) {
+      // The explicit detail already contains this operation's diagnostic text.
+      // Retain its list identity, safety facts and references without duplicating output.
+      candidate.result.results = candidate.result.results.map(withoutDiagnosticOutput);
+    }
+    bounded.backgroundOperations.push(candidate);
+    if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget) {
+      candidate.result.results = candidate.result.results?.map(withoutDiagnosticOutput);
+    }
+    if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget) {
+      bounded.backgroundOperations.pop();
+      continue;
+    }
+    bounded.omittedOperationCount -= 1;
+    if (operationNeedsAttention(operation)) bounded.omittedUnsafeOperationCount -= 1;
+  }
+  // An explicitly requested single operation is always retained. If its nested
+  // diagnostic text dominates the envelope, keep its safety facts and refs.
+  if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget) {
+    if (bounded.backgroundOperation?.result?.results) bounded.backgroundOperation.result.results = bounded.backgroundOperation.result.results.map(withoutDiagnosticOutput);
+    if (bounded.results) bounded.results = bounded.results.map(withoutDiagnosticOutput);
+  }
+  if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget) {
+    omitDiagnosticDetails(bounded);
+    omitDiagnosticDetails(bounded.backgroundOperation?.result);
+    for (const operation of bounded.backgroundOperations || []) omitDiagnosticDetails(operation.result);
+  }
+  while (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget && bounded.backgroundOperations?.length) {
+    const omitted = bounded.backgroundOperations.pop();
+    bounded.omittedOperationCount += 1;
+    if (operationNeedsAttention(omitted)) bounded.omittedUnsafeOperationCount += 1;
+  }
+  if (!bounded.omittedOperationCount) delete bounded.omittedOperationCount;
+  if (!bounded.omittedUnsafeOperationCount) delete bounded.omittedUnsafeOperationCount;
+  return bounded;
+}
+
+function operationNeedsAttention(operation) {
+  const result = operation?.result || operation || {};
+  return result.terminationConfirmed === false || result.mutationUnknown === true || result.cleanupPending === true
+    || (Array.isArray(result.results) && result.results.some(item => item?.terminationConfirmed === false || item?.mutationUnknown === true || item?.cleanupPending === true));
+}
+
+function operationPriority(operation, target) {
+  if (target && operation?.operationId === target) return 0;
+  if (operationNeedsAttention(operation)) return 1;
+  if (operation?.status === 'running') return 2;
+  if (operation?.status === 'failed' || operation?.status === 'cancelled' || operation?.result?.commandSucceeded === false || operation?.result?.validationStatus === 'failed') return 3;
+  return 4;
+}
+
+function operationTime(operation) {
+  const value = Date.parse(operation?.updatedAt || operation?.completedAt || operation?.startedAt || '');
+  return Number.isFinite(value) ? value : 0;
+}
+
+function withoutDiagnosticOutput(item) {
+  return {
+    ...item,
+    ...(item.stdout ? { stdout: undefined, stdoutTruncated: true } : {}),
+    ...(item.stderr ? { stderr: undefined, stderrTruncated: true } : {})
+  };
 }
 
 function compactOperationResult(operation) {
   if (!operation || typeof operation !== 'object') return undefined;
   const result = operation.result || {};
   return {
-    operationId: operation.operationId,
-    work_id: operation.work_id,
-    workspace: operation.workspace,
-    tool: operation.tool,
-    status: operation.status,
-    phase: operation.phase,
-    revision: operation.revision,
+    operationId: boundedText(scalarText(operation.operationId), 512),
+    work_id: boundedText(scalarText(operation.work_id), 512),
+    workspace: boundedText(scalarText(operation.workspace), 512),
+    tool: boundedText(scalarText(operation.tool), 512),
+    status: boundedText(scalarText(operation.status), 512),
+    phase: boundedText(scalarText(operation.phase), 512),
+    revision: boundedScalar(operation.revision),
     error: displayText(operation.error, 1000),
-    result: {
+    result: boundedResultScalars({
       commandSucceeded: result.commandSucceeded,
+      operationOk: result.operationOk,
+      handlerCompleted: result.handlerCompleted,
+      retryable: result.retryable,
+      errorCode: result.errorCode,
       validationStatus: result.validationStatus,
       exitCode: result.exitCode,
+      executed: result.executed,
+      timedOut: result.timedOut,
+      cancelled: result.cancelled,
+      terminationConfirmed: result.terminationConfirmed,
+      forcedTermination: result.forcedTermination,
+      mutationUnknown: result.mutationUnknown,
+      cleanupPending: result.cleanupPending,
+      queueTimedOut: result.queueTimedOut,
+      stdoutBytes: result.stdoutBytes,
+      stderrBytes: result.stderrBytes,
+      stdoutTruncated: result.stdoutTruncated,
+      stderrTruncated: result.stderrTruncated,
+      stdoutSpillTruncated: result.stdoutSpillTruncated,
+      stderrSpillTruncated: result.stderrSpillTruncated,
       stdoutOutputRef: result.stdoutOutputRef,
       stderrOutputRef: result.stderrOutputRef,
-      results: compactDiagnosticResults(result.results)
-    }
+      results: compactDiagnosticResults(result.results),
+      ...(Array.isArray(result.results) && result.results.length > 5 ? { omittedDiagnosticCount: result.results.length - 5 } : {})
+    })
   };
 }
 
 function compactDiagnosticResults(results) {
   if (!Array.isArray(results) || results.length === 0) return undefined;
-  return results.slice(0, 5).map(item => Object.fromEntries(Object.entries({
-    command: boundedText(item?.command, 1000),
+  // A configured small frame must retain diagnostic status and a useful tail.
+  // Scale text first so a single failure is not discarded for its output alone.
+  const commandChars = Math.min(1000, Math.floor(MAX_TOOL_RESULT_BYTES / 16));
+  const stdoutChars = Math.min(2000, Math.floor(MAX_TOOL_RESULT_BYTES / 16));
+  const stderrChars = Math.min(4000, Math.floor(MAX_TOOL_RESULT_BYTES / 8));
+  return results.map((item, index) => ({ item, index })).sort((left, right) =>
+    Number(!operationNeedsAttention(left.item)) - Number(!operationNeedsAttention(right.item))
+    || Number(left.item?.ok !== false) - Number(right.item?.ok !== false)
+    || left.index - right.index
+  ).slice(0, 5).map(({ item }) => boundedResultScalars(Object.fromEntries(Object.entries({
+    command: boundedText(item?.command, commandChars),
     ok: item?.ok !== false,
     exitCode: item?.exitCode,
-    timedOut: item?.timedOut === true,
+    executed: item?.executed,
+    commandSucceeded: item?.commandSucceeded,
+    timedOut: item?.timedOut,
+    cancelled: item?.cancelled,
+    terminationConfirmed: item?.terminationConfirmed,
+    forcedTermination: item?.forcedTermination,
+    mutationUnknown: item?.mutationUnknown,
+    cleanupPending: item?.cleanupPending,
+    queueTimedOut: item?.queueTimedOut,
+    stdoutBytes: item?.stdoutBytes,
+    stderrBytes: item?.stderrBytes,
+    stdoutTruncated: typeof item?.stdout === 'string' && item.stdout.length > stdoutChars ? true : item?.stdoutTruncated,
+    stderrTruncated: typeof item?.stderr === 'string' && item.stderr.length > stderrChars ? true : item?.stderrTruncated,
+    stdoutSpillTruncated: item?.stdoutSpillTruncated,
+    stderrSpillTruncated: item?.stderrSpillTruncated,
     signal: item?.signal,
-    stdout: tailText(item?.stdout, 2000),
-    stderr: tailText(item?.stderr, 4000),
+    stdout: tailText(item?.stdout, stdoutChars),
+    stderr: tailText(item?.stderr, stderrChars),
     stdoutOutputRef: item?.stdoutOutputRef,
     stderrOutputRef: item?.stderrOutputRef
-  }).filter(([, value]) => value != null)));
+  }).filter(([, value]) => value != null))));
+}
+
+function boundedScalar(value) {
+  if (typeof value === 'string') return boundedText(value, 512);
+  if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
+  return undefined;
+}
+
+function boundedResultScalars(value) {
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+    key === 'results' || ['command', 'stdout', 'stderr'].includes(key) ? item : boundedScalar(item)
+  ]).filter(([, item]) => item !== undefined));
+}
+
+function omitDiagnosticDetails(value) {
+  if (!Array.isArray(value?.results) || !value.results.length) return;
+  value.omittedDiagnosticCount = (value.omittedDiagnosticCount || 0) + value.results.length;
+  const unsafe = value.results.filter(operationNeedsAttention).length;
+  if (unsafe) value.omittedUnsafeDiagnosticCount = (value.omittedUnsafeDiagnosticCount || 0) + unsafe;
+  value.results = [];
 }
 
 function boundedText(value, maxChars) {

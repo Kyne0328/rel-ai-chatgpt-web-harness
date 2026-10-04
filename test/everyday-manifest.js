@@ -113,6 +113,7 @@ export const EVERYDAY_TEST_FILES = [
   "tool-registry-unit.mjs",
   "unborn-workspace-unit.mjs",
   "unit-safe-read-json.mjs",
+  "update-install-marker-race-unit.mjs",
   "update-support-policy-http-unit.mjs",
   "update-support-policy-unit.mjs",
   "validation-parallelism-unit.mjs",

@@ -11,6 +11,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-release-workflow-'));
 
 try {
   copyFixture();
+  verifyPromotionPreflight();
   verifyReleaseBump();
   verifyPackageContracts();
   verifyWorkflowContracts();
@@ -41,6 +42,7 @@ function copyFixture() {
     'src/packageMetadata.js',
     'src/version.js',
     'scripts/release-check.mjs',
+    'scripts/promote-release.mjs',
     'scripts/platform-architecture.mjs',
     'scripts/release-bump.mjs',
     'scripts/release-surfaces.mjs',
@@ -147,8 +149,8 @@ function verifyPackageContracts() {
   assert.doesNotMatch(String(rootPackage.scripts['test:release'] || ''), /release:check/, 'finalized release metadata belongs to the dedicated preflight gate and must not be rerun by the source release parent');
   assert.deepEqual(
     electronPackage.build.extraResources.find(resource => resource.to === 'src')?.filter,
-    ['**/*.js', '**/*.ts', '**/*.html', '**/*.ps1'],
-    'Electron packaging must include JavaScript, TypeScript, HTML runtime resources, and the Windows UI Automation PowerShell helper'
+    ['**/*'],
+    'Electron packaging must include the complete canonical source tree, including CSS, MJS, HTML, and platform helpers'
   );
   const packagedNodeModules = electronPackage.build.extraResources.find(resource => resource.to === 'node_modules')?.filter || [];
   assert.ok(packagedNodeModules.includes('yallist/**'), 'Electron packaging must include yallist because the bundled semver dependency resolves it through lru-cache at runtime');
@@ -255,6 +257,12 @@ function verifyWorkflowContracts() {
   const linuxReleaseStart = workflow.indexOf('\n  linux:', windowsReleaseStart);
   const macReleaseStart = workflow.indexOf('\n  mac:', linuxReleaseStart);
   const releaseGate = workflow.slice(releaseGateStart, windowsReleaseStart);
+  const sharedCiSourceGate = ciWorkflow.slice(ciWorkflow.indexOf('  test:'), ciWorkflow.indexOf('\n  packaged-windows:'));
+  for (const [name, sourceGate] of [['CI', sharedCiSourceGate], ['release', releaseGate]]) {
+    const baselineFetch = 'git fetch --no-tags --depth=1 origin refs/tags/1.1.3:refs/tags/1.1.3';
+    assert.ok(sourceGate.includes(baselineFetch), `${name} source gate must fetch the actual 1.1.3 database compatibility baseline`);
+    assert.ok(sourceGate.indexOf(baselineFetch) < sourceGate.indexOf('npm run test:'), `${name} must make the legacy tag available before migration tests`);
+  }
   const windowsRelease = workflow.slice(windowsReleaseStart, linuxReleaseStart);
   const linuxRelease = workflow.slice(linuxReleaseStart, macReleaseStart);
   const macRelease = workflow.slice(macReleaseStart, workflow.indexOf('\n  windows-install-upgrade:', macReleaseStart));
@@ -398,6 +406,93 @@ function verifyWorkflowContracts() {
   const fuseWrapper = fs.readFileSync(path.join(tmp, 'scripts', 'verify-fuses.mjs'), 'utf8');
   assert.match(fuseWrapper, /process\.argv\.slice\(2\)/);
   assert.match(fuseWrapper, /allowBuildCheck: true, platform/);
+}
+
+function verifyPromotionPreflight() {
+  const requiredAssets = ['latest.yml', 'latest-linux.yml', 'latest-mac.yml', 'SHA256SUMS.txt'];
+  const requiredLine = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'promote-release.yml'), 'utf8').match(/for required in (.+); do/);
+  assert.ok(requiredLine, 'promotion workflow must declare its required metadata');
+  assert.deepEqual([...requiredLine[1].matchAll(/"([^"]+)"/g)].map(match => match[1]).sort(), [...requiredAssets].sort(),
+    'the CLI and workflow must require the same release metadata');
+  const candidate = { isDraft: false, isPrerelease: true, assets: requiredAssets.map(name => ({ name })) };
+  const scenarios = [
+    { name: 'draft', candidate: { ...candidate, isDraft: true }, exitCode: 1, calls: ['view'] },
+    { name: 'already stable', candidate: { ...candidate, isPrerelease: false }, exitCode: 1, calls: ['view'] },
+    ...requiredAssets.map(missing => ({
+      name: `missing ${missing}`,
+      candidate: { ...candidate, assets: candidate.assets.filter(asset => asset.name !== missing) },
+      exitCode: 1,
+      calls: ['view']
+    })),
+    { name: 'all metadata missing', candidate: { ...candidate, assets: [] }, exitCode: 1, calls: ['view'] },
+    { name: 'invalid metadata JSON', body: '{', exitCode: 1, calls: ['view'] },
+    { name: 'null metadata', body: 'null', exitCode: 1, calls: ['view'] },
+    { name: 'inspection failure', candidate, viewStatus: 2, exitCode: 2, calls: ['view'] },
+    { name: 'inspection launch error', candidate, viewError: true, exitCode: 1, calls: ['view'] },
+    { name: 'complete candidate', candidate, version: 'v1.2.3', exitCode: 0, calls: ['view', 'edit'] },
+    { name: 'edit failure', candidate, editStatus: 3, exitCode: 3, calls: ['view', 'edit'] },
+    { name: 'edit launch error', candidate, editError: true, exitCode: 1, calls: ['view', 'edit'] },
+    { name: 'invalid version', candidate, version: 'not-a-version', exitCode: 2, calls: [] }
+  ];
+  for (const scenario of scenarios) {
+    // Run the actual CLI entry point in an isolated Node process. Every process-launch
+    // method is intercepted before import, so no real GitHub CLI can run.
+    const input = `
+      import assert from 'node:assert/strict';
+      import childProcess from 'node:child_process';
+      import { syncBuiltinESMExports } from 'node:module';
+      import { pathToFileURL } from 'node:url';
+      const scenario = ${JSON.stringify(scenario)};
+      const calls = [];
+      childProcess.spawnSync = (file, args) => {
+        assert.equal(file, process.platform === 'win32' ? 'gh.exe' : 'gh');
+        assert.equal(args[0], 'release');
+        assert.equal(args[2], '1.2.3');
+        assert.equal(args[args.indexOf('--repo') + 1], 'fixture/relai-release');
+        calls.push(args[1]);
+        if (args[1] === 'view') return {
+          status: scenario.viewStatus ?? 0,
+          stdout: scenario.body ?? JSON.stringify(scenario.candidate),
+          stderr: '',
+          ...(scenario.viewError ? { error: new Error('synthetic view failure') } : {})
+        };
+        assert.equal(args[1], 'edit');
+        assert.ok(args.includes('--prerelease=false'));
+        assert.ok(args.includes('--latest'));
+        return { status: scenario.editStatus ?? 0, ...(scenario.editError ? { error: new Error('synthetic edit failure') } : {}) };
+      };
+      for (const name of ['spawn', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) {
+        childProcess[name] = () => { throw new Error('Unexpected real process launch: ' + name); };
+      }
+      syncBuiltinESMExports();
+      globalThis.fetch = () => { throw new Error('Unexpected network request'); };
+      const exitSignal = new Error('intercepted CLI exit');
+      let exitCode = 0;
+      process.exit = code => { exitCode = code ?? 0; throw exitSignal; };
+      const script = ${JSON.stringify(path.join(tmp, 'scripts', 'promote-release.mjs'))};
+      process.argv = [process.execPath, script, scenario.version || '1.2.3'];
+      try { await import(pathToFileURL(script).href); }
+      catch (error) { if (error !== exitSignal) throw error; }
+      console.log('PROMOTION_RESULT=' + JSON.stringify({ exitCode, calls }));
+    `;
+    const result = spawnSync(process.execPath, ['--input-type=module', '-'], {
+      input,
+      cwd: tmp,
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: {
+        PATH: '',
+        GITHUB_REPOSITORY: 'fixture/relai-release',
+        ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {})
+      }
+    });
+    assert.equal(result.status, 0, `${scenario.name}: ${result.stderr || result.error?.message || result.stdout}`);
+    const reportLine = result.stdout.split(/\r?\n/).find(line => line.startsWith('PROMOTION_RESULT='));
+    assert.ok(reportLine, `${scenario.name}: the isolated CLI must report its result`);
+    const report = JSON.parse(reportLine.slice('PROMOTION_RESULT='.length));
+    assert.equal(report.exitCode, scenario.exitCode, `${scenario.name}: promotion must fail closed before editing invalid candidates`);
+    assert.deepEqual(report.calls, scenario.calls, `${scenario.name}: only a verified candidate may reach the single edit call`);
+  }
 }
 
 function verifyTunnelClientTamperDetection() {

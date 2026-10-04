@@ -70,7 +70,6 @@ export interface ToolDefinitionMetadata {
   inputSchema: ObjectJsonSchema;
   outputSchema: JsonSchema;
   annotations: ToolAnnotations;
-  execution?: ToolExecution;
   handlerName: string;
   connectorStrip: string[];
   groups: ToolGroup[];

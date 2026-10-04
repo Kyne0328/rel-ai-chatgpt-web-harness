@@ -6,7 +6,7 @@ import { readJsonFile, writeJsonAtomic } from '../durableState.ts';
 import { getStateDir } from '../statePaths.js';
 import { readTaskBackgroundOperation, readTaskBackgroundOperations, recordTaskBackgroundOperation } from '../taskHistoryStore.ts';
 import { sanitizeTaskRecord } from '../taskObservability.js';
-import { createOutputSpillWriter } from '../outputSpill.js';
+import { retainOutputStreams } from '../outputSpill.js';
 import { FALLBACK_EXECUTION_STATUS } from './contracts.ts';
 import { publishMcpEvent } from './events.ts';
 
@@ -665,25 +665,7 @@ async function retainFallbackOutput(config, record, result) {
   if (!config || record.persist === false || (record.workId && !readTaskBackgroundOperation(config, record.workId))) return;
   const owner = record.workId || (record.workspace && record.noticeScope ? `workspace:${record.workspace}:principal:${record.noticeScope}` : '');
   if (!owner) return;
-  async function retain(value, depth = 0) {
-    if (!value || typeof value !== 'object' || depth > 5) return;
-    for (const stream of ['stdout', 'stderr']) {
-      const refKey = `${stream}OutputRef`;
-      if (typeof value[stream] !== 'string' || !value[stream] || value[refKey]) continue;
-      const writer = createOutputSpillWriter(config, owner);
-      writer.start(value[stream]);
-      const retained = await writer.finish();
-      if (retained?.outputRef) value[refKey] = retained.outputRef;
-      if (retained?.spillTruncated) value[`${stream}SpillTruncated`] = true;
-    }
-    for (const child of Object.values(value)) {
-      if (child && typeof child === 'object') await retain(child, depth + 1);
-    }
-  }
-  try { await retain(result?.structuredContent); }
-  catch (error) {
-    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback output retention:', error);
-  }
+  await retainOutputStreams(config, owner, result?.structuredContent);
 }
 
 function persistFallbackSnapshot(config, record) {
