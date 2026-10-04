@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { DatabasePersistenceResult } from './contracts/persistence.ts';
 import { statePath } from './stateLayout.js';
+import { TASK_HISTORY_PROJECTION_SCHEMA_SQL } from './taskHistoryProjectionSchema.ts';
 import {
   assertSqliteIntegrity,
   checkpointSqlite,
@@ -15,8 +16,12 @@ import {
   writeSqliteValidationStamp
 } from './sqliteDurability.ts';
 
-const STATE_SCHEMA_VERSION = 5;
-const STATE_VALIDATION_KEY = `state-v${STATE_SCHEMA_VERSION}`;
+// Extensions are additive to the schema-2 contract shipped in 1.1.3.
+// Keep its compatibility marker stable so installing that release remains safe.
+const STATE_SCHEMA_VERSION = 2;
+const STATE_EXTENSION_VERSION = 6;
+const MAX_LEGACY_SCHEMA_VERSION = 5;
+const STATE_VALIDATION_KEY = `state-v${STATE_SCHEMA_VERSION}-extensions-${STATE_EXTENSION_VERSION}`;
 
 interface StateDatabaseConfig extends Record<string, unknown> {
   stateDir?: string;
@@ -245,11 +250,6 @@ INSERT INTO state_meta(key,value) VALUES('task_history_event_index_v1','1')
   ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 `;
 
-const SCHEMA_V4_SQL = `
-DROP TABLE IF EXISTS native_task_quarantine;
-DROP TABLE IF EXISTS native_tasks;
-`;
-
 const SCHEMA_V5_SQL = `
 DROP TRIGGER IF EXISTS task_history_events_after_insert;
 DROP TRIGGER IF EXISTS task_history_events_after_update;
@@ -429,11 +429,13 @@ END;
 `;
 
 const STATE_MIGRATIONS: readonly StateMigration[] = Object.freeze([
-  { version: 1, apply: db => db.exec(SCHEMA_V1_SQL) },
-  { version: 2, apply: db => db.exec(SCHEMA_V2_SQL) },
-  { version: 3, apply: db => db.exec(SCHEMA_V3_SQL) },
-  { version: 4, apply: db => db.exec(SCHEMA_V4_SQL) },
-  { version: 5, apply: db => db.exec(SCHEMA_V5_SQL) }
+  { version: 1, apply: (db: DatabaseSync) => db.exec(SCHEMA_V1_SQL) },
+  { version: 2, apply: (db: DatabaseSync) => db.exec(SCHEMA_V2_SQL) },
+  { version: 3, apply: (db: DatabaseSync) => db.exec(SCHEMA_V3_SQL) },
+  // Legacy native-task tables are retained for clients installed by a downgrade.
+  { version: 4, apply: () => {} },
+  { version: 5, apply: (db: DatabaseSync) => db.exec(SCHEMA_V5_SQL) },
+  { version: 6, apply: (db: DatabaseSync) => db.exec(TASK_HISTORY_PROJECTION_SCHEMA_SQL) }
 ]);
 
 function stateDatabasePath(config: StateDatabaseConfig = {}): string {
@@ -476,7 +478,7 @@ function withStateDatabase<TResult, TMissing = undefined>(
   if (!db) return options.missingValue as TMissing;
   const transaction = options.transaction === true;
   try {
-    if (transaction) db.exec('BEGIN IMMEDIATE');
+    if (transaction) db.exec(options.readonly === true ? 'BEGIN' : 'BEGIN IMMEDIATE');
     const result = operation(db);
     if (transaction) db.exec('COMMIT');
     return result;
@@ -496,19 +498,24 @@ function ensureStateSchema(db: DatabaseSync, file: string): void {
   if (!Number.isInteger(current) || current < 0) {
     throw new Error(`Durable state schema version '${current}' is invalid.`);
   }
-  if (current > STATE_SCHEMA_VERSION) {
-    throw new Error(`Durable state schema ${current} is newer than supported schema ${STATE_SCHEMA_VERSION}.`);
+  if (current > MAX_LEGACY_SCHEMA_VERSION) {
+    throw new Error(`Durable state schema ${current} is newer than supported schema ${MAX_LEGACY_SCHEMA_VERSION}.`);
   }
-  if (current === STATE_SCHEMA_VERSION) return;
+  const extensions = Number(stateMetaValue(db, 'extension_schema_version', current));
+  if (!Number.isInteger(extensions) || extensions < 0 || extensions > STATE_EXTENSION_VERSION) {
+    throw new Error(`Durable state extension schema '${extensions}' is unsupported.`);
+  }
+  if (current === STATE_SCHEMA_VERSION && extensions === STATE_EXTENSION_VERSION) return;
 
   if (current > 0) createSqliteBackup(db, file, { label: 'Durable state database' });
   db.exec('BEGIN IMMEDIATE');
   try {
     for (const migration of STATE_MIGRATIONS) {
-      if (migration.version <= current) continue;
+      if (migration.version <= extensions) continue;
       migration.apply(db);
-      setStateMeta(db, 'schema_version', migration.version);
     }
+    setStateMeta(db, 'extension_schema_version', STATE_EXTENSION_VERSION);
+    setStateMeta(db, 'schema_version', STATE_SCHEMA_VERSION);
     db.exec('COMMIT');
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch {}

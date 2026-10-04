@@ -70,6 +70,7 @@ interface TaskHistoryRetentionOptions {
   retentionDays?: number;
   storageBudgetBytes?: number;
   nowMs?: number;
+  timeoutMs?: number;
 }
 
 interface SessionTextSearchOptions {
@@ -103,30 +104,18 @@ function listSessions(directory: string, limit = MAX_HISTORY_QUERY_SESSIONS): St
 function listSessionSummaries(directory: string, limit = MAX_HISTORY_QUERY_SESSIONS): StoredTaskSession[] {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
-  return withStateDatabase(config, (db: DatabaseSync) => {
+  const invalid: string[] = [];
+  const sessions = withStateDatabase(config, (db: DatabaseSync) => {
     const rows = db.prepare(`
-      SELECT id,
-        updated_at_ms,
-        CASE
-          WHEN json_valid(payload) THEN json_set(
-            json_remove(payload, '$.events', '$.workflowEvidence'),
-            '$.events',
-            CASE
-              WHEN json_type(payload, '$.events') = 'array'
-                AND json_array_length(json_extract(payload, '$.events')) = 1
-                AND json_type(payload, '$.events[0]') = 'object'
-                THEN json_array(json(json_extract(payload, '$.events[0]')))
-              ELSE json('[]')
-            END
-          )
-          ELSE payload
-        END AS payload
-      FROM task_history
+      SELECT id,updated_at_ms,payload
+      FROM task_history_summaries
       ORDER BY updated_at_ms DESC,id ASC
       LIMIT ?
     `).all(Math.max(0, Math.floor(Number(limit) || 0))) as unknown as TaskHistoryRow[];
-    return parseSessionRows(db, rows);
-  }, { transaction: false }) as StoredTaskSession[];
+    return parseSessionRows(db, rows, true, invalid);
+  }, { readonly: true }) as StoredTaskSession[];
+  removeInvalidSessions(config, invalid);
+  return sessions;
 }
 
 function findSessionsContaining(directory: string, values: unknown, options: SessionTextSearchOptions = {}): StoredTaskSession[] {
@@ -160,6 +149,17 @@ function findSessionsContaining(directory: string, values: unknown, options: Ses
   }, { transaction: true }) as StoredTaskSession[];
 }
 
+function findConversationSessions(directory: string, workspace: string, conversationId: string, limit = 24): StoredTaskSession[] {
+  const config = configForDirectory(directory);
+  migrateLegacyTaskHistory(config);
+  return withStateDatabase(config, (db: DatabaseSync) => {
+    const rows = db.prepare(`SELECT id,updated_at_ms,payload FROM task_history_summaries
+      WHERE workspace=? AND conversation_id=? ORDER BY updated_at_ms DESC,id ASC LIMIT ?`)
+      .all(workspace, conversationId, Math.min(MAX_HISTORY_QUERY_SESSIONS, Math.max(1, Math.floor(limit)))) as unknown as TaskHistoryRow[];
+    return parseSessionRows(db, rows, true);
+  }, { readonly: true }) as StoredTaskSession[];
+}
+
 function listSessionSummaryPage(directory: string, options: SessionPageOptions = {}): { items: StoredTaskSession[]; cursor: SessionPageCursor | null; hasMore: boolean } {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
@@ -169,7 +169,7 @@ function listSessionSummaryPage(directory: string, options: SessionPageOptions =
     const parameters: Array<string | number> = [];
     const workspace = String(options.workspace || '').trim();
     if (workspace) {
-      filters.push("COALESCE(json_extract(payload, '$.workspace'), '') = ?");
+      filters.push('workspace = ?');
       parameters.push(workspace);
     }
     const cursorUpdatedAtMs = Math.max(0, Math.floor(Number(options.cursor?.updatedAtMs || 0)));
@@ -180,29 +180,21 @@ function listSessionSummaryPage(directory: string, options: SessionPageOptions =
     }
     parameters.push(pageSize + 1);
     const rows = db.prepare(`
-      SELECT id,updated_at_ms,
-        CASE
-          WHEN json_valid(payload) THEN json_set(
-            json_remove(payload, '$.events', '$.workflowEvidence'),
-            '$.events', json('[]')
-          )
-          ELSE payload
-        END AS payload
-      FROM task_history
+      SELECT id,updated_at_ms,payload FROM task_history_summaries
       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
       ORDER BY updated_at_ms DESC,id ASC
       LIMIT ?
     `).all(...parameters) as unknown as TaskHistoryRow[];
     const hasMore = rows.length > pageSize;
     const pageRows = rows.slice(0, pageSize);
-    const items = parseSessionRows(db, pageRows);
+    const items = parseSessionRows(db, pageRows, true).map(session => ({ ...session, events: [] }));
     const last = pageRows.at(-1);
     return {
       items,
       cursor: last ? { updatedAtMs: Number(last.updated_at_ms || 0), id: String(last.id || '') } : null,
       hasMore
     };
-  }, { transaction: false }) as { items: StoredTaskSession[]; cursor: SessionPageCursor | null; hasMore: boolean };
+  }, { readonly: true }) as { items: StoredTaskSession[]; cursor: SessionPageCursor | null; hasMore: boolean };
 }
 
 function listRecentSessionEvents(directory: string, limit = MAX_HISTORY_QUERY_SESSIONS): Record<string, any>[] {
@@ -286,10 +278,10 @@ function listRecentSessionEventPage(directory: string, options: EventPageOptions
       } : null,
       hasMore
     };
-  }, { transaction: false }) as { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean };
+  }, { readonly: true }) as { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean };
 }
 
-function parseSessionRows(db: DatabaseSync, rows: TaskHistoryRow[]): StoredTaskSession[] {
+function parseSessionRows(db: DatabaseSync, rows: TaskHistoryRow[], readonly = false, invalidRows?: string[]): StoredTaskSession[] {
   const sessions: StoredTaskSession[] = [];
   const invalid: string[] = [];
   for (const row of rows) {
@@ -297,24 +289,40 @@ function parseSessionRows(db: DatabaseSync, rows: TaskHistoryRow[]): StoredTaskS
     if (session) sessions.push({ ...session, historyUpdatedAtMs: Number(row.updated_at_ms || 0) });
     else invalid.push(String(row.id));
   }
-  if (invalid.length) {
+  if (invalid.length && !readonly) {
     const remove = db.prepare('DELETE FROM task_history WHERE id=?');
     for (const id of invalid) remove.run(id);
   }
+  if (readonly) invalidRows?.push(...invalid);
   return sessions;
+}
+
+function removeInvalidSessions(config: TaskHistoryConfig, ids: string[]): void {
+  if (!ids.length) return;
+  // Corrupt-row cleanup is exceptional. Do it after closing the reader, and
+  // fail fast if a writer is busy so valid dashboard reads remain available.
+  try {
+    withStateDatabase(config, (db: DatabaseSync) => {
+      const remove = db.prepare('DELETE FROM task_history WHERE id=?');
+      for (const id of ids) remove.run(id);
+    }, { transaction: true });
+  } catch {}
 }
 
 function readSession(directory: string, id: unknown): StoredTaskSession | null {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
-  return withStateDatabase(config, (db: DatabaseSync) => {
+  let invalid = false;
+  const session = withStateDatabase(config, (db: DatabaseSync) => {
     const row = db.prepare('SELECT payload FROM task_history WHERE id=?').get(String(id || '')) as Pick<TaskHistoryRow, 'payload'> | undefined;
     if (!row) return null;
     const session = parseStoredSession(row.payload);
     if (session) return session;
-    db.prepare('DELETE FROM task_history WHERE id=?').run(String(id || ''));
+    invalid = true;
     return null;
-  }, { transaction: false }) as StoredTaskSession | null;
+  }, { readonly: true }) as StoredTaskSession | null;
+  if (invalid) removeInvalidSessions(config, [String(id || '')]);
+  return session;
 }
 
 function removeSession(directory: string, id: unknown): void {
@@ -396,11 +404,8 @@ function pruneSessions(directory: string, options: TaskHistoryRetentionOptions =
   withStateDatabase(config, (db: DatabaseSync) => {
     const prunedIds: string[] = [];
     const removeHistory = db.prepare('DELETE FROM task_history WHERE id=?');
-    const expired = db.prepare(`SELECT id FROM task_history
-      WHERE updated_at_ms < ? AND CASE
-        WHEN json_valid(payload) THEN lower(COALESCE(json_extract(payload, '$.status'), '')) IN ('completed','failed','cancelled')
-        ELSE 1
-      END
+    const expired = db.prepare(`SELECT id FROM task_history_summaries
+      WHERE updated_at_ms < ? AND status IN ('completed','failed','cancelled','invalid')
       ORDER BY updated_at_ms ASC,id DESC
     `).all(cutoffMs) as unknown as Array<{ id: string }>;
     for (const row of expired) {
@@ -434,13 +439,16 @@ function pruneSessions(directory: string, options: TaskHistoryRetentionOptions =
       }
     }
     retireObsoleteTaskIntegrity(db, [...new Set(prunedIds)]);
-  }, { transaction: true });
+  }, { transaction: true, timeoutMs: options.timeoutMs ?? 0 });
 }
 
 function taskHistoryStorageBytes(db: DatabaseSync): number {
-  const history = db.prepare('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes FROM task_history').get() as { bytes?: unknown } | undefined;
-  const events = db.prepare('SELECT COALESCE(SUM(length(CAST(payload AS BLOB))),0) AS bytes FROM task_history_events').get() as { bytes?: unknown } | undefined;
-  return Math.max(0, Number(history?.bytes || 0)) + Math.max(0, Number(events?.bytes || 0));
+  const usage = db.prepare('SELECT COALESCE(SUM(bytes),0) AS bytes FROM task_history_storage_usage').get() as { bytes?: unknown } | undefined;
+  return Math.max(0, Number(usage?.bytes || 0));
+}
+
+function pruneSessionsAsync(directory: string): Promise<void> {
+  return enqueueWorkerRequest(configForDirectory(directory), { action: 'prune', directory });
 }
 
 function retireObsoleteTaskIntegrity(db: DatabaseSync, prunedTaskIds: string[]): void {
@@ -581,12 +589,16 @@ function resetTaskHistoryStorageMetrics(): void {
 }
 
 function enqueueWorkerWrite(config: TaskHistoryConfig, session: StoredTaskSession): Promise<void> {
+  return enqueueWorkerRequest(config, { action: 'write', session });
+}
+
+function enqueueWorkerRequest(config: TaskHistoryConfig, payload: Record<string, unknown>): Promise<void> {
   const worker = ensureWriteWorker();
   const id = ++writeRequestSequence;
   worker.ref();
   return new Promise((resolve, reject) => {
     pendingWriteRequests.set(id, { resolve, reject });
-    worker.postMessage({ id, stateDir: getStateDir(config), session });
+    worker.postMessage({ ...payload, id, stateDir: getStateDir(config) });
   });
 }
 
@@ -610,7 +622,7 @@ function settleWorkerWrite(worker: Worker, message: Record<string, any>): void {
   if (!pending) return;
   pendingWriteRequests.delete(id);
   if (message.ok === true) {
-    recordStorageWrite(Number(message.bytes || 0), Number(message.durationMs || 0));
+    if (message.action !== 'prune') recordStorageWrite(Number(message.bytes || 0), Number(message.durationMs || 0));
     pending.resolve();
   } else {
     const error = new Error(String(message.error?.message || 'Task history write failed.')) as Error & { code?: string };
@@ -643,6 +655,7 @@ export {
   clearTaskHistory,
   ensureCurrentHistory,
   findSessionsContaining,
+  findConversationSessions,
   getTaskHistoryDir,
   listRecentSessionEventPage,
   listRecentSessionEvents,
@@ -650,6 +663,7 @@ export {
   listSessionSummaryPage,
   listSessions,
   pruneSessions,
+  pruneSessionsAsync,
   readSession,
   removeSession,
   removeWorkspaceSessions,

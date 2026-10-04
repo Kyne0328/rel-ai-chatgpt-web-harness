@@ -213,6 +213,7 @@ async function createDesktopHost(options = {}) {
     listPersistentProfiles: () => browserProfiles.persistentBrowserProfileDirectories(browserProfileConfig()),
     readPersistentSites: profileDirectory => browserProfiles.readPersistentBrowserSites(profileDirectory),
     recordPersistentSite: (profileDirectory, url) => browserProfiles.recordPersistentBrowserSite(profileDirectory, url),
+    flushPersistentSites: profileDirectory => browserProfiles.waitPersistentBrowserSiteWrites(profileDirectory),
     forgetPersistentSite: (profileDirectory, origin) => browserProfiles.forgetPersistentBrowserSite(profileDirectory, origin),
     onEvent: event => serviceProcessClient?.sendNativeEvent(event),
     onError: error => runtimeLogs.append(formatError(error), { level: 'warning', source: 'embedded-browser' })
@@ -625,8 +626,9 @@ async function createDesktopHost(options = {}) {
       ? await serviceRuntime.restartAdditionalTunnels()
       : { connections: [] };
     return {
-      ok: true,
       ...removed,
+      ok: !runtime.error,
+      ...(runtime.error ? { error: 'The tunnel configuration was removed, but its process could not be stopped. Stop Rel.AI and retry.' } : {}),
       connections: tunnelConnections.list(),
       statuses: runtime.connections || []
     };
@@ -792,7 +794,11 @@ async function createDesktopHost(options = {}) {
 
   async function closeForManualMacUpdate() {
     isQuitting = true;
-    await shutdownCoordinator.prepare('update');
+    const shutdown = await shutdownCoordinator.prepare('update');
+    if (shutdown?.clean === false) {
+      await recoverApplicationUpdate();
+      throw new Error('Rel.AI could not shut down safely. Review connection errors and retry before replacing the application.');
+    }
     app.exit(0);
   }
 
@@ -1069,7 +1075,16 @@ async function createDesktopHost(options = {}) {
     } else {
       tunnelCredentials.clear();
       tunnelConnections.clear();
-      connection.clearConnectionState();
+      const cleared = connection.clearConnectionState();
+      if (cleared?.ok !== true) {
+        const error = new Error(`Logout did not finish. ${cleared?.error || 'Some saved connection data could not be cleared. Try again.'}`);
+        isQuitting = false;
+        shutdownCoordinator.reset();
+        desktopTray.setup();
+        setStatus({ error: error.message, errorCode: 'connection_state_clear_failed' });
+        recoveryWindowManager.show();
+        throw error;
+      }
     }
     const cleanArgs = process.argv.slice(1).filter(arg => arg !== '--background' && arg !== '--hidden');
     app.relaunch({ args: cleanArgs });

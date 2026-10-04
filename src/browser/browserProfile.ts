@@ -49,20 +49,28 @@ function preparePersistentBrowserProfile(config: Record<string, unknown>, princi
   return directory;
 }
 
-async function clearPersistentBrowserProfile(config: Record<string, unknown>, principalFingerprint: string): Promise<{ cleared: boolean }> {
+async function waitPersistentBrowserSiteWrites(profileDirectory: string): Promise<void> {
+  await registryWrites.get(path.resolve(profileDirectory))?.catch(() => {});
+}
+
+function assertPersistentBrowserProfileSafe(config: Record<string, unknown>, principalFingerprint: string): string {
   const root = persistentBrowserProfileRoot(config);
   const directory = browserProfileDirectory(config, principalFingerprint);
   const principalDirectory = path.dirname(directory);
   for (const [target, label] of [[root, 'root'], [principalDirectory, 'principal path'], [directory, 'path']] as const) {
     const existing = safeLstat(target);
-    if (!existing) {
-      if (target === directory) return { cleared: false };
-      continue;
-    }
+    if (!existing) continue;
     if (existing.isSymbolicLink()) throw new Error(`Refusing to clear a symbolic-link browser profile ${label}.`);
     if (!existing.isDirectory()) throw new Error(`Browser profile ${label} is not a directory.`);
   }
-  await registryWrites.get(path.resolve(directory))?.catch(() => {});
+  return directory;
+}
+
+async function clearPersistentBrowserProfile(config: Record<string, unknown>, principalFingerprint: string): Promise<{ cleared: boolean }> {
+  const directory = assertPersistentBrowserProfileSafe(config, principalFingerprint);
+  const principalDirectory = path.dirname(directory);
+  if (!safeLstat(directory)) return { cleared: false };
+  await waitPersistentBrowserSiteWrites(directory);
   await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   try {
     if ((await fs.promises.readdir(principalDirectory)).length === 0) await fs.promises.rmdir(principalDirectory);
@@ -149,8 +157,8 @@ function safeLstat(file: string): fs.Stats | null {
 }
 
 export {
-  browserProfileDirectory, clearPersistentBrowserProfile, clearPersistentBrowserProfiles,
+  assertPersistentBrowserProfileSafe, browserProfileDirectory, clearPersistentBrowserProfile, clearPersistentBrowserProfiles,
   forgetPersistentBrowserSite, normalizeBrowserProfileMode, persistentBrowserProfileDirectories,
-  persistentBrowserProfileRoot, preparePersistentBrowserProfile, readPersistentBrowserSites, recordPersistentBrowserSite
+  persistentBrowserProfileRoot, preparePersistentBrowserProfile, readPersistentBrowserSites, recordPersistentBrowserSite, waitPersistentBrowserSiteWrites
 };
 export type { BrowserProfileMode };

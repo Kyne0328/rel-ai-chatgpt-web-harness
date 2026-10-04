@@ -1,5 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { importResourceModule } from './resource-path.js';
+
+const { writeJsonAtomic, writeJsonAtomicAsync } = await importResourceModule('src/durableState.ts');
 
 const UPDATE_INSTALL_MARKER = 'update-installing.json';
 const STALE_UPDATE_MARKER_MS = 5 * 60 * 1000;
@@ -51,8 +54,7 @@ function markUpdateInstallPhaseSync(app, phase, options = {}) {
   const marker = readUpdateInstallMarker(app);
   if (!marker) return null;
   const next = nextMarker(marker, phase, options);
-  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(target, `${JSON.stringify(next, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  writeJsonAtomic(target, next, { mode: 0o600 });
   return { ...next, path: target };
 }
 
@@ -192,8 +194,7 @@ function nextMarker(marker, phase, options = {}) {
 }
 
 async function persistMarker(target, payload) {
-  await fs.promises.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-  await fs.promises.writeFile(target, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await writeJsonAtomicAsync(target, payload, { mode: 0o600 });
 }
 
 function normalizeEvents(value, startedAt, phase) {

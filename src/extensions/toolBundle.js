@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
+import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import sevenZip from '7zip-bin';
 import { extract as extractTar } from 'tar';
@@ -337,50 +338,53 @@ function validateExtractedTree(root, limits) {
 
 async function decompressXzToTar(archivePath, tarPath, maxBytes) {
   fs.mkdirSync(path.dirname(tarPath), { recursive: true, mode: 0o700 });
-  await new Promise((resolve, reject) => {
-    const child = spawn(sevenZip.path7za, ['e', '-so', archivePath], {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    const output = fs.createWriteStream(tarPath, { flags: 'wx', mode: 0o600 });
-    let bytes = 0;
-    let stderr = '';
-    let settled = false;
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error('Tool bundle TAR.XZ decompression timed out.'));
-    }, SEVEN_ZIP_TIMEOUT_MS);
-
-    const finish = error => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { output.end(); } catch {}
-      if (error) reject(error);
+  const child = spawn(sevenZip.path7za, ['e', '-so', archivePath], {
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  const output = fs.createWriteStream(tarPath, { flags: 'wx', mode: 0o600 });
+  let bytes = 0;
+  let stderr = '';
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+    child.stdout.destroy(new Error('Tool bundle TAR.XZ decompression timed out.'));
+  }, SEVEN_ZIP_TIMEOUT_MS);
+  const childFinished = new Promise((resolve, reject) => {
+    child.once('error', error => reject(new Error('Could not start bundled 7-Zip for TAR.XZ extraction.', { cause: error })));
+    child.once('close', code => {
+      if (timedOut) reject(new Error('Tool bundle TAR.XZ decompression timed out.'));
+      else if (code !== 0) reject(new Error(`Tool bundle TAR.XZ decompression failed with exit code ${code}: ${stderr.trim()}`));
       else resolve();
-    };
-
-    child.stdout.on('data', chunk => {
-      bytes += chunk.length;
-      if (bytes > maxBytes) {
-        child.kill();
-        finish(new Error('Tool bundle TAR.XZ expands beyond the allowed intermediate size.'));
-        return;
-      }
-      if (!output.write(chunk)) child.stdout.pause();
-    });
-    output.on('drain', () => child.stdout.resume());
-    child.stderr.on('data', chunk => {
-      if (stderr.length < MAX_SEVEN_ZIP_OUTPUT_BYTES) stderr += chunk.toString('utf8');
-    });
-    child.on('error', error => finish(new Error('Could not start bundled 7-Zip for TAR.XZ extraction.', { cause: error })));
-    child.on('close', code => {
-      output.end(() => {
-        if (code !== 0) finish(new Error(`Tool bundle TAR.XZ decompression failed with exit code ${code}: ${stderr.trim()}`));
-        else finish();
-      });
     });
   });
+  child.stderr.on('data', chunk => {
+    if (stderr.length < MAX_SEVEN_ZIP_OUTPUT_BYTES) stderr += chunk.toString('utf8');
+  });
+  const writing = pipeline(child.stdout, new Transform({
+    transform(chunk, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > maxBytes) callback(new Error('Tool bundle TAR.XZ expands beyond the allowed intermediate size.'));
+      else callback(null, chunk);
+    }
+  }), output);
+  try {
+    await Promise.all([writing, childFinished]);
+  } catch (error) {
+    const stopRequested = child.kill('SIGKILL');
+    child.stdout.destroy();
+    output.destroy();
+    // Node owns the TAR file handle. Wait for its pipeline to close, but never
+    // wait indefinitely for a decompressor that did not acknowledge termination.
+    await writing.catch(() => {});
+    if (!stopRequested && child.exitCode == null && child.signalCode == null) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)} Could not confirm termination of the 7-Zip decompressor (PID ${child.pid || 'unavailable'}).`, { cause: error });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function runSevenZip(args) {

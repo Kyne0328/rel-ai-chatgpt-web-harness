@@ -45,6 +45,7 @@ interface BrowserPageDriver {
 }
 
 interface LocalBrowserDriver {
+  readonly recordsPersistentSites?: boolean;
   readonly browserProduct: string;
   createPage(signal?: AbortSignal): Promise<BrowserPageDriver>;
   close(): Promise<void>;

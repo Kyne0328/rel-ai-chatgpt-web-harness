@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 
 import { withStateDatabase } from './stateDatabase.ts';
 import { upsertTaskHistorySession } from './taskHistoryPersistence.ts';
+import { pruneSessions } from './taskHistoryStorage.ts';
 
 if (!parentPort) throw new Error('Task history storage worker requires a parent port.');
 
@@ -10,11 +11,14 @@ parentPort.on('message', message => {
   const id = Number(message?.id || 0);
   const started = performance.now();
   try {
-    const result = withStateDatabase({ stateDir: String(message.stateDir || '') }, db =>
-      upsertTaskHistorySession(db, message.session, message.updatedAtMs), { transaction: true, timeoutMs: 5000 });
+    const result = message.action === 'prune'
+      ? (pruneSessions(String(message.directory || ''), { timeoutMs: 5000 }), null)
+      : withStateDatabase({ stateDir: String(message.stateDir || '') }, db =>
+        upsertTaskHistorySession(db, message.session, message.updatedAtMs), { transaction: true, timeoutMs: 5000 });
     parentPort.postMessage({
       id,
       ok: true,
+      action: message.action,
       bytes: Number(result?.bytes || 0),
       durationMs: performance.now() - started
     });

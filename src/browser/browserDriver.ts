@@ -75,6 +75,11 @@ function dispatchBrowserNativeEvent(event: NativeBrowserEvent = {}): void {
   }
 }
 
+async function clearBrowserProfileSession(profileDirectory: string): Promise<void> {
+  if (!nativeBrowserBridge) return;
+  await nativeBrowserBridge({ action: 'clear_profile', profileDirectory });
+}
+
 async function launchBrowserDriver(options: LaunchBrowserDriverOptions): Promise<LocalBrowserDriver> {
   const bridge = nativeBrowserBridge;
   if (!bridge) return launchLocalBrowserDriver(options);
@@ -91,6 +96,7 @@ async function launchBrowserDriver(options: LaunchBrowserDriverOptions): Promise
 
   return Object.freeze({
     browserProduct: String(started.browserProduct || 'Rel.AI Embedded Chromium'),
+    recordsPersistentSites: true,
     createPage: (signal?: AbortSignal) => createNativePage(bridge, nativeSessionId, signal),
     close: async () => {
       sessionDisconnectListeners.delete(nativeSessionId);
@@ -188,6 +194,6 @@ function objectValue(value: Record<string, unknown> | void): Record<string, unkn
 }
 
 export {
-  configureBrowserNativeBridge, dispatchBrowserNativeEvent, launchBrowserDriver
+  clearBrowserProfileSession, configureBrowserNativeBridge, dispatchBrowserNativeEvent, launchBrowserDriver
 };
 export type { BrowserPageDriver, LocalBrowserDriver };

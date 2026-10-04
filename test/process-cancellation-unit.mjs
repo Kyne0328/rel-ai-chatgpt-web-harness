@@ -104,6 +104,53 @@ try {
     assert.equal(noSpawn.durationMs, 0);
     assert.equal(fs.existsSync(noSpawnMarker), false, 'an already aborted request must not spawn a process');
   }
+  const markerArgs = ['-e', 'require("node:fs").writeFileSync(process.argv[1], "started")', noSpawnMarker];
+  const expired = await runProcess(process.execPath, markerArgs, {
+    cwd: root, deadlineAtMs: Date.now() - 1, resourceClass: 'heavy', resourceOwner: 'deadline-fixture'
+  }, config);
+  assert.equal(fs.existsSync(noSpawnMarker), false, 'an expired absolute deadline must synchronously prevent the physical child');
+  assert.equal(expired.executed, false, 'an expired absolute deadline must report no spawn');
+  assert.equal(finite.executed, true, 'a normally completed child was physically started');
+  assert.equal(expired.timedOut, true);
+  assert.equal(expired.cancelled, false);
+  assert.equal(fs.existsSync(noSpawnMarker), false);
+
+  const originalNow = Date.now;
+  const beforePreparation = originalNow();
+  let clock = beforePreparation;
+  const delayedEnvironment = {};
+  Object.defineProperty(delayedEnvironment, 'RELAI_DEADLINE_FIXTURE', {
+    enumerable: true,
+    get() { clock = beforePreparation + 100; return 'prepared'; }
+  });
+  Date.now = () => clock;
+  try {
+    const expiredDuringPreparation = await runProcess(process.execPath, markerArgs, {
+      cwd: root, env: delayedEnvironment, deadlineAtMs: beforePreparation + 50,
+      resourceClass: 'heavy', resourceOwner: 'deadline-fixture'
+    }, config);
+    assert.equal(expiredDuringPreparation.executed, false, 'the final pre-spawn gate must recheck time after environment preparation');
+    assert.equal(expiredDuringPreparation.timedOut, true);
+    assert.equal(fs.existsSync(noSpawnMarker), false);
+  } finally { Date.now = originalNow; }
+
+  const cancelledBeforeDeadline = await runProcess(process.execPath, markerArgs, {
+    cwd: root, signal: AbortSignal.abort(new DOMException('User stopped the operation.', 'AbortError')),
+    deadlineAtMs: Date.now() - 1
+  }, config);
+  assert.equal(cancelledBeforeDeadline.executed, false);
+  assert.equal(cancelledBeforeDeadline.cancelled, true);
+  assert.equal(cancelledBeforeDeadline.timedOut, false, 'an existing user cancellation keeps its first-cause classification');
+  const spawnFailure = await runProcess(path.join(root, 'missing-executable'), [], { cwd: root }, config);
+  assert.equal(spawnFailure.executed, false, 'a spawn error is not physical command execution');
+  assert.equal(spawnFailure.spawnError, true);
+  const afterDeadline = await runProcess(process.execPath, [finiteScript, 'lease-released'], {
+    cwd: root, resourceClass: 'heavy', resourceOwner: 'deadline-fixture', queueTimeoutMs: 1000
+  }, config);
+  assert.equal(afterDeadline.executed, true, 'pre-spawn exits must release the resource lease');
+  assert.equal(afterDeadline.exitCode, 0);
+  assert.equal(summarizeCommand({ executed: false, exitCode: -1 }).executed, false);
+
   assert.equal(summarizeCommand({ exitCode: 0, timedOut: true }).ok, false);
   assert.equal(summarizeCommand({ exitCode: 0, cancelled: true }).ok, false);
 

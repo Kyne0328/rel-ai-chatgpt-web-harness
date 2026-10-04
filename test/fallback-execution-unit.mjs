@@ -21,14 +21,18 @@ import {
   startFallbackExecution,
   updateFallbackExecutionPhase
 } from '../src/mcp/fallbackExecutions.js';
+import { relaiExec } from '../src/bridge/exec.js';
 import { readOutputSpill } from '../src/outputSpill.js';
 import { MCP_PROTOCOL_VERSION } from '../src/mcp/protocol.js';
 import { toolResult } from '../src/mcp/results.js';
 import { enrichWithFallbackCompletions } from '../src/mcp/toolInvocation.js';
 import { executeToolCall } from '../src/tools/execution.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
-import { principalFingerprint } from '../src/mcp/principal.ts';
-import { handleTransportFallbackRequest } from '../src/mcp/transportFallback.ts';
+import { runWorkspaceOperation } from '../src/workspaceOperationQueue.js';
+import { createHttpPrincipal, createStdioPrincipal, principalFingerprint } from '../src/mcp/principal.ts';
+import { toolContext } from '../src/mcp/context.js';
+import { acknowledgeMcpFallbackCompletionDelivery, beginMcpRequest, finishMcpRequest } from '../src/core/mcp-runtime.ts';
+import { createFallbackAwareStdioTransport, handleTransportFallbackRequest } from '../src/mcp/transportFallback.ts';
 import {
   readTaskHistorySessionRecord,
   recordTaskBackgroundOperation,
@@ -70,6 +74,19 @@ function readMessage(id) {
       }
     }
   };
+}
+
+function processStartMessage(id) {
+  const request = readMessage(id);
+  request.params.name = 'relai_process';
+  request.params.arguments = {
+    action: 'start',
+    workspace: 'app',
+    command: 'node server.js',
+    kind: 'service',
+    purpose: 'Exercise resilient persistent-process startup.'
+  };
+  return request;
 }
 
 function workStatusMessage(id, args = {}) {
@@ -136,6 +153,8 @@ const transientConfig = { stateDir: transientSandbox, auditLogPath: path.join(tr
 
 assert.equal(DEFAULT_FALLBACK_GRACE_MS, 1_000, 'background fallback should detach quickly instead of holding the connector open');
 resetFallbackExecutions();
+await testTerminalElapsedClocks();
+await testCompletionReceiptIsolation();
 
 const phaseStartedAt = Date.now();
 const phaseExecution = startFallbackExecution({
@@ -231,16 +250,84 @@ const explicitDeadline = await handleTransportFallbackRequest(transientConfig, m
   executeToolResult: async (_config, _name, _args, options) => {
     if (!options.signal.aborted) await new Promise(resolve => options.signal.addEventListener('abort', resolve, { once: true }));
     return toolResult({
-      ok: false,
+      ok: true,
+      executed: false,
       commandSucceeded: false,
       terminationConfirmed: true,
+      mutationTracking: 'cancelled-before-execution',
       mutationUnknown: false,
-      timedOut: true
-    }, true);
+      timedOut: true,
+      error: 'Timed out after 1000ms'
+    }, false);
   }
 });
 assert.ok(Date.now() - explicitDeadlineStarted < 2500, 'an explicit command timeout must not receive an extra cleanup grace before transport cancellation');
-assert.equal(explicitDeadline.body.result.structuredContent.errorCode, 'SYNCHRONOUS_EXECUTION_TIMEOUT');
+assert.equal(explicitDeadline.body.result.isError, false, 'a settled handler timeout result must not be replaced by a generic transport error');
+assert.equal(explicitDeadline.body.result.structuredContent.executed, false);
+assert.equal(explicitDeadline.body.result.structuredContent.timedOut, true);
+assert.equal(explicitDeadline.body.result.structuredContent.terminationConfirmed, true);
+assert.equal(explicitDeadline.body.result.structuredContent.mutationUnknown, false);
+assert.equal(Object.hasOwn(explicitDeadline.body.result.structuredContent, 'errorCode'), false);
+
+const preExecutionAbort = new AbortController();
+preExecutionAbort.abort(new DOMException('Execution deadline expired.', 'TimeoutError'));
+const preExecutionResult = await relaiExec(
+  { alias: 'app', path: transientSandbox, commands: {}, testCommands: {} },
+  transientConfig,
+  { executable: process.execPath, argv: ['--version'], timeoutMs: 1000 },
+  {
+    signal: preExecutionAbort.signal,
+    deadlineAtMs: Date.now() - 1,
+    mutationTrackingRequired: true
+  }
+);
+assert.equal(preExecutionResult.executed, false);
+assert.equal(preExecutionResult.timedOut, true);
+assert.equal(preExecutionResult.terminationConfirmed, true);
+assert.equal(preExecutionResult.mutationTracking, 'cancelled-before-execution');
+assert.equal(preExecutionResult.mutationUnknown, false, 'a command that never started cannot leave unknown workspace mutations');
+
+// Exec cleanup can outlive request cancellation without implying that a mutating
+// subprocess survived. The process-specific ownership/result checks decide
+// quarantine for exec; the generic in-process mutation watchdog must not poison
+// the workspace merely because cleanup takes longer than its grace period.
+const originalSetTimeout = globalThis.setTimeout;
+const watchdogController = new AbortController();
+let watchdogHandlerStartedResolve;
+const watchdogHandlerStarted = new Promise(resolve => { watchdogHandlerStartedResolve = resolve; });
+try {
+  globalThis.setTimeout = (callback, ms, ...args) => originalSetTimeout(callback, Number(ms) === 15_000 ? 5 : ms, ...args);
+  const watchdogExecution = executeToolCall({
+    config: transientConfig,
+    name: 'relai_exec',
+    executionName: OP.EXEC,
+    effectiveArgs: { workspace: 'watchdog-exec', command: 'node mutation.js', timeoutMs: 60_000 },
+    context: { signal: watchdogController.signal, requestId: 'watchdog_exec_cleanup_test' },
+    finishActivity: null,
+    definition: {
+      annotations: { readOnlyHint: false },
+      behavior: { concurrencyScope: 'mutation', longRunning: true },
+      handler: async (_config, _args, handlerContext) => {
+        watchdogHandlerStartedResolve();
+        if (!handlerContext.signal.aborted) {
+          await new Promise(resolve => handlerContext.signal.addEventListener('abort', resolve, { once: true }));
+        }
+        await new Promise(resolve => originalSetTimeout(resolve, 25));
+        return { ok: true };
+      }
+    },
+    workspaceOverride: { alias: 'watchdog-exec', path: transientSandbox, directFilesystem: true }
+  });
+  await watchdogHandlerStarted;
+  watchdogController.abort(new DOMException('Execution deadline expired.', 'TimeoutError'));
+  await watchdogExecution;
+} finally {
+  globalThis.setTimeout = originalSetTimeout;
+}
+const postCleanupMutation = await runWorkspaceOperation('watchdog-exec', async () => 'released', {
+  mode: 'write', scope: 'mutation', taskId: 'after-watchdog'
+});
+assert.equal(postCleanupMutation, 'released', 'slow exec cleanup with no surviving process must not quarantine later mutations');
 
 const inheritedValidationDeadlineStarted = Date.now();
 let inheritedValidationDeadlineObserved = false;
@@ -346,6 +433,35 @@ for (const [index, mode] of ['no_termination_fields', 'pre_aborted', 'handler_ca
     assert.equal(diagnostics.executed, false);
     assert.match(response.body.result.content[0].text, /did not start/);
   }
+}
+
+for (const [index, mode] of ['unsafe_exec_cancelled', 'unsafe_exec_timeout', 'resilient_read_cancelled'].entries()) {
+  let calls = 0;
+  const timedOut = mode === 'unsafe_exec_timeout';
+  const reason = new DOMException('Request ended before admission.', timedOut ? 'TimeoutError' : 'AbortError');
+  const request = mode === 'resilient_read_cancelled'
+    ? readMessage(950 + index)
+    : message(950 + index, '', 'node never-admitted.js', 60000);
+  const fallbackDirectory = path.join(transientConfig.stateDir, 'fallback-executions');
+  const persistedFallbackFiles = () => fs.existsSync(fallbackDirectory) ? fs.readdirSync(fallbackDirectory).sort() : [];
+  const before = persistedFallbackFiles();
+  const response = await handleTransportFallbackRequest(transientConfig, request, {
+    principal: 'principal-pre-admission', transportType: 'streamable-http',
+    synchronousFallbackGraceMs: 0, signal: AbortSignal.abort(reason),
+    executeToolResult: async () => { calls += 1; return toolResult({ ok: true, executed: true }, false); }
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 0, 'already cancelled detached admission must not invoke even a deferred handler');
+  const result = response.body.result.structuredContent;
+  assert.equal(response.body.result.isError, true);
+  assert.equal(result.executed, false);
+  assert.equal(result.cancelled, !timedOut);
+  assert.equal(result.timedOut, timedOut);
+  assert.equal(result.terminationConfirmed, true);
+  assert.equal(result.mutationUnknown, false);
+  assert.equal(result.operationId, undefined);
+  assert.deepEqual(persistedFallbackFiles(), before, 'rejected admission must not add a persisted background record');
+  // Resilient persist:false admission is covered by the handler call count, not disk state.
 }
 
 const cleanupWaitStarted = Date.now();
@@ -469,6 +585,39 @@ const freshRead = await handleTransportFallbackRequest(transientConfig, readMess
 });
 assert.equal(resilientReadExecutions, 2, 'after confirmed delivery, the same read must execute fresh instead of replaying stale data');
 freshRead.onDelivered();
+
+let resilientProcessStarts = 0;
+const resilientProcessStartExecute = async () => {
+  resilientProcessStarts += 1;
+  await delay(30);
+  return toolResult({ ok: true, workspace: 'app', processId: 'proc_resilient_start', status: 'running' }, false);
+};
+const acceptedProcessStart = await handleTransportFallbackRequest(transientConfig, processStartMessage(1010), {
+  principal: 'principal-resilient-process',
+  transportType: 'streamable-http',
+  synchronousFallbackGraceMs: 5,
+  executeToolResult: resilientProcessStartExecute
+});
+assert.equal(acceptedProcessStart.body.result.structuredContent.status, 'running');
+assert.ok(acceptedProcessStart.body.result.structuredContent.operationId, 'slow managed-process startup must return a fallback operation identity');
+const retriedProcessStart = await handleTransportFallbackRequest(transientConfig, processStartMessage(1011), {
+  principal: 'principal-resilient-process',
+  transportType: 'streamable-http',
+  synchronousFallbackGraceMs: 5,
+  executeToolResult: resilientProcessStartExecute
+});
+assert.equal(resilientProcessStarts, 1, 'retry after a lost process-start response must reuse the active startup instead of creating another process');
+assert.equal(retriedProcessStart.body.result.structuredContent.operationId, acceptedProcessStart.body.result.structuredContent.operationId);
+await delay(40);
+const completedProcessStart = await handleTransportFallbackRequest(transientConfig, processStartMessage(1012), {
+  principal: 'principal-resilient-process',
+  transportType: 'streamable-http',
+  synchronousFallbackGraceMs: 5,
+  executeToolResult: resilientProcessStartExecute
+});
+assert.equal(resilientProcessStarts, 1, 'completed but unacknowledged process startup must replay its result without a duplicate start');
+assert.equal(completedProcessStart.body.result.structuredContent.processId, 'proc_resilient_start');
+completedProcessStart.onDelivered?.();
 
 let workBeginExecutions = 0;
 const workBeginExecute = async () => {
@@ -1068,3 +1217,252 @@ try {
 }
 
 console.log('Background operations share durable tasks, preserve exact retries and diagnostics, recover every operation after restart, and support individual and task-wide cancellation.');
+
+// Drive execution and observation clocks explicitly; no wall-clock sleep is
+// needed to distinguish live elapsed time from terminal elapsed time.
+async function testTerminalElapsedClocks() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-fallback-elapsed-'));
+  const elapsedConfig = { stateDir: directory, auditLogPath: path.join(directory, 'audit.jsonl') };
+  const base = Date.now();
+  try {
+    for (const [index, mode] of ['completed', 'failed', 'rejected', 'cancelled'].entries()) {
+      resetFallbackExecutions();
+      const started = base + index * 10_000;
+      let clock = started;
+      const workId = `work_elapsed_${mode}`;
+      seedTask(elapsedConfig, workId);
+      let resolveRun;
+      let rejectRun;
+      const pending = new Promise((resolve, reject) => { resolveRun = resolve; rejectRun = reject; });
+      const execution = startFallbackExecution({
+        config: elapsedConfig, workId, tool: 'relai_exec', workspace: 'app',
+        signature: workId, now: () => clock,
+        run: () => pending
+      });
+      // Let startFallbackExecution install its handler before resolving or
+      // rejecting the deferred run; this is a microtask, not a timer delay.
+      await Promise.resolve();
+      for (const elapsed of [125, 275]) {
+        const running = fallbackExecutionStatus(execution.record.operationId, { now: () => started + elapsed });
+        assert.equal(running.status, 'running');
+        assert.equal(running.elapsedMs, elapsed, 'running elapsed time must follow the observation clock');
+      }
+      if (mode === 'cancelled') {
+        clock = started + 300;
+        cancelFallbackExecution(execution.record.operationId, {
+          config: elapsedConfig, expectedWorkId: workId, now: () => clock,
+          reason: 'Deterministic elapsed clock cancellation.'
+        });
+        const stopping = fallbackExecutionStatus(execution.record.operationId, { now: () => started + 350 });
+        assert.equal(stopping.status, 'running', 'cancellation request is not yet completion');
+        assert.equal(stopping.elapsedMs, 350, 'elapsed time must keep advancing while cancellation cleanup is pending');
+      }
+      clock = started + 400;
+      if (mode === 'rejected') rejectRun(new Error('Deterministic elapsed clock rejection.'));
+      else resolveRun(toolResult({ ok: mode === 'completed', workspace: 'app', work_id: workId }, mode !== 'completed'));
+      await execution.record.promise;
+      const expectedStatus = mode === 'rejected' ? 'failed' : mode;
+      for (const observed of [started + 1400, started + 8400]) {
+        const terminal = fallbackExecutionStatus(execution.record.operationId, { now: () => observed });
+        assert.equal(terminal.status, expectedStatus);
+        assert.equal(terminal.elapsedMs, 400, `${mode} elapsed time must freeze at completion`);
+        assert.equal(terminal.completedAt, new Date(started + 400).toISOString());
+      }
+
+      const completedAt = execution.record.completedAt;
+      execution.record.completedAtMs = 0;
+      assert.equal(fallbackExecutionStatus(execution.record.operationId, { now: () => started + 1500 }).elapsedMs, 400,
+        'a missing numeric completion clock must use the valid completedAt timestamp');
+      execution.record.completedAtMs = Number.NaN;
+      assert.equal(fallbackExecutionStatus(execution.record.operationId, { now: () => started + 1500 }).elapsedMs, 400,
+        'a malformed numeric completion clock must fall back to the valid timestamp');
+      for (const invalid of ['', 'not-a-date']) {
+        execution.record.completedAtMs = 0;
+        execution.record.completedAt = invalid;
+        const terminal = fallbackExecutionStatus(execution.record.operationId, { now: () => started + 1500 });
+        assert.equal(Number.isFinite(terminal.elapsedMs), true, 'missing/malformed completion dates must not produce NaN');
+        assert.equal(terminal.elapsedMs, 1500, 'unknown completion must use the safe observation-time fallback');
+      }
+      execution.record.completedAt = completedAt;
+      execution.record.completedAtMs = started + 400;
+
+      const persisted = readTaskHistorySessionRecord(elapsedConfig, workId).backgroundOperation;
+      assert.equal(persisted.completedAt, completedAt);
+      assert.equal(Object.hasOwn(persisted, 'completedAtMs'), false, 'recovery fixture must rely on the persisted ISO timestamp');
+      resetFallbackExecutions();
+      for (const observed of [started + 2400, started + 7400]) {
+        const recovered = fallbackExecutionStatus(execution.record.operationId, { config: elapsedConfig, now: () => observed });
+        assert.equal(recovered.status, expectedStatus);
+        assert.equal(recovered.elapsedMs, 400, `${mode} elapsed time must stay frozen after persistence recovery`);
+        assert.equal(recovered.completedAt, completedAt);
+      }
+    }
+
+    resetFallbackExecutions();
+    const workId = 'work_elapsed_interrupted';
+    const started = base + 50_000;
+    seedTask(elapsedConfig, workId);
+    recordTaskBackgroundOperation(elapsedConfig, workId, {
+      operationId: 'fallback_elapsed_interrupted_fixture', workId,
+      tool: 'relai_exec', workspace: 'app', signature: 'elapsed-interrupted',
+      status: 'running', startedAt: new Date(started).toISOString(),
+      updatedAt: new Date(started).toISOString(), revision: 1
+    });
+    const interrupted = fallbackExecutionStatus(workId, { config: elapsedConfig, now: () => started + 500 });
+    assert.equal(interrupted.status, 'interrupted');
+    assert.equal(interrupted.elapsedMs, 500);
+    assert.equal(fallbackExecutionStatus(workId, { config: elapsedConfig, now: () => started + 5000 }).elapsedMs, 500,
+      'restart interruption becomes terminal at recovery, rather than advancing on later polls');
+    resetFallbackExecutions();
+    assert.equal(fallbackExecutionStatus(workId, { config: elapsedConfig, now: () => started + 6000 }).elapsedMs, 500,
+      'the recovery-generated completion timestamp must survive another restart');
+  } finally {
+    resetFallbackExecutions();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+// Receipt identity is internal. Two HTTP requests may reuse a JSON-RPC id;
+// neither may acknowledge the other's workspace completion before delivery.
+async function testCompletionReceiptIsolation() {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-receipt-isolation-'));
+  const receiptConfig = { stateDir: directory, auditLogPath: path.join(directory, 'audit.jsonl') };
+  const wireId = 'same-protocol-id';
+  const principal = createHttpPrincipal({ clientId: 'receipt-client', scopes: ['mcp'] }, 'static_bearer');
+  const noticeScope = principalFingerprint(principal);
+  const context = { config: receiptConfig, principal };
+  const metricRequestIds = [];
+  async function seedNotice(workspace, suffix, noticePrincipal = principal) {
+    const operation = startFallbackExecution({
+      config: receiptConfig, scopeId: `receipt-${suffix}`, workspace,
+      noticeScope: principalFingerprint(noticePrincipal), tool: 'relai_exec', signature: suffix,
+      run: async () => toolResult({ ok: true, workspace, commandSucceeded: true }, false)
+    });
+    enableFallbackCompletionNotice(receiptConfig, operation.record);
+    await operation.record.promise;
+    const notices = peekFallbackCompletionNotices(receiptConfig, { noticeScope: principalFingerprint(noticePrincipal), workspace });
+    assert.equal(notices.length, 1, 'receipt fixture must have one real pending completion');
+    return operation.record.operationId;
+  }
+  const noticesFor = (workspace, scope = noticeScope) => peekFallbackCompletionNotices(receiptConfig, { noticeScope: scope, workspace });
+  try {
+    for (const outcomeB of ['finish', 'disconnect']) {
+      resetFallbackExecutions();
+      const workspaceA = `receipt-a-${outcomeB}`;
+      const workspaceB = `receipt-b-${outcomeB}`;
+      const operationA = await seedNotice(workspaceA, `a-${outcomeB}`);
+      const operationB = await seedNotice(workspaceB, `b-${outcomeB}`);
+      const internalA = beginMcpRequest({ principal: 'receipt-client', method: 'tools/call', authMode: 'static_bearer' });
+      const internalB = beginMcpRequest({ principal: 'receipt-client', method: 'tools/call', authMode: 'static_bearer' });
+      metricRequestIds.push(internalA, internalB);
+      assert.notEqual(internalA, internalB);
+      const sdkRequest = { mcpReq: { id: wireId, params: { _meta: { relaiRequestId: 'client-forgery' } } } };
+      assert.equal(toolContext(sdkRequest, { principal, requestId: internalA }).requestId, internalA,
+        'normal SDK execution must prefer the server-owned receipt UUID over protocol/client metadata');
+      assert.equal(toolContext(sdkRequest, { principal, requestId: internalB }).requestId, internalB);
+      assert.equal(principalFingerprint(createHttpPrincipal({ clientId: 'receipt-client', scopes: ['mcp'], relaiRequestId: internalA }, 'static_bearer')), noticeScope,
+        'receipt UUIDs must not alter authenticated principal identity');
+
+      let releaseA;
+      let releaseB;
+      const holdA = new Promise(resolve => { releaseA = resolve; });
+      const holdB = new Promise(resolve => { releaseB = resolve; });
+      const registered = [];
+      const request = workspace => {
+        const value = message(wireId, '', 'node receipt-fixture.js', 25_000);
+        value.params.arguments.workspace = workspace;
+        return value;
+      };
+      const execute = hold => async (_config, _name, args, options) => {
+        const result = toolResult(enrichWithFallbackCompletions(receiptConfig, 'relai_exec', args,
+          { ok: true, workspace: args.workspace }, { principal, requestId: options.requestId }), false);
+        registered.push({ workspace: args.workspace, requestId: options.requestId });
+        await hold;
+        return result;
+      };
+      const responseA = handleTransportFallbackRequest(receiptConfig, request(workspaceA), {
+        principal, transportType: 'test', requestId: internalA, executeToolResult: execute(holdA)
+      });
+      let responseB;
+      try {
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(registered, [{ workspace: workspaceA, requestId: internalA }]);
+        responseB = handleTransportFallbackRequest(receiptConfig, request(workspaceB), {
+          principal, transportType: 'test', requestId: internalB, executeToolResult: execute(holdB)
+        });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(registered, [
+          { workspace: workspaceA, requestId: internalA },
+          { workspace: workspaceB, requestId: internalB }
+        ], 'bounded transport must preserve the supplied server receipt identities');
+        releaseA();
+        const deliveredA = await responseA;
+        assert.equal(deliveredA.body.id, wireId, 'internal receipt correlation must not change the JSON-RPC response id');
+        assert.equal(deliveredA.body.result.structuredContent.completedOperations[0].operationId, operationA);
+        assert.equal(acknowledgeMcpFallbackCompletionDelivery(context, internalA), true);
+        assert.deepEqual(noticesFor(workspaceA), []);
+        assert.equal(noticesFor(workspaceB)[0].operationId, operationB, 'finishing A must not consume pending B');
+        assert.equal(acknowledgeMcpFallbackCompletionDelivery(context, wireId), false, 'wire ids are not HTTP receipt acknowledgements');
+        releaseB();
+        const deliveredB = await responseB;
+        assert.equal(deliveredB.body.id, wireId);
+        if (outcomeB === 'finish') {
+          assert.equal(acknowledgeMcpFallbackCompletionDelivery(context, internalB), true);
+          assert.deepEqual(noticesFor(workspaceB), []);
+        } else {
+          // Execution settled, but the response connection never emitted finish.
+          assert.equal(noticesFor(workspaceB)[0].operationId, operationB,
+            'a dropped B response must leave its completion available for a later request');
+        }
+      } finally {
+        releaseA();
+        releaseB();
+        await Promise.allSettled([responseA, responseB]);
+        finishMcpRequest(internalA, { method: 'tools/call', ok: false });
+        finishMcpRequest(internalB, { method: 'tools/call', ok: false });
+      }
+    }
+
+    resetFallbackExecutions();
+    const stdioA = createStdioPrincipal();
+    const stdioB = createStdioPrincipal();
+    assert.notEqual(principalFingerprint(stdioA), principalFingerprint(stdioB), 'normal stdio startup gives each connection its own principal');
+    const stdioWorkspace = 'receipt-stdio';
+    const operationA = await seedNotice(stdioWorkspace, 'stdio-a', stdioA);
+    const operationB = await seedNotice(stdioWorkspace, 'stdio-b', stdioB);
+    const result = stdioPrincipal => toolResult(enrichWithFallbackCompletions(receiptConfig, 'relai_read', { workspace: stdioWorkspace },
+      { ok: true, workspace: stdioWorkspace }, toolContext({ mcpReq: { id: wireId } }, { principal: stdioPrincipal, transportType: 'stdio' })), false);
+    const resultA = result(stdioA);
+    const resultB = result(stdioB);
+    assert.equal(resultA.structuredContent.completedOperations[0].operationId, operationA);
+    assert.equal(resultB.structuredContent.completedOperations[0].operationId, operationB);
+    const transport = () => ({
+      fail: false, sent: [],
+      async send(value) { if (this.fail) throw new Error('synthetic undelivered stdio response'); this.sent.push(value); },
+      async start() {}, async close() {}
+    });
+    const transportA = transport();
+    const transportB = transport();
+    const wrapperA = createFallbackAwareStdioTransport({ config: receiptConfig, principal: stdioA, transport: transportA });
+    const wrapperB = createFallbackAwareStdioTransport({ config: receiptConfig, principal: stdioB, transport: transportB });
+    try {
+      await wrapperA.send({ jsonrpc: '2.0', id: wireId, result: resultA });
+      assert.deepEqual(noticesFor(stdioWorkspace, principalFingerprint(stdioA)), []);
+      assert.equal(noticesFor(stdioWorkspace, principalFingerprint(stdioB))[0].operationId, operationB);
+      transportB.fail = true;
+      await assert.rejects(() => wrapperB.send({ jsonrpc: '2.0', id: wireId, result: resultB }), /undelivered stdio/);
+      assert.equal(noticesFor(stdioWorkspace, principalFingerprint(stdioB))[0].operationId, operationB, 'failed stdio writes must not acknowledge delivery');
+      transportB.fail = false;
+      await wrapperB.send({ jsonrpc: '2.0', id: wireId, result: resultB });
+      assert.deepEqual(noticesFor(stdioWorkspace, principalFingerprint(stdioB)), []);
+      assert.equal(transportA.sent[0].id, wireId);
+      assert.equal(transportB.sent[0].id, wireId);
+    } finally {
+      await Promise.all([wrapperA.close(), wrapperB.close()]);
+    }
+  } finally {
+    for (const id of metricRequestIds) finishMcpRequest(id, { method: 'tools/call', ok: false });
+    resetFallbackExecutions();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}

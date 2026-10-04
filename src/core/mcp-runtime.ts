@@ -70,7 +70,8 @@ export function createMcpServerForRequest(
     publicHttpOnly: true,
     transportType: 'streamable-http',
     legacyCompatibility: era === 'legacy',
-    principal: createHttpPrincipal(authInfo, authMode)
+    principal: createHttpPrincipal(authInfo, authMode),
+    requestId: String(authInfo.relaiRequestId || '')
   });
 }
 

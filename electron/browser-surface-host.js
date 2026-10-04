@@ -24,6 +24,7 @@ function createBrowserSurfaceHost(options = {}) {
     listPersistentProfiles = async () => [],
     readPersistentSites = async () => [],
     recordPersistentSite = async () => {},
+    flushPersistentSites = async () => {},
     forgetPersistentSite = async () => {},
     onEvent = () => {},
     onStateChange = () => {},
@@ -36,6 +37,8 @@ function createBrowserSurfaceHost(options = {}) {
   if (typeof getDashboardWindow !== 'function') throw new TypeError('Embedded browser requires a dashboard-window getter.');
 
   const sessions = new Map();
+  const clearingProfiles = new Set();
+  let clearingSavedData = false;
   let activeSessionId = '';
   let pinnedSessionId = '';
   let surfaceBounds = { visible: false, x: 0, y: 0, width: 1, height: 1 };
@@ -56,6 +59,7 @@ function createBrowserSurfaceHost(options = {}) {
       case 'upload': return withPage(payload, action, uploadFile, options);
       case 'begin_download': return withPage(payload, action, beginDownload, options);
       case 'set_control': return setControlForSession(payload.nativeSessionId, payload.owner, payload.reason);
+      case 'clear_profile': return clearProfileSession(payload.profileDirectory);
       case 'close_page': return closePage(payload);
       case 'close_session': return closeSessionFromTool(payload.nativeSessionId);
       default: throw new Error(`Unsupported embedded browser action '${action || '(missing)'}.`);
@@ -67,6 +71,9 @@ function createBrowserSurfaceHost(options = {}) {
     const nativeSessionId = `embedded_browser_${crypto.randomBytes(18).toString('base64url')}`;
     const profileDirectory = String(payload.profileDirectory || '').trim();
     const persistent = Boolean(profileDirectory);
+    if (persistent && (clearingSavedData || clearingProfiles.has(profileDirectoryKey(profileDirectory)))) {
+      throw browserError('BROWSER_PROFILE_ALREADY_ACTIVE', 'The persistent browser profile is still being cleared. Try again after it finishes.');
+    }
     const viewport = normalizeViewport(payload.viewport);
     const browserSession = persistent
       ? session.fromPath(path.resolve(profileDirectory))
@@ -387,6 +394,23 @@ function createBrowserSurfaceHost(options = {}) {
     return { ok: true, nativeSessionId, status: 'closed' };
   }
 
+  async function clearProfileSession(value) {
+    const profileDirectory = String(value || '').trim();
+    if (!path.isAbsolute(profileDirectory)) throw new Error('Persistent browser profile must be an absolute path.');
+    const directory = path.resolve(profileDirectory);
+    const profileKey = profileDirectoryKey(directory);
+    if (clearingSavedData || clearingProfiles.has(profileKey) || [...sessions.values()].some(record => record.persistent && profileDirectoryKey(record.profileDirectory) === profileKey)) {
+      throw browserError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Stop the persistent browser session and wait for any current clear to finish before clearing its saved site data.');
+    }
+    clearingProfiles.add(profileKey);
+    try {
+      await clearNativeProfileData(directory);
+      return { ok: true, cleared: true };
+    } finally {
+      clearingProfiles.delete(profileKey);
+    }
+  }
+
   async function listSavedSites() {
     const profiles = await Promise.resolve(listPersistentProfiles());
     const sites = new Map();
@@ -414,44 +438,59 @@ function createBrowserSurfaceHost(options = {}) {
   }
 
   async function clearSavedSite(value) {
-    if ([...sessions.values()].some(record => record.persistent)) {
-      throw new Error('Stop persistent browser sessions before clearing saved browser data.');
-    }
     const origin = normalizeSavedSiteOrigin(value);
     if (!origin) throw new Error('Saved browser site must be an absolute HTTP or HTTPS origin.');
-    const profiles = await Promise.resolve(listPersistentProfiles());
-    let cleared = false;
-    for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
-      const directory = path.resolve(String(profileDirectory || ''));
-      if (!directory) continue;
-      const electronSession = session.fromPath(directory);
-      if (typeof electronSession.clearStorageData === 'function') {
-        await electronSession.clearStorageData({ origin });
+    return withSavedDataClear(async () => {
+      const profiles = await Promise.resolve(listPersistentProfiles());
+      let cleared = false;
+      for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
+        const directory = path.resolve(String(profileDirectory || ''));
+        if (!directory) continue;
+        await clearNativeProfileData(directory, origin);
         cleared = true;
+        await Promise.resolve(forgetPersistentSite(directory, origin));
       }
-      await Promise.resolve(forgetPersistentSite(directory, origin));
-    }
-    publishState();
-    return { ok: true, origin, cleared };
+      return { ok: true, origin, cleared };
+    });
   }
 
   async function clearSavedData() {
-    if ([...sessions.values()].some(record => record.persistent)) {
-      throw new Error('Stop persistent browser sessions before clearing saved browser data.');
+    return withSavedDataClear(async () => {
+      const profiles = await Promise.resolve(listPersistentProfiles());
+      for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
+        const directory = path.resolve(String(profileDirectory || ''));
+        if (!directory) continue;
+        await clearNativeProfileData(directory);
+      }
+      const result = await clearPersistentData();
+      return { ok: true, cleared: result?.cleared === true };
+    });
+  }
+
+  async function withSavedDataClear(action) {
+    if (clearingSavedData || clearingProfiles.size || [...sessions.values()].some(record => record.persistent)) {
+      throw browserError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Stop persistent browser sessions and wait for any current clear to finish before clearing saved browser data.');
     }
-    const profiles = await Promise.resolve(listPersistentProfiles());
-    for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
-      const directory = path.resolve(String(profileDirectory || ''));
-      if (!directory) continue;
-      const electronSession = session.fromPath(directory);
-      await Promise.allSettled([
-        Promise.resolve(electronSession.clearStorageData?.()),
-        Promise.resolve(electronSession.clearCache?.())
-      ]);
+    clearingSavedData = true;
+    try {
+      const result = await action();
+      publishState();
+      return result;
+    } catch (error) {
+      throw browserError('BROWSER_SAVED_DATA_CLEAR_FAILED', `Browser data clearing did not finish. Some site data may already have been cleared. ${String(error?.message || error)}`);
+    } finally {
+      clearingSavedData = false;
     }
-    const result = await clearPersistentData();
-    publishState();
-    return { ok: true, cleared: result?.cleared === true };
+  }
+
+  async function clearNativeProfileData(directory, origin = '') {
+    await flushPersistentSites(directory);
+    const browserSession = session.fromPath(directory);
+    await browserSession.clearStorageData(origin ? { origin } : undefined);
+    if (!origin) {
+      await browserSession.clearCache();
+      await browserSession.clearAuthCache?.();
+    }
   }
 
   async function stopActiveSession() {
@@ -569,7 +608,7 @@ function createBrowserSurfaceHost(options = {}) {
       control: record?.control || 'ai',
       profile: record ? (record.persistent ? 'persistent' : 'ephemeral') : '',
       handoffReason: record?.handoffReason || '',
-      permissionRequests: record ? [...record.pendingPermissions.values()].map(publicPermissionRequest) : [],
+      permissionRequests: [...sessions.values()].flatMap(candidate => [...candidate.pendingPermissions.values()].map(publicPermissionRequest)),
       viewport: record ? { ...record.viewport } : null,
       nativeSessionId: record?.nativeSessionId || '',
       nativePageId: page?.nativePageId || '',
@@ -692,7 +731,7 @@ function createBrowserSurfaceHost(options = {}) {
     });
     wc.on('page-title-updated', () => publishState());
     wc.on('blur', () => {
-      if (page.closing || record.control !== 'user' || record.activePageId !== page.nativePageId) return;
+      if (page.closing || record.control !== 'user' || record.handoffReason || record.activePageId !== page.nativePageId) return;
       void applyControl(record, 'ai').catch(onError);
     });
     wc.on('before-input-event', event => {
@@ -749,6 +788,7 @@ function createBrowserSurfaceHost(options = {}) {
       const requestId = `browser_permission_${crypto.randomBytes(12).toString('base64url')}`;
       const pending = {
         requestId,
+        nativeSessionId: record.nativeSessionId,
         permission: String(permission || 'unknown'),
         origin: permissionOrigin(details.requestingUrl || contents?.getURL?.()),
         webContentsId: Number(contents?.id || 0),
@@ -794,6 +834,7 @@ function createBrowserSurfaceHost(options = {}) {
   function publicPermissionRequest(pending) {
     return {
       requestId: pending.requestId,
+      nativeSessionId: pending.nativeSessionId,
       permission: pending.permission,
       origin: pending.origin
     };
@@ -1033,6 +1074,11 @@ function createBrowserSurfaceHost(options = {}) {
   }
 
   return Object.freeze({ run, getState, setBounds, setControl, respondPermission, listSavedSites, clearSavedSite, clearSavedData, selectSession, selectTab, closeTab, stopActiveSession, closeAll });
+}
+
+function profileDirectoryKey(value) {
+  const directory = path.resolve(String(value));
+  return process.platform === 'win32' ? directory.toLowerCase() : directory;
 }
 
 function normalizeSavedSiteOrigin(value) {

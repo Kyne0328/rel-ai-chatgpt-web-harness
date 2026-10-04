@@ -17,7 +17,7 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Icon } from '../components/icons.js';
 import { StatusPill } from '../components/pill.js';
-import { connectionLayerViews, connectionSummary } from '../connection-state.js';
+import { connectionLayerViews, connectionStateFor, connectionSummary } from '../connection-state.js';
 import { DEVELOPER_FEATURE_CHANGE_EVENT, DEVELOPER_FEATURES, readDeveloperFeatureEnabled } from '../developer-mode.js';
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import {
@@ -799,13 +799,14 @@ function DashboardState({ kind = 'loading', title, description, primaryLabel = '
 
 function connectionPresentation(data = {}) {
   if (data?.ok === false) return { label: 'Error', tone: 'bad' };
-  const connection = connectionSummary(data?.connectionState);
+  const state = connectionStateFor(data);
+  const connection = connectionSummary(state);
   if (connection.tone !== 'ok') return { label: connection.label, tone: connection.tone };
   const task = classifyTaskActivity(data?.taskActivity);
   if (task.category === 'attention') return { label: 'Action required', tone: 'bad' };
   if (task.category === 'working') return { label: `${Math.max(1, task.taskCount)} running`, tone: 'working' };
   if (task.category === 'waiting') return { label: `${Math.max(1, task.taskCount)} open`, tone: 'warn' };
-  const dashboardLayer = connectionLayerViews(data?.connectionState).find(layer => layer.key === 'dashboardUpdates');
+  const dashboardLayer = connectionLayerViews(state).find(layer => layer.key === 'dashboardUpdates');
   if (dashboardLayer) return { label: dashboardLayer.label, tone: dashboardLayer.tone };
   return { label: 'Available', tone: 'ok', callCount: task.activeCalls };
 }

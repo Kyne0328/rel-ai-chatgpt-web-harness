@@ -680,9 +680,8 @@ function sanitizeTaskRecord(record, options = {}) {
 }
 
 function sanitizeTaskRecordForProjection(record, options = {}) {
-  const value = sanitizeTaskRecord(record, options);
-  if (!value || typeof value !== 'object') return value;
-  const projected = { ...value };
+  if (!record || typeof record !== 'object') return record;
+  const projected = { ...record };
   delete projected.workflowEvidence;
   delete projected.workflow;
   if (projected.backgroundOperation && typeof projected.backgroundOperation === 'object') {
@@ -692,7 +691,7 @@ function sanitizeTaskRecordForProjection(record, options = {}) {
   if (Array.isArray(projected.backgroundOperations)) {
     projected.backgroundOperations = projected.backgroundOperations.map(({ signature: _signature, noticeScope: _noticeScope, ...operation }) => operation);
   }
-  return projected;
+  return sanitizeTaskRecord(projected, options);
 }
 function sanitizeStructuredValue(value, depth = 0) {
   if (depth > 5 || value == null) return undefined;
@@ -718,10 +717,10 @@ function sanitizeStructuredValue(value, depth = 0) {
 }
 
 function cleanText(value, maxLength = 200) {
-  const sanitized = Array.from(String(value == null ? '' : value), character => {
-    const code = character.charCodeAt(0);
-    return code <= 31 || code === 127 ? ' ' : character;
-  }).join('');
+  // Replace controls without allocating an array entry for every character of
+  // large task and operation descriptions.
+  // eslint-disable-next-line no-control-regex
+  const sanitized = String(value == null ? '' : value).replace(/[\u0000-\u001f\u007f]/g, ' ');
   const text = sanitized
     .replace(/\s+/g, ' ')
     .trim();

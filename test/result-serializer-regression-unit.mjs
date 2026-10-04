@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { toolResult } from '../src/mcp/results.js';
 import { fromJsonSchema } from '@modelcontextprotocol/server';
 
 import { serializeConnectorResult } from '../src/tools/connector.js';
@@ -99,5 +100,59 @@ for (const confirmed of [false, true]) {
   assert.equal(Object.hasOwn(compacted.results[0], 'privateFixtureField'), false);
   await assertValid(OP.VALIDATE_CHECKS, compacted, 'timeout safety evidence must satisfy the existing schema');
 }
+
+const cap = 512 * 1024;
+const largeText = '\u0001'.repeat(700 * 1024);
+const explicitSafety = {
+  executed: false, commandSucceeded: false, timedOut: true, cancelled: false,
+  terminationConfirmed: false, forcedTermination: false, mutationUnknown: true,
+  cleanupPending: true, stdoutSpillTruncated: false, stderrSpillTruncated: true,
+  stdoutOutputRef: 'spill_abcdefghijklmnopqrstuvwx', stdoutBytes: 700 * 1024
+};
+const oversizedExec = toolResult(serializeConnectorResult({
+  publicName: 'relai_exec', action: '', operationName: OP.EXEC,
+  value: { ok: true, exitCode: -1, durationMs: 0, ...explicitSafety, stdout: largeText },
+  args: { workspace: 'repo', executable: 'node', argv: ['fixture.js'] }
+}), false).structuredContent;
+assert.equal(oversizedExec.truncated, true);
+for (const [key, value] of Object.entries(explicitSafety)) {
+  if (['cancelled', 'cleanupPending'].includes(key)) continue; // The existing compact exec contract omits these values before MCP framing.
+  assert.equal(oversizedExec[key], value, `final MCP cap must preserve ${key}`);
+}
+const framedSafety = toolResult({ ok: false, ...explicitSafety, stdout: largeText }, true).structuredContent;
+for (const [key, value] of Object.entries(explicitSafety)) assert.equal(framedSafety[key], value, `MCP framing must preserve explicit ${key}`);
+assert.equal(oversizedExec.stdoutTruncated, true);
+assert.ok(Buffer.byteLength(JSON.stringify(oversizedExec)) <= cap);
+const unknownSafety = toolResult({ ok: true, stdout: largeText }, false).structuredContent;
+assert.equal(Object.hasOwn(unknownSafety, 'terminationConfirmed'), false, 'missing safety facts must not become false');
+assert.equal(Object.hasOwn(unknownSafety, 'executed'), false);
+
+const diagnostic = { ok: false, command: '\u0001'.repeat(1000), ...explicitSafety, stdout: '\u0001'.repeat(6000), stderr: '\u0001'.repeat(6000) };
+const operations = Array.from({ length: 80 }, (_, index) => ({
+  operationId: `op-${index}`, workspace: 'repo', status: index === 1 ? 'running' : 'completed',
+  updatedAt: new Date(1700000000000 + index).toISOString(),
+  result: { commandSucceeded: true, results: Array.from({ length: 8 }, () => ({ ...diagnostic, terminationConfirmed: true, mutationUnknown: false, cleanupPending: false })) }
+}));
+operations[0].result = { ...explicitSafety, results: [diagnostic] };
+operations[3].result = { commandSucceeded: true, results: [diagnostic] };
+operations[2].result.validationStatus = largeText;
+const boundedHistory = toolResult({
+  ok: true, workspace: { alias: 'repo', privateUnneededConfig: largeText }, operationId: 'op-2',
+  backgroundOperation: operations[2], backgroundOperations: operations,
+  results: [diagnostic], completedOperations: [{ operationId: 'done', status: 'completed', summary: largeText }]
+}, false).structuredContent;
+assert.ok(Buffer.byteLength(JSON.stringify(boundedHistory)) <= cap, 'the serialized byte cap must remain a hard bound for many nested diagnostics and escaped strings');
+assert.equal(boundedHistory.workspace, 'repo');
+assert.equal(boundedHistory.backgroundOperations[0].operationId, 'op-2', 'targeted operation is first');
+assert.ok(boundedHistory.backgroundOperations.some(item => item.operationId === 'op-0'), 'uncertain termination must not be displaced by mundane completed operations');
+assert.ok(boundedHistory.omittedOperationCount > 0);
+assert.ok(boundedHistory.backgroundOperations.some(item => item.operationId === 'op-3'), 'nested unsafe diagnostics must protect their enclosing operation');
+assert.equal(boundedHistory.backgroundOperation.operationId, 'op-2');
+assert.equal(boundedHistory.results[0].terminationConfirmed, false);
+assert.equal(boundedHistory.results[0].stdoutOutputRef, explicitSafety.stdoutOutputRef);
+const retainedUnsafe = boundedHistory.backgroundOperations.find(item => item.operationId === 'op-0');
+assert.equal(retainedUnsafe.result.terminationConfirmed, false);
+assert.equal(retainedUnsafe.result.mutationUnknown, true);
+assert.equal(retainedUnsafe.result.results[0].cancelled, false);
 
 console.log('Exec and validation result serializer regression tests passed.');

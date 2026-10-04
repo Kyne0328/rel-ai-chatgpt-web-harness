@@ -46,12 +46,18 @@ async function requestBrowserHandoff({
 }: BrowserHandoffRequest): Promise<unknown> {
   const response = acceptedContent(rawContext.mcpReq?.inputResponses as never, 'browser_handoff') as BrowserHandoffResponse | undefined;
   const state = rawContext.mcpReq?.requestState?.();
+  const inputResponses = rawContext.mcpReq?.inputResponses;
+  const inputResponse = isRecord(inputResponses) ? inputResponses.browser_handoff : null;
+  const cancelled = isRecord(inputResponse) && ['decline', 'cancel'].includes(String(inputResponse.action || ''));
 
-  if (response && isBrowserHandoffState(state)) {
+  if (response || cancelled) {
+    if (!isBrowserHandoffState(state)) {
+      return toolResult({ ok: false, errorCode: 'BROWSER_HANDOFF_STATE_INVALID', error: 'This browser handoff is no longer valid. Request it again.' }, true);
+    }
     const mismatch = browserHandoffStateMismatch(state, args, context);
     if (mismatch) return mismatch;
     const resumed = await execute('resume');
-    if (response.completed === true) {
+    if (response?.completed === true) {
       return toolResult({ ...resumed, handoffCompleted: true }, false);
     }
     return toolResult({
@@ -121,7 +127,8 @@ function browserHandoffStateMismatch(
   args: Record<string, unknown>,
   context: BrowserHandoffContext
 ): unknown {
-  if (Date.now() > Number(state.expiresAt || 0)) {
+  const expiresAt = Number(state.expiresAt);
+  if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
     return toolResult({ ok: false, errorCode: 'BROWSER_HANDOFF_EXPIRED', error: 'This browser handoff expired. Request it again.' }, true);
   }
   if (String(state.principal || '') !== principalFingerprint(context.principal)) {

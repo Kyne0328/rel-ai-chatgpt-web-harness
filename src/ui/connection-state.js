@@ -34,10 +34,24 @@ function normalizeConnectionState(state = {}) {
   };
 }
 export function connectionStateFor(data = {}, dashboardStatus = '') {
-  const source = data.connectionState || data.desktopStatus?.connectionState || DEFAULT_STATE;
+  const desktopState = data.desktopStatus?.connectionState;
+  const source = data.connectionState || desktopState || DEFAULT_STATE;
   const mcpConnection = data.mcpConnection && typeof data.mcpConnection === 'object' ? { ...data.mcpConnection, status: normalizeActivity(data.mcpConnection.activityStatus || data.mcpConnection.status) } : source.mcpClient;
   const normalized = normalizeConnectionState({ ...source, mcpClient: mcpConnection });
+  const additionalTunnelStatuses = Array.isArray(data.desktopStatus?.additionalTunnelStatuses)
+    ? data.desktopStatus.additionalTunnelStatuses
+    : [];
+  const primaryConfigured = Boolean(data.desktopStatus?.tunnelId || data.connection?.tunnelId || normalized.publicEndpoint.status !== 'disabled');
   normalized.mode = 'secure_tunnel';
+  // Desktop status owns the raw primary endpoint. A projected aggregate must
+  // never be counted as a primary tunnel on the next event or shell render.
+  if (desktopState?.publicEndpoint) {
+    const primary = normalizeLayer('publicEndpoint', desktopState.publicEndpoint, DEFAULT_STATE.publicEndpoint.status);
+    normalized.localService = normalizeLayer('localService', desktopState.localService, DEFAULT_STATE.localService.status);
+    normalized.publicEndpoint = aggregateTunnelEndpoint(primary, additionalTunnelStatuses, Boolean(data.desktopStatus?.tunnelId || primary.status !== 'disabled'));
+  } else if (!Object.hasOwn(normalized.publicEndpoint, 'connectionCount')) {
+    normalized.publicEndpoint = aggregateTunnelEndpoint(normalized.publicEndpoint, additionalTunnelStatuses, primaryConfigured);
+  }
   normalized.chatgptReadiness = { status: normalized.localService.status === 'running' && normalized.publicEndpoint.status === 'available' ? 'ready' : 'unavailable' };
   if (dashboardStatus) normalized.dashboardUpdates = { status: ALLOWED.dashboardUpdates.has(dashboardStatus) ? dashboardStatus : 'offline' };
   return normalized;
@@ -55,7 +69,14 @@ export function hasObservedMcpToolCall(connection = {}) {
 }
 export function connectionLayerViews(state = {}) {
   const normalized = normalizeConnectionState(state);
-  return LAYERS.map(([key,title,descriptions]) => { const value=normalized[key]; const [label,tone,description]=descriptions[value.status]||['Unknown','warn','Connection state is unavailable.']; return { key,title,status:value.status,label,tone,description:key==='mcpClient'?requestDescription(value,description):description }; });
+  return LAYERS.map(([key,title,descriptions]) => {
+    const value = normalized[key];
+    if (key === 'publicEndpoint' && Number(value.connectionCount || 0) > 1) {
+      return { key, title: 'Secure MCP tunnels', status: value.status, ...multiTunnelLayerView(value) };
+    }
+    const [label,tone,description] = descriptions[value.status] || ['Unknown','warn','Connection state is unavailable.'];
+    return { key,title,status:value.status,label,tone,description:key==='mcpClient'?requestDescription(value,description):description };
+  });
 }
 export function connectionSummary(state = {}) {
   const normalized = normalizeConnectionState(state);
@@ -69,10 +90,85 @@ export function connectionSummary(state = {}) {
   if (tunnel === 'disabled') return summary('Connect this computer', 'Setup required', 'warn', 'Set up the Secure MCP Tunnel for this computer.');
   if (tunnel === 'connecting') return summary('Connecting to ChatGPT', 'Connecting', 'working', 'Rel.AI is finishing the secure connection. No setup changes are needed while it connects.');
   if (tunnel === 'degraded') { const retry=normalized.publicEndpoint; const detail=retry.nextRetryAt?` Retry ${Math.max(1,Number(retry.retryAttempt||1))} is scheduled automatically.`:''; return summary('ChatGPT connection interrupted', 'Tunnel reconnecting', 'warn', `The local service is still running while Rel.AI retries the Secure MCP Tunnel automatically.${detail}`); }
+  if (tunnel === 'available' && Number(normalized.publicEndpoint.connectionCount || 0) > 1 && Number(normalized.publicEndpoint.issueCount || 0) > 0) {
+    return summary('Rel.AI is connected', 'Connected', 'warn', partialTunnelMessage(normalized.publicEndpoint));
+  }
   if (activity === 'request_failed') return summary('The last ChatGPT request failed', 'Last request failed', 'warn', 'The local Rel.AI service and Secure MCP Tunnel are ready for another request. Restart Rel.AI only if a connection layer has a problem.');
   if (activity === 'active') return summary('ChatGPT is using Rel.AI', 'Active now', 'working', 'A request from ChatGPT is in progress.');
   if (activity === 'recent' || activity === 'connected') return summary('Rel.AI is available to ChatGPT', 'Recently active', 'ok', 'A recent ChatGPT request completed successfully.');
   return summary('Rel.AI is ready for ChatGPT', 'Ready', 'ok', 'This computer is connected and ready for ChatGPT.');
+}
+export function tunnelRuntimeView(status = {}) {
+  const state = String(status?.state || status?.status || '');
+  if (status?.retry?.scheduled || status?.retry?.inFlight || state === 'degraded') return { status: 'degraded', label: 'Reconnecting', tone: 'warn' };
+  if (state === 'running' || state === 'available') return { status: 'available', label: 'Connected', tone: 'good' };
+  if (state === 'failed' || state === 'unavailable') return { status: 'unavailable', label: 'Failed', tone: 'bad' };
+  if (['starting', 'locally_ready', 'authenticating', 'connecting'].includes(state)) return { status: 'connecting', label: 'Connecting', tone: 'working' };
+  return { status: 'disabled', label: 'Stopped', tone: 'neutral' };
+}
+function aggregateTunnelEndpoint(primary, additionalStatuses, primaryConfigured) {
+  const states = [];
+  if (primaryConfigured || primary.status !== 'disabled') states.push(primary.status);
+  for (const status of additionalStatuses) {
+    if (!status || typeof status !== 'object') continue;
+    states.push(tunnelRuntimeView(status).status);
+  }
+  if (!states.length) return { ...primary, connectionCount: 0, availableCount: 0, reconnectingCount: 0, connectingCount: 0, unavailableCount: 0, stoppedCount: 0, issueCount: 0 };
+  const availableCount = states.filter(status => status === 'available').length;
+  const reconnectingCount = states.filter(status => status === 'degraded').length;
+  const connectingCount = states.filter(status => status === 'connecting').length;
+  const unavailableCount = states.filter(status => status === 'unavailable').length;
+  const stoppedCount = states.filter(status => status === 'disabled').length;
+  const status = availableCount > 0
+    ? 'available'
+    : reconnectingCount > 0
+      ? 'degraded'
+      : connectingCount > 0
+        ? 'connecting'
+        : unavailableCount > 0
+          ? 'unavailable'
+          : 'disabled';
+  return {
+    ...primary,
+    status,
+    connectionCount: states.length,
+    availableCount,
+    reconnectingCount,
+    connectingCount,
+    unavailableCount,
+    stoppedCount,
+    issueCount: reconnectingCount + connectingCount + unavailableCount + stoppedCount
+  };
+}
+function multiTunnelLayerView(value) {
+  const total = Number(value.connectionCount || 0);
+  const connected = Number(value.availableCount || 0);
+  const issues = Number(value.issueCount || 0);
+  if (value.status === 'available') {
+    return {
+      label: issues > 0 ? `${connected} of ${total} connected` : `${connected} connected`,
+      tone: issues > 0 ? 'warn' : 'ok',
+      description: issues > 0 ? partialTunnelMessage(value) : 'All configured Secure MCP Tunnels are connected and ready for ChatGPT requests.'
+    };
+  }
+  if (value.status === 'degraded') return { label: 'Tunnels reconnecting', tone: 'warn', description: 'No tunnel is currently connected. Rel.AI is retrying one or more Secure MCP Tunnels automatically.' };
+  if (value.status === 'connecting') return { label: 'Tunnels connecting', tone: 'working', description: 'Rel.AI is establishing one or more Secure MCP Tunnel connections.' };
+  if (value.status === 'unavailable') return { label: 'Unavailable', tone: 'bad', description: 'None of the configured Secure MCP Tunnels could become ready.' };
+  return { label: 'Not connected', tone: 'warn', description: 'No configured Secure MCP Tunnel is currently connected.' };
+}
+function partialTunnelMessage(value) {
+  const connected = Math.max(1, Number(value.availableCount || 0));
+  const total = Math.max(connected, Number(value.connectionCount || connected));
+  const details = [];
+  const reconnecting = Number(value.reconnectingCount || 0);
+  const connecting = Number(value.connectingCount || 0);
+  const unavailable = Number(value.unavailableCount || 0);
+  const stopped = Number(value.stoppedCount || 0);
+  if (reconnecting) details.push(`${reconnecting} tunnel${reconnecting === 1 ? ' is' : 's are'} reconnecting.`);
+  if (connecting) details.push(`${connecting} tunnel${connecting === 1 ? ' is' : 's are'} connecting.`);
+  if (unavailable) details.push(`${unavailable} tunnel${unavailable === 1 ? ' is' : 's are'} unavailable.`);
+  if (stopped) details.push(`${stopped} tunnel${stopped === 1 ? ' is' : 's are'} stopped.`);
+  return `ChatGPT can still reach Rel.AI through ${connected} of ${total} configured tunnel${total === 1 ? '' : 's'}.${details.length ? ` ${details.join(' ')}` : ''}`;
 }
 function normalizeLayer(key,value,fallback){const source=value&&typeof value==='object'?value:{};const status=String(source.status||fallback);return{...source,status:ALLOWED[key].has(status)?status:fallback};}
 function normalizeActivity(value){const status=String(value||'no_requests');if(ALLOWED.mcpClient.has(status))return status;if(status==='request_succeeded')return'recent';return'no_requests';}

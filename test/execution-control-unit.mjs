@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { executeToolCall } from '../src/tools/execution.js';
+import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 
 import {
   hasAgentCancellationHandle,
@@ -49,5 +51,31 @@ assert.equal(isPersistentAdbInvocation('adb', ['logcat', '-d']), false);
 assert.equal(isPersistentAdbInvocation('adb', ['track-devices']), true);
 assert.equal(isPersistentAdbInvocation('adb', ['shell']), true);
 assert.equal(isPersistentAdbInvocation('adb', ['shell', 'getprop']), false);
+
+// Exercise the actual admission boundary without spawning a child or waiting
+// for a timer: an expired deadline must already be represented as an abort.
+for (const cancellationSource of ['none', 'context', 'activity']) {
+  const cancellation = new DOMException('User cancelled before admission.', 'AbortError');
+  const finishActivity = () => {};
+  if (cancellationSource === 'activity') finishActivity.signal = AbortSignal.abort(cancellation);
+  let observed;
+  const result = await executeToolCall({
+    config: {}, name: OP.EXEC, executionName: OP.EXEC,
+    effectiveArgs: { executable: process.execPath, argv: ['--version'] },
+    context: {
+      deadlineAtMs: Date.now() - 1,
+      ...(cancellationSource === 'context' ? { signal: AbortSignal.abort(cancellation) } : {})
+    },
+    finishActivity,
+    definition: { handler: async (_config, _args, context) => {
+      observed = context.signal;
+      return { ok: true, executed: false };
+    } }
+  });
+  assert.equal(result.value.executed, false);
+  assert.equal(observed.aborted, true, 'admitted exec must observe an already expired deadline synchronously');
+  assert.equal(observed.reason.name, cancellationSource === 'none' ? 'TimeoutError' : 'AbortError');
+  if (cancellationSource !== 'none') assert.equal(observed.reason, cancellation);
+}
 
 console.log('Agent-controlled one-shot timeout policy tests passed.');

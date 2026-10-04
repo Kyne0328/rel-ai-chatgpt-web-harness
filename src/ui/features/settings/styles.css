@@ -19,8 +19,10 @@
 .additional-tunnels-heading > div { min-width: 0; }
 .additional-tunnels-heading > div > strong { display: block; font-size: 12px; }
 .additional-tunnels-heading .settings-help { margin-top: 4px; max-width: 720px; }
+.additional-tunnel-summary { margin: 0; color: var(--ui-text-secondary); font-size: 12px; }
 .additional-tunnel-list { display: grid; overflow: hidden; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
 .additional-tunnel-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px; border-bottom: 1px solid var(--ui-border-subtle); }
+.additional-tunnel-row[data-primary="true"] { background: var(--ui-surface-secondary); }
 .additional-tunnel-row:last-child { border-bottom: 0; }
 .additional-tunnel-copy { display: grid; min-width: 0; gap: 3px; }
 .additional-tunnel-copy > strong { font-size: 12px; }

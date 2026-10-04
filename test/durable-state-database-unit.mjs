@@ -5,6 +5,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Worker } from 'node:worker_threads';
 import { once } from 'node:events';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 import {
   initializeStateDatabase,
@@ -120,7 +122,8 @@ try {
 
   const migratedDb = openStateDatabase(migrationConfig);
   try {
-    assert.equal(migratedDb.prepare("SELECT value FROM state_meta WHERE key='schema_version'").get().value, '5');
+    assert.equal(migratedDb.prepare("SELECT value FROM state_meta WHERE key='schema_version'").get().value, '2');
+    assert.equal(migratedDb.prepare("SELECT value FROM state_meta WHERE key='extension_schema_version'").get().value, '6');
     assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM task_history WHERE id='task-old'").get().count, 1);
     assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='task_integrity_tasks'").get());
     assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workspace_integrity'").get());
@@ -132,8 +135,8 @@ try {
       'task-history activity projection must retain one insert/update/delete trigger set');
     assert.ok(migratedDb.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='task_history_events_task_recent_idx'").get(),
       'schema v5 must index retained activity by task for Task inspector pagination');
-    assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('native_tasks','native_task_quarantine')").get().count, 0,
-      'schema v4 must remove obsolete native MCP Tasks persistence');
+    assert.equal(migratedDb.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name IN ('native_tasks','native_task_quarantine')").get().count, 2,
+      'legacy native-task data must remain available to a downgraded client');
   } finally {
     migratedDb.close();
   }
@@ -144,6 +147,32 @@ try {
   } finally {
     migrationBackup.close();
   }
+
+  // Exercise the actual 1.1.3 database implementation, including a write followed
+  // by reopening with the current implementation. Unknown extensions remain intact.
+  const repositoryRoot = path.resolve(import.meta.dirname, '..');
+  const legacySource = execFileSync('git', ['show', '1.1.3:src/stateDatabase.ts'], { cwd: repositoryRoot, encoding: 'utf8' })
+    .replace(/from '(\.\/[^']+)'/g, (_, relative) => `from '${pathToFileURL(path.resolve(repositoryRoot, 'src', relative)).href}'`);
+  const legacyModulePath = path.join(temp, 'schema-1.1.3.ts');
+  fs.writeFileSync(legacyModulePath, legacySource);
+  const legacyClient = await import(pathToFileURL(legacyModulePath));
+  const downgradedDb = legacyClient.openStateDatabase(migrationConfig);
+  const originalTask = downgradedDb.prepare("SELECT payload FROM task_history WHERE id='task-old'").get().payload;
+  downgradedDb.prepare('INSERT INTO task_history(id,updated_at_ms,payload) VALUES(?,?,?)')
+    .run('legacy-write', Date.now(), JSON.stringify({ version: 3, id: 'legacy-write', taskId: 'legacy-write', sessionId: 'legacy-write', workspace: 'app', status: 'completed', events: [] }));
+  downgradedDb.close();
+  const upgradedDb = openStateDatabase(migrationConfig);
+  try {
+    assert.equal(upgradedDb.prepare("SELECT payload FROM task_history WHERE id='task-old'").get().payload, originalTask);
+    assert.ok(upgradedDb.prepare("SELECT id FROM task_history_summaries WHERE id='legacy-write'").get(),
+      'legacy client writes must update current projections automatically');
+    assert.equal(upgradedDb.prepare("SELECT value FROM state_meta WHERE key='extension_schema_version'").get().value, '6');
+    upgradedDb.prepare("UPDATE state_meta SET value='99' WHERE key='schema_version'").run();
+  } finally { upgradedDb.close(); }
+  assert.throws(() => openStateDatabase(migrationConfig), /newer than supported/);
+  const resetMarker = new DatabaseSync(migrationFile);
+  resetMarker.prepare("UPDATE state_meta SET value='2' WHERE key='schema_version'").run();
+  resetMarker.close();
 
   maintainStateDatabase(migrationConfig);
   assert.equal(fs.existsSync(`${migrationFile}.validated.json`), true, 'verified state maintenance must leave a lightweight startup validation stamp');

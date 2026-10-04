@@ -580,8 +580,8 @@ function resolveDirectFilesystemRoot(rootInput, targets, operationName) {
     throw directFilesystemError('DIRECT_FILESYSTEM_ROOT_UNAVAILABLE', `Direct filesystem root does not exist or is unavailable: ${root}`);
   }
   if (!stat.isDirectory()) throw directFilesystemError('DIRECT_FILESYSTEM_ROOT_NOT_DIRECTORY', `Direct filesystem root must be a directory: ${root}`);
-  const sensitive = classifySensitivePath(root);
-  if (sensitive.sensitive) {
+  const sensitive = [root, fs.realpathSync(root)].some(candidate => classifySensitivePath(candidate).sensitive);
+  if (sensitive) {
     throw directFilesystemError('SENSITIVE_PATH_RESTRICTED', `Direct filesystem root is blocked by the sensitive-path policy: ${root}`);
   }
   return root;

@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import semver from 'semver';
 import { z } from 'zod';
 import { getApplicationMetadata } from '../appMetadata.js';
+import { makeProcessEnvironment } from '../processEnvironment.js';
 import {
   extensionBinRoot,
   managedExtensionBundleCommandPath,
@@ -456,12 +457,19 @@ async function loadExtensionCatalogSources(config = {}, options = {}) {
   const sources = [];
   const entries = [];
 
-  for (const descriptor of descriptors) {
-    let catalog;
+  // At most 21 configured catalogs: load independently, then arbitrate duplicate
+  // IDs in source order so one slow publisher cannot delay every later source.
+  const loaded = await Promise.all(descriptors.map(async descriptor => {
     try {
-      catalog = await fetchExtensionCatalog({ catalogUrl: descriptor.catalogUrl, refresh: options.refresh });
+      const catalog = await fetchExtensionCatalog({ catalogUrl: descriptor.catalogUrl, refresh: options.refresh });
+      return { descriptor, catalog, error: '' };
     } catch (error) {
-      sources.push({ ...descriptor, status: 'error', error: errorMessage(error), extensionCount: 0, catalogUpdatedAt: '' });
+      return { descriptor, catalog: null, error: errorMessage(error) };
+    }
+  }));
+  for (const { descriptor, catalog, error } of loaded) {
+    if (!catalog) {
+      sources.push({ ...descriptor, status: 'error', error, extensionCount: 0, catalogUpdatedAt: '' });
       continue;
     }
     const conflicts = catalog.extensions.map(entry => entry.id).filter(id => claimed.has(id));
@@ -675,6 +683,7 @@ async function prepareManagedCondaInstall(config, manifest, artifact, extensionS
     '--no-rc',
     '--root-prefix', path.join(extensionStaging, '.conda-root'),
     '--prefix', toolRoot,
+    '--relocate-prefix', path.join(extensionsRoot(config), manifest.id, '.tool'),
     '--file', explicitPath
   ], { cwd: extensionStaging });
 
@@ -712,11 +721,10 @@ function runMicromamba(executable, args, options = {}) {
       cwd: options.cwd,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
+      env: makeProcessEnvironment({
         MAMBA_NO_BANNER: '1',
         MAMBA_ROOT_PREFIX: path.join(options.cwd || process.cwd(), '.conda-root')
-      }
+      })
     });
     let stdout = '';
     let stderr = '';
@@ -1278,10 +1286,30 @@ async function fetchFile(url, maxBytes, label, options = {}) {
     if (!isHttpsUrl(response.url || url)) throw new Error(`The ${label} redirected to a non-HTTPS URL.`);
     const declaredLength = Number(response.headers.get('content-length') || 0);
     if (declaredLength > maxBytes) throw new Error(`The ${label} exceeds the allowed size.`);
-    const content = Buffer.from(await response.arrayBuffer());
-    if (content.length > maxBytes) throw new Error(`The ${label} exceeds the allowed size.`);
-    return content;
+    if (!response.body) return Buffer.alloc(0);
+    const reader = response.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+    let completed = false;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          controller.abort();
+          throw new Error(`The ${label} exceeds the allowed size.`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+      completed = true;
+      return Buffer.concat(chunks, totalBytes);
+    } finally {
+      if (!completed) await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
   } catch (error) {
+    controller.abort();
     if (error?.name === 'AbortError') throw new Error(`Timed out downloading ${label}.`, { cause: error });
     throw error;
   } finally {

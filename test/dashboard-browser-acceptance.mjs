@@ -18,6 +18,8 @@ const projectCreateWorkspace = path.join(temp, 'workspace-created');
 const configPath = path.join(temp, 'config.json');
 const outputPath = path.join(temp, 'probe.json');
 const screenshotDir = path.join(temp, 'screenshots');
+// Audit/debug opt-in: retain only this test's isolated fixtures and screenshots.
+const keepArtifacts = process.env.RELAI_KEEP_DASHBOARD_PROBE_ARTIFACTS === '1';
 const axePath = path.join(temp, 'axe-core.js');
 fs.writeFileSync(axePath, axe.source, 'utf8');
 const token = 'browser-acceptance-token';
@@ -249,14 +251,15 @@ try {
   assert.deepEqual(seriousAccessibilityViolations, [], `Critical/serious axe violations: ${JSON.stringify(seriousAccessibilityViolations)}`);
   assert.equal(result.failures.length, 0, JSON.stringify(result.failures));
   await closePromise;
-  console.log(`Real Electron Chromium dashboard acceptance passed across ${result.responsive.length} viewport scenarios; temporary screenshots were reviewed and removed.`);
+  console.log(`Real Electron Chromium dashboard acceptance passed across ${result.responsive.length} viewport scenarios; fixture screenshots were generated and their existence checked.`);
 } finally {
   await mcpSession?.close().catch(() => {});
   if (child && child.exitCode == null) child.kill('SIGKILL');
   await closePromise.catch(() => {});
   server.kill('SIGKILL');
   await once(server, 'close').catch(() => {});
-  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (keepArtifacts) console.log(`Dashboard probe artifacts retained at ${temp}`);
+  else fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 function electronEnvironment(extra = {}) {

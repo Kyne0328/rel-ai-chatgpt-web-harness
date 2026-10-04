@@ -35,6 +35,7 @@ export interface DesktopBrowserTabDto {
 }
 export interface DesktopBrowserPermissionRequestDto {
   requestId: string;
+  nativeSessionId: string;
   permission: string;
   origin: string;
 }

@@ -191,9 +191,31 @@ async function allowRate(binding, key) {
 async function readLimitedBody(request, maxBytes) {
   const declared = Number(request.headers.get('content-length') || 0);
   if (declared > maxBytes) throw Object.assign(new Error('Payload too large.'), { status: 413 });
-  const body = await request.arrayBuffer();
-  if (body.byteLength > maxBytes) throw Object.assign(new Error('Payload too large.'), { status: 413 });
-  return body;
+  if (!request.body) return new ArrayBuffer(0);
+  const reader = request.body.getReader();
+  const chunks = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw Object.assign(new Error('Payload too large.'), { status: 413 });
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
 }
 
 async function handlePresence(request, env) {
@@ -2205,7 +2227,7 @@ const handler = {
   async fetch(request, env) {
     const url = new URL(request.url);
     try {
-      if (request.method === 'GET' && url.pathname === '/health') return handleHealth(env);
+      if (request.method === 'GET' && url.pathname === '/health') return await handleHealth(env);
       if (request.method === 'GET' && url.pathname === '/admin') {
         return new Response(adminHtml(), {
           status: 200,
@@ -2215,11 +2237,11 @@ const handler = {
           })
         });
       }
-      if (request.method === 'POST' && url.pathname === '/api/v1/admin/login') return handleAdminLogin(request, env);
-      if (request.method === 'POST' && url.pathname === '/api/v1/admin/logout') return handleAdminLogout(request, env);
-      if (request.method === 'GET' && url.pathname === '/api/v1/admin/summary') return handleAdminSummary(request, env);
-      if (request.method === 'POST' && url.pathname === '/api/v1/installation/presence') return handlePresence(request, env);
-      if (request.method === 'POST' && url.pathname === '/v1/traces') return handleTraces(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/v1/admin/login') return await handleAdminLogin(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/v1/admin/logout') return await handleAdminLogout(request, env);
+      if (request.method === 'GET' && url.pathname === '/api/v1/admin/summary') return await handleAdminSummary(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/v1/installation/presence') return await handlePresence(request, env);
+      if (request.method === 'POST' && url.pathname === '/v1/traces') return await handleTraces(request, env);
       return json({ ok: false, error: 'Not found.' }, 404);
     } catch (error) {
       console.error('relai-telemetry request failed', error instanceof Error ? error.message : String(error));

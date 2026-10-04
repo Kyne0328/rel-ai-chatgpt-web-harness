@@ -120,6 +120,38 @@ assert.equal(fallback.structuredContent?.userInputRequired, true);
 assert.match(fallback.structuredContent?.nextAction || '', /action "resume"/);
 assert.equal(fallbackCalls[0], 'handoff');
 
+for (const action of ['decline', 'cancel']) {
+  const declinedCalls = [];
+  const result = await requestBrowserHandoff({
+    args,
+    context: { principal, clientCapabilities: { elicitation: {} } },
+    rawContext: rawContext({ inputResponses: { browser_handoff: { action } }, state: codec.lastClaims }),
+    codec,
+    execute: executeStub(declinedCalls)
+  });
+  assert.equal(result.structuredContent?.errorCode, 'BROWSER_HANDOFF_CANCELLED', `${action} must terminate the pending request instead of eliciting again`);
+  assert.notEqual(result.resultType, 'input_required');
+  assert.deepEqual(declinedCalls, ['resume'], `${action} must release exactly the validated pending handoff`);
+}
+for (const patch of [
+  { kind: 'invalid' },
+  { expiresAt: 'invalid' },
+  { expiresAt: Date.now() - 1 },
+  { principal: 'another-principal' },
+  { workspace: 'another-workspace' },
+  { sessionId: 'another-session' }
+]) {
+  const invalidCalls = [];
+  const result = await requestBrowserHandoff({
+    args,
+    context: { principal, clientCapabilities: { elicitation: {} } },
+    rawContext: rawContext({ inputResponses: { browser_handoff: { action: 'cancel' } }, state: { ...codec.lastClaims, ...patch } }),
+    codec,
+    execute: executeStub(invalidCalls)
+  });
+  assert.equal(result.isError, true, 'cancel must still validate expiry, principal, workspace, and session');
+  assert.deepEqual(invalidCalls, [], 'invalid state must never resume a browser or create a replacement handoff');
+}
 console.log('Browser sign-in handoff elicitation, fallback, cancellation, and principal binding passed.');
 
 function executeStub(calls) {

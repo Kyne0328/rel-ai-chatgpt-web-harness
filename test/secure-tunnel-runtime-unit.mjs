@@ -227,6 +227,100 @@ try {
   assert.equal(boundedStopChild.killedWith, 'SIGKILL', 'stop timeout must make a final direct termination attempt');
   assert.equal(boundedStopRuntime.snapshot().state, 'stopped');
 
+  let stopAttempt = 0;
+  let failNextStop = false;
+  let unconfirmedChild;
+  const unconfirmedRuntime = createSecureTunnelRuntime({
+    spawnImpl(...args) {
+      unconfirmedChild = fakeSpawn(...args);
+      unconfirmedChild.kill = () => false;
+      return unconfirmedChild;
+    },
+    fetchImpl: fetchTunnel,
+    stopProcess: async child => {
+      stopAttempt += 1;
+      if (stopAttempt === 1 || failNextStop) {
+        failNextStop = false;
+        return { exited: false, forced: true, error: 'fixture termination not confirmed' };
+      }
+      child.exitCode = 0;
+      return { exited: true, forced: false };
+    },
+    resolveExecutable: () => process.execPath,
+    makeEnvironment: makeTunnelProcessEnvironment,
+    stateDir: path.join(stateDir, 'unconfirmed-stop')
+  });
+  const fixtureConfig = { tunnelId: 'tunnel_example123456', port: 3333, localToken: 'fixture-token', apiKey: 'fixture-key', timeoutMs: 1000 };
+  await unconfirmedRuntime.start(fixtureConfig);
+  try {
+    const failedStop = await unconfirmedRuntime.stop();
+    assert.equal(failedStop.stopped, false, 'unconfirmed exit must not report a successful stop');
+    assert.equal(unconfirmedRuntime.snapshot().processOwned, true, 'failed termination must retain process ownership');
+    assert.equal(unconfirmedRuntime.snapshot().state, 'failed');
+    await assert.rejects(() => unconfirmedRuntime.start(fixtureConfig), /already running/, 'unknown live child must block a duplicate start');
+    const retryStop = await unconfirmedRuntime.stop();
+    assert.equal(retryStop.exited, true);
+    assert.equal(stopAttempt, 2, 'repeat stop must retry the same owned process');
+    assert.equal(unconfirmedRuntime.snapshot().processOwned, false);
+    assert.equal(unconfirmedRuntime.snapshot().state, 'stopped');
+    assert.equal(unconfirmedRuntime.snapshot().errorCode, '', 'a confirmed retry must clear the terminal stop error');
+    const previousChild = unconfirmedChild;
+    await unconfirmedRuntime.start(fixtureConfig);
+    previousChild.emit('exit', 0, null);
+    assert.equal(unconfirmedRuntime.snapshot().processOwned, true, 'late exit of the old child must not clear its replacement');
+    assert.equal(unconfirmedChild.exitCode, null);
+    await unconfirmedRuntime.stop();
+    await unconfirmedRuntime.start(fixtureConfig);
+    failNextStop = true;
+    assert.equal((await unconfirmedRuntime.stop()).stopped, false);
+    assert.equal(unconfirmedRuntime.snapshot().errorCode, 'secure_tunnel_stop_failed');
+    unconfirmedChild.exitCode = 0;
+    unconfirmedChild.emit('exit', 0, null);
+    assert.equal(unconfirmedRuntime.snapshot().processOwned, false);
+    assert.equal(unconfirmedRuntime.snapshot().state, 'stopped', 'the matching late exit must complete an explicit stop');
+    assert.equal(unconfirmedRuntime.snapshot().errorCode, '', 'confirmed late exit must clear the terminal stop error');
+    await unconfirmedRuntime.start(fixtureConfig);
+    await unconfirmedRuntime.stop();
+  } finally {
+    unconfirmedChild.exitCode = 0;
+    await unconfirmedRuntime.stop();
+  }
+
+  let releaseHealthProbe;
+  let beginHealthProbe;
+  const healthProbeStarted = new Promise(resolve => { beginHealthProbe = resolve; });
+  const healthProbeResult = new Promise(resolve => { releaseHealthProbe = resolve; });
+  let deferHealth = false;
+  const staleProbeRuntime = createSecureTunnelRuntime({
+    spawnImpl: fakeSpawn,
+    fetchImpl: url => {
+      if (deferHealth && url.endsWith('/healthz')) {
+        beginHealthProbe();
+        return healthProbeResult;
+      }
+      return fetchTunnel(url);
+    },
+    stopProcess: async child => { child.exitCode = 0; return { exited: true, forced: false }; },
+    resolveExecutable: () => process.execPath,
+    makeEnvironment: makeTunnelProcessEnvironment,
+    stateDir: path.join(stateDir, 'stale-probe'),
+    monitorIntervalMs: 50,
+    degradedFailureThreshold: 1
+  });
+  await staleProbeRuntime.start(fixtureConfig);
+  deferHealth = true;
+  await healthProbeStarted;
+  await staleProbeRuntime.stop();
+  deferHealth = false;
+  await staleProbeRuntime.start(fixtureConfig);
+  deliveryDegraded = true;
+  releaseHealthProbe(response(200));
+  await new Promise(resolve => setImmediate(resolve));
+  deliveryDegraded = false;
+  try {
+    assert.equal(staleProbeRuntime.snapshot().state, 'running', 'a late old health probe must never corrupt a replacement tunnel');
+  } finally { await staleProbeRuntime.stop(); }
+
   let authChild = null;
   let authStopped = false;
   const authRuntime = createSecureTunnelRuntime({

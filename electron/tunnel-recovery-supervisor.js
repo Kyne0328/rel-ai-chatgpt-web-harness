@@ -5,7 +5,8 @@ const TERMINAL_TUNNEL_CODES = new Set([
   'tunnel_authentication_failed',
   'tunnel_access_denied',
   'tunnel_not_found',
-  'tunnel_runtime_unavailable'
+  'tunnel_runtime_unavailable',
+  'secure_tunnel_stop_failed'
 ]);
 
 function createTunnelRecoverySupervisor({

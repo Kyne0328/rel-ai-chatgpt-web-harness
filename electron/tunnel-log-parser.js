@@ -115,7 +115,11 @@ function normalizeTunnelLogRecord(record, { defaultLevel = 'info', now = () => n
   const component = sanitizeTunnelField(value.component, 80);
   const error = sanitizeTunnelText(value.error, MAX_DETAIL_CHARS);
   const statusCode = numericStatus(value.status_code ?? value.statusCode);
-  const classification = classifyTunnelEvent({ message, component, error, statusCode });
+  const failureSource = sanitizeTunnelField(value.failure_source, 80);
+  const transportErrorKind = sanitizeTunnelField(value.transport_error_kind, 80);
+  const upstreamResponseReceived = typeof value.upstream_response_received === 'boolean'
+    ? value.upstream_response_received : undefined;
+  const classification = classifyTunnelEvent({ message, component, error, statusCode, failureSource, transportErrorKind, upstreamResponseReceived });
   const details = compactTunnelDetails({
     httpStatus: statusCode || undefined,
     retryInMs: finiteTunnelNumber(value.retry_in_ms ?? value.retryInMs),
@@ -124,7 +128,12 @@ function normalizeTunnelLogRecord(record, { defaultLevel = 'info', now = () => n
     tunnelId: value.tunnel_id,
     clientInstanceId: value.client_instance_id,
     tunnelRequestId: value.tunnel_request_id,
-    method: value.method,
+    method: value.rpc_method ?? value.method,
+    failureSource: failureSource || undefined,
+    transportErrorKind: transportErrorKind || undefined,
+    upstreamResponseReceived,
+    upstreamStatus: numericStatus(value.upstream_status) || undefined,
+    tunnelClientVersion: value.tunnel_client_version,
     target: value.target,
     channel: value.channel,
     transport: value.transport
@@ -141,8 +150,20 @@ function normalizeTunnelLogRecord(record, { defaultLevel = 'info', now = () => n
   };
 }
 
-function classifyTunnelEvent({ message, component, error, statusCode }) {
+function classifyTunnelEvent({ message, component, error, statusCode, failureSource, transportErrorKind, upstreamResponseReceived }) {
   const combined = `${message} ${error}`.toLowerCase();
+  if (component === 'dispatcher' && statusCode >= 400 && /mcp upstream error|upstream error|posted error response/.test(combined)) {
+    const cause = [failureSource, transportErrorKind].filter(Boolean).join(': ');
+    return {
+      level: 'warning',
+      code: statusCode >= 500 ? 'tunnel_upstream_5xx' : 'tunnel_mcp_request_failed',
+      message: failureSource === 'target_http' || upstreamResponseReceived === true
+        ? `The local MCP server returned HTTP ${statusCode}.`
+        : upstreamResponseReceived === false
+          ? `The tunnel could not complete the local MCP request (HTTP ${statusCode}${cause ? `; ${cause}` : ''}).`
+          : `The MCP request failed with HTTP ${statusCode}; upstream cause is unavailable.`
+    };
+  }
   if (statusCode === 401 || /\b401\b|unauthori[sz]ed|invalid api key/.test(combined)) {
     return { level: 'error', code: 'tunnel_authentication_failed', message: 'OpenAI rejected the tunnel runtime API key.' };
   }
@@ -158,7 +179,7 @@ function classifyTunnelEvent({ message, component, error, statusCode }) {
   if (statusCode >= 500 && /mcp upstream error|upstream error|posted error response/.test(combined)) {
     return { level: 'warning', code: 'tunnel_upstream_5xx', message: `The tunnel received an upstream HTTP ${statusCode} response from the MCP path.` };
   }
-  if (/poll failed|unexpected eof|\bgoaway\b|context deadline exceeded|i\/o timeout|dns|no such host|connection reset|connection refused|network is unreachable/.test(combined)) {
+  if (/poll failed|poll timed out|poll transport failed|unexpected eof|\bgoaway\b|context deadline exceeded|i\/o timeout|dns|no such host|connection reset|connection refused|network is unreachable/.test(combined)) {
     return { level: 'warning', code: 'tunnel_connection_interrupted', message: 'Tunnel polling was interrupted. Retrying automatically.' };
   }
   if (DEBUG_MESSAGES.has(message.toLowerCase())) return { level: 'debug', code: '', message };
@@ -171,6 +192,10 @@ function compactTunnelDetails(value) {
     if (raw === undefined || raw === null || raw === '') continue;
     if (typeof raw === 'number') {
       if (Number.isFinite(raw)) details[key] = raw;
+      continue;
+    }
+    if (typeof raw === 'boolean') {
+      details[key] = raw;
       continue;
     }
     const sanitized = sanitizeTunnelText(raw, MAX_DETAIL_CHARS);

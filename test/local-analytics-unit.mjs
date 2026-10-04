@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { LOCAL_ANALYTICS_RETENTION_DAYS, clearLocalAnalytics, flushLocalAnalytics, pruneLocalAnalytics, recordLocalTaskCompletion, recordLocalToolOutcome, recordLocalTransportEvent, readLocalUsageSnapshot, readLocalUsageSnapshotAsync } from '../src/localAnalytics.js';
+import { LOCAL_ANALYTICS_RETENTION_DAYS, clearLocalAnalytics, flushLocalAnalytics, pruneLocalAnalytics, recordLocalTaskCompletion, recordLocalToolOutcome, recordLocalTransportEvent, readLocalUsageSnapshot, readLocalUsageSnapshotAsync, scheduleLocalTaskCompletion, scheduleLocalToolOutcome, scheduleLocalTransportEvent } from '../src/localAnalytics.js';
 import { failureCategoryFromCode } from '../src/analyticsFailureCategory.js';
 import { openStateDatabase, stateDatabasePath, withStateDatabase } from '../src/stateDatabase.ts';
 
@@ -96,6 +96,20 @@ try {
   assert.equal(cleared.ok, true);
   assert.ok(cleared.removedFiles >= 1);
   assert.equal(readLocalUsageSnapshot(config, '2026-08').totals.toolCalls, 0, 'clearing analytics must clear the SQLite analytics rows');
+
+  scheduleLocalToolOutcome(config, { tool: 'relai_read', workspace: 'repo', ok: true, at: '2026-08-08T12:00:00Z' });
+  scheduleLocalTaskCompletion(config, { workspace: 'repo', taskIntent: 'bugfix', at: '2026-08-08T12:00:00Z' });
+  scheduleLocalTransportEvent(config, { event: 'request_started', at: '2026-08-08T12:00:00Z' });
+  await clearLocalAnalytics(config);
+  await flushLocalAnalytics(config);
+  const clearedScheduled = readLocalUsageSnapshot(config, '2026-08');
+  assert.equal(clearedScheduled.totals.toolCalls, 0, 'pre-clear scheduled outcomes must not repopulate cleared analytics');
+  assert.deepEqual(clearedScheduled.taskIntents, [], 'pre-clear scheduled task completions must be cleared');
+  assert.equal(clearedScheduled.transport.request_started, 0, 'pre-clear scheduled transport events must be cleared');
+  scheduleLocalToolOutcome(config, { tool: 'relai_read', workspace: 'repo', ok: true, at: '2026-08-08T13:00:00Z' });
+  await flushLocalAnalytics(config);
+  assert.equal(readLocalUsageSnapshot(config, '2026-08').totals.toolCalls, 1, 'legitimate events scheduled after clear must still be recorded');
+  await clearLocalAnalytics(config);
 
   const freshResetStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-analytics-reset-'));
   try {

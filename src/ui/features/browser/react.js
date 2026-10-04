@@ -167,6 +167,10 @@ function createBrowserRoute() {
     const permissions = Array.isArray(state.permissionRequests) ? state.permissionRequests : [];
     const permissionRequest = permissions[0] || null;
     const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+    const permissionSessionIndex = sessions.findIndex(session => session.nativeSessionId === permissionRequest?.nativeSessionId);
+    const permissionSessionLabel = permissionSessionIndex >= 0
+      ? `Session ${permissionSessionIndex + 1} · ${sessionLabel(sessions[permissionSessionIndex], permissionSessionIndex)}`
+      : 'Unknown browser session';
     const tabs = Array.isArray(state.tabs) ? state.tabs : [];
     const activeIndex = Math.max(0, tabs.findIndex(tab => tab?.active === true || String(tab?.nativePageId || '') === state.nativePageId));
     const pageHost = hostOf(state.url);
@@ -183,10 +187,10 @@ function createBrowserRoute() {
       ) : null,
       permissionRequest ? h('div', { className: 'browser-permission-banner', role: 'region', 'aria-label': 'Site permission request' },
         h(Icon, { name: 'warning', size: 16 }),
-        h('span', null, `${permissionRequest.origin || 'This site'} wants permission to use ${permissionLabel(permissionRequest.permission)}.`),
+        h('span', { id: 'browserPermissionRequest' }, `${permissionSessionLabel}: ${permissionRequest.origin || 'This site'} wants permission to use ${permissionLabel(permissionRequest.permission)}.`),
         h('div', { className: 'browser-permission-actions' },
-          h('button', { className: 'secondary compact-button', type: 'button', disabled: busy === `permission:${permissionRequest.requestId}`, onClick: () => { void run(`permission:${permissionRequest.requestId}`, () => browser.respondPermission(permissionRequest.requestId, false)); } }, 'Deny'),
-          h('button', { className: 'primary compact-button', type: 'button', disabled: busy === `permission:${permissionRequest.requestId}`, onClick: () => { void run(`permission:${permissionRequest.requestId}`, () => browser.respondPermission(permissionRequest.requestId, true)); } }, 'Allow for this session')
+          h('button', { className: 'secondary compact-button', type: 'button', 'aria-describedby': 'browserPermissionRequest', disabled: busy === `permission:${permissionRequest.requestId}`, onClick: () => { void run(`permission:${permissionRequest.requestId}`, () => browser.respondPermission(permissionRequest.requestId, false)); } }, 'Deny'),
+          h('button', { className: 'primary compact-button', type: 'button', 'aria-describedby': 'browserPermissionRequest', disabled: busy === `permission:${permissionRequest.requestId}`, onClick: () => { void run(`permission:${permissionRequest.requestId}`, () => browser.respondPermission(permissionRequest.requestId, true)); } }, 'Allow for this session')
         )
       ) : null,
       h('div', { className: 'browser-chrome card' },

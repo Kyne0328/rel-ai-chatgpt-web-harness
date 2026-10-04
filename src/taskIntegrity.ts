@@ -14,6 +14,8 @@ const STORE_VERSION = 1;
 // Integrity writes share durable-state.sqlite with short analytics transactions.
 // Allow brief writer handoff without restoring the multi-second synchronous stall.
 const INTEGRITY_SQLITE_TIMEOUT_MS = 250;
+const INTEGRITY_SQLITE_RETRY_ATTEMPTS = 2;
+const INTEGRITY_SQLITE_RETRY_DELAY_MS = 25;
 const LEGACY_INTEGRITY_MIGRATION_KEY = 'task_integrity_legacy_migrated_v1';
 const AMBIENT_OWNER = '@ambient';
 const migratedIntegrityDatabases = new Set<string>();
@@ -99,6 +101,7 @@ interface OwnershipProjection {
 interface RepositoryEventState {
   baseline: RepositoryBaseline | null;
   changedFiles: string[] | null;
+  statusOutput?: string;
 }
 
 class TaskIntegrityError extends Error {
@@ -125,7 +128,7 @@ async function recordTaskIntegrityEvent(config: IntegrityConfig, event: Integrit
     }
     const workspace = resolveWorkspace(config, workspaceAlias);
     const repository = await repositoryStateForEvent(workspace, config, event);
-    return withIntegrityTransaction(config, db => {
+    return await withIntegrityTransactionRetry(config, db => {
       if (!taskId) {
         const workspaceState = normalizeWorkspaceState(readWorkspaceRow(db, workspace.alias) || createWorkspaceState(workspace.alias));
         applyWorkspaceIntegrityEvent(workspaceState, event, repository.changedFiles);
@@ -167,7 +170,7 @@ async function ensureTaskBaseline(
   config: IntegrityConfig,
   taskId: string,
   workspaceAlias: string,
-  options: { signal?: AbortSignal } = {}
+  options: { signal?: AbortSignal; onStatusOutput?: (statusOutput: string) => void } = {}
 ): Promise<IntegrityAuthority | null> {
   options.signal?.throwIfAborted?.();
   const initial = readTaskIntegrity(config, taskId, workspaceAlias);
@@ -188,11 +191,12 @@ async function captureTaskBaseline(
   config: IntegrityConfig,
   taskId: string,
   workspaceAlias: string,
-  options: { signal?: AbortSignal } = {}
+  options: { signal?: AbortSignal; onStatusOutput?: (statusOutput: string) => void } = {}
 ): Promise<IntegrityAuthority | null> {
   options.signal?.throwIfAborted?.();
   const workspace = resolveWorkspace(config, workspaceAlias);
   const repository = await repositoryStateForEvent(workspace, config, { tool: OP.WORK_BEGIN }, options);
+  if (repository.statusOutput !== undefined) options.onStatusOutput?.(repository.statusOutput);
   return withIntegrityTransaction(config, db => {
     const authority = readTaskRow(db, taskId);
     if (!authority?.baseline.pending || !repository.baseline) return authority;
@@ -232,7 +236,7 @@ function taskCommitOwnership(config: IntegrityConfig, taskId: unknown, workspace
     if (!authority || (workspaceAlias && authority.workspace !== workspaceAlias)) return { ownedFiles: [], conflictingFiles: [] };
     const workspace = normalizeWorkspaceState(readWorkspaceRow(db, authority.workspace) || createWorkspaceState(authority.workspace));
     return taskCommitOwnershipFromState(workspace, String(taskId || ''));
-  }, { transaction: true });
+  }, { transaction: true, readonly: true });
 }
 
 function claimTaskChangedFiles(config: IntegrityConfig, taskId: unknown, workspaceAlias: unknown, changedFiles: unknown[] = []): OwnershipProjection {
@@ -382,7 +386,7 @@ function readIntegrityProjection(config: IntegrityConfig, taskId: string, worksp
     const workspace = clean(authority.workspace || workspaceAlias);
     const workspaceState = readWorkspaceRow(db, workspace) || createWorkspaceState(workspace);
     return integrityProjection(authority, workspaceState);
-  }, { transaction: true });
+  }, { transaction: true, readonly: true });
 }
 
 function integrityProjection(authority: IntegrityAuthority, workspaceState: WorkspaceIntegrityState): IntegrityProjection {
@@ -483,12 +487,15 @@ async function repositoryStateForEvent(
     ...(options.signal ? { signal: options.signal } : {})
   }, config);
   options.signal?.throwIfAborted?.();
-  const parsed = statusResult.exitCode === 0 && !statusResult.stdoutTruncated
-    ? parseGitStatus(statusResult.stdout || '')
+  const statusOutput = statusResult.exitCode === 0 && !statusResult.stdoutTruncated
+    ? String(statusResult.stdout || '')
+    : undefined;
+  const parsed = statusOutput !== undefined
+    ? parseGitStatus(statusOutput)
     : { branch: null, unborn: false, entries: [] };
   const entries = (Array.isArray(parsed.entries) ? parsed.entries : []) as Array<Record<string, any>>;
   const changedFiles: string[] = unique(entries.map(entry => normalizePath(entry.path)).filter(Boolean)).sort();
-  if (tool !== OP.WORK_BEGIN) return { baseline: null, changedFiles };
+  if (tool !== OP.WORK_BEGIN) return { baseline: null, changedFiles, ...(statusOutput !== undefined ? { statusOutput } : {}) };
   const headResult = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: workspace.path,
     timeout: 30_000,
@@ -499,6 +506,7 @@ async function repositoryStateForEvent(
   const head = headResult.exitCode === 0 && !headResult.stdoutTruncated ? String(headResult.stdout || '').trim() : '';
   return {
     changedFiles,
+    ...(statusOutput !== undefined ? { statusOutput } : {}),
     baseline: {
       branch: parsed.branch || '',
       head,
@@ -510,7 +518,10 @@ async function repositoryStateForEvent(
 
 function eventMutatedCode(event: IntegrityEvent): boolean {
   const tool = clean(event.tool);
-  if (tool === OP.EXEC) return exactChangedFiles(event).length > 0 || event.mutationUnknown === true;
+  if (tool === OP.EXEC) {
+    if (event.executed === false) return false;
+    return exactChangedFiles(event).length > 0 || event.mutationUnknown === true;
+  }
   return CODE_MUTATING_TOOLS.has(tool);
 }
 
@@ -591,10 +602,37 @@ function integrityDir(config: IntegrityConfig): string {
 function withIntegrityDatabase<TResult>(
   config: IntegrityConfig,
   operation: (db: DatabaseSync) => TResult,
-  options: { transaction?: boolean } = {}
+  options: { transaction?: boolean; readonly?: boolean } = {}
 ): TResult {
   migrateLegacyIntegrity(config);
-  return withStateDatabase(config, operation, { ...options, timeoutMs: INTEGRITY_SQLITE_TIMEOUT_MS }) as TResult;
+  return withStateDatabase(config, operation, {
+    ...options,
+    readonly: options.readonly === true || options.transaction !== true,
+    timeoutMs: INTEGRITY_SQLITE_TIMEOUT_MS
+  }) as TResult;
+}
+
+async function withIntegrityTransactionRetry<TResult>(config: IntegrityConfig, operation: (db: DatabaseSync) => TResult): Promise<TResult> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < INTEGRITY_SQLITE_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return withIntegrityTransaction(config, operation);
+    } catch (error) {
+      lastError = error;
+      if (!isSqliteBusyError(error) || attempt >= INTEGRITY_SQLITE_RETRY_ATTEMPTS - 1) throw error;
+      await new Promise(resolve => setTimeout(resolve, INTEGRITY_SQLITE_RETRY_DELAY_MS * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
+function isSqliteBusyError(error: unknown): boolean {
+  let current = error as Record<string, any> | null;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (Number(current.errcode) === 5 || String(current.code || '') === 'SQLITE_BUSY') return true;
+    current = current.cause && typeof current.cause === 'object' ? current.cause as Record<string, any> : null;
+  }
+  return false;
 }
 
 function withIntegrityTransaction<TResult>(config: IntegrityConfig, operation: (db: DatabaseSync) => TResult): TResult {

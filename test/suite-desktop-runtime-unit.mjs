@@ -1275,6 +1275,8 @@ async function case_multi_tunnel_connection_unit() {
     assert.deepEqual(new Set(starts.map(start => start.apiKey)), new Set(['sk-account-a-123456', 'sk-account-b-123456']));
     assert.deepEqual(new Set(starts.map(start => start.instanceId)), new Set(['tunnel_accountA123', 'tunnel_accountB123']));
 
+    const startsBeforeSecond = starts.length;
+    const stopsBeforeSecond = stops.length;
     const second = await pool.sync({
       connections: [
         { tunnelId: 'tunnel_accountB123', label: 'Account B', enabled: true, apiKey: 'sk-account-b-123456' }
@@ -1283,8 +1285,64 @@ async function case_multi_tunnel_connection_unit() {
       localToken: 'shared-local-token'
     });
     assert.deepEqual(second.connections.map(connection => connection.tunnelId), ['tunnel_accountB123'], 'removed tunnels must disappear from the pool status');
-    assert.ok(stops.includes('tunnel_accountA123'));
-    assert.ok(stops.includes('tunnel_accountB123'));
+    assert.equal(starts.length, startsBeforeSecond, 'removing one tunnel must not restart an unchanged healthy peer');
+    assert.deepEqual(stops.slice(stopsBeforeSecond), ['tunnel_accountA123'], 'removing one tunnel must stop only that tunnel');
+
+    const startsBeforeAdd = starts.length;
+    const stopsBeforeAdd = stops.length;
+    const added = await pool.sync({
+      connections: [
+        { tunnelId: 'tunnel_accountB123', label: 'Account B', enabled: true, apiKey: 'sk-account-b-123456' },
+        { tunnelId: 'tunnel_accountC123', label: 'Account C', enabled: true, apiKey: 'sk-account-c-123456' }
+      ],
+      port: 3333,
+      localToken: 'shared-local-token'
+    });
+    assert.deepEqual(new Set(added.connections.map(connection => connection.tunnelId)), new Set(['tunnel_accountB123', 'tunnel_accountC123']));
+    assert.equal(starts.length, startsBeforeAdd + 1, 'adding one tunnel must start only the new tunnel');
+    assert.equal(starts.at(-1).tunnelId, 'tunnel_accountC123');
+    assert.equal(stops.length, stopsBeforeAdd, 'adding one tunnel must not stop an unchanged healthy peer');
+
+    const startsBeforeDisable = starts.length;
+    const stopsBeforeDisable = stops.length;
+    const disabled = await pool.sync({
+      connections: [
+        { tunnelId: 'tunnel_accountB123', label: 'Account B', enabled: true, apiKey: 'sk-account-b-123456' },
+        { tunnelId: 'tunnel_accountC123', label: 'Account C', enabled: false, apiKey: 'sk-account-c-123456' }
+      ],
+      port: 3333,
+      localToken: 'shared-local-token'
+    });
+    assert.deepEqual(disabled.connections.map(connection => connection.tunnelId), ['tunnel_accountB123']);
+    assert.equal(starts.length, startsBeforeDisable, 'disabling one tunnel must not restart an unchanged healthy peer');
+    assert.deepEqual(stops.slice(stopsBeforeDisable), ['tunnel_accountC123'], 'disabling one tunnel must stop only that tunnel');
+
+    const startsBeforeRename = starts.length;
+    const stopsBeforeRename = stops.length;
+    const renamed = await pool.sync({
+      connections: [
+        { tunnelId: 'tunnel_accountB123', label: 'Renamed account', enabled: true, apiKey: 'sk-account-b-123456' }
+      ],
+      port: 3333,
+      localToken: 'shared-local-token'
+    });
+    assert.equal(renamed.connections[0].label, 'Renamed account');
+    assert.equal(starts.length, startsBeforeRename, 'metadata-only edits must not restart the tunnel');
+    assert.equal(stops.length, stopsBeforeRename, 'metadata-only edits must not stop the tunnel');
+
+    const startsBeforeCredentialChange = starts.length;
+    const stopsBeforeCredentialChange = stops.length;
+    await pool.sync({
+      connections: [
+        { tunnelId: 'tunnel_accountB123', label: 'Renamed account', enabled: true, apiKey: 'sk-account-b-rotated123456' }
+      ],
+      port: 3333,
+      localToken: 'shared-local-token'
+    });
+    assert.equal(starts.length, startsBeforeCredentialChange + 1, 'credential changes must restart only the changed tunnel');
+    assert.equal(stops.length, stopsBeforeCredentialChange + 1, 'credential changes must stop only the changed tunnel');
+    assert.equal(starts.at(-1).tunnelId, 'tunnel_accountB123');
+    assert.equal(starts.at(-1).apiKey, 'sk-account-b-rotated123456');
 
     await pool.stop();
     assert.equal(pool.snapshot().connections[0].state, 'stopped');
@@ -1373,8 +1431,8 @@ async function case_additional_tunnel_failure_isolation() {
     assert.equal(Object.hasOwn(prepared.find(item => item.tunnelId === disabledId), 'apiKey'), false);
     assert.equal(Object.hasOwn(prepared.find(item => item.tunnelId === brokenId), 'apiKey'), false);
     const result = await pool.sync({ connections: prepared, port: 3333, localToken: 'isolated-fixture-token' });
-    assert.deepEqual(created, [healthyId], 'failed credentials must not create a runtime');
-    assert.deepEqual(started, [healthyId], 'healthy peers must still start');
+    assert.deepEqual(created, [], 'credential failure in one tunnel must not recreate a healthy peer');
+    assert.deepEqual(started, [], 'credential failure in one tunnel must not restart a healthy peer');
     assert.ok(stopped.includes(brokenId), 'a previously running failed connection must be stopped');
     assert.equal(result.connections.find(item => item.tunnelId === healthyId).state, 'running');
     const failure = result.connections.find(item => item.tunnelId === brokenId);
@@ -1461,3 +1519,157 @@ if (additionalTunnelRegressionFailures.length) {
   throw new AggregateError(additionalTunnelRegressionFailures.map(result => result.reason), 'Additional tunnel failure-isolation regressions failed.');
 }
 
+
+
+async function case_additional_tunnel_stop_failure() {
+  const assert = (await import('node:assert/strict')).default;
+  const { createTunnelRuntimePool } = await import('../electron/tunnel-runtime-pool.js');
+  for (const failure of ['result', 'throw']) {
+    let allowStop = false;
+    let starts = 0;
+    let stops = 0;
+    const pool = createTunnelRuntimePool({
+      createRuntime: options => {
+        let state = { state: 'stopped', tunnelId: options.instanceId };
+        return {
+          async start() { starts += 1; state = { ...state, state: 'running' }; options.onStatus(state); return state; },
+          async stop() {
+            stops += 1;
+            if (!allowStop) {
+              if (failure === 'throw') throw new Error('fixture termination failed');
+              return { stopped: false, exited: false, error: 'fixture termination failed' };
+            }
+            state = { ...state, state: 'stopped' }; options.onStatus(state);
+            return { stopped: true, exited: true };
+          },
+          snapshot: () => state
+        };
+      }
+    });
+    const config = { connections: [{ tunnelId: 'tunnel_stopfixture123', apiKey: 'fixture-key', label: 'Fixture' }], port: 3333, localToken: 'fixture-token' };
+    await pool.sync(config);
+    try {
+      const failed = await pool.stop();
+      assert.equal(failed.stopped, false, `${failure}: aggregate cleanup must not claim a failed stop succeeded`);
+      assert.equal(failed.connections[0].state, 'failed');
+      await pool.sync({ ...config, connections: [] });
+      assert.equal(pool.snapshot().connections[0].state, 'failed', 'removed but still live tunnel must remain visible');
+      assert.equal(starts, 1, 'failed termination must never create a duplicate tunnel');
+      allowStop = true;
+      const retried = await pool.stop();
+      assert.equal(retried.stopped, true);
+      assert.ok(stops >= 3, 'repeat stop must retain and retry failed runtime ownership');
+      assert.equal(retried.connections[0].state, 'stopped');
+    } finally { allowStop = true; await pool.stop(); }
+  }
+}
+await case_additional_tunnel_stop_failure();
+
+async function case_additional_tunnel_remove_failure() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const { runInNewContext } = await import('node:vm');
+  const source = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
+  const begin = source.indexOf('  async function removeAdditionalTunnel(tunnelId) {');
+  const end = source.indexOf('  async function setKeepAwake(', begin);
+  const remove = runInNewContext(source.slice(begin, end) + '\nremoveAdditionalTunnel', {
+    tunnelConnections: { remove: () => ({ ok: true, removed: true }), list: () => [] },
+    serviceRuntime: { isListening: () => true, restartAdditionalTunnels: async () => ({ error: 'fixture stop failed', connections: [{ tunnelId: 'fixture', state: 'failed' }] }) }
+  });
+  const result = await remove('fixture');
+  assert.equal(result.removed, true, 'completed configuration mutation must remain explicit');
+  assert.equal(result.ok, false, 'failed live process termination must not be reported as a successful removal');
+  assert.match(result.error, /could not be stopped/i);
+}
+await case_additional_tunnel_remove_failure();
+
+await import('./update-install-marker-race-unit.mjs');
+
+
+async function case_mac_manual_update_shutdown_failure() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const { runInNewContext } = await import('node:vm');
+  const source = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
+  const begin = source.indexOf('  async function closeForManualMacUpdate() {');
+  const end = source.indexOf('  async function prepareApplicationUpdate()', begin);
+  for (const clean of [false, true]) {
+    let exits = 0;
+    let recovered = 0;
+    const context = {
+      isQuitting: false,
+      shutdownCoordinator: { prepare: async () => ({ clean, serviceResult: { cleanup: { clean } } }) },
+      recoverApplicationUpdate: async () => { recovered += 1; context.isQuitting = false; },
+      app: { exit: () => { exits += 1; } }
+    };
+    const close = runInNewContext(source.slice(begin, end) + '\ncloseForManualMacUpdate', context);
+    if (clean) await close();
+    else await assert.rejects(close, /could not shut down safely/);
+    assert.equal(exits, clean ? 1 : 0, 'manual macOS update must not exit on unconfirmed shutdown');
+    assert.equal(recovered, clean ? 0 : 1, 'unclean shutdown must reopen the existing recovery path for retry');
+    assert.equal(context.isQuitting, clean, 'failed shutdown must not leave the desktop permanently quitting');
+  }
+}
+await case_mac_manual_update_shutdown_failure();
+
+
+async function case_logout_connection_clear_failure() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const { runInNewContext } = await import('node:vm');
+  const profileSource = fs.readFileSync(new URL('../src/connectionProfile.js', import.meta.url), 'utf8');
+  const clearBegin = profileSource.indexOf('function clearConnectionState(');
+  const clearEnd = profileSource.indexOf('function localBaseUrl(', clearBegin);
+  for (const mode of ['remove', 'truncate', 'partial-failure', 'double-failure']) {
+    const removals = [];
+    const writes = [];
+    const clear = runInNewContext(profileSource.slice(clearBegin, clearEnd) + '\nclearConnectionState', {
+      getEnvPath: () => 'fixture.env',
+      getConnectionProfilePath: () => 'fixture.json',
+      fs: {
+        rmSync: target => { removals.push(target); if (mode !== 'remove') throw new Error('fixture locked'); },
+        writeFileSync: (target, value) => { writes.push({ target, value }); if (mode === 'double-failure' || (mode === 'partial-failure' && target === 'fixture.env.bak')) throw new Error('fixture denied'); }
+      }
+    });
+    const result = clear();
+    assert.equal(result.ok, mode === 'remove' || mode === 'truncate', 'failure to remove and empty any saved state must not report success');
+    assert.deepEqual(removals, ['fixture.env', 'fixture.env.bak', 'fixture.json', 'fixture.json.bak'], 'clearing must target only the canonical active files and their backups');
+    assert.equal(writes.length, mode === 'remove' ? 0 : 4);
+    assert.ok(writes.every(entry => entry.value === ''), 'locked-file fallback must erase content');
+    if (!result.ok) assert.match(result.error, /could not be cleared/);
+  }
+  const hostSource = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
+  const begin = hostSource.indexOf('  async function logoutApplication(');
+  const end = hostSource.indexOf('  async function quitApplication()', begin);
+  for (const cleared of [false, true]) {
+    const calls = { exits: 0, relaunches: 0, resets: 0, tray: 0, recovery: 0, networkStarts: 0 };
+    const status = { serverRunning: false, tunnelStatus: 'stopped' };
+    const context = {
+      isQuitting: false,
+      desktopPower: { getStatus: () => ({}) },
+      taskActivityBlockReason: () => '',
+      shutdownCoordinator: { prepare: async () => ({ clean: true }), reset: () => { calls.resets += 1; } },
+      tunnelCredentials: { clear() {} },
+      tunnelConnections: { clear() {} },
+      connection: { clearConnectionState: () => ({ ok: cleared, error: cleared ? '' : 'Some saved connection data could not be cleared.' }) },
+      desktopTray: { setup: () => { calls.tray += 1; } },
+      recoveryWindowManager: { show: () => { calls.recovery += 1; } },
+      setStatus: update => Object.assign(status, update),
+      startServer: () => { calls.networkStarts += 1; },
+      process: { argv: ['fixture-node', 'fixture-app'] },
+      app: { relaunch: () => { calls.relaunches += 1; }, exit: () => { calls.exits += 1; } }
+    };
+    const logout = runInNewContext(hostSource.slice(begin, end) + '\nlogoutApplication', context);
+    if (cleared) assert.equal((await logout()).ok, true);
+    else await assert.rejects(() => logout(), /Logout did not finish.*could not be cleared/);
+    assert.equal(calls.relaunches, cleared ? 1 : 0);
+    assert.equal(calls.exits, cleared ? 1 : 0, 'failed logout must not exit while saved state remains');
+    assert.equal(calls.networkStarts, 0, 'failed logout recovery must not reconnect the service');
+    assert.equal(context.isQuitting, cleared);
+    assert.equal(calls.resets, cleared ? 0 : 1);
+    assert.equal(calls.tray, cleared ? 0 : 1);
+    assert.equal(calls.recovery, cleared ? 0 : 1);
+    if (!cleared) assert.equal(status.errorCode, 'connection_state_clear_failed');
+  }
+}
+await case_logout_connection_clear_failure();

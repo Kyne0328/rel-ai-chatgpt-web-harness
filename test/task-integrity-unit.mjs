@@ -39,6 +39,7 @@ const embeddedValidationTask = 'embedded-validation-task';
 const failedPostCheckTask = 'failed-post-check-task';
 const unavailableTrackingTask = 'unavailable-tracking-task';
 const cancellationIntegrityTask = 'cancellation-integrity-task';
+const preExecutionTimeoutTask = 'pre-execution-timeout-task';
 const event = (taskId, tool, extra = {}) => ({
   taskId,
   workspace: 'app',
@@ -52,8 +53,29 @@ const event = (taskId, tool, extra = {}) => ({
 
 try {
   readWorkspaceIntegrity(config, 'app');
+  const transientContentionTask = 'transient-lock-contention-task';
+  await recordTaskIntegrityEvent(config, event(transientContentionTask, 'work.begin'));
+  const transientLockHolder = openStateDatabase(config);
+  transientLockHolder.exec('BEGIN IMMEDIATE');
+  const releaseTransientLock = setTimeout(() => {
+    transientLockHolder.exec('ROLLBACK');
+    transientLockHolder.close();
+  }, 50);
+  const transientContentionStartedAt = Date.now();
+  await recordTaskIntegrityEvent(config, event(transientContentionTask, 'edit', { changedFiles: ['transient.js'] }));
+  clearTimeout(releaseTransientLock);
+  assert.ok(Date.now() - transientContentionStartedAt < 1000, 'brief SQLite writer handoff must recover within the bounded retry budget');
+  const transientGeneration = readTaskIntegrity(config, transientContentionTask, 'app').mutationGeneration;
+
   const lockHolder = openStateDatabase(config);
   lockHolder.exec('BEGIN IMMEDIATE');
+  const readProjection = await recordTaskIntegrityEvent(config, event(transientContentionTask, 'read'));
+  assert.equal(readProjection.taskMutationGeneration, transientGeneration, 'read-only task audit projection must remain available while another connection owns the writer slot');
+  assert.deepEqual(
+    taskIntegrity.taskCommitOwnership(config, transientContentionTask, 'app'),
+    { ownedFiles: ['transient.js'], conflictingFiles: [] },
+    'commit ownership reads must not acquire the SQLite writer slot'
+  );
   const contentionStartedAt = Date.now();
   await assert.rejects(
     () => recordTaskIntegrityEvent(config, event('lock-contention-task', 'edit')),
@@ -67,7 +89,11 @@ try {
   const deferredId = 'deferred-baseline-task';
   await recordTaskIntegrityEvent(config, event(deferredId, 'work.begin', { deferBaseline: true }));
   assert.equal(readTaskIntegrity(config, deferredId, 'app').baseline.pending, true);
-  const deferred = await taskIntegrity.ensureTaskBaseline(config, deferredId, 'app');
+  let deferredStatusOutput;
+  const deferred = await taskIntegrity.ensureTaskBaseline(config, deferredId, 'app', {
+    onStatusOutput: statusOutput => { deferredStatusOutput = statusOutput; }
+  });
+  assert.equal(typeof deferredStatusOutput, 'string', 'first-use baseline capture must expose its Git status snapshot for exec mutation tracking reuse');
   assert.ok(deferred.baseline.changedFiles.includes('ambient.txt'), 'deferred baseline must still protect pre-existing dirty files');
   assert.equal(deferred.baseline.pending, undefined);
   assert.deepEqual(deferred.taskOwnedChangedFiles, []);
@@ -81,6 +107,20 @@ try {
     taskCancellationStatus: 'cancelled'
   }));
   assert.ok(readTaskIntegrity(config, cancellationIntegrityTask, 'app').cancelledAt, 'confirmed cancellation must publish terminal integrity state');
+
+  await recordTaskIntegrityEvent(config, event(preExecutionTimeoutTask, 'work.begin'));
+  const preExecutionBefore = readTaskIntegrity(config, preExecutionTimeoutTask, 'app');
+  await recordTaskIntegrityEvent(config, event(preExecutionTimeoutTask, 'exec', {
+    executed: false,
+    commandSucceeded: false,
+    timedOut: true,
+    terminationConfirmed: true,
+    mutationUnknown: true,
+    changedFiles: []
+  }));
+  const preExecutionAfter = readTaskIntegrity(config, preExecutionTimeoutTask, 'app');
+  assert.equal(preExecutionAfter.mutationGeneration, preExecutionBefore.mutationGeneration, 'an exec that never started must not advance mutation integrity even if an older producer reports mutationUnknown');
+  assert.deepEqual(preExecutionAfter.taskOwnedChangedFiles, preExecutionBefore.taskOwnedChangedFiles);
 
   await recordTaskIntegrityEvent(config, event(taskOne, 'work.begin'));
   const initial = readTaskIntegrity(config, taskOne, 'app');
@@ -182,7 +222,6 @@ try {
   assert.deepEqual(unavailableTracking.taskOwnedChangedFiles, []);
 
   const beforeTaskless = readWorkspaceIntegrity(config, 'app');
-  assert.equal(beforeTaskless.generation, 8);
   fs.writeFileSync(path.join(workspacePath, 'task-one.js'), 'export const one = "taskless";\n');
   await recordTaskIntegrityEvent(config, {
     workspace: 'app',
@@ -192,7 +231,7 @@ try {
     changedFiles: ['task-one.js']
   });
   const workspaceState = readWorkspaceIntegrity(config, 'app');
-  assert.equal(workspaceState.generation, 9, 'taskless mutations must advance the same authoritative workspace generation');
+  assert.equal(workspaceState.generation, beforeTaskless.generation + 1, 'taskless mutations must advance the same authoritative workspace generation');
   assert.equal(workspaceState.lastMutation.taskId, '', 'taskless mutations must not invent a logical task owner');
   assert.ok(workspaceState.uncommittedOwners['task-one.js']?.includes('@ambient'), 'taskless mutations must remain ambient/unowned');
   assert.ok(taskIntegrity.taskCommitOwnership(config, taskOne, 'app').conflictingFiles.includes('task-one.js'), 'taskless mutation of a task-owned path must become an ownership conflict');

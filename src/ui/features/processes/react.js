@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useEffect, useMemo, useState } from 'react';
 import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
@@ -16,9 +16,10 @@ export function createProcessesRoute(useDashboardSlices) {
       () => processListView(data),
       [data]
     );
-    const rows = model.rows.filter(row => row.state.active);
+    const rows = model.rows.filter(row => !row.state.terminal);
+    const attentionCount = rows.filter(row => !row.state.active).length;
     const recentRows = model.rows.filter(row => row.state.terminal).slice(0, 5);
-    const count = `${rows.length} running`;
+    const count = `${model.running} running${attentionCount ? ` · ${attentionCount} ${attentionCount === 1 ? 'needs' : 'need'} attention` : ''}`;
     const recentLabel = model.finished > recentRows.length
       ? `Recently ended · latest ${recentRows.length}`
       : `Recently ended · ${recentRows.length}`;
@@ -137,12 +138,10 @@ function OutputBlock({ processId, stream, value, meta, active }) {
   const [history, setHistory] = useState(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [error, setError] = useState('');
-  const followingRef = useRef(false);
   useEffect(() => {
     setHistory(null);
     setLoadingEarlier(false);
     setError('');
-    followingRef.current = false;
   }, [processId, stream]);
 
   const startOffset = history?.startOffset ?? meta.tailStartOffset;
@@ -152,12 +151,11 @@ function OutputBlock({ processId, stream, value, meta, active }) {
   const latestTailOnly = !history && meta.tailTruncated;
 
   useEffect(() => {
-    if (!history || followingRef.current || history.nextOffset >= meta.totalBytes) return undefined;
+    if (!history || history.nextOffset >= meta.totalBytes) return undefined;
     let cancelled = false;
     const offset = history.nextOffset;
     const remaining = Math.max(0, meta.totalBytes - offset);
     if (!remaining) return undefined;
-    followingRef.current = true;
     void readProcessOutputRange(processId, stream, {
       offset,
       maxBytes: Math.min(PROCESS_OUTPUT_CHUNK_BYTES, remaining)
@@ -177,8 +175,6 @@ function OutputBlock({ processId, stream, value, meta, active }) {
       setError('');
     }).catch(nextError => {
       if (!cancelled) setError(errorMessage(nextError));
-    }).finally(() => {
-      followingRef.current = false;
     });
     return () => { cancelled = true; };
   }, [history, meta.totalBytes, processId, stream]);

@@ -49,6 +49,30 @@ const sessionCache = await import('../src/sessionCache.js');
 const callTool = (name, args, context = {}) => rawCallTool(name, args, { principal: 'local:trusted', ...context });
 
 try {
+  const ordinaryAlias = path.join(tmp, 'ordinary-root-alias');
+  const privateDirectory = path.join(outsideRoot, '.aws');
+  const privateAlias = path.join(tmp, 'private-root-alias');
+  fs.mkdirSync(privateDirectory);
+  fs.writeFileSync(path.join(privateDirectory, 'config'), 'synthetic private configuration\n');
+  fs.symlinkSync(outsideRoot, ordinaryAlias, process.platform === 'win32' ? 'junction' : 'dir');
+  fs.symlinkSync(privateDirectory, privateAlias, process.platform === 'win32' ? 'junction' : 'dir');
+  for (const target of ['outside.txt', path.join(ordinaryAlias, 'outside.txt')]) {
+    const ordinary = await callTool('relai_read', {
+      root: ordinaryAlias, paths: [target], guidanceMode: 'none'
+    }, { publicHttpOnly: true, requestId: 'direct-filesystem-ordinary-alias', transportType: 'test' });
+    assert.equal(ordinary.items[0].content, 'outside before\nsearch needle\n');
+  }
+  for (const [name, args] of [
+    ['relai_read', { paths: ['config'], guidanceMode: 'none' }],
+    ['relai_search', { pattern: 'synthetic', fixed: true }],
+    ['relai_edit', { path: 'config', content: 'must not write', independent: true }]
+  ]) {
+    await assert.rejects(() => callTool(name, { root: privateAlias, ...args }, {
+      publicHttpOnly: true, requestId: 'direct-filesystem-sensitive-root-alias', transportType: 'test'
+    }), error => error.code === 'SENSITIVE_PATH_RESTRICTED', 'a root alias must not remove a sensitive real-path ancestor');
+  }
+  assert.equal(fs.readFileSync(path.join(privateDirectory, 'config'), 'utf8'), 'synthetic private configuration\n');
+
   const task = await callTool('relai_work', { action: 'begin',
     workspace: 'repo',
     bootstrap: 'none'

@@ -14,6 +14,8 @@ const DEFAULT_FALLBACK_GRACE_MS = 1_000;
 const FALLBACK_RECORD_TTL_MS = 15 * 60_000;
 const MAX_FALLBACK_RECORDS = 128;
 const MAX_COMPLETION_NOTICES = 16;
+const FALLBACK_PRUNE_INTERVAL_MS = 30_000;
+const fallbackPrunes = new Map();
 const REPLAYABLE_FALLBACK_STATUSES = new Set([
   FALLBACK_EXECUTION_STATUS.COMPLETED,
   FALLBACK_EXECUTION_STATUS.FAILED,
@@ -275,6 +277,8 @@ function publicFallbackRecord(record, now = Date.now) {
   const running = record.status === FALLBACK_EXECUTION_STATUS.RUNNING;
   const currentMs = timeValue(now);
   const startedAtMs = Number(record.startedAtMs || Date.parse(record.startedAt) || currentMs);
+  const completedAtMs = Number(record.completedAtMs || Date.parse(record.completedAt) || 0);
+  const elapsedEndMs = running || completedAtMs <= 0 ? currentMs : completedAtMs;
   const deadlineAtMs = Number(record.deadlineAtMs || 0);
   return {
     operationId: record.operationId,
@@ -286,7 +290,7 @@ function publicFallbackRecord(record, now = Date.now) {
     startedAt: record.startedAt,
     updatedAt: record.updatedAt || record.startedAt,
     revision: Math.max(1, Number(record.revision || 1)),
-    elapsedMs: Math.max(0, currentMs - startedAtMs),
+    elapsedMs: Math.max(0, elapsedEndMs - startedAtMs),
     ...(deadlineAtMs > 0 ? {
       deadlineAt: new Date(deadlineAtMs).toISOString(),
       remainingMs: Math.max(0, deadlineAtMs - currentMs)
@@ -696,7 +700,7 @@ function persistFallbackSnapshot(config, record) {
       : sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     writeJsonAtomic(file, sanitized, { mode: 0o600 });
-    pruneTasklessFallbackFiles(config);
+    scheduleTasklessFallbackPrune(config);
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback operation persistence:', error);
   }
@@ -708,22 +712,48 @@ function tasklessFallbackFile(config, operationId) {
   return path.join(getStateDir(config), 'fallback-executions', `${id}.json`);
 }
 
-function pruneTasklessFallbackFiles(config) {
+function scheduleTasklessFallbackPrune(config) {
   const root = path.join(getStateDir(config), 'fallback-executions');
+  const previous = fallbackPrunes.get(root);
+  if (previous?.pending || Date.now() - Number(previous?.startedAt || 0) < FALLBACK_PRUNE_INTERVAL_MS) return;
+  const state = { pending: true, startedAt: Date.now(), promise: null };
+  fallbackPrunes.set(root, state);
+  state.promise = pruneTasklessFallbackFiles(root)
+    .catch(error => {
+      if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback cleanup:', error);
+    })
+    .finally(() => { state.pending = false; });
+}
+
+async function pruneTasklessFallbackFiles(root) {
   let entries;
-  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
+  try { entries = await fs.promises.readdir(root, { withFileTypes: true }); } catch { return; }
   const cutoff = Date.now() - FALLBACK_RECORD_TTL_MS;
-  const files = entries.filter(entry => entry.isFile() && /^fallback_[A-Za-z0-9_-]{20,160}\.json$/.test(entry.name)).map(entry => {
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^fallback_[A-Za-z0-9_-]{20,160}\.json$/.test(entry.name)) continue;
     const file = path.join(root, entry.name);
-    try { return { file, mtimeMs: fs.statSync(file).mtimeMs }; } catch { return null; }
-  }).filter(Boolean).sort((a, b) => b.mtimeMs - a.mtimeMs);
-  files.forEach((entry, index) => {
-    if (entry.mtimeMs >= cutoff && index < MAX_FALLBACK_RECORDS) return;
-    const record = readPersistedFallback(config, path.basename(entry.file, '.json'));
-    if (record?.status === FALLBACK_EXECUTION_STATUS.RUNNING) return;
-    if (record?.workId) return;
-    try { fs.rmSync(entry.file, { force: true }); } catch {}
-  });
+    try {
+      const stat = await fs.promises.lstat(file);
+      if (!stat.isFile()) continue;
+      // Work-bound files are lookup pointers. Reading their authoritative task
+      // here repeatedly hydrates large histories and blocks all tunnel clients.
+      const record = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+      if (record?.operationId !== path.basename(file, '.json') || record.workId) continue;
+      if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) continue;
+      files.push({ file, mtimeMs: stat.mtimeMs, size: stat.size });
+    } catch {}
+  }
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const [index, entry] of files.entries()) {
+    if (entry.mtimeMs >= cutoff && index < MAX_FALLBACK_RECORDS) continue;
+    try {
+      const current = await fs.promises.lstat(entry.file);
+      // A concurrent request may have replaced this record during cleanup.
+      if (current.mtimeMs !== entry.mtimeMs || current.size !== entry.size || !current.isFile()) continue;
+      await fs.promises.unlink(entry.file);
+    } catch {}
+  }
 }
 
 function settleRecord(record, status, now = Date.now) {

@@ -399,7 +399,7 @@ function relationshipSourceIdsForImportResolutionChanges(db, workspaceRoot, reso
   const context = cachedContext || loadResolutionContext(db, workspaceRoot);
   if (resolutionCache && !cachedContext) resolutionCache.context = context;
 
-  const candidateLeaves = new Set();
+  const candidateLeaves = new Set(['.', '..']);
   const candidateTargetIds = new Set();
   for (const relativePath of paths) {
     for (const key of importSuffixKeys(relativePath)) {
@@ -447,12 +447,16 @@ function relationshipSourceIdsForImportResolutionChanges(db, workspaceRoot, reso
     `).all(...chunk));
   });
 
+  // Include equivalent extension/directory spellings before canonical resolution.
+  // Suffix wildcards deliberately over-select; inspectRows still decides
+  // whether the supported-extension/directory resolution actually changed.
+  const specifier = "rtrim(replace(trim(i.specifier), '\\', '/'), '/')";
   forEachChunk([...candidateLeaves], 100, chunk => {
-    const clauses = chunk.map(() => "(i.specifier=? OR i.specifier LIKE ? ESCAPE '\\' OR i.specifier LIKE ? ESCAPE '\\' OR i.specifier LIKE ? ESCAPE '\\')").join(' OR ');
+    const clauses = chunk.map(() => `(${specifier}=? OR ${specifier} LIKE ? ESCAPE '\\' OR ${specifier} LIKE ? ESCAPE '\\' OR ${specifier} LIKE ? ESCAPE '\\' OR ${specifier} LIKE ? ESCAPE '\\' OR ${specifier} LIKE ? ESCAPE '\\' OR ${specifier} LIKE ? ESCAPE '\\' OR ${specifier} LIKE ? ESCAPE '\\')`).join(' OR ');
     const parameters = [];
     for (const leaf of chunk) {
       const escaped = escapeSqlLike(leaf);
-      parameters.push(leaf, `%/${escaped}`, `%.${escaped}`, `%::${escaped}`);
+      parameters.push(leaf, `${escaped}.%`, `%/${escaped}`, `%/${escaped}.%`, `%.${escaped}`, `%.${escaped}.%`, `%::${escaped}`, `%::${escaped}.%`);
     }
     inspectRows(db.prepare(`
       SELECT i.source_file_id, i.specifier, i.target_file_id, f.path, f.language, f.is_test

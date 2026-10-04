@@ -131,3 +131,24 @@ function deferred() {
   const promise = new Promise(done => { resolve = done; });
   return { promise, resolve };
 }
+
+
+{
+  let restarts = 0;
+  const timers = [];
+  const stoppedSupervisor = createTunnelRecoverySupervisor({
+    restartConnection: async () => { restarts += 1; return { serverRunning: true, tunnelStatus: 'running' }; },
+    setTimer: callback => { const timer = { callback }; timers.push(timer); return timer; },
+    clearTimer: () => {}
+  });
+  stoppedSupervisor.cancel();
+  const stopFailure = stoppedSupervisor.observe({ state: 'failed', errorCode: 'secure_tunnel_stop_failed', error: 'fixture stop unconfirmed' });
+  assert.equal(stopFailure.scheduled, false, 'explicit stop failure must not schedule a background restart');
+  assert.equal(timers.length, 0);
+  assert.equal(restarts, 0);
+  stoppedSupervisor.observe({ state: 'stopped', errorCode: '' });
+  const resumed = await stoppedSupervisor.retryNow();
+  assert.equal(resumed.tunnelStatus, 'running', 'manual retry must remain available after confirmed termination');
+  assert.equal(restarts, 1);
+  stoppedSupervisor.cancel();
+}

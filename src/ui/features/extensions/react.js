@@ -123,6 +123,7 @@ function createExtensionsRoute() {
         }
         const count = Number(result.source?.extensionCount || 0);
         toast(`Extension source added${count ? ` with ${count} extension${count === 1 ? '' : 's'}` : ''}.`, { variant: 'success' });
+        invalidateCache('/api/extensions');
         await load({ refresh: true });
         return result;
       } finally {
@@ -152,6 +153,7 @@ function createExtensionsRoute() {
         }
         const retained = Array.isArray(result.installedExtensions) ? result.installedExtensions.length : 0;
         toast(retained ? `Source removed. ${retained} installed extension${retained === 1 ? '' : 's'} kept.` : 'Extension source removed.', { variant: 'success' });
+        invalidateCache('/api/extensions');
         await load({ refresh: true });
         return result;
       } finally {

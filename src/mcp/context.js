@@ -35,7 +35,7 @@ function toolContext(context, options = {}) {
   }
   return {
     publicHttpOnly: options.publicHttpOnly === true || Boolean(context?.http),
-    requestId: context?.mcpReq?.id,
+    requestId: options.requestId ?? context?.mcpReq?.id,
     serverInstanceId: SERVER_INSTANCE_ID,
     transportType: String(options.transportType || (context?.http ? 'streamable-http' : 'stdio')),
     protocolVersion: String(envelope[PROTOCOL_VERSION_META_KEY] || MCP_PROTOCOL_VERSION),

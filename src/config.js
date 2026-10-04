@@ -167,6 +167,9 @@ function expandHome(value) {
 function normalizeConfig(config) {
   const base = makeDefaultConfig();
   const next = configSchema(base).parse(config);
+  if (config?.telemetry?.enabled === false && !Object.hasOwn(config.telemetry, 'diagnosticsEnabled')) {
+    next.telemetry.diagnosticsEnabled = false;
+  }
   next.version = 7;
   next.stateDir = expandHome(next.stateDir || base.stateDir);
   if (!path.isAbsolute(next.stateDir)) next.stateDir = path.resolve(next.stateDir);

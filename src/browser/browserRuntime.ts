@@ -18,8 +18,8 @@ import {
   uploadAuthorizedBrowserFile,
   type BrowserLocalIoWorkspace
 } from './browserLocalIo.ts';
-import { launchBrowserDriver, type BrowserPageDriver, type LocalBrowserDriver } from './browserDriver.ts';
-import { browserProfileDirectory, clearPersistentBrowserProfile, normalizeBrowserProfileMode, preparePersistentBrowserProfile, recordPersistentBrowserSite, type BrowserProfileMode } from './browserProfile.ts';
+import { clearBrowserProfileSession, launchBrowserDriver, type BrowserPageDriver, type LocalBrowserDriver } from './browserDriver.ts';
+import { assertPersistentBrowserProfileSafe, clearPersistentBrowserProfile, normalizeBrowserProfileMode, preparePersistentBrowserProfile, recordPersistentBrowserSite, type BrowserProfileMode } from './browserProfile.ts';
 import type { StructuredInteractionArgs } from './playwrightPrimitives.ts';
 import { BROWSER_HANDOFF_TTL_MS, browserHandoffExpired } from './browserHandoffPolicy.ts';
 
@@ -204,7 +204,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       const initial = args.url
         ? await navigateTab(tab, normalizeBrowserUrl(args.url), timeoutFor(args.timeoutMs), options.signal)
         : await withAbort(tab.page.describe(options.signal), options.signal, browserCancellationError);
-      if (profileDirectory && initial.url) await recordPersistentBrowserSite(profileDirectory, initial.url);
+      if (profileDirectory && initial.url && !driver.recordsPersistentSites) await recordPersistentBrowserSite(profileDirectory, initial.url);
       return sessionResult(record, 'start', {
         tabId: tab.tabId,
         viewport,
@@ -246,7 +246,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       const result = args.url
         ? await navigateTab(tab, normalizeBrowserUrl(args.url), timeoutFor(args.timeoutMs), options.signal)
         : await withAbort(tab.page.describe(options.signal), options.signal, browserCancellationError);
-      if (record.profileDirectory && result.url) await recordPersistentBrowserSite(record.profileDirectory, result.url);
+      if (record.profileDirectory && result.url && !record.driver.recordsPersistentSites) await recordPersistentBrowserSite(record.profileDirectory, result.url);
       return sessionResult(record, 'open_tab', { tabId: tab.tabId, ...result });
     } catch (error) {
       record.tabs.delete(tab.tabId);
@@ -280,7 +280,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     assertAiControl(record, 'navigate');
     const tab = requireTab(record, args.tabId);
     const result = await navigateTab(tab, normalizeBrowserUrl(args.url), timeoutFor(args.timeoutMs), options.signal);
-    if (record.profileDirectory && result.url) await recordPersistentBrowserSite(record.profileDirectory, result.url);
+    if (record.profileDirectory && result.url && !record.driver.recordsPersistentSites) await recordPersistentBrowserSite(record.profileDirectory, result.url);
     record.activeTabId = tab.tabId;
     return sessionResult(record, 'navigate', { tabId: tab.tabId, ...result });
   }
@@ -385,13 +385,19 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
   ): Promise<Record<string, unknown>> {
     const attribution = createAutomationAttribution(workspace, args, context);
     const config = getProfileConfig();
-    const directory = browserProfileDirectory(config, attribution.principalFingerprint);
+    const directory = assertPersistentBrowserProfileSafe(config, attribution.principalFingerprint);
     const profileKey = normalizeProfileKey(directory);
     if (activeProfiles.has(profileKey) || pendingProfiles.has(profileKey)) {
       throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Stop the persistent browser session before clearing its saved site data.');
     }
-    const result = await clearPersistentBrowserProfile(config, attribution.principalFingerprint);
-    return { ok: true, workspace: workspace.alias, action: 'clear_profile', profile: 'persistent', cleared: result.cleared };
+    pendingProfiles.add(profileKey);
+    try {
+      await clearBrowserProfileSession(directory);
+      const result = await clearPersistentBrowserProfile(config, attribution.principalFingerprint);
+      return { ok: true, workspace: workspace.alias, action: 'clear_profile', profile: 'persistent', cleared: result.cleared };
+    } finally {
+      pendingProfiles.delete(profileKey);
+    }
   }
 
   async function stop(

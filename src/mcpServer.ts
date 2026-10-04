@@ -20,6 +20,7 @@ interface RelaiMcpServerOptions {
   principal?: unknown;
   publicHttpOnly?: boolean;
   transportType?: string;
+  requestId?: string;
 }
 
 const MCP_SERVER_INFO = Object.freeze({

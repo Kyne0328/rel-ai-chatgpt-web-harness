@@ -269,6 +269,39 @@ try {
   assert.match(workId || '', /^[0-9a-f-]{36}$/i, 'HTTP Apps transport must start work from a configured workspace path');
   const persistedTask = await waitForTaskCorrelation(workId, 'chat-session-regression');
   assert.equal(persistedTask?.correlation?.conversationId, 'chat-session-regression', 'ChatGPT session metadata must persist as internal task correlation without leaking into compact model-visible status');
+  // Exercise the actual Node adapter -> SDK factory -> normal toolContext path.
+  // Protocol ids may be reused across independent stateless HTTP requests.
+  const sharedWireId = 'receipt-uuid-http-wire-id';
+  const receiptClientName = 'receipt-uuid-http-probe';
+  const receiptResponses = await Promise.all([0, 1].map(() => client.request('tools/call', {
+    name: 'relai_work',
+    arguments: { action: 'status', workspace: 'repo', work_id: workId },
+    _meta: { relaiRequestId: 'client-controlled-receipt-forgery' }
+  }, {
+    id: sharedWireId,
+    clientInfo: { name: receiptClientName, version: '1.0.0' },
+    extraHeaders: { 'x-relai-request-id': 'client-controlled-receipt-forgery' }
+  })));
+  for (const response of receiptResponses) {
+    assert.equal(response.response.status, 200, JSON.stringify(response.body));
+    assert.equal(response.body.id, sharedWireId, 'receipt isolation must not change wire response ids');
+    assert.equal(response.body.result?.isError, false, JSON.stringify(response.body));
+  }
+  let receiptAudit = [];
+  const receiptAuditDeadline = Date.now() + 5000;
+  while (Date.now() < receiptAuditDeadline) {
+    receiptAudit = (fs.existsSync(config.auditLogPath) ? fs.readFileSync(config.auditLogPath, 'utf8') : '')
+      .split(/\r?\n/).filter(Boolean).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } })
+      .filter(event => event.tool === 'work.status' && event.clientName === receiptClientName && event.taskId === workId);
+    if (receiptAudit.length >= 2) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(receiptAudit.length, 2, 'both normal SDK calls must retain auditable receipt identities');
+  const receiptIds = receiptAudit.map(event => event.requestId);
+  for (const id of receiptIds) assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    'the actual HTTP/SDK path must use a server-generated UUID, not client metadata or the protocol id');
+  assert.equal(new Set(receiptIds).size, 2, 'same-principal same-protocol-id HTTP calls must have distinct receipt identities');
+
   const validationWithExplicitLevel = await client.request('tools/call', {
     name: 'relai_validate',
     arguments: {

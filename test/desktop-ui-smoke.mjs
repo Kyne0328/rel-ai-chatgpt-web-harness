@@ -156,8 +156,8 @@ assert.match(settingsReact, /saved key is encrypted on this computer\. Rel\.AI d
 assert.match(settingsReact, /replacementKeyPresent: Boolean\(String\(value\?\.tunnelApiKey \|\| ''\)\.trim\(\)\)/, 'React dirty-state tracking may record only whether a replacement key is present');
 assert.doesNotMatch(settingsReact, /replacementKey:\s*String\(value\?\.tunnelApiKey/, 'React dirty-state snapshots must not serialize the runtime API key');
 assert.match(settingsReact, /Save connection settings/);
-assert.match(settingsReact, /Additional ChatGPT tunnels/);
-assert.match(settingsReact, /same Rel\.AI service and the same configured workspaces/);
+assert.match(settingsReact, /ChatGPT tunnel connections/);
+assert.match(settingsReact, /same local Rel\.AI service and the same configured workspaces/);
 assert.match(settingsReact, /saveTunnel/);
 assert.match(settingsReact, /removeTunnel/);
 assert.match(settingsReact, /function SettingsField/);

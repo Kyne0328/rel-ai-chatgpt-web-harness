@@ -35,6 +35,17 @@ write('src/routes.js', "export function getThing() { return true; }\nrouter.get(
 write('src/client.js', "export function loadThing() { return fetch('/v1/things'); }\n");
 write('src/late-caller.js', "import './late-target.js';\nexport const lateCaller = true;\n");
 
+const lateResolutionCases = [
+  ['src/extension-caller.ts', './extension-target.js', 'src/extension-target.ts'],
+  ['src/directory-caller.ts', './directory-target.js', 'src/directory-target/index.ts'],
+  ['src/trailing-caller.ts', './trailing-target/', 'src/trailing-target/index.ts'],
+  ['src/dot/caller.ts', '.', 'src/dot/index.ts']
+];
+for (const [caller, specifier] of lateResolutionCases) write(caller, `import '${specifier}';\n`);
+// More than one member keeps a dot-directory import unresolved until index.ts exists.
+write('src/dot/helper.ts', 'export const helper = true;\n');
+write('other/unchanged-caller.ts', "import './extension-target.js';\n");
+
 try {
   await repositoryIntelligence.ensure(workspace, config, { watch: false });
   fs.writeFileSync(path.join(workspaceRoot, 'src', 'target.js'), 'export function target() { return 2; }\n', 'utf8');
@@ -73,6 +84,22 @@ try {
     assert.ok(imported.length > 0, 'scoped addition must re-resolve previously unresolved imports');
   } finally {
     lateDb.close();
+  }
+
+  // Import spelling must not hide a newly resolvable target from invalidation.
+  const latePaths = lateResolutionCases.map(([, , target]) => target);
+  for (const target of latePaths) write(target, 'export const newlyAvailable = true;\n');
+  repositoryIntelligence.noteMutation(workspace, config, latePaths);
+  const spellingRefresh = await repositoryIntelligence.ensure(workspace, config, { watch: false });
+  assert.equal(spellingRefresh.scanMode, 'incremental');
+  const spellingDb = openIndexDatabase(repositoryIndexPath(config, workspace), { readonly: true });
+  try {
+    assert.equal(spellingDb.prepare("SELECT target_path FROM imports JOIN files ON files.id=imports.source_file_id WHERE files.path='other/unchanged-caller.ts'").get()?.target_path, null, 'candidate over-selection must leave unrelated unresolved imports unchanged');
+    for (const [caller, specifier, target] of lateResolutionCases) {
+      assert.ok(edgeRows(spellingDb, 'IMPORTS', caller, target).length > 0, `scoped addition must re-resolve ${specifier} from ${caller}`);
+    }
+  } finally {
+    spellingDb.close();
   }
 
   // Added callers and targets must also participate in the scoped generation.

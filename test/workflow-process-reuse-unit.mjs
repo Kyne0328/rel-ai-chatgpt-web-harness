@@ -30,6 +30,28 @@ try {
   assert.equal([concurrentFirst, concurrentSecond].filter(result => result.reused === true).length, 1,
     'exactly one simultaneous caller must observe reuse after the initial process starts');
 
+  const slowCoordinationArgs = { command, kind: 'service', purpose: 'bounded coordination fixture', startupWaitMs: 250 };
+  const slowCoordinationStart = startManagedProcess(
+    workspace,
+    config,
+    slowCoordinationArgs,
+    { taskId: 'task-coordination', principal: 'principal-a' }
+  );
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const coordinationStartedAt = Date.now();
+  await assert.rejects(
+    () => startManagedProcess(
+      workspace,
+      config,
+      slowCoordinationArgs,
+      { taskId: 'task-coordination', principal: 'principal-a', coordinationTimeoutMs: 50 }
+    ),
+    error => error?.code === 'PROCESS_START_COORDINATION_TIMEOUT'
+  );
+  assert.ok(Date.now() - coordinationStartedAt < 500, 'a duplicate startup must not wait indefinitely behind a stale reuse reservation');
+  const slowCoordinationProcess = await slowCoordinationStart;
+  started.push(slowCoordinationProcess.processId);
+
   const otherTask = await startManagedProcess(workspace, config, { command, kind: 'service', purpose: 'reuse fixture', startupWaitMs: 25 }, { taskId: 'task-b', principal: 'principal-a' });
   started.push(otherTask.processId);
   assert.notEqual(otherTask.processId, first.processId, 'processes must never be reused across logical tasks');

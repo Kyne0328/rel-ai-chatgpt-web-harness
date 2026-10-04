@@ -21,15 +21,32 @@ export function removeDashboardExtension(id: string): Record<string, unknown> {
   return removeExtension(readConfig(), id) as Record<string, unknown>;
 }
 
-export async function addDashboardExtensionSource(input: string): Promise<Record<string, unknown>> {
-  const current = readConfig();
-  const source = await validateExtensionSource(current, input);
-  const next = structuredClone(current);
-  next.extensions = next.extensions || { sources: [] };
-  next.extensions.sources = Array.isArray(next.extensions.sources) ? next.extensions.sources : [];
-  next.extensions.sources.push({ repositoryUrl: source.repositoryUrl, catalogUrl: source.catalogUrl });
-  writeConfig(next);
-  return { ok: true, source };
+let sourceAdditionQueue: Promise<unknown> = Promise.resolve();
+
+export function addDashboardExtensionSource(input: string): Promise<Record<string, unknown>> {
+  const operation = sourceAdditionQueue.then(async () => {
+    const current = readConfig();
+    if ((current.extensions?.sources?.length || 0) >= 20) {
+      throw new Error('A maximum of 20 extension sources can be configured. Remove one before adding another.');
+    }
+    const source = await validateExtensionSource(current, input);
+    // Validation performs network I/O. Preserve unrelated settings saved while
+    // it was in flight, and serialize source additions so conflicts see the last save.
+    const next = structuredClone(readConfig());
+    next.extensions = next.extensions || { sources: [] };
+    next.extensions.sources = Array.isArray(next.extensions.sources) ? next.extensions.sources : [];
+    if (next.extensions.sources.some((item: { catalogUrl?: string }) => item.catalogUrl === source.catalogUrl)) {
+      throw new Error('This extension source is already added.');
+    }
+    if (next.extensions.sources.length >= 20) {
+      throw new Error('A maximum of 20 extension sources can be configured. Remove one before adding another.');
+    }
+    next.extensions.sources.push({ repositoryUrl: source.repositoryUrl, catalogUrl: source.catalogUrl });
+    writeConfig(next);
+    return { ok: true, source };
+  });
+  sourceAdditionQueue = operation.catch(() => {});
+  return operation;
 }
 
 export function removeDashboardExtensionSource(sourceId: string): Record<string, unknown> {

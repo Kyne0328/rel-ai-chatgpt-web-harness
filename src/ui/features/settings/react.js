@@ -5,7 +5,7 @@ import { Icon } from '../../components/icons.js';
 import { openModal } from '../../components/modal.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
-import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection } from '../../connection-state.js';
+import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection, tunnelRuntimeView } from '../../connection-state.js';
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath } from '../../router.js';
@@ -123,6 +123,15 @@ function ConnectionPage({ data }) {
   const action = connectionPrimaryAction(state);
   const guideMode = connectionGuideMode(state);
   const tunnelId = String(data.desktopStatus?.tunnelId || data.connection?.tunnelId || '');
+  const primaryTunnel = tunnelId ? {
+    tunnelId,
+    label: 'Primary connection',
+    state: String(data.desktopStatus?.tunnelStatus || ''),
+    retry: {
+      scheduled: Boolean(data.desktopStatus?.tunnelNextRetryAt),
+      inFlight: false
+    }
+  } : null;
   const workspaceAlias = data.config?.workspaces?.[0]?.alias || 'myapp';
 
   const openSettings = ({ focus = false } = {}) => {
@@ -156,7 +165,7 @@ function ConnectionPage({ data }) {
     h(ConnectionLayers, { state, summary }),
     guideMode ? h(ConnectionGuide, { mode: guideMode, tunnelId, workspaceAlias }) : null,
     h('section', { id: 'connectionControls', className: 'connection-controls-section', ref: controlsRef },
-      h(DesktopConnectionSettings, { expanded: String(state.publicEndpoint?.status || '') === 'disabled' })
+      h(DesktopConnectionSettings, { expanded: String(state.publicEndpoint?.status || '') === 'disabled', primaryTunnel })
     ),
     typeof window.relaiDesktop?.logout === 'function' ? h(Card, { title: 'Connection controls' }, h(LogoutRow)) : null
   );
@@ -176,6 +185,7 @@ function connectionPrimaryAction(state = {}) {
     return { kind: 'restart', label: 'Retry now' };
   }
   if (endpoint === 'degraded') return { kind: 'restart', label: 'Retry now' };
+  if (endpoint === 'available' && Number(state.publicEndpoint?.issueCount || 0) > 0) return { kind: 'none' };
   if (summary.tone === 'working') return { kind: 'none' };
   if (summary.tone === 'bad' || summary.tone === 'warn') return { kind: 'route', href: '#diagnostics', label: 'Troubleshoot' };
   return { kind: 'none' };
@@ -245,7 +255,7 @@ function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
   );
 }
 
-function DesktopConnectionSettings({ expanded = false }) {
+function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
   const [form, setForm] = useState(null);
   const [saved, setSaved] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -393,6 +403,7 @@ function DesktopConnectionSettings({ expanded = false }) {
       ),
       credentialError ? h('div', { className: 'connection-key-error', role: 'alert' }, credentialError) : null,
       h(AdditionalTunnelConnections, {
+        primary: primaryTunnel,
         connections: form.additionalTunnels,
         statuses: form.additionalTunnelStatuses,
         desktop,
@@ -423,7 +434,7 @@ function DesktopConnectionSettings({ expanded = false }) {
   );
 }
 
-function AdditionalTunnelConnections({ connections = [], statuses = [], desktop, onChange }) {
+function AdditionalTunnelConnections({ primary = null, connections = [], statuses = [], desktop, onChange }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState({ label: '', tunnelId: '', apiKey: '' });
   const [showSecret, setShowSecret] = useState(false);
@@ -431,6 +442,11 @@ function AdditionalTunnelConnections({ connections = [], statuses = [], desktop,
   const [validation, setValidation] = useState(null);
 
   const statusFor = tunnelId => statuses.find(status => status.tunnelId === tunnelId) || null;
+  const rows = [
+    ...(primary?.tunnelId ? [{ connection: primary, status: primary, primary: true }] : []),
+    ...connections.map(connection => ({ connection, status: statusFor(connection.tunnelId), primary: false }))
+  ];
+  const statusSummary = tunnelConnectionStatusSummary(rows.map(row => row.status));
   const updateDraft = patch => {
     setValidation(null);
     setDraft(current => ({ ...current, ...patch }));
@@ -496,8 +512,8 @@ function AdditionalTunnelConnections({ connections = [], statuses = [], desktop,
   return h('section', { className: 'additional-tunnels', 'aria-labelledby': 'additionalTunnelsTitle' },
     h('div', { className: 'additional-tunnels-heading' },
       h('div', null,
-        h('strong', { id: 'additionalTunnelsTitle' }, 'Additional ChatGPT tunnels'),
-        h('p', { className: 'settings-help' }, 'Give each other ChatGPT account its own Secure MCP Tunnel. Every tunnel forwards to this same Rel.AI service and the same configured workspaces.')
+        h('strong', { id: 'additionalTunnelsTitle' }, 'ChatGPT tunnel connections'),
+        h('p', { className: 'settings-help' }, 'Each ChatGPT account can use its own Secure MCP Tunnel. Every tunnel reaches this same local Rel.AI service and the same configured workspaces.')
       ),
       h('button', {
         className: 'secondary compact-button',
@@ -507,28 +523,36 @@ function AdditionalTunnelConnections({ connections = [], statuses = [], desktop,
         'aria-controls': 'additionalTunnelForm'
       }, open ? 'Cancel' : 'Add tunnel')
     ),
-    connections.length ? h('div', { className: 'additional-tunnel-list' },
-      connections.map(connection => {
-        const status = statusFor(connection.tunnelId);
-        const view = additionalTunnelStatusView(status);
-        return h('div', { className: 'additional-tunnel-row', key: connection.tunnelId },
-          h('div', { className: 'additional-tunnel-copy' },
-            h('strong', null, connection.label),
-            h('span', { className: 'mono' }, connection.tunnelId),
-            status?.error ? h('small', { className: 'additional-tunnel-error' }, status.error) : null
-          ),
-          h('div', { className: 'additional-tunnel-actions' },
-            h(StatusPill, { label: view.label, tone: view.tone }),
-            h('button', {
-              className: 'secondary compact-button',
-              type: 'button',
-              disabled: Boolean(busy),
-              onClick: () => void remove(connection)
-            }, busy === connection.tunnelId ? 'Removing…' : 'Remove')
-          )
-        );
-      })
-    ) : h('p', { className: 'muted additional-tunnels-empty' }, 'No additional ChatGPT accounts are connected yet.'),
+    rows.length ? h(React.Fragment, null,
+      h('p', { className: 'additional-tunnel-summary', role: 'status' }, statusSummary),
+      h('div', { className: 'additional-tunnel-list' },
+        rows.map(row => {
+          const { connection, status } = row;
+          const view = tunnelRuntimeView(status);
+          return h('div', {
+            className: 'additional-tunnel-row',
+            key: connection.tunnelId,
+            'data-primary': row.primary ? 'true' : undefined
+          },
+            h('div', { className: 'additional-tunnel-copy' },
+              h('strong', null, connection.label || (row.primary ? 'Primary connection' : connection.tunnelId)),
+              h('small', null, row.primary ? 'Primary ChatGPT tunnel' : 'Additional ChatGPT tunnel'),
+              h('span', { className: 'mono' }, connection.tunnelId),
+              !row.primary && status?.error ? h('small', { className: 'additional-tunnel-error' }, status.error) : null
+            ),
+            h('div', { className: 'additional-tunnel-actions' },
+              h(StatusPill, { label: view.label, tone: view.tone }),
+              row.primary ? null : h('button', {
+                className: 'secondary compact-button',
+                type: 'button',
+                disabled: Boolean(busy),
+                onClick: () => void remove(connection)
+              }, busy === connection.tunnelId ? 'Removing…' : 'Remove')
+            )
+          );
+        })
+      )
+    ) : h('p', { className: 'muted additional-tunnels-empty' }, 'No ChatGPT tunnel connection is configured yet.'),
     open ? h('div', { id: 'additionalTunnelForm', className: 'additional-tunnel-form' },
       h(SettingsField, {
         label: 'Connection name',
@@ -598,14 +622,21 @@ function validateAdditionalTunnel(value) {
   return null;
 }
 
-function additionalTunnelStatusView(status) {
-  const state = String(status?.state || '');
-  if (status?.retry?.scheduled || status?.retry?.inFlight) return { label: 'Reconnecting', tone: 'warn' };
-  if (state === 'running') return { label: 'Connected', tone: 'good' };
-  if (state === 'degraded') return { label: 'Reconnecting', tone: 'warn' };
-  if (state === 'failed') return { label: 'Failed', tone: 'bad' };
-  if (['starting', 'locally_ready', 'authenticating'].includes(state)) return { label: 'Connecting', tone: 'working' };
-  return { label: 'Stopped', tone: 'neutral' };
+function tunnelConnectionStatusSummary(statuses = []) {
+  const views = statuses.map(tunnelRuntimeView);
+  const count = status => views.filter(view => view.status === status).length;
+  const parts = [`${views.length} tunnel${views.length === 1 ? '' : 's'}`];
+  const connected = count('available');
+  const reconnecting = count('degraded');
+  const connecting = count('connecting');
+  const failed = count('unavailable');
+  const stopped = count('disabled');
+  if (connected) parts.push(`${connected} connected`);
+  if (reconnecting) parts.push(`${reconnecting} reconnecting`);
+  if (connecting) parts.push(`${connecting} connecting`);
+  if (failed) parts.push(`${failed} failed`);
+  if (stopped) parts.push(`${stopped} stopped`);
+  return parts.join(' · ');
 }
 
 function validateConnectionSettings(value) {

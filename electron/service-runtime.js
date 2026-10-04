@@ -209,13 +209,7 @@ function createDesktopServiceRuntime(deps) {
     }
 
     const runToken = ++lifecycleToken;
-    const stopAdditionalTunnels = additionalTunnelRuntime?.stop
-      ? additionalTunnelRuntime.stop().catch(() => {})
-      : Promise.resolve();
-    await Promise.all([
-      secureTunnelRuntime.stop().catch(() => {}),
-      stopAdditionalTunnels
-    ]);
+    await secureTunnelRuntime.stop().catch(() => {});
     if (runToken !== lifecycleToken || stopPromise || !isListening() || !activePort) return getCurrentStatus();
     const localUrl = `http://127.0.0.1:${activePort}`;
     setStatus({

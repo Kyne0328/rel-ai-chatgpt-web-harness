@@ -4,11 +4,24 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
+import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { normalizeConfig } from '../src/config.js';
 
-import { initializeTelemetry, runSpan, sanitizeAttributes, shutdownTelemetry, summarizeCommandForTelemetry, telemetrySampleRatio, telemetryStatus } from '../src/telemetry.js';
+import { initializeTelemetry, runSpan, sanitizeAttributes, setTelemetryDiagnosticsEnabled, shutdownTelemetry, summarizeCommandForTelemetry, telemetrySampleRatio, telemetryStatus } from '../src/telemetry.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-tool-task-'));
 try {
+  const legacyDisabled = { stateDir: root, telemetry: { enabled: false, endpoint: 'http://127.0.0.1:4318/v1/traces', sampleRatio: 0.25 } };
+  const migratedDisabled = normalizeConfig(legacyDisabled);
+  assert.equal(migratedDisabled.telemetry.diagnosticsEnabled, false, 'upgrades must preserve a retained legacy telemetry opt-out');
+  assert.equal(migratedDisabled.telemetry.endpoint, legacyDisabled.telemetry.endpoint);
+  assert.equal(migratedDisabled.telemetry.sampleRatio, 0.25);
+  assert.equal(Object.hasOwn(migratedDisabled.telemetry, 'enabled'), false, 'normalization must produce only the canonical telemetry setting');
+  assert.equal(Object.hasOwn(legacyDisabled.telemetry, 'diagnosticsEnabled'), false, 'normalization must not mutate the input configuration');
+  assert.equal(normalizeConfig({ stateDir: root }).telemetry.diagnosticsEnabled, true, 'new installations retain the documented default');
+  assert.equal(normalizeConfig({ stateDir: root, telemetry: { enabled: true } }).telemetry.diagnosticsEnabled, true);
+  assert.equal(normalizeConfig({ stateDir: root, telemetry: { enabled: false, diagnosticsEnabled: true } }).telemetry.diagnosticsEnabled, true, 'an explicit canonical enable setting must take precedence');
+  assert.equal(normalizeConfig({ stateDir: root, telemetry: { enabled: true, diagnosticsEnabled: false } }).telemetry.diagnosticsEnabled, false, 'an explicit canonical opt-out must take precedence');
   const attributes = sanitizeAttributes({
     'relai.workspace': 'app',
     authorization: 'Bearer secret',
@@ -41,7 +54,7 @@ try {
   const previousOfficialBuild = process.env.REL_AI_OFFICIAL_BUILD;
   process.env.REL_AI_OFFICIAL_BUILD = '1';
   try {
-    const official = telemetryStatus({ telemetry: { diagnosticsEnabled: false, sampleRatio: 1 } });
+    const official = telemetryStatus({ stateDir: root, telemetry: { diagnosticsEnabled: false, sampleRatio: 1 } });
     assert.equal(official.usageReportingEnabled, true, 'official packaged builds must use the built-in maintainer usage endpoint');
     assert.equal(official.endpointConfigured, true, 'official packaged builds must expose the built-in diagnostic endpoint even when diagnostics are disabled');
   } finally {
@@ -67,6 +80,12 @@ try {
   });
   const previousUsageEndpoint = process.env.REL_AI_MAINTAINER_USAGE_ENDPOINT;
   const previousDiagnosticsEndpoint = process.env.REL_AI_MAINTAINER_DIAGNOSTICS_ENDPOINT;
+  const originalRegister = NodeTracerProvider.prototype.register;
+  let diagnosticProvider;
+  NodeTracerProvider.prototype.register = function (...args) {
+    diagnosticProvider = this;
+    return Reflect.apply(originalRegister, this, args);
+  };
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   try {
@@ -152,7 +171,8 @@ try {
       }),
       new RegExp(secret)
     );
-    await shutdownTelemetry();
+    assert.ok(diagnosticProvider, 'the actual SDK provider must initialize for diagnostic tests');
+    await diagnosticProvider.forceFlush();
 
     const diagnosticPayload = Buffer.concat(
       requests
@@ -166,7 +186,46 @@ try {
     assert.equal(diagnosticRequest?.installationId, upgradedIdentityState.installationId, 'maintainer diagnostics must identify the installation without adding it to the trace payload');
     assert.equal(diagnosticPayload.includes(Buffer.from(secret)), false, 'OTLP payloads must never include raw exception messages');
     assert.equal(diagnosticPayload.includes(Buffer.from(privatePath)), false, 'OTLP payloads must never include raw local paths from exceptions');
+
+    const diagnosticsConfig = { stateDir: root, telemetry: { diagnosticsEnabled: true, sampleRatio: 1 } };
+    await runSpan(diagnosticsConfig, 'relai.test.queued_before_opt_out', {}, async () => true);
+    let releaseActive;
+    let markActiveStarted;
+    const activeGate = new Promise(resolve => { releaseActive = resolve; });
+    const activeStarted = new Promise(resolve => { markActiveStarted = resolve; });
+    const activeSpan = runSpan(diagnosticsConfig, 'relai.test.active_across_opt_out', {}, async () => {
+      markActiveStarted();
+      await activeGate;
+      return 'operation completed';
+    });
+    await activeStarted;
+    const racingSpan = runSpan(diagnosticsConfig, 'relai.test.pending_at_opt_out', {}, async () => 'race operation completed');
+    await setTelemetryDiagnosticsEnabled(diagnosticsConfig, false);
+    const directDisabledSpan = diagnosticProvider.getTracer('relai-opt-out-test').startSpan('relai.test.direct_sdk_disabled');
+    directDisabledSpan.end();
+    assert.equal(await racingSpan, 'race operation completed', 'a pending telemetry setup must not change the primary operation');
+    assert.equal(await runSpan(diagnosticsConfig, 'relai.test.disabled', {}, async () => 'unchanged'), 'unchanged');
+    await assert.rejects(() => runSpan(diagnosticsConfig, 'relai.test.disabled_error', {}, async () => {
+      throw new Error('SYNTHETIC_OPERATION_ERROR');
+    }), /SYNTHETIC_OPERATION_ERROR/, 'opt-out must preserve the primary operation error');
+    await setTelemetryDiagnosticsEnabled(diagnosticsConfig, true);
+    releaseActive();
+    assert.equal(await activeSpan, 'operation completed');
+    await runSpan(diagnosticsConfig, 'relai.test.after_reenable', {}, async () => true);
+    await diagnosticProvider.forceFlush();
+    const afterTogglePayload = Buffer.concat(requests.filter(request => request.path === '/v1/traces').map(request => request.body));
+    for (const excluded of ['queued_before_opt_out', 'active_across_opt_out', 'pending_at_opt_out', 'relai.test.disabled', 'direct_sdk_disabled']) {
+      assert.equal(afterTogglePayload.includes(Buffer.from(excluded)), false, `opt-out must permanently discard ${excluded}`);
+    }
+    assert.equal(afterTogglePayload.includes(Buffer.from('after_reenable')), true, 'new spans after re-enable must export normally');
+
+    await runSpan(diagnosticsConfig, 'relai.test.queued_at_shutdown', {}, async () => true);
+    await setTelemetryDiagnosticsEnabled(diagnosticsConfig, false);
+    const requestsBeforeDisabledShutdown = requests.length;
+    await shutdownTelemetry();
+    assert.equal(requests.length, requestsBeforeDisabledShutdown, 'disabled shutdown must discard queued spans without export');
   } finally {
+    NodeTracerProvider.prototype.register = originalRegister;
     if (previousUsageEndpoint == null) delete process.env.REL_AI_MAINTAINER_USAGE_ENDPOINT;
     else process.env.REL_AI_MAINTAINER_USAGE_ENDPOINT = previousUsageEndpoint;
     if (previousDiagnosticsEndpoint == null) delete process.env.REL_AI_MAINTAINER_DIAGNOSTICS_ENDPOINT;

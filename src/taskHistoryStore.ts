@@ -17,13 +17,14 @@ import {
   clearTaskHistory as clearStoredTaskHistory,
   ensureCurrentHistory,
   findSessionsContaining,
+  findConversationSessions,
   getTaskHistoryDir,
   listRecentSessionEventPage,
   listRecentSessionEvents,
   listSessionSummaries,
   listSessionSummaryPage,
   listSessions,
-  pruneSessions,
+  pruneSessionsAsync,
   readSession,
   removeSession,
   removeWorkspaceSessions,
@@ -41,6 +42,7 @@ const STORE_VERSION = 3;
 const MAX_SESSION_EVENTS = 200;
 const TASK_HISTORY_FLUSH_MS = 75;
 const TASK_HISTORY_PRUNE_DELAY_MS = 1500;
+const activePrunes = new Set<Promise<void>>();
 const TASK_HISTORY_RETRY_BASE_MS = 1000;
 const TASK_HISTORY_RETRY_MAX_MS = 15_000;
 
@@ -306,6 +308,7 @@ function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapsh
     persisted = storedSessions.map((session: StoredTaskSession) => {
       const pending = readPendingSession(directory, session.id);
       const needsFullRecord = options.summary === true
+        && maintain
         && !pending
         && session.status !== 'inactive'
         && !isTerminalTaskStatus(session.status);
@@ -438,10 +441,7 @@ function findTaskReuseCandidates(config: TaskHistoryConfig, workspaceAlias: unkn
   if (!workspace || !conversation) return [];
   try {
     const directory = getTaskHistoryDir(config);
-    const sessions = findSessionsContaining(directory, [conversation], {
-      workspace,
-      limit: clamp(limit || 24, 1, 50)
-    });
+    const sessions = findConversationSessions(directory, workspace, conversation, clamp(limit || 24, 1, 50));
     return (Array.isArray(sessions) ? sessions : [])
       .filter(session => Boolean(session?.id))
       .map(session => readWorkingSession(directory, String(session.id)) || session) as TaskRecord[];
@@ -815,8 +815,11 @@ function scheduleTaskHistoryPrune(directory: string): void {
   if (pendingPrunes.has(directory)) return;
   const timer = setTimeout(() => {
     pendingPrunes.delete(directory);
-    try { pruneSessions(directory); }
-    catch (error) { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history prune:', error); }
+    const prune = pruneSessionsAsync(directory).catch((error: unknown) => {
+      if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history prune:', error);
+    });
+    activePrunes.add(prune);
+    void prune.finally(() => activePrunes.delete(prune));
   }, TASK_HISTORY_PRUNE_DELAY_MS);
   timer.unref?.();
   pendingPrunes.set(directory, timer);
@@ -847,9 +850,10 @@ async function flushTaskHistoryPersistence(): Promise<{ ok: boolean; failed: num
   for (const [directory, timer] of [...pendingPrunes.entries()]) {
     clearTimeout(timer);
     pendingPrunes.delete(directory);
-    try { pruneSessions(directory); }
+    try { await pruneSessionsAsync(directory); }
     catch (error) { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history prune flush:', error); }
   }
+  await Promise.all([...activePrunes]);
   return { ok: failed.size === 0, failed: failed.size, pending: pendingSessions.size };
 }
 

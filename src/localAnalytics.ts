@@ -794,6 +794,7 @@ function removeWorkspaceLocalAnalytics(config: AnalyticsConfig = {}, workspaceVa
 }
 
 async function clearLocalAnalytics(config: AnalyticsConfig = {}): Promise<{ ok: true; removedFiles: number; removedBytes: number }> {
+  await drainScheduledAnalyticsWrites();
   closeAnalyticsWriteDatabases(config);
   migrateLegacyLocalAnalytics(config);
   const result = withStateDatabase(config, (db: StateDatabase) => {

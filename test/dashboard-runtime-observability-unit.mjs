@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -119,6 +120,133 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const taskIdentitySource = fs.readFileSync(path.join(root, 'src/ui/task-identity.js'), 'utf8');
 const sessionsSource = fs.readFileSync(path.join(root, 'src/ui/features/sessions/react.js'), 'utf8');
 const processesSource = fs.readFileSync(path.join(root, 'src/ui/features/processes/react.js'), 'utf8');
+// Exercise the actual route partition and row render, not just model flags or source text.
+const processStopRequests = [];
+let processRefreshes = 0;
+const processRenderContext = {
+  React: {
+    Fragment: 'fragment',
+    createElement(type, props, ...children) {
+      return typeof type === 'function' ? type({ ...props, children }) : { type, props: props || {}, children };
+    }
+  },
+  memo: component => component,
+  useMemo: compute => compute(),
+  useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
+  useRef: initial => ({ current: initial }),
+  useEffect: () => {},
+  Icon: () => null,
+  StatusPill: ({ label }) => label,
+  processListView,
+  postJson: async (...args) => { processStopRequests.push(args); return { ok: true }; },
+  requestDashboardRefresh: () => { processRefreshes += 1; }
+};
+vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace('export function createProcessesRoute', 'function createProcessesRoute')
+  + '\nglobalThis.renderProcesses = createProcessesRoute;', processRenderContext);
+const restartedProcessTree = processRenderContext.renderProcesses(() => ({
+  managedProcesses: [{ processId: 'restart-survivor', status: 'unknown_after_restart', pid: 456, label: 'Restart survivor' }]
+}))();
+const processNodes = [];
+function visitProcessNode(node) {
+  if (node == null) return;
+  if (Array.isArray(node)) return node.forEach(visitProcessNode);
+  processNodes.push(node);
+  if (typeof node === 'object') (node.children || []).forEach(visitProcessNode);
+}
+visitProcessNode(restartedProcessTree);
+assert.ok(processNodes.some(node => node?.props?.['data-process-id'] === 'restart-survivor'), 'a process whose state is unknown after restart must remain visible');
+assert.ok(processNodes.some(node => node?.props?.['data-stop-process'] === true && node.props.disabled === false), 'a restart-unknown process must retain its enabled Stop action');
+assert.ok(processNodes.includes('Unknown after restart'), 'the renderer must disclose uncertain restart state');
+assert.ok(processNodes.some(node => typeof node === 'string' && /Stop the process if it is still running/.test(node)), 'the renderer must retain restart recovery guidance');
+assert.ok(processNodes.includes('0 running · 1 needs attention'), 'uncertain processes must not be counted as running or finished');
+
+processNodes.find(node => node?.props?.['data-stop-process'] === true).props.onClick();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(processStopRequests[0]?.[0], '/api/processes/stop');
+assert.equal(processStopRequests[0]?.[1]?.processId, 'restart-survivor', 'Stop must target the displayed process through the existing backend endpoint');
+assert.equal(processRefreshes, 1);
+
+// Drive the real OutputBlock effects with controlled request completion order.
+async function exerciseProcessOutputFollow(newestFirst) {
+  const slots = [];
+  const pendingEffects = [];
+  const requests = [];
+  let cursor = 0;
+  let writes = 0;
+  let props;
+  let tree;
+  const context = {
+    React: { createElement: (type, nodeProps, ...children) => ({ type, props: nodeProps || {}, children }) },
+    memo: component => component,
+    useState(initial) {
+      const index = cursor++;
+      slots[index] ||= { value: typeof initial === 'function' ? initial() : initial };
+      return [slots[index].value, next => {
+        writes += 1;
+        slots[index].value = typeof next === 'function' ? next(slots[index].value) : next;
+      }];
+    },
+    useRef(initial) {
+      const index = cursor++;
+      slots[index] ||= { value: { current: initial } };
+      return slots[index].value;
+    },
+    useEffect(effect, dependencies) {
+      const index = cursor++;
+      const previous = slots[index];
+      if (previous && dependencies.every((value, i) => Object.is(value, previous.dependencies[i]))) return;
+      pendingEffects.push(() => {
+        previous?.cleanup?.();
+        slots[index] = { dependencies, cleanup: effect() };
+      });
+    },
+    fetchJson(url) {
+      return new Promise(resolve => requests.push({ url, resolve }));
+    },
+    URLSearchParams
+  };
+  vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace('export function createProcessesRoute', 'function createProcessesRoute')
+    + '\nglobalThis.renderOutput = OutputBlock;', context);
+  const render = totalBytes => {
+    props = {
+      processId: 'follow-process', stream: 'stdout', value: 'B'.repeat(10), active: true,
+      meta: { tailStartOffset: 10, totalBytes, retainedFromOffset: 0, droppedBytes: 0, tailTruncated: true, retentionTruncated: false }
+    };
+    cursor = 0;
+    tree = context.renderOutput(props);
+    while (pendingEffects.length) pendingEffects.shift()();
+    return tree;
+  };
+  const flatten = node => node == null ? [] : Array.isArray(node) ? node.flatMap(flatten)
+    : [node, ...(typeof node === 'object' ? (node.children || []).flatMap(flatten) : [])];
+  const drain = async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); };
+  render(20);
+  flatten(tree).find(node => node?.props?.['aria-label'] === 'Load earlier stdout output').props.onClick();
+  requests[0].resolve({ ok: true, range: { offset: 0, nextOffset: 10, text: 'A'.repeat(10) } });
+  await drain();
+  render(20);
+  render(30);
+  assert.equal(requests.length, 2);
+  render(40); // New live bytes arrive while the prior range request is unresolved.
+  assert.equal(requests.length, 3, 'new output must retain a pending follower when the previous effect is invalidated');
+  const older = () => requests[1].resolve({ ok: true, range: { offset: 20, nextOffset: 30, text: 'C'.repeat(10) } });
+  const newer = () => requests[2].resolve({ ok: true, range: { offset: 20, nextOffset: 40, text: 'C'.repeat(10) + 'D'.repeat(10) } });
+  if (newestFirst) { newer(); await drain(); older(); } else { older(); await drain(); newer(); }
+  await drain();
+  render(40);
+  const output = flatten(tree).find(node => node?.type === 'pre');
+  assert.equal(output.children.join(''), 'A'.repeat(10) + 'B'.repeat(10) + 'C'.repeat(10) + 'D'.repeat(10), 'latest range must append once, without losing or duplicating bytes after an overlap');
+  render(50);
+  assert.equal(requests.length, 4, 'following must continue after the overlap');
+  slots.forEach(slot => slot?.cleanup?.());
+  const writesBeforeUnmountResponse = writes;
+  requests[3].resolve({ ok: true, range: { offset: 40, nextOffset: 50, text: 'E'.repeat(10) } });
+  await drain();
+  assert.equal(writes, writesBeforeUnmountResponse, 'a disposed output follower must ignore its pending response');
+}
+await exerciseProcessOutputFollow(false);
+await exerciseProcessOutputFollow(true);
+
 const dashboardDataSource = fs.readFileSync(path.join(root, 'src/core/dashboard-data.ts'), 'utf8');
 const dashboardRuntimeSource = fs.readFileSync(path.join(root, 'src/core/dashboard-runtime.ts'), 'utf8');
 const settingsSource = fs.readFileSync(path.join(root, 'src/ui/features/settings/react.js'), 'utf8');

@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
+import fs from 'node:fs';
+import os from 'node:os';
+import { configureBrowserNativeBridge } from '../src/browser/browserDriver.ts';
+import { createBrowserRuntime } from '../src/browser/browserRuntime.ts';
+import * as browserProfiles from '../src/browser/browserProfile.ts';
 
 import { createBrowserSurfaceHost } from '../electron/browser-surface-host.js';
 import { registerBrowserSurfaceIpc } from '../electron/ipc-handlers-dashboard.js';
@@ -20,8 +25,9 @@ class FakeSession extends EventEmitter {
   setPermissionRequestHandler(handler) { this.permissionRequestHandler = handler; }
   setPermissionCheckHandler(handler) { this.permissionCheckHandler = handler; }
   setCertificateVerifyProc(handler) { this.certificateVerifier = handler; }
-  async clearStorageData(options) { this.storageCleared += 1; this.storageClearOptions.push(options); }
+  async clearStorageData(options) { this.storageCleared += 1; this.storageClearOptions.push(options); this.cookieValues = []; }
   async clearCache() { this.cacheCleared += 1; }
+  async clearAuthCache() { this.authCacheCleared = (this.authCacheCleared || 0) + 1; }
 }
 
 class FakeWebContents extends EventEmitter {
@@ -109,6 +115,7 @@ function createHarness({
   listPersistentProfiles = async () => [],
   readPersistentSites = async () => [],
   recordPersistentSite = async () => {},
+  flushPersistentSites = async () => {},
   forgetPersistentSite = async () => {}
 } = {}) {
   const sessions = [];
@@ -158,6 +165,7 @@ function createHarness({
     listPersistentProfiles,
     readPersistentSites,
     recordPersistentSite,
+    flushPersistentSites,
     forgetPersistentSite,
     onEvent: event => events.push(event)
   });
@@ -235,6 +243,36 @@ function createHarness({
   assert.equal(sessions[0].permissionCheckHandler({ id: 999 }, 'geolocation', 'https://other.test'), false, 'a session grant must not authorize a different origin');
   assert.deepEqual(host.getState().permissionRequests, []);
   await host.closeAll();
+}
+
+{
+  const { host, sessions, webContents } = createHarness();
+  try {
+    const foreground = await host.run({ action: 'start' });
+    await host.run({ action: 'open_page', nativeSessionId: foreground.nativeSessionId });
+    await host.setControl('user');
+    const background = await host.run({ action: 'start' });
+    await host.run({ action: 'open_page', nativeSessionId: background.nativeSessionId });
+    const decisions = [];
+    sessions[1].permissionRequestHandler(webContents[1], 'geolocation', allowed => decisions.push(['location', allowed]), { requestingUrl: 'https://same.fixture.invalid/' });
+    sessions[1].permissionRequestHandler(webContents[1], 'notifications', allowed => decisions.push(['notifications', allowed]), { requestingUrl: 'https://same.fixture.invalid/' });
+    const state = host.getState();
+    assert.equal(state.nativeSessionId, foreground.nativeSessionId, 'background permission must not steal the pinned view');
+    assert.equal(state.control, 'user');
+    assert.equal(state.permissionRequests.length, 2, 'all pending background permissions must be actionable');
+    assert.ok(state.permissionRequests.every(request => request.nativeSessionId === background.nativeSessionId), 'permission prompts must retain unambiguous session identity');
+    const location = state.permissionRequests.find(request => request.permission === 'geolocation');
+    const notifications = state.permissionRequests.find(request => request.permission === 'notifications');
+    host.respondPermission(location.requestId, false);
+    assert.deepEqual(decisions, [['location', false]]);
+    assert.equal(host.getState().permissionRequests.length, 1, 'denial must remove only its own pending request');
+    host.respondPermission(notifications.requestId, true);
+    assert.deepEqual(decisions, [['location', false], ['notifications', true]]);
+    assert.equal(sessions[1].permissionCheckHandler(webContents[1], 'notifications', 'https://same.fixture.invalid'), true);
+    assert.equal(sessions[0].permissionCheckHandler(webContents[0], 'notifications', 'https://same.fixture.invalid'), false, 'permission response must not grant another session');
+    assert.equal(host.getState().nativeSessionId, foreground.nativeSessionId);
+    assert.equal(host.getState().control, 'user');
+  } finally { await host.closeAll(); }
 }
 
 {
@@ -472,6 +510,22 @@ function createHarness({
   await host.setControl('ai');
   assert.equal(webContents[0].debuggerCommands.findLast(([method]) => method === 'Input.setIgnoreInputEvents')?.[1]?.ignore, true, 'returning control must lock native page input again');
 
+  for (const reason of ['sign_in', 'mfa', 'captcha', 'user_input']) {
+    await host.run({ action: 'set_control', nativeSessionId: started.nativeSessionId, owner: 'user', reason });
+    webContents[0].emit('blur');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(host.getState().control, 'user', `${reason} handoff must survive Alt+Tab or clicking away`);
+    assert.equal(host.getState().handoffReason, reason, 'handoff reason must remain visible until explicit completion');
+    assert.equal(webContents[0].debuggerCommands.findLast(([method]) => method === 'Input.setIgnoreInputEvents')?.[1]?.ignore, false, 'pending handoff must leave native page input enabled');
+    await assert.rejects(
+      () => host.run({ action: 'navigate', nativeSessionId: started.nativeSessionId, nativePageId: opened.nativePageId, url: 'https://example.test/' }),
+      error => error?.code === 'BROWSER_USER_CONTROL_ACTIVE'
+    );
+    await host.run({ action: 'set_control', nativeSessionId: started.nativeSessionId, owner: 'ai' });
+    assert.equal(host.getState().control, 'ai', 'explicit completion or cancellation must resume agent control');
+    assert.equal(host.getState().handoffReason, '');
+  }
+
   await host.closeAll();
   assert.equal(host.getState().active, false);
   assert.deepEqual(host.getState().sessions, []);
@@ -598,6 +652,193 @@ function createHarness({
   assert.equal(cancelCount, 1, 'closing a page must cancel a download that already started');
   await cancelledDownload;
   await host.closeAll();
+}
+
+{
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-profile-clear-'));
+  const previousStateDir = process.env.REL_AI_MCP_STATE_DIR;
+  process.env.REL_AI_MCP_STATE_DIR = temporary;
+  const pendingSiteWrites = [];
+  const { host, pathSessions, webContents } = createHarness({
+    recordPersistentSite: (directory, url) => {
+      const pending = browserProfiles.recordPersistentBrowserSite(directory, url);
+      pendingSiteWrites.push(pending);
+      return pending;
+    },
+    flushPersistentSites: directory => browserProfiles.waitPersistentBrowserSiteWrites
+      ? browserProfiles.waitPersistentBrowserSiteWrites(directory)
+      : Promise.all(pendingSiteWrites)
+  });
+  const runtime = createBrowserRuntime({ getProfileConfig: () => ({ stateDir: temporary }) });
+  const workspace = { alias: 'fixture' };
+  const context = { principal: { clientId: 'native-profile-fixture', subject: 'fixture', authMode: 'test' } };
+  configureBrowserNativeBridge(payload => host.run(payload));
+  let releaseClear = () => {};
+  let releaseWrite = () => {};
+  let beginWrite = () => {};
+  let holdWrite = false;
+  let writes = 0;
+  const writeStarted = new Promise(resolve => { beginWrite = resolve; });
+  const writeBarrier = new Promise(resolve => { releaseWrite = resolve; });
+  const originalWriteFile = fs.promises.writeFile;
+  fs.promises.writeFile = async (file, ...args) => {
+    if (String(file).startsWith(temporary) && String(file).includes('.relai-sites.json.tmp-')) {
+      writes += 1;
+      if (holdWrite) { beginWrite(); await writeBarrier; }
+    }
+    return originalWriteFile(file, ...args);
+  };
+  try {
+    const first = await runtime.start(workspace, { url: 'https://initial.fixture.invalid/' }, context);
+    await Promise.all(pendingSiteWrites);
+    assert.equal(writes, 1, 'native navigation must have one registry writer, not both host and utility');
+    await Promise.all([
+      webContents[0].loadURL('https://one.fixture.invalid/'),
+      webContents[0].loadURL('https://two.fixture.invalid/')
+    ]);
+    await Promise.all(pendingSiteWrites);
+    const recordedSites = await browserProfiles.readPersistentBrowserSites([...pathSessions.keys()][0]);
+    assert.ok(recordedSites.includes('https://one.fixture.invalid'));
+    assert.ok(recordedSites.includes('https://two.fixture.invalid'), 'concurrent native origins must both survive canonical serialization');
+    const cachedSession = [...pathSessions.values()][0];
+    cachedSession.cookieValues = [{ name: 'fixture', value: 'synthetic', domain: 'fixture.invalid' }];
+    holdWrite = true;
+    await webContents[0].loadURL('https://pending.fixture.invalid/');
+    await writeStarted;
+    await runtime.stop(workspace, { sessionId: first.sessionId }, context);
+    assert.equal(cachedSession.storageCleared, 0, 'ordinary persistent close must retain saved site data');
+    let clearStarted = false;
+    let beginClear = () => {};
+    const clearStartedPromise = new Promise(resolve => { beginClear = resolve; });
+    const clearBarrier = new Promise(resolve => { releaseClear = resolve; });
+    const clearStorage = cachedSession.clearStorageData.bind(cachedSession);
+    cachedSession.clearStorageData = async () => { clearStarted = true; beginClear(); await clearBarrier; await clearStorage(); };
+    const clearing = runtime.clearProfile(workspace, {}, context);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(clearStarted, false, 'native clear must wait for the host-owned pending registry write');
+    await assert.rejects(() => runtime.start(workspace, {}, context), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE', 'profile clear must reserve ownership against concurrent start');
+    holdWrite = false;
+    releaseWrite();
+    await clearStartedPromise;
+    assert.equal(clearStarted, true, 'clear_profile must cross the native bridge and clear the cached Electron Session');
+    releaseClear();
+    assert.equal((await clearing).cleared, true);
+    assert.equal(fs.existsSync([...pathSessions.keys()][0]), false, 'late host registry work must not recreate cleared metadata');
+    assert.deepEqual(cachedSession.cookieValues, []);
+    assert.equal(cachedSession.cacheCleared, 1);
+    assert.equal(cachedSession.authCacheCleared, 1);
+    const reopened = await runtime.start(workspace, {}, context);
+    assert.equal([...pathSessions.values()][0], cachedSession, 'the test must actually reuse the same native Session');
+    await runtime.stop(workspace, { sessionId: reopened.sessionId }, context);
+    cachedSession.clearStorageData = async () => { throw new Error('fixture storage clear failed'); };
+    await assert.rejects(() => runtime.clearProfile(workspace, {}, context), /fixture storage clear failed/);
+    assert.equal(fs.existsSync([...pathSessions.keys()][0]), true, 'native clear failure must prevent filesystem deletion');
+    const afterFailure = await runtime.start(workspace, {}, context);
+    assert.ok(afterFailure.sessionId, 'failed profile clear must release its reservation');
+    await runtime.stop(workspace, { sessionId: afterFailure.sessionId }, context);
+    const profileDirectory = [...pathSessions.keys()][0];
+    const backupDirectory = `${profileDirectory}-fixture-backup`;
+    const unrelatedDirectory = path.join(temporary, 'unrelated-fixture-profile');
+    fs.mkdirSync(unrelatedDirectory, { recursive: true });
+    fs.writeFileSync(path.join(unrelatedDirectory, 'sentinel.txt'), 'fixture data');
+    fs.renameSync(profileDirectory, backupDirectory);
+    let nativeClearCalls = 0;
+    cachedSession.clearStorageData = async () => { nativeClearCalls += 1; };
+    try {
+      fs.symlinkSync(unrelatedDirectory, profileDirectory, process.platform === 'win32' ? 'junction' : 'dir');
+      await assert.rejects(() => runtime.clearProfile(workspace, {}, context), /symbolic-link browser profile/);
+      assert.equal(nativeClearCalls, 0, 'unsafe profile paths must be rejected before any native data clear');
+      assert.equal(fs.readFileSync(path.join(unrelatedDirectory, 'sentinel.txt'), 'utf8'), 'fixture data');
+    } finally {
+      fs.rmSync(profileDirectory, { recursive: true, force: true });
+      fs.renameSync(backupDirectory, profileDirectory);
+    }
+  } finally {
+    releaseWrite();
+    releaseClear();
+    fs.promises.writeFile = originalWriteFile;
+    await runtime.shutdown();
+    configureBrowserNativeBridge(null);
+    await host.closeAll();
+    if (previousStateDir === undefined) delete process.env.REL_AI_MCP_STATE_DIR;
+    else process.env.REL_AI_MCP_STATE_DIR = previousStateDir;
+    fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  }
+}
+
+
+{
+  const profileDirectory = path.resolve(os.tmpdir(), `relai-native-clear-custody-${process.pid}`);
+  const { host, pathSessions } = createHarness();
+  let releaseClear = () => {};
+  let clearing;
+  try {
+    const original = await host.run({ action: 'start', profileDirectory });
+    await host.run({ action: 'close_session', nativeSessionId: original.nativeSessionId });
+    const cached = [...pathSessions.values()][0];
+    let beginClear;
+    const clearStarted = new Promise(resolve => { beginClear = resolve; });
+    const clearBarrier = new Promise(resolve => { releaseClear = resolve; });
+    cached.clearStorageData = async () => { beginClear(); await clearBarrier; };
+    const caller = new AbortController();
+    clearing = host.run({ action: 'clear_profile', profileDirectory }, { signal: caller.signal });
+    await clearStarted;
+    caller.abort(new Error('fixture caller timed out'));
+    const equivalentPath = process.platform === 'win32' ? profileDirectory.toUpperCase() : profileDirectory;
+    await assert.rejects(() => host.run({ action: 'start', profileDirectory: equivalentPath }), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE', 'lost IPC caller must not release the host-owned noncancellable clear');
+    releaseClear();
+    await clearing;
+    const recovered = await host.run({ action: 'start', profileDirectory });
+    await host.run({ action: 'close_session', nativeSessionId: recovered.nativeSessionId });
+    cached.clearStorageData = async () => { throw new Error('fixture native clear failed'); };
+    await assert.rejects(() => host.run({ action: 'clear_profile', profileDirectory }), /fixture native clear failed/);
+    const afterFailure = await host.run({ action: 'start', profileDirectory });
+    assert.ok(afterFailure.nativeSessionId, 'failed native clear must release its own reservation');
+  } finally {
+    releaseClear();
+    await clearing?.catch(() => {});
+    await host.closeAll();
+  }
+}
+
+for (const scope of ['all', 'site']) {
+  const profileDirectory = path.resolve(os.tmpdir(), `relai-saved-data-custody-${process.pid}-${scope}`);
+  let diskClears = 0;
+  let forgotten = 0;
+  const { host, pathSessions } = createHarness({
+    listPersistentProfiles: async () => [profileDirectory],
+    clearPersistentData: async () => { diskClears += 1; return { cleared: true }; },
+    forgetPersistentSite: async () => { forgotten += 1; }
+  });
+  let releaseClear = () => {};
+  let clearing;
+  try {
+    await host.listSavedSites();
+    const cached = [...pathSessions.values()][0];
+    let beginClear;
+    const started = new Promise(resolve => { beginClear = resolve; });
+    const barrier = new Promise(resolve => { releaseClear = resolve; });
+    cached.clearStorageData = async () => { beginClear(); await barrier; };
+    const clear = () => scope === 'all' ? host.clearSavedData() : host.clearSavedSite('https://saved.fixture.invalid');
+    clearing = clear();
+    await started;
+    await assert.rejects(() => host.run({ action: 'start', profileDirectory: `${profileDirectory}-new` }), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE', 'whole-store clear must guard new persistent profiles too');
+    await assert.rejects(() => host.run({ action: 'clear_profile', profileDirectory }), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+    releaseClear();
+    await clearing;
+    const previousDiskClears = diskClears;
+    const previousForgotten = forgotten;
+    cached.clearStorageData = async () => { throw new Error('fixture native clearing failed'); };
+    await assert.rejects(clear, /Some site data may already have been cleared.*fixture native clearing failed/);
+    assert.equal(diskClears, previousDiskClears, 'native failure must prevent deletion of saved profile files');
+    assert.equal(forgotten, previousForgotten, 'native failure must not forget the affected site registry');
+    const recovered = await host.run({ action: 'start', profileDirectory });
+    assert.ok(recovered.nativeSessionId, 'a failed whole-store clear must release its guard');
+  } finally {
+    releaseClear();
+    await clearing?.catch(() => {});
+    await host.closeAll();
+  }
 }
 
 console.log('Embedded browser surface lifecycle, attachment, takeover, downloads, and cleanup passed.');

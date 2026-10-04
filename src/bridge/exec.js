@@ -196,7 +196,9 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   let filesystemBefore = null;
   if (trackMutation) {
     try {
-      statusBefore = await readGitStatusMap(workspace, config, signal);
+      statusBefore = typeof context.preExecutionGitStatus === 'string'
+        ? statusMutationSnapshot(workspace, context.preExecutionGitStatus)
+        : await readGitStatusMap(workspace, config, signal);
       filesystemBefore = !statusBefore ? await readFilesystemStatusMap(workspace, signal) : null;
     } catch (error) {
       if (!signal?.aborted) throw error;
@@ -228,7 +230,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
         changedFiles: [],
         changedFilesTruncated: false,
         mutationTracking: 'cancelled-before-execution',
-        mutationUnknown: true
+        mutationUnknown: false
       };
     }
   }

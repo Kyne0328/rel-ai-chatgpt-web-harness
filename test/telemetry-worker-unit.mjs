@@ -165,9 +165,37 @@ assert.equal((await telemetryWorker.fetch(new Request(presenceUrl, {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(valid)
 }), telemetryEnv)).status, 401, 'presence must reject missing installation credentials');
 const presenceAuth = { 'content-type': 'application/json', authorization: `Bearer ${ingestToken}` };
+let oversizedPulls = 0;
+let oversizedCancelled = false;
+const oversizedBody = new ReadableStream({
+  pull(controller) {
+    oversizedPulls += 1;
+    controller.enqueue(new Uint8Array(1024).fill(32));
+    if (oversizedPulls === 16) controller.close();
+  },
+  cancel() { oversizedCancelled = true; }
+}, { highWaterMark: 0 });
+const oversizedResponse = await telemetryWorker.fetch(new Request(presenceUrl, {
+  method: 'POST', headers: presenceAuth, body: oversizedBody, duplex: 'half'
+}), telemetryEnv);
+assert.equal(oversizedResponse.status, 413);
+assert.equal(oversizedCancelled, true, 'oversized streaming bodies must be cancelled as soon as the byte limit is exceeded');
+assert.ok(oversizedPulls <= 5, 'the 4 KiB presence limit must prevent reading the complete oversized body');
 const enrolled = await telemetryWorker.fetch(new Request(presenceUrl, { method: 'POST', headers: presenceAuth, body: JSON.stringify(valid) }), telemetryEnv);
 assert.equal(enrolled.status, 202);
 assert.equal(installations.get(valid.installationId).ingest_token_hash, await hashIngestToken(ingestToken));
+const presenceBytes = new TextEncoder().encode(JSON.stringify(valid));
+let presenceOffset = 0;
+const fragmentedPresence = new ReadableStream({
+  pull(controller) {
+    if (presenceOffset >= presenceBytes.length) return controller.close();
+    controller.enqueue(presenceBytes.slice(presenceOffset, presenceOffset + 7));
+    presenceOffset += 7;
+  }
+});
+assert.equal((await telemetryWorker.fetch(new Request(presenceUrl, {
+  method: 'POST', headers: presenceAuth, body: fragmentedPresence, duplex: 'half'
+}), telemetryEnv)).status, 202, 'bounded streaming reads must retain fragmented valid request bodies');
 const rejectedPresence = await telemetryWorker.fetch(new Request(presenceUrl, {
   method: 'POST', headers: { ...presenceAuth, authorization: 'Bearer wrong-credential-that-is-long-enough-1234567890' }, body: JSON.stringify(valid)
 }), telemetryEnv);
@@ -198,6 +226,32 @@ try {
   assert.equal(forwarded?.headers.get('authorization'), 'Bearer test-axiom-token', 'the Worker must replace the client credential with the Axiom credential');
   assert.equal(forwarded?.headers.get('x-relai-installation-id'), null, 'installation identity must not be forwarded to Axiom');
 } finally {
+  globalThis.fetch = originalFetch;
+}
+
+const originalConsoleError = console.error;
+console.error = () => {};
+try {
+  const failingDb = {
+    prepare() {
+      return { bind() { return { first: async () => { throw new Error('SYNTHETIC_DATABASE_FAILURE'); } }; } };
+    }
+  };
+  const failedSummary = await telemetryWorker.fetch(new Request('https://telemetry.example/api/v1/admin/summary', {
+    headers: { cookie: 'relai_admin_session=synthetic-session' }
+  }), { DB: failingDb });
+  assert.equal(failedSummary.status, 500, 'asynchronous route failures must reach the Worker error boundary');
+  assert.deepEqual(await failedSummary.json(), { ok: false, error: 'Internal telemetry service error.' });
+  globalThis.fetch = async () => { throw new Error('SYNTHETIC_UPSTREAM_FAILURE'); };
+  const failedTrace = await telemetryWorker.fetch(new Request(traceUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${ingestToken}`, 'x-relai-installation-id': valid.installationId },
+    body: '{}'
+  }), telemetryEnv);
+  assert.equal(failedTrace.status, 500, 'asynchronous upstream failures must reach the Worker error boundary');
+  assert.deepEqual(await failedTrace.json(), { ok: false, error: 'Internal telemetry service error.' });
+} finally {
+  console.error = originalConsoleError;
   globalThis.fetch = originalFetch;
 }
 

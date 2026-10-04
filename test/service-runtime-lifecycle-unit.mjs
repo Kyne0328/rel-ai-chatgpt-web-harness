@@ -23,6 +23,7 @@ try {
   let localStopCalls = 0;
   let tunnelStopCalls = 0;
   let tunnelStartCalls = 0;
+  let additionalTunnelStopCalls = 0;
   let tunnelStopGate = null;
   let doctorArgs = null;
   let dashboardCloseCalls = 0;
@@ -78,6 +79,12 @@ try {
         if (tunnelStopGate) await tunnelStopGate.promise;
         tunnelStart.resolve({ cancelled: true });
         return { stopped: true, exited: true };
+      }
+    },
+    additionalTunnelRuntime: {
+      async stop() {
+        additionalTunnelStopCalls += 1;
+        return { stopped: true, connections: [] };
       }
     },
     tunnelCredentials: { getApiKey: () => 'test-api-key' },
@@ -163,9 +170,12 @@ try {
   }, 'tunnel diagnostics must use the active local MCP endpoint and encrypted tunnel credential');
 
   const startsBeforeReconnectStop = tunnelStartCalls;
+  const additionalStopsBeforeReconnect = additionalTunnelStopCalls;
   tunnelStopGate = deferred();
   const reconnecting = runtime.restartConnection();
   await new Promise(resolve => setImmediate(resolve));
+  assert.equal(additionalTunnelStopCalls, additionalStopsBeforeReconnect,
+    'primary reconnect must keep healthy additional tunnels running');
   const stoppingReconnect = runtime.stopServer({ preserveDashboard: true });
   await new Promise(resolve => setImmediate(resolve));
   tunnelStopGate.resolve();

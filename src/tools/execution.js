@@ -66,6 +66,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           : 0;
       const deadlineSignal = deadlineAtMs > 0 ? AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now())) : undefined;
       const requestSignal = combineAbortSignals(context?.signal, deadlineSignal);
+      let taskBaselineStatusOutput;
 
       const invokeHandler = async (args, signal = requestSignal) => {
         if (typeof definition?.handler !== 'function') throw new Error(`Tool '${name}' has no executable handler.`);
@@ -87,6 +88,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           backgroundStatusMode,
           fallbackOperationId: context?.fallbackOperationId || '',
           mutationTrackingRequired: executionName !== OP.EXEC || !readOnlyExec,
+          ...(taskBaselineStatusOutput !== undefined ? { preExecutionGitStatus: taskBaselineStatusOutput } : {}),
           workspaceOverride: workspaceOverride || undefined
         }));
         if (workspace
@@ -128,7 +130,10 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             }
             if (taskId && workspace && !directFilesystem && taskBaselineRequired(executionName, queueScope)) {
               try {
-                const integrity = await ensureTaskBaseline(config, taskId, workspace.alias, { signal: watchdog.signal });
+                const integrity = await ensureTaskBaseline(config, taskId, workspace.alias, {
+                  signal: watchdog.signal,
+                  onStatusOutput: statusOutput => { taskBaselineStatusOutput = statusOutput; }
+                });
                 if (requestTaskContext && integrity) requestTaskContext.integrity = integrity;
               } catch (error) {
                 // A finite exec can be stopped while its first-use ownership baseline
@@ -234,7 +239,11 @@ function createMutationWatchdog(scope, executionName, args, callerSignal, worksp
   let timer = null;
 
   const scheduleQuarantine = () => {
-    if (!workspaceAlias || quarantineTimer) return;
+    // relai_exec keeps the mutation lane until process cleanup settles, and its
+    // durable process ownership plus terminationConfirmed result decide whether
+    // the workspace must be quarantined. Cleanup latency alone is not evidence
+    // that an exec subprocess is still mutating the workspace.
+    if (executionName === OP.EXEC || !workspaceAlias || quarantineTimer) return;
     const reason = signal?.reason instanceof Error && signal.reason.message
       ? signal.reason.message
       : 'Mutation cancellation was requested.';

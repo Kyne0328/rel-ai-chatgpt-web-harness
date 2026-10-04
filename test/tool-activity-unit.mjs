@@ -298,6 +298,45 @@ assert.equal(completedWithWarningMetadata?.failedToolCallCount, 1);
 assert.equal(completedWithWarningMetadata?.progress?.percentage, 100);
 warningCompletionTracker.reset();
 
+for (const internalOperation of ['validate.checks', 'work.finish']) {
+  const completionTracker = createToolActivityTracker({ idleMs: 60_000 });
+  const events = [];
+  completionTracker.onToolActivity(event => events.push(event));
+  const begin = completionTracker.beginConnectorToolCall({
+    tool: 'relai_work', internalOperation: 'work.begin', createTask: true, workspace: 'repo', scopeId: `failed-${internalOperation}`
+  });
+  begin();
+  const completion = completionTracker.beginConnectorToolCall({
+    tool: internalOperation === 'work.finish' ? 'relai_work' : 'relai_validate', internalOperation,
+    taskId: begin.taskId, workspace: 'repo', scopeId: `failed-${internalOperation}`
+  });
+  completion.requestCompletion({ summary: 'Candidate completion before persistence.' });
+  completion({ ok: false, error: 'Injected post-handler integrity persistence failure.' });
+  const active = completionTracker.getToolActivity().tasks.find(task => task.id === begin.taskId);
+  assert.ok(active, 'failed completion must leave its task active and recoverable');
+  assert.notEqual(active.status, 'completed');
+  assert.notEqual(active.completionKnown, true);
+  assert.equal(events.some(event => event.phase === 'completed'), false);
+  completionTracker.reset();
+}
+const concurrentCompletionTracker = createToolActivityTracker({ idleMs: 60_000 });
+const concurrentStart = concurrentCompletionTracker.beginConnectorToolCall({
+  tool: 'relai_work', internalOperation: 'work.begin', createTask: true, workspace: 'repo', scopeId: 'completion-owner'
+});
+concurrentStart();
+const firstCompletion = concurrentCompletionTracker.beginConnectorToolCall({
+  tool: 'relai_work', internalOperation: 'work.finish', taskId: concurrentStart.taskId, workspace: 'repo', scopeId: 'completion-owner'
+});
+const unrelatedCompletion = concurrentCompletionTracker.beginConnectorToolCall({
+  tool: 'relai_work', internalOperation: 'work.finish', taskId: concurrentStart.taskId, workspace: 'repo', scopeId: 'completion-owner'
+});
+assert.equal(firstCompletion.requestCompletion({ summary: 'Owned by the successful invocation.' }).duplicate, false);
+assert.equal(unrelatedCompletion.requestCompletion({ summary: 'Duplicate request.' }).duplicate, true);
+unrelatedCompletion({ ok: false, error: 'Unrelated invocation failed.' });
+firstCompletion({ ok: true });
+assert.equal(concurrentCompletionTracker.getToolActivity().lastTask?.status, 'completed', 'a failed duplicate must not clear another invocation completion request');
+concurrentCompletionTracker.reset();
+
 let nextId = 40;
 const started = new Set();
 const blockerCalls = [];

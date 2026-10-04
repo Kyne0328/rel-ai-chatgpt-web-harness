@@ -53,6 +53,7 @@ function createSecureTunnelRuntime({
   if (typeof onLog !== 'function' || typeof onStatus !== 'function') throw new TypeError('Tunnel callbacks must be functions.');
 
   let child = null;
+  let childHealthUrlFile = '';
   let generation = 0;
   let stopping = false;
   let monitorPromise = null;
@@ -145,10 +146,7 @@ function createSecureTunnelRuntime({
       });
       if (ownedChild && ownedChild.exitCode === null) {
         fatalStopPromise = stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 })
-          .catch(() => ({ exited: false, forced: false }))
-          .finally(() => {
-            if (child === ownedChild) child = null;
-          });
+          .catch(() => ({ exited: false, forced: false }));
       }
     };
 
@@ -170,6 +168,7 @@ function createSecureTunnelRuntime({
     }
 
     child = ownedChild;
+    childHealthUrlFile = healthUrlFile;
     pipeTunnelLogs(ownedChild.stdout, acceptLogEntry, 'info');
     pipeTunnelLogs(ownedChild.stderr, acceptLogEntry, 'warning');
     ownedChild.once('error', error => {
@@ -179,12 +178,14 @@ function createSecureTunnelRuntime({
     });
     ownedChild.once('exit', (code, signal) => {
       void fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
-      if (runGeneration !== generation || child !== ownedChild) return;
+      if (child !== ownedChild) return;
       child = null;
+      childHealthUrlFile = '';
       if (stopping) {
         update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
         return;
       }
+      if (runGeneration !== generation) return;
       if (state.state === 'failed') return;
       update({
         state: 'failed',
@@ -213,8 +214,7 @@ function createSecureTunnelRuntime({
       if (fatalFailure) throw fatalFailure;
       if (runGeneration !== generation || child !== ownedChild) {
         if (ownedChild?.exitCode === null) await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
-        if (child === ownedChild) child = null;
-        await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
+        if (ownedChild.exitCode !== null || ownedChild.signalCode != null) await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
         return { cancelled: true, ...snapshot() };
       }
 
@@ -245,8 +245,7 @@ function createSecureTunnelRuntime({
       const failure = fatalFailure || normalizeTunnelFailure(error);
       if (fatalStopPromise) await fatalStopPromise;
       else if (ownedChild?.exitCode === null) await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
-      if (child === ownedChild) child = null;
-      await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
+      if (!ownedChild || ownedChild.exitCode !== null || ownedChild.signalCode != null) await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
       if (runGeneration !== generation) return { cancelled: true, ...snapshot() };
       update({ state: 'failed', tunnelId, healthUrl: '', error: failure.message, errorCode: failure.code, consecutiveFailures: 0, outageStartedAt: null, recoveryMode: '' });
       throw failure;
@@ -265,10 +264,12 @@ function createSecureTunnelRuntime({
       let operational;
       try {
         operational = await tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId });
+        if (runGeneration !== generation || child !== ownedChild || stopping) return;
       } catch (error) {
+        if (runGeneration !== generation || child !== ownedChild || stopping) return;
         if (FATAL_TUNNEL_CODES.has(String(error?.code || ''))) {
-          if (child === ownedChild) child = null;
           await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
+          if (runGeneration !== generation || stopping) return;
           update({
             state: 'failed',
             tunnelId,
@@ -326,8 +327,8 @@ function createSecureTunnelRuntime({
       }
 
       if (consecutiveFailures >= failedAfterFailures || Date.now() - outageStartedAt >= failedAfterMs) {
-        if (child === ownedChild) child = null;
         await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 }).catch(() => {});
+        if (runGeneration !== generation || stopping) return;
         update({
           state: 'failed',
           tunnelId,
@@ -426,32 +427,43 @@ function createSecureTunnelRuntime({
   }
 
   async function stop() {
-    const ownedHealthUrlFile = path.join(path.resolve(stateDir), `tunnel-health-${process.pid}-${generation}.url`);
-    generation += 1;
+    const stopGeneration = ++generation;
     stopping = true;
     const ownedChild = child;
-    child = null;
+    const ownedMonitor = monitorPromise;
     if (!ownedChild) {
       transportFailureStreak = 0;
       update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
       return { stopped: true, exited: true, forced: false };
     }
     let result;
+    let failure = null;
     try {
       result = await stopOwnedProcess(ownedChild, { graceMs: 1000, forceWaitMs: 2000 });
-      if (result?.exited) await fs.promises.rm(ownedHealthUrlFile, { force: true }).catch(() => {});
+      if (result?.exited === false || result?.stopped === false) {
+        failure = new Error(result.error || 'OpenAI tunnel-client termination could not be confirmed.');
+      }
     } catch (error) {
-      if (monitorPromise) await Promise.race([monitorPromise, delay(100)]).catch(() => {});
-      monitorPromise = null;
-      transportFailureStreak = 0;
-      update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
-      return { stopped: false, exited: false, forced: true, error: messageOf(error) };
+      failure = error;
     }
-    if (monitorPromise) await Promise.race([monitorPromise, delay(100)]).catch(() => {});
-    monitorPromise = null;
+    if (ownedMonitor) await Promise.race([ownedMonitor, delay(100)]).catch(() => {});
+    if (monitorPromise === ownedMonitor) monitorPromise = null;
+    const exited = result?.exited === true || Number.isInteger(ownedChild.exitCode) || ownedChild.signalCode != null;
+    if (stopGeneration !== generation) {
+      return failure
+        ? { stopped: false, exited, forced: true, error: messageOf(failure) }
+        : { ...result, stopped: exited, exited };
+    }
     transportFailureStreak = 0;
+    if (!exited) {
+      const error = messageOf(failure || new Error('OpenAI tunnel-client termination could not be confirmed.'));
+      update({ state: 'failed', error, errorCode: 'secure_tunnel_stop_failed', recoveryMode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null });
+      return { stopped: false, exited: false, forced: true, error };
+    }
     update({ state: 'stopped', tunnelId: '', healthUrl: '', error: '', errorCode: '', consecutiveFailures: 0, transportFailureStreak: 0, outageStartedAt: null, recoveryMode: '', tunnelHealth: null });
-    return { stopped: true, ...result };
+    return failure
+      ? { stopped: false, exited: true, forced: true, error: messageOf(failure) }
+      : { stopped: true, ...result, exited: true };
   }
 
   function snapshot() {
@@ -460,8 +472,9 @@ function createSecureTunnelRuntime({
 
   async function stopOwnedProcess(ownedChild, stopOptions) {
     let timer = null;
+    let result;
     try {
-      return await Promise.race([
+      result = await Promise.race([
         Promise.resolve(stopProcess(ownedChild, stopOptions)),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(new Error(
@@ -469,11 +482,18 @@ function createSecureTunnelRuntime({
           )), stopTimeoutMs);
         })
       ]);
+      return result;
     } catch (error) {
       try { ownedChild?.kill?.('SIGKILL'); } catch {}
       throw error;
     } finally {
       if (timer) clearTimeout(timer);
+      if (child === ownedChild && (result?.exited === true || Number.isInteger(ownedChild.exitCode) || ownedChild.signalCode != null)) {
+        const healthUrlFile = childHealthUrlFile;
+        child = null;
+        childHealthUrlFile = '';
+        if (healthUrlFile) await fs.promises.rm(healthUrlFile, { force: true }).catch(() => {});
+      }
     }
   }
 

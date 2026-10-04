@@ -6,6 +6,12 @@ import { isClearlyReadOnlyExec } from "../src/tools/execution.js";
 import * as sessionCache from "../src/sessionCache.js";
 import { getToolActivity, resetToolActivity } from "../src/toolActivity.js";
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { getPublicToolSchemas } from '../src/tools/schema.js';
+import { invokeRelaiTool } from '../src/mcp/toolInvocation.js';
+import { readOutputSpill } from '../src/outputSpill.js';
+import { startFallbackExecution } from '../src/mcp/fallbackExecutions.js';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -149,6 +155,50 @@ try {
   assert.deepEqual(success.environmentKeys, ['API_TOKEN', 'RELAI_EXEC_TEST']);
   assert.equal(Object.hasOwn(success, 'commandSummary'), false, 'connector response must not duplicate the audit-only summary');
 
+  // Native SQLite writes fail only after the child has appended its counter.
+  // A retry must never be needed to learn that the original command ran once.
+  const originalPrepare = DatabaseSync.prototype.prepare;
+  for (const boundary of ['audit', 'claim']) {
+    const counter = path.join(boundary === 'claim' ? workspace : temp, `integrity-${boundary}-counter`);
+    let injected = 0;
+    DatabaseSync.prototype.prepare = function(sql, ...parameters) {
+      if (fs.existsSync(counter) && /^INSERT INTO (?:workspace_integrity|task_integrity_tasks)\b/.test(String(sql))) {
+        injected += 1;
+        throw Object.assign(new Error('Injected post-handler SQLITE_BUSY'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+      }
+      return originalPrepare.call(this, sql, ...parameters);
+    };
+    let bookkeepingFailure;
+    try {
+      bookkeepingFailure = await execCall({ executable: process.execPath,
+        argv: ['-e', 'require("node:fs").appendFileSync(process.argv[1], "1"); process.stdout.write("PHYSICAL-RESULT");', counter] });
+    } finally { DatabaseSync.prototype.prepare = originalPrepare; }
+    assert.ok(injected > 0, `${boundary} fixture must reach post-handler persistence`);
+    assert.equal(fs.readFileSync(counter, 'utf8'), '1');
+    assert.equal(bookkeepingFailure.ok, false);
+    assert.equal(bookkeepingFailure.executed, true);
+    assert.equal(bookkeepingFailure.commandSucceeded, true);
+    assert.equal(bookkeepingFailure.exitCode, 0);
+    assert.equal(bookkeepingFailure.stdout, 'PHYSICAL-RESULT');
+    assert.equal(bookkeepingFailure.handlerCompleted, true);
+    assert.equal(bookkeepingFailure.retryable, false);
+    assert.equal(bookkeepingFailure.errorDetails.retryable, false);
+    assert.equal(bookkeepingFailure.errorCode, 'TASK_INTEGRITY_PERSISTENCE_FAILED');
+    assert.match(bookkeepingFailure.nextAction, /Do not repeat/);
+  }
+  const blockedCounter = path.join(temp, 'integrity-pre-handler-counter');
+  DatabaseSync.prototype.prepare = function(sql, ...parameters) {
+    if (/^SELECT payload FROM task_integrity_tasks\b/.test(String(sql))) {
+      throw Object.assign(new Error('Injected pre-handler SQLITE_BUSY'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+    }
+    return originalPrepare.call(this, sql, ...parameters);
+  };
+  try {
+    await assert.rejects(() => execCall({ executable: process.execPath,
+      argv: ['-e', 'require("node:fs").appendFileSync(process.argv[1], "1")', blockedCounter] }));
+  } finally { DatabaseSync.prototype.prepare = originalPrepare; }
+  assert.equal(fs.existsSync(blockedCounter), false, 'pre-handler integrity failure must remain fail-closed');
+
   const literal = "backtick:` dollar:$ double:\"quoted\" newline\nsecond";
   const directSource = [
     "const chunks = [];",
@@ -269,6 +319,109 @@ try {
   assert.equal(spilled.items[0].type, 'output');
   assert.equal(spilled.items[0].outputRef, large.stdoutOutputRef);
   assert.equal(spilled.items[0].content, 'x'.repeat(20000), 'task-scoped spill must preserve output discarded from the bounded connector response');
+  // Exercise actual MCP invocation, not just the storage helper. Output below
+  // maxOutputBytes still needs retention before the smaller transport cap.
+  const digest = value => crypto.createHash('sha256').update(value).digest('hex');
+  for (const size of [600 * 1024, 3 * 1024 * 1024, 5 * 1024 * 1024]) {
+    const expected = Buffer.from(`HEAD:${size}\n` + '0123456789abcdef\n'.repeat(Math.ceil(size / 17)) + `MIDDLE:${size}\nTAIL:${size}\n`);
+    const source = `process.stdout.write(${JSON.stringify(`HEAD:${size}\n`)} + ${JSON.stringify('0123456789abcdef\n')}.repeat(${Math.ceil(size / 17)}) + ${JSON.stringify(`MIDDLE:${size}\nTAIL:${size}\n`)});`;
+    const invoke = backgroundFallbackExecution => invokeRelaiTool({
+      config: readConfig(), name: 'relai_exec',
+      args: { work_id: initialTask.work_id, executable: process.execPath, argv: ['-e', source], maxOutputBytes: 16 * 1024 * 1024 },
+      context: { ...context, principal: 'local:trusted', backgroundFallbackExecution }
+    });
+    let response;
+    if (size === 3 * 1024 * 1024) {
+      const pending = startFallbackExecution({
+        config: readConfig(), workId: initialTask.work_id, tool: 'relai_exec', workspace: 'app',
+        signature: `retention-${size}`, run: () => invoke(true)
+      });
+      response = (await pending.record.promise).result;
+    } else response = await invoke(false);
+    assert.equal(response.isError, false);
+    const actual = response.structuredContent;
+    assert.equal(actual.executed, true);
+    assert.equal(actual.commandSucceeded, true);
+    assert.equal(actual.stdoutBytes, expected.length);
+    assert.equal(actual.stdoutTruncated, true);
+    assert.match(actual.stdoutOutputRef, /^spill_/);
+    assert.ok(Buffer.byteLength(JSON.stringify(actual)) <= 512 * 1024);
+    const stored = readOutputSpill(readConfig(), initialTask.work_id, actual.stdoutOutputRef);
+    assert.equal(stored.bytes, expected.length, 'retention must preserve bytes before transport tail compaction');
+    assert.equal(digest(fs.readFileSync(stored.file)), digest(expected));
+    const firstLines = await callTool('relai_read', {
+      work_id: initialTask.work_id, outputRef: actual.stdoutOutputRef, startLine: 1, endLine: 3,
+      maxBytes: 65536, guidanceMode: 'none'
+    }, context);
+    assert.match(firstLines.items[0].content, new RegExp(`HEAD:${size}`), 'public outputRef read must recover the distinctive head, not only the tail');
+  }
+
+  const publicRead = getPublicToolSchemas().find(tool => tool.name === 'relai_read');
+  assert.match(publicRead.inputSchema.properties.byteOffset.description, /nextOffset/);
+  assert.match(publicRead.inputSchema.properties.byteOffset.description, /base64/);
+
+  const singleLinePattern = '\uFEFFa😀é\u0001';
+  const singleLineRepeats = Math.ceil(3 * 1024 * 1024 / Buffer.byteLength(singleLinePattern));
+  const singleLineExpected = Buffer.from(singleLinePattern.repeat(singleLineRepeats));
+  const singleLineResponse = await invokeRelaiTool({
+    config: readConfig(), name: 'relai_exec',
+    args: { workspace: 'app', independent: true, executable: process.execPath,
+      argv: ['-e', `process.stdout.write(${JSON.stringify(singleLinePattern)}.repeat(${singleLineRepeats}));`],
+      maxOutputBytes: 16 * 1024 * 1024 },
+    context: { ...context, principal: 'local:trusted' }
+  });
+  assert.equal(singleLineResponse.isError, false);
+  const singleLineRef = singleLineResponse.structuredContent.stdoutOutputRef;
+  assert.match(singleLineRef, /^spill_/);
+  const readByteChunk = extra => invokeRelaiTool({
+    config: readConfig(), name: 'relai_read',
+    args: { workspace: 'app', independent: true, outputRef: singleLineRef, byteOffset: 0, maxBytes: 10 * 1024 * 1024, guidanceMode: 'none', ...extra },
+    context: { ...context, principal: 'local:trusted' }
+  });
+  for (const [readWorkspace, readPrincipal] of [['plain', 'local:trusted'], ['app', 'other-fixture-principal']]) {
+    const unauthorized = await invokeRelaiTool({
+      config: readConfig(), name: 'relai_read',
+      args: { workspace: readWorkspace, independent: true, outputRef: singleLineRef, byteOffset: 0, maxBytes: 1000 },
+      context: { ...context, principal: readPrincipal }
+    });
+    assert.equal(unauthorized.isError, true, 'byte cursors must not bypass output ownership');
+  }
+  let byteOffset = 0;
+  const chunks = [];
+  let splitUtf8Seen = false;
+  do {
+    const chunkResponse = await readByteChunk({ byteOffset });
+    assert.equal(chunkResponse.isError, false);
+    assert.ok(Buffer.byteLength(JSON.stringify(chunkResponse.structuredContent)) <= 512 * 1024);
+    const chunk = chunkResponse.structuredContent.items[0];
+    assert.equal(chunk.byteOffset, byteOffset);
+    assert.ok(chunk.returnedBytes > 0 && chunk.returnedBytes <= 64 * 1024);
+    assert.equal(chunk.nextOffset, byteOffset + chunk.returnedBytes);
+    assert.equal(chunk.bytes, singleLineExpected.length);
+    const bytes = chunk.invalidUtf8 ? Buffer.from(chunk.base64, 'base64') : Buffer.from(chunk.content);
+    if (chunk.invalidUtf8) splitUtf8Seen = true;
+    assert.equal(bytes.length, chunk.returnedBytes);
+    chunks.push(bytes);
+    byteOffset = chunk.nextOffset;
+    assert.equal(chunk.truncated, byteOffset < singleLineExpected.length);
+  } while (byteOffset < singleLineExpected.length);
+  assert.equal(digest(Buffer.concat(chunks)), digest(singleLineExpected), 'byte pagination must reconstruct a multi-megabyte single line exactly');
+  assert.equal(splitUtf8Seen, true, 'the fixture must exercise multibyte character splits');
+  for (const offset of [singleLineExpected.length, singleLineExpected.length + 1000]) {
+    const eof = (await readByteChunk({ byteOffset: offset })).structuredContent.items[0];
+    assert.equal(eof.returnedBytes, 0);
+    assert.equal(eof.nextOffset, singleLineExpected.length);
+    assert.equal(eof.truncated, false);
+  }
+  for (const extra of [{ byteOffset: -1 }, { byteOffset: Infinity }, { byteOffset: Number.MAX_SAFE_INTEGER + 1 }, { byteOffset: 0.5 }, { startLine: 1 }, { endLine: 2 }, { ranges: [{ path: 'src/index.js', startLine: 1 }] }, { paths: ['src/index.js'] }, { skill: 'fixture' }, { asResource: true }, { outputRef: undefined, paths: ['src/index.js'] }]) {
+    assert.equal((await readByteChunk(extra)).isError, true, 'invalid byte cursors and mixed modes must be rejected');
+  }
+  const bomChunk = (await readByteChunk({ byteOffset: Buffer.byteLength(singleLinePattern), maxBytes: 1000 })).structuredContent.items[0];
+  const bomBytes = bomChunk.invalidUtf8 ? Buffer.from(bomChunk.base64, 'base64') : Buffer.from(bomChunk.content);
+  assert.deepEqual(bomBytes.subarray(0, 3), Buffer.from([0xef, 0xbb, 0xbf]), 'a U+FEFF at a chunk boundary must remain in exact readback');
+  const smallChunk = (await readByteChunk({ maxBytes: 1000 })).structuredContent.items[0];
+  assert.equal(smallChunk.returnedBytes, 1000, 'the byte reader must honor a smaller explicit budget');
+
   const otherTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   await assert.rejects(
     () => callTool('relai_read', {

@@ -22,6 +22,7 @@ let usageReportingStarted = false;
 let runtimeApi: typeof import('@opentelemetry/api') | null = null;
 let initializationPromise: Promise<boolean> | null = null;
 let runtimeDiagnosticsEnabledOverride: boolean | null = null;
+let diagnosticsConsentGeneration = 0;
 let initializedDiagnosticsEndpoint = '';
 let initializedSampleRatio: number | null = null;
 let usageLastAttemptAt = '';
@@ -224,10 +225,18 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
         }
       } : {})
     });
+    const spanConsentGenerations = new WeakMap<object, number>();
     const diagnosticsExporter = {
       export(spans: Parameters<typeof baseExporter.export>[0], resultCallback: Parameters<typeof baseExporter.export>[1]) {
+        const allowedSpans = telemetryEnabled(config)
+          ? spans.filter(span => spanConsentGenerations.get(span) === diagnosticsConsentGeneration)
+          : [];
+        if (!allowedSpans.length) {
+          resultCallback({ code: 0 });
+          return;
+        }
         diagnosticsLastAttemptAt = new Date().toISOString();
-        baseExporter.export(spans, result => {
+        baseExporter.export(allowedSpans, result => {
           if (result?.code === 0) diagnosticsLastSuccessAt = new Date().toISOString();
           else diagnosticsLastFailureAt = new Date().toISOString();
           resultCallback(result);
@@ -235,6 +244,7 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
       },
       shutdown: () => baseExporter.shutdown()
     };
+    const batchProcessor = new sdk.BatchSpanProcessor(diagnosticsExporter);
     diagnosticsProvider = new sdk.NodeTracerProvider({
       resource: resources.resourceFromAttributes({
         [conventions.ATTR_SERVICE_VERSION]: pkg.version,
@@ -243,7 +253,15 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
         'relai.telemetry.mode': 'diagnostics'
       }),
       sampler: new sdk.ParentBasedSampler({ root: new sdk.TraceIdRatioBasedSampler(sampleRatio) }),
-      spanProcessors: [new sdk.BatchSpanProcessor(diagnosticsExporter)]
+      spanProcessors: [{
+        onStart(span, parentContext) {
+          if (telemetryEnabled(config)) spanConsentGenerations.set(span, diagnosticsConsentGeneration);
+          batchProcessor.onStart(span, parentContext);
+        },
+        onEnd: span => batchProcessor.onEnd(span),
+        forceFlush: () => batchProcessor.forceFlush(),
+        shutdown: () => batchProcessor.shutdown()
+      }]
     });
     diagnosticsProvider.register();
     initializedDiagnosticsEndpoint = diagnosticsEndpoint;
@@ -291,12 +309,15 @@ async function initializedTelemetryApi(config: TelemetryConfig): Promise<typeof 
   if (!telemetryEndpoint(config)) return null;
   initializeTelemetry(config);
   if (initializationPromise) await initializationPromise;
-  return diagnosticsProvider ? runtimeApi : null;
+  return telemetryEnabled(config) && diagnosticsProvider ? runtimeApi : null;
 }
 
 async function setTelemetryDiagnosticsEnabled(config: TelemetryConfig, enabled: boolean): Promise<void> {
   runtimeDiagnosticsEnabledOverride = enabled === true;
-  if (!runtimeDiagnosticsEnabledOverride) return;
+  if (!runtimeDiagnosticsEnabledOverride) {
+    diagnosticsConsentGeneration += 1;
+    return;
+  }
   initializeTelemetry(config);
   if (initializationPromise) await initializationPromise;
 }
@@ -361,8 +382,9 @@ async function runSpan<T>(
   operation: () => T | Promise<T>,
   options: RunSpanOptions = {}
 ): Promise<T> {
+  const consentGeneration = diagnosticsConsentGeneration;
   const api = await initializedTelemetryApi(config);
-  if (!api) return operation();
+  if (!api || !telemetryEnabled(config) || consentGeneration !== diagnosticsConsentGeneration) return operation();
   const parentContext = options.carrier ? extractTraceContext(api, options.carrier) : api.context.active();
   const span = api.trace.getTracer('rel-ai-mcp', pkg.version).startSpan(String(name || 'relai.operation'), {
     attributes: sanitizeAttributes(attributes) as OpenTelemetryApi.Attributes,
@@ -407,14 +429,17 @@ async function shutdownTelemetry(): Promise<void> {
   initializationPromise = null;
   usageRequestPromise = null;
   usageReportingStarted = false;
-  runtimeDiagnosticsEnabledOverride = null;
   if (usageHeartbeat) clearTimeout(usageHeartbeat);
   usageHeartbeat = null;
   if (usageRetryTimer) clearTimeout(usageRetryTimer);
   usageRetryTimer = null;
   initializedDiagnosticsEndpoint = '';
   initializedSampleRatio = null;
-  await currentDiagnostics?.shutdown();
+  try {
+    await currentDiagnostics?.shutdown();
+  } finally {
+    runtimeDiagnosticsEnabledOverride = null;
+  }
 }
 
 function telemetryStatus(config: TelemetryConfig = {}): TelemetryStatus {

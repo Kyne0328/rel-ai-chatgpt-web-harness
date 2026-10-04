@@ -166,6 +166,8 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
     clientInfo: legacy ? params.clientInfo : meta[CLIENT_INFO_META_KEY],
     clientCapabilities: legacy ? params.capabilities : meta[CLIENT_CAPABILITIES_META_KEY]
   });
+  authInfo.relaiRequestId = requestId;
+  ctx.req.auth = authInfo;
   transportDetails.requestId = requestId;
   transportDetails.method = String(message?.method || transportDetails.method || '');
   const transportName = expectedMcpName(transportDetails.method, params) || transportDetails.name;
@@ -218,7 +220,7 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
     }
 
     if (message?.method === 'tools/call' && message.id != null) {
-      ctx.res.once('finish', () => { acknowledgeMcpFallbackCompletionDelivery(requestContext, message.id); });
+      ctx.res.once('finish', () => { acknowledgeMcpFallbackCompletionDelivery(requestContext, requestId); });
     }
 
     await measureMcpPhase(
@@ -239,6 +241,7 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
           envelope: meta,
           authInfo,
           requestHeaders: ctx.req.headers,
+          requestId,
           signal: requestAbort.signal
         });
         if (transportResponse) {

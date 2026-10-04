@@ -86,6 +86,7 @@ interface ManagedProcessContext extends GenericRecord {
   readonly mcp?: { readonly authInfo?: unknown };
   readonly authInfo?: unknown;
   readonly authMode?: unknown;
+  readonly coordinationTimeoutMs?: unknown;
 }
 
 interface PtyExitEvent {
@@ -249,6 +250,7 @@ const RUNTIME_ID = crypto.randomUUID();
 const RECENT_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_LOG_BYTES = 16 * 1024 * 1024;
 const DEFAULT_STARTUP_WAIT_MS = 750;
+const DEFAULT_PROCESS_COORDINATION_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_GRACE_MS = 3000;
 const DEFAULT_FORCE_WAIT_MS = 2000;
 const METADATA_FLUSH_DELAY_MS = 50;
@@ -322,10 +324,23 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     environment: Object.entries(env).sort(([left], [right]) => left.localeCompare(right))
   });
   const admissionSignal = combineAbortSignals(context.signal, getCurrentTaskAbortSignal());
-  const releaseReuseReservation = args.reuseExisting === false
-    ? null
-    : await acquireManagedProcessReuseReservation(reuseFingerprint, admissionSignal);
+  const coordinationTimeoutMs = clampNumber(
+    context.coordinationTimeoutMs,
+    10,
+    60_000,
+    DEFAULT_PROCESS_COORDINATION_TIMEOUT_MS
+  );
+  const coordinationController = new AbortController();
+  const coordinationTimer = setTimeout(() => {
+    coordinationController.abort(processCoordinationTimeoutError(coordinationTimeoutMs));
+  }, coordinationTimeoutMs);
+  coordinationTimer.unref?.();
+  const coordinationSignal = combineAbortSignals(admissionSignal, coordinationController.signal);
+  let releaseReuseReservation: (() => void) | null = null;
   try {
+    releaseReuseReservation = args.reuseExisting === false
+      ? null
+      : await acquireManagedProcessReuseReservation(reuseFingerprint, coordinationSignal);
     admissionSignal?.throwIfAborted?.();
     hydrateProcessMetadata(config);
     const reusable = args.reuseExisting === false ? null : findReusableManagedProcess(reuseFingerprint);
@@ -343,7 +358,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         }
       };
     }
-    await reserveRestoredManagedProcessCapacity(config, admissionSignal);
+    await reserveRestoredManagedProcessCapacity(config, coordinationSignal);
   const processId = `proc_${crypto.randomBytes(24).toString('base64url')}`;
   const directory = processDirectory(config, processId);
   const stdoutPath = path.join(directory, 'stdout.log');
@@ -438,7 +453,8 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       let resourceLease: HostResourceLease;
       try {
         await retireIdleInteractivePtysForCapacity(config);
-        resourceLease = await acquireHostResource('persistent', workspace.alias, { signal: startupSignal });
+        resourceLease = await acquireHostResource('persistent', workspace.alias, { signal: coordinationSignal });
+        clearTimeout(coordinationTimer);
       } catch (error) {
         if (errorCode(error) === 'HOST_RESOURCE_ABORTED') {
           throw cancellationError('Managed process startup was cancelled while waiting for host capacity.');
@@ -612,6 +628,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     };
   });
   } finally {
+    clearTimeout(coordinationTimer);
     releaseReuseReservation?.();
   }
 }
@@ -1132,7 +1149,7 @@ async function acquireManagedProcessReuseReservation(
   const current = new Promise<void>(resolve => { releaseCurrent = resolve; });
   const tail = previous.then(() => current);
   processReuseReservations.set(reuseFingerprint, tail);
-  await previous;
+  await waitForManagedProcessCoordination(previous, signal, 'Managed process startup was cancelled while waiting to reuse an existing process.');
   if (signal?.aborted) {
     releaseCurrent();
     if (processReuseReservations.get(reuseFingerprint) === tail) processReuseReservations.delete(reuseFingerprint);
@@ -1145,6 +1162,41 @@ async function acquireManagedProcessReuseReservation(
     releaseCurrent();
     if (processReuseReservations.get(reuseFingerprint) === tail) processReuseReservations.delete(reuseFingerprint);
   };
+}
+
+function waitForManagedProcessCoordination<T>(promise: Promise<T>, signal: AbortSignal | undefined, message: string): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(managedProcessCoordinationAbortError(signal, message));
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      complete();
+    };
+    const onAbort = () => finish(() => reject(managedProcessCoordinationAbortError(signal, message)));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) return onAbort();
+    Promise.resolve(promise).then(
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error))
+    );
+  });
+}
+
+function managedProcessCoordinationAbortError(signal: AbortSignal, message: string): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error && errorCode(reason) === 'PROCESS_START_COORDINATION_TIMEOUT') return reason;
+  return cancellationError(message);
+}
+
+function processCoordinationTimeoutError(timeoutMs: number): Error {
+  return Object.assign(
+    new Error(`Managed process startup coordination exceeded ${timeoutMs}ms. Retry after the active startup or capacity recovery finishes.`),
+    { code: 'PROCESS_START_COORDINATION_TIMEOUT', retryable: true }
+  );
 }
 
 function principalKeyForContext(context: ManagedProcessContext = {}): string {
@@ -1559,7 +1611,11 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
 
 function reserveRestoredManagedProcessCapacity(config: ManagedProcessConfig, signal?: AbortSignal): Promise<void> {
   const previous = restoredCapacityReservation;
-  const next = previous.then(() => reserveRestoredManagedProcessCapacityInternal(config, signal));
+  const next = waitForManagedProcessCoordination(
+    previous,
+    signal,
+    'Managed process startup was cancelled while restoring persistent-process capacity.'
+  ).then(() => reserveRestoredManagedProcessCapacityInternal(config, signal));
   restoredCapacityReservation = next.catch(() => undefined);
   return next;
 }

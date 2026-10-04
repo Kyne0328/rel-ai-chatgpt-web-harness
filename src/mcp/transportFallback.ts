@@ -48,6 +48,7 @@ const TRANSPORT_RESILIENT_OPERATION_NAMES = new Set([
   'snapshot',
   'read',
   'search.text',
+  'process.start',
   'process.list'
 ]);
 
@@ -105,7 +106,7 @@ async function handleTransportFallbackRequest(config: any, message: any, options
       ...options,
       capabilities,
       signal,
-      requestId: message.id,
+      requestId: options.requestId ?? message.id,
       message
     }),
     { bounds: synchronousBounds, signal: options.signal }
@@ -176,6 +177,23 @@ function synchronousEstimate(args: any, bounds: any, options: any = {}) {
 async function runFallbackToolExecution(config: any, message: any, args: any, options: any = {}) {
   const name = String(message.params?.name || '');
   const workId = options.scopeOnly === true ? '' : String(args.work_id || '').trim();
+  if (options.signal?.aborted) {
+    const timedOut = options.signal.reason?.name === 'TimeoutError';
+    return successResponse(message.id, toolResult({
+      ok: false,
+      ...(workId ? { work_id: workId } : {}),
+      executed: false,
+      commandSucceeded: false,
+      timedOut,
+      cancelled: !timedOut,
+      terminationConfirmed: true,
+      mutationUnknown: false,
+      error: options.signal.reason instanceof Error
+        ? options.signal.reason.message
+        : String(options.signal.reason || (timedOut ? 'Request timed out before execution.' : 'Request cancelled before execution.')),
+      errorCode: timedOut ? 'TIMEOUT' : 'CANCELLED'
+    }, true));
+  }
   const signature = fallbackSignature(name, args);
   const scopeId = workId || `workspace:${principalIdentity(options.principal)}:${String(args.workspace || '')}:${signature}`;
   const explicitTimeoutMs = Number(args?.timeoutMs);
@@ -380,6 +398,8 @@ async function runBoundedExecution(executor: any, options: any = {}) {
 
   if (settled.kind === 'timeout' || timedOut) {
     const cleanup = await awaitCleanup(execution);
+    const terminalTimeout = settledTimeoutResult(cleanup);
+    if (terminalTimeout) return { ok: true, value: terminalTimeout };
     return { ok: false, error: executionLimitError('synchronous_timeout', 'Bounded synchronous execution exceeded its maximum duration.', bounds), cleanup };
   }
   if (settled.kind === 'aborted') {
@@ -403,6 +423,13 @@ async function awaitCleanup(execution: any) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function settledTimeoutResult(cleanup: any) {
+  if (cleanup?.kind !== 'value') return null;
+  const value = cleanup.value;
+  const structured = objectValue(value?.structuredContent || value?.result);
+  return structured.timedOut === true ? value : null;
 }
 
 function transportToolContext(options: any) {

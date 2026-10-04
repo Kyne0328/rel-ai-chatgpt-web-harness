@@ -270,7 +270,7 @@ async function case_connection_state_unit() {
     const assert = __m0.default;
   
     const __m1 = await import("../src/ui/connection-state.js");
-    const { connectionLayerViews, connectionStateFor, connectionSummary, isMcpAuthenticationReady } = __m1;
+    const { connectionLayerViews, connectionStateFor, connectionSummary, isMcpAuthenticationReady, withConnectionState } = __m1;
   
   const base = {
     connectionState: {
@@ -339,7 +339,84 @@ async function case_connection_state_unit() {
   assert.equal(connectionSummary(unavailable).label, 'Needs attention');
   assert.equal(connectionSummary(unavailable).title, 'ChatGPT connection unavailable');
   assert.doesNotMatch(connectionSummary(unavailable).message, /Tunnel ID|API key|MCP/i);
+
+  const partiallyConnected = connectionStateFor({
+    connectionState: {
+      localService: { status: 'running' },
+      publicEndpoint: { status: 'degraded', retryAttempt: 2, nextRetryAt: '2026-10-04T02:00:00.000Z' },
+      dashboardUpdates: { status: 'live' }
+    },
+    desktopStatus: {
+      tunnelId: 'tunnel_primary123',
+      additionalTunnelStatuses: [
+        { tunnelId: 'tunnel_secondary123', label: 'Account 2', state: 'running' }
+      ]
+    },
+    mcpConnection: { status: 'ready', activityStatus: 'no_requests' }
+  });
+  assert.equal(partiallyConnected.publicEndpoint.status, 'available', 'one healthy tunnel must keep the aggregate endpoint available');
+  assert.equal(partiallyConnected.publicEndpoint.connectionCount, 2);
+  assert.equal(partiallyConnected.publicEndpoint.availableCount, 1);
+  assert.equal(partiallyConnected.publicEndpoint.reconnectingCount, 1);
+  assert.equal(partiallyConnected.chatgptReadiness.status, 'ready', 'ChatGPT readiness must stay ready while any configured tunnel is connected');
+  assert.equal(connectionSummary(partiallyConnected).label, 'Connected');
+  assert.equal(connectionSummary(partiallyConnected).tone, 'warn');
+  assert.match(connectionSummary(partiallyConnected).message, /1 of 2 configured tunnels/i);
+  assert.match(connectionSummary(partiallyConnected).message, /1 tunnel is reconnecting/i);
+  const partialTunnelLayer = connectionLayerViews(partiallyConnected).find(layer => layer.key === 'publicEndpoint');
+  assert.equal(partialTunnelLayer?.title, 'Secure MCP tunnels');
+  assert.equal(partialTunnelLayer?.label, '1 of 2 connected');
   
+  // Bootstrap projection, successive desktop status events, and the shell's
+  // reduced store must not count an aggregate endpoint as a healthy primary.
+  const rawPrimary = {
+    localService: { status: 'running' },
+    publicEndpoint: { status: 'degraded' }
+  };
+  const desktopProjection = connectionStateFor({
+    ...base,
+    desktopStatus: { connectionState: rawPrimary, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'running' }] }
+  }, 'live');
+  assert.equal(desktopProjection.publicEndpoint.availableCount, 1, 'fresh desktop primary state must override a stale HTTP endpoint');
+  assert.equal(desktopProjection.publicEndpoint.reconnectingCount, 1);
+  const shellProjection = connectionStateFor({ connectionState: desktopProjection });
+  assert.deepEqual(shellProjection.publicEndpoint, desktopProjection.publicEndpoint, 'the shell must preserve the already projected tunnel counts');
+  assert.equal(connectionSummary(shellProjection).tone, 'warn');
+  assert.match(connectionSummary(shellProjection).message, /1 of 2 configured tunnels/);
+  const allUnhealthy = connectionStateFor({
+    connectionState: desktopProjection,
+    desktopStatus: { connectionState: rawPrimary, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'degraded' }] }
+  }, 'live');
+  assert.equal(allUnhealthy.publicEndpoint.status, 'degraded', 'the last healthy tunnel failing must clear aggregate availability');
+  assert.equal(allUnhealthy.publicEndpoint.availableCount, 0);
+  assert.equal(allUnhealthy.chatgptReadiness.status, 'unavailable');
+  const primaryRecovered = connectionStateFor({
+    connectionState: allUnhealthy,
+    desktopStatus: { connectionState: { ...rawPrimary, publicEndpoint: { status: 'available' } }, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'failed' }] }
+  }, 'live');
+  assert.equal(primaryRecovered.publicEndpoint.availableCount, 1);
+  assert.equal(primaryRecovered.publicEndpoint.unavailableCount, 1);
+  assert.equal(primaryRecovered.publicEndpoint.connectionCount, 2);
+  assert.equal(connectionSummary(primaryRecovered).tone, 'warn');
+
+  const desktopBootstrapSource = (await import('node:fs')).readFileSync(new URL('../public/dashboard.js', import.meta.url), 'utf8');
+  const desktopUpdateSource = desktopBootstrapSource.match(/function applyDesktopStatus\(status\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(desktopUpdateSource, 'desktop status updates must remain routed through their actual store projection');
+  let projectedStore = { connectionState: desktopProjection };
+  const desktopUpdateContext = {
+    withConnectionState, _liveState: 'live',
+    getStore: () => projectedStore,
+    patchLocalConnection: patch => { projectedStore = { ...projectedStore, ...patch }; },
+    dashboardHidden: () => false,
+    updateShell: () => {}
+  };
+  (await import('node:vm')).default.runInNewContext(desktopUpdateSource + '\n;globalThis.applyDesktopStatus = applyDesktopStatus;', desktopUpdateContext);
+  desktopUpdateContext.applyDesktopStatus({ connectionState: rawPrimary, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'degraded' }] });
+  assert.equal(projectedStore.connectionState.publicEndpoint.status, 'degraded', 'the actual desktop store update must clear a formerly healthy aggregate');
+  assert.equal(projectedStore.connectionState.publicEndpoint.availableCount, 0);
+  desktopUpdateContext.applyDesktopStatus({ connectionState: { ...rawPrimary, publicEndpoint: { status: 'available' } }, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'failed' }] });
+  assert.equal(projectedStore.connectionState.publicEndpoint.availableCount, 1, 'the actual desktop update must also recover without counting stale aggregate state');
+
   assert.deepEqual(connectionLayerViews(recent).map(layer => layer.title), [
     'Local Rel.AI service',
     'OpenAI Secure MCP Tunnel',
@@ -1038,3 +1115,101 @@ async function case_ui_list_ordering_unit() {
   console.log('UI list ordering tests passed.');
 }
 await case_ui_list_ordering_unit();
+
+// Extension source mutations must invalidate the normal route's cached snapshot.
+async function case_extension_source_cache_unit() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const vm = (await import('node:vm')).default;
+  const source = fs.readFileSync(new URL('../src/ui/features/extensions/react.js', import.meta.url), 'utf8');
+  for (const action of ['add_source', 'remove_source']) {
+    const before = { ok: true, installed: [], catalog: [], sources: [{ id: 'existing' }] };
+    const after = { ...before, sources: action === 'add_source' ? [{ id: 'existing' }, { id: 'new' }] : [] };
+    const cache = new Map([['/api/extensions', before]]);
+    const requests = [];
+    let stateIndex = 0;
+    const fetchJson = async (url, options = {}) => {
+      requests.push({ url, options });
+      if (options.cache !== 'no-store' && cache.has(url)) return cache.get(url);
+      if (options.cache !== 'no-store') cache.set(url, after);
+      return after;
+    };
+    const context = {
+      React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
+      useState: initial => [stateIndex++ === 0 ? 'sources' : stateIndex === 2 ? before : initial, () => {}],
+      useMemo: compute => compute(),
+      useEffect: () => {},
+      fetchJson,
+      postJson: async (_url, body) => { assert.equal(body.action, action); return { ok: true, source: {}, installedExtensions: [] }; },
+      invalidateCache: url => cache.delete(url),
+      confirmAction: async () => true,
+      toast: () => {},
+      Icon: () => null
+    };
+    vm.runInNewContext(source.replace(/^import .*;\n/gm, '').replace(/^export \{.*\};$/m, '')
+      + '\nglobalThis.renderExtensions = createExtensionsRoute();', context);
+    const tree = context.renderExtensions();
+    const flatten = node => node == null ? [] : Array.isArray(node) ? node.flatMap(flatten)
+      : [node, ...(typeof node === 'object' ? (node.children || []).flatMap(flatten) : [])];
+    const panel = flatten(tree).find(node => typeof node?.props?.onAddSource === 'function');
+    assert.ok(panel, 'the Sources tab must expose its action callbacks');
+    if (action === 'add_source') await panel.props.onAddSource('https://example.test/catalog.json');
+    else await panel.props.onRemoveSource({ id: 'existing', name: 'Existing source' });
+    assert.ok(requests.some(request => request.url === '/api/extensions?refresh=1'));
+    const remounted = await fetchJson('/api/extensions', { cacheTtlMs: 15_000 });
+    assert.equal(remounted, after, `${action} must not resurrect the stale base-route cache after navigating away and back`);
+  }
+  console.log('Extension source mutation cache tests passed.');
+}
+await case_extension_source_cache_unit();
+
+async function case_browser_permission_origin_unit() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const vm = (await import('node:vm')).default;
+  const source = fs.readFileSync(new URL('../src/ui/features/browser/react.js', import.meta.url), 'utf8');
+  for (const knownSession of [true, false]) {
+    const responses = [];
+    const controlChanges = [];
+    const state = {
+      active: true, control: 'ai', url: 'https://same.example.test/front', nativeSessionId: 'foreground', tabs: [],
+      sessions: [
+        { nativeSessionId: 'foreground', title: 'Same site', url: 'https://same.example.test/front', active: true },
+        { nativeSessionId: 'background', title: 'Same site', url: 'https://same.example.test/back', active: false }
+      ],
+      permissionRequests: [{ requestId: 'background-permission', nativeSessionId: knownSession ? 'background' : 'gone', origin: 'https://same.example.test', permission: 'geolocation' }]
+    };
+    let stateIndex = 0;
+    const context = {
+      React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
+      window: { relaiDesktop: { browser: {
+        respondPermission: async (id, allow) => { responses.push({ id, allow }); },
+        selectSession: id => controlChanges.push(id),
+        setControl: mode => controlChanges.push(mode)
+      } } },
+      useState: initial => [stateIndex++ === 0 ? state : typeof initial === 'function' ? initial() : initial, () => {}],
+      useEffect: () => {}, useCallback: callback => callback, useRef: initial => ({ current: initial }),
+      Icon: () => null, StatusPill: () => null, URL
+    };
+    vm.runInNewContext(source.replace(/^import .*;\n/gm, '').replace(/^export \{.*\};$/m, '')
+      + '\nglobalThis.renderBrowser = createBrowserRoute();', context);
+    const tree = context.renderBrowser();
+    const flatten = node => node == null ? [] : Array.isArray(node) ? node.flatMap(flatten)
+      : [node, ...(typeof node === 'object' ? (node.children || []).flatMap(flatten) : [])];
+    const nodes = flatten(tree);
+    const prompt = nodes.find(node => node?.props?.id === 'browserPermissionRequest');
+    assert.ok(prompt, 'a permission prompt must expose its session and origin as an accessible description');
+    const promptText = prompt.children.join('');
+    assert.match(promptText, /https:\/\/same\.example\.test/);
+    assert.match(promptText, knownSession ? /Session 2 · Same site/ : /Unknown browser session/);
+    const buttons = nodes.filter(node => node?.type === 'button' && node.props['aria-describedby'] === 'browserPermissionRequest');
+    assert.equal(buttons.length, 2, 'both permission decisions must describe their originating session');
+    buttons.find(node => node.children.includes('Allow for this session')).props.onClick();
+    for (let index = 0; index < 4; index += 1) await Promise.resolve();
+    assert.equal(responses[0]?.id, 'background-permission');
+    assert.equal(responses[0]?.allow, true);
+    assert.deepEqual(controlChanges, [], 'responding to a background prompt must not change the visible session or control owner');
+  }
+  console.log('Browser permission origin labels and request routing passed.');
+}
+await case_browser_permission_origin_unit();
