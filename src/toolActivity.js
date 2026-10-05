@@ -425,6 +425,7 @@ function createToolActivityTracker(options = {}) {
       if (patch.workspace != null) operation.workspace = String(patch.workspace);
       if (patch.tool != null) operation.tool = String(patch.tool);
       applyActivityPatch(operation.activity, {
+        ...(patch.metadata !== undefined ? { metadata: patch.metadata } : {}),
         ...(patch.operation != null ? { title: operation.label } : {}),
         ...(patch.detail != null ? { summary: operation.detail } : {}),
         tool: { name: operation.tool, operation: operation.label }

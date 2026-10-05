@@ -8,7 +8,7 @@ import { classifyTaskIntent } from '../workflow/intent.js';
 import { buildTaskBootstrap } from '../context/context-builder.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 
-const TERMINAL_REFERENCE_OPERATIONS = new Set([OP.PROCESS_LIST, OP.PROCESS_READ, OP.PROCESS_STOP, OP.WORK_STATUS]);
+const TERMINAL_REFERENCE_OPERATIONS = new Set([OP.PROCESS_LIST, OP.PROCESS_READ, OP.PROCESS_STOP, OP.WORK_STATUS, OP.WORK_RESULT]);
 
 function findReusableTask(config, workspace, args = {}, principal, conversationId = '') {
   const conversation = String(conversationId || '').trim();
@@ -176,7 +176,7 @@ function taskAuditContext(context, activity, requestedTaskId, toolName, ok, valu
   const cancellationStatus = toolName === OP.WORK_CANCEL ? String(value?.status || '').trim().toLowerCase() : '';
   const cancellationPending = cancellationStatus === 'cancelling';
   const taskId = activity?.taskId || requestedTaskId || '';
-  const taskHistoryEligible = toolName !== OP.WORK_STATUS
+  const taskHistoryEligible = ![OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY].includes(toolName)
     && Boolean(taskId && (requestedTaskId || toolName === OP.WORK_BEGIN));
   return {
     taskId,

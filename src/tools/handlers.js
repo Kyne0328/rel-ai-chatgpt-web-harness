@@ -6,6 +6,7 @@ import { setTimeout as setNodeTimeout } from 'node:timers';
 import { resolveWorkspace } from '../config.js';
 import { repoSnapshot, relaiReadAsync, workspaceTidyPlan, workspaceTidyRun, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr } from '../localRepoBridge.js';
 import { planEdit } from '../executionPlanner.js';
+import { workspaceHistory } from './history.ts';
 import { relaiStatus } from './status.js';
 import { completeTask } from './completion.js';
 import { cancelTask, stopTaskOperations } from './cancellation.js';
@@ -195,6 +196,8 @@ const HANDLERS = Object.freeze({
   restorePaths: inWorkspace((workspace, config, args) => relaiRestorePaths(workspace, config, args)),
   resetWorkspace: inWorkspace((workspace, config, args) => relaiResetWorkspace(workspace, config, args)),
   status: relaiStatus,
+  operationResult: (config, args, context) => relaiStatus(config, { ...args, includeResult: true }, context),
+  workspaceHistory,
   gitCommit: inWorkspace(async (workspace, config, args, context) => {
     const commitArgs = withTaskOwnedCommitContext(config, workspace, args, context);
     const result = await relaiGitCommit(workspace, config, commitArgs);

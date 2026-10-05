@@ -43,5 +43,5 @@ Continue through ordinary task boundaries without asking for status confirmation
 
 Finish the requested behavior, review task-owned changes, and report the checks actually performed. Use final successful validation with `complete:true` only when validation and task closure should be atomic; otherwise finish the work session explicitly when the objective is complete.
 
-Load [references/workflows.md](references/workflows.md) for fallback completion, validation lifecycle, publishing, recovery, process, migration, and plan-execution details.
+Load [references/workflows.md](references/workflows.md) for fallback completion, interrupted-work recovery, measured waiting-phase diagnosis, deployed-build verification, validation lifecycle, publishing, process, migration, and plan-execution details.
 Load [references/safety.md](references/safety.md) before restore/reset, commit/push, sensitive authorization, or other destructive or approval-gated operations.

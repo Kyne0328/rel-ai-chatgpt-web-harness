@@ -1,6 +1,16 @@
 // Explicit everyday regression executables.
 // Prefer adding behavior to an existing suite-*-unit.mjs file. Add a standalone file here only when process/global isolation or an independently maintained boundary is required.
 export const EVERYDAY_TEST_FILES = [
+  "ui-operation-diagnostics-unit.mjs",
+  "operation-contract-validation-unit.mjs",
+  "operation-receipts-history-unit.mjs",
+  "response-budget-unit.mjs",
+  "runtime-source-comparison-unit.mjs",
+  "runtime-build-compatibility-unit.mjs",
+  "runtime-build-identity-unit.mjs",
+  "activity-ingestion-persistence-unit.mjs",
+  "activity-identity-scale-unit.mjs",
+  "activity-identity-replay-unit.mjs",
   "abortable-promise-unit.mjs",
   "app-identity-unit.mjs",
   "artifact-intake-unit.mjs",
@@ -62,6 +72,7 @@ export const EVERYDAY_TEST_FILES = [
   "multi-chat-task-isolation-unit.mjs",
   "mutation-process-ownership-unit.mjs",
   "onboarding-config-smoke.mjs",
+  "operation-timeline-unit.mjs",
   "output-spill-failure-unit.mjs",
   "patch-update-smoke.mjs",
   "process-manager-unit.mjs",
@@ -78,6 +89,7 @@ export const EVERYDAY_TEST_FILES = [
   "staged-write-fallback-unit.mjs",
   "status-workspace-aliases-unit.mjs",
   "structured-patch-transaction-unit.mjs",
+  "structured-error-budget-unit.mjs",
   "structured-tool-error-unit.mjs",
   "suite-activity-session-unit.mjs",
   "suite-automation-unit.mjs",

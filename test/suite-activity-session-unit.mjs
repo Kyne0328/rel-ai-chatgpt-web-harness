@@ -61,7 +61,7 @@ async function case_activity_controller_contract_unit() {
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw target'/, 'technical details must preserve raw target information');
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw result'/, 'technical details must preserve raw result information');
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw error'/, 'technical details must preserve raw error information');
-  assert.match(activity, /ACTIVITY_STORE_KEYS = Object\.freeze\(\['auditTail', 'tasks'\]\)/, 'Activity must subscribe only to the dashboard slices it renders');
+  assert.match(activity, /ACTIVITY_STORE_KEYS = Object\.freeze\(\['auditTail', 'tasks', 'runtime', 'runtimeCompatibility'\]\)/, 'Activity must subscribe only to the dashboard slices it renders');
   assert.match(activity, /createActivityRoute\(useDashboardSlices\)[\s\S]*useDashboardSlices\(ACTIVITY_STORE_KEYS\)/, 'Activity must consume scoped canonical dashboard store slices');
   assert.match(reactMain, /registerReactSection\('activity'/, 'Activity must remain registered as a canonical React route');
   assert.doesNotMatch(dashboard, /case 'activity':\s*return true;/, 'React-owned Activity must not retain an imperative live-rendering branch');

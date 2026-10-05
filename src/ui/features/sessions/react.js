@@ -5,6 +5,7 @@ import { copyText } from '../../clipboard.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
+import { OperationDiagnostics, RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { formatDuration, timeAgo } from '../../utils.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref, setWorkspaceFilter } from '../../router.js';
 import { activityEventId } from '../../activity-event.js';
@@ -43,7 +44,7 @@ const TASK_HISTORY_URL = '/api/tasks/history';
 const TASK_SESSION_URL = '/api/tasks/session';
 const DETAIL_FILE_PREVIEW = 4;
 const DETAIL_EVENT_PREVIEW = 8;
-const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail']);
+const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'runtime', 'runtimeCompatibility']);
 
 export function createSessionsRoute(useDashboardSlices) {
   return function SessionsRoute() {
@@ -346,6 +347,8 @@ function SessionsPage({ data = {} }) {
           selectedDetail
             ? h(SessionInspector, {
                 session: selectedDetail,
+                runtime: data.runtime,
+                runtimeCompatibility: data.runtimeCompatibility,
                 activeTab,
                 setActiveTab,
                 olderExpanded,
@@ -481,7 +484,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) {
+function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -490,6 +493,9 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
     previousId.current = id;
     if (!window.matchMedia('(max-width: 760px)').matches) return;
     headingRef.current?.focus({ preventScroll: true });
+    // A selected task's inspector follows the list on narrow screens. Reveal
+    // the new selection once; hydration and live updates keep the same ID.
+    headingRef.current?.scrollIntoView({ behavior: 'instant', block: 'start', inline: 'nearest' });
   }, [id]);
 
   const identities = taskEntityView(session);
@@ -586,7 +592,7 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
       )
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-technical', role: 'tabpanel', 'aria-labelledby': 'session-tab-technical', tabIndex: 0, hidden: activeTab !== 'technical', 'data-session-panel': 'technical' },
-      h(TechnicalDetails, { session, identities, state, operationValue, controlKey, onStopOperation: operationId => controlTask('stop', operationId) }),
+      h(TechnicalDetails, { session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, onStopOperation: operationId => controlTask('stop', operationId) }),
       session.trace?.entries?.length
         ? h('div', { className: 'session-inline-actions' }, h('button', { className: 'secondary', type: 'button', onClick: () => exportTrace(session), 'data-export-task-trace': '' }, 'Export trace (.jsonl)'))
         : null
@@ -817,7 +823,7 @@ function EventRow({ event, session, older = false }) {
   );
 }
 
-function TechnicalDetails({ session, identities, state, operationValue, controlKey, onStopOperation }) {
+function TechnicalDetails({ session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, onStopOperation }) {
   return h('div', { className: 'task-detail-technical is-expanded' },
     h('section', { className: 'task-detail-section' },
       h('div', { className: 'task-detail-heading' }, h('h3', null, 'Identifiers')),
@@ -837,7 +843,8 @@ function TechnicalDetails({ session, identities, state, operationValue, controlK
         h(Detail, { label: 'Completion confirmed', value: session.completionKnown ? 'Yes' : 'No' })
       )
     ),
-    h(CurrentOperations, { session, controlKey, onStopOperation })
+    h(CurrentOperations, { session, controlKey, onStopOperation }),
+    h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility })
   );
 }
 
@@ -859,7 +866,7 @@ function CurrentOperations({ session, controlKey = '', onStopOperation }) {
   const operations = executable && Array.isArray(session.currentOperations) ? session.currentOperations : [];
   if (!operations.length) return null;
   return h('section', { className: 'task-detail-section' },
-    h('div', { className: 'task-detail-heading' }, h('h3', null, 'Running actions'), h('span', null, operations.length)),
+    h('div', { className: 'task-detail-heading' }, h('h3', null, 'Current actions'), h('span', null, operations.length)),
     h('div', { className: 'task-event-list' }, ...operations.map((operation, index) => {
       const operationId = String(operation.id || operation.operationId || operation.invocationId || '');
       const stopping = Boolean(operation.stopRequestedAt) || controlKey === `stop:${operationId}`;
@@ -874,7 +881,8 @@ function CurrentOperations({ session, controlKey = '', onStopOperation }) {
             'aria-label': `Stop ${operation.label || operation.tool || 'running action'}`,
             onClick: () => { void onStopOperation?.(operationId); }
           }, stopping ? 'Stopping…' : 'Stop') : null
-        )
+        ),
+        h(OperationDiagnostics, { operation, live: true })
       );
     }))
   );

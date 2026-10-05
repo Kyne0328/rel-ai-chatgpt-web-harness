@@ -84,9 +84,22 @@ const FIELD_SCHEMAS = Object.freeze({
   writeGuidance: OBJECT,
   operationJournal: { type: ['object', 'array'], additionalProperties: true, items: OBJECT },
   work_id: STRING,
+  operationCursor: {type: ['string', 'null']},
+  operationsHasMore: BOOLEAN,
+  cursor: {type: ['string', 'null']},
+  hasMore: BOOLEAN,
+  tasks: ARRAY,
+  entries: ARRAY,
+  kind: STRING,
   backgroundOperation: OBJECT,
   backgroundOperations: { type: 'array', items: OBJECT },
   taskId: STRING,
+  responseBudget: OBJECT,
+  timeline: OBJECT,
+  outputFinalizationTimedOut: BOOLEAN,
+  outputFinalizationError: STRING,
+  mutationOwnershipPersistenceError: STRING,
+  rootExitConfirmed: BOOLEAN,
   executed: BOOLEAN,
   commandSucceeded: BOOLEAN,
   status: STRING,
@@ -292,7 +305,6 @@ const FIELD_SCHEMAS = Object.freeze({
   cwd: STRING,
   shell: STRING,
   lifecycle: STRING,
-  kind: STRING,
   purpose: STRING,
   metadataRevision: STRING,
 
@@ -475,7 +487,9 @@ const TOOL_FIELDS = Object.freeze({
   [OP.CHANGES_REPLAY]: ['ok', 'workspace', 'work_id', 'checkpointId', 'payloadSha256', 'createdAt', 'replayed', 'staged', 'redactSensitive', 'path', 'reviewScope', 'reviewedScope', 'reviewHash', 'reviewedFiles', 'excludedWorkspaceFiles', 'status', 'branch', 'aheadBehind', 'statusEntries', 'sessionChangedFiles', 'baselineChangedFiles', 'untrackedSessionFiles', 'untrackedBaselineFiles', 'baselineSource', 'diff', 'sensitiveReview', 'sensitiveValuesReturned', 'exitCode', 'stderr'],
   [OP.CHANGES_RESTORE]: ['ok', 'executed', 'workspace', 'work_id', 'mode', 'paths', 'command', 'commandSummary', 'cwd', 'shell', 'durationMs', 'queueWaitMs', 'queueTimedOut', 'exitCode', 'stdout', 'stderr', 'stdoutBytes', 'stderrBytes', 'stdoutTruncated', 'stderrTruncated', 'timedOut', 'cancelled', 'terminationConfirmed', 'forcedTermination', 'signal', 'error'],
   [OP.CHANGES_RESET]: ['ok', 'workspace', 'work_id', 'mode', 'removeUntracked', 'reset', 'clean'],
-  [OP.WORK_STATUS]: ['ok', 'version', 'workspace', 'work_id', 'operationId', 'workspaceAliases', 'workspaceCount', 'toolSurface', 'tools', 'toolGroups', 'scripts', 'ci', 'runtime', 'repositoryRuntime', 'runtimeCompatibility', 'repository', 'readiness', 'state', 'task', 'activeRelatedWork', 'backgroundOperation', 'backgroundOperations'],
+  [OP.WORK_STATUS]: ['ok', 'version', 'workspace', 'work_id', 'operationId', 'workspaceAliases', 'workspaceCount', 'toolSurface', 'tools', 'toolGroups', 'scripts', 'ci', 'runtime', 'repositoryRuntime', 'runtimeCompatibility', 'repository', 'readiness', 'state', 'task', 'activeRelatedWork', 'backgroundOperation', 'backgroundOperations', 'operationCursor', 'operationsHasMore'],
+  [OP.WORK_RESULT]: ['ok', 'version', 'workspace', 'work_id', 'operationId', 'workspaceAliases', 'workspaceCount', 'toolSurface', 'tools', 'toolGroups', 'scripts', 'ci', 'runtime', 'repositoryRuntime', 'runtimeCompatibility', 'repository', 'readiness', 'state', 'task', 'activeRelatedWork', 'backgroundOperation', 'backgroundOperations', 'operationCursor', 'operationsHasMore'],
+  [OP.WORK_HISTORY]: ['ok', 'workspace', 'kind', 'tasks', 'entries', 'cursor', 'hasMore'],
   [OP.WORK_STOP]: ['ok', 'workspace', 'work_id', 'status', 'duplicate', 'operationId', 'stoppedOperationIds', 'stoppedOperationCount', 'message'],
   [OP.PUBLISH_COMMIT]: ['ok', 'workspace', 'work_id', 'dryRun', 'message', 'addAll', 'paths', 'sensitiveAuthorization', 'statusBefore', 'add', 'commit', 'head', 'statusAfter', 'secretStagedFiles', 'unauthorizedSecretPaths', 'indexRestored', 'error'],
   [OP.PUBLISH_PUSH]: ['ok', 'workspace', 'work_id', 'remote', 'branch', 'dryRun', 'setUpstream', 'push'],
@@ -506,7 +520,7 @@ const NON_EXCEPTION_FAILURE_TOOLS = new Set([OP.VALIDATE_DIAGNOSTICS, OP.VALIDAT
 const COMPACT_RESULT_FIELDS = Object.freeze([
   'ok', 'truncated', 'originalBytes', 'workspace', 'work_id', 'processId', 'status', 'duplicate',
   'mode', 'check', 'exitCode', 'durationMs', 'diagnosticCount', 'validationStatus', 'completionKnown',
-  'message', 'error', 'errorCode', 'warning', 'level', 'summary', 'nextAction', 'stdout', 'stderr', 'results'
+  'message', 'error', 'errorCode', 'warning', 'level', 'summary', 'nextAction', 'stdout', 'stderr', 'results', 'timeline', 'outputFinalizationTimedOut', 'outputFinalizationError', 'mutationOwnershipPersistenceError', 'rootExitConfirmed', 'responseBudget'
 ]);
 
 function outputSchemaFor(name) {

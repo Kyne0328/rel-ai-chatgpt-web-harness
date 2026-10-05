@@ -1,0 +1,22 @@
+import assert from 'node:assert/strict';
+import { assessRuntimeCompatibility, runtimeMetadata } from '../src/runtimeCompatibility.js';
+
+const current = runtimeMetadata();
+assert.ok(current.buildIdentity);
+assert.ok(Number.isFinite(Date.parse(current.buildIdentity.startedAt)));
+assert.ok(current.buildIdentity.schemaDigest);
+assert.equal(runtimeMetadata().buildIdentity, current.buildIdentity);
+const buildIdentity = { ...current.buildIdentity, sourceRevision: 'a'.repeat(40), sourceFingerprint: 'b'.repeat(64), dirty: true };
+const runtime = { ...current, buildIdentity };
+const repository = { ...current, source: 'repository' };
+const unverified = assessRuntimeCompatibility(runtime, repository);
+assert.equal(unverified.releaseMetadataMatches, true);
+assert.equal(unverified.metadataMatches, true);
+assert.equal(unverified.sourceParity.status, 'unknown');
+assert.equal(unverified.sourceParity.verified, false);
+const different = assessRuntimeCompatibility(runtime, repository, { repositoryBuildState: { sourceRevision: 'a'.repeat(40), sourceFingerprint: 'c'.repeat(64), dirty: true } });
+assert.equal(different.releaseMetadataMatches, true, 'same version/schema can have different implementation bytes');
+assert.equal(different.sourceParity.status, 'different');
+assert.equal(different.compatible, true, 'source skew must not turn an advisory comparison into a tool boundary');
+assert.equal(different.schemaSensitiveOperationsBlocked, false);
+console.log('Release compatibility and source/build identity are independent contracts.');

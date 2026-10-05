@@ -110,6 +110,7 @@ function buildToolActivityDetails(name, args = {}, value = null, error = null, o
     ...(stdout ? { stdout } : {}),
     ...(stderr ? { stderr } : {}),
     metadata: sanitizeActivityMetadata({
+      ...(value?.timeline ? { timeline: value.timeline } : {}),
       ...(options.metadata || {}),
       pathCount: pathCount(args),
       matchCount: value?.matchCount,
@@ -235,10 +236,33 @@ function sanitizeActivityMetadata(value, depth = 0) {
   const output = {};
   for (const [key, item] of Object.entries(value)) {
     if (isSensitiveKey(key)) continue;
+    if (key === 'timeline' && depth === 0) { output.timeline = sanitizeOperationTimeline(item); continue; }
     if (!ALLOWED_METADATA_KEYS.has(key)) continue;
     const sanitized = sanitizeMetadataValue(item, depth + 1);
     if (sanitized !== undefined && sanitized !== '' && !(Array.isArray(sanitized) && sanitized.length === 0)) output[key] = sanitized;
   }
+  return output;
+}
+
+function sanitizeOperationTimeline(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  const output = {};
+  for (const key of ['phase', 'phaseStartedAt', 'lastProgressAt', 'deadlineKind', 'terminationCertainty', 'childExitedAt', 'errorCode']) {
+    if (typeof value[key] === 'string') output[key] = sanitizeDisplayText(value[key], 100);
+  }
+  for (const key of ['executed', 'outputFinalizationTimedOut', 'phasesTruncated']) {
+    if (typeof value[key] === 'boolean') output[key] = value[key];
+  }
+  for (const key of ['queuePosition', 'queueWaitMs']) {
+    if (Number.isFinite(value[key])) output[key] = Math.max(0, value[key]);
+  }
+  if (value.blocking && typeof value.blocking === 'object') {
+    output.blocking = Object.fromEntries(['owner', 'operationId', 'taskId'].filter(key => typeof value.blocking[key] === 'string').map(key => [key, sanitizeDisplayText(value.blocking[key], 200)]));
+  }
+  if (Array.isArray(value.phases)) output.phases = value.phases.slice(0, 24).map(item => {
+    if (!item || typeof item !== 'object') return null;
+    return Object.fromEntries(['phase', 'startedAt', 'endedAt', 'durationMs'].filter(key => typeof item[key] === 'string' || (key === 'durationMs' && Number.isFinite(item[key]))).map(key => [key, typeof item[key] === 'string' ? sanitizeDisplayText(item[key], 100) : Math.max(0, item[key])]));
+  }).filter(Boolean);
   return output;
 }
 
@@ -682,7 +706,14 @@ function sanitizeTaskRecord(record, options = {}) {
   if (!options.eventsAlreadySanitized && Array.isArray(value.events)) {
     value.events = value.events.map(sanitizeActivityEventRecord).filter(Boolean);
   }
-  if (Array.isArray(value.currentOperations)) value.currentOperations = value.currentOperations.map(item => sanitizeStructuredValue(item, 0)).filter(Boolean);
+  if (Array.isArray(value.currentOperations)) value.currentOperations = value.currentOperations.map(item => {
+    const operation = sanitizeStructuredValue(item, 0);
+    const timeline = item?.activity?.metadata?.timeline || item?.metadata?.timeline || item?.timeline;
+    if (operation && timeline) {
+      operation.metadata = { ...(operation.metadata || {}), timeline: sanitizeOperationTimeline(timeline) };
+    }
+    return operation;
+  }).filter(Boolean);
   if (value.semanticProgress && typeof value.semanticProgress === 'object') value.semanticProgress = sanitizeStructuredValue(value.semanticProgress, 0);
   if (value.plan && typeof value.plan === 'object') {
     value.plan = value.status === 'completed' ? terminalizeTaskPlan(value.plan) : normalizeTaskPlan(value.plan);
@@ -697,6 +728,7 @@ function sanitizeTaskRecord(record, options = {}) {
 function sanitizeTaskRecordForProjection(record, options = {}) {
   if (!record || typeof record !== 'object') return record;
   const projected = { ...record };
+  delete projected.eventCounterReceipts;
   delete projected.workflowEvidence;
   delete projected.workflow;
   if (projected.backgroundOperation && typeof projected.backgroundOperation === 'object') {
@@ -787,7 +819,6 @@ export {
   sanitizeActivityEventRecord,
   sanitizeCompletionSummary,
   sanitizeDisplayText,
-  sanitizeStreamText,
   sanitizeTaskRecord,
   sanitizeTaskRecordForProjection,
 

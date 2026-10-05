@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 
+import { fallbackOperationReceipt } from '../mcp/fallbackExecutions.js';
 import { slimCompactPublicResult } from './compactResult.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { withTaskIdentity } from './task.js';
@@ -15,7 +16,8 @@ import {
 const RESULT_IDENTITY_FIELDS = new Set(['workspace', 'action', 'sessionId', 'tabId', 'processId', 'observationId', 'semanticObservationId', 'targetId']);
 
 function serializeConnectorResult({ publicName, action, operationName, value, args = {}, workId = '' }) {
-  const operationResult = compactForConnector(operationName, value, args);
+  const compacted = compactForConnector(operationName, value, args);
+  const operationResult = value?.timeline && compacted && typeof compacted === 'object' ? { ...compacted, timeline: value.timeline } : compacted;
   const publicResult = slimCompactPublicResult(publicName, action, operationResult);
   const identified = withTaskIdentity(publicResult, workId);
   let result = identified;
@@ -51,24 +53,6 @@ function pruneArgumentEchoes(value, args) {
   return result;
 }
 
-function compactBackgroundOperation(value) {
-  if (!value || typeof value !== 'object') return value;
-  return pruneEmpty({
-    operationId: value.operationId,
-    work_id: value.work_id,
-    workspace: value.workspace,
-    tool: value.tool,
-    status: value.status,
-    phase: value.phase,
-    updatedAt: value.updatedAt,
-    completedAt: value.completedAt,
-    revision: value.revision,
-    cancellationRequestedAt: value.cancellationRequestedAt,
-    stopping: value.stopping,
-    error: value.error,
-    result: value.status && value.status !== 'running' ? value.result : undefined
-  });
-}
 
 function compactForConnector(name, value, args = {}) {
   if (!value || typeof value !== 'object') return value;
@@ -90,7 +74,8 @@ function compactForConnector(name, value, args = {}) {
       });
       return { ...value, items };
     }
-    case OP.WORK_STATUS: {
+    case OP.WORK_STATUS:
+    case OP.WORK_RESULT: {
       const full = String(args.detail || '').toLowerCase() === 'full';
       const workspace = value.workspace && typeof value.workspace === 'object'
         ? pruneEmpty(full ? {
@@ -105,9 +90,10 @@ function compactForConnector(name, value, args = {}) {
         : value.workspace;
       const targeted = Boolean(args.workspace || args.work_id || args.operationId);
       if (!full && targeted) {
-        const compatibility = value.runtimeCompatibility?.metadataMatches === false
+        const compatibility = value.runtimeCompatibility
           ? pruneEmpty({
               status: value.runtimeCompatibility.status,
+              sourceParity: value.runtimeCompatibility.sourceParity,
               compatible: value.runtimeCompatibility.compatible,
               restartRequired: value.runtimeCompatibility.restartRequired,
               activeTasksPreventRestart: value.runtimeCompatibility.activeTasksPreventRestart,
@@ -120,8 +106,17 @@ function compactForConnector(name, value, args = {}) {
           work_id: value.work_id,
           task: value.task,
           activeRelatedWork: value.activeRelatedWork,
-          backgroundOperation: compactBackgroundOperation(value.backgroundOperation),
-          backgroundOperations: value.backgroundOperations?.map(compactBackgroundOperation),
+          backgroundOperation: args.operationId && args.includeResult !== false ? value.backgroundOperation : fallbackOperationReceipt(value.backgroundOperation),
+          backgroundOperations: value.backgroundOperations,
+          operationCursor: value.operationCursor,
+          operationsHasMore: value.operationsHasMore,
+          truncated: value.truncated,
+          originalBytes: value.originalBytes,
+          nextAction: value.nextAction,
+          error: value.error,
+          errorCode: value.errorCode,
+          operationId: value.operationId,
+          runtime: value.runtime?.buildIdentity ? { buildIdentity: value.runtime.buildIdentity } : undefined,
           runtimeCompatibility: compatibility
         });
       }
@@ -143,6 +138,14 @@ function compactForConnector(name, value, args = {}) {
         activeRelatedWork: value.activeRelatedWork,
         backgroundOperation: value.backgroundOperation,
         backgroundOperations: value.backgroundOperations,
+        operationCursor: value.operationCursor,
+        operationsHasMore: value.operationsHasMore,
+        truncated: value.truncated,
+        originalBytes: value.originalBytes,
+        nextAction: value.nextAction,
+        error: value.error,
+        errorCode: value.errorCode,
+        operationId: value.operationId,
         state: workspace && value.workspace ? policySentence(value.workspace.policy) : null,
         workspaceCount: value.workspaceCount,
         workspaceAliases: value.workspaceAliases
@@ -218,6 +221,9 @@ function compactForConnector(name, value, args = {}) {
         cwd: value.cwd && value.cwd !== '.' ? value.cwd : undefined,
         exitCode: value.exitCode,
         durationMs: value.durationMs,
+        outputFinalizationTimedOut: value.outputFinalizationTimedOut,
+        outputFinalizationError: value.outputFinalizationError,
+        mutationOwnershipPersistenceError: value.mutationOwnershipPersistenceError,
         stdout: value.stdout || undefined,
         stderr: value.stderr || undefined,
         stdoutBytes: value.stdoutBytes || undefined,
@@ -230,6 +236,7 @@ function compactForConnector(name, value, args = {}) {
         stderrSpillTruncated: value.stderrSpillTruncated != null ? value.stderrSpillTruncated === true : undefined,
         timedOut: value.timedOut === true ? true : undefined,
         cancelled: value.cancelled === true ? true : undefined,
+        rootExitConfirmed: value.rootExitConfirmed,
         terminationConfirmed: value.terminationConfirmed != null ? value.terminationConfirmed === true : undefined,
         forcedTermination: value.forcedTermination != null ? value.forcedTermination === true : undefined,
         signal: value.signal || undefined,

@@ -1,10 +1,12 @@
+import { toolArgumentError } from './validationGuidance.js';
 import { fromJsonSchema } from '@modelcontextprotocol/server';
 import { HANDLERS } from './handlers.js';
 import {
   getCatalogToolDefinition as getPublicMetadata,
   getCatalogToolDefinitions as getPublicDefinitions,
   getOperationDefinitions as getOperationMetadata,
-  resolveToolOperation
+  resolveToolOperation,
+  getToolActionCatalog
 } from './actionCatalog.ts';
 import type { CatalogToolDefinition } from './actionDefinitions.ts';
 
@@ -74,7 +76,8 @@ async function validateExecutableOperationInput(
     return `${location || '<root>'}: ${issue.message}`;
   });
   const publicLabel = String(options.publicLabel || '').trim();
-  throw new Error(`Input validation error for ${publicLabel || name}: ${details.join('; ')}.`);
+  const entry = getToolActionCatalog().find(item => item.operationName === name);
+  throw toolArgumentError({ publicTool: entry?.publicTool || publicLabel || name, action: entry?.action || '', fields: entry?.fields || [], required: entry?.required || [], schema: entry?.inputSchema || {}, issues: result.issues, message: `Input validation error for ${publicLabel || name}: ${details.join('; ')}.` });
 }
 
 function getExecutableToolDefinition(

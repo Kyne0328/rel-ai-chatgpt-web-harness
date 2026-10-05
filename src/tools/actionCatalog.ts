@@ -1,3 +1,4 @@
+import { toolArgumentError } from './validationGuidance.js';
 import type { ApprovalRequirement } from '../contracts/authorization.ts';
 import {
   getCatalogToolDefinition,
@@ -9,7 +10,7 @@ import {
 import type { ActionMapping, ActionRegistry, CatalogToolDefinition, PublicActionContract } from './actionDefinitions.ts';
 import { ACTION_REGISTRY as RAW_ACTION_REGISTRY } from './actionRegistry.js';
 
-const TOOL_SURFACE_VERSION = 88;
+const TOOL_SURFACE_VERSION = 89;
 const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 
 type ToolActionCatalogEntry = Readonly<{
@@ -116,7 +117,7 @@ function getCatalogAction(publicTool: string, args: Record<string, unknown> = {}
   const entry = ACTION_BY_KEY.get(catalogKey(publicTool, action));
   if (!entry) {
     const choices = Object.keys(actions).filter(value => value !== 'default');
-    throw new Error(`Unsupported action '${action || '(missing)'}' for ${publicTool}. Supported actions: ${choices.join(', ')}.`);
+    throw toolArgumentError({ publicTool, action, message: `Unsupported action '${action || '(missing)'}' for ${publicTool}. Supported actions: ${choices.join(', ')}. Supply action explicitly when inference is ambiguous.`, issues: [{ field: 'action', message: `Supported actions: ${choices.join(', ')}. Supply action explicitly when inference is ambiguous.` }] });
   }
   return entry;
 }
@@ -161,6 +162,15 @@ function inferCatalogAction(publicTool: string, args: Record<string, unknown>, a
   }
 }
 
+function normalizePublicToolArguments(name: string, args: Record<string, unknown> = {}): Record<string, unknown> {
+  const entry = getCatalogAction(name, args);
+  if (!entry) return args;
+  // Resolve once before schema validation so discovery and every transport use
+  // exactly the same inference and action-specific field grammar as execution.
+  resolveToolOperation(name, args);
+  return !String(args.action || '').trim() && entry.action !== 'default' ? { ...args, action: entry.action } : args;
+}
+
 function nonEmptyArg(args: Record<string, unknown>, key: string): boolean {
   if (!Object.hasOwn(args, key)) return false;
   const value = args[key];
@@ -195,12 +205,12 @@ function normalizeOperationArguments(
   if (entry.keepAction) allowed.add('action');
   const unsupported = Object.keys(args).filter(field => !allowed.has(field));
   if (unsupported.length) {
-    throw new Error(`Unsupported field '${unsupported[0]}' for ${publicName} action ${action}.`);
+    throw toolArgumentError({ publicTool: publicName, action, fields: entry.fields, required: entry.required, schema: entry.inputSchema, issues: unsupported.map(field => ({ field, message: `Field is not supported by action ${action}.` })), message: `Unsupported field '${unsupported[0]}' for ${publicName} action ${action}.` });
   }
   for (const field of entry.required || []) {
     const allowsEmptyValue = publicName === 'relai_computer' && action === 'set_value' && field === 'value';
     if (args[field] === undefined || args[field] === null || (!allowsEmptyValue && args[field] === '')) {
-      throw new Error(`Missing required field '${field}' for ${publicName} action ${action}.`);
+      throw toolArgumentError({ publicTool: publicName, action, fields: entry.fields, required: entry.required, schema: entry.inputSchema, issues: [{ field, message: 'Required field is missing.' }], message: `Missing required field '${field}' for ${publicName} action ${action}.` });
     }
   }
   return args;
@@ -233,6 +243,7 @@ export {
   getOperationDefinition,
   getOperationDefinitions,
   getToolActionCatalog,
-  resolveToolOperation
+  resolveToolOperation,
+  normalizePublicToolArguments
 };
 export type { CatalogTool, ToolActionCatalogEntry };

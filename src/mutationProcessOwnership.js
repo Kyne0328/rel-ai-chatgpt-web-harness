@@ -31,6 +31,35 @@ function recordCurrentMutationProcess(pidValue) {
   return file;
 }
 
+function markCurrentMutationProcessUncertain(pidValue, reason = '') {
+  const current = ownershipContext.getStore();
+  const pid = Number(pidValue);
+  if (!current || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  const file = mutationProcessRecordFile(current.config, current.workspace, runtimeId, pid);
+  try {
+    const record = readJsonFile(file, {
+      validate: value => Boolean(value && typeof value === 'object'
+        && value.schemaVersion === RECORD_SCHEMA_VERSION && value.runtimeId === runtimeId
+        && value.workspace === current.workspace && value.pid === pid)
+    });
+    if (!record) throw new Error('The original mutation ownership record is unavailable.');
+    writeJsonAtomic(file, {
+      ...record,
+      terminationUncertain: true,
+      terminationUncertaintyReason: String(reason || 'Process-tree termination was not confirmed.').slice(0, 1000)
+    }, { mode: 0o600 });
+    return true;
+  } catch (cause) {
+    // Keep the original marker. A failed persistence attempt must never be
+    // interpreted as confirmed termination or permission to clear ownership.
+    const error = new Error('Could not persist uncertain process termination; restart recovery cannot verify this uncertainty. Keep the workspace blocked and verify all descendants stopped before recovery.', { cause });
+    error.code = 'MUTATION_TERMINATION_UNCERTAINTY_PERSIST_FAILED';
+    error.terminationConfirmed = false;
+    error.pid = pid;
+    throw error;
+  }
+}
+
 function clearCurrentMutationProcess(pidValue) {
   const current = ownershipContext.getStore();
   const pid = Number(pidValue);
@@ -80,6 +109,7 @@ function mutationProcessRecordFile(config, workspace, ownerRuntimeId, pid) {
 export {
   clearCurrentMutationProcess,
   listMutationProcessRecords,
+  markCurrentMutationProcessUncertain,
   recordCurrentMutationProcess,
   removeMutationProcessRecord,
   runWithMutationProcessOwnership

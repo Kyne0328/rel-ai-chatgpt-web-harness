@@ -87,10 +87,17 @@ function eventIdentityFields(event = {}, options = {}) {
   ];
 }
 
+function eventIdentityAliases(event = {}) {
+  return [...new Set([event.eventId, event.operationId, event.id, event.auditId]
+    .filter(value => value != null && String(value) !== '').map(String))];
+}
+
 function eventIdentityKey(event = {}, index = 0, options = {}) {
   if (event.eventId) return String(event.eventId);
-  if (options.preferId === true && event.id) return String(event.id);
+  if (options.preferId === true && event.id != null && String(event.id)) return String(event.id);
   if (event.operationId) return String(event.operationId);
+  if (event.id != null && String(event.id)) return String(event.id);
+  if (event.auditId) return String(event.auditId);
   return [
     eventTimestampValue(event),
     event.tool?.name || event.tool || event.type || '',
@@ -114,6 +121,7 @@ export {
   TASK_RUNTIME_TERMINAL_PHASES,
   clamp,
   cleanTaskId,
+  eventIdentityAliases,
   eventIdentityFields,
   eventIdentityKey,
   eventTime,

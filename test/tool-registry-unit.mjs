@@ -191,7 +191,7 @@ for (const removed of removedDirectNames) {
 }
 
 const publicSchemaByName = new Map(publicSchemas.map(schema => [schema.name, schema]));
-assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'stop', 'finish', 'cancel']);
+assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'result', 'history', 'stop', 'finish', 'cancel']);
 const processSchema = schemaByName.get('relai_process');
 assert.deepEqual(processSchema.inputSchema.properties.action.enum, ['start', 'read', 'write', 'stop', 'list']);
 assert.ok(processSchema.inputSchema.properties.kind.enum.includes('service'));

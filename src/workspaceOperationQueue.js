@@ -12,6 +12,9 @@
 // are abort-aware so a disconnected MCP request never remains queued until an
 // unrelated operation eventually releases its lock.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+const queueOwnerContext = new AsyncLocalStorage();
 const locks = new Map();
 const mutationBlocks = new Map();
 const mutationBlockControllers = new Map();
@@ -50,7 +53,7 @@ function admitWaiting(state) {
   }
 }
 
-function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs) {
+function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs, onQueueState = null) {
   throwIfAborted(signal);
   const queuedAt = Date.now();
   return new Promise((resolve, reject) => {
@@ -64,6 +67,8 @@ function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeo
       mode,
       owner: owner && typeof owner === 'object' ? { ...owner } : null,
       settled: false,
+      onQueueState,
+      lastQueueState: '',
       admit: () => {
         if (entry.settled) return;
         entry.settled = true;
@@ -83,6 +88,7 @@ function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeo
       cleanupWait();
       reject(workspaceOperationAbortError(signal));
       admitWaiting(state);
+      notifyQueueStates(state);
     };
     const boundedTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
       ? Math.max(1, Math.floor(Number(timeoutMs)))
@@ -95,12 +101,33 @@ function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeo
         if (entry.settled || !removeWaitingEntry()) return;
         entry.settled = true;
         cleanupWait();
-        reject(workspaceOperationQueueTimeoutError(reportedTimeoutMs, state));
+        reject(workspaceOperationQueueTimeoutError(reportedTimeoutMs, state, entry.owner));
         admitWaiting(state);
+        notifyQueueStates(state);
       }, boundedTimeoutMs);
     }
     admitWaiting(state);
+    notifyQueueStates(state);
   });
+}
+
+function notifyQueueStates(state) {
+  let precedingWriter = null;
+  for (let index = 0; index < state.queue.length; index += 1) {
+    const entry = state.queue[index];
+    const owner = state.activeWriterOwner || precedingWriter?.owner;
+    if (!precedingWriter && entry.mode === WRITE) precedingWriter = entry;
+    if (typeof entry.onQueueState !== 'function') continue;
+    const details = {
+      queuePosition: index + 1,
+      blocking: disclosedQueueOwner(owner, entry.owner),
+      activeReaderCount: state.activeReaders
+    };
+    const signature = JSON.stringify(details);
+    if (signature === entry.lastQueueState) continue;
+    entry.lastQueueState = signature;
+    try { entry.onQueueState(details); } catch { /* Diagnostics cannot strand a queue. */ }
+  }
 }
 
 function release(key, state, mode) {
@@ -110,6 +137,7 @@ function release(key, state, mode) {
     state.activeWriterOwner = null;
   }
   admitWaiting(state);
+  notifyQueueStates(state);
   deleteIdleLock(key, state);
 }
 
@@ -119,11 +147,11 @@ function deleteIdleLock(key, state) {
   }
 }
 
-async function withLock(key, mode, operation, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs) {
+async function withLock(key, mode, operation, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs, onQueueState = null) {
   const state = lockStateFor(key);
   let waitMs;
   try {
-    waitMs = await acquire(state, mode, signal, timeoutMs, owner, reportedTimeoutMs);
+    waitMs = await acquire(state, mode, signal, timeoutMs, owner, reportedTimeoutMs, onQueueState);
   } catch (error) {
     deleteIdleLock(key, state);
     throw error;
@@ -132,7 +160,7 @@ async function withLock(key, mode, operation, signal, timeoutMs = 0, owner = nul
     // The signal can flip after admission resolves but before this continuation
     // resumes. In that race, release the acquired lock without invoking work.
     throwIfAborted(signal);
-    return await operation(waitMs, state);
+    return await queueOwnerContext.run(owner, () => operation(waitMs, state));
   } finally {
     release(key, state, mode);
   }
@@ -168,15 +196,29 @@ function workspaceOperationAbortError(signal) {
   const error = new Error(message, reason instanceof Error ? { cause: reason } : undefined);
   error.name = 'AbortError';
   error.code = 'WORKSPACE_OPERATION_ABORTED';
+  error.executed = false;
   error.retryable = true;
   return error;
 }
 
-function workspaceOperationQueueTimeoutError(timeoutMs, state = {}) {
-  const blocker = state.activeWriterOwner && typeof state.activeWriterOwner === 'object' ? state.activeWriterOwner : null;
+// A shared workspace lock does not grant access to another principal's task.
+// Unattributed callers receive only generic queue diagnostics.
+function disclosedQueueOwner(owner, requester) {
+  const principal = String(requester?.principalFingerprint || '');
+  if (!principal || principal !== String(owner?.principalFingerprint || '')) return {};
+  return {
+    owner: owner.operation || '', operationId: owner.operationId || '', taskId: owner.taskId || '',
+    ...(owner.startedAt ? { startedAt: owner.startedAt } : {})
+  };
+}
+
+function workspaceOperationQueueTimeoutError(timeoutMs, state = {}, requester = null) {
+  const disclosed = disclosedQueueOwner(state.activeWriterOwner, requester);
+  const blocker = { ...disclosed, operation: disclosed.owner };
   const blockerLabel = blocker?.operation ? ` Blocked by ${blocker.operation}${blocker.taskId ? ` in task ${blocker.taskId}` : ''}.` : '';
   const error = new Error(`Workspace operation queue wait exceeded ${timeoutMs}ms.${blockerLabel} The waiting operation was not started; retry after the blocker finishes or stop it.`);
   error.code = 'WORKSPACE_OPERATION_QUEUE_TIMEOUT';
+  error.executed = false;
   error.retryable = true;
   error.queueTimeoutMs = timeoutMs;
   if (blocker?.taskId) error.blockingTaskId = String(blocker.taskId);
@@ -288,7 +330,7 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
         queued: state.queue.length
       });
       return operation();
-    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
+    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
   }
 
   if (scope === MUTATION_SCOPE) {
@@ -308,9 +350,9 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
             queued: workspaceState.queue.length + taskState.queue.length + mutationState.queue.length
           });
           return operation();
-        }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
-      }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
-    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs);
+        }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+      }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
   }
 
   return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => {
@@ -325,8 +367,8 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
         queued: workspaceState.queue.length + taskState.queue.length
       });
       return operation();
-    }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs);
-  }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs);
+    }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+  }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
 }
 
 function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
@@ -340,6 +382,8 @@ function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
     : 0;
   throwIfWorkspaceMutationBlocked(workspace);
   const signal = mutationQueueSignal(workspace, options.signal);
+  // Validation may enter this narrower boundary from an already-owned task lane.
+  const owner = options.owner || queueOwnerContext.getStore() || null;
   return withLock(mutationKey(workspace), WRITE, async (waitMs, state) => {
     throwIfWorkspaceMutationBlocked(workspace);
     notifyWait(options, waitMs, {
@@ -350,7 +394,7 @@ function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
       queued: state.queue.length
     });
     return operation();
-  }, signal, queueTimeoutMs, options.owner);
+  }, signal, queueTimeoutMs, owner, queueTimeoutMs, options.onQueueState);
 }
 
 function pendingWorkspaceOperations() {

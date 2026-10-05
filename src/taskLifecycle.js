@@ -7,8 +7,9 @@ import {
   sanitizeTaskRecord
 } from './taskObservability.js';
 import { isTerminalTaskStatus, normalizeHistoricalTaskStatus } from './taskState.js';
-import { eventIdentityKey, eventTimestampMs, operationForTool, timestampMs, unique } from './taskEvents.js';
+import { eventIdentityAliases, eventIdentityKey, eventTimestampMs, operationForTool, timestampMs, unique } from './taskEvents.js';
 import { classifyTaskChangedFiles } from './taskSemanticProgress.js';
+import { canonicalizeActivityEvents, ensureActivityEventIdentity } from './taskEventIdentity.js';
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
 
 const MAX_SESSION_EVENTS = 200;
@@ -26,9 +27,10 @@ function canonicalTaskSnapshot(record = {}, options = {}) {
   const terminal = isTerminalTaskStatus(status);
   const inactive = status === 'inactive';
   const activeCalls = terminal || inactive ? 0 : Math.max(0, Number(sanitized.activeCalls || 0));
-  const events = Array.isArray(sanitized.events)
-    ? sanitized.events.slice(-MAX_SESSION_EVENTS)
+  const importedEvents = Array.isArray(sanitized.events)
+    ? canonicalizeActivityEvents(sanitized.events, { source: options.eventSource || `task-history:${sanitized.workspace || ''}:${id}` })
     : [];
+  const events = importedEvents.slice(-MAX_SESSION_EVENTS);
   const currentOperations = terminal || inactive
     ? []
     : Array.isArray(sanitized.currentOperations) ? sanitized.currentOperations : [];
@@ -57,6 +59,7 @@ function canonicalTaskSnapshot(record = {}, options = {}) {
     activeCalls,
     currentOperations,
     events,
+    eventCounterReceipts: counterReceipts(sanitized.eventCounterReceipts, importedEvents),
     calls: Math.max(0, Number(sanitized.calls ?? sanitized.toolCallCount ?? 0)),
     toolCallCount: Math.max(0, Number(sanitized.toolCallCount ?? sanitized.calls ?? 0)),
     successfulToolCallCount: Math.max(0, Number(sanitized.successfulToolCallCount || 0)),
@@ -75,7 +78,15 @@ function canonicalTaskSnapshot(record = {}, options = {}) {
 
 function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
   const current = canonicalTaskSnapshot(session, { eventsAlreadySanitized: options.eventsAlreadySanitized === true });
-  const timestamp = timestampMs(event.ts || event.timestamp) || Date.now();
+  event = ensureActivityEventIdentity(event, { source: options.eventSource, occurrence: options.eventOccurrence });
+  const aliases = new Set(eventIdentityAliases(event));
+  const lifecycleIndex = (current.events || []).findIndex(item => eventIdentityAliases(item).some(id => aliases.has(id)));
+  const previousEvent = current.events[lifecycleIndex];
+  const receipt = findCounterReceipt(current.eventCounterReceipts, aliases);
+  const eventId = receipt?.eventId || (previousEvent && eventIdentityKey(previousEvent)) || eventIdentityKey(event);
+  event = { ...event, eventId };
+  const represented = Boolean(receipt) || lifecycleIndex >= 0;
+  const timestamp = timestampMs(event.ts || event.timestamp) || eventTimestampMs(previousEvent || {}) || Date.now();
   const ended = timestamp + Math.max(0, Number(event.ms || event.durationMs || 0));
   const completion = event.ok !== false && (event.completionKnown === true || event.tool === OP.WORK_FINISH);
   const cancellationStatus = String(event.taskCancellationStatus || '').trim().toLowerCase();
@@ -86,17 +97,18 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
     ...(Array.isArray(event.taskOwnedChangedFiles) ? event.taskOwnedChangedFiles : []),
     ...(Array.isArray(event.changedFiles) ? event.changedFiles : [])
   ].map(String).filter(Boolean));
-  const eventId = event.eventId || event.operationId || '';
-  const lifecycleIndex = eventId
-    ? (current.events || []).findIndex(item => item?.eventId === eventId || item?.operationId === eventId)
-    : -1;
-  const represented = lifecycleIndex >= 0;
   const recoverableValidationFailure = event.tool === OP.VALIDATE_CHECKS && ['failed', 'not_run'].includes(String(event.validationStatus || ''));
-  const failures = Math.max(Number(current.failures || 0), Number(current.failedToolCallCount || 0))
-    + (event.ok === false && !represented && !recoverableValidationFailure ? 1 : 0);
+  const priorOutcome = receipt?.outcome || eventCounterOutcome(previousEvent);
+  const incomingOutcome = eventCounterOutcome(event, true);
+  const outcome = incomingOutcome === 'pending' && priorOutcome !== 'pending' ? priorOutcome : incomingOutcome;
+  const failures = Math.max(0, Math.max(Number(current.failures || 0), Number(current.failedToolCallCount || 0))
+    + Number(outcome === 'failed') - Number(priorOutcome === 'failed'));
   const calls = Number(current.calls || 0) + (represented ? 0 : 1);
+  const successfulToolCallCount = Math.max(0, Number(current.successfulToolCallCount || 0)
+    + Number(outcome === 'succeeded') - Number(priorOutcome === 'succeeded'));
+  const eventCounterReceipts = updateCounterReceipt(current.eventCounterReceipts, eventId, outcome, aliases);
   const compact = compactLifecycleEvent(event);
-  const events = represented
+  const events = lifecycleIndex >= 0
     ? current.events.map((item, index) => index === lifecycleIndex ? { ...item, ...compact } : item)
     : [...current.events, compact];
   const status = completion || current.completionKnown
@@ -150,7 +162,8 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
     durationMs: Math.max(0, timestampMs(updatedAt) - timestampMs(startedAt)),
     calls,
     toolCallCount: Math.max(Number(current.toolCallCount || 0), calls),
-    successfulToolCallCount: Math.max(0, calls - failures),
+    successfulToolCallCount,
+    eventCounterReceipts,
     failedToolCallCount: failures,
     failures,
     changedFiles,
@@ -217,6 +230,7 @@ function mergeTaskLifecycleSnapshots(persisted, live, options = {}) {
     || merged.changedFileCount > merged.changedFiles.length;
   merged.completionKnown = durable.completionKnown === true || active.completionKnown === true;
   merged.events = mergeLifecycleEvents(durable.events || [], active.events || []);
+  merged.eventCounterReceipts = mergeCounterReceipts(durable.eventCounterReceipts, active.eventCounterReceipts, merged.events);
   return canonicalTaskSnapshot(merged, { eventsAlreadySanitized: true });
 }
 
@@ -252,7 +266,7 @@ function mergeLifecycleEvents(left, right) {
 
 function compactLifecycleEvent(event) {
   const keep = [
-    'id', 'eventId', 'ts', 'timestamp', 'startedAt', 'completedAt', 'durationMs', 'pid', 'taskId',
+    'id', 'eventId', 'auditId', 'eventIdentitySource', 'eventIdentityOccurrence', 'ts', 'timestamp', 'startedAt', 'completedAt', 'durationMs', 'pid', 'taskId',
     'operationId', 'requestId', 'serverInstanceId', 'transportType', 'clientName', 'clientVersion',
     'taskIdentityVersion', 'taskIdExplicit', 'taskHistoryEligible', 'duplicateRequest', 'eventType',
     'category', 'action', 'status', 'title', 'summary', 'currentStage', 'currentActivity', 'tool',
@@ -265,8 +279,84 @@ function compactLifecycleEvent(event) {
   for (const key of ['taskSummary', 'message', 'error']) {
     if (compact[key] != null) compact[key] = sanitizeDisplayText(compact[key], 500);
   }
-  if (!compact.eventId && compact.operationId) compact.eventId = compact.operationId;
+  if (!compact.eventId) compact.eventId = eventIdentityKey(event);
   return sanitizeActivityEventRecord(compact);
+}
+
+
+function eventCounterOutcome(event, audit = false) {
+  if (!event) return 'pending';
+  if (['running', 'queued', 'pending', 'accepted'].includes(event.status)) return 'pending';
+  if (event.tool === OP.VALIDATE_CHECKS && ['failed', 'not_run'].includes(String(event.validationStatus || ''))) return 'validation_failed';
+  if (event.ok === false || event.status === 'failed') return 'failed';
+  if (event.status === 'cancelled') return 'cancelled';
+  return audit || event.ok === true || event.status === 'succeeded' ? 'succeeded' : 'pending';
+}
+
+// The durable receipt index is independent of the bounded display tail. It has
+// no last-N eviction: old audit replays must remain idempotent. Canonical reads
+// reuse it unchanged; lookups are O(1), and only a new receipt copies the compact
+// outcome dictionary (the task snapshot must already be serialized on writes).
+function counterReceipts(receipts = {}, events = []) {
+  let result = receipts?.version === 1 && receipts.outcomes && receipts.aliases
+    ? receipts
+    : { version: 1, outcomes: Object.create(null), aliases: Object.create(null) };
+  let writable = result !== receipts;
+  const write = () => {
+    if (writable) return;
+    result = { version: 1, outcomes: { ...result.outcomes }, aliases: { ...result.aliases } };
+    writable = true;
+  };
+  const set = (eventId, outcome, aliases = []) => {
+    const existing = Object.hasOwn(result.outcomes, eventId) ? result.outcomes[eventId] : undefined;
+    if (existing === undefined || (existing === 'pending' && outcome !== 'pending')) {
+      write();
+      Object.defineProperty(result.outcomes, eventId, { value: outcome, enumerable: true, configurable: true, writable: true });
+    }
+    for (const alias of aliases) {
+      if (alias === eventId || (Object.hasOwn(result.aliases, alias) && result.aliases[alias] === eventId)) continue;
+      write();
+      Object.defineProperty(result.aliases, alias, { value: eventId, enumerable: true, configurable: true, writable: true });
+    }
+  };
+  for (const receipt of Array.isArray(receipts) ? receipts : []) {
+    if (receipt?.eventId) set(String(receipt.eventId), String(receipt.outcome || 'pending'), Array.isArray(receipt.aliases) ? receipt.aliases.map(String) : []);
+  }
+  for (const event of events) set(eventIdentityKey(event), eventCounterOutcome(event), eventIdentityAliases(event));
+  return result;
+}
+
+function findCounterReceipt(receipts, aliases) {
+  for (const alias of aliases) {
+    const eventId = Object.hasOwn(receipts.outcomes, alias) ? alias
+      : Object.hasOwn(receipts.aliases, alias) ? receipts.aliases[alias] : '';
+    if (eventId && Object.hasOwn(receipts.outcomes, eventId)) return { eventId, outcome: receipts.outcomes[eventId] };
+  }
+  return null;
+}
+
+function updateCounterReceipt(receipts, eventId, outcome, aliases) {
+  let result = receipts;
+  if (!Object.hasOwn(receipts.outcomes, eventId) || receipts.outcomes[eventId] !== outcome) {
+    result = { ...result, outcomes: { ...receipts.outcomes, [eventId]: outcome } };
+  }
+  for (const alias of aliases) {
+    if (alias === eventId || (Object.hasOwn(result.aliases, alias) && result.aliases[alias] === eventId)) continue;
+    if (result.aliases === receipts.aliases) result = { ...result, aliases: { ...receipts.aliases } };
+    Object.defineProperty(result.aliases, alias, { value: eventId, enumerable: true, configurable: true, writable: true });
+  }
+  return result;
+}
+
+function mergeCounterReceipts(left, right, events) {
+  if (left === right) return counterReceipts(left, events);
+  const outcomes = { ...left.outcomes };
+  for (const [eventId, outcome] of Object.entries(right.outcomes)) {
+    if (outcome !== 'pending' || !Object.hasOwn(outcomes, eventId)) {
+      Object.defineProperty(outcomes, eventId, { value: outcome, enumerable: true, configurable: true, writable: true });
+    }
+  }
+  return counterReceipts({ version: 1, outcomes, aliases: { ...left.aliases, ...right.aliases } }, events);
 }
 
 function validationState(event) {

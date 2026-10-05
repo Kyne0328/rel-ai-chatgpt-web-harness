@@ -62,7 +62,8 @@ const {
   standardWebhookSignature
 } = await import('../src/mcp/events.ts');
 const { acknowledgeFallbackCompletionDelivery } = await import('../src/mcp/fallbackExecutions.js');
-const { enrichWithFallbackCompletions } = await import('../src/mcp/toolInvocation.js');
+const { enrichWithFallbackCompletions, registerReturnedFallbackCompletions } = await import('../src/mcp/toolInvocation.js');
+const { toolResult } = await import('../src/mcp/results.js');
 const { principalFingerprint } = await import('../src/mcp/principal.ts');
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-mcp-events-'));
@@ -340,6 +341,10 @@ try {
     'work-b',
     'the existence of an Events subscription must never suppress a durable fallback notice'
   );
+  assert.equal(acknowledgeFallbackCompletionDelivery(owner, 21), false,
+    'peeking at completion notices must not register delivery before response serialization');
+  registerReturnedFallbackCompletions(config, { workspace }, toolResult(exactButUndelivered),
+    { principal, requestId: 21 }, exactButUndelivered);
   assert.equal(acknowledgeFallbackCompletionDelivery(owner, 21), true);
 
   writeSubscriptionStore([
@@ -358,6 +363,10 @@ try {
     1,
     'an already queued completion remains deliverable until a response is confirmed, even when an exact subscription exists'
   );
+  assert.equal(acknowledgeFallbackCompletionDelivery(owner, 22), false,
+    'peeking at completion notices must not register delivery before response serialization');
+  registerReturnedFallbackCompletions(config, { workspace }, toolResult(queuedBeforeWebhook),
+    { principal, requestId: 22 }, queuedBeforeWebhook);
   assert.equal(acknowledgeFallbackCompletionDelivery(owner, 22), true);
 
   writeSubscriptionStore([
@@ -389,6 +398,10 @@ try {
   );
   assert.equal(fallback.completedOperations?.length, 1);
   assert.equal(fallback.completedOperations?.[0]?.status, 'completed');
+  assert.equal(acknowledgeFallbackCompletionDelivery(owner, 23), false,
+    'peeking at completion notices must not register delivery before response serialization');
+  registerReturnedFallbackCompletions(config, { workspace }, toolResult(fallback),
+    { principal, requestId: 23 }, fallback);
   assert.equal(acknowledgeFallbackCompletionDelivery(owner, 23), true);
 
   console.log('MCP Events definitions, callback verification, signing, retry, filter matching, secret rotation, expiry/410 cleanup, unsubscribe, and delivery-backed fallback tests passed.');

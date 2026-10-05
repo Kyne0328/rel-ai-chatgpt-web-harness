@@ -1,0 +1,13 @@
+.operation-diagnostics { @apply min-w-0 rounded-md p-3 text-xs; grid-column: 1 / -1; border: 1px solid var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+.operation-diagnostics-title { @apply block text-sm; color: var(--ui-text-primary); }
+.operation-diagnostics p { @apply my-1; color: var(--ui-text-secondary); }
+.operation-diagnostics details { @apply mt-2; }
+.operation-diagnostics summary { @apply min-h-9 cursor-pointer py-2 font-semibold; overflow-wrap: anywhere; }
+.operation-diagnostics summary:focus-visible { outline: 2px solid var(--ui-text-primary); outline-offset: 2px; }
+.operation-diagnostics-facts { @apply my-2 grid gap-2; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+.operation-diagnostics-facts > div { @apply min-w-0; }
+.operation-diagnostics-facts dt { color: var(--ui-text-tertiary); }
+.operation-diagnostics-facts dd { @apply m-0; overflow-wrap: anywhere; white-space: normal; }
+.operation-phase-durations { @apply my-2 grid list-none gap-1 p-0; }
+.operation-phase-durations li { @apply flex flex-wrap justify-between gap-x-3; }
+.operation-diagnostics .operation-diagnostics-warning { @apply my-2 border-l-2 pl-2 font-semibold; color: var(--ui-text-primary); border-color: currentColor; }

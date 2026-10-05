@@ -13,6 +13,7 @@ import { fetchJson } from '../../api.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
+import { OperationDiagnostics, RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { toast } from '../../components/toast.js';
 import { copyText } from '../../clipboard.js';
 import { getRouteParams, getWorkspaceFilter, navigate, replaceRouteParams, routeHref } from '../../router.js';
@@ -38,7 +39,7 @@ import {
 } from './model.js';
 
 const h = React.createElement;
-const ACTIVITY_STORE_KEYS = Object.freeze(['auditTail', 'tasks']);
+const ACTIVITY_STORE_KEYS = Object.freeze(['auditTail', 'tasks', 'runtime', 'runtimeCompatibility']);
 const EMPTY_FILTERS = Object.freeze({ search: '', timeRange: '1h', workspace: '', tool: '', status: '', task: '' });
 const TIME_OPTIONS = Object.freeze([
   { value: '15m', label: 'Last 15 minutes' },
@@ -328,6 +329,9 @@ function ActivityView({ data = {} }) {
     const heading = inspectorHeadingRef.current;
     if (!(heading instanceof HTMLElement)) return;
     heading.focus({ preventScroll: true });
+    // In the stacked layout, a longer inspector can sit below the list and
+    // viewport. Reveal explicit selections once; live updates must not scroll.
+    heading.scrollIntoView({ behavior: 'instant', block: 'start', inline: 'nearest' });
   }, [selectedEventId, selectedEntry]);
 
   const syncRoute = useCallback(next => {
@@ -519,6 +523,8 @@ function ActivityView({ data = {} }) {
         ),
         h(ActivityInspector, {
           entry: selectedEntry,
+          runtime: data.runtime,
+          runtimeCompatibility: data.runtimeCompatibility,
           sessionIndex,
           headingRef: inspectorHeadingRef,
           copyState,
@@ -695,7 +701,7 @@ function ActivitySpacerRow({ height }) {
   );
 }
 
-function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
+function ActivityInspector({ entry, runtime, runtimeCompatibility, sessionIndex, headingRef, copyState, onCopy }) {
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
       h('div', { className: 'inspector-empty' }, h('strong', null, 'Select an activity'))
@@ -753,6 +759,7 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
           }, 'Task activity')
         )
       ) : null,
+      h(OperationDiagnostics, { key: activityEventId(entry), operation: entry, live: group === 'active' }),
       readableSection('Target', targetText),
       command ? h(CommandDetail, { command }) : null,
       isCommandRun ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
@@ -760,6 +767,7 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
       readableSection('Error', errorText, 'activity-detail-error'),
+      h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }),
       h('details', { className: 'activity-detail-technical' },
         h('summary', null, 'Technical details'),
         h('div', { className: 'activity-detail-fields' },

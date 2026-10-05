@@ -15,6 +15,7 @@ const SPILL_TTL_MS = 24 * 60 * 60 * 1000;
 // unbounded heap allocation. The producer can pause its stream at this limit.
 const MAX_PENDING_SPILL_BYTES = 4 * 1024 * 1024;
 const SPILL_LOW_WATER_BYTES = 1024 * 1024;
+const DEFAULT_FINALIZATION_TIMEOUT_MS = 2000;
 const spillUsageByRoot = new Map();
 const activeSpillsByRoot = new Map();
 const activeReservationsByRoot = new Map();
@@ -39,11 +40,17 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
   let finished = false;
   let writePromise = null;
   let writeError = null;
+  let abandoned = false;
+  let finalizationTimedOut = false;
+  let finishPromise = null;
+  let released = false;
+  let notifyAbandoned;
+  const abandonedPromise = new Promise(resolve => { notifyAbandoned = resolve; });
   const pending = [];
   const lowWaterWaiters = new Set();
 
   function start(initial) {
-    if (!owner || fd !== null || finished) return;
+    if (!owner || fd !== null || finished || abandoned) return;
     const prunedUsage = pruneOutputSpills(root);
     // `pruneOutputSpills` sees on-disk bytes, which may lag behind accepted
     // asynchronous writes. Add only the active writers' unwritten
@@ -78,7 +85,7 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
   }
 
   function append(value) {
-    if (fd === null || finished) return;
+    if (fd === null || finished || abandoned) return;
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(String(value ?? ''), 'utf8');
     if (!chunk.length) return;
     const fileRemaining = Math.max(0, MAX_OUTPUT_SPILL_BYTES - bytes);
@@ -103,13 +110,13 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
   }
 
   function pumpWrites() {
-    if (writePromise || fd === null || !pending.length) return;
+    if (writePromise || fd === null || abandoned || !pending.length) return;
     writePromise = (async () => {
-      while (pending.length && fd !== null) {
+      while (pending.length && fd !== null && !abandoned) {
         const chunk = pending.shift();
         if (!chunk) continue;
         try {
-          await writeChunk(fd, chunk);
+          await writeChunk(fd, chunk, () => abandoned);
           writtenBytes += chunk.length;
           resolveLowWaterWaiters();
         } catch (error) {
@@ -125,22 +132,27 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
       }
     })().finally(() => {
       writePromise = null;
-      if (pending.length && fd !== null) pumpWrites();
+      if (abandoned) releaseStorage();
+      else if (pending.length && fd !== null) pumpWrites();
       resolveLowWaterWaiters();
     });
   }
 
-  function waitForLowWatermark(limit = SPILL_LOW_WATER_BYTES) {
-    if (pendingBytes() <= limit || (fd === null && !pending.length)) return Promise.resolve();
+  function waitForLowWatermark(limit = SPILL_LOW_WATER_BYTES, options = {}) {
+    if (abandoned || pendingBytes() <= limit || (fd === null && !pending.length)) return Promise.resolve();
     return new Promise(resolve => {
-      lowWaterWaiters.add({ limit, resolve });
+      // Transport retention has no live child/deadline to break a stalled
+      // producer wait. Bound that caller's wait as well as finish itself.
+      const timer = options.timeoutMs == null ? null : setTimeout(abandon, finalizationTimeoutMs(options.timeoutMs));
+      lowWaterWaiters.add({ limit, resolve, timer });
     });
   }
 
   function resolveLowWaterWaiters() {
     for (const waiter of lowWaterWaiters) {
-      if (pendingBytes() <= waiter.limit || (fd === null && !pending.length)) {
+      if (abandoned || pendingBytes() <= waiter.limit || (fd === null && !pending.length)) {
         lowWaterWaiters.delete(waiter);
+        if (waiter.timer) clearTimeout(waiter.timer);
         waiter.resolve();
       }
     }
@@ -152,8 +164,8 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
 
   async function flush() {
     pumpWrites();
-    while (writePromise || pending.length) {
-      if (writePromise) await writePromise;
+    while (!abandoned && (writePromise || pending.length)) {
+      if (writePromise) await Promise.race([writePromise, abandonedPromise]);
       else pumpWrites();
     }
     if (writeError) {
@@ -163,10 +175,22 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
     }
   }
 
-  async function finish() {
-    if (finished && fd === null) return outputRef || spillTruncated ? { outputRef, bytes, spillTruncated } : null;
-    finished = true;
-    await flush();
+  function abandon() {
+    abandoned = true;
+    spillTruncated = true;
+    finalizationTimedOut = true;
+    pending.length = 0;
+    notifyAbandoned();
+    resolveLowWaterWaiters();
+    // Never close/reuse a descriptor while a filesystem write may still use
+    // it. If completion eventually arrives, pumpWrites releases storage then.
+    // Until then retain its quota reservation, bounded by the existing caps.
+    if (!writePromise) releaseStorage();
+  }
+
+  function releaseStorage() {
+    if (released) return;
+    released = true;
     if (fd !== null) {
       try { fs.closeSync(fd); } catch {}
       fd = null;
@@ -180,8 +204,23 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
       reservations.bytes = Math.max(0, reservations.bytes - bytes);
       if (!reservations.files) activeReservationsByRoot.delete(root);
     }
-    if (!outputRef && !spillTruncated) return null;
-    return { outputRef, bytes, spillTruncated };
+  }
+
+  function finish(options = {}) {
+    if (finishPromise) return finishPromise;
+    finished = true;
+    const timeoutMs = finalizationTimeoutMs(options.timeoutMs);
+    finishPromise = (async () => {
+      // This timer must stay referenced: a pending promise and an open file
+      // descriptor alone do not keep Node alive after the child has exited.
+      const timer = setTimeout(abandon, timeoutMs);
+      try { await flush(); }
+      finally { clearTimeout(timer); }
+      if (!writePromise) releaseStorage();
+      if (!outputRef && !spillTruncated) return null;
+      return { outputRef, bytes, spillTruncated, ...(finalizationTimedOut ? { finalizationTimedOut: true } : {}) };
+    })();
+    return finishPromise;
   }
 
   return {
@@ -189,6 +228,7 @@ function createOutputSpillWriter(config = {}, ownerId = '') {
     append,
     flush,
     finish,
+    get finalizationTimedOut() { return finalizationTimedOut; },
     get pendingBytes() { return pendingBytes(); },
     waitForLowWatermark
   };
@@ -200,6 +240,7 @@ async function retainOutputStreams(config, ownerId, value, options = {}) {
   // A timeout/cancellation result may be the only remaining copy of output.
   // Preserve it even when the execution signal was already aborted on entry.
   const signal = options.signal?.aborted ? null : options.signal;
+  const timeoutMs = finalizationTimeoutMs(options.finalizationTimeoutMs ?? config.processOutputFinalizationTimeoutMs);
   async function retain(current, depth = 0) {
     if (!current || typeof current !== 'object' || depth > 5) return;
     for (const stream of ['stdout', 'stderr']) {
@@ -218,9 +259,14 @@ async function retainOutputStreams(config, ownerId, value, options = {}) {
             break;
           }
           writer.append(bytes.subarray(offset, offset + SPILL_LOW_WATER_BYTES));
-          await writer.waitForLowWatermark();
+          await writer.waitForLowWatermark(SPILL_LOW_WATER_BYTES, { timeoutMs });
+          if (writer.finalizationTimedOut) { sourceTruncated = true; break; }
         }
-        const retained = await writer.finish();
+        const retained = await writer.finish({ timeoutMs });
+        if (retained?.finalizationTimedOut) {
+          current.outputFinalizationTimedOut = true;
+          current.outputFinalizationError ||= `Output retention timed out after ${timeoutMs}ms; retained output may be incomplete.`;
+        }
         if (retained?.outputRef) current[refKey] = retained.outputRef;
         if (sourceTruncated || retained?.spillTruncated === true || !retained?.outputRef) {
           current[`${stream}SpillTruncated`] = true;
@@ -238,14 +284,21 @@ async function retainOutputStreams(config, ownerId, value, options = {}) {
   await retain(value);
 }
 
-function writeChunk(fd, chunk) {
+function finalizationTimeoutMs(value) {
+  const configured = Number(value);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(30000, Math.max(1, Math.floor(configured)))
+    : DEFAULT_FINALIZATION_TIMEOUT_MS;
+}
+
+function writeChunk(fd, chunk, isAbandoned = () => false) {
   return new Promise((resolve, reject) => {
     fs.write(fd, chunk, 0, chunk.length, null, (error, written) => {
       if (error) {
         reject(error);
         return;
       }
-      if (written === chunk.length) {
+      if (isAbandoned() || written === chunk.length) {
         resolve();
         return;
       }
@@ -253,7 +306,7 @@ function writeChunk(fd, chunk) {
         reject(new Error('Output spill write made no progress.'));
         return;
       }
-      writeChunk(fd, chunk.subarray(written)).then(resolve, reject);
+      writeChunk(fd, chunk.subarray(written), isAbandoned).then(resolve, reject);
     });
   });
 }

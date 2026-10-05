@@ -23,8 +23,10 @@ import {
   validJsonRpcId
 } from './protocol.js';
 import { createRelaiRequestStateCodec, openAiConversationId } from './context.js';
+import { serializeToolError } from '../tools/errors.js';
+import { toolArgumentError } from '../tools/validationGuidance.js';
 import { toolResult } from './results.js';
-import { catalogApprovalRequirement, getToolActionCatalog, resolveToolOperation } from '../tools/actionCatalog.js';
+import { catalogApprovalRequirement, getToolActionCatalog, resolveToolOperation, normalizePublicToolArguments, getCatalogAction } from '../tools/actionCatalog.js';
 import { getToolSchemas } from '../tools/schema.js';
 import { validateToolOutput } from '../tools/outputValidation.js';
 import { principalFingerprint, principalIdentity } from './principal.ts';
@@ -354,15 +356,16 @@ async function executeToolResult(config: any, name: any, args: any, options: any
 }
 
 async function validateToolArguments(_config: any, name: any, value: any) {
-  const args = value == null ? {} : value;
+  let args = value == null ? {} : value;
   if (!isPlainObject(args)) return { ok: false, error: `Invalid arguments for tool ${name}: arguments must be an object.` };
+  try { args = normalizePublicToolArguments(name, args); } catch (error) { return { ok: false, error }; }
   const validator = TRANSPORT_TOOL_VALIDATORS.get(name);
   if (!validator) return { ok: false, error: `Tool ${name} not found.` };
   const result = await validator.validate(args);
   if (result.issues) {
     return {
       ok: false,
-      error: `Invalid arguments for tool ${name}: ${result.issues.map((issue: any) => issue.message).join('; ')}`
+      error: toolArgumentError({ publicTool: name, action: String(args.action || ''), fields: getCatalogAction(name, args)?.fields || [], required: getCatalogAction(name, args)?.required || [], schema: getCatalogAction(name, args)?.inputSchema || {}, issues: result.issues })
     };
   }
   return { ok: true, value: result.value };
@@ -545,11 +548,11 @@ function toolExecutionErrorResponse(id: any, error: any, cleanup: any = null) {
 }
 
 function toolArgumentErrorResponse(id: any, error: any) {
-  const message = String(error || 'Invalid tool arguments.');
+  const message = error instanceof Error ? error.message : String(error || 'Invalid tool arguments.');
   return successResponse(id, {
     content: [{ type: 'text', text: message }],
     isError: true,
-    structuredContent: { ok: false, error: message, errorCode: 'INVALID_TOOL_ARGUMENTS' }
+    structuredContent: { ...serializeToolError('', error), ok: false, error: message, errorCode: 'INVALID_TOOL_ARGUMENTS' }
   });
 }
 

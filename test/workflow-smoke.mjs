@@ -60,16 +60,17 @@ async function completedTaskCall(id, name, args) {
 
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const statusId = followupId++;
-    taskCall(statusId, 'relai_work', { action: 'status', workspace: 'smoke', operationId: initial.operationId });
+    taskCall(statusId, 'relai_work', { action: 'status', workspace: 'smoke', operationId: initial.operationId, includeResult: false });
     const status = structuredContentOf(await client.waitFor(statusId));
     const operation = status.backgroundOperation;
     if (operation?.status && operation.status !== 'running') {
-      if (args.complete === true && operation.status === 'completed' && operation.result) {
-        return operation.result;
+      const resultId = followupId++;
+      taskCall(resultId, 'relai_work', { action: 'result', workspace: 'smoke', operationId: initial.operationId, maxResponseBytes: 524288 });
+      const retrieved = structuredContentOf(await client.waitFor(resultId));
+      if (retrieved.backgroundOperation?.operationId !== initial.operationId || !retrieved.backgroundOperation?.result) {
+        throw new Error(`${name} completed without a retrievable result for its exact operationId: ${JSON.stringify(retrieved)}`);
       }
-      const replayId = followupId++;
-      taskCall(replayId, name, args);
-      return structuredContentOf(await client.waitFor(replayId));
+      return retrieved.backgroundOperation.result;
     }
     await new Promise(resolve => setTimeout(resolve, 100));
   }
@@ -179,7 +180,7 @@ try {
   taskCall(18, 'relai_exec', { workspace: 'smoke', command: 'node create-artifact.js', timeoutMs: 5000 });
   const artifactExec = structuredContentOf(await client.waitFor(18));
   if (!artifactExec.changedFiles?.includes('session-artifact.txt')) throw new Error('Task-owned exec did not attribute its untracked artifact.');
-  taskCall(10, 'relai_work', { action: 'status', workspace: 'smoke', detail: 'full' });
+  taskCall(10, 'relai_work', { action: 'status', workspace: 'smoke', detail: 'full', maxResponseBytes: 131072 });
   const status = structuredContentOf(await client.waitFor(10));
   if (!status.workspace?.repository?.sessionChangedFiles?.includes('session-artifact.txt')) throw new Error('Session ownership missing task-owned untracked artifact.');
 

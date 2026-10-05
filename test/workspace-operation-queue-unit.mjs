@@ -288,14 +288,15 @@ async function nextTurn() {
     await releaseBlocker.promise;
   }, {
     mode: 'write', scope: 'mutation', taskId: 'blocker',
-    owner: { taskId: 'blocker', operationId: 'op-blocker', operation: 'Long mutation', startedAt: '2026-09-20T00:00:00.000Z' }
+    owner: { taskId: 'blocker', operationId: 'op-blocker', operation: 'Long mutation', startedAt: '2026-09-20T00:00:00.000Z', principalFingerprint: 'queue-timeout-fixture' }
   });
   await blockerStarted.promise;
 
   let timedOutRan = false;
   await assert.rejects(
     runWorkspaceOperation('queue-timeout', async () => { timedOutRan = true; }, {
-      mode: 'write', scope: 'mutation', taskId: 'queued', queueTimeoutMs: 25
+      mode: 'write', scope: 'mutation', taskId: 'queued', queueTimeoutMs: 25,
+      owner: { principalFingerprint: 'queue-timeout-fixture' }
     }),
     error => error?.code === 'WORKSPACE_OPERATION_QUEUE_TIMEOUT'
       && error?.retryable === true

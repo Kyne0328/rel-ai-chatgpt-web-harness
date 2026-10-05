@@ -16,6 +16,7 @@ import {
   peekFallbackCompletionNotices,
   enableFallbackCompletionNotice,
   fallbackExecutionStatus,
+  fallbackSignature,
   fallbackExecutionsStatus,
   resetFallbackExecutions,
   startFallbackExecution,
@@ -25,7 +26,7 @@ import { relaiExec } from '../src/bridge/exec.js';
 import { readOutputSpill } from '../src/outputSpill.js';
 import { MCP_PROTOCOL_VERSION } from '../src/mcp/protocol.js';
 import { toolResult } from '../src/mcp/results.js';
-import { enrichWithFallbackCompletions } from '../src/mcp/toolInvocation.js';
+import { enrichWithFallbackCompletions, registerReturnedFallbackCompletions } from '../src/mcp/toolInvocation.js';
 import { executeToolCall } from '../src/tools/execution.js';
 import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
@@ -173,7 +174,8 @@ const phaseExecution = startFallbackExecution({
   }
 });
 const startingPhase = fallbackExecutionStatus(phaseExecution.record.operationId, { now: () => phaseStartedAt + 100 });
-assert.equal(startingPhase.phase, 'starting');
+assert.equal(startingPhase.phase, 'accepted');
+assert.equal(startingPhase.timeline.executed, false);
 assert.equal(startingPhase.elapsedMs, 100);
 assert.equal(startingPhase.remainingMs, 9_900);
 updateFallbackExecutionPhase(phaseExecution.record.operationId, 'queued', transientConfig);
@@ -493,7 +495,7 @@ const longBounded = await handleTransportFallbackRequest(transientConfig, messag
   }
 });
 assert.equal(longBounded.body.result.structuredContent.status, 'running', 'a command whose timeout cannot fit with transport cleanup must use fallback');
-assert.equal(longBounded.body.result.structuredContent.phase, 'starting');
+assert.equal(longBounded.body.result.structuredContent.phase, 'accepted');
 assert.equal(Object.hasOwn(longBounded.body.result.structuredContent, 'pollAfterMs'), false, 'fallback acknowledgement must not prompt the agent to poll');
 assert.ok(longBounded.body.result.structuredContent.deadlineAt, 'fallback status must expose the original command deadline');
 assert.ok(longBounded.body.result.structuredContent.remainingMs > 0 && longBounded.body.result.structuredContent.remainingMs <= 26_000);
@@ -737,7 +739,9 @@ assert.equal(executionCount, 1, 'accepting a different operation must not restar
 await delay(60);
 const completed = fallbackExecutionStatus(slow.body.result.structuredContent.operationId);
 assert.equal(completed.status, 'completed');
-assert.equal(completed.revision, 2);
+assert.equal(completed.revision, slow.body.result.structuredContent.revision + 2, 'persisting and terminal settlement each advance the accepted receipt revision');
+assert.deepEqual(completed.timeline.phases.map(phase => phase.phase), ['accepted', 'persisting', 'result-ready']);
+assert.equal(completed.phase, 'result-ready');
 assert.equal(completed.result.exitCode, 0);
 assert.equal(completed.result.stdout, 'slow complete');
 assert.equal(executionCount, 1, 'request cancellation must not abort or restart detached fallback work');
@@ -994,11 +998,19 @@ try {
     executeToolResult: durableExecute
   });
   assert.equal(durableStarted.body.result.structuredContent.status, 'running');
-  await delay(50);
+  const durableTracked = startFallbackExecution({
+    config, workId: durableWorkId, workspace: 'app', noticeScope: principalFingerprint('principal-a'),
+    tool: 'relai_exec', signature: fallbackSignature('relai_exec', message(10, durableWorkId).params.arguments),
+    run: () => { throw new Error('Durable completion wait must not duplicate the accepted operation'); }
+  });
+  assert.equal(durableTracked.reused, true);
+  await durableTracked.record.promise;
 
   const durableSession = readTaskHistorySessionRecord(config, durableWorkId);
   assert.equal(durableSession.backgroundOperation.status, 'completed');
-  assert.equal(durableSession.backgroundOperation.revision, 2);
+  assert.equal(durableSession.backgroundOperation.revision, durableStarted.body.result.structuredContent.revision + 2, 'durable receipt records persisting and terminal settlement after admission');
+  assert.equal(durableSession.backgroundOperation.phase, 'result-ready');
+  assert.deepEqual(durableSession.backgroundOperation.timeline.phases.map(phase => phase.phase), ['accepted', 'persisting', 'result-ready']);
   assert.equal(durableSession.backgroundOperation.result.exitCode, 0);
   assert.equal(Object.hasOwn(durableSession.backgroundOperation.result, 'stdout'), false, 'durable task history must redact raw command output');
   assert.ok(durableSession.backgroundOperation.signature, 'private signature must persist for restart-safe deduplication');
@@ -1129,6 +1141,7 @@ try {
     { principal: noticePrincipal, requestId: 701 }
   );
   assert.equal(lostPiggybackRetry.completedOperations?.[0]?.work_id, piggybackWorkId, 'a dropped response must leave the completion notice available for retry');
+  registerReturnedFallbackCompletions(config, { workspace: 'app' }, toolResult(lostPiggybackRetry, false), { principal: noticePrincipal, requestId: 701 });
   assert.equal(acknowledgeFallbackCompletionDelivery(noticeScope, 701), true, 'response delivery must acknowledge the retried completion notice');
   const afterPiggyback = enrichWithFallbackCompletions(
     config,
@@ -1197,6 +1210,7 @@ try {
   assert.match(restartNotices[0].summary, /interrupted/i);
 
   const interruptedWorkId = 'work_interrupted_fallback_test';
+  const interruptedInitialRevision = 1;
   seedTask(config, interruptedWorkId);
   recordTaskBackgroundOperation(config, interruptedWorkId, {
     operationId: 'fallback_interrupted_fixture',
@@ -1207,13 +1221,13 @@ try {
     status: 'running',
     startedAt: '2026-08-27T00:00:00.000Z',
     updatedAt: '2026-08-27T00:00:00.000Z',
-    revision: 1,
+    revision: interruptedInitialRevision,
     result: { exitCode: 0, stdout: 'must-not-persist' }
   });
   resetFallbackExecutions();
   const interrupted = fallbackExecutionStatus(interruptedWorkId, { config, now: () => Date.parse('2026-08-27T00:01:00.000Z') });
   assert.equal(interrupted.status, 'interrupted');
-  assert.equal(interrupted.revision, 2);
+  assert.equal(interrupted.revision, interruptedInitialRevision + 1, 'restart interruption records exactly one new terminal transition');
   assert.match(interrupted.error, /runtime restarted/i);
   const interruptedSession = readTaskHistorySessionRecord(config, interruptedWorkId);
   assert.equal(interruptedSession.backgroundOperation.status, 'interrupted');
@@ -1384,6 +1398,7 @@ async function testCompletionReceiptIsolation() {
       const execute = hold => async (_config, _name, args, options) => {
         const result = toolResult(enrichWithFallbackCompletions(receiptConfig, 'relai_exec', args,
           { ok: true, workspace: args.workspace }, { principal, requestId: options.requestId }), false);
+        registerReturnedFallbackCompletions(receiptConfig, args, result, { principal, requestId: options.requestId });
         registered.push({ workspace: args.workspace, requestId: options.requestId });
         await hold;
         return result;
@@ -1440,8 +1455,8 @@ async function testCompletionReceiptIsolation() {
     const operationB = await seedNotice(stdioWorkspace, 'stdio-b', stdioB);
     const result = stdioPrincipal => toolResult(enrichWithFallbackCompletions(receiptConfig, 'relai_read', { workspace: stdioWorkspace },
       { ok: true, workspace: stdioWorkspace }, toolContext({ mcpReq: { id: wireId } }, { principal: stdioPrincipal, transportType: 'stdio' })), false);
-    const resultA = result(stdioA);
-    const resultB = result(stdioB);
+    const resultA = registerReturnedFallbackCompletions(receiptConfig, { workspace: stdioWorkspace }, result(stdioA), toolContext({ mcpReq: { id: wireId } }, { principal: stdioA, transportType: 'stdio' }));
+    const resultB = registerReturnedFallbackCompletions(receiptConfig, { workspace: stdioWorkspace }, result(stdioB), toolContext({ mcpReq: { id: wireId } }, { principal: stdioB, transportType: 'stdio' }));
     assert.equal(resultA.structuredContent.completedOperations[0].operationId, operationA);
     assert.equal(resultB.structuredContent.completedOperations[0].operationId, operationB);
     const transport = () => ({

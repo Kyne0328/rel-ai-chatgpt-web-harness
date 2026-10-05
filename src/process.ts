@@ -11,12 +11,13 @@ import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
 import { acquireHostResource } from './hostResourceScheduler.js';
-import { clearCurrentMutationProcess, recordCurrentMutationProcess } from './mutationProcessOwnership.js';
+import { clearCurrentMutationProcess, markCurrentMutationProcessUncertain, recordCurrentMutationProcess } from './mutationProcessOwnership.js';
 
 const TASKKILL_EXE = String.raw`C:\Windows\System32\taskkill.exe`;
 const DEFAULT_TERMINATION_GRACE_MS = 1000;
 const DEFAULT_FORCE_WAIT_MS = 2000;
 const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
+const DEFAULT_OUTPUT_FINALIZATION_TIMEOUT_MS = 2000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const DISABLED_GIT_HOOKS_PATH = `.disabled-git-hooks-${process.pid}-${crypto.randomBytes(12).toString('hex')}`;
 
@@ -52,6 +53,16 @@ interface ProcessRuntimeConfig extends Record<string, unknown> {
   readonly processEnvironment?: ProcessEnvironmentConfig;
   readonly processTerminationGraceMs?: unknown;
   readonly processForceWaitMs?: unknown;
+  readonly processOutputFinalizationTimeoutMs?: unknown;
+}
+
+interface ProcessPhaseEvent {
+  readonly phase: 'host-queued' | 'spawned' | 'exited' | 'draining-output' | 'drained';
+  readonly atMs: number;
+  readonly executed: boolean;
+  readonly rootExitConfirmed?: boolean;
+  readonly terminationConfirmed?: boolean;
+  readonly outputFinalizationTimedOut?: boolean;
 }
 
 interface RunProcessOptions {
@@ -72,6 +83,8 @@ interface RunProcessOptions {
   readonly inheritCredentials?: boolean;
   readonly input?: unknown;
   readonly preserveOutputWhitespace?: boolean;
+  readonly outputFinalizationTimeoutMs?: unknown;
+  readonly onPhase?: (event: ProcessPhaseEvent) => void;
 }
 
 /** Process outcomes are part of the exported process API contract. */
@@ -87,6 +100,10 @@ export interface RunProcessResult {
   readonly queueTimedOut?: boolean;
   readonly spawnError?: boolean;
   readonly terminationConfirmed?: boolean;
+  readonly rootExitConfirmed?: boolean;
+  readonly outputFinalizationTimedOut?: boolean;
+  readonly outputFinalizationError?: string;
+  readonly mutationOwnershipPersistenceError?: string;
   readonly forcedTermination?: boolean;
   readonly queueWaitMs: number;
   readonly durationMs: number;
@@ -115,13 +132,14 @@ interface ResourceLease {
 interface OutputSpillResult {
   readonly outputRef: string;
   readonly spillTruncated?: boolean;
+  readonly finalizationTimedOut?: boolean;
 }
 
 interface OutputSpillWriter {
   start(buffer: Buffer): void;
   append(buffer: Buffer): void;
   flush(): Promise<void>;
-  finish(): Promise<OutputSpillResult | null>;
+  finish(options?: { readonly timeoutMs?: number }): Promise<OutputSpillResult | null>;
   readonly pendingBytes: number;
   waitForLowWatermark(limit?: number): Promise<void>;
 }
@@ -285,6 +303,14 @@ async function terminateProcessTree(target: ProcessTarget, options: ProcessTreeT
     ? isProcessAlive(target)
     : isProcessGroupAlive(rootPid);
   if (!treeAlive) {
+    // Windows can no longer discover a surviving descendant through taskkill
+    // once its root PID is gone. Root absence alone is not tree-exit proof.
+    if (process.platform === 'win32' && rootPid > 0) {
+      return {
+        exited: false, forced: false, gracefulSignalSent: false, forceSignalSent: false,
+        error: 'The Windows root process already exited; descendant termination could not be confirmed.'
+      };
+    }
     return { exited: true, forced: false, gracefulSignalSent: false, forceSignalSent: false };
   }
 
@@ -296,7 +322,7 @@ async function terminateProcessTree(target: ProcessTarget, options: ProcessTreeT
     const gracefulExit = process.platform === 'win32'
       ? await waitForWindowsTargetsExit(trackedTargets, graceMs)
       : await waitForProcessGroupExit(rootPid, graceMs);
-    if (gracefulExit) {
+    if (gracefulExit && (process.platform !== 'win32' || gracefulSignalSent)) {
       return { exited: true, forced: false, gracefulSignalSent, forceSignalSent: false };
     }
   }
@@ -307,7 +333,10 @@ async function terminateProcessTree(target: ProcessTarget, options: ProcessTreeT
   const exited = process.platform === 'win32'
     ? await waitForWindowsTargetsExit(trackedTargets, forceWaitMs)
     : await waitForProcessGroupExit(rootPid, forceWaitMs);
-  return { exited, forced: true, gracefulSignalSent, forceSignalSent };
+  return {
+    exited: exited && (process.platform !== 'win32' || forceSignalSent),
+    forced: true, gracefulSignalSent, forceSignalSent
+  };
 }
 
 async function signalWindowsProcessTree(target: ProcessTarget, force = false): Promise<boolean> {
@@ -327,7 +356,7 @@ async function signalWindowsProcessTree(target: ProcessTarget, force = false): P
     const timer = setTimeout(() => {
       try { killer?.kill(); } catch {}
       killer?.unref?.();
-      finish(!isProcessAlive(target));
+      finish(false);
     }, WINDOWS_TASKKILL_TIMEOUT_MS);
     try {
       killer = spawn(TASKKILL_EXE, [...(force ? ['/f'] : []), '/t', '/pid', String(pid)], {
@@ -336,12 +365,12 @@ async function signalWindowsProcessTree(target: ProcessTarget, force = false): P
       });
       killer.once('error', error => {
         debugKill(`[rel-ai-mcp] ${force ? 'force ' : ''}Windows process tree:`, error);
-        finish(!isProcessAlive(target));
+        finish(false);
       });
-      killer.once('close', code => finish(code === 0 || !isProcessAlive(target)));
+      killer.once('close', code => finish(code === 0));
     } catch (error) {
       debugKill(`[rel-ai-mcp] ${force ? 'force ' : ''}Windows process tree:`, error);
-      finish(!isProcessAlive(target));
+      finish(false);
     }
   });
 }
@@ -394,6 +423,12 @@ function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolea
 }
 
 async function runProcess(command: string, args: readonly string[] = [], options: RunProcessOptions = {}, config: ProcessRuntimeConfig = {}): Promise<RunProcessResult> {
+  let executed = false;
+  let rootExitConfirmed = false;
+  const reportPhase = (phase: ProcessPhaseEvent['phase'], details: Partial<ProcessPhaseEvent> = {}): void => {
+    // Observability must never prevent process cleanup or change execution.
+    try { options.onPhase?.({ phase, atMs: Date.now(), executed, rootExitConfirmed, ...details }); } catch {}
+  };
   if (options.signal?.aborted) {
     return terminalQueueResult({
       error: errorMessage(options.signal.reason || 'Operation cancelled before process start.'),
@@ -406,6 +441,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
   const queueStartedAt = Date.now();
   let resourceLease: ResourceLease | null = null;
   if (resourceClass) {
+    reportPhase('host-queued');
     try {
       resourceLease = await acquireHostResource(
         resourceClass,
@@ -468,6 +504,12 @@ async function runProcess(command: string, args: readonly string[] = [], options
       30000,
       DEFAULT_FORCE_WAIT_MS
     );
+    const outputFinalizationTimeoutMs = clampMilliseconds(
+      options.outputFinalizationTimeoutMs ?? config.processOutputFinalizationTimeoutMs,
+      1,
+      30000,
+      DEFAULT_OUTPUT_FINALIZATION_TIMEOUT_MS
+    );
     const isGit = command === 'git';
     if (isGit && options.shell) throw new Error('Rel.AI-owned Git commands must run without shell parsing.');
     const executable = isGit ? (resolveGitExecutable() || command) : command;
@@ -517,6 +559,8 @@ async function runProcess(command: string, args: readonly string[] = [], options
     const processStartedAt = Date.now();
     const subprocess = execa(file, shell ? [] : processArgs, execaOptions);
     const subprocessClose = observeSubprocessClose(subprocess.nodeChildProcess);
+    executed = processPid(subprocess) > 0;
+    if (executed) reportPhase('spawned');
     const windowsTermination = {
       kind: '' as 'timeout' | 'cancel' | '',
       promise: null as Promise<ProcessTreeTerminationResult> | null
@@ -559,6 +603,9 @@ async function runProcess(command: string, args: readonly string[] = [], options
     });
 
     const disposePostExitPipeDrain = armPostExitPipeDrain(subprocess, forceWaitMs, () => {
+      rootExitConfirmed = true;
+      reportPhase('exited');
+      reportPhase('draining-output');
       // Once the launched process exits, its own output is complete. A
       // background descendant can still inherit these handles and keep Execa
       // waiting for EOF forever. Resume any paused output first, give buffered
@@ -618,7 +665,19 @@ async function runProcess(command: string, args: readonly string[] = [], options
       // process tree stopped; unconfirmed mutations retain their durable owner.
       await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
     }
-    if (mutationProcessRecorded && (!timedOut && !cancelled || terminationOutcome?.exited === true)) {
+    rootExitConfirmed ||= executed && !isProcessAlive(subprocess);
+    let mutationOwnershipPersistenceError = '';
+    if (mutationProcessRecorded && terminationOutcome?.exited === false) {
+      try {
+        markCurrentMutationProcessUncertain(subprocess.pid,
+          terminationOutcome.error || 'Process-tree termination was not confirmed after cancellation or timeout.');
+      } catch (error) {
+        // Return the unconfirmed termination result so the caller still takes
+        // its normal quarantine path; do not throw past that safety decision.
+        mutationOwnershipPersistenceError = errorMessage(error);
+        stderrBuffer.append(`\n[rel-ai-mcp ${mutationOwnershipPersistenceError}]\n`);
+      }
+    } else if (mutationProcessRecorded && (!timedOut && !cancelled || terminationOutcome?.exited === true)) {
       clearCurrentMutationProcess(subprocess.pid);
     }
     if (timedOut) {
@@ -629,11 +688,21 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBuffer.append('\n[rel-ai-mcp operation cancelled]\n');
     }
 
-    await Promise.all([stdoutSpill.flush(), stderrSpill.flush()]);
+    reportPhase('draining-output', terminationOutcome ? { terminationConfirmed: terminationOutcome.exited } : {});
     const [stdoutSpillResult, stderrSpillResult] = await Promise.all([
-      stdoutSpill.finish(),
-      stderrSpill.finish()
+      stdoutSpill.finish({ timeoutMs: outputFinalizationTimeoutMs }),
+      stderrSpill.finish({ timeoutMs: outputFinalizationTimeoutMs })
     ]);
+    const outputFinalizationTimedOut = stdoutSpillResult?.finalizationTimedOut === true
+      || stderrSpillResult?.finalizationTimedOut === true;
+    const outputFinalizationError = outputFinalizationTimedOut
+      ? `Output retention timed out after ${outputFinalizationTimeoutMs}ms; retained output may be incomplete.`
+      : '';
+    if (outputFinalizationTimedOut) stderrBuffer.append(`\n[rel-ai-mcp ${outputFinalizationError}]\n`);
+    reportPhase('drained', {
+      ...(terminationOutcome ? { terminationConfirmed: terminationOutcome.exited } : {}),
+      ...(outputFinalizationTimedOut ? { outputFinalizationTimedOut: true } : {})
+    });
     const spawnError = result.failed
       && !result.signal
       && !timedOut
@@ -649,6 +718,9 @@ async function runProcess(command: string, args: readonly string[] = [], options
 
     return {
       executed: !spawnError && processPid(subprocess) > 0,
+      rootExitConfirmed,
+      ...(mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError } : {}),
+      ...(outputFinalizationTimedOut ? { outputFinalizationTimedOut: true, outputFinalizationError } : {}),
       exitCode: typeof result.exitCode === 'number' ? result.exitCode : -1,
       ...(result.signal ? { signal: result.signal } : {}),
       stdout: processOutputText(stdoutBuffer, options.preserveOutputWhitespace),
@@ -924,6 +996,10 @@ function summarizeCommand(result: Partial<RunProcessResult> & Pick<RunProcessRes
     ...(result.queueTimedOut ? { queueTimedOut: true } : {}),
     ...(result.cancelled ? { cancelled: true } : {}),
     ...(result.terminationConfirmed != null ? { terminationConfirmed: result.terminationConfirmed } : {}),
+    ...(result.rootExitConfirmed != null ? { rootExitConfirmed: result.rootExitConfirmed } : {}),
+    ...(result.outputFinalizationTimedOut ? { outputFinalizationTimedOut: true } : {}),
+    ...(result.outputFinalizationError ? { outputFinalizationError: result.outputFinalizationError } : {}),
+    ...(result.mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError: result.mutationOwnershipPersistenceError } : {}),
     ...(result.forcedTermination ? { forcedTermination: true } : {}),
     ...(result.stdout ? { stdout: result.stdout } : {}),
     ...(result.stderr ? { stderr: result.stderr } : {})

@@ -80,10 +80,16 @@ try {
     const deadline = Date.now() + 10000;
     while (Date.now() <= deadline) {
       const statusResponse = await rpc('relai_work', {
-        action: 'status', operationId: payload.operationId
+        action: 'status', operationId: payload.operationId, includeResult: false
       });
       const operation = statusResponse.payload.backgroundOperation;
-      if (operation?.status === 'completed') return operation.result;
+      if (operation?.status === 'completed') {
+        assert.equal(operation.result, undefined, `${label} compact polling must not embed the retained result`);
+        const retrieved = await rpc('relai_work', { action: 'result', operationId: payload.operationId, maxResponseBytes: 524288 });
+        assert.equal(retrieved.payload.backgroundOperation?.operationId, payload.operationId, 'retrieval must preserve the exact mutation identity');
+        assert.ok(retrieved.payload.backgroundOperation?.result, `${label} explicit result retrieval must return the retained result: ${JSON.stringify(retrieved.payload)}`);
+        return retrieved.payload.backgroundOperation.result;
+      }
       assert.notEqual(operation?.status, 'failed', `${label} fallback must not fail: ${JSON.stringify(operation)}`);
       assert.notEqual(operation?.status, 'cancelled', `${label} fallback must not be cancelled`);
       await new Promise(resolve => setTimeout(resolve, 25));

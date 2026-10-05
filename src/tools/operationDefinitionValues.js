@@ -246,10 +246,24 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.WORK_STATUS,
     title: "Workspace and Repository Status",
-    description: "Read-only. Return compact durable task state and every retained background operation by default. Supply work_id to recover a task and its operations, or operationId to retrieve one exact operation. Each operation has its own status, phase, result, and diagnostic output references. Set detail:'full' when repository status, command discovery, runtime/tool-surface metadata, or continuity details are actually needed.",
-    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"operationId":{"type":"string","pattern":"^fallback_[A-Za-z0-9_-]{20,160}$"},"maxBytes":{"type":"number","minimum":1000,"maximum":5242880},"detail":{"type":"string","enum":["compact","full"]}},"required":[],"additionalProperties":false},
+    description: "Read-only. Return bounded task state and paginated operation receipts without historical result bodies. Supply work_id for task operations, operationLimit/operationCursor to page. Supply operationId to retrieve the same retained result without rerunning it, or includeResult:false for a receipt. maxResponseBytes caps the UTF-8 MCP tool-result envelope; maxBytes only limits repository inspection. Set detail:'full' when repository status, command discovery, runtime/tool-surface metadata, or continuity details are actually needed.",
+    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"operationId":{"type":"string","pattern":"^fallback_[A-Za-z0-9_-]{20,160}$"},"includeResult":{"type":"boolean"},"operationLimit":{"type":"integer","minimum":1,"maximum":50},"operationCursor":{"type":"string","maxLength":1024},"maxResponseBytes":{"type":"integer","minimum":2048,"maximum":524288},"maxBytes":{"type":"number","minimum":1000,"maximum":5242880},"detail":{"type":"string","enum":["compact","full"]}},"required":[],"additionalProperties":false},
     handlerName: 'status',
     behavior: {"taskScope":"optional"},
+  },
+  {
+    name: OP.WORK_RESULT,
+    title: "Retrieve Retained Operation Result",
+    description: "Read-only. Retrieve the existing result by operationId without executing or resubmitting its mutation. Results may expire; absence is not proof that side effects did not occur. Use returned output references for paginated stream reads.",
+    inputSchema: {type: 'object', properties: {workspace: {type: 'string'}, operationId: {type: 'string', pattern: '^fallback_[A-Za-z0-9_-]{20,160}$'}, maxResponseBytes: {type: 'integer', minimum: 2048, maximum: 524288}}, required: ['operationId'], additionalProperties: false},
+    handlerName: 'operationResult', behavior: {taskScope: 'optional'}
+  },
+  {
+    name: OP.WORK_HISTORY,
+    title: "Read Authorized Workspace History",
+    description: "Read-only paginated task summaries or activity for one authorized workspace and the current principal. Does not adopt, resume, or modify tasks. kind defaults to tasks; activity supports taskId. Continue with the returned opaque cursor. maxResponseBytes is separate from page limit.",
+    inputSchema: {type: 'object', properties: {workspace: {type: 'string'}, kind: {type: 'string', enum: ['tasks', 'activity']}, taskId: {type: 'string', maxLength: 200}, limit: {type: 'integer', minimum: 1, maximum: 100}, cursor: {type: 'string', maxLength: 2048}, maxResponseBytes: {type: 'integer', minimum: 2048, maximum: 524288}}, required: ['workspace'], additionalProperties: false},
+    handlerName: 'workspaceHistory', behavior: {taskScope: 'none'}
   },
   {
     name: OP.PUBLISH_COMMIT,

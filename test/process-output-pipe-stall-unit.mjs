@@ -5,6 +5,10 @@ import path from 'node:path';
 
 import { runProcess, terminateProcessTree } from '../src/process.js';
 import { pendingWorkspaceOperations, runWorkspaceOperation } from '../src/workspaceOperationQueue.js';
+import { verifyRunProcessSpillFinalization, verifyStalledSpillFinalization } from './fixtures/process-output-finalization.mjs';
+
+await verifyStalledSpillFinalization();
+await verifyRunProcessSpillFinalization(runProcess);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-output-pipe-stall-'));
 const stateDir = path.join(root, 'state');

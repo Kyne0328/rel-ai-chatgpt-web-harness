@@ -292,6 +292,7 @@ app.whenReady().then(async () => {
     };
   })()`);
   const activitySelectionStability = await exerciseActivitySelectionStability(win);
+  const operationDiagnostics = await exerciseOperationDiagnostics(win);
   await waitFor(win, `!document.querySelector('#__relai-drawer-backdrop')`);
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
@@ -512,6 +513,7 @@ app.whenReady().then(async () => {
     taskSelectionStability,
     activityInteraction,
     activitySelectionStability,
+    operationDiagnostics,
     activityDesktopGeometry,
     activityLiveStability,
     keyboard: { beforeFocus, afterFocus },
@@ -527,6 +529,162 @@ app.whenReady().then(async () => {
   fs.writeFileSync(outputPath, JSON.stringify({ error: `${error?.stack || String(error)}\n${failures.join('\n')}` }, null, 2));
   app.exit(1);
 });
+
+// Exercise production React presentation through normal aggregate refreshes. The
+// fixture changes returned receipt data only; it never replaces feature DOM.
+async function exerciseOperationDiagnostics(win) {
+  const size = win.getSize();
+  const zoom = win.webContents.getZoomFactor();
+  const visible = win.isVisible();
+  win.show();
+  win.focus();
+  const startedAt = new Date(Date.now() - 5000).toISOString();
+  const timeline = {
+    phase: 'queued', phaseStartedAt: startedAt, lastProgressAt: startedAt,
+    executed: false, deadlineKind: 'admission', terminationCertainty: 'not-started',
+    blocking: { owner: 'Workspace writer', operationId: `owner-${'x'.repeat(160)}`, taskId: 'acceptance-owner' },
+    phases: [{ phase: 'accepted', startedAt, endedAt: startedAt, durationMs: 123 }, { phase: 'queued', startedAt, durationMs: 2000 }]
+  };
+  await win.webContents.executeJavaScript(`(() => {
+    window.__relaiDiagnosticsOriginalFetch = window.fetch;
+    window.__relaiDiagnosticsFixture = { status: 'completed', timeline: null };
+    window.__relaiDiagnosticsFetches = 0;
+    window.fetch = async (...args) => {
+      const response = await window.__relaiDiagnosticsOriginalFetch(...args);
+      if (!String(args[0]).includes('/api/dashboard/v10')) return response;
+      const data = await response.json();
+      const fixture = window.__relaiDiagnosticsFixture;
+      data.auditTail.entries = data.auditTail.entries.map(entry => entry.taskId === 'acceptance-running'
+        ? { ...entry, status: fixture.status, operationId: 'diagnostic-operation', summary: 'Operation diagnostics fixture',
+          metadata: fixture.timeline ? { timeline: fixture.timeline } : {} } : entry);
+      data.runtime = { ...(data.runtime || {}), buildIdentity: { buildId: 'diagnostic-build', dirty: true,
+        sourceRevision: 'revision-fixture', sourceFingerprint: 'fingerprint-fixture', startedAt: ${JSON.stringify(startedAt)}, schemaDigest: 'schema-fixture' } };
+      data.runtimeCompatibility = { metadataMatches: true, sourceParity: { status: 'unknown', verified: false } };
+      window.__relaiDiagnosticsFetches += 1;
+      return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+    };
+    location.hash = '#activity?time=all&task=acceptance-running';
+    window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
+  })()`);
+  try {
+    await waitFor(win, `window.__relaiDiagnosticsFetches > 0 && document.querySelector('.activity-row-trigger')?.textContent.includes('Operation diagnostics fixture')`);
+    await win.webContents.executeJavaScript(`document.querySelector('.activity-row-trigger').click()`);
+    await waitFor(win, `document.querySelector('[data-operation-diagnostics="unknown"]') && document.querySelector('[data-runtime-build-identity]')?.textContent.includes('diagnostic-build')`);
+    const legacy = await win.webContents.executeJavaScript(`(() => {
+      const panel = document.querySelector('[data-operation-diagnostics]');
+      const fields = [...panel.querySelectorAll('dl > div')];
+      return {
+        unknownTiming: fields.find(item => item.querySelector('dt')?.textContent === 'Phase started')?.querySelector('dd')?.textContent === 'Unknown',
+        unknownTermination: fields.find(item => item.querySelector('dt')?.textContent === 'Process termination')?.querySelector('dd')?.textContent === 'unknown',
+        liveClocks: panel.querySelectorAll('[data-clock-elapsed-start]').length
+      };
+    })()`);
+    const refresh = async fixture => {
+      const before = await win.webContents.executeJavaScript('window.__relaiDiagnosticsFetches');
+      await win.webContents.executeJavaScript(`window.__relaiDiagnosticsFixture = ${JSON.stringify(fixture)}; window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'))`);
+      await waitFor(win, `window.__relaiDiagnosticsFetches > ${before}`);
+      await waitForCapturePaint(win);
+    };
+    await refresh({ status: 'running', timeline });
+    await waitFor(win, `document.querySelector('[data-operation-diagnostics="queued"] [role="status"]')?.textContent.includes('Waiting for this owner')`);
+    await win.webContents.executeJavaScript(`(() => {
+      const panel = document.querySelector('[data-operation-diagnostics]');
+      const details = panel.querySelector('details');
+      details.open = false;
+      details.querySelector('summary').focus();
+      window.__relaiDiagnosticsEnter = null;
+      details.querySelector('summary').addEventListener('keypress', event => {
+        window.__relaiDiagnosticsEnter = { trusted: event.isTrusted, charCode: event.charCode, key: event.key };
+      }, { once: true });
+      window.__relaiDiagnosticsPanel = panel;
+      window.__relaiDiagnosticsDetails = details;
+      window.__relaiDiagnosticsStatus = panel.querySelector('[role="status"]');
+      window.__relaiDiagnosticsMutations = 0;
+      window.__relaiDiagnosticsObserver = new MutationObserver(records => { window.__relaiDiagnosticsMutations += records.length; });
+      window.__relaiDiagnosticsObserver.observe(window.__relaiDiagnosticsStatus, { childList: true, characterData: true, subtree: true });
+    })()`);
+    win.focus();
+    win.webContents.focus();
+    await waitFor(win, `document.hasFocus() && document.activeElement === document.querySelector('[data-operation-diagnostics] summary')`);
+    // sendInputEvent keyDown is a raw-key event. Native summary activation also
+    // needs the Enter character/keypress stage of a real keyboard sequence.
+    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+    win.webContents.sendInputEvent({ type: 'char', keyCode: String.fromCharCode(13) });
+    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+    try {
+      await waitFor(win, `document.querySelector('[data-operation-diagnostics] details')?.open && window.__relaiDiagnosticsEnter?.trusted === true && window.__relaiDiagnosticsEnter?.charCode === 13`);
+    } catch (error) {
+      const keyboard = await win.webContents.executeJavaScript(`({ focused: document.hasFocus(), active: document.activeElement?.outerHTML, enter: window.__relaiDiagnosticsEnter, open: document.querySelector('[data-operation-diagnostics] details')?.open })`);
+      throw new Error(`${error.message}; native summary keyboard=${JSON.stringify(keyboard)}`, { cause: error });
+    }
+    const keyboardExpanded = true;
+    for (let index = 0; index < 3; index += 1) await refresh({ status: 'running', timeline });
+    const repeated = await win.webContents.executeJavaScript(`(() => {
+      const panel = document.querySelector('[data-operation-diagnostics]');
+      return {
+        samePanel: panel === window.__relaiDiagnosticsPanel,
+        sameDisclosure: panel.querySelector('details') === window.__relaiDiagnosticsDetails,
+        expanded: panel.querySelector('details').open,
+        focusPreserved: document.activeElement === panel.querySelector('summary'),
+        statusMutations: window.__relaiDiagnosticsMutations,
+        measuredDuration: panel.textContent.includes('123 ms'),
+        clockOutsideAnnouncement: !panel.querySelector('[role="status"] [data-clock-elapsed-start]')
+      };
+    })()`);
+    await win.webContents.setZoomFactor(2);
+    win.setSize(750, 900);
+    await delay(150);
+    await win.webContents.executeJavaScript(`document.querySelector('[data-operation-diagnostics] summary').scrollIntoView({ block: 'center' })`);
+    await waitForCapturePaint(win);
+    const narrow = await win.webContents.executeJavaScript(`(() => {
+      const panel = document.querySelector('[data-operation-diagnostics]');
+      const bounds = panel.getBoundingClientRect();
+      const summary = panel.querySelector('summary').getBoundingClientRect();
+      return {
+        viewportWidth: innerWidth,
+        horizontalOverflow: document.documentElement.scrollWidth > innerWidth + 1,
+        factsContained: [...panel.querySelectorAll('dd')].every(node => { const rect = node.getBoundingClientRect(); return rect.left >= bounds.left && rect.right <= bounds.right + 1; }),
+        summaryReachable: summary.width > 0 && summary.top >= 0 && summary.bottom <= innerHeight,
+        expanded: panel.querySelector('details').open
+      };
+    })()`);
+    fs.mkdirSync(screenshotDir, { recursive: true });
+    narrow.screenshot = path.join(screenshotDir, 'operation-diagnostics-narrow.png');
+    fs.writeFileSync(narrow.screenshot, (await win.webContents.capturePage()).toPNG());
+    await refresh({ status: 'running', timeline: { ...timeline, phase: 'draining-output', executed: true, childExitedAt: startedAt, terminationCertainty: 'unknown' } });
+    await waitFor(win, `document.querySelector('[data-operation-diagnostics="draining-output"]')?.textContent.includes('Command exited, collecting result')`);
+    const collecting = await win.webContents.executeJavaScript(`({
+      samePanel: document.querySelector('[data-operation-diagnostics]') === window.__relaiDiagnosticsPanel,
+      expanded: document.querySelector('[data-operation-diagnostics] details')?.open,
+      sameLiveRegion: document.querySelector('[data-operation-diagnostics] [role="status"]') === window.__relaiDiagnosticsStatus
+    })`);
+    await refresh({ status: 'completed', timeline: { ...timeline, phase: 'result-ready', executed: true, terminationCertainty: 'unconfirmed' } });
+    await waitFor(win, `document.querySelector('[data-operation-diagnostics="result-ready"]')?.textContent.includes('Result ready')`);
+    const ready = await win.webContents.executeJavaScript(`(() => {
+      const panel = document.querySelector('[data-operation-diagnostics]');
+      const build = document.querySelector('[data-runtime-build-identity]');
+      return {
+        samePanel: panel === window.__relaiDiagnosticsPanel,
+        sameLiveRegion: panel.querySelector('[role="status"]') === window.__relaiDiagnosticsStatus,
+        noLiveClock: panel.querySelectorAll('[data-clock-elapsed-start]').length === 0,
+        uncertaintyVisible: panel.querySelector('.operation-diagnostics-warning')?.textContent.includes('termination is unconfirmed') === true,
+        cachedBuild: build.textContent.includes('diagnostic-build'),
+        parityUnknown: [...build.querySelectorAll('dl > div')].some(node => node.querySelector('dt')?.textContent === 'Source/build parity' && node.querySelector('dd')?.textContent === 'Unknown')
+      };
+    })()`);
+    return { legacy, keyboardExpanded, repeated, narrow, collecting, ready };
+  } finally {
+    await win.webContents.executeJavaScript(`(() => {
+      window.__relaiDiagnosticsObserver?.disconnect();
+      window.fetch = window.__relaiDiagnosticsOriginalFetch;
+      for (const key of Object.keys(window).filter(key => key.startsWith('__relaiDiagnostics'))) delete window[key];
+      window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
+    })()`);
+    await win.webContents.setZoomFactor(zoom);
+    win.setSize(...size);
+    if (!visible) win.hide();
+  }
+}
 
 async function exerciseActivitySelectionStability(win) {
   const ids = await win.webContents.executeJavaScript(`(() => {

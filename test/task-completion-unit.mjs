@@ -5,7 +5,10 @@ import { flushAuditWrites, getAuditPath, readAudit } from "../src/audit.js";
 import { flushLocalAnalytics, readLocalUsageSnapshot } from "../src/localAnalytics.js";
 import { repositoryIntelligence } from "../src/repository/intelligence/service.js";
 import { resetTaskHistoryCaches } from "../src/taskHistoryStorage.ts";
-import { flushTaskHistoryPersistence } from "../src/taskHistoryStore.ts";
+import { flushTaskHistoryPersistence, readTaskHistorySessionRecord } from "../src/taskHistoryStore.ts";
+import { startFallbackExecution, resetFallbackExecutions } from "../src/mcp/fallbackExecutions.js";
+import { principalFingerprint } from "../src/mcp/principal.ts";
+import { toolResult } from "../src/mcp/results.js";
 import { readSessionPolicy } from "../src/policyResolver.js";
 import { readTaskIntegrity } from '../src/taskIntegrity.ts';
 import { taskEphemeralDirectory } from '../src/taskEphemeral.ts';
@@ -113,6 +116,41 @@ try {
   assert.equal(readOnlyCompletion.validationStatus, 'not_required');
   assert.equal(readOnlyCompletion.completionKnown, true);
   assert.deepEqual(readOnlyCompletion.changedFiles || [], [], 'read-only completion must not claim ambient repository changes');
+
+  // Reading a retained result must not reopen or revise a terminal task.
+  let retainedRuns = 0;
+  const retained = startFallbackExecution({
+    config: readConfig(), workId: unvalidatedTask, noticeScope: principalFingerprint('local:trusted'),
+    workspace: 'app', tool: 'relai_read', signature: 'terminal-observation-fixture',
+    run: async () => { retainedRuns += 1; return toolResult({ ok: true, summary: 'Retained read fixture.' }, false); }
+  });
+  await retained.record.promise;
+  await flushAuditWrites();
+  assert.equal((await flushTaskHistoryPersistence()).ok, true);
+  const terminalFields = record => Object.fromEntries([
+    'status', 'calls', 'toolCallCount', 'successfulToolCallCount', 'failedToolCallCount',
+    'failures', 'completedAt', 'endedAt', 'updatedAt', 'lastActivityAt', 'durationMs'
+  ].map(key => [key, record[key]]));
+  const originalTerminal = terminalFields(readTaskHistorySessionRecord(readConfig(), unvalidatedTask));
+  const originalEvents = readTaskHistorySessionRecord(readConfig(), unvalidatedTask).events.map(event => event.eventId);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const retrieved = await callTool('relai_work', {
+      action: 'result', workspace: 'app', work_id: unvalidatedTask, operationId: retained.record.operationId
+    }, { publicHttpOnly: true });
+    assert.equal(retrieved.ok, true);
+    assert.equal(retrieved.backgroundOperation.operationId, retained.record.operationId);
+    const history = await callTool('relai_work', {
+      action: 'history', workspace: 'app', kind: 'activity', taskId: unvalidatedTask
+    }, { publicHttpOnly: true });
+    assert.equal(history.ok, true);
+    await flushAuditWrites();
+    assert.equal((await flushTaskHistoryPersistence()).ok, true);
+    const observed = readTaskHistorySessionRecord(readConfig(), unvalidatedTask);
+    assert.deepEqual(terminalFields(observed), originalTerminal, 'result/history reads preserve terminal counters and timestamps');
+    assert.deepEqual(observed.events.map(event => event.eventId), originalEvents, 'observation does not append task activity');
+  }
+  assert.equal(retainedRuns, 1, 'repeated result retrieval must not repeat its original operation');
+
 
   resetToolActivity();
   const scratchTask = await startTask('ephemeral-cleanup');
@@ -601,6 +639,7 @@ try {
 } finally {
   await flushAuditWrites();
   await flushTaskHistoryPersistence();
+  resetFallbackExecutions();
   await flushLocalAnalytics();
   resetToolActivity();
   await repositoryIntelligence.shutdown();

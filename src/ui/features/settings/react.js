@@ -4,6 +4,7 @@ import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { openModal } from '../../components/modal.js';
 import { StatusPill } from '../../components/pill.js';
+import { RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection, tunnelRuntimeView } from '../../connection-state.js';
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
@@ -1595,6 +1596,7 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
         h('strong', null, runtimeNotice.title),
         h('div', null, runtimeNotice.message)
       ) : null,
+      h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }),
       developer.name ? h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': developer.username ? `${developer.name} on GitHub (@${developer.username})` : `${developer.name} on GitHub` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')) : null,
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
     ),

@@ -1,3 +1,4 @@
+import { boundResponsePayload, jsonBytes, responseByteLimit, utf8Head } from '../tools/responseBudget.js';
 import { MCP_CONTENT_TYPES } from '../contracts/mcp.ts';
 
 const DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024;
@@ -9,20 +10,22 @@ const MAX_TOOL_RESULT_BYTES = Number(
 );
 const MAX_TOOL_TEXT_BYTES = Number(process.env.REL_AI_MCP_MAX_TOOL_TEXT_BYTES || DEFAULT_MAX_TOOL_TEXT_BYTES);
 
-function toolResult(payload, isError, meta) {
+function toolResult(payload, isError, meta, options = {}) {
   const { imageContents, structuredPayload } = extractToolImages(payload);
   const resourceLinkContent = toolResourceLinkContent(payload);
   const serialized = JSON.stringify(structuredPayload);
   const bytes = Buffer.byteLength(serialized, 'utf8');
+  const withoutTimeline = structuredPayload?.timeline || structuredPayload?.errorDetails?.timeline
+    ? { ...structuredPayload, timeline: undefined, ...(structuredPayload.errorDetails ? { errorDetails: { ...structuredPayload.errorDetails, timeline: undefined } } : {}), truncated: true, originalBytes: bytes } : null;
   const structuredContent = bytes > MAX_TOOL_RESULT_BYTES
-    ? compactToolResult(structuredPayload, bytes)
+    ? (withoutTimeline && jsonBytes(withoutTimeline) <= MAX_TOOL_RESULT_BYTES ? withoutTimeline : compactToolResult(structuredPayload, bytes))
     : structuredPayload;
   const text = conciseToolResultText(structuredPayload, {
     isError: Boolean(isError),
     originalBytes: bytes,
     structuredTruncated: bytes > MAX_TOOL_RESULT_BYTES
   });
-  return {
+  const result = {
     content: [
       { type: MCP_CONTENT_TYPES.TEXT, text: truncateUtf8Head(text, MAX_TOOL_TEXT_BYTES) },
       ...imageContents,
@@ -32,6 +35,17 @@ function toolResult(payload, isError, meta) {
     isError: Boolean(isError),
     ...(meta && typeof meta === 'object' ? { _meta: meta } : {})
   };
+  if (options.maxResponseBytes != null) {
+    const limit = responseByteLimit(options.maxResponseBytes);
+    result.structuredContent = { ...result.structuredContent, responseBudget: { maxResponseBytes: limit, returnedBytes: 0, complete: result.structuredContent?.truncated !== true } };
+    if (jsonBytes(result) > limit - 512) {
+      result.structuredContent = { ...boundResponsePayload(result.structuredContent, limit - 1024), truncated: true };
+      result.content = [{ type: MCP_CONTENT_TYPES.TEXT, text: utf8Head(conciseToolResultText(result.structuredContent, { isError }), 256) }];
+    }
+    result.structuredContent.responseBudget = { maxResponseBytes: limit, returnedBytes: 0, complete: result.structuredContent?.truncated !== true };
+    for (let pass = 0; pass < 3; pass += 1) result.structuredContent.responseBudget.returnedBytes = jsonBytes(result);
+  }
+  return result;
 }
 
 function extractToolImages(payload) {
@@ -236,6 +250,7 @@ function compactToolResult(payload, originalBytes) {
     commandSucceeded: payload.commandSucceeded,
     timedOut: payload.timedOut,
     cancelled: payload.cancelled,
+    rootExitConfirmed: payload.rootExitConfirmed,
     terminationConfirmed: payload.terminationConfirmed,
     forcedTermination: payload.forcedTermination,
     mutationUnknown: payload.mutationUnknown,
@@ -248,6 +263,13 @@ function compactToolResult(payload, originalBytes) {
     stdoutSpillTruncated: payload.stdoutSpillTruncated,
     stderrSpillTruncated: payload.stderrSpillTruncated,
     durationMs: payload.durationMs,
+    timeline: payload.timeline ? { phase: payload.timeline.phase, executed: payload.timeline.executed, terminationCertainty: payload.timeline.terminationCertainty, lastProgressAt: payload.timeline.lastProgressAt } : undefined,
+    items: Array.isArray(payload.items) && payload.items.length === 0 ? [] : undefined,
+    skipped: Array.isArray(payload.skipped) ? payload.skipped.slice(0, 2).map(item => ({ path: boundedText(item.path, 200), reason: boundedText(item.reason, 240) })) : undefined,
+    errorDetails: payload.errorDetails ? { ...payload.errorDetails, timeline: undefined } : undefined,
+    outputFinalizationTimedOut: payload.outputFinalizationTimedOut,
+    outputFinalizationError: payload.outputFinalizationError,
+    mutationOwnershipPersistenceError: payload.mutationOwnershipPersistenceError,
     diagnosticCount: payload.diagnosticCount,
     validationStatus: payload.validationStatus,
     completionKnown: payload.completionKnown,
@@ -255,7 +277,7 @@ function compactToolResult(payload, originalBytes) {
     handlerCompleted: payload.handlerCompleted,
     retryable: payload.retryable,
     operationError: displayText(payload.operationError, 2000),
-    message: displayText(payload.message, 2000) || 'Result was compacted. Use returned output references or narrower read-only requests for more detail.',
+    message: displayText(payload.message, 2000) || (payload.operationId ? 'Result was compacted. Retrieve the same operationId with relai_work action result or read its output references. Do not rerun the mutation.' : 'Result was compacted. Use returned output references or narrower read-only requests for more detail.'),
     error: displayText(payload.error, 4000),
     errorCode: payload.errorCode,
     level: payload.level,
@@ -280,7 +302,7 @@ function compactToolResult(payload, originalBytes) {
   // Identity/status fields are scalars, never a second copy of workspace config
   // or an arbitrary nested payload. Keep the fixed envelope bounded as well.
   for (const [key, value] of Object.entries(bounded)) {
-    if (['backgroundOperation', 'backgroundOperations', 'results', 'completedOperations'].includes(key)) continue;
+    if (['backgroundOperation', 'backgroundOperations', 'results', 'completedOperations', 'timeline', 'items', 'skipped', 'errorDetails'].includes(key)) continue;
     if (value && typeof value === 'object') bounded[key] = boundedText(scalarText(value), 512);
     else if (typeof value === 'string' && !['message', 'error', 'summary', 'nextAction', 'stdout', 'stderr'].includes(key)) {
       bounded[key] = boundedText(value, 512);
@@ -299,6 +321,10 @@ function compactToolResult(payload, originalBytes) {
   // Reserve space for omission metadata. At most twenty detailed candidates
   // are considered so repeated JSON sizing stays bounded even for huge history.
   const budget = Math.max(0, MAX_TOOL_RESULT_BYTES - Math.min(512, Math.ceil(MAX_TOOL_RESULT_BYTES / 32)));
+  if (Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget) {
+    delete bounded.timeline;
+    if (!payload.message) delete bounded.message;
+  }
   if (ordered.length && Buffer.byteLength(JSON.stringify(bounded), 'utf8') > budget - 128 * 1024) {
     if (bounded.backgroundOperation?.result?.results) bounded.backgroundOperation.result.results = bounded.backgroundOperation.result.results.map(withoutDiagnosticOutput);
     if (bounded.results) bounded.results = bounded.results.map(withoutDiagnosticOutput);
@@ -343,7 +369,67 @@ function compactToolResult(payload, originalBytes) {
   }
   if (!bounded.omittedOperationCount) delete bounded.omittedOperationCount;
   if (!bounded.omittedUnsafeOperationCount) delete bounded.omittedUnsafeOperationCount;
-  return bounded;
+  return fitStructuredResult(bounded, MAX_TOOL_RESULT_BYTES);
+}
+
+function fitStructuredResult(value, maxBytes) {
+  if (jsonBytes(value) <= maxBytes) return value;
+  const result = JSON.parse(JSON.stringify(value));
+  delete result.timeline;
+  if (result.errorDetails) delete result.errorDetails.timeline;
+  // Preserve operation identities, references and safety facts. Shrink prose
+  // first, including escaped strings whose JSON size exceeds their UTF-8 size.
+  const identities = /^(operationId|work_id|processId|eventId|workspace|.*OutputRef|errorCode|code)$/;
+  while (jsonBytes(result) > maxBytes) {
+    const candidates = [];
+    const visit = object => {
+      if (!object || typeof object !== 'object') return;
+      for (const [key, item] of Object.entries(object)) {
+        if (typeof item === 'string' && item.length > 80 && !identities.test(key)) candidates.push({ object, key, item, bytes: jsonBytes(item) });
+        else if (item && typeof item === 'object') visit(item);
+      }
+    };
+    visit(result);
+    candidates.sort((left, right) => right.bytes - left.bytes);
+    const next = candidates[0];
+    if (!next) break;
+    next.object[next.key] = utf8Head(next.item, Math.max(40, Math.floor(Buffer.byteLength(next.item, 'utf8') / 2)));
+  }
+  for (const field of ['completedOperations', 'backgroundOperations', 'results', 'skipped']) {
+    while (jsonBytes(result) > maxBytes && result[field]?.length > 1) {
+      result[field].pop();
+      if (field === 'results') result.omittedDiagnosticCount = (result.omittedDiagnosticCount || 0) + 1;
+    }
+  }
+  for (const field of ['message', 'summary', 'stdout', 'stderr', 'nextAction', 'errorDetails', 'skipped']) {
+    if (jsonBytes(result) <= maxBytes) break;
+    delete result[field];
+  }
+  if (jsonBytes(result) <= maxBytes) return result;
+  // Final bounded receipt for pathological metadata: no execution success or
+  // termination certainty is invented when optional detail must be omitted.
+  const keys = ['ok', 'truncated', 'originalBytes', 'operationId', 'work_id', 'errorCode', 'executed', 'commandSucceeded', 'exitCode', 'timedOut', 'cancelled', 'rootExitConfirmed', 'terminationConfirmed', 'mutationUnknown', 'cleanupPending', 'stdoutOutputRef', 'stderrOutputRef'];
+  const receipt = Object.fromEntries(keys.filter(key => result[key] !== undefined).map(key => [key, result[key]]));
+  if (result.results?.[0]) {
+    const first = Object.fromEntries(keys.filter(key => result.results[0][key] !== undefined).map(key => [key, result.results[0][key]]));
+    receipt.results = [first];
+    receipt.omittedDiagnosticCount = Math.max(0, (result.results.length - 1) + (result.omittedDiagnosticCount || 0));
+  }
+  if (jsonBytes(receipt) > maxBytes) {
+    // Oversized identities cannot be truncated into different valid identities.
+    // Keep explicit safety facts, and report unavailable details instead.
+    for (const field of ['work_id', 'stdoutOutputRef', 'stderrOutputRef']) {
+      if (jsonBytes(receipt) <= maxBytes) break;
+      delete receipt[field];
+    }
+  }
+  if (jsonBytes(receipt) > maxBytes) {
+    for (const field of ['operationId', 'errorCode', 'originalBytes', 'results']) {
+      if (jsonBytes(receipt) <= maxBytes) break;
+      delete receipt[field];
+    }
+  }
+  return jsonBytes(receipt) <= maxBytes ? receipt : { ok: false, truncated: true };
 }
 
 function operationNeedsAttention(operation) {
@@ -387,6 +473,8 @@ function compactOperationResult(operation) {
     error: displayText(operation.error, 1000),
     result: boundedResultScalars({
       commandSucceeded: result.commandSucceeded,
+      outputFinalizationTimedOut: result.outputFinalizationTimedOut,
+      outputFinalizationError: result.outputFinalizationError,
       operationOk: result.operationOk,
       handlerCompleted: result.handlerCompleted,
       retryable: result.retryable,
@@ -396,6 +484,8 @@ function compactOperationResult(operation) {
       executed: result.executed,
       timedOut: result.timedOut,
       cancelled: result.cancelled,
+      rootExitConfirmed: result.rootExitConfirmed,
+      mutationOwnershipPersistenceError: result.mutationOwnershipPersistenceError,
       terminationConfirmed: result.terminationConfirmed,
       forcedTermination: result.forcedTermination,
       mutationUnknown: result.mutationUnknown,
@@ -434,6 +524,10 @@ function compactDiagnosticResults(results) {
     commandSucceeded: item?.commandSucceeded,
     timedOut: item?.timedOut,
     cancelled: item?.cancelled,
+    rootExitConfirmed: item?.rootExitConfirmed,
+    mutationOwnershipPersistenceError: item?.mutationOwnershipPersistenceError,
+    outputFinalizationTimedOut: item?.outputFinalizationTimedOut,
+    outputFinalizationError: item?.outputFinalizationError,
     terminationConfirmed: item?.terminationConfirmed,
     forcedTermination: item?.forcedTermination,
     mutationUnknown: item?.mutationUnknown,

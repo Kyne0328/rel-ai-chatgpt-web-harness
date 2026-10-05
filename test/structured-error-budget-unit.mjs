@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+process.env.REL_AI_MCP_MAX_TOOL_RESULT_BYTES = '1200';
+const { toolResult } = await import('../src/mcp/results.js');
+const timeline = { phase: 'reconciling', executed: true, phases: Array.from({ length: 13 }, (_, index) => ({ phase: `phase-${index}`, startedAt: '2026-10-05T00:00:00.000Z', endedAt: '2026-10-05T00:00:01.000Z', durationMs: 1000 })) };
+const response = toolResult({ ok: false, error: 'Ordinary EIO failure while reconciling', errorCode: 'EIO', executed: true, terminationConfirmed: false, mutationUnknown: true, timeline, errorDetails: { code: 'EIO', source: 'rel-ai-mcp', operation: 'write', executed: true, terminationCertainty: 'unknown', timeline, retryable: false, allowedAlternatives: ['Inspect the same operationId before attempting further mutations.'] } }, true).structuredContent;
+assert.ok(Buffer.byteLength(JSON.stringify(response), 'utf8') <= 1200);
+assert.equal(response.errorCode, 'EIO');
+assert.equal(response.executed, true);
+assert.equal(response.terminationConfirmed, false);
+assert.equal(response.mutationUnknown, true);
+assert.equal(response.errorDetails.executed, true);
+assert.equal(response.errorDetails.terminationCertainty, 'unknown');
+assert.equal(response.errorDetails.timeline, undefined, 'duplicate timeline must not bypass the global cap');
+console.log('Nested structured error timeline respects the 1200-byte cap.');

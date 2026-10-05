@@ -9,6 +9,7 @@ import { getToolSurfaceManifest } from './tools/schema.js';
 import { allWorkspaceAliases, resolveWorkspace } from './config.js';
 import { buildToolManifest } from './mcp/toolManifest.js';
 import semver from 'semver';
+import { assessSourceParity, cachedRepositoryBuildState, runtimeBuildIdentity } from './runtimeBuildIdentity.js';
 
 const PROTOCOL_VERSION = MCP_PROTOCOL_VERSION;
 const MAX_REPOSITORY_METADATA_CACHE = 64;
@@ -29,7 +30,8 @@ function runtimeMetadata() {
     toolSurfaceVersion: surface.toolSurfaceVersion,
     toolCount: manifest.activeToolCount,
     manifestHash: manifest.version,
-    schemaVersion: manifest.schemaVersion
+    schemaVersion: manifest.schemaVersion,
+    buildIdentity: runtimeBuildIdentity(manifest.hash)
   }));
   runtimeMetadataCache = { revision, value };
   return value;
@@ -117,12 +119,15 @@ function rememberRepositoryMetadata(key, revision, value) {
 
 function assessRuntimeCompatibility(runtime, repository, options = {}) {
   const activeTaskCount = Math.max(0, Number(options.activeTaskCount || 0));
+  const sourceParity = assessSourceParity(runtime.buildIdentity, options.repositoryBuildState ?? cachedRepositoryBuildState(repository?.root));
   if (!repository) {
     return {
       available: false,
       status: 'repository_unavailable',
       compatible: true,
       metadataMatches: null,
+      releaseMetadataMatches: null,
+      sourceParity,
       restartRequired: false,
       schemaSensitiveOperationsBlocked: false,
       advisoryOnly: true,
@@ -147,13 +152,15 @@ function assessRuntimeCompatibility(runtime, repository, options = {}) {
       status: 'compatible',
       compatible: true,
       metadataMatches: true,
+      releaseMetadataMatches: true,
+      sourceParity,
       restartRequired: false,
       schemaSensitiveOperationsBlocked: false,
       advisoryOnly: true,
       activeTaskCount,
       activeTasksPreventRestart: false,
       differences: [],
-      message: 'The connected runtime matches the repository release metadata.'
+      message: `The connected runtime matches the repository release metadata. Source/build parity is ${sourceParity.status}.`
     };
   }
 
@@ -170,6 +177,8 @@ function assessRuntimeCompatibility(runtime, repository, options = {}) {
     // skew cannot be mistaken for a tool-call boundary by connector clients.
     compatible: true,
     metadataMatches: false,
+    releaseMetadataMatches: false,
+    sourceParity,
     restartRequired,
     schemaSensitiveOperationsBlocked: false,
     advisoryOnly: true,

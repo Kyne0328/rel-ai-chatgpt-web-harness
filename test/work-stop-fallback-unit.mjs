@@ -6,6 +6,7 @@ import path from 'node:path';
 import { flushAuditWrites } from '../src/audit.js';
 import { flushLocalAnalytics } from '../src/localAnalytics.js';
 import { fallbackExecutionStatus, fallbackSignature, resetFallbackExecutions, startFallbackExecution } from '../src/mcp/fallbackExecutions.js';
+import { principalFingerprint } from '../src/mcp/principal.ts';
 import { handleTransportFallbackRequest } from '../src/mcp/transportFallback.ts';
 import { CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY } from '@modelcontextprotocol/server';
 import { MCP_PROTOCOL_VERSION } from '../src/mcp/protocol.js';
@@ -65,6 +66,7 @@ try {
   const fallback = startFallbackExecution({
     config: { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') },
     workId: task.work_id,
+    noticeScope: principalFingerprint(context.principal),
     tool: 'relai_validate',
     workspace: 'app',
     signature: 'work-stop-fallback',
@@ -81,7 +83,8 @@ try {
   let siblingAbortObserved = false;
   const sibling = startFallbackExecution({
     config: { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') },
-    workId: task.work_id, tool: 'relai_exec', workspace: 'app', signature: 'work-stop-sibling',
+    workId: task.work_id,
+    noticeScope: principalFingerprint(context.principal), tool: 'relai_exec', workspace: 'app', signature: 'work-stop-sibling',
     run: signal => new Promise(resolve => {
       const finish = () => {
         siblingAbortObserved = true;
@@ -92,6 +95,7 @@ try {
     })
   });
   const status = await callTool('relai_work', { action: 'status', work_id: task.work_id });
+  assert.equal(fallbackExecutionStatus(fallback.record.operationId, { noticeScope: principalFingerprint('other-principal') }), null, 'receipt lookup must remain strict to its recorded principal');
   assert.deepEqual(new Set(status.backgroundOperations.map(operation => operation.operationId)), new Set([fallback.record.operationId, sibling.record.operationId]));
   await assert.rejects(
     callTool('relai_work', { action: 'finish', work_id: task.work_id, summary: 'Must wait for both operations.' }),
@@ -171,7 +175,7 @@ try {
   const retried = await submit('queue-first-retry', firstArgs);
   assert.equal(retried.body.result.structuredContent.operationId, firstId);
   const records = [firstArgs, secondArgs].map(args => startFallbackExecution({
-    config: queueConfig, workId: queueTask.work_id, tool: 'relai_exec', workspace: 'app',
+    config: queueConfig, workId: queueTask.work_id, noticeScope: principalFingerprint(context.principal), tool: 'relai_exec', workspace: 'app',
     signature: fallbackSignature('relai_exec', args), run: () => { throw new Error('Queued command duplicated'); }
   }));
   fs.writeFileSync(releasePath, 'release');
@@ -212,7 +216,14 @@ try {
             timer = setTimeout(() => reject(new Error('Compact status queued behind the held workspace writer.')), 5000);
           })
         ]);
-        assert.equal(result.ok, true);
+        if (args.operationId === 'fallback_unknown_status_fixture_12345') {
+          assert.equal(result.ok, false, 'an unavailable exact operation must not be reported as successfully recovered');
+          assert.equal(result.errorCode, 'OPERATION_NOT_FOUND');
+          assert.equal(result.operationId, args.operationId);
+          assert.equal(result.backgroundOperation, undefined, 'unknown operation lookup must never adopt a different operation');
+        } else {
+          assert.equal(result.ok, true);
+        }
         if (args.operationId === firstId) assert.equal(result.backgroundOperation.status, 'completed');
         if (args.operationId === fallback.record.operationId) assert.equal(result.backgroundOperation.status, 'cancelled');
       } finally {

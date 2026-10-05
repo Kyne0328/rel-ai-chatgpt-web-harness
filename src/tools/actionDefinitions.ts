@@ -90,7 +90,7 @@ const TASK_PROGRESS_PUBLIC_TOOLS: ReadonlySet<string> = new Set([
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_CONTEXT, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT, OP.INSPECT, OP.SEARCH_SEMANTIC,
   OP.PROCESS_READ, OP.PROCESS_LIST, OP.CHANGES_TIDY_PLAN, OP.VALIDATE_HTTP, OP.CHANGES_DIFF, OP.CHANGES_REPLAY,
-  OP.WORK_STATUS, OP.PUBLISH_DRAFT_PR
+  OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.PUBLISH_DRAFT_PR
 ]);
 const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.PROCESS_STOP, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
@@ -123,7 +123,7 @@ const PERSISTENT_PROCESS_TOOLS: ReadonlySet<string> = new Set([
 ]);
 const ALWAYS_IMMEDIATE_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_BEGIN, OP.WORK_PLAN, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT,
-  OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+  OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
 ]);
 
 const DEFAULT_BEHAVIOR: Readonly<ToolBehavior> = Object.freeze({
@@ -188,7 +188,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Durable goal lifecycle. Every durable Rel.AI goal starts with a non-empty plan on begin. One work_id can own multiple background operations: status lists them, or retrieves one by operationId. stop with operationId targets one command; task-wide stop/cancel covers all. context recovers continuity. Keep the plan current and finish after outstanding operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
+    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. status lists receipts. result retrieves operationId. history pages authorized records. context restores continuity. stop with operationId stops one command. Task stop/cancel stops all. Keep the plan current. Finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
@@ -196,7 +196,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_snapshot', title: 'Workspace Snapshot',
-    description: 'Returns a compact local workspace or repository bootstrap overview. This read-only operation may use an authorized workspace directly without a work_id.'
+    description: 'Read-only local workspace/repository bootstrap overview. An authorized workspace needs no work_id.'
   },
   {
     name: 'relai_read', title: 'Read Local Workspace',
@@ -235,7 +235,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_browser', title: 'Use Local Browser',
-    description: 'Local browser for localhost/LAN/intranet/VPN, machine-authenticated sessions, and workspace file transfer. Persistent browsing is the default so cookies and sign-ins can be reused; use profile:ephemeral for a private session. Use handoff when the user must enter a password, MFA code, CAPTCHA, or other private site input, then resume AI control. clear_profile removes saved browser site data for the current authenticated client. Semantic snapshots explain page content, layout snapshots cover geometry/overflow, and screenshots provide pixel evidence. Public web stays host-owned.',
+    description: 'Local browser for localhost/LAN/intranet/VPN, machine-authenticated sessions, and workspace file transfer. Persistent profile reuses sign-ins. profile:ephemeral is private. handoff lets the user enter passwords, MFA, CAPTCHA, or private input. resume returns control. clear_profile removes saved site data for this client. Use semantic snapshots for content, layout for geometry/overflow, screenshots for pixels. Public web stays host-owned.',
     annotations: annotations(false, true, false, true), dashboard: { capabilities: ['execute'] }
   },
   {

@@ -8,6 +8,9 @@ import { syncBuiltinESMExports } from 'node:module';
 import { listMutationProcessRecords, runWithMutationProcessOwnership } from '../src/mutationProcessOwnership.js';
 
 import { isProcessTreeAlive, runProcess, summarizeCommand, terminateProcessTree } from '../src/process.js';
+import { verifyWindowsRootExitTermination } from './fixtures/windows-root-exit-termination.mjs';
+
+await verifyWindowsRootExitTermination(terminateProcessTree);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-process-cancellation-'));
 const stateDir = path.join(root, 'state');
@@ -54,6 +57,7 @@ const child = spawn(process.execPath, [process.argv[2]], {
   windowsHide: true
 });
 process.stdout.write('CHILD:' + child.pid + '\\n');
+if (process.argv[3]) require('node:fs').writeFileSync(process.argv[3], String(child.pid));
 child.unref();
 `);
 
@@ -276,6 +280,43 @@ try {
   }
 
   if (process.platform === 'win32') {
+    // This real Windows child exits before cancellation while its detached
+    // descendant keeps inherited pipes open. Root exit is known, tree exit is
+    // not; output settlement must not erase its durable mutation ownership.
+    const controller = new AbortController();
+    const owner = 'root-exited-descendant-alive';
+    let descendantPid = 0;
+    const descendantPidFile = path.join(root, 'windows-descendant.pid');
+    try {
+      const result = await runWithMutationProcessOwnership(config, owner, () => runProcess(
+        process.execPath, [inheritedPipeParentScript, inheritedPipeChildScript, descendantPidFile],
+        {
+          cwd: root, signal: controller.signal, forceWaitMs: 25,
+          onPhase(event) {
+            if (event.phase === 'exited') controller.abort(new Error('Cancel after physical root exit.'));
+          }
+        }, config
+      ));
+      descendantPid = Number(/CHILD:(\d+)/.exec(result.stdout)?.[1]);
+      assert.ok(descendantPid > 0, 'the isolated descendant must have a known cleanup PID');
+      assert.equal(pidAlive(descendantPid), true, 'fixture must prove the descendant survived root exit');
+      assert.equal(result.rootExitConfirmed, true);
+      assert.equal(result.cancelled, true);
+      assert.equal(result.terminationConfirmed, false, 'root exit alone cannot authorize mutation-lane release after cancellation');
+      assert.equal(listMutationProcessRecords(config, owner).length, 1,
+        'ambiguous Windows descendant termination must retain durable mutation ownership');
+      assert.equal(listMutationProcessRecords(config, owner)[0].terminationUncertain, true,
+        'known termination uncertainty must survive a service restart');
+    } finally {
+      if (!descendantPid && fs.existsSync(descendantPidFile)) descendantPid = Number(fs.readFileSync(descendantPidFile, 'utf8'));
+      if (descendantPid > 0 && pidAlive(descendantPid)) {
+        await terminateProcessTree(descendantPid, { graceMs: 0, forceWaitMs: 2000 });
+        assert.equal(await waitForPidExit(descendantPid, 5000), true);
+      }
+    }
+  }
+
+  if (process.platform === 'win32') {
     // Execa must not keep the caller pending after our Windows termination
     // attempt fails. Retain the owner of the still-live, test-owned child.
     for (const mode of ['timeout', 'deadline', 'cancel']) {
@@ -320,6 +361,7 @@ try {
         assert.notEqual(mode === 'cancel' ? result.timedOut : result.cancelled, true);
         const owners = listMutationProcessRecords(config, owner);
         assert.equal(owners.length, 1, 'unconfirmed child ownership must survive the bounded result');
+        assert.equal(owners[0].terminationUncertain, true, 'cancellation uncertainty must be durable');
         assert.equal(isProcessTreeAlive(owners[0].pid), true, 'fixture proves the result did not pretend the child exited');
       } finally {
         if (budgetTimer) clearTimeout(budgetTimer);

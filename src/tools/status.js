@@ -13,7 +13,8 @@ import { readProjectInstructions, summarizeProjectInstructions } from '../projec
 import { workspaceGitStatus } from '../repo/gitOps.js';
 import { runtimeCompatibility } from '../runtimeCompatibility.js';
 import { getToolActivity } from '../toolActivity.js';
-import { fallbackExecutionStatus, fallbackExecutionsStatus } from '../mcp/fallbackExecutions.js';
+import { fallbackExecutionStatus, fallbackExecutionsPage, fallbackOperationReceipt } from '../mcp/fallbackExecutions.js';
+import { boundResponsePayload, responseByteLimit } from './responseBudget.js';
 import { principalFingerprint } from '../mcp/principal.ts';
 import { authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.ts';
 import { readTaskHistorySessionRecord } from '../taskHistoryStore.ts';
@@ -37,9 +38,13 @@ async function relaiStatus(config, args = {}, context = {}) {
     ? authorizedWorkspaceAliases(context.principal, configuredWorkspaceAliases)
     : configuredWorkspaceAliases;
   const backgroundReference = String(args.operationId || args.work_id || '').trim();
-  const operationOptions = { config, workId: args.work_id, ...(context.connector ? { noticeScope: principalFingerprint(context.principal) } : {}) };
-  const backgroundOperation = backgroundReference ? fallbackExecutionStatus(backgroundReference, operationOptions) : null;
-  const backgroundOperations = args.work_id ? fallbackExecutionsStatus(args.work_id, operationOptions) : [];
+  const operationOptions = { config, workId: args.work_id, workspace: args.workspace, ...(context.connector ? { noticeScope: principalFingerprint(context.principal) } : {}) };
+  const foundOperation = backgroundReference ? fallbackExecutionStatus(backgroundReference, operationOptions) : null;
+  const detailedOperation = context.connector && foundOperation && !workspaceAliases.includes(foundOperation.workspace) ? null : foundOperation;
+  const backgroundOperation = args.operationId && args.includeResult !== false ? { ...fallbackOperationReceipt(detailedOperation), ...detailedOperation } : fallbackOperationReceipt(detailedOperation);
+  const operationPage = args.work_id ? fallbackExecutionsPage(args.work_id, { ...operationOptions, limit: args.operationLimit, cursor: args.operationCursor }) : null;
+  const backgroundOperations = operationPage?.operations || [];
+  if (args.operationId && !detailedOperation) return { ok: false, errorCode: 'OPERATION_NOT_FOUND', operationId: args.operationId, error: 'Operation is unavailable, expired, or outside this principal/workspace scope.', nextAction: 'Inspect authorized workspace history. Do not repeat a mutation only to recover its result.' };
   // A response byte cap must not opt compact control-plane requests into repository inspection.
   const compactConnectorStatus = context?.connector === true && args.detail !== 'full';
   let selectedWorkspace = null;
@@ -83,15 +88,15 @@ async function relaiStatus(config, args = {}, context = {}) {
     workspace: args.workspace,
     activeTaskCount: taskActivity.activeTaskCount
   });
-  return {
+  const surface = getToolSurfaceManifest(config);
+  const value = {
     ok: true,
     version: getVersion(),
     runtime: compatibility.runtime,
     ...(compatibility.repository ? { repositoryRuntime: compatibility.repository } : {}),
     runtimeCompatibility: compatibility.compatibility,
-    tools: getToolNames(config),
-    toolGroups: getToolGroups(config),
-    toolSurface: getToolSurfaceManifest(config),
+    ...(localDiagnostics ? { tools: getToolNames(config), toolGroups: getToolGroups(config) } : {}),
+    toolSurface: localDiagnostics ? surface : { schemaVersion: surface.schemaVersion, toolSurfaceVersion: surface.toolSurfaceVersion, toolCount: surface.toolCount, deprecations: surface.deprecations },
     ...(localDiagnostics ? { scripts: sortedKeys(scripts), ci } : {}),
     workspace: selectedWorkspace,
     ...(args.work_id ? { work_id: String(args.work_id) } : {}),
@@ -99,10 +104,12 @@ async function relaiStatus(config, args = {}, context = {}) {
     ...(args.work_id ? { task: compactSessionSummary(taskSession || {}, { continuity: taskContinuity }) } : {}),
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
     ...(backgroundOperation ? { backgroundOperation } : {}),
-    ...(backgroundOperations.length ? { backgroundOperations } : {}),
+    ...(operationPage ? { backgroundOperations, operationCursor: operationPage.cursor, operationsHasMore: operationPage.hasMore } : {}),
     workspaceCount: workspaceAliases.length,
     workspaceAliases
   };
+  return context.connector || args.maxResponseBytes !== undefined
+    ? boundResponsePayload(value, responseByteLimit(args.maxResponseBytes) - 1024) : value;
 }
 
 function ciScriptStatus(scripts) {

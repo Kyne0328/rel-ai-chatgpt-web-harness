@@ -10,6 +10,7 @@ import {
 } from './taskObservability.js';
 import { isTerminalTaskStatus } from './taskState.js';
 import { canonicalTaskSnapshot, mergeTaskLifecycleSnapshots, reduceTaskLifecycleAuditEvent } from './taskLifecycle.js';
+import { ensureActivityEventIdentity } from './taskEventIdentity.js';
 import { DEFAULT_TASK_STALE_MS } from './taskTiming.js';
 import { clamp, cleanTaskId, eventIdentityKey, eventTime, eventTimestampMs, isCurrentTaskEvent, timestampMs } from './taskEvents.js';
 import {
@@ -648,7 +649,8 @@ function storedSessionActivityMs(session: TaskRecord): number {
 }
 
 function upsertActivityEvent(events: HistoryEvent[], event: HistoryEvent | null): HistoryEvent[] {
-  if (!event?.eventId) return [...events].slice(-MAX_SESSION_EVENTS);
+  if (!event) return [...events].slice(-MAX_SESSION_EVENTS);
+  event = ensureActivityEventIdentity(event) as HistoryEvent;
   const next = [...events];
   const eventId = eventIdentityKey(event);
   const index = next.findIndex((item: HistoryEvent) => eventIdentityKey(item) === eventId);

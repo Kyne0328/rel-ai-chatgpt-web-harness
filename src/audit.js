@@ -4,6 +4,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getStateDir } from './statePaths.js';
+import { ensureActivityEventIdentity } from './taskEventIdentity.js';
 import { sanitizeDisplayText } from './taskObservability.js';
 
 function getAuditPath(config = {}) {
@@ -22,12 +23,12 @@ const pendingAuditOperations = new Set();
 async function logAudit(config, event) {
   const auditPath = getAuditPath(config);
   const redacted = redactEvent(event || {});
-  const entry = {
+  const entry = ensureActivityEventIdentity({
     ts: new Date().toISOString(),
     pid: process.pid,
     ...redacted,
     auditId: redacted.auditId || crypto.randomUUID()
-  };
+  });
   const integrity = await recordTaskIntegrityEvent(config, entry);
   if (integrity) Object.assign(entry, integrity);
   enqueueAuditWrite(auditPath, entry);
@@ -172,17 +173,33 @@ async function flushAuditWrites(auditPath = '') {
   }
 }
 
-function readAuditTail(auditPath) {
-  const stat = fs.statSync(auditPath);
-  const start = Math.max(0, stat.size - READ_TAIL_BYTES);
-  const fd = fs.openSync(auditPath, 'r');
+function readAuditFileEntries(file, auditPath, tail = false) {
+  const stat = fs.statSync(file);
+  const start = tail ? Math.max(0, stat.size - READ_TAIL_BYTES) : 0;
+  const fd = fs.openSync(file, 'r');
   try {
-    const length = stat.size - start;
-    const buf = Buffer.allocUnsafe(length);
-    fs.readSync(fd, buf, 0, length, start);
-    let text = buf.toString('utf8');
-    if (start > 0) text = text.slice(text.indexOf('\n') + 1);
-    return text;
+    const buffer = Buffer.allocUnsafe(stat.size - start);
+    const read = fs.readSync(fd, buffer, 0, buffer.length, start);
+    const bytes = buffer.subarray(0, read);
+    let offset = start > 0 ? bytes.indexOf(10) + 1 : 0;
+    if (start > 0 && offset === 0) return [];
+    // File identity survives normal rename-based rotation; absolute offsets
+    // make full scans and bounded tails assign the same imported IDs.
+    const source = `audit-file:${path.resolve(auditPath)}:${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+    const entries = [];
+    while (offset < bytes.length) {
+      const newline = bytes.indexOf(10, offset);
+      const end = newline < 0 ? bytes.length : newline;
+      const line = bytes.subarray(offset, end).toString('utf8').trim();
+      if (line) {
+        let entry;
+        try { entry = JSON.parse(line); } catch { entry = { malformed: true, message: 'Unreadable audit entry omitted.' }; }
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) entry = { malformed: true, message: 'Unreadable audit entry omitted.' };
+        entries.push(ensureActivityEventIdentity(entry, { source, occurrence: start + offset }));
+      }
+      offset = end + 1;
+    }
+    return entries;
   } finally {
     fs.closeSync(fd);
   }
@@ -195,12 +212,8 @@ function readAudit(config, options = {}) {
   const fullScan = Boolean(options.fullScan || taskId || workspace);
   const limit = Math.min(Math.max(Number(options.limit || 100), 1), fullScan ? 10000 : 1000);
   let persistedEntries = [];
-  if (fs.existsSync(auditPath)) {
-    const text = fullScan ? readAuditGenerations(auditPath) : readAuditTail(auditPath);
-    persistedEntries = text.trim().split(/\r?\n/).filter(Boolean).map(line => {
-      try { return JSON.parse(line); } catch { return { malformed: true, message: 'Unreadable audit entry omitted.' }; }
-    });
-  }
+  const files = (fullScan ? [`${auditPath}.1`, auditPath] : [auditPath]).filter(file => fs.existsSync(file));
+  for (const file of files) persistedEntries.push(...readAuditFileEntries(file, auditPath, !fullScan));
   const state = auditWriteStates.get(auditPath);
   const queuedEntries = state ? [...state.inFlight, ...state.pending] : [];
   const entries = dedupeAuditEntries([...persistedEntries, ...queuedEntries])
@@ -218,11 +231,6 @@ function dedupeAuditEntries(entries) {
     seen.add(id);
     return true;
   });
-}
-
-function readAuditGenerations(auditPath) {
-  const files = [`${auditPath}.1`, auditPath].filter(file => fs.existsSync(file));
-  return files.map(file => fs.readFileSync(file, 'utf8')).join('');
 }
 
 async function clearAuditHistory(config) {

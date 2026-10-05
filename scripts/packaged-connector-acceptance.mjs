@@ -178,6 +178,25 @@ try {
   assert.ok(status.workspace?.repository?.changedFiles?.includes('acceptance.txt'));
 
   const activeDashboard = await dashboard();
+  const packagedProvenance = JSON.parse(fs.readFileSync(path.join(resources, 'build-provenance.json'), 'utf8'));
+  const identity = activeDashboard.runtime?.buildIdentity;
+  assert.equal(identity?.state, 'recorded', 'the launched package must expose its cached build provenance');
+  assert.equal(identity.sourceFingerprint, packagedProvenance.sourceFingerprint);
+  assert.equal(identity.sourceRevision, packagedProvenance.sourceRevision);
+  assert.equal(identity.dirty, packagedProvenance.dirty);
+  assert.equal(identity.buildId, packagedProvenance.sourceFingerprint.slice(0, 12));
+  assert.ok(Number.isFinite(Date.parse(identity.startedAt)));
+  assert.ok(identity.schemaDigest.length > 0);
+  const boundedStatus = await mcp(primarySession, 'bounded-status', 'tools/call', { name: 'relai_work', arguments: {
+    action: 'status', workspace: 'acceptance', work_id: taskId, maxResponseBytes: 2048
+  } });
+  assert.equal(boundedStatus.result?.isError, false);
+  assert.ok(Buffer.byteLength(JSON.stringify(boundedStatus.result), 'utf8') <= 2048, 'packaged status must honor its total UTF-8 tool-result budget');
+  const history = await callTool(primarySession, 'typed-history', 'relai_work', {
+    action: 'history', workspace: 'acceptance', kind: 'tasks', limit: 10
+  });
+  assert.ok(history.tasks?.some(task => task.work_id === taskId), 'packaged typed history must include the authorized task');
+
 
   for (const prefix of ['/ui/', '/public/ui/']) {
     for (const [relativePath, contentType] of [
@@ -568,7 +587,8 @@ async function callToolSettled(session, id, name, args, timeoutMs = 120_000) {
       action: 'status',
       workspace: args.workspace,
       operationId,
-      detail: 'compact'
+      detail: 'compact',
+      includeResult: false
     });
     const operation = status?.backgroundOperation;
     if (!operation || String(operation.operationId || '') !== operationId) continue;
@@ -576,8 +596,13 @@ async function callToolSettled(session, id, name, args, timeoutMs = 120_000) {
       pollAfterMs = Math.max(25, Number(operation.pollAfterMs || pollAfterMs));
       continue;
     }
-    if (operation.status === 'completed' && operation.result && typeof operation.result === 'object') {
-      return operation.result;
+    if (operation.status === 'completed') {
+      const retrieved = await callTool(session, `${id}-result`, 'relai_work', {
+        action: 'result', workspace: args.workspace, operationId, maxResponseBytes: 524288
+      });
+      assert.equal(retrieved.backgroundOperation?.operationId, operationId);
+      assert.ok(retrieved.backgroundOperation?.result, 'completed package operations must remain retrievable without replaying mutations');
+      return retrieved.backgroundOperation.result;
     }
     throw new Error(`${name} background operation ${operationId} ended with status ${operation.status}: ${operation.error || operation.result?.error || 'no result'}`);
   }

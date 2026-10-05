@@ -7,6 +7,7 @@ import type { TaskDto } from './contracts/tasks.ts';
 import { getStateDir } from './statePaths.js';
 import { setStateMeta, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
 import { normalizeTaskProgress, sanitizeTaskRecord } from './taskObservability.js';
+import { canonicalizeActivityEvents } from './taskEventIdentity.js';
 import { upsertTaskHistorySession } from './taskHistoryPersistence.ts';
 
 const MAX_HISTORY_QUERY_SESSIONS = 500;
@@ -48,9 +49,11 @@ interface SessionPageCursor {
 }
 
 interface SessionPageOptions {
+  includeCursors?: boolean;
   limit?: number;
   cursor?: SessionPageCursor | null;
   workspace?: string;
+  principalFingerprint?: string;
 }
 
 interface EventPageCursor {
@@ -61,9 +64,12 @@ interface EventPageCursor {
 }
 
 interface EventPageOptions {
+  includeCursors?: boolean;
   limit?: number;
   cursor?: EventPageCursor | null;
   taskId?: string;
+  workspace?: string;
+  principalFingerprint?: string;
 }
 
 interface TaskHistoryRetentionOptions {
@@ -172,6 +178,10 @@ function listSessionSummaryPage(directory: string, options: SessionPageOptions =
       filters.push('workspace = ?');
       parameters.push(workspace);
     }
+    if (options.principalFingerprint !== undefined) {
+      filters.push("COALESCE(json_extract(payload, '$.principalFingerprint'), '') = ?");
+      parameters.push(String(options.principalFingerprint));
+    }
     const cursorUpdatedAtMs = Math.max(0, Math.floor(Number(options.cursor?.updatedAtMs || 0)));
     const cursorId = String(options.cursor?.id || '').trim();
     if (cursorUpdatedAtMs && cursorId) {
@@ -187,7 +197,10 @@ function listSessionSummaryPage(directory: string, options: SessionPageOptions =
     `).all(...parameters) as unknown as TaskHistoryRow[];
     const hasMore = rows.length > pageSize;
     const pageRows = rows.slice(0, pageSize);
-    const items = parseSessionRows(db, pageRows, true).map(session => ({ ...session, events: [] }));
+    const items = parseSessionRows(db, pageRows, true).map(session => ({
+      ...session, events: [],
+      ...(options.includeCursors ? { _pageCursor: { updatedAtMs: Number(session.historyUpdatedAtMs || 0), id: String(session.id || '') } } : {})
+    }));
     const last = pageRows.at(-1);
     return {
       items,
@@ -212,6 +225,18 @@ function listRecentSessionEventPage(directory: string, options: EventPageOptions
     if (taskIdFilter) {
       filters.push('task_id = ?');
       parameters.push(taskIdFilter);
+    }
+    if (options.workspace !== undefined || options.principalFingerprint !== undefined) {
+      const scope = ['scope.id = task_history_events.task_id'];
+      if (options.workspace !== undefined) {
+        scope.push('scope.workspace = ?');
+        parameters.push(String(options.workspace));
+      }
+      if (options.principalFingerprint !== undefined) {
+        scope.push("COALESCE(json_extract(scope.payload, '$.principalFingerprint'), '') = ?");
+        parameters.push(String(options.principalFingerprint));
+      }
+      filters.push(`EXISTS (SELECT 1 FROM task_history_summaries AS scope WHERE ${scope.join(' AND ')})`);
     }
     const cursor = options.cursor;
     const eventTimestamp = String(cursor?.eventTimestamp || '').trim();
@@ -261,7 +286,11 @@ function listRecentSessionEventPage(directory: string, options: EventPageOptions
           ...event,
           workspace: event.workspace || row.workspace || '',
           taskId: event.taskId || row.task_id || row.id,
-          sessionId: event.sessionId || row.session_id || row.id
+          sessionId: event.sessionId || row.session_id || row.id,
+          ...(options.includeCursors ? { _pageCursor: {
+            eventTimestamp: String(row.event_timestamp || ''), taskUpdatedAtMs: Number(row.task_updated_at_ms || 0),
+            taskId: String(row.task_id || row.id || ''), eventIndex: Number(row.event_index || 0)
+          } } : {})
         }];
       } catch {
         return [];
@@ -369,6 +398,7 @@ function normalizeStoredSession(session: unknown, { forWrite = false }: { forWri
     || (sanitized.status === 'completed' ? sanitized.summary || '' : '');
   return {
     ...sanitized,
+    events: canonicalizeActivityEvents(Array.isArray(sanitized.events) ? sanitized.events : [], { source: `task-history:${sanitized.workspace || ''}:${id}` }),
     ...(resultSummary ? { resultSummary } : {}),
     progress: normalizeTaskProgress(sanitized.progress, sanitized.status)
   } as StoredTaskSession;

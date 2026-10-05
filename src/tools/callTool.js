@@ -63,6 +63,7 @@ async function callToolObserved(name, args = {}, context = {}) {
   let workspaceOverride = null;
   let handlerResultKnown = false;
   let handlerResult;
+  let operationTimeline;
   let compactResponse = false;
   try {
     if (!isToolCallable(name, config)) {
@@ -232,7 +233,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       executionOperationId: context?.fallbackOperationId,
       createTask: operationName === OP.WORK_BEGIN && !knownTask,
       trackTask: context?.trackTaskActivity !== false
-        && (operationName !== OP.WORK_STATUS || resumedStatusRead)
+        && (![OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY].includes(operationName) || resumedStatusRead)
         && !duplicateTerminalCancellation
         && (!terminalTaskReference || resumedStatusRead)
         && (operationName === OP.WORK_BEGIN || Boolean(requestedTaskId)),
@@ -258,6 +259,9 @@ async function callToolObserved(name, args = {}, context = {}) {
       config, name, executionName: operationName, effectiveArgs, context, requestTaskContext, finishActivity, definition, started, workspaceOverride
     });
     const value = execution.value;
+    operationTimeline = execution.timeline;
+    operationTimeline?.transition('persisting');
+    if (value && typeof value === 'object') value.timeline = operationTimeline?.snapshot();
     handlerResult = value;
     handlerResultKnown = true;
     sessionStart = execution.sessionStart;
@@ -333,6 +337,9 @@ async function callToolObserved(name, args = {}, context = {}) {
         taskIntent: knownTask?.intent || requestTaskContext?.session?.intent || 'auto'
       };
     }
+    operationTimeline?.transition('result-ready');
+    if (value && typeof value === 'object') value.timeline = operationTimeline?.finish();
+    if (activityResult.activity && value?.timeline) activityResult.activity.metadata.timeline = value.timeline;
     const responseValue = connector && resolved.compact
       ? measurePerformancePhaseSync('serialization', () => serializeConnectorResult({
         publicName: name,
@@ -354,6 +361,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       effectivePrincipal,
       connector
     );
+    if (operationTimeline) enhanced.timeline = operationTimeline.finish({ errorCode: enhanced.code });
     const knownResult = handlerResultKnown ? handlerResult : error?.handlerResult;
     const postHandlerIntegrityFailure = enhanced.code === 'TASK_INTEGRITY_PERSISTENCE_FAILED' && (handlerResultKnown || error?.handlerResultKnown === true);
     if (postHandlerIntegrityFailure) enhanced.retryable = false;
@@ -364,7 +372,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       activity: buildToolActivityDetails(operationName, effectiveArgs || {}, postHandlerIntegrityFailure ? knownResult : null, enhanced, {
         operation: finishActivity?.operation,
         phase: 'complete',
-        metadata: { errorCode: enhanced.code, retryable: enhanced.retryable === true, publicTool: name }
+        metadata: { errorCode: enhanced.code, retryable: enhanced.retryable === true, publicTool: name, ...(enhanced.timeline ? { timeline: enhanced.timeline } : {}) }
       })
     };
     const failedWorkId = finishActivity?.taskId || requestedTaskId;
@@ -468,25 +476,25 @@ function assertTaskPlanReady({ taskId, knownTask, operationName }) {
 }
 
 const taskPlanGateExemptOperations = new Set([
-  OP.WORK_BEGIN, OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL,
+  OP.WORK_BEGIN, OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL,
   OP.PROCESS_READ, OP.PROCESS_LIST, OP.PROCESS_STOP
 ]);
 
 function taskOperationBindsProject(operationName) {
   return ![
-    OP.WORK_BEGIN, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+    OP.WORK_BEGIN, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
   ].includes(operationName);
 }
 
 function taskLifecycleCanRunWithoutIntegrity(operationName) {
   return [
-    OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+    OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
   ].includes(operationName);
 }
 
 function taskLifecycleIgnoresWorkspaceArgument(operationName) {
   return [
-    OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+    OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
   ].includes(operationName);
 }
 

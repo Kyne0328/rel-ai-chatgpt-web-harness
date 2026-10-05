@@ -417,22 +417,23 @@ try {
   const stopListening = onToolActivity(event => callEvents.push(event));
 
   await callTool('relai_work', { action: 'status' }, { publicHttpOnly: true });
-  assert.deepEqual(callEvents.slice(0, 2).map(event => [event.phase, event.tool, event.activeConnectorCalls]), [
+  assert.deepEqual(callEvents.filter(event => event.phase !== 'progress').map(event => [event.phase, event.tool, event.activeConnectorCalls]), [
     ['started', 'relai_work', 1],
     ['finished', 'relai_work', 0]
   ]);
-  assert.equal(callEvents[0].taskId, '');
-  assert.equal(callEvents[1].taskId, '');
+  assert.ok(callEvents.every(event => event.taskId === ''), 'status timeline updates must remain taskless');
+  assert.ok(callEvents.filter(event => event.phase === 'progress').every(event => event.activeConnectorCalls === 1), 'progress cannot finish the connector call early');
+  assert.ok(callEvents.some(event => event.phase === 'progress' && event.activityEvent?.metadata?.timeline), 'phase diagnostics must reach the Activity event');
   assert.equal(getToolActivity().activeTaskCount, 0, 'taskless status calls must not create logical sessions');
 
   callEvents.length = 0;
   await callTool('relai_work', { action: 'status' }, { publicHttpOnly: false });
-  assert.deepEqual(callEvents.map(event => [event.phase, event.tool, event.activeConnectorCalls]), [
+  assert.deepEqual(callEvents.filter(event => event.phase !== 'progress').map(event => [event.phase, event.tool, event.activeConnectorCalls]), [
     ['started', 'relai_work', 0],
     ['finished', 'relai_work', 0]
   ], 'stdio/local calls must be grouped without activating the connector sleep blocker');
-  assert.equal(callEvents[0].taskId, '');
-  assert.equal(callEvents[1].taskId, '');
+  assert.ok(callEvents.every(event => event.taskId === ''), 'local status timeline updates must remain taskless');
+  assert.ok(callEvents.every(event => event.activeConnectorCalls === 0), 'local phase updates cannot activate the connector sleep blocker');
   assert.equal(getToolActivity().activeTaskCount, 0, 'local status calls must remain activity-only');
 
   callEvents.length = 0;

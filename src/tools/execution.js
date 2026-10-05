@@ -1,4 +1,7 @@
 import * as path from 'node:path';
+import { createOperationTimeline } from '../operationTimeline.js';
+import { principalFingerprint, principalForContext, principalKind } from '../mcp/principal.ts';
+import { PRINCIPAL_KIND } from '../mcp/contracts.ts';
 
 import { combineAbortSignals } from '../abortSignals.ts';
 import { hasAgentCancellationHandle, isClearlyWorkspaceReadOnlyAdb } from '../executionControl.js';
@@ -33,8 +36,12 @@ const WORK_FINISH_QUEUE_TIMEOUT_MS = 2_000;
 const DEFAULT_MUTATION_WATCHDOG_MS = 5 * 60_000;
 const MUTATION_WATCHDOG_TERMINATION_GRACE_MS = 15_000;
 
-async function executeToolCall({ config, name, executionName = name, effectiveArgs, context, requestTaskContext = null, finishActivity, definition, workspaceOverride = null }) {
+async function executeToolCall({ config, name, executionName = name, effectiveArgs, context, requestTaskContext = null, finishActivity, definition, started, workspaceOverride = null }) {
   let sessionStart = { started: false, alias: '' };
+  let timeline;
+  const queuePrincipal = principalForContext(context, context?.publicHttpOnly === true);
+  const queuePrincipalFingerprint = principalKind(queuePrincipal) === PRINCIPAL_KIND.CONNECTOR_ANONYMOUS
+    ? '' : principalFingerprint(queuePrincipal);
   const spanTaskId = String(finishActivity?.taskId || requestTaskContext?.taskId || effectiveArgs?.work_id || '').trim();
   const value = await runWithToolActivity(finishActivity, () => runSpan(config,
     executionName === OP.WORK_BEGIN ? 'relai.logical_task.start' : 'relai.tool.call',
@@ -44,9 +51,9 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       const backgroundReference = String(effectiveArgs?.operationId || taskId || '').trim();
       // Compact connector status is control-plane work even when the requested
       // operation is completed, unknown, or not represented by a fallback record.
-      const compactStatusMode = executionName === OP.WORK_STATUS
+      const compactStatusMode = [OP.WORK_RESULT, OP.WORK_HISTORY].includes(executionName) || (executionName === OP.WORK_STATUS
         && context?.publicHttpOnly === true
-        && effectiveArgs?.detail !== 'full';
+        && effectiveArgs?.detail !== 'full');
       const backgroundStatusMode = compactStatusMode || (executionName === OP.WORK_STATUS
         && Boolean(backgroundReference)
         && fallbackExecutionsStatus(backgroundReference, { config, workId: taskId }).some(record => record.status === 'running'));
@@ -73,10 +80,19 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       // Already-requested cancellation is the first cause even when a deadline
       // expired while synchronous preparation prevented timer delivery.
       const requestSignal = combineAbortSignals(context?.signal, finishActivity?.signal, deadlineSignal);
+      timeline = createOperationTimeline({
+        acceptedAtMs: started,
+        deadlineKind: deadlineAtMs > 0 ? 'operation' : 'admission',
+        onUpdate: snapshot => {
+          updateCurrentToolActivity({ metadata: { timeline: snapshot } });
+          updateFallbackExecutionPhase(context?.fallbackOperationId, snapshot.phase, config, snapshot);
+        }
+      });
       let taskBaselineStatusOutput;
 
       const invokeHandler = async (args, signal = requestSignal) => {
         if (typeof definition?.handler !== 'function') throw new Error(`Tool '${name}' has no executable handler.`);
+        if (executionName !== OP.EXEC) timeline.transition('running', { executed: true });
         const handled = await measurePerformancePhase('tool.execution', () => definition.handler(config, args || {}, {
           connector: Boolean(context?.publicHttpOnly),
           taskId,
@@ -85,6 +101,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           conversationId: context?.conversationId,
           transportSessionId: context?.transportSessionId,
           signal,
+          onOperationPhase: event => timeline.transition(event.phase, event),
           ...(deadlineAtMs > 0 ? { deadlineAtMs } : {}),
           principal: context?.principal,
 
@@ -106,6 +123,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           && Array.isArray(handled?.changedFiles)
           && handled.changedFiles.length) {
           try {
+            timeline.transition('persisting');
             claimTaskChangedFiles(config, taskId, workspace.alias, handled.changedFiles);
           } catch (error) {
             const code = String(error?.code || '');
@@ -127,13 +145,14 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
 
       if (executionName === OP.WORK_FINISH) finishActivity?.assertCompletionAvailable?.();
       const operationSignal = combineAbortSignals(requestSignal, finishActivity?.signal);
-      updateFallbackExecutionPhase(context?.fallbackOperationId, 'queued', config);
+      timeline.transition('queued');
       const result = await runWorkspaceOperation(
         executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || backgroundStatusMode
           ? ''
           : workspaceOverride?.alias || effectiveArgs?.workspace,
         async () => {
-          updateFallbackExecutionPhase(context?.fallbackOperationId, 'preparing', config);
+          timeline.transition('admitted');
+          timeline.transition('preparing');
           const watchdog = createMutationWatchdog(
             queueScope,
             executionName,
@@ -167,7 +186,6 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
               'tool.session',
               () => maybeStartSession(config, executionName, effectiveArgs || {}, { taskId })
             );
-            if (executionName !== OP.EXEC) updateFallbackExecutionPhase(context?.fallbackOperationId, 'running', config);
             const handled = await (workspace && !directFilesystem && isMutationScope(queueScope)
               ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal))
               : invokeHandler(effectiveArgs, watchdog.signal));
@@ -201,16 +219,26 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           {
             taskId,
             operationId: String(finishActivity?.operationId || ''),
+            principalFingerprint: queuePrincipalFingerprint,
             operation: String(finishActivity?.operation || executionName),
             startedAt: new Date().toISOString()
-          }
+          },
+          timeline
         )
       );
 
       return result;
     }, { carrier: context?.requestHeaders || {} }
-  ));
-  return { value, sessionStart };
+  )).catch(error => {
+    if (timeline && error && typeof error === 'object') {
+      error.timeline = timeline.finish({ errorCode: error.code });
+      error.executed = error.timeline.executed;
+      error.deadlineKind = error.timeline.deadlineKind;
+      error.terminationCertainty = error.terminationCertainty || error.timeline.terminationCertainty;
+    }
+    throw error;
+  });
+  return { value: value && typeof value === 'object' && !Array.isArray(value) ? { ...value, timeline: timeline?.snapshot() } : value, sessionStart, timeline };
 }
 
 function isMutationScope(scope) {
@@ -223,6 +251,15 @@ function assertNoRecoveredMutationProcess(config, workspace) {
       const error = new Error(`Workspace '${workspace}' has invalid recovered mutation ownership state. Remove the invalid state only after confirming no stale mutating process is running.`);
       error.code = 'WORKSPACE_MUTATION_RECOVERY_STATE_INVALID';
       error.retryable = false;
+      throw error;
+    }
+    if (record.terminationUncertain === true) {
+      const error = new Error(`Workspace '${workspace}' retains unconfirmed process-tree termination for PID ${record.pid}. Restart or root-PID disappearance cannot clear this uncertainty. An operator must verify that relevant descendants have stopped before using the existing recovery-record cleanup procedure.`);
+      error.code = 'WORKSPACE_MUTATION_TERMINATION_UNCERTAIN';
+      error.retryable = false;
+      error.pid = record.pid;
+      error.executed = false;
+      error.terminationCertainty = 'unconfirmed';
       throw error;
     }
     if (isProcessTreeAlive(record.pid)) {
@@ -435,7 +472,7 @@ function detachedQueueTaskId(context = {}, queueScope = '') {
   return String(context?.requestId || '').trim();
 }
 
-function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = null) {
+function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = null, timeline = null) {
   return {
     mode,
     scope,
@@ -443,7 +480,12 @@ function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = n
     ...(owner ? { owner } : {}),
     ...(signal ? { signal } : {}),
     ...(queueTimeoutMs > 0 ? { queueTimeoutMs } : {}),
+    onQueueState: details => timeline?.transition('queued', {
+      queuePosition: details.queuePosition,
+      blocking: details.blocking
+    }),
     onWait: (waitMs, details) => {
+      timeline?.transition('admitted', { queueWaitMs: waitMs });
       addSpanEvent('workspace.queue.admitted', {
         'relai.workspace': details.workspace,
         'relai.queue.mode': details.mode,

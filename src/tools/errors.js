@@ -54,15 +54,30 @@ function operationForTool(toolName) {
 
 function serializeToolError(toolName, error) {
   const message = error instanceof Error ? error.message : String(error);
-  const payload = { ok: false, error: message };
+  const payload = { ok: false, error: message,
+    ...(error?.timeline ? { timeline: error.timeline } : {}),
+    ...(typeof error?.executed === 'boolean' ? { executed: error.executed } : {}),
+    ...(error?.deadlineKind ? { deadlineKind: error.deadlineKind } : {}),
+    ...(error?.terminationCertainty ? { terminationCertainty: error.terminationCertainty } : {})
+  };
   if (!error || typeof error !== 'object' || !error.code) return payload;
   return {
     ...payload,
     errorCode: String(error.code),
+    ...(error.validation ? { validation: error.validation } : {}),
+    ...(error.timeline ? { timeline: error.timeline } : {}),
+    ...(typeof error.executed === 'boolean' ? { executed: error.executed } : {}),
+    ...(error.deadlineKind ? { deadlineKind: error.deadlineKind } : {}),
+    ...(error.terminationCertainty ? { terminationCertainty: error.terminationCertainty } : {}),
+    ...(['TASK_NOT_FOUND', 'TASK_ID_REQUIRED', 'INVALID_TASK_STATE', 'TASK_INTEGRITY_STATE_MISSING', 'TASK_SCOPE_CONFLICT', 'TASK_OWNERSHIP_MISMATCH'].includes(String(error.code)) ? { recovery: { action: 'inspect_history', nextAction: 'Use relai_work action history with the exact authorized workspace to inspect your own work. Retrieve a known operationId with action result. Verify the intended task before supplying work_id, or explicitly begin a new task; never adopt an unrelated task or resubmit a mutation merely to recover a result.' } } : {}),
     errorDetails: {
       code: String(error.code),
       source: String(error.source || 'rel-ai-mcp'),
       operation: String(error.operation || operationForTool(toolName)),
+      ...(error.timeline ? { timeline: error.timeline } : {}),
+      ...(typeof error.executed === 'boolean' ? { executed: error.executed } : {}),
+      ...(error.deadlineKind ? { deadlineKind: error.deadlineKind } : {}),
+      ...(error.terminationCertainty ? { terminationCertainty: error.terminationCertainty } : {}),
       ...(error.path ? { path: String(error.path) } : {}),
       ...(error.fileClass ? { fileClass: String(error.fileClass) } : {}),
       ...(error.taskId ? { taskId: String(error.taskId) } : {}),

@@ -6,7 +6,6 @@ import { runProcess } from '../process.js';
 
 import { getCurrentTaskAbortSignal } from '../toolActivity.js';
 import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
-import { updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { isPersistentAdbInvocation, resolveOneShotTimeoutMs } from '../executionControl.js';
 import { outputSpillOwner } from '../outputSpill.js';
 import { runSpan } from '../telemetry.js';
@@ -255,7 +254,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       };
     }
   }
-  updateFallbackExecutionPhase(context.fallbackOperationId, 'running', config);
+  context.onOperationPhase?.({ phase: 'running', executed: false });
   const result = await runSpan(config, 'relai.process.exec', {
     'relai.workspace': workspace.alias,
     'relai.process.command': displayCommand,
@@ -273,6 +272,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       maxOutputBytes,
       signal,
       resourceClass: 'heavy',
+      onPhase: event => context.onOperationPhase?.(event),
       resourceOwner: workspace.alias,
       outputSpillTaskId: outputSpillOwner({
         taskId: context.taskId || args.work_id,
@@ -287,6 +287,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     const host = command ? executionLabel : executable;
     throw processExecutionError('PROCESS_SPAWN_FAILED', `Could not start ${host}: ${result.error || 'unknown spawn error'}`);
   }
+  context.onOperationPhase?.({ phase: 'reconciling', executed: result.executed === true, terminationConfirmed: result.terminationConfirmed });
   let mutationTracking = 'unavailable';
   let mutationUnknown = false;
   let changed;
@@ -347,6 +348,10 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     ...(result.stderrSpillTruncated != null ? { stderrSpillTruncated: result.stderrSpillTruncated === true } : {}),
     timedOut,
     queueTimedOut: result.queueTimedOut === true,
+    ...(typeof result.rootExitConfirmed === 'boolean' ? { rootExitConfirmed: result.rootExitConfirmed } : {}),
+    ...(result.outputFinalizationTimedOut ? { outputFinalizationTimedOut: true } : {}),
+    ...(result.outputFinalizationError ? { outputFinalizationError: result.outputFinalizationError } : {}),
+    ...(result.mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError: result.mutationOwnershipPersistenceError } : {}),
     cancelled,
     ...(result.terminationConfirmed != null ? { terminationConfirmed: result.terminationConfirmed === true } : {}),
     ...(result.forcedTermination != null ? { forcedTermination: result.forcedTermination === true } : {}),

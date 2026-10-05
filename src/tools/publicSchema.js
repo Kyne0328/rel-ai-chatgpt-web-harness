@@ -130,6 +130,7 @@ function annotateActionGrammar(schema, catalogTool, name) {
         ...schema.properties.action,
         description: [
           actionGrammar,
+          name === 'relai_search' ? `text accepts pattern or queries (max ${actions.find(entry => entry.action === 'text')?.inputSchema?.properties?.queries?.maxItems || 'schema limit'}), glob, contextBefore/contextAfter; pathPrefix applies only to semantic. Omitted action infers text from pattern and semantic from query; queries alone requires action.` : '',
           formHints.length ? `Forms: ${formHints.join('; ')}.` : ''
         ].filter(Boolean).join(' ')
       }

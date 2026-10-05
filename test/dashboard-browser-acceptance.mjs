@@ -205,6 +205,23 @@ try {
   assert.equal(result.activityLiveStability.frozen, true, JSON.stringify(result.activityLiveStability));
   assert.equal(result.activityLiveStability.resumed, true, JSON.stringify(result.activityLiveStability));
   assert.ok(result.activityLiveStability.messageAfterResume.length > 0, JSON.stringify(result.activityLiveStability));
+  const operationDiagnostics = result.operationDiagnostics;
+  assert.deepEqual(operationDiagnostics.legacy, { unknownTiming: true, unknownTermination: true, liveClocks: 0 });
+  assert.equal(operationDiagnostics.keyboardExpanded, true, 'native timing disclosure must open from the keyboard');
+  assert.deepEqual(operationDiagnostics.repeated, {
+    samePanel: true, sameDisclosure: true, expanded: true, focusPreserved: true,
+    statusMutations: 0, measuredDuration: true, clockOutsideAnnouncement: true
+  }, 'repeated aggregate polls must preserve disclosure, focus, measured durations and quiet live status');
+  assert.deepEqual(operationDiagnostics.collecting, { samePanel: true, expanded: true, sameLiveRegion: true });
+  assert.deepEqual(operationDiagnostics.ready, {
+    samePanel: true, sameLiveRegion: true, noLiveClock: true, uncertaintyVisible: true, cachedBuild: true, parityUnknown: true
+  }, 'result readiness must preserve the live region, stop clocks, and retain uncertainty/build provenance');
+  assert.ok(operationDiagnostics.narrow.viewportWidth >= 300 && operationDiagnostics.narrow.viewportWidth <= 375);
+  assert.equal(operationDiagnostics.narrow.horizontalOverflow, false, 'expanded operation diagnostics must reflow on a narrow viewport');
+  assert.equal(operationDiagnostics.narrow.factsContained, true, 'long blocker identifiers must stay inside the inspector');
+  assert.equal(operationDiagnostics.narrow.summaryReachable, true);
+  assert.equal(operationDiagnostics.narrow.expanded, true);
+  assert.equal(fs.existsSync(operationDiagnostics.narrow.screenshot), true);
   assert.deepEqual(result.responsive.map(item => item.name), [
     'window-1024x768',
     'window-640x720',

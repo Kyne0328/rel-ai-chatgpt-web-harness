@@ -24,6 +24,15 @@ assert.match(workflow, /Do not invoke specialists ceremonially/i);
 assert.match(workflow, /references\/workflows\.md/);
 assert.match(workflow, /references\/safety\.md/);
 
+const recoveryGuidance = read('skills/rel-ai-workflow/references/workflows.md');
+for (const heading of ['Recover interrupted work without repeating side effects', 'Diagnose a waiting operation by its measured phase', 'Verify the deployed build before claiming a fix is live']) {
+  assert.ok(recoveryGuidance.includes('## ' + heading), 'workflow references must expose the bounded operating procedure: ' + heading);
+}
+assert.match(recoveryGuidance, /Never repeat an edit, command, publication, or other mutation just to obtain its old result/);
+assert.match(recoveryGuidance, /Resume only the next verified unfinished stage/);
+assert.match(recoveryGuidance, /Matching release metadata alone|matching release metadata do not prove source\/build parity/i);
+assert.match(recoveryGuidance, /preserve.*quarantine.*termination remains unconfirmed/i);
+
 const specialistContracts = {
   'rel-ai-planning': {
     use: /non-trivial repository features|refactors|migrations|multi-stage/i,

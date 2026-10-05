@@ -121,7 +121,7 @@ assert.match(reactMain, /registerReactSection\('tasks'/, 'Tasks must be register
 assert.match(sessionsReact, /data-sessions-react/, 'Tasks React route must own the rendered feature root');
 assert.match(activity, /export function createActivityRoute/, 'Activity must expose a React route factory');
 assert.doesNotMatch(activity, /dangerouslySetInnerHTML|pillHtml/, 'Activity React must render status pills as React elements instead of legacy HTML strings');
-assert.match(activity, /ACTIVITY_STORE_KEYS = Object\.freeze\(\['auditTail', 'tasks'\]\)/, 'Activity must subscribe only to the store slices it renders');
+assert.match(activity, /ACTIVITY_STORE_KEYS = Object\.freeze\(\['auditTail', 'tasks', 'runtime', 'runtimeCompatibility'\]\)/, 'Activity must subscribe only to the store slices it renders');
 assert.match(reactMain, /registerReactSection\('activity'/, 'Activity must be registered as a canonical React route');
 assert.match(activity, /h\('th', \{ scope: 'col', className: 'activity-message-column' \}, 'Activity'\)/, 'Activity must use one consolidated primary activity column');
 assert.doesNotMatch(activity, /activity-tool-column|activity-task-column|activity-status-column|activity-action-column/, 'Activity must not split scan context across redundant desktop columns');

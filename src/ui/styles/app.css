@@ -1,6 +1,7 @@
 @import "tailwindcss" source(none);
 @import "./color-tokens.css";
 @import "../components/filter-controls.css";
+@import "../components/operation-diagnostics.css";
 @import "../features/home/styles.css";
 @import "../features/onboarding/styles.css";
 @import "../features/settings/styles.css";

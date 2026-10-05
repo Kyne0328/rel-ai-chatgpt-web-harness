@@ -1358,7 +1358,9 @@ async function case_tool_action_catalog_parity_unit() {
     const args = entry.action === 'default' ? {} : { action: entry.action };
     if (entry.behavior.taskScope === 'required') args.work_id = 'work_catalog';
     switch (key) {
-      case 'relai_work:begin': args.workspace = 'repo'; break;
+      case 'relai_work:begin':
+      case 'relai_work:history': args.workspace = 'repo'; break;
+      case 'relai_work:result': args.operationId = 'fallback_abcdefghijklmnopqrstuvwx'; break;
       case 'relai_work:plan': args.steps = [{ title: 'Catalog plan step', status: 'pending' }]; break;
       case 'relai_work:finish': args.summary = 'Completed.'; break;
       case 'relai_search:text': args.pattern = 'needle'; break;
@@ -1665,7 +1667,9 @@ async function case_tool_action_contract_unit() {
     const args = entry.action === 'default' ? {} : { action: entry.action };
     if (entry.behavior?.taskScope === 'required') args.work_id = 'work_contract';
     switch (key) {
-      case 'relai_work:begin': args.workspace = 'repo'; break;
+      case 'relai_work:begin':
+      case 'relai_work:history': args.workspace = 'repo'; break;
+      case 'relai_work:result': args.operationId = 'fallback_abcdefghijklmnopqrstuvwx'; break;
       case 'relai_work:plan': args.steps = [{ title: 'Contract plan step', status: 'pending' }]; break;
       case 'relai_work:finish': args.summary = 'Completed.'; break;
       case 'relai_search:text': args.pattern = 'needle'; break;
@@ -2064,7 +2068,9 @@ async function case_tool_output_validation_unit() {
   function requiredArgs(entry) {
     const key = `${entry.publicTool}:${entry.action}`;
     switch (key) {
-      case 'relai_work:begin': return { workspace: 'repo' };
+      case 'relai_work:begin':
+      case 'relai_work:history': return { workspace: 'repo' };
+      case 'relai_work:result': return { operationId: 'fallback_abcdefghijklmnopqrstuvwx' };
       case 'relai_work:plan': return { steps: [{ title: 'Output validation plan step', status: 'pending' }] };
       case 'relai_work:finish': return { summary: 'Done.' };
       case 'relai_search:text': return { pattern: 'needle' };
@@ -2310,13 +2316,20 @@ async function case_tool_surface_discovery_unit() {
       const malformed = await client.waitFor(6);
       assert.equal(malformed.result?.isError, true, 'runtime validation must surface malformed cross-action input as a tool error');
       assert.equal(malformed.result?.structuredContent?.ok, false);
-      assert.match(malformed.result?.structuredContent?.error || '', /Invalid arguments for tool relai_search/);
-      assert.match(malformed.result?.structuredContent?.error || '', /additional properties|oneOf/i);
+      assert.equal(malformed.result?.structuredContent?.errorCode, 'INVALID_TOOL_ARGUMENTS');
+      assert.match(malformed.result?.structuredContent?.error || '', /Unsupported field 'query'.*relai_search action text/);
+      assert.equal(malformed.result?.structuredContent?.validation?.action, 'text');
+      assert.ok(malformed.result?.structuredContent?.validation?.issues.some(issue => issue.field === 'query'));
+      assert.ok(malformed.result?.structuredContent?.validation?.allowedFields.includes('pattern'));
+      assert.equal(malformed.result?.structuredContent?.validation?.allowedFields.includes('query'), false);
   
       client.call(7, 'relai_search', { action: 'text', work_id: work.work_id, pattern: 'surface', maxFiles: 201 });
       const boundedFailure = await client.waitFor(7);
       assert.equal(boundedFailure.result?.isError, true, 'action-specific canonical validation must surface as a tool error');
-      assert.match(boundedFailure.result?.structuredContent?.error || '', /relai_search action 'text'/, 'public errors must identify the callable public tool/action');
+      assert.equal(boundedFailure.result?.structuredContent?.errorCode, 'INVALID_TOOL_ARGUMENTS');
+      assert.equal(boundedFailure.result?.structuredContent?.validation?.action, 'text');
+      assert.ok(boundedFailure.result?.structuredContent?.validation?.issues.some(issue => issue.field === 'maxFiles'));
+      assert.match(boundedFailure.result?.structuredContent?.error || '', /relai_search.*text/, 'public errors must identify the callable public tool/action');
       assert.doesNotMatch(boundedFailure.result?.structuredContent?.error || '', /search\.text/, 'public errors must not leak internal operation IDs');
     } finally {
       await client.close();

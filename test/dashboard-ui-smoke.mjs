@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { OperationDiagnostics, RuntimeBuildIdentity } from '../src/ui/components/operation-diagnostics.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -189,3 +192,33 @@ assert.equal(typeof activityFilterTransition, 'function');
 
 console.log('Dashboard UI ownership contracts passed.');
 
+
+// Render the actual shared inspector component, including older uninstrumented events.
+const renderDiagnostics = props => renderToStaticMarkup(React.createElement(OperationDiagnostics, props));
+const legacyDiagnostics = renderDiagnostics({ operation: { status: 'completed' } });
+assert.match(legacyDiagnostics, /Operation ended/);
+assert.match(legacyDiagnostics, /Unknown/);
+assert.doesNotMatch(legacyDiagnostics, /role="status"|data-clock-elapsed-start/, 'historical/unknown records must not announce or run a live clock');
+const liveDiagnostics = renderDiagnostics({ live: true, operation: { id: 'operation-wait', metadata: { timeline: {
+  phase: 'queued', phaseStartedAt: '2026-10-05T01:00:00Z', executed: false,
+  blocking: { owner: '<script>untrusted owner</script>', operationId: 'owner-op' },
+  phases: [{ phase: 'accepted', durationMs: 123, endedAt: '2026-10-05T01:00:00Z' }]
+} } } });
+assert.match(liveDiagnostics, /Waiting for this owner/);
+assert.match(liveDiagnostics, /<details><summary>Timing and ownership<\/summary>/, 'timing disclosure must use native keyboard-operable semantics');
+assert.match(liveDiagnostics, /role="status" aria-atomic="true"/);
+assert.doesNotMatch(liveDiagnostics.match(/role="status"[\s\S]*?<\/div>/)?.[0] || '', /data-clock-elapsed-start/, 'elapsed clocks must not create second-by-second live announcements');
+assert.match(liveDiagnostics, /data-clock-elapsed-start/);
+assert.match(liveDiagnostics, /123 ms/);
+assert.match(liveDiagnostics, /&lt;script&gt;untrusted owner&lt;\/script&gt;/);
+assert.doesNotMatch(liveDiagnostics, /<script>/, 'backend diagnostic labels must render as escaped text');
+const readyDiagnostics = renderDiagnostics({ live: true, operation: { timeline: { phase: 'result-ready', terminationCertainty: 'unconfirmed' } } });
+assert.match(readyDiagnostics, /Result ready/);
+assert.match(readyDiagnostics, /termination is unconfirmed/);
+assert.doesNotMatch(readyDiagnostics, /data-clock-elapsed-start/);
+const buildDiagnostics = renderToStaticMarkup(React.createElement(RuntimeBuildIdentity, {
+  runtime: { buildIdentity: { buildId: 'runtime-a' } }, compatibility: { metadataMatches: true }
+}));
+assert.match(buildDiagnostics, /Connected runtime \(cached\): runtime-a/);
+assert.match(buildDiagnostics, /Source\/build parity<\/dt><dd>Unknown/);
+assert.match(buildDiagnostics, /Historical operations may have run on a different build/);

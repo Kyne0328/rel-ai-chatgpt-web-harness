@@ -24,6 +24,40 @@ When the user asks to continue a specific `work_id`, retrieve its status before 
 
 `relai_validate` records evidence and leaves durable work open by default. Use `complete:true` only for the final successful validation when closure should be atomic. Failed, cancelled, or stale validation never closes the goal; continue and revalidate, or explicitly finish with truthful residual risk when the objective is complete despite that evidence.
 
+## Recover interrupted work without repeating side effects
+
+Use this procedure after a lost response, interrupted assistant turn, expired result, or stale work identifier:
+
+1. Retain the original workspace, `work_id`, `operationId`, and any `outputRef`. Read `relai_work` action `status` for that existing work. Use compact status first; page with the returned operation cursor instead of widening every poll.
+2. Retrieve the existing operation with `relai_work` action `result` and its `operationId`, or use action `status` with that `operationId`. These are read-only retrievals. An accepted receipt is not completion, and a ready result is not proof that the caller acknowledged it.
+3. Follow returned output references and byte offsets when output is truncated. Use the current tool-surface contract for stream retrieval. `maxResponseBytes` bounds the response envelope; it is separate from repository/log budgets. Never repeat an edit, command, publication, or other mutation just to obtain its old result.
+4. Reconcile recorded completion against the actual artifacts and task-owned diff. Check only the affected files, hashes, output paths, or published revision needed to establish the next step. Mark each stage verified, incomplete, or uncertain; do not infer success from an inactive task or missing receipt.
+5. Resume only the next verified unfinished stage on the same work session. A stale or missing work ID is a scope/recovery question, not permission to adopt a different task. If necessary, use read-only `relai_work` action `history` for the exact workspace and current principal, continuing its opaque cursor; match the requested goal before choosing a work ID.
+6. If a result has expired or evidence conflicts, report exactly what is known and what remains uncertain. Do not resubmit an uncertain mutation. Obtain fresh authority for any materially changed action, and preserve ownership/quarantine while termination remains unconfirmed.
+
+Keep a compact handoff: workspace/work ID, outstanding operation IDs, verified artifact/check receipts, next unfinished stage, and the specific uncertainty. Do not carry full historical result bodies into each status poll.
+
+## Diagnose a waiting operation by its measured phase
+
+Retrieve the existing operation first. Read its timeline, phase start, last-progress time, measured durations, deadline kind, blocking owner/operation/task, execution flag, and termination certainty. Missing fields mean unknown, including on older runtimes. Elapsed time alone does not establish a hang.
+
+- `accepted`, `queued`, or `host-queued`: admission or host capacity may still be pending. Identify the recorded blocker. `executed:false`, `WORKSPACE_OPERATION_QUEUE_TIMEOUT`, and queue-admission `WORKSPACE_OPERATION_ABORTED` are not evidence that a child process spawned. An operation deadline may include queue time; an admission cap is a different budget.
+- `admitted` or `preparing`: the resource was admitted, but process start may still be pending. Inspect the next recorded progress point; do not reset the queue to force execution.
+- `running` or `spawned`: the handler or command has started. Use that operation's retained output and existing process evidence. A handler can execute without spawning a child.
+- `exited`, `draining-output`, or `drained`: the root command has exited or output collection is underway. This is not the same as confirmed process-tree termination. Check output-finalization warnings and retained partial output.
+- `reconciling` or `persisting`: changes or the result are being recorded. Inspect existing artifact evidence and last progress; do not run the original mutation as a diagnostic.
+- `result-ready` or `delivered`: retrieve the existing result. Only an explicit receipt acknowledgement establishes delivery; a protocol completion/cancellation label does not establish process-tree termination.
+
+If stopping is authorized, target the exact finite operation ID. A stop request is not a verified stop. Recheck termination certainty and preserve lane ownership or quarantine until the runtime confirms safety. Do not bypass mutation guards, cancel another task, restart an active service, or increase all timeouts merely to make a wait disappear.
+
+## Verify the deployed build before claiming a fix is live
+
+1. Record the expected build ID, source revision, dirty state, source fingerprint, schema digest, and the checks run against those bytes when producing the package.
+2. Request current full runtime status once when needed. Compare its cached `runtime.buildIdentity` against the expected artifact. Release version, tool-surface/schema compatibility, and matching release metadata do not prove source/build parity.
+3. Treat absent build provenance, an unknown parity result, or unmatched fingerprints as unverified deployment. Do not relabel protocol compatibility as deployed-code equality, and do not hash the whole repository on every status poll.
+4. After an authorized install/restart, reconnect and read the new runtime identity and start time. An earlier task narrative or the package filename is not evidence of which runtime is now serving calls. Respect active work and shutdown protections; deployment authority does not imply permission to terminate unrelated work.
+5. Exercise the changed tool route with a bounded safe acceptance check against the connected runtime. Record the actual runtime fingerprint with that result. Report implementation, source-test evidence, installed artifact identity, and live route verification as separate claims when only some are established.
+
 ## Managed processes
 
 Use `relai_process` action `start` only for a program that must persist or accept later input. Supply:

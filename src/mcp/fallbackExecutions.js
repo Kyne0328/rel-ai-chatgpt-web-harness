@@ -59,7 +59,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
     noticeEnabled: false,
     signature,
     status: FALLBACK_EXECUTION_STATUS.RUNNING,
-    phase: 'starting',
+    phase: 'accepted',
+    timeline: { phase: 'accepted', phaseStartedAt: startedAt, lastProgressAt: startedAt, executed: false, phases: [{ phase: 'accepted', startedAt }] },
     deadlineAtMs: Number.isFinite(Number(deadlineAtMs)) && Number(deadlineAtMs) > 0 ? Math.floor(Number(deadlineAtMs)) : 0,
     startedAt,
     startedAtMs,
@@ -82,6 +83,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
   record.promise = Promise.resolve()
     .then(() => run(controller.signal, record.operationId))
     .then(async result => {
+      const resultTimeline = result?.structuredContent?.timeline || { ...record.timeline, executed: result?.structuredContent?.executed };
+      updateFallbackExecutionPhase(record.operationId, 'persisting', config, resultTimeline);
       await retainFallbackOutput(config, record, result);
       if (controller.signal.aborted) {
         // Cancellation stays terminal, but the handler may hold the only evidence
@@ -118,6 +121,7 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
       deliverFallbackCompletion(config, record);
       return { ok: true, result };
     }, error => {
+      record.timeline = error?.timeline || { ...record.timeline, executed: error?.executed };
       if (controller.signal.aborted) {
         settleCancelledRecord(record, now, controller.signal.reason || error);
         persistFallbackRecord(config, record);
@@ -210,6 +214,8 @@ function acknowledgeFallbackDelivery(config, reference) {
   // the eventual result. Keep the replay identity until a terminal result arrives.
   if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) return true;
   record.deliveryAcknowledged = true;
+  record.phase = 'delivered';
+  record.timeline = fallbackTimelinePhase(record.timeline, 'delivered', Date.now());
   persistFallbackRecord(config, record);
   return true;
 }
@@ -228,7 +234,8 @@ function recoverExecutionRecords(reference, options = {}) {
   for (const record of persisted) {
     if (!record?.operationId) continue;
     if (executionsByOperationId.has(record.operationId)) continue;
-    if (options.noticeScope && record.noticeScope && record.noticeScope !== options.noticeScope) continue;
+    if (options.noticeScope && record.noticeScope !== options.noticeScope) continue;
+    if (options.workspace && record.workspace !== options.workspace) continue;
     if (options.workId && record.workId !== options.workId) continue;
     const recovered = recoverPersistedFallback(options.config, record.operationId, options.now || Date.now, record);
     if (recovered) executionsByOperationId.set(recovered.operationId, hydratePersistedRecord(recovered));
@@ -242,14 +249,51 @@ function fallbackExecutionsStatus(reference, options = {}) {
   pruneFallbackExecutions(now);
   recoverExecutionRecords(id, options);
   return recordsForReference(id)
-    .filter(record => !options.noticeScope || !record.noticeScope || record.noticeScope === options.noticeScope)
+    .filter(record => !options.noticeScope || record.noticeScope === options.noticeScope)
+    .filter(record => !options.workspace || record.workspace === options.workspace)
     .filter(record => !options.workId || record.workId === options.workId)
     .map(record => publicFallbackRecord(record, now));
 }
 
-function updateFallbackExecutionPhase(operationId, phase, config) {
+
+// Deliberately omit retained results from list/status receipts. Detailed retrieval
+// remains a read of the exact same durable operation, never execution.
+function fallbackOperationReceipt(operation) {
+  if (!operation) return null;
+  const { result, ...receipt } = operation;
+  const fields = ['ok', 'executed', 'commandSucceeded', 'exitCode', 'errorCode', 'validationStatus',
+    'timedOut', 'cancelled', 'rootExitConfirmed', 'terminationConfirmed', 'mutationUnknown', 'cleanupPending', 'outputFinalizationTimedOut', 'outputFinalizationError', 'mutationOwnershipPersistenceError',
+    'stdoutOutputRef', 'stderrOutputRef', 'stdoutBytes', 'stderrBytes', 'stdoutTruncated',
+    'stderrTruncated', 'stdoutSpillTruncated', 'stderrSpillTruncated'];
+  return { ...receipt, resultAvailable: result != null || operation.resultAvailable === true,
+    ...(result ? { resultSummary: Object.fromEntries(fields.filter(key => result[key] !== undefined).map(key => [key, result[key]])),
+      resultTruncated: operation.resultTruncated === true || result.truncated === true || result.resultDetailsCompacted === true } : {}) };
+}
+function fallbackOperationCursor(operation) {
+  return Buffer.from(JSON.stringify([operation.startedAt, operation.operationId])).toString('base64url');
+}
+function fallbackExecutionsPage(reference, options = {}) {
+  let cursor = null;
+  if (options.cursor) {
+    try { cursor = JSON.parse(Buffer.from(String(options.cursor), 'base64url').toString('utf8')); } catch {}
+    if (!Array.isArray(cursor) || cursor.length !== 2 || !cursor.every(value => typeof value === 'string')) {
+      const error = new Error('Invalid operationCursor. Start a new status page without a cursor.');
+      error.code = 'INVALID_OPERATION_CURSOR'; throw error;
+    }
+  }
+  const records = fallbackExecutionsStatus(reference, options)
+    .sort((a, b) => b.startedAt.localeCompare(a.startedAt) || a.operationId.localeCompare(b.operationId))
+    .filter(record => !cursor || record.startedAt < cursor[0] || (record.startedAt === cursor[0] && record.operationId > cursor[1]));
+  const limit = Math.min(50, Math.max(1, Math.floor(Number(options.limit) || 10)));
+  const operations = records.slice(0, limit).map(record => ({ ...fallbackOperationReceipt(record), cursor: fallbackOperationCursor(record) }));
+  return { operations, cursor: operations.at(-1)?.cursor || null, hasMore: records.length > operations.length };
+}
+
+function updateFallbackExecutionPhase(operationId, phase, config, timeline = null) {
   const record = executionsByOperationId.get(String(operationId || ''));
-  if (!record || record.status !== FALLBACK_EXECUTION_STATUS.RUNNING || record.phase === phase) return;
+  if (!record || record.status !== FALLBACK_EXECUTION_STATUS.RUNNING || (record.phase === phase && !timeline)) return;
+  if (timeline && typeof timeline === 'object') record.timeline = timeline;
+  record.timeline = fallbackTimelinePhase(record.timeline, phase, Date.now());
   record.phase = phase;
   record.updatedAt = new Date().toISOString();
   record.revision += 1;
@@ -287,10 +331,15 @@ function publicFallbackRecord(record, now = Date.now) {
     workspace: record.workspace,
     status: record.status,
     ...(record.phase ? { phase: record.phase } : {}),
+    ...(record.timeline ? { timeline: record.timeline } : {}),
+    ...(record.resultRetention ? { resultRetention: record.resultRetention } : {}),
+    ...(record.persistedResultCompacted ? { persistedResultCompacted: true } : {}),
     startedAt: record.startedAt,
     updatedAt: record.updatedAt || record.startedAt,
     revision: Math.max(1, Number(record.revision || 1)),
     elapsedMs: Math.max(0, elapsedEndMs - startedAtMs),
+    ...(structured ? { resultSource: record.result ? 'live' : 'retained' } : {}),
+    ...(record.persistedResultCompacted && !record.result ? { resultTruncated: true, nextAction: 'Only a compacted retained result remains. Read available output references or inspect artifacts read-only. A larger response budget cannot restore omitted data; do not rerun the mutation.' } : {}),
     ...(deadlineAtMs > 0 ? {
       deadlineAt: new Date(deadlineAtMs).toISOString(),
       remainingMs: Math.max(0, deadlineAtMs - currentMs)
@@ -591,6 +640,7 @@ function hydratePersistedRecord(record) {
     signature: String(record.signature || ''),
     status: String(record.status || ''),
     phase: String(record.phase || ''),
+    timeline: record.timeline || null,
     deadlineAtMs: Number(record.deadlineAtMs || 0),
     startedAt: String(record.startedAt || ''),
     startedAtMs: Date.parse(record.startedAt) || 0,
@@ -599,6 +649,8 @@ function hydratePersistedRecord(record) {
     completedAtMs: Date.parse(record.completedAt) || 0,
     revision: Math.max(1, Number(record.revision || 1)),
     result: null,
+    persistedResultCompacted: record.persistedResultCompacted === true,
+    resultRetention: record.resultRetention || null,
     persistedResult: record.result && typeof record.result === 'object' ? record.result : null,
     isError: record.isError === true,
     error: String(record.error || ''),
@@ -622,6 +674,9 @@ function persistentFallbackRecord(record) {
     signature: record.signature,
     status: record.status,
     ...(record.phase ? { phase: record.phase } : {}),
+    ...(record.timeline ? { timeline: record.timeline } : {}),
+    ...(record.resultRetention ? { resultRetention: record.resultRetention } : {}),
+    ...(record.persistedResultCompacted ? { persistedResultCompacted: true } : {}),
     ...(Number(record.deadlineAtMs) > 0 ? { deadlineAtMs: Math.floor(Number(record.deadlineAtMs)) } : {}),
     startedAt: record.startedAt,
     updatedAt: record.updatedAt || record.startedAt,
@@ -658,7 +713,11 @@ function readPersistedFallback(config, reference, workId = '') {
 
 function persistFallbackRecord(config, record) {
   if (!config || !record || record.persist === false) return;
-  persistFallbackSnapshot(config, persistentFallbackRecord(record));
+  const persisted = persistFallbackSnapshot(config, persistentFallbackRecord(record));
+  if (persisted) {
+    record.persistedResultCompacted = persisted.persistedResultCompacted === true;
+    record.resultRetention = persisted.resultRetention || null;
+  }
 }
 
 async function retainFallbackOutput(config, record, result) {
@@ -670,6 +729,14 @@ async function retainFallbackOutput(config, record, result) {
 
 function persistFallbackSnapshot(config, record) {
   try {
+    const projected = sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
+    const originalResult = JSON.stringify(record.result);
+    const retainedResult = JSON.stringify(projected.result);
+    if (originalResult !== retainedResult) {
+      projected.persistedResultCompacted = true;
+      projected.resultRetention = { complete: false, compacted: true, originalBytes: Buffer.byteLength(originalResult || '', 'utf8'), retainedBytes: Buffer.byteLength(retainedResult || '', 'utf8'), reason: 'Durable history retains a sanitized bounded projection. Omitted fields cannot be restored by increasing the response budget.' };
+    }
+    record = projected;
     if (record.workId) {
       recordTaskBackgroundOperation(config, record.workId, record);
       // Work-bound records also need direct operationId lookup after restart.
@@ -679,10 +746,11 @@ function persistFallbackSnapshot(config, record) {
     // Task history is authoritative for work-bound operations; the file is an
     // operationId lookup index, not a second copy of the execution state.
     const sanitized = record.workId ? { operationId: record.operationId, workId: record.workId }
-      : sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
+      : record;
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     writeJsonAtomic(file, sanitized, { mode: 0o600 });
     scheduleTasklessFallbackPrune(config);
+    return record;
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback operation persistence:', error);
   }
@@ -738,10 +806,24 @@ async function pruneTasklessFallbackFiles(root) {
   }
 }
 
+function fallbackTimelinePhase(timeline, phase, atMs) {
+  const at = new Date(atMs).toISOString();
+  if (timeline?.phase === phase) return { ...timeline, lastProgressAt: at };
+  const phases = (timeline?.phases || []).map(item => ({ ...item }));
+  const previous = phases.at(-1);
+  if (previous && !previous.endedAt) {
+    previous.endedAt = at;
+    previous.durationMs = Math.max(0, atMs - (Date.parse(previous.startedAt) || atMs));
+  }
+  phases.push({ phase, startedAt: at });
+  return { ...timeline, phase, phaseStartedAt: at, lastProgressAt: at, phases: phases.slice(-32) };
+}
+
 function settleRecord(record, status, now = Date.now) {
   const completedAtMs = timeValue(now);
   record.status = status;
-  record.phase = '';
+  record.phase = 'result-ready';
+  record.timeline = fallbackTimelinePhase(record.timeline, 'result-ready', completedAtMs);
   record.completedAtMs = completedAtMs;
   record.completedAt = new Date(completedAtMs).toISOString();
   record.updatedAt = record.completedAt;
@@ -801,6 +883,8 @@ export {
   enableFallbackCompletionNotice,
   fallbackExecutionStatus,
   fallbackExecutionsStatus,
+  fallbackExecutionsPage,
+  fallbackOperationReceipt,
   updateFallbackExecutionPhase,
   assertFallbackCompletionAvailable,
   fallbackSignature,
