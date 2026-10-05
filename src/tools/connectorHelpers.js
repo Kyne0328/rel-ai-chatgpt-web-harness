@@ -1,3 +1,5 @@
+import { executionOutcome } from '../executionOutcome.js';
+
 function policySentence(policy) {
   if (!policy || typeof policy !== 'object' || policy.sessionActive !== true) return null;
   const parts = [policy.taskHint ? `Session active: ${policy.taskHint}` : 'Session active'];
@@ -7,13 +9,15 @@ function policySentence(policy) {
   return `${parts.join('. ')}.`;
 }
 
-function pruneEmpty(obj) {
-  const out = {};
-  for (const [key, value] of Object.entries(obj)) {
-    if (value == null || (Array.isArray(value) && value.length === 0)) continue;
-    out[key] = value;
-  }
-  return out;
+function pruneEmpty(obj, preserveEmptyArrays = null) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+  return Object.fromEntries(Object.entries(obj).filter(([key, value]) => {
+    if (value === undefined) return false;
+    // These nullable execution facts distinguish an unknown/unavailable result
+    // from a field the producer did not supply. Their public schemas allow null.
+    if (value === null) return key === 'exitCode' || key === 'terminationConfirmed';
+    return !Array.isArray(value) || value.length > 0 || preserveEmptyArrays?.has(key) === true;
+  }));
 }
 
 function compactRepositoryState(value, { includeWorkspace = true } = {}) {
@@ -36,41 +40,16 @@ function compactRepositoryState(value, { includeWorkspace = true } = {}) {
   });
 }
 
-function compactCommandResult(result) {
+function compactCommandResult(result, options = {}) {
   if (!result || typeof result !== 'object') return result;
   const failed = result.commandSucceeded === false || result.ok === false || Number(result.exitCode || 0) !== 0;
   return pruneEmpty({
     command: result.command,
     ok: result.ok,
-    executed: result.executed,
-    commandSucceeded: result.commandSucceeded,
-    admissionBlocked: result.admissionBlocked,
-    queueWaitMs: result.queueWaitMs,
-    queueTimedOut: result.queueTimedOut,
-    errorCode: result.errorCode,
-    blockedResource: result.blockedResource,
-    resourceReason: result.resourceReason,
-    retryable: result.retryable,
-    resourcePressure: result.resourcePressure,
-    exitCode: result.exitCode,
-    durationMs: result.durationMs,
+    ...executionOutcome(result),
     timeline: result.timeline,
-    outputFinalizationTimedOut: result.outputFinalizationTimedOut,
-    outputFinalizationError: result.outputFinalizationError,
-    mutationOwnershipPersistenceError: result.mutationOwnershipPersistenceError,
-    stdout: failed ? result.stdout : undefined,
-    stderr: failed ? result.stderr : undefined,
-    stdoutBytes: result.stdoutBytes || undefined,
-    stderrBytes: result.stderrBytes || undefined,
-    stdoutTruncated: result.stdoutTruncated === true ? true : undefined,
-    stderrTruncated: result.stderrTruncated === true ? true : undefined,
-    timedOut: result.timedOut != null ? result.timedOut === true : undefined,
-    cancelled: result.cancelled != null ? result.cancelled === true : undefined,
-    rootExitConfirmed: result.rootExitConfirmed,
-    terminationConfirmed: result.terminationConfirmed != null ? result.terminationConfirmed === true : undefined,
-    forcedTermination: result.forcedTermination != null ? result.forcedTermination === true : undefined,
-    mutationUnknown: result.mutationUnknown != null ? result.mutationUnknown === true : undefined,
-    error: result.error
+    stdout: failed || options.fullOutput === true ? result.stdout : undefined,
+    stderr: failed || options.fullOutput === true ? result.stderr : undefined
   });
 }
 

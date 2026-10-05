@@ -970,6 +970,66 @@ async function case_toast_unit() {
 }
 await case_toast_unit();
 
+
+async function case_update_modal_lifecycle() {
+  const { default: assert } = await import('node:assert/strict');
+  const { initUpdateAvailableModal } = await import('../src/ui/update-available-modal.js');
+  const { closeModal } = await import('../src/ui/components/modal.js');
+  const { getOverlaySnapshot } = await import('../src/ui/overlay-store.js');
+  const originalDocument = globalThis.document;
+  let listener;
+  let installs = 0;
+  const version = '1.2.0';
+  globalThis.document = { activeElement: null, querySelector: () => null };
+  const cleanup = initUpdateAvailableModal({
+    bridge: {
+      getUpdateStatus: async () => ({ state: 'available', availableVersion: version }),
+      onUpdateStatus: callback => { listener = callback; return () => { listener = null; }; },
+      installUpdate: async () => {
+        installs += 1;
+        return { ok: true, status: { state: 'installing', availableVersion: version } };
+      }
+    }
+  });
+  try {
+    await Promise.resolve();
+    const available = getOverlaySnapshot().modal;
+    assert.equal(available.title, 'Update available');
+    listener({ state: 'installing', availableVersion: version });
+    const installing = getOverlaySnapshot().modal;
+    assert.equal(installing.dismissEnabled, false, 'installing cannot be dismissed');
+    assert.equal(installing.showClose, false);
+    listener({ state: 'installing', availableVersion: version });
+    assert.equal(getOverlaySnapshot().modal.id, installing.id, 'repeated installing updates must retain overlay ownership');
+
+    listener({ state: 'downloaded', availableVersion: version, error: 'Fixture preparation failed' });
+    const failed = getOverlaySnapshot().modal;
+    assert.equal(failed.dismissEnabled, true, 'failed preparation must restore dismissal');
+    listener({ state: 'downloaded', availableVersion: version, error: 'Retry is available' });
+    assert.equal(getOverlaySnapshot().modal.id, failed.id, 'failure details must update the existing overlay');
+    getOverlaySnapshot().modal.content.props.onAction({ method: 'installUpdate' });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(installs, 1);
+    const retry = getOverlaySnapshot().modal;
+    assert.equal(retry.dismissEnabled, false, 'retry must restore the blocking installing state');
+    listener({ state: 'installing', availableVersion: version });
+    assert.equal(getOverlaySnapshot().modal.id, retry.id, 'retry status updates must not reopen the overlay');
+
+    listener({ state: 'downloaded', availableVersion: version, error: 'Fixture preparation failed again' });
+    await getOverlaySnapshot().modal.onDismiss();
+    assert.equal(getOverlaySnapshot().modal, null, 'failure close must settle the owned overlay');
+    listener({ state: 'up_to_date', availableVersion: '' });
+    assert.equal(getOverlaySnapshot().modal, null);
+  } finally {
+    cleanup();
+    closeModal();
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+}
+await case_update_modal_lifecycle();
+
 // Formerly ui-list-ordering-unit.mjs
 async function case_ui_list_ordering_unit() {
   const __m0 = await import("node:assert/strict");

@@ -5,6 +5,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { execa, type Options as ExecaOptions } from 'execa';
 import { resolveGitExecutable } from './gitExecutable.js';
 import { isTimeoutAbort } from './abortSignals.js';
+import { executionOutcome } from './executionOutcome.js';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
 import { getStateDir } from './statePaths.js';
@@ -1030,31 +1031,7 @@ function appendLimited(current: string, next: string, maxBytes: number): string 
 function summarizeCommand(result: Partial<RunProcessResult> & Pick<RunProcessResult, 'exitCode'>): Record<string, unknown> {
   return {
     ok: result.exitCode === 0 && result.timedOut !== true && result.cancelled !== true,
-    ...(result.executed != null ? { executed: result.executed } : {}),
-    exitCode: result.exitCode,
-    ...(result.signal ? { signal: result.signal } : {}),
-    ...(result.error ? { error: result.error } : {}),
-    ...(result.durationMs != null ? { durationMs: result.durationMs } : {}),
-    ...(result.queueWaitMs != null ? { queueWaitMs: result.queueWaitMs } : {}),
-    ...(result.stdoutBytes != null ? { stdoutBytes: result.stdoutBytes } : {}),
-    ...(result.stderrBytes != null ? { stderrBytes: result.stderrBytes } : {}),
-    ...(result.stdoutTruncated ? { stdoutTruncated: true } : {}),
-    ...(result.stderrTruncated ? { stderrTruncated: true } : {}),
-    ...(result.timedOut ? { timedOut: true } : {}),
-    ...(result.queueTimedOut ? { queueTimedOut: true } : {}),
-    ...(result.admissionBlocked ? { admissionBlocked: true } : {}),
-    ...(result.errorCode ? { errorCode: result.errorCode } : {}),
-    ...(result.blockedResource ? { blockedResource: result.blockedResource } : {}),
-    ...(result.resourceReason ? { resourceReason: result.resourceReason } : {}),
-    ...(result.retryable ? { retryable: true } : {}),
-    ...(result.resourcePressure ? { resourcePressure: result.resourcePressure } : {}),
-    ...(result.cancelled ? { cancelled: true } : {}),
-    ...(result.terminationConfirmed != null ? { terminationConfirmed: result.terminationConfirmed } : {}),
-    ...(result.rootExitConfirmed != null ? { rootExitConfirmed: result.rootExitConfirmed } : {}),
-    ...(result.outputFinalizationTimedOut ? { outputFinalizationTimedOut: true } : {}),
-    ...(result.outputFinalizationError ? { outputFinalizationError: result.outputFinalizationError } : {}),
-    ...(result.mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError: result.mutationOwnershipPersistenceError } : {}),
-    ...(result.forcedTermination ? { forcedTermination: true } : {}),
+    ...executionOutcome(result),
     ...(result.stdout ? { stdout: result.stdout } : {}),
     ...(result.stderr ? { stderr: result.stderr } : {})
   };

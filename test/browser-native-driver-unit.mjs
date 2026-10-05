@@ -95,4 +95,55 @@ try {
   configureBrowserNativeBridge(null);
 }
 
+
+for (const failure of ['reject', 'negative-result']) {
+  let failingAction = 'close_page';
+  const fail = () => {
+    if (failure === 'reject') throw new Error('fixture native close refused');
+    return { ok: false, error: 'fixture native close refused' };
+  };
+  configureBrowserNativeBridge(async payload => payload.action === failingAction ? fail() : bridge(payload));
+  try {
+    const driver = await launchBrowserDriver({ viewport: { width: 1280, height: 720 }, ignoreHTTPSErrors: false });
+    let page = await driver.createPage();
+    let pageClosed = 0;
+    let disconnected = 0;
+    let created = 0;
+    page.onClosed(() => { pageClosed += 1; });
+    driver.onDisconnected(() => { disconnected += 1; });
+    driver.onPageCreated(() => { created += 1; });
+
+    await assert.rejects(() => page.close(), /fixture native close refused/);
+    dispatchBrowserNativeEvent({ resource: 'browser', type: 'page_closed', nativePageId: 'embedded_page_abcdefghijklmnop' });
+    assert.equal(pageClosed, 1, 'a failed page close must preserve its native event listener');
+    failingAction = '';
+    page = await driver.createPage();
+    page.onClosed(() => { pageClosed += 1; });
+    await page.close();
+    dispatchBrowserNativeEvent({ resource: 'browser', type: 'page_closed', nativePageId: 'embedded_page_abcdefghijklmnop' });
+    assert.equal(pageClosed, 1, 'successful page close must release its listener');
+
+    failingAction = 'close_session';
+    await assert.rejects(() => driver.close(), /fixture native close refused/);
+    dispatchBrowserNativeEvent({ resource: 'browser', type: 'page_opened', nativeSessionId: 'embedded_browser_abcdefghijklmnop', nativePageId: 'embedded_page_retryevent123456' });
+    assert.equal(created, 1, 'failed session close must retain page-registration events');
+    dispatchBrowserNativeEvent({ resource: 'browser', type: 'session_disconnected', nativeSessionId: 'embedded_browser_abcdefghijklmnop' });
+    assert.equal(disconnected, 1, 'failed session close must retain disconnect notification');
+
+    failingAction = '';
+    await driver.close();
+    const replacement = await launchBrowserDriver({ viewport: { width: 1280, height: 720 }, ignoreHTTPSErrors: false });
+    replacement.onDisconnected(() => { disconnected += 1; });
+    replacement.onPageCreated(() => { created += 1; });
+    await replacement.close();
+    dispatchBrowserNativeEvent({ resource: 'browser', type: 'session_disconnected', nativeSessionId: 'embedded_browser_abcdefghijklmnop' });
+    dispatchBrowserNativeEvent({ resource: 'browser', type: 'page_opened', nativeSessionId: 'embedded_browser_abcdefghijklmnop', nativePageId: 'embedded_page_retryevent123456' });
+    assert.equal(disconnected, 1, 'successful session close must release disconnect notification');
+    assert.equal(created, 1, 'successful session close must release page-registration events');
+  } finally {
+    configureBrowserNativeBridge(null);
+  }
+}
+
+
 console.log('Embedded browser native driver bridge and lifecycle events passed.');

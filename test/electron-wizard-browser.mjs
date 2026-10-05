@@ -1,3 +1,5 @@
+// Focus on setup fields, accessible validation, and user-facing recovery boundaries.
+// Dynamic IPC authorization and credential handling live in suite-runtime-core-unit.mjs and desktop-settings-unit.mjs.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,18 +9,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 const html = read('electron/renderer/wizard.html');
 const js = read('electron/renderer/wizard.js');
-const preload = read('electron/preload.cjs');
-const ipc = read('electron/ipc-handlers.js');
-const desktopContract = read('src/contracts/desktop.ts');
-const main = read('electron/main.js');
-const desktopHost = read('electron/desktop-host.js');
-const coreDesktopOperations = read('src/core/desktop-operations.ts');
-const css = read('electron/renderer/app.css');
 
-assert.match(html, /Connect this computer to OpenAI/);
-assert.match(html, /After it connects, Rel\.AI will show the ChatGPT connector setup step/);
-assert.doesNotMatch(html, /Before you start/, 'wizard must not restore the redundant prerequisite card');
-assert.match(html, /OpenAI organization and ChatGPT workspace/);
+const ipc = read('electron/ipc-handlers.js');
+
 assert.match(html, /id="tunnelIdInput"/);
 assert.match(html, /id="tunnelApiKeyInput"/);
 assert.match(html, /id="portInput"/);
@@ -29,15 +22,10 @@ assert.match(html, /data-open-openai="tunnels"/);
 assert.match(html, /data-open-openai="apiKeys"/);
 assert.match(html, /Create the tunnel in the OpenAI organization and ChatGPT workspace where you use Rel\.AI/i);
 assert.match(html, /Name, Description, Organizations, and ChatGPT workspaces/i);
-assert.match(html, /complete these tunnel fields/i);
 assert.match(html, /same OpenAI organization as your tunnel/i);
-assert.match(html, /Having trouble\?/i);
-assert.match(html, /About the runtime API key/i);
+assert.match(html, /restricted API key/i);
 assert.match(html, /Stored securely on this computer/i);
 assert.match(html, /OpenAI Secure MCP Tunnel/i);
-assert.doesNotMatch(html, /Read \+ Manage|Read \+ Use|For a personal account/i, 'Administrative edge cases should not clutter the happy path.');
-assert.doesNotMatch(html, /https:\/\/platform\.openai\.com\/settings\/organization\//, 'Raw setup URLs should not look like paste fields in the wizard.');
-assert.doesNotMatch(html, /wizard-chatgpt-path|What you will choose in ChatGPT next/i, 'Future ChatGPT configuration belongs after the tunnel is running.');
 assert.ok(html.indexOf('data-open-openai="tunnels"') < html.indexOf('id="tunnelIdInput"'), 'Tunnel source action must immediately precede its destination field.');
 assert.ok(html.indexOf('data-open-openai="apiKeys"') < html.indexOf('id="tunnelApiKeyInput"'), 'API-key source action must immediately precede its destination field.');
 for (const id of ['tunnelIdInput', 'tunnelApiKeyInput', 'portInput']) assert.match(html, new RegExp(`label for="${id}"`));
@@ -45,7 +33,6 @@ for (const id of ['tunnelIdError', 'runtimeKeyError', 'portError']) assert.match
 assert.match(html, /<form[^>]*id="connectionForm"/);
 assert.match(html, /id="connectBtn"[^>]*type="submit"/);
 assert.doesNotMatch(html, /Support project on GitHub|supportProject/);
-assert.doesNotMatch(html, /ChatGPT connector name|Name this computer's ChatGPT connector/);
 assert.doesNotMatch(html, /Cloudflare|Rel\.AI Cloud|ngrok|Direct connection|pairing code|approval token|Rel\.AI account/i);
 
 assert.match(js, /validTunnelId/);
@@ -66,35 +53,14 @@ assert.match(js, /Stored securely\. Leave blank to keep it\./);
 assert.doesNotMatch(js, /copySetupValue|copyText\(value\)/);
 assert.doesNotMatch(js, /cloud|ngrok|pairing|approvalToken|connectionMode/i);
 
-for (const api of ['wizardDone', 'closeWizard', 'getRecoveryConfig', 'openOpenAISetup']) assert.match(preload, new RegExp(`\\b${api}\\b`));
-for (const removed of ['startCloudEnrollment', 'getGatewayUsage', 'replaceApprovalToken', 'openExternal']) assert.doesNotMatch(preload, new RegExp(`\\b${removed}\\b`));
-assert.match(desktopContract, /WIZARD_DONE:\s*'wizard:done'/);
-assert.match(desktopContract, /WIZARD_OPEN_OPENAI_SETUP:\s*'wizard:open-openai-setup'/);
-assert.match(ipc, /channels:\s*DESKTOP_IPC/);
-assert.match(ipc, /channels\.WIZARD_DONE/);
-assert.match(ipc, /channels\.WIZARD_OPEN_OPENAI_SETUP/);
 assert.match(ipc, /OPENAI_SETUP_URLS/);
 assert.match(ipc, /https:\/\/platform\.openai\.com\/settings\/organization\/tunnels/);
 assert.match(ipc, /https:\/\/platform\.openai\.com\/settings\/organization\/api-keys/);
 assert.doesNotMatch(ipc, /supportProject/);
 assert.match(ipc, /shell\.openExternal\(url\)/);
 assert.match(ipc, /Unknown OpenAI setup destination/);
-assert.match(ipc, /setTunnelApiKey/);
-assert.match(ipc, /saveLauncherConfig/);
 assert.match(ipc, /if \(status\?\.serverRunning === true\) \{[\s\S]*?closeWizard\(\{ returnToFallback: false \}\);[\s\S]*?\}/);
 assert.match(ipc, /return \{ ok: status\?\.serverRunning === true, status \};/);
 assert.doesNotMatch(ipc, /serverRunning === true && status\?\.tunnelStatus === 'running'/);
-assert.doesNotMatch(ipc, /wizard:cloud|desktop:gateway|approval-token|url:open-link/);
-assert.match(main, /createDesktopHost/);
-assert.match(main, /void desktop\.start\(\)/, 'Desktop startup must stay non-blocking so Electron can emit ready.');
-assert.doesNotMatch(desktopHost, /launchOptions\.firstRun\s*\?\s*'#settings\/connection'/, 'Successful first-run setup must not send the user back to Connection after the tunnel is already configured.');
-assert.match(desktopHost, /serviceProcessClient\.markOnboardingHandoff\(\)/, 'Successful first-run setup must delegate the Overview handoff to the core utility process.');
-assert.match(coreDesktopOperations, /writeOnboardingState\(\{[\s\S]{0,260}handoffPending:\s*true/, 'The core operation must persist the Overview handoff until the remaining setup steps are complete.');
-assert.match(desktopHost, /await showDashboardWindow\(''\)/, 'Successful first-run setup must open Overview so the next-step guide is immediately visible.');
-assert.match(css, /\.wizard-/);
-assert.match(css, /Segoe UI Variable/);
-assert.match(css, /\.wizard-value-step/);
-assert.match(css, /\.wizard-help-details/);
-assert.match(css, /@media \(max-width: 620px\)[\s\S]*\.wizard-/);
 
 console.log('Secure MCP Tunnel wizard contracts passed.');

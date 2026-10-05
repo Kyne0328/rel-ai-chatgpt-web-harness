@@ -1,5 +1,5 @@
 import * as crypto from 'node:crypto';
-import { throwIfAborted, withAbort, withAbortResource } from '../abortablePromise.ts';
+import { throwIfAborted, withAbort } from '../abortablePromise.ts';
 import { taskError } from '../toolActivity.js';
 import {
   assertAutomationAttribution,
@@ -61,8 +61,10 @@ type UiSessionRecord = Readonly<{
 type SessionCallback<T> = (record: UiSessionRecord) => Promise<T> | T;
 
 const sessions = new Map<string, UiSessionRecord>();
-const pendingStarts = new Set<Readonly<{ taskId: string }>>();
-const pendingSessionCloses = new Set<Promise<void>>();
+const pendingStarts = new Set<{ taskId: string; cancelled: boolean; done: Promise<void> }>();
+const closingSessions = new Map<string, Promise<void>>();
+const taskCleanups = new Map<string, Promise<{ stopped: number }>>();
+let shutdownPromise: Promise<{ stopped: number }> | null = null;
 
 async function startUiSession(
   workspace: AutomationWorkspace,
@@ -70,7 +72,9 @@ async function startUiSession(
   context: UiContext = {}
 ): Promise<Record<string, unknown>> {
   throwIfAborted(context.signal, uiCancellationError);
+  if (shutdownPromise) throw taskError('UI_RUNTIME_SHUTTING_DOWN', 'Wait for UI browser shutdown to finish before starting another session.');
   const taskId = taskIdFor(args, context);
+  if (taskId && taskCleanups.has(taskId)) throw taskError('UI_SESSION_CLOSING', 'Wait for this work session\'s UI browser cleanup to finish before starting another session.');
   const existing = taskId ? [...sessions.values()].find(record => record.attribution.taskId === taskId) : null;
   const pendingForTask = taskId ? [...pendingStarts].some(pending => pending.taskId === taskId) : false;
   if (existing || pendingForTask) {
@@ -90,29 +94,43 @@ async function startUiSession(
   const viewport = normalizeViewport(args.width, args.height);
   const sessionId = `ui_${crypto.randomBytes(24).toString('base64url')}`;
   const createdAt = new Date().toISOString();
-  const pendingStart = Object.freeze({ taskId });
+  let resolveStartDone: (() => void) | undefined;
+  const startDone = new Promise<void>(resolve => { resolveStartDone = resolve; });
+  const pendingStart = { taskId, cancelled: false, done: startDone };
   pendingStarts.add(pendingStart);
-  let browser: WebBrowserSession | null = null;
   let record: UiSessionRecord | null = null;
+  let launching: Promise<UiSessionRecord> | null = null;
+  let launchSettled = false;
+  let cleanupAttempted = false;
+  const finishStart = () => { pendingStarts.delete(pendingStart); resolveStartDone?.(); };
+  const assertStartActive = () => {
+    throwIfAborted(context.signal, uiCancellationError);
+    if (pendingStart.cancelled) throw taskError('UI_OPERATION_CANCELLED', 'UI browser startup was cancelled during cleanup.');
+  };
   try {
-    browser = await withAbortResource(launchWebBrowserSession({
-      protocol,
-      viewport,
-      headless: args.headless !== false,
-      allowedPorts
-    }), context.signal, launchedBrowser => launchedBrowser.close(), uiCancellationError);
-    record = Object.freeze({
-      sessionId,
-      attribution: createAutomationAttribution(workspace, args, context),
-      origin,
-      allowedPorts,
-      browser,
-      createdAt
-    });
-    sessions.set(sessionId, record);
-    browser.onDisconnected(() => sessions.delete(sessionId));
-
-    const initialNavigation = await withAbort(browser.navigate(initialUrl, timeoutFor(args.timeoutMs)), context.signal, uiCancellationError);
+    launching = launchWebBrowserSession({
+      protocol, viewport, headless: args.headless !== false, allowedPorts
+    }).then(async browser => {
+      const acquired: UiSessionRecord = Object.freeze({
+        sessionId, attribution: createAutomationAttribution(workspace, args, context),
+        origin, allowedPorts, browser, createdAt
+      });
+      record = acquired;
+      sessions.set(sessionId, acquired);
+      browser.onDisconnected(() => {
+        if (!closingSessions.has(sessionId)) sessions.delete(sessionId);
+      });
+      if (pendingStart.cancelled || context.signal?.aborted) {
+        cleanupAttempted = true;
+        await closeUiRecord(acquired);
+        assertStartActive();
+      }
+      return acquired;
+    }).finally(() => { launchSettled = true; });
+    record = await withAbort(launching, context.signal, uiCancellationError);
+    assertStartActive();
+    const initialNavigation = await withAbort(record.browser.navigate(initialUrl, timeoutFor(args.timeoutMs)), context.signal, uiCancellationError);
+    assertStartActive();
     return {
       ok: true,
       workspace: workspace.alias,
@@ -124,16 +142,16 @@ async function startUiSession(
       title: initialNavigation.title ?? '',
       viewport,
       browserEngine: 'chromium',
-      browserProduct: browser.browserProduct,
+      browserProduct: record.browser.browserProduct,
       allowedPorts: [...allowedPorts].sort((left, right) => left - right),
       createdAt
     };
   } catch (error) {
-    if (record) sessions.delete(sessionId);
-    if (browser) await browser.close().catch(() => {});
+    if (record && !cleanupAttempted) await closeUiRecord(record).catch(() => {});
     throw error;
   } finally {
-    pendingStarts.delete(pendingStart);
+    if (launching && !launchSettled) void launching.catch(() => {}).finally(finishStart);
+    else finishStart();
   }
 }
 
@@ -150,12 +168,17 @@ function withUiSession<T>(
 function requireUiSession(
   workspace: AutomationWorkspace,
   args: UiArgs = {},
-  context: UiContext = {}
+  context: UiContext = {},
+  allowClosing = false
 ): UiSessionRecord {
   const sessionId = assertUiSessionId(args.sessionId);
   const record = sessions.get(sessionId);
-  if (!record) throw taskError('UI_SESSION_NOT_FOUND', `Unknown or closed UI test session: ${sessionId}.`);
+  // Task/global cleanup revokes public use before awaiting resource teardown.
+  if (!record || (!allowClosing && (shutdownPromise || taskCleanups.has(record.attribution.taskId)))) {
+    throw taskError('UI_SESSION_NOT_FOUND', `Unknown or closed UI test session: ${sessionId}.`);
+  }
   assertAutomationAttribution(record.attribution, workspace, args, context);
+  if (!allowClosing && closingSessions.has(sessionId)) throw taskError('UI_SESSION_CLOSING', 'Wait for UI browser cleanup to finish before using this session.');
   return record;
 }
 
@@ -164,10 +187,9 @@ async function stopUiSession(
   args: UiArgs = {},
   context: UiContext = {}
 ): Promise<Record<string, unknown>> {
-  const record = requireUiSession(workspace, args, context);
-  sessions.delete(record.sessionId);
+  const record = requireUiSession(workspace, args, context, true);
   try {
-    await record.browser.close();
+    await closeUiRecord(record);
     return {
       ok: true,
       workspace: workspace.alias,
@@ -181,27 +203,39 @@ async function stopUiSession(
       workspace: workspace.alias,
       action: 'stop',
       sessionId: record.sessionId,
-      status: 'stopped',
       error: errorMessage(error)
     };
   }
 }
 
-async function stopUiSessionsForTask(taskId: string): Promise<{ stopped: number }> {
+function stopUiSessionsForTask(taskId: string): Promise<{ stopped: number }> {
   const id = String(taskId || '').trim();
-  if (!id) return { stopped: 0 };
-  const records = [...sessions.values()].filter(record => record.attribution.taskId === id);
-  for (const record of records) sessions.delete(record.sessionId);
-  await trackUiRecordClose(records);
-  return { stopped: records.length };
+  if (!id) return Promise.resolve({ stopped: 0 });
+  const existing = taskCleanups.get(id);
+  if (existing) return existing;
+  const cleanup = (async () => {
+    const starts = [...pendingStarts].filter(pending => pending.taskId === id);
+    for (const pending of starts) pending.cancelled = true;
+    await Promise.all(starts.map(pending => pending.done));
+    const records = [...sessions.values()].filter(record => record.attribution.taskId === id);
+    await closeUiRecords(records);
+    return { stopped: records.length };
+  })().finally(() => { taskCleanups.delete(id); });
+  taskCleanups.set(id, cleanup);
+  return cleanup;
 }
 
-async function stopAllUiSessions(): Promise<{ stopped: number }> {
-  const records = [...sessions.values()];
-  sessions.clear();
-  const closing = trackUiRecordClose(records);
-  await Promise.allSettled([closing, ...pendingSessionCloses]);
-  return { stopped: records.length };
+function stopAllUiSessions(): Promise<{ stopped: number }> {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    const starts = [...pendingStarts];
+    for (const pending of starts) pending.cancelled = true;
+    await Promise.all(starts.map(pending => pending.done));
+    const records = [...sessions.values()];
+    await closeUiRecords(records);
+    return { stopped: records.length };
+  })().finally(() => { shutdownPromise = null; });
+  return shutdownPromise;
 }
 
 function pageResult(record: UiSessionRecord, action: string, result: BrowserActionResult): Record<string, unknown> {
@@ -214,19 +248,20 @@ function pageResult(record: UiSessionRecord, action: string, result: BrowserActi
   };
 }
 
-async function trackUiRecordClose(records: readonly UiSessionRecord[]): Promise<void> {
-  if (!records.length) return;
-  const closing = closeUiRecords(records);
-  pendingSessionCloses.add(closing);
-  try {
-    await closing;
-  } finally {
-    pendingSessionCloses.delete(closing);
-  }
+function closeUiRecord(record: UiSessionRecord): Promise<void> {
+  const existing = closingSessions.get(record.sessionId);
+  if (existing) return existing;
+  const closing = Promise.resolve().then(() => record.browser.close())
+    .then(() => { sessions.delete(record.sessionId); })
+    .finally(() => { closingSessions.delete(record.sessionId); });
+  closingSessions.set(record.sessionId, closing);
+  return closing;
 }
 
 async function closeUiRecords(records: readonly UiSessionRecord[]): Promise<void> {
-  await Promise.allSettled(records.map(record => record.browser.close()));
+  const results = await Promise.allSettled(records.map(closeUiRecord));
+  const failures = results.filter(result => result.status === 'rejected');
+  if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'UI browser cleanup failed.');
 }
 
 function uiCancellationError(signal: AbortSignal): Error {

@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { readManagedProcess, startManagedProcess, stopManagedProcess, writeManagedProcess } from '../src/processManager.js';
+import { hostResourceStats } from '../src/hostResourceScheduler.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-process-pty-'));
 const repo = path.join(root, 'repo');
@@ -76,20 +77,48 @@ try {
   if (process.platform === 'win32') {
     const previousIdleTimeout = process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS;
     process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS = '1000';
+    const baseline = hostResourceStats();
     try {
       const idleShell = await startManagedProcess(workspace, config, {
         executable: process.env.ComSpec || 'cmd.exe',
         argv: ['/Q'],
         kind: 'interactive',
-        purpose: 'Verify idle shell prompts retire automatically.',
+        purpose: 'Verify disposable task shell prompts retire automatically.',
+        lifecycle: 'task',
         pty: true,
         startupWaitMs: 100
-      }, context);
+      }, { ...context, requestTaskContext: { taskId: context.taskId, session: { workspace: workspace.alias } } });
       processId = idleShell.processId;
       await waitFor(snapshot => /[A-Za-z]:\\[^\r\n>]*>/.test(snapshot.stdout.text), 5000);
       const retired = await waitFor(snapshot => snapshot.status === 'stopped', 6000);
-      assert.equal(retired.status, 'stopped', 'an idle cmd prompt must retire after the configured grace period');
+      assert.equal(retired.status, 'stopped', 'a disposable task cmd prompt retires after the configured grace period');
+      assert.equal(retired.terminationConfirmed, true);
+      assert.equal(hostResourceStats().persistent.active, baseline.persistent.active, 'retired task shells return retained-process capacity');
       processId = '';
+
+      for (const lifecycle of [undefined, 'persistent']) {
+        const persistedValue = lifecycle || 'default';
+        const persistentShell = await startManagedProcess(workspace, config, {
+          executable: process.env.ComSpec || 'cmd.exe', argv: ['/Q'],
+          kind: 'interactive', purpose: `Preserve ${persistedValue} persistent shell state.`,
+          ...(lifecycle ? { lifecycle } : {}), pty: true, startupWaitMs: 100
+        }, context);
+        processId = persistentShell.processId;
+        await waitFor(snapshot => /[A-Za-z]:\\[^\r\n>]*>/.test(snapshot.stdout.text), 5000);
+        await writeManagedProcess(config, { processId, input: `set RELAI_PTY_STATE=${persistedValue}\r` }, context);
+        await new Promise(resolve => setTimeout(resolve, 1300));
+        const idle = readManagedProcess(config, { processId }, context);
+        assert.equal(idle.status, 'running', `${persistedValue} persistence must survive the idle threshold`);
+        assert.equal(hostResourceStats().heavy.active, baseline.heavy.active, 'idle persistent shells hold no active-work/startup token');
+        assert.equal(hostResourceStats().persistent.active, baseline.persistent.active + 1, 'live persistent shells remain counted in the bounded retained-process quota');
+        await writeManagedProcess(config, { processId, input: 'echo PERSISTED:%RELAI_PTY_STATE%\r' }, context);
+        await waitFor(snapshot => snapshot.stdout.text.includes(`PERSISTED:${persistedValue}`));
+        const stoppedPersistent = await stopManagedProcess(config, { processId, graceMs: 500 }, context);
+        assert.equal(stoppedPersistent.status, 'stopped');
+        assert.equal(stoppedPersistent.terminationConfirmed, true);
+        assert.equal(hostResourceStats().persistent.active, baseline.persistent.active);
+        processId = '';
+      }
     } finally {
       if (previousIdleTimeout === undefined) delete process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS;
       else process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS = previousIdleTimeout;

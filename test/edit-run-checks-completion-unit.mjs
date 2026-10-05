@@ -70,7 +70,7 @@ try {
   await flushLocalAnalytics();
   resetToolActivity();
   await flushTaskHistoryPersistence();
-  clearTaskHistory({ stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') });
+  await clearTaskHistory({ stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') });
   await clearAuditHistory({ stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') });
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
   else process.env.REL_AI_MCP_CONFIG = previousConfig;

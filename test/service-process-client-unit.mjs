@@ -342,4 +342,97 @@ assert.equal((await uncleanStopClient.start({ host: '127.0.0.1', port: 3333, tok
 assert.equal(uncleanStopForks, 2);
 await uncleanStopClient.dispose({ stop: false });
 
+
+async function verifyServiceNativeRequestLifecycle() {
+  const { registerHooks } = await import('node:module');
+  const { mock } = await import('node:test');
+  const originalParentPort = process.parentPort;
+  const parentPort = new EventEmitter();
+  const messages = [];
+  parentPort.postMessage = message => messages.push(message);
+  let serverOptions;
+  let browserOperation;
+  const server = {
+    listening: true,
+    address: () => ({ port: 4567 }),
+    close: callback => callback(),
+    closeIdleConnections() {},
+    waitForShutdown: async () => ({ clean: true })
+  };
+  globalThis.__relaiNativeRequestModules = {
+    'src/httpServer.ts': { startHttpServer: options => { serverOptions = options; return server; } },
+    'src/toolActivity.js': { getToolActivity: () => ({}), onToolActivity: () => () => {} },
+    'src/desktopManager.ts': { configureDesktopNativeBridge() {} },
+    'src/browser/browserDriver.ts': { configureBrowserNativeBridge: operation => { browserOperation = operation; } }
+  };
+  const serviceUrl = new URL('../electron/service-process.js?native-request-lifecycle', import.meta.url).href;
+  const resourceStub = 'data:text/javascript,' + encodeURIComponent(
+    'export async function importResourceModule(path) { return globalThis.__relaiNativeRequestModules[path]; }'
+  );
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL === serviceUrl && specifier === './resource-path.js') {
+        return { url: resourceStub, shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    }
+  });
+  const send = (method, id) => parentPort.emit('message', { data: { type: 'request', method, id, payload: { token: 'fixture' } } });
+  const yieldTurn = () => new Promise(resolve => setImmediate(resolve));
+  try {
+    process.parentPort = parentPort;
+    await import(serviceUrl);
+    send('start', 'start-native-test');
+    await yieldTurn();
+    assert.ok(serverOptions, 'the production service must install its native callbacks on HTTP startup');
+    mock.timers.enable({ apis: ['setTimeout'] });
+
+    let pickerSettled = false;
+    const picker = serverOptions.pickFolder();
+    void picker.then(() => { pickerSettled = true; }, () => { pickerSettled = true; });
+    const pickerRequest = messages.at(-1);
+    assert.equal(pickerRequest.method, 'pickFolder');
+    mock.timers.tick(31_000);
+    await yieldTurn();
+    assert.equal(pickerSettled, false, 'a user-controlled picker must remain open beyond machine request deadlines');
+    parentPort.emit('message', { data: { type: 'native-response', id: pickerRequest.id, ok: true, result: '/chosen-folder' } });
+    assert.equal(await picker, '/chosen-folder', 'a delayed selection must still reach the requesting route');
+
+    const machineRequest = serverOptions.openFolder('/chosen-folder');
+    const machineTimeout = assert.rejects(machineRequest, /Native desktop request timed out: openFolder/);
+    mock.timers.tick(30_000);
+    await machineTimeout;
+    assert.equal(messages.at(-1).type, 'native-cancel', 'machine request deadlines must still cancel native work');
+
+    const controller = new AbortController();
+    const aborted = browserOperation({ action: 'snapshot' }, { signal: controller.signal });
+    const abortResult = assert.rejects(aborted, error => error.code === 'BROWSER_OPERATION_CANCELLED');
+    controller.abort();
+    await abortResult;
+
+    const abandoned = serverOptions.pickFolder();
+    const stopped = assert.rejects(abandoned, /service is stopping/);
+    send('stop', 'stop-native-test');
+    await stopped;
+    await yieldTurn();
+    assert.equal(messages.find(message => message.id === 'stop-native-test')?.ok, true, 'shutdown must settle pending user-driven requests');
+    send('start', 'restart-native-test');
+    await yieldTurn();
+    const cancelledPicker = serverOptions.pickFolder();
+    const finalPicker = messages.at(-1);
+    parentPort.emit('message', { data: { type: 'native-response', id: finalPicker.id, ok: true, result: null } });
+    assert.equal(await cancelledPicker, null, 'the next service generation must still support user cancellation');
+    send('stop', 'cleanup-native-test');
+    await yieldTurn();
+  } finally {
+    hooks.deregister();
+    mock.timers.reset();
+    if (originalParentPort === undefined) delete process.parentPort;
+    else process.parentPort = originalParentPort;
+    delete globalThis.__relaiNativeRequestModules;
+  }
+}
+
+await verifyServiceNativeRequestLifecycle();
+
 console.log('Electron utility-process service bridge contracts passed.');

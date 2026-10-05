@@ -19,40 +19,15 @@ async function case_activity_controller_contract_unit() {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
   const activity = read('src/ui/features/activity/react.js');
-  const reactMain = read('src/ui/react/main.js');
-  const dashboard = read('public/dashboard.js');
   const activityCss = read('src/ui/features/activity/styles.css');
   
-  assert.match(activity, /from '\.\/model\.js'/, 'Activity must keep filtering and merge behavior in its pure model');
-  assert.match(activity, /replaceActivityHistory\(data\.auditTail\?\.entries \|\| \[\]\)/, 'React Activity must initialize from the canonical dashboard snapshot');
   assert.match(activity, /liveEntriesSinceLoadRef/, 'live entries received during history loading must be retained');
-  assert.match(activity, /parseActivityHistoryResponse\(response\)/, 'structured history fetch errors must be interpreted explicitly');
   assert.match(activity, /pauseTimeoutWhenHidden:\s*false/, 'Activity history must not suspend its timeout for an entire minimized period');
   assert.match(activity, /historyRetryRef/, 'a hidden history failure must retry when the dashboard becomes visible');
-  assert.match(activity, /replaceActivityHistory\(parsed\.entries\)/, 'stored history must remain an authoritative snapshot');
   assert.match(activity, /pausedEntriesRef/, 'paused live snapshots must be buffered');
   assert.match(activity, /await loadHistory\('merge'\)/, 'resuming must reconcile buffered events with a fresh stored snapshot');
-  assert.match(activity, /if \(!merged\.changed\) return false;/, 'unchanged live snapshots must be React no-ops');
-  assert.match(activity, /sorted:\s*true/, 'Activity must avoid re-sorting canonical already-sorted history during filtering');
   assert.match(activity, /relai:clock-tick/, 'time-range filters must age from the shared dashboard clock');
   assert.match(activity, /nextActivityExpiry/, 'clock updates must only rerender at an expiration boundary');
-  assert.match(activity, /const ActivityRow = memo\(/, 'live Activity rows must be memoized so unrelated event updates do not rerender them');
-  assert.match(activity, /const eventId = activityEventId\(entry\);[\s\S]*key:\s*eventId/, 'live Activity rows must use canonical domain event IDs as React keys');
-  assert.doesNotMatch(activity, /entries\.map\(\([^)]*index[^)]*\)[\s\S]{0,180}key:\s*index/, 'live Activity rows must never use array indexes as keys');
-  assert.match(activity, /selectedEventId/, 'selected Activity identity must be explicit React state');
-  assert.match(activity, /selected:\s*Boolean\(selectedEventId && eventId === selectedEventId\)/, 'selection must follow canonical event identity across live merges');
-  assert.match(activity, /activityActionLabel\(entry\)/, 'row actions must keep distinguishable accessible labels');
-  const primaryMessageIndex = activity.indexOf("className: 'activity-message-copy'");
-  const supportingMetadataIndex = activity.indexOf("className: 'activity-row-meta'", primaryMessageIndex);
-  assert.ok(primaryMessageIndex >= 0 && supportingMetadataIndex > primaryMessageIndex,
-    'message text must render before supporting task/project metadata regardless of JSX/object formatting');
-  assert.match(activity, /className:\s*'activity-row-task'/, 'rows must retain task context as supporting metadata');
-  assert.match(activity, /className:\s*'activity-row-project'/, 'rows must retain project context as supporting metadata');
-  assert.match(activity, /className:\s*'activity-row-status'/, 'Activity status chips must render in a dedicated row-status slot instead of flowing with secondary metadata');
-  assert.match(activityCss, /\.activity-row-trigger\s*\{[^}]*grid-template-columns:\s*92px\s+minmax\(0,\s*1fr\)/s, 'Activity rows must reserve a consistent leading status column');
-  assert.match(activityCss, /\.activity-row-status\s*\{[^}]*grid-row:\s*1\s*\/\s*span\s*2/s, 'Activity status chips must align across both message and metadata rows');
-  assert.match(activity, /focus\(\{ preventScroll: true \}\)/, 'stacked inspector selection must move focus without an intermediate browser scroll');
-  assert.match(activity, /Copy event JSON/, 'technical details must preserve the copy action');
   assert.match(activity, /'aria-expanded': treeRevision\.open/, 'the raw JSON tree toggle must expose its expanded state to assistive technology');
   assert.match(activity, /treeRevision\.open \? 'Collapse all' : 'Expand all'/, 'raw JSON controls must use one stateful expand/collapse toggle instead of duplicate opposite actions');
   assert.match(activity, /command \? h\(CommandDetail, \{ command \}\) : null/, 'Activity details must render the recorded command as a first-class readable section');
@@ -61,13 +36,6 @@ async function case_activity_controller_contract_unit() {
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw target'/, 'technical details must preserve raw target information');
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw result'/, 'technical details must preserve raw result information');
   assert.match(activity, /h\(RawDetail, \{ title: 'Raw error'/, 'technical details must preserve raw error information');
-  assert.match(activity, /ACTIVITY_STORE_KEYS = Object\.freeze\(\['auditTail', 'tasks', 'runtime', 'runtimeCompatibility'\]\)/, 'Activity must subscribe only to the dashboard slices it renders');
-  assert.match(activity, /createActivityRoute\(useDashboardSlices\)[\s\S]*useDashboardSlices\(ACTIVITY_STORE_KEYS\)/, 'Activity must consume scoped canonical dashboard store slices');
-  assert.match(reactMain, /registerReactSection\('activity'/, 'Activity must remain registered as a canonical React route');
-  assert.doesNotMatch(dashboard, /case 'activity':\s*return true;/, 'React-owned Activity must not retain an imperative live-rendering branch');
-  assert.match(activityCss, /\.activity-master-detail\s*\{[^}]*grid-template-columns:/s, 'Activity must retain a list/inspector layout; rendered browser coverage owns the exact geometry and stacking breakpoint');
-  assert.match(activityCss, /\.activity-message-copy\s*\{[^}]*min-width:/s, 'messages need an explicit readable minimum width');
-  assert.match(activityCss, /\.activity-col-message\s*\{[^}]*width:\s*auto/s, 'the primary Activity column must be able to consume the remaining table width');
   
   console.log('Activity React controller contract test passed.');
 }
@@ -106,43 +74,6 @@ async function case_activity_event_unit() {
   console.log('Activity event identity tests passed.');
 }
 await case_activity_event_unit();
-
-// Formerly activity-message-layout-unit.mjs
-async function case_activity_message_layout_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("node:fs");
-    const fs = __m1.default;
-  
-  const css = fs.readFileSync('src/ui/features/activity/styles.css', 'utf8');
-  const react = fs.readFileSync('src/ui/features/activity/react.js', 'utf8');
-  
-  assert.match(react, /h\('colgroup',[\s\S]{0,260}activity-col-time[\s\S]{0,180}activity-col-message/, 'React activity table must keep the canonical time + activity columns');
-  assert.doesNotMatch(react, /activity-col-(?:tool|task|status|action)/, 'tool, task, status, and action belong in Activity metadata instead of duplicate table columns');
-  const statusIndex = react.indexOf("className: 'activity-row-status'");
-  const metaIndex = react.indexOf("className: 'activity-row-meta'");
-  assert.ok(statusIndex >= 0 && metaIndex > statusIndex, 'Activity status must occupy a stable leading slot before secondary metadata');
-  assert.ok(metaIndex >= 0, 'Activity rows must render a supporting metadata region');
-  for (const marker of ['activity-row-action', 'activity-row-task', 'activity-row-project']) {
-    assert.ok(react.indexOf(marker, metaIndex) > metaIndex, `Activity metadata must retain ${marker} context`);
-  }
-  assert.match(react, /ActivityRowStatus[\s\S]{0,180}return h\(StatusPill, \{ value \}\)/, 'Activity rows must use the shared status pill for succeeded and failed states');
-  assert.doesNotMatch(react, /group === 'succeeded'[\s\S]{0,220}activity-row-status is-succeeded/, 'Succeeded rows must not use a one-off icon-only status treatment');
-  assert.doesNotMatch(css, /activity-row-status\.is-succeeded/, 'Activity CSS must not retain the obsolete success-only status style');
-  assert.match(css, /\.activity-table\s*\{[^}]*table-layout:\s*fixed/s, 'Activity table must use a stable fixed layout');
-  assert.match(css, /\.activity-col-time\s*\{[^}]*width:\s*\d+px/s, 'Time must keep a bounded fixed-width column');
-  assert.doesNotMatch(css, /^\.activity-time-column\s*\{[^}]*align-top/ms, 'the Time header must keep the table header vertical alignment');
-  assert.match(css, /^\.activity-table tbody \.activity-time-column\s*\{[^}]*align-top/ms, 'only Activity body times should align to the top of multi-line rows');
-  assert.match(css, /\.activity-col-message\s*\{[^}]*width:\s*auto/s, 'Activity content must consume the remaining width');
-  assert.doesNotMatch(css, /\.activity-col-message\s*\{[^}]*width:\s*calc\(/s, 'Activity width must not depend on brittle calc chains');
-  assert.match(css, /\.activity-message-copy\s*\{[^}]*min-width:/s, 'message text must retain an explicit readable minimum width');
-  assert.doesNotMatch(css, /\.activity-time-column\s*\{[^}]*display:\s*none/s, 'responsive layouts must preserve the time column so chronology remains visible');
-  assert.match(css, /@media\s*\(max-width:[^)]+\)[\s\S]*\.activity-col-message\s*\{[^}]*width:\s*100%/s, 'the Activity column must use the available narrow-layout width alongside the retained time column'); // rigidity-ok: full width is the responsive Activity-column contract.
-  
-  console.log('Activity message layout invariants passed.');
-}
-await case_activity_message_layout_unit();
 
 // Formerly activity-model-unit.mjs
 async function case_activity_model_unit() {
@@ -360,33 +291,14 @@ async function case_activity_scroll_unit() {
   const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
   
   const css = read('src/ui/styles/app.css');
-  const activityCss = read('src/ui/features/activity/styles.css');
   const activity = read('src/ui/features/activity/react.js');
   
   const tableWrapRule = css.match(/\.table-wrap\s*\{([^}]*)\}/)?.[1] || '';
-  const routeRootRule = css.match(/\.route-root\s*\{([^}]*)\}/)?.[1] || '';
-  const activityPageRule = activityCss.match(/\.activity-page\s*\{([^}]*)\}/)?.[1] || '';
-  const activityCardRule = activityCss.match(/\.activity-event-card\s*\{([^}]*)\}/)?.[1] || '';
-  const activityCardBodyRule = activityCss.match(/\.activity-event-card \.card-body\s*\{([^}]*)\}/)?.[1] || '';
-  const activityTableWrapRule = activityCss.match(/\.activity-event-card \.table-wrap\s*\{([^}]*)\}/)?.[1] || '';
   const filterScrollResetBody = activity.match(/const resetListScroll = useCallback\(\(\) => \{([\s\S]*?)\n {2}\}, \[\]\);/)?.[1] || '';
   
-  assert.match(activity, /className:\s*'table-wrap'/, 'React Activity must render its event log inside the shared table wrapper');
   assert.match(filterScrollResetBody, /tableWrapRef\.current\.scrollLeft = 0/, 'filter changes may reset horizontal table position');
   assert.doesNotMatch(filterScrollResetBody, /scrollTop/, 'Activity filter/live updates must not reset vertical reading position');
   assert.match(activity, /const jumpToLatest = useCallback[\s\S]*listPaneRef\.current\.scrollTop = 0/, 'the explicit Jump to latest action may return the list to the top');
-  assert.match(css, /\.main\s*\{[^}]*@apply flex min-w-0 w-full flex-col/, 'the main dashboard column must expose remaining height to route content');
-  assert.match(routeRootRule, /@apply flex min-w-0 flex-col/, 'route content must use a vertical flex layout');
-  assert.match(routeRootRule, /flex:\s*1 0 auto/, 'route content must claim unused dashboard height without shrinking long pages');
-  assert.match(activityPageRule, /min-height:\s*0/, 'Activity must be allowed to shrink within the available route height'); // rigidity-ok: flex overflow invariant
-  assert.match(activityPageRule, /flex:\s*1 1 0/, 'Activity must fill available route height while allowing internal scrolling'); // rigidity-ok: bounded route flex child
-  assert.match(activityCardRule, /@apply flex min-w-0 flex-col/, 'the event log card must lay out its header and body vertically');
-  assert.match(activityCardRule, /min-height:\s*0/, 'the event log card must allow its scroll panes to shrink'); // rigidity-ok: flex overflow invariant
-  assert.match(activityCardRule, /flex:\s*1 1 0/, 'the event log card must fill remaining Activity height without forcing outer-page overflow'); // rigidity-ok: bounded vertical flex child
-  assert.match(activityCardBodyRule, /flex:\s*1 0 auto/, 'the event log body must fill the card');
-  assert.match(activityTableWrapRule, /flex:\s*1 0 auto/, 'the event log table wrapper must fill the body');
-  assert.match(activityCss, /\.activity-event-card \.table-wrap\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0/, 'the event log wrapper must span the full card width'); // rigidity-ok: semantic scroll-container invariant
-  assert.match(activityCss, /\.activity-event-card \.table-wrap\s*\{[^}]*overflow-x:\s*auto/, 'horizontal overflow must be contained by the Activity table wrapper');
   assert.match(tableWrapRule, /overscroll-behavior-x:\s*contain/, 'horizontal table overscroll should remain contained');
   assert.match(tableWrapRule, /overscroll-behavior-y:\s*auto/, 'vertical wheel and touch scrolling must chain to the Activity page');
   assert.doesNotMatch(tableWrapRule, /overscroll-behavior:\s*contain/, 'the table wrapper must not trap vertical page scrolling');

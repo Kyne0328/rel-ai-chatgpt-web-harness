@@ -111,6 +111,7 @@ class FakeWebContentsView {
 
 function createHarness({
   failOpen = false,
+  onOpen = async () => {},
   clearPersistentData = async () => ({ cleared: true }),
   listPersistentProfiles = async () => [],
   readPersistentSites = async () => [],
@@ -160,6 +161,7 @@ function createHarness({
     openDashboard: async route => {
       routes.push(route);
       if (failOpen) throw new Error('dashboard unavailable');
+      await onOpen(route);
     },
     clearPersistentData,
     listPersistentProfiles,
@@ -840,5 +842,185 @@ for (const scope of ['all', 'site']) {
     await host.closeAll();
   }
 }
+
+
+{
+  let beginOpen;
+  let releaseOpen;
+  const opening = new Promise(resolve => { beginOpen = resolve; });
+  const barrier = new Promise(resolve => { releaseOpen = resolve; });
+  const { host } = createHarness({ onOpen: async () => { beginOpen(); await barrier; } });
+  const started = host.run({ action: 'start' });
+  const rejected = assert.rejects(started, error => error?.code === 'BROWSER_OPERATION_CANCELLED');
+  await opening;
+  await host.closeAll();
+  releaseOpen();
+  await rejected;
+  assert.equal(host.getState().activeSessionCount, 0, 'startup must not publish a session removed during dashboard opening');
+}
+
+{
+  const { host, sessions } = createHarness();
+  await host.run({ action: 'start' });
+  let beginClear;
+  let releaseClear;
+  const clearing = new Promise(resolve => { beginClear = resolve; });
+  const barrier = new Promise(resolve => { releaseClear = resolve; });
+  sessions[0].clearStorageData = async () => { beginClear(); await barrier; };
+  const closing = host.closeAll();
+  await clearing;
+  assert.equal(host.closeAll(), closing, 'concurrent shutdown calls must share one cleanup owner');
+  await assert.rejects(() => host.run({ action: 'start' }), error => error?.code === 'BROWSER_OPERATION_CANCELLED');
+  releaseClear();
+  await closing;
+  assert.ok((await host.run({ action: 'start' })).nativeSessionId, 'startup must recover after cleanup settles');
+  await host.closeAll();
+}
+
+for (const transition of ['user-control', 'close']) {
+  const { host, webContents } = createHarness();
+  const session = await host.run({ action: 'start' });
+  const page = await host.run({ action: 'open_page', nativeSessionId: session.nativeSessionId });
+  let beginWait;
+  let releaseWait;
+  const waiting = new Promise(resolve => { beginWait = resolve; });
+  const barrier = new Promise(resolve => { releaseWait = resolve; });
+  let mutations = 0;
+  webContents[0].executeJavaScript = async script => {
+    if (String(script).includes('return { attached:')) {
+      beginWait();
+      await barrier;
+      return { attached: true, visible: true };
+    }
+    mutations += 1;
+    return true;
+  };
+  const operation = host.run({
+    action: 'interact', interaction: 'click', target: { by: 'testid', value: 'synthetic-control' },
+    nativeSessionId: session.nativeSessionId, nativePageId: page.nativePageId
+  });
+  const rejected = assert.rejects(operation, error => ['BROWSER_USER_CONTROL_ACTIVE', 'BROWSER_OPERATION_CANCELLED'].includes(error?.code));
+  await waiting;
+  if (transition === 'user-control') await host.setControl('user');
+  else await host.closeAll();
+  releaseWait();
+  await rejected;
+  assert.equal(mutations, 0, 'retired or user-owned fake pages must not receive queued mutations');
+  await host.closeAll();
+}
+
+
+
+for (const scope of ['page', 'session']) {
+  const { host, webContents } = createHarness();
+  const session = await host.run({ action: 'start' });
+  const page = await host.run({ action: 'open_page', nativeSessionId: session.nativeSessionId });
+  const wc = webContents[0];
+  const close = wc.close.bind(wc);
+  let failed = false;
+  wc.close = () => {
+    if (!failed) { failed = true; throw new Error('fixture native close failed'); }
+    close();
+  };
+  const request = scope === 'page'
+    ? { action: 'close_page', nativeSessionId: session.nativeSessionId, nativePageId: page.nativePageId }
+    : { action: 'close_session', nativeSessionId: session.nativeSessionId };
+  await assert.rejects(() => host.run(request), /fixture native close failed/);
+  assert.equal(host.getState().activeSessionCount, 1, 'a failed native close must retain session ownership');
+  assert.equal(host.getState().pageCount, 1, 'a failed native close must retain the page for retry');
+  assert.equal(wc.isDestroyed(), false);
+  await host.run(request);
+  assert.equal(wc.isDestroyed(), true, 'retry must perform actual teardown rather than report an absent handle');
+  assert.equal(host.getState().pageCount, 0);
+  await host.closeAll();
+}
+
+{
+  const { host, webContents } = createHarness();
+  const session = await host.run({ action: 'start' });
+  const page = await host.run({ action: 'open_page', nativeSessionId: session.nativeSessionId });
+  const wc = webContents[0];
+  const destroy = wc.destroy.bind(wc);
+  const close = wc.close.bind(wc);
+  wc.close = () => {};
+  wc.destroy = () => { throw new Error('fixture native destroy failed'); };
+  await assert.rejects(() => host.run({ action: 'close_page', nativeSessionId: session.nativeSessionId, nativePageId: page.nativePageId }), /fixture native destroy failed/);
+  assert.equal(host.getState().pageCount, 1);
+  wc.close = close;
+  wc.destroy = destroy;
+  await host.closeAll();
+  assert.equal(wc.isDestroyed(), true);
+}
+
+{
+  const { mock } = await import('node:test');
+  const { host, webContents } = createHarness();
+  const session = await host.run({ action: 'start' });
+  await host.run({ action: 'open_page', nativeSessionId: session.nativeSessionId });
+  const wc = webContents[0];
+  const close = wc.close.bind(wc);
+  wc.close = () => {};
+  wc.destroy = () => {};
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const result = host.run({ action: 'close_session', nativeSessionId: session.nativeSessionId });
+    const rejected = assert.rejects(result, /termination could not be confirmed/);
+    await new Promise(resolve => setImmediate(resolve));
+    mock.timers.tick(5000);
+    await rejected;
+    assert.equal(host.getState().activeSessionCount, 1, 'a teardown timeout must preserve retryable ownership');
+    assert.equal(host.getState().pageCount, 1);
+    wc.close = close;
+    await host.closeAll();
+    assert.equal(wc.isDestroyed(), true);
+  } finally {
+    mock.timers.reset();
+  }
+}
+
+{
+  const { host, webContents } = createHarness();
+  const session = await host.run({ action: 'start' });
+  await host.run({ action: 'open_page', nativeSessionId: session.nativeSessionId });
+  const wc = webContents[0];
+  let closeCalls = 0;
+  wc.close = () => { closeCalls += 1; };
+  wc.destroy = () => {};
+  const request = { action: 'close_session', nativeSessionId: session.nativeSessionId };
+  const first = host.run(request);
+  const second = host.run(request);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closeCalls, 1, 'concurrent closes must share the same native teardown attempt');
+  assert.equal(host.getState().activeSessionCount, 1, 'ownership persists until the destroyed event');
+  await assert.rejects(() => host.run({ action: 'open_page', nativeSessionId: session.nativeSessionId }), error => error?.code === 'BROWSER_OPERATION_CANCELLED');
+  assert.equal(wc.windowOpenHandler({ url: 'https://synthetic.fixture.invalid/' }).action, 'deny', 'closing sessions cannot register late popup pages');
+  wc.destroyed = true;
+  wc.emit('destroyed');
+  await Promise.all([first, second]);
+  assert.equal(host.getState().activeSessionCount, 0);
+}
+
+{
+  const { host, webContents } = createHarness();
+  const first = await host.run({ action: 'start' });
+  await host.run({ action: 'open_page', nativeSessionId: first.nativeSessionId });
+  await host.run({ action: 'open_page', nativeSessionId: first.nativeSessionId });
+  const other = await host.run({ action: 'start' });
+  await host.run({ action: 'open_page', nativeSessionId: other.nativeSessionId });
+  const failedPage = webContents[1];
+  const close = failedPage.close.bind(failedPage);
+  failedPage.close = () => { throw new Error('fixture partial page close failed'); };
+  await assert.rejects(() => host.closeAll(), /Some embedded browser sessions could not be closed/);
+  assert.equal(webContents[0].isDestroyed(), true);
+  assert.equal(webContents[2].isDestroyed(), true, 'one failed session must not prevent cleanup of other sessions');
+  assert.equal(failedPage.isDestroyed(), false);
+  assert.equal(host.getState().activeSessionCount, 1);
+  assert.equal(host.getState().pageCount, 1, 'partial teardown must keep only the resource still needing cleanup');
+  failedPage.close = close;
+  await host.closeAll();
+  assert.equal(failedPage.isDestroyed(), true);
+  assert.equal(host.getState().activeSessionCount, 0);
+}
+
 
 console.log('Embedded browser surface lifecycle, attachment, takeover, downloads, and cleanup passed.');

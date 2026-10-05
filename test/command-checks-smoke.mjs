@@ -4,6 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { relaiVerify } from "../src/localRepoBridge.js";
+import { outputSpillOwner, readOutputSpill } from '../src/outputSpill.js';
+import { serializeConnectorResult } from '../src/tools/connector.js';
+import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
+
 const { mapCheckArgs } = (() => {
   // mapCheckArgs is not exported from localRepoBridge; replicate it here as the internal bridge does
   return {
@@ -20,8 +24,10 @@ const { mapCheckArgs } = (() => {
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-checks-smoke-'));
 const workspace = { path: tmp, alias: 'test', commands: { lint: 'echo lint ok' }, testCommands: {} };
-const config = {};
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-checks-state-'));
+const config = { stateDir };
 
+try {
 fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({
   scripts: {
     check: 'node -e "console.log(\'check should not run for release\')"',
@@ -34,7 +40,7 @@ fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({
 // delegates to a script that includes it.
 {
   const result = await relaiVerify(workspace, config, { level: 'standard' });
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.deepEqual(result.checks, ['npm run test:all']);
   assert.ok(result.results[0].stdout.includes('release all'));
 }
@@ -153,6 +159,26 @@ fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({
   const totalBytes = Buffer.byteLength(stdout, 'utf8');
   // Output should be capped — well below 5 MB
   assert.ok(totalBytes < 2 * 1024 * 1024, `output should be truncated, got ${totalBytes} bytes`);
+
+  assert.equal(resultEntry.stdoutSpillTruncated, false, 'the actual producer must retain the complete oversized stream');
+  assert.ok(resultEntry.stdoutOutputRef, 'validation must return a real output recovery reference');
+  const owner = outputSpillOwner({ workspace: workspace.alias });
+  const retained = readOutputSpill(config, owner, resultEntry.stdoutOutputRef);
+  assert.equal(retained.bytes, 5000000, 'the spill retains bytes omitted from the bounded response tail');
+  const fd = fs.openSync(retained.file, 'r');
+  try {
+    const tail = Buffer.alloc(32);
+    fs.readSync(fd, tail, 0, tail.length, retained.bytes - tail.length);
+    assert.equal(tail.toString('utf8'), 'x'.repeat(32));
+  } finally { fs.closeSync(fd); }
+  const publicResult = serializeConnectorResult({
+    publicName: 'relai_validate', action: 'checks', operationName: OP.VALIDATE_CHECKS,
+    value: result, args: { workspace: workspace.alias }
+  });
+  assert.equal(publicResult.results[0].stdout, undefined, 'successful output remains compact by default');
+  assert.equal(publicResult.results[0].stdoutOutputRef, resultEntry.stdoutOutputRef, 'a real spill handle survives public serialization');
+  assert.equal(publicResult.results[0].stdoutSpillTruncated, false);
+
 }
 
 // 8. Old command alias still maps internally (passes command: "echo aliased" and gets ok result)
@@ -179,6 +205,18 @@ fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({
   const fullStdout = full.results[0].stdout || '';
   assert.ok(fullStdout.length > 4000, 'fullOutput should keep a larger tail');
   assert.ok(fullStdout.includes('END_MARKER_Z'), 'fullOutput tail must keep the END of output');
+
+  const publicFull = serializeConnectorResult({
+    publicName: 'relai_validate', action: 'checks', operationName: OP.VALIDATE_CHECKS,
+    value: full, args: { workspace: workspace.alias, fullOutput: true }
+  });
+  assert.equal(publicFull.results[0].stdout, fullStdout, 'explicit fullOutput retains the producer-bounded success tail');
+  assert.ok(publicFull.results[0].stdout.includes('END_MARKER_Z'));
+
 }
 
 console.log('Check-command smoke tests passed.');
+} finally {
+  fs.rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+}

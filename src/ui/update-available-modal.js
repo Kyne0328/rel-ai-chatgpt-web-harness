@@ -172,7 +172,6 @@ function initUpdateAvailableModal(options = {}) {
       onAction: action => void runSupportUpdateAction(action)
     });
     if (activeModalKey !== view.key) {
-      activeModalKey = view.key;
       openModal({
         title: view.title,
         content,
@@ -180,6 +179,7 @@ function initUpdateAvailableModal(options = {}) {
         escDisabled: view.blocking,
         onClose: () => { activeModalKey = ''; }
       });
+      activeModalKey = view.key;
       return;
     }
     updateModal({ title: view.title, content, escDisabled: view.blocking });

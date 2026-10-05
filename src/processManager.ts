@@ -1720,6 +1720,7 @@ function scheduleInteractivePtyRetirement(config: ManagedProcessConfig, record: 
 
 function isRetirableInteractivePty(record: ManagedProcessRecord): boolean {
   return record.runtimeId === RUNTIME_ID
+    && record.lifecycle === 'task'
     && record.kind === 'interactive'
     && record.pty === true
     && record.status === 'running'

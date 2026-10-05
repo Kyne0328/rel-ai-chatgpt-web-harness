@@ -163,6 +163,26 @@ try {
     assert.equal(route.loadingSeen, false, `MCP activity exposed a loading placeholder on #${route.route}: ${JSON.stringify(route)}`);
     assert.deepEqual(route.mainFrameNavigationDelta, { didStartNavigation: 0, didNavigate: 0, didFinishLoad: 0 }, `MCP activity navigated the main frame on #${route.route}`);
   }
+  assert.deepEqual(result.updateModalTransitions, {
+    installingLocked: true,
+    repeated: { samePanel: true, focusPreserved: true, closeAvailable: true },
+    closed: true,
+    focusReturned: true
+  }, 'update transitions must preserve focus, block installation dismissal, and restore close/retry behavior');
+  assert.deepEqual(result.usageRequestOrdering, {
+    monthRequestsDeduplicated: true,
+    selectedRangeMatchesData: true,
+    renderedActions: 13,
+    failed: true,
+    recovered: true,
+    routeAfterLateResult: '#tasks'
+  }, 'analytics must render the latest range, deduplicate shared month reads, and recover after errors');
+  assert.deepEqual(result.connectionSaveLifecycle, {
+    during: { calls: 1, locked: true },
+    after: { port: '3344', latestTunnelStatus: true },
+    failed: { editable: true, port: '3355', dirty: 'true' },
+    recovered: { ports: [3344, 3355, 3355], dirty: 'false' }
+  }, 'connection saves must prevent competing edits, retain live tunnel updates, and recover after a failed save');
   assert.equal(result.taskInteraction.immediate, true, 'Task summary detail must render synchronously on selection before history hydration');
   assert.equal(result.taskInteraction.inspector, true);
   assert.equal(result.taskInteraction.selectedRow, true);

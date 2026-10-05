@@ -174,16 +174,16 @@ for (const field of ['download_url', 'file_id', 'mime_type', 'file_name']) {
 assert.equal(publicEditSchema?.inputSchema?.properties?.stage, undefined, 'internal staged-edit transport fallback must stay out of public discovery');
 assert.equal(publicEditSchema?.inputSchema?.properties?.writeId, undefined, 'internal staged-edit identifiers must stay out of public discovery');
 const publicProcessSchema = publicSchemas.find(item => item.name === 'relai_process');
-assert.match(publicProcessSchema?.inputSchema?.properties?.command?.description || '', /shell syntax/i, 'public process discovery must retain shell guidance');
+assert.match(publicProcessSchema?.inputSchema?.properties?.command?.description || '', /shell (?:command|syntax)/i, 'public process discovery must identify the shell execution form');
 assert.doesNotMatch(publicProcessSchema?.inputSchema?.properties?.command?.description || '', /Action usage:/i, 'public process fields must not repeat action-routing prose');
 assert.match(publicProcessSchema?.inputSchema?.properties?.action?.description || '', /processId! except start\/list.*start\([^)]*kind![^)]*purpose![^)]*\).*read.*write.*stop.*list/i, 'public process discovery must factor repeated process identity while preserving action requirements');
 assert.match(publicExecSchema?.description || '', /direct executable \+ argv.*command string/i, 'ChatGPT discovery must describe both execution forms declaratively');
 assert.match(publicExecSchema?.inputSchema?.description || '', /direct executable \+ argv, and shell command/i);
 assert.match(publicExecSchema?.inputSchema?.description || '', /Input form: command or executable\./i, 'flat discovery must preserve canonical executable-mode alternatives');
-assert.match(publicExecSchema?.inputSchema?.properties?.command?.description || '', /Multiline scripts or structured text can be supplied through input/i);
+assert.match(publicExecSchema?.inputSchema?.properties?.command?.description || '', /does not accept argv or input/i, 'shell-command discovery must not advertise direct-mode-only fields');
 assert.match(publicExecSchema?.inputSchema?.properties?.executable?.description || '', /shell:false/i);
 assert.equal(publicExecSchema?.inputSchema?.properties?.argv?.description, undefined, 'public discovery must not repeat argv semantics already expressed by the execution-form description');
-assert.match(publicExecSchema?.inputSchema?.properties?.input?.description || '', /multiline scripts or structured text/i);
+assert.match(publicExecSchema?.inputSchema?.properties?.input?.description || '', /direct executable \+ argv.*multiline scripts or structured text/i, 'literal multiline stdin guidance belongs to the direct-mode input field');
 assert.equal(publicExecSchema?.inputSchema?.allOf, undefined, 'relai_exec discovery stays import-safe; execution-mode exclusivity is enforced at runtime');
 for (const removed of removedDirectNames) {
   assert.equal(resolveToolOperation(removed, {}), null, `${removed} must not resolve as a public tool`);
@@ -274,6 +274,7 @@ await invalid('relai_computer', { action: 'status', text: 'unexpected' });
 await invalid('relai_exec', { work_id: 'work' });
 await invalid('relai_exec', { work_id: 'work', command: 'node -v', executable: 'node' });
 await invalid('relai_exec', { work_id: 'work', command: 'node -v', argv: ['-v'] });
+await invalid('relai_exec', { work_id: 'work', command: 'node -v', input: 'direct-mode-only' });
 await valid('relai_edit', { work_id: 'work', semantic: { action: 'rename', path: 'src/index.js', line: 1, column: 1, newName: 'renamed' } });
 await valid('relai_edit', { work_id: 'work', symbolEdit: { action: 'replace', symbol: 'renderApp', content: 'function renderApp() {}' } });
 await invalid('relai_edit', { work_id: 'work', symbolEdit: { action: 'replace', symbol: 'renderApp', content: 'function renderApp() {}' }, path: 'src/index.js', content: 'conflict' });

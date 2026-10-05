@@ -121,6 +121,7 @@ interface PersistenceSnapshot {
 const pendingSessions = new Map<string, PendingSession>();
 const pendingFlushTimers = new Map<string, NodeJS.Timeout>();
 const pendingPrunes = new Map<string, NodeJS.Timeout>();
+const clearingDirectories = new Map<string, Promise<void>>();
 let activityPersistenceBound = false;
 let taskHistoryPersistenceState: PersistenceState = { lastError: '', lastFailureAt: null, retryCount: 0 };
 
@@ -303,7 +304,7 @@ function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapsh
   let persisted: TaskRecord[] = [];
   try {
     ensureCurrentHistory(config);
-    const storedSessions = options.summary === true
+    const storedSessions = clearingDirectories.has(directory) ? [] : options.summary === true
       ? listSessionSummaries(directory, storedLimit)
       : listSessions(directory, storedLimit);
     persisted = storedSessions.map((session: StoredTaskSession) => {
@@ -344,6 +345,7 @@ function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapsh
 function readRecentTaskHistoryEvents(config: TaskHistoryConfig, limit = 200): HistoryEvent[] {
   try {
     const directory = getTaskHistoryDir(config);
+    if (clearingDirectories.has(directory)) return [];
     return listRecentSessionEvents(directory, clamp(limit || 200, 1, 1000))
       .map((event: HistoryEvent) => sanitizeActivityEventRecord(event) as HistoryEvent)
       .filter((event: HistoryEvent | null): event is HistoryEvent => Boolean(event));
@@ -355,8 +357,9 @@ function readRecentTaskHistoryEvents(config: TaskHistoryConfig, limit = 200): Hi
 
 function readTaskHistoryPage(config: TaskHistoryConfig, options: TaskHistoryPageOptions = {}): { tasks: TaskRecord[]; cursor: SessionPageCursor | null; hasMore: boolean } {
   try {
-    ensureCurrentHistory(config);
     const directory = getTaskHistoryDir(config);
+    if (clearingDirectories.has(directory)) return { tasks: [], cursor: null, hasMore: false };
+    ensureCurrentHistory(config);
     const activeIds = activeTaskIdSet(options.activeTaskIds);
     const page = listSessionSummaryPage(directory, {
       limit: clamp(options.limit || 100, 1, 500),
@@ -386,7 +389,9 @@ function readTaskHistoryPage(config: TaskHistoryConfig, options: TaskHistoryPage
 
 function readRecentTaskHistoryEventsPage(config: TaskHistoryConfig, options: ActivityHistoryPageOptions = {}): { entries: HistoryEvent[]; cursor: EventPageCursor | null; hasMore: boolean } {
   try {
-    const page = listRecentSessionEventPage(getTaskHistoryDir(config), {
+    const directory = getTaskHistoryDir(config);
+    if (clearingDirectories.has(directory)) return { entries: [], cursor: null, hasMore: false };
+    const page = listRecentSessionEventPage(directory, {
       limit: clamp(options.limit || 500, 1, 500),
       cursor: options.cursor || null,
       taskId: cleanTaskId(options.taskId)
@@ -442,7 +447,11 @@ function findTaskReuseCandidates(config: TaskHistoryConfig, workspaceAlias: unkn
   if (!workspace || !conversation) return [];
   try {
     const directory = getTaskHistoryDir(config);
-    const sessions = findConversationSessions(directory, workspace, conversation, clamp(limit || 24, 1, 50));
+    const sessions = clearingDirectories.has(directory)
+      ? pendingSessionsForDirectory(directory)
+        .filter(session => String(session.workspace || '') === workspace && String(session.correlation?.conversationId || '') === conversation)
+        .slice(0, clamp(limit || 24, 1, 50))
+      : findConversationSessions(directory, workspace, conversation, clamp(limit || 24, 1, 50));
     return (Array.isArray(sessions) ? sessions : [])
       .filter(session => Boolean(session?.id))
       .map(session => readWorkingSession(directory, String(session.id)) || session) as TaskRecord[];
@@ -453,6 +462,7 @@ function findTaskReuseCandidates(config: TaskHistoryConfig, workspaceAlias: unkn
 }
 
 function retrievalCandidateSessions(config: TaskHistoryConfig, workspaceAlias: string, query: unknown, options: { portable?: boolean } = {}): TaskRecord[] {
+  if (clearingDirectories.has(getTaskHistoryDir(config))) return readTaskHistory(config, {}, { limit: MAX_HISTORY_QUERY_SESSIONS, summary: true });
   const signature = queryTaskSignature(query);
   const exactNeedles = uniqueStrings([...signature.identifiers, ...signature.paths, ...signature.pathScopes])
     .filter(value => value.length >= 4)
@@ -486,7 +496,7 @@ function readConversationContinuity(config: TaskHistoryConfig, conversationId: u
   const excludeTaskId = cleanTaskId(options.excludeTaskId);
   const limit = clamp(options.limit || 3, 1, 5);
   let candidates: TaskRecord[] | null = null;
-  if (id.length >= 4) {
+  if (id.length >= 4 && !clearingDirectories.has(getTaskHistoryDir(config))) {
     try {
       const exact = findSessionsContaining(getTaskHistoryDir(config), [id], { limit: 20 });
       candidates = (Array.isArray(exact) ? exact : [])
@@ -702,7 +712,7 @@ function readPendingSession(directory: string, id: string): TaskRecord | null {
 }
 
 function readWorkingSession(directory: string, id: string): TaskRecord | null {
-  return readPendingSession(directory, id) || readSession(directory, id) as TaskRecord | null;
+  return readPendingSession(directory, id) || (clearingDirectories.has(directory) ? null : readSession(directory, id) as TaskRecord | null);
 }
 
 function pendingSessionEntriesForDirectory(directory: string): Array<[string, PendingSession]> {
@@ -719,7 +729,7 @@ function pendingSessionsForDirectory(directory: string): TaskRecord[] {
 function persistSession(directory: string, session: TaskRecord, options: PersistenceOptions = {}): void {
   if (!session?.id) return;
   const key = pendingSessionKey(directory, session.id);
-  if (options.defer !== true) {
+  if (options.defer !== true && !clearingDirectories.has(directory)) {
     const pending = pendingSessions.get(key);
     if (pending?.writing) {
       pending.session = session;
@@ -781,6 +791,9 @@ async function flushPendingDirectory(directory: string): Promise<boolean> {
 }
 
 async function flushPendingSession(key: string, pending: PendingSession): Promise<boolean> {
+  const clearing = clearingDirectories.get(pending.directory);
+  if (clearing) await clearing.catch(() => {});
+  if (pendingSessions.get(key) !== pending) return true;
   if (pending.writing) return pending.promise;
   pending.writing = true;
   const version = pending.version;
@@ -807,7 +820,7 @@ async function flushPendingSession(key: string, pending: PendingSession): Promis
       pending.retryCount = 0;
       pending.persistedVersion = version;
       scheduleTaskHistoryPrune(pending.directory);
-      if (pending.version <= version) pendingSessions.delete(key);
+      if (pending.version <= version && pendingSessions.get(key) === pending) pendingSessions.delete(key);
       recordTaskHistoryPersistenceSuccess();
     });
   return pending.promise;
@@ -898,19 +911,48 @@ async function clearWorkspaceTaskHistory(config: TaskHistoryConfig, workspaceVal
   return { removed: taskIds.length, taskIds };
 }
 
-function clearTaskHistory(config: TaskHistoryConfig): void {
+function clearTaskHistory(config: TaskHistoryConfig): Promise<void> {
   const directory = getTaskHistoryDir(config);
+  const existing = clearingDirectories.get(directory);
+  if (existing) return existing;
   const prefix = `${directory}\u0000`;
-  for (const [key] of [...pendingSessions.entries()]) {
+  const writes: Promise<boolean>[] = [];
+  const detached: Array<[string, PendingSession]> = [];
+  for (const [key, pending] of [...pendingSessions.entries()]) {
     if (!key.startsWith(prefix)) continue;
+    detached.push([key, pending]);
+    if (pending.writing) writes.push(pending.promise);
     pendingSessions.delete(key);
   }
   clearPendingDirectoryFlush(directory);
   const pruneTimer = pendingPrunes.get(directory);
   if (pruneTimer) clearTimeout(pruneTimer);
   pendingPrunes.delete(directory);
-  clearStoredTaskHistory(config);
-  recordTaskHistoryPersistenceSuccess();
+  // Only writes already posted at the clear boundary must drain. Fresh events
+  // are queued separately and persist after this durable deletion completes.
+  const clearing = Promise.all(writes).then(results => {
+    if (results.some(succeeded => !succeeded)) throw new Error('Task history writes failed before cleanup could complete.');
+    clearStoredTaskHistory(config);
+    recordTaskHistoryPersistenceSuccess();
+  }).catch(error => {
+    // A rejected clear must not discard snapshots that have never reached disk.
+    // Preserve fresh events accepted while deletion was pending as well.
+    for (const [key, pending] of detached) {
+      const fresh = pendingSessions.get(key);
+      if (fresh) {
+        fresh.session = mergeTaskLifecycleSnapshots(pending.session, fresh.session, { eventsAlreadySanitized: true }) as TaskRecord;
+        fresh.version += 1;
+      } else {
+        pendingSessions.set(key, { ...pending, writing: false, version: pending.version + 1, promise: Promise.resolve(true) });
+      }
+    }
+    throw error;
+  }).finally(() => {
+    clearingDirectories.delete(directory);
+    if (pendingSessionEntriesForDirectory(directory).length) schedulePendingDirectoryFlush(directory, 0);
+  });
+  clearingDirectories.set(directory, clearing);
+  return clearing;
 }
 
 function emptySession(id: string): TaskRecord {

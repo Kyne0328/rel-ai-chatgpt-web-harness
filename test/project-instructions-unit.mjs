@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { MAX_PROJECT_INSTRUCTION_BYTES, readProjectInstructions, resetProjectInstructionCacheForTests } from '../src/projectInstructions.js';
-import { repoSnapshot, relaiRead } from '../src/localRepoBridge.js';
+import { repoSnapshot, relaiReadAsync } from '../src/localRepoBridge.js';
 import { workspaceInspect } from '../src/tools/status.js';
 import { compactForConnector } from '../src/tools/connector.js';
 import { publicConfigSummary } from '../src/config.js';
@@ -40,7 +40,7 @@ try {
   assert.deepEqual(legacyIgnored.sources, [], 'legacy Rel.AI instruction paths must not be loaded automatically');
   assert.equal(legacyIgnored.content, '');
 
-  const directRead = relaiRead(workspace, config, { paths: ['.relai/instructions.md'] });
+  const directRead = await relaiReadAsync(workspace, config, { paths: ['.relai/instructions.md'] });
   assert.match(directRead.items[0].content, /Legacy nested rule/, 'legacy files remain ordinary readable repository files');
 
   fs.writeFileSync(path.join(repo, 'AGENTS.md'), 'Root agent rule.\n', 'utf8');

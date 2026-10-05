@@ -236,6 +236,128 @@ await assert.rejects(
   error => error?.code === 'BROWSER_SESSION_NOT_FOUND'
 );
 
+{
+  const closingFake = createFakeBrowserHarness();
+  const closingRuntime = createBrowserRuntime({ launch: closingFake.launch, getProfileConfig: () => ({ stateDir: path.join(temp, 'closing-state') }) });
+  const owner = { taskId: 'work_closing' };
+  const session = await closingRuntime.start(workspace, {}, owner);
+  const closeBarrier = Promise.withResolvers();
+  closingFake.state.closeBarrier = closeBarrier.promise;
+  const firstStop = closingRuntime.stop(workspace, { sessionId: session.sessionId }, owner);
+  const secondStop = closingRuntime.stop(workspace, { sessionId: session.sessionId }, owner);
+  await assert.rejects(() => closingRuntime.start(workspace, {}, { taskId: 'work_other' }), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  await assert.rejects(() => closingRuntime.clearProfile(workspace, {}, owner), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  await assert.rejects(() => closingRuntime.snapshot(workspace, { sessionId: session.sessionId }, owner), error => error?.code === 'BROWSER_SESSION_CLOSING');
+  closeBarrier.resolve();
+  assert.equal((await firstStop).ok, true);
+  assert.equal((await secondStop).ok, true);
+  assert.equal(closingFake.state.closeCount, 1, 'concurrent stops must share one driver teardown');
+  assert.equal(closingRuntime.activeSessionCount(), 0);
+  closingFake.state.closeBarrier = null;
+  const replacement = await closingRuntime.start(workspace, {}, owner);
+  closingFake.state.failNextClose = true;
+  const failedStop = await closingRuntime.stop(workspace, { sessionId: replacement.sessionId }, owner);
+  assert.equal(failedStop.ok, false, 'driver close errors must be reported');
+  assert.match(failedStop.error, /simulated close failure/);
+  assert.equal(closingRuntime.activeSessionCount(), 1, 'failed close must preserve ownership for retry');
+  await assert.rejects(() => closingRuntime.start(workspace, {}, { taskId: 'work_other' }), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  assert.equal((await closingRuntime.stop(workspace, { sessionId: replacement.sessionId }, owner)).ok, true);
+  const shutdownSession = await closingRuntime.start(workspace, {}, owner);
+  closingFake.state.failNextClose = true;
+  await assert.rejects(() => closingRuntime.shutdown(), /Local browser cleanup failed/);
+  assert.equal((await closingRuntime.status(workspace, { sessionId: shutdownSession.sessionId }, owner)).ok, true);
+  await closingRuntime.shutdown();
+}
+
+for (const cleanup of ['shutdown', 'task']) {
+  const pendingFake = createFakeBrowserHarness();
+  const launchBarrier = Promise.withResolvers();
+  pendingFake.state.launchBarrier = launchBarrier.promise;
+  const pendingRuntime = createBrowserRuntime({ launch: pendingFake.launch, getProfileConfig: () => ({ stateDir: path.join(temp, `pending-${cleanup}`) }) });
+  const owner = { taskId: `work_pending_${cleanup}` };
+  const starting = assert.rejects(() => pendingRuntime.start(workspace, {}, owner), error => error?.code === 'BROWSER_OPERATION_CANCELLED');
+  let cleaned = false;
+  const cleaning = (cleanup === 'shutdown' ? pendingRuntime.shutdown() : pendingRuntime.stopSessionsForTask(owner.taskId))
+    .then(result => { cleaned = true; return result; });
+  await Promise.resolve();
+  assert.equal(cleaned, false, 'cleanup must wait for pending startup resources');
+  if (cleanup === 'shutdown') {
+    await assert.rejects(() => pendingRuntime.start(workspace, {}, owner), error => error?.code === 'BROWSER_RUNTIME_SHUTTING_DOWN');
+  } else {
+    await assert.rejects(() => pendingRuntime.start(workspace, { profile: 'ephemeral' }, owner), error => error?.code === 'BROWSER_SESSION_CLOSING');
+  }
+  launchBarrier.resolve();
+  await starting;
+  await cleaning;
+  assert.equal(pendingRuntime.activeSessionCount(), 0, 'a late launch must not resurrect a cleaned-up session');
+  assert.equal(pendingFake.state.closeCount, 1, 'the late driver must be closed');
+}
+
+{
+  const cancelledFake = createFakeBrowserHarness();
+  const launchBarrier = Promise.withResolvers();
+  const closeBarrier = Promise.withResolvers();
+  cancelledFake.state.launchBarrier = launchBarrier.promise;
+  cancelledFake.state.closeBarrier = closeBarrier.promise;
+  const cancelledRuntime = createBrowserRuntime({ launch: cancelledFake.launch, getProfileConfig: () => ({ stateDir: path.join(temp, 'cancelled-launch') }) });
+  const controller = new AbortController();
+  const starting = assert.rejects(() => cancelledRuntime.start(workspace, {}, {}, { signal: controller.signal }), error => error?.code === 'BROWSER_OPERATION_CANCELLED');
+  controller.abort(new Error('cancel pending launch'));
+  await starting;
+  let cleaned = false;
+  const cleaning = cancelledRuntime.shutdown().then(() => { cleaned = true; });
+  launchBarrier.resolve();
+  for (let turn = 0; turn < 4; turn += 1) await Promise.resolve();
+  assert.equal(cleaned, false, 'shutdown must await late cleanup after the caller has observed cancellation');
+  closeBarrier.resolve();
+  await cleaning;
+  assert.equal(cancelledFake.state.closeCount, 1);
+  assert.equal(cancelledRuntime.activeSessionCount(), 0);
+}
+
+for (const cleanup of ['task', 'shutdown']) {
+  const immediateFake = createFakeBrowserHarness();
+  const immediateRuntime = createBrowserRuntime({ launch: immediateFake.launch, getProfileConfig: () => ({ stateDir: path.join(temp, `immediate-${cleanup}`) }) });
+  const owner = { taskId: `work_immediate_${cleanup}` };
+  const session = await immediateRuntime.start(workspace, {}, owner);
+  const closeBarrier = Promise.withResolvers();
+  immediateFake.state.closeBarrier = closeBarrier.promise;
+  const cleaning = cleanup === 'task' ? immediateRuntime.stopSessionsForTask(owner.taskId) : immediateRuntime.shutdown();
+  await assert.rejects(() => immediateRuntime.snapshot(workspace, { sessionId: session.sessionId }, owner),
+    error => error?.code === 'BROWSER_SESSION_NOT_FOUND', 'terminal cleanup must revoke public use before its first asynchronous continuation');
+  closeBarrier.resolve();
+  await cleaning;
+  assert.equal(immediateRuntime.activeSessionCount(), 0);
+}
+
+for (const cancellation of ['caller', 'shutdown']) {
+  const lateFake = createFakeBrowserHarness();
+  const launchBarrier = Promise.withResolvers();
+  lateFake.state.launchBarrier = launchBarrier.promise;
+  lateFake.state.failClose = true;
+  const lateRuntime = createBrowserRuntime({ launch: lateFake.launch, getProfileConfig: () => ({ stateDir: path.join(temp, `failed-late-${cancellation}`) }) });
+  const controller = new AbortController();
+  const starting = assert.rejects(() => lateRuntime.start(workspace, {}, {}, { signal: controller.signal }),
+    error => cancellation === 'caller' ? error?.code === 'BROWSER_OPERATION_CANCELLED' : /simulated close failure/.test(error.message));
+  let cleaning;
+  if (cancellation === 'caller') {
+    controller.abort(new Error('cancel late failing driver'));
+    await starting;
+  } else {
+    cleaning = assert.rejects(() => lateRuntime.shutdown(), /Local browser cleanup failed/);
+  }
+  launchBarrier.resolve();
+  await starting;
+  if (cleaning) await cleaning;
+  else await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lateRuntime.activeSessionCount(), 1, 'a late driver with failed cleanup must retain a retryable owner');
+  await assert.rejects(() => lateRuntime.start(workspace, {}, {}), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  await assert.rejects(() => lateRuntime.clearProfile(workspace, {}, {}), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  lateFake.state.failClose = false;
+  await lateRuntime.shutdown();
+  assert.equal(lateRuntime.activeSessionCount(), 0, 'later shutdown must finish retained late-driver cleanup');
+}
+
 fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 console.log('Local browser runtime lifecycle, persistent defaults, user handoff, tabs, cancellation, failure recovery, active ownership boundaries, and cleanup passed.');
 
@@ -243,7 +365,10 @@ function createFakeBrowserHarness() {
   const state = {
     closeCount: 0,
     failNextLaunch: false,
+    failNextClose: false,
+    failClose: false,
     launchBarrier: null,
+    closeBarrier: null,
     timeoutInteraction: false,
     pendingSnapshot: false,
     navigateCount: 0,
@@ -291,7 +416,14 @@ function createFakeBrowserHarness() {
         pages.push(page);
         return page;
       },
-      async close() { state.closeCount += 1; },
+      async close() {
+        state.closeCount += 1;
+        if (state.closeBarrier) await state.closeBarrier;
+        if (state.failClose || state.failNextClose) {
+          state.failNextClose = false;
+          throw new Error('simulated close failure');
+        }
+      },
       onDisconnected(listener) { disconnected = listener; },
       async setControl(owner, reason = '') { state.controlChanges.push({ owner, reason }); },
       disconnect() { disconnected?.(); }

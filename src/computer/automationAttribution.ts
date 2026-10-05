@@ -1,5 +1,6 @@
 import { principalFingerprint } from '../mcp/principal.ts';
 import { onToolActivity, taskError } from '../toolActivity.js';
+import { sanitizeDisplayText } from '../taskObservability.js';
 
 const TERMINAL_TASK_PHASES = new Set(['completed', 'cancelled', 'inactive']);
 
@@ -61,6 +62,10 @@ function assertAutomationAttribution(
 }
 
 function registerTerminalTaskCleanup(cleanup: (taskId: string) => Promise<unknown> | unknown): () => void {
+  const reportFailure = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error || 'Unknown cleanup failure');
+    console.error('[rel-ai-mcp] automatic automation cleanup failed:', sanitizeDisplayText(message, 500));
+  };
   return onToolActivity((activity: {
     phase?: unknown;
     taskId?: unknown;
@@ -68,7 +73,13 @@ function registerTerminalTaskCleanup(cleanup: (taskId: string) => Promise<unknow
   }) => {
     if (!TERMINAL_TASK_PHASES.has(String(activity?.phase || ''))) return;
     const taskId = String(activity?.taskId || activity?.task?.taskId || activity?.task?.id || '').trim();
-    if (taskId) void cleanup(taskId);
+    if (!taskId) return;
+    try {
+      // Invoke immediately so terminal events revoke public use synchronously.
+      void Promise.resolve(cleanup(taskId)).catch(reportFailure);
+    } catch (error) {
+      reportFailure(error);
+    }
   });
 }
 

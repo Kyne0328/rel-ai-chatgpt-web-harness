@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { fallbackOperationReceipt } from '../mcp/fallbackExecutions.js';
 import { slimCompactPublicResult } from './compactResult.js';
+import { executionOutcome } from '../executionOutcome.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { withTaskIdentity } from './task.js';
 import {
@@ -162,7 +163,9 @@ function compactForConnector(name, value, args = {}) {
         workspace: value.workspace || args.workspace,
         level: value.level,
         checks: value.checks,
-        results: Array.isArray(value.results) ? value.results.map(compactCommandResult) : value.results,
+        results: Array.isArray(value.results)
+          ? value.results.map(result => compactCommandResult(result, { fullOutput: args.fullOutput === true || value.fullOutput === true }))
+          : value.results,
         skippedChecks: value.skippedChecks,
         completedUnits: value.completedUnits,
         executedUnits: value.executedUnits,
@@ -220,41 +223,19 @@ function compactForConnector(name, value, args = {}) {
     case OP.EXEC:
       return pruneEmpty({
         ok: value.ok,
-        executed: value.executed,
-        commandSucceeded: value.commandSucceeded,
+        ...executionOutcome(value),
         workspace: value.workspace || args.workspace,
         command: value.command,
         shell: value.shell || undefined,
         cwd: value.cwd && value.cwd !== '.' ? value.cwd : undefined,
-        exitCode: value.exitCode,
-        durationMs: value.durationMs,
-        outputFinalizationTimedOut: value.outputFinalizationTimedOut,
-        outputFinalizationError: value.outputFinalizationError,
-        mutationOwnershipPersistenceError: value.mutationOwnershipPersistenceError,
         stdout: value.stdout || undefined,
         stderr: value.stderr || undefined,
-        stdoutBytes: value.stdoutBytes || undefined,
-        stderrBytes: value.stderrBytes || undefined,
-        stdoutTruncated: value.stdoutTruncated === true ? true : undefined,
-        stderrTruncated: value.stderrTruncated === true ? true : undefined,
-        stdoutOutputRef: value.stdoutOutputRef || undefined,
-        stderrOutputRef: value.stderrOutputRef || undefined,
-        stdoutSpillTruncated: value.stdoutSpillTruncated != null ? value.stdoutSpillTruncated === true : undefined,
-        stderrSpillTruncated: value.stderrSpillTruncated != null ? value.stderrSpillTruncated === true : undefined,
-        timedOut: value.timedOut === true ? true : undefined,
-        cancelled: value.cancelled === true ? true : undefined,
-        rootExitConfirmed: value.rootExitConfirmed,
-        terminationConfirmed: value.terminationConfirmed != null ? value.terminationConfirmed === true : undefined,
-        forcedTermination: value.forcedTermination != null ? value.forcedTermination === true : undefined,
-        signal: value.signal || undefined,
-        error: value.error || undefined,
         environmentKeys: value.environmentKeys?.length ? value.environmentKeys : undefined,
         changedFiles: value.changedFiles?.length ? value.changedFiles : undefined,
         ephemeralChangedFiles: value.ephemeralChangedFiles?.length ? value.ephemeralChangedFiles : undefined,
         changedFilesTruncated: value.changedFilesTruncated === true ? true : undefined,
         mutationTracking: value.mutationTracking || undefined,
-        mutationTrackingDetails: value.mutationTrackingDetails || undefined,
-        mutationUnknown: value.mutationUnknown === true ? true : undefined
+        mutationTrackingDetails: value.mutationTrackingDetails || undefined
       });
     case OP.PROCESS_LIST:
       return {

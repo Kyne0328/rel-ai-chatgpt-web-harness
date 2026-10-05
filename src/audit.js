@@ -259,7 +259,7 @@ async function clearAuditHistory(config) {
   }
   await fs.promises.mkdir(path.dirname(auditPath), { recursive: true, mode: 0o700 });
   await fs.promises.writeFile(auditPath, '', { mode: 0o600 });
-  try { clearTaskHistory(config); } catch {}
+  await clearTaskHistory(config);
   return { auditPath, removedFiles, removedBytes };
 }
 

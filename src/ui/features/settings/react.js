@@ -265,6 +265,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
   const [validation, setValidation] = useState(null);
   const [saveState, setSaveState] = useState('idle');
   const firstInputRef = useRef(null);
+  const saveInFlightRef = useRef(false);
   const desktop = window.relaiDesktop;
 
   useEffect(() => {
@@ -327,11 +328,13 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
   const dirty = connectionSnapshot(form) !== saved;
   const credentialError = tunnelCredentialError(form);
   const update = patch => {
+    if (saveInFlightRef.current) return;
     setValidation(null);
     setSaveState('idle');
     setForm(current => ({ ...current, ...patch }));
   };
   const save = async () => {
+    if (saveInFlightRef.current) return;
     const issue = validateConnectionSettings(form);
     if (issue) {
       setValidation(issue);
@@ -339,19 +342,19 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
       window.requestAnimationFrame(() => document.querySelector(`[data-connection-field="${issue.field}"]`)?.focus());
       return;
     }
+    saveInFlightRef.current = true;
     setSaveState('saving');
     setValidation(null);
     try {
       const result = await desktop.saveSettings({ port: form.port, tunnelId: form.tunnelId, tunnelApiKey: form.tunnelApiKey });
-      const next = {
-        ...form,
+      setForm(current => ({
+        ...current,
         tunnelApiKey: '',
         tunnelApiKeyConfigured: true,
         tunnelErrorCode: String(result?.errorCode || result?.status?.errorCode || ''),
         tunnelError: String(result?.error || result?.status?.error || '')
-      };
-      setForm(next);
-      setSaved(connectionSnapshot({ ...next, tunnelErrorCode: '', tunnelError: '' }));
+      }));
+      setSaved(connectionSnapshot({ ...form, tunnelApiKey: '' }));
       requestDashboardRefresh();
       if (result?.ok === false) {
         setOpen(true);
@@ -365,6 +368,8 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
     } catch (error) {
       setSaveState('error');
       toast(messageOf(error), { variant: 'error' });
+    } finally {
+      saveInFlightRef.current = false;
     }
   };
   const describedBy = field => [ `${field}Help`, validation?.field === field ? `${field}Error` : '' ].filter(Boolean).join(' ');
@@ -381,7 +386,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
       h('p', { className: 'muted' }, 'Use these settings when connecting this computer for the first time or fixing a connection problem.'),
       h(SettingsField, { label: 'Tunnel ID', help: 'The OpenAI Secure MCP Tunnel ID for this computer.', error: validation?.field === 'tunnelId' ? validation.message : '', inputId: 'tunnelId' },
         h('input', {
-          id: 'tunnelId', type: 'text', value: form.tunnelId, autoComplete: 'off', spellCheck: false,
+          id: 'tunnelId', type: 'text', value: form.tunnelId, autoComplete: 'off', spellCheck: false, disabled: saveState === 'saving',
           ref: firstInputRef, 'data-connection-field': 'tunnelId', 'aria-invalid': validation?.field === 'tunnelId' ? 'true' : undefined,
           'aria-describedby': describedBy('tunnelId'), onChange: event => update({ tunnelId: event.currentTarget.value.trim() })
         })
@@ -393,7 +398,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
       },
         h('div', { className: 'password-field' },
           h('input', {
-            id: 'tunnelApiKey', type: showSecret ? 'text' : 'password', value: form.tunnelApiKey,
+            id: 'tunnelApiKey', type: showSecret ? 'text' : 'password', value: form.tunnelApiKey, disabled: saveState === 'saving',
             placeholder: form.tunnelApiKeyConfigured ? 'Stored securely. Enter a new key only to replace it.' : 'Paste runtime API key',
             autoComplete: 'off', spellCheck: false, 'data-connection-field': 'tunnelApiKey',
             'aria-invalid': validation?.field === 'tunnelApiKey' ? 'true' : undefined, 'aria-describedby': describedBy('tunnelApiKey'),
@@ -419,7 +424,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
         h('div', { className: 'settings-panel-body' },
           h(SettingsField, { label: 'Local connection port', help: 'Change this only when port 3333 conflicts with another local application.', error: validation?.field === 'port' ? validation.message : '', inputId: 'port' },
             h('input', {
-              id: 'port', className: 'settings-number-control', type: 'number', min: '1024', max: '65535', step: '1', value: form.port,
+              id: 'port', className: 'settings-number-control', type: 'number', min: '1024', max: '65535', step: '1', value: form.port, disabled: saveState === 'saving',
               'data-connection-field': 'port', 'aria-invalid': validation?.field === 'port' ? 'true' : undefined,
               'aria-describedby': describedBy('port'), onChange: event => update({ port: Number(event.currentTarget.value) })
             })

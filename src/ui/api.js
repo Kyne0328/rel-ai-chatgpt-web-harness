@@ -1,5 +1,3 @@
-import { QueryClient } from '@tanstack/react-query';
-
 // Consolidated fetch layer — replaces divergent fetchJson helpers across client files.
 // Dashboard requests authenticate only with the HttpOnly session cookie established
 // by the one-time /dashboard bootstrap. The MCP bearer token never enters renderer JS.
@@ -8,12 +6,8 @@ import { QueryClient } from '@tanstack/react-query';
 // bootstrap, manual/live refresh, workspace mutations, and settings cache
 // invalidation — keep them in sync via this constant, not copied literals.
 export const DASHBOARD_DATA_URL = '/api/dashboard/v10?limit=100';
-const QUERY_NAMESPACE = 'relai-dashboard-http';
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { gcTime: 60_000, retry: false, staleTime: 1000 }
-  }
-});
+const CACHE_RETENTION_MS = 60_000;
+const responseCache = new Map();
 let _cacheGeneration = 0;
 let _dashboardReloadPromise = null;
 
@@ -26,14 +20,27 @@ export function requestDashboardRefresh() {
 function cacheKeyFor(url, fetchOpts) {
   const isGet = !fetchOpts.method || fetchOpts.method === 'GET';
   const bypassCache = fetchOpts.cache === 'no-store' || fetchOpts.cache === 'reload';
-  return isGet && !bypassCache ? [QUERY_NAMESPACE, url] : null;
+  return isGet && !bypassCache ? url : null;
 }
 
 function cachedValue(cacheKey, maxAgeMs = 1000) {
   if (!cacheKey || !(maxAgeMs > 0)) return null;
-  const state = queryClient.getQueryState(cacheKey);
-  if (!state || Date.now() - Number(state.dataUpdatedAt || 0) >= maxAgeMs) return null;
-  return queryClient.getQueryData(cacheKey) || null;
+  const entry = responseCache.get(cacheKey);
+  if (!entry || Date.now() - entry.updatedAt >= maxAgeMs) return null;
+  return entry.data;
+}
+
+function cacheResponse(cacheKey, data) {
+  let entry = responseCache.get(cacheKey);
+  if (!entry) {
+    // Retention starts on insertion; refreshing data does not extend it.
+    const timer = setTimeout(() => responseCache.delete(cacheKey), CACHE_RETENTION_MS);
+    timer.unref?.();
+    entry = { data, updatedAt: 0, timer };
+    responseCache.set(cacheKey, entry);
+  }
+  entry.data = data;
+  entry.updatedAt = Date.now();
 }
 
 function timeoutFor(timeout) {
@@ -158,7 +165,7 @@ export async function fetchJson(url, opts = {}) {
     });
     const data = normalizeResponseData(res, await parseJsonResponse(res));
     if (cacheKey && res.ok && data?.ok !== false && cacheGeneration === _cacheGeneration) {
-      queryClient.setQueryData(cacheKey, data);
+      cacheResponse(cacheKey, data);
     }
     return data;
   } catch (err) {
@@ -174,8 +181,10 @@ export async function postJson(url, body, opts = {}) {
 
 export function invalidateCache(url) {
   _cacheGeneration += 1;
-  queryClient.removeQueries({
-    queryKey: url ? [QUERY_NAMESPACE, url] : [QUERY_NAMESPACE],
-    exact: Boolean(url)
-  });
+  const keys = url ? [url] : responseCache.keys();
+  for (const key of keys) {
+    const entry = responseCache.get(key);
+    if (entry) clearTimeout(entry.timer);
+    responseCache.delete(key);
+  }
 }

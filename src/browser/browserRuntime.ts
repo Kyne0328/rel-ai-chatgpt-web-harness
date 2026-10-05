@@ -98,9 +98,11 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
   const getProfileConfig = dependencies.getProfileConfig || (() => readConfig({ allowMissing: true }));
   const sessions = new Map<string, BrowserSessionRecord>();
   const activeProfiles = new Map<string, string>();
-  const pendingStarts = new Set<Readonly<{ attribution: AutomationAttribution; profileKey: string }>>();
+  const pendingStarts = new Set<{ attribution: AutomationAttribution; profileKey: string; cancelled: boolean; done: Promise<void> }>();
   const pendingProfiles = new Set<string>();
-  const pendingCloses = new Set<Promise<void>>();
+  const closingSessions = new Map<string, Promise<void>>();
+  const taskCleanups = new Map<string, Promise<{ stopped: number }>>();
+  let shutdownPromise: Promise<{ stopped: number }> | null = null;
 
   async function status(
     workspace: AutomationWorkspace,
@@ -108,7 +110,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     context: BrowserContext = {}
   ): Promise<Record<string, unknown>> {
     if (args.sessionId) {
-      const record = requireSession(workspace, args, context);
+      const record = requireSession(workspace, args, context, true);
       return sessionResult(record, 'status', { tabs: await tabSummaries(record) });
     }
     const owned = [...sessions.values()].filter(record => attributionMatches(record.attribution, workspace, context));
@@ -136,8 +138,10 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     options: BrowserOperationOptions = {}
   ): Promise<Record<string, unknown>> {
     throwIfAborted(options.signal, browserCancellationError);
+    if (shutdownPromise) throw taskError('BROWSER_RUNTIME_SHUTTING_DOWN', 'Wait for local browser shutdown to finish before starting another session.');
     const attribution = createAutomationAttribution(workspace, args, context);
     const taskId = attribution.taskId;
+    if (taskId && taskCleanups.has(taskId)) throw taskError('BROWSER_SESSION_CLOSING', 'Wait for this work session\'s browser cleanup to finish before starting another session.');
     const existing = taskId ? [...sessions.values()].find(record =>
       record.attribution.taskId === taskId && attributionMatches(record.attribution, workspace, context)
     ) : null;
@@ -164,63 +168,87 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Persistent Rel.AI browser profile is already active in another local browser session.');
     }
 
-    const pendingStart = Object.freeze({ attribution, profileKey });
+    let resolveStartDone: (() => void) | undefined;
+    const startDone = new Promise<void>(resolve => { resolveStartDone = resolve; });
+    const pendingStart = { attribution, profileKey, cancelled: false, done: startDone };
     pendingStarts.add(pendingStart);
     if (profileKey) pendingProfiles.add(profileKey);
-    let driver: LocalBrowserDriver | null = null;
     let record: BrowserSessionRecord | null = null;
+    let launching: Promise<BrowserSessionRecord> | null = null;
+    let launchSettled = false;
+    let cleanupAttempted = false;
+    const finishStart = () => {
+      pendingStarts.delete(pendingStart);
+      if (profileKey) pendingProfiles.delete(profileKey);
+      resolveStartDone?.();
+    };
+    const assertStartActive = () => {
+      throwIfAborted(options.signal, browserCancellationError);
+      if (pendingStart.cancelled) throw taskError('BROWSER_OPERATION_CANCELLED', 'Local browser startup was cancelled during cleanup.');
+    };
     try {
-      driver = await withAbortResource(launch({
+      launching = launch({
         viewport,
         ignoreHTTPSErrors: args.ignoreHTTPSErrors === true,
         ...(options.signal ? { signal: options.signal } : {}),
         ...(profileDirectory ? { profileDirectory } : {})
-      }), options.signal, launchedDriver => launchedDriver.close(), browserCancellationError);
-      record = {
-        sessionId,
-        attribution,
-        driver,
-        tabs: new Map(),
-        activeTabId: '',
-        createdAt,
-        browserProduct: driver.browserProduct,
-        profileMode,
-        profileDirectory,
-        profileKey,
-        handoff: null
-      };
-      sessions.set(sessionId, record);
-      if (profileKey) activeProfiles.set(profileKey, sessionId);
-      driver.onDisconnected(() => removeSession(record!));
-      driver.onPageCreated?.((page, active) => {
-        if (record!.tabs.size >= MAX_ACTIVE_BROWSER_TABS_PER_SESSION) {
-          void page.close().catch(() => {});
-          return;
+      }).then(async driver => {
+        // Every acquired driver has one owner, including a launch that completes
+        // after caller cancellation. Failed cleanup stays visible and retryable.
+        const acquired: BrowserSessionRecord = {
+          sessionId, attribution, driver, tabs: new Map(), activeTabId: '',
+          createdAt, browserProduct: driver.browserProduct, profileMode,
+          profileDirectory, profileKey, handoff: null
+        };
+        record = acquired;
+        sessions.set(sessionId, acquired);
+        if (profileKey) activeProfiles.set(profileKey, sessionId);
+        driver.onDisconnected(() => {
+          if (!closingSessions.has(sessionId)) removeSession(acquired);
+        });
+        driver.onPageCreated?.((page, active) => {
+          if (acquired.tabs.size >= MAX_ACTIVE_BROWSER_TABS_PER_SESSION) {
+            void page.close().catch(() => {});
+            return;
+          }
+          registerTab(acquired, page, active);
+        });
+        if (pendingStart.cancelled || options.signal?.aborted) {
+          cleanupAttempted = true;
+          await closeSession(acquired);
+          assertStartActive();
         }
-        registerTab(record!, page, active);
-      });
+        return acquired;
+      }).finally(() => { launchSettled = true; });
+      record = await withAbort(launching, options.signal, browserCancellationError);
+      assertStartActive();
 
       const tab = await createTab(record, options.signal);
       const initial = args.url
         ? await navigateTab(tab, normalizeBrowserUrl(args.url), timeoutFor(args.timeoutMs), options.signal)
         : await withAbort(tab.page.describe(options.signal), options.signal, browserCancellationError);
-      if (profileDirectory && initial.url && !driver.recordsPersistentSites) await recordPersistentBrowserSite(profileDirectory, initial.url);
+      if (profileDirectory && initial.url && !record.driver.recordsPersistentSites) await recordPersistentBrowserSite(profileDirectory, initial.url);
+      assertStartActive();
       return sessionResult(record, 'start', {
         tabId: tab.tabId,
         viewport,
         browserEngine: 'chromium',
-        browserProduct: driver.browserProduct,
+        browserProduct: record.driver.browserProduct,
         profile: profileMode,
         createdAt,
         ...initial
       });
     } catch (error) {
-      if (record) removeSession(record);
-      if (driver) await driver.close().catch(() => {});
+      if (record && !cleanupAttempted) await closeSession(record).catch(() => {});
       throw error;
     } finally {
-      pendingStarts.delete(pendingStart);
-      if (profileKey) pendingProfiles.delete(profileKey);
+      // An aborted launch can still create a driver. Keep its profile reserved
+      // until the late resource has actually been closed.
+      if (launching && !launchSettled) {
+        void launching.catch(() => {}).finally(finishStart);
+      } else {
+        finishStart();
+      }
     }
   }
 
@@ -405,31 +433,43 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     args: BrowserArgs = {},
     context: BrowserContext = {}
   ): Promise<Record<string, unknown>> {
-    const record = requireSession(workspace, args, context);
-    removeSession(record);
+    const record = requireSession(workspace, args, context, true);
     try {
-      await trackClose([record]);
+      await closeSession(record);
       return { ok: true, workspace: workspace.alias, action: 'stop', sessionId: record.sessionId, status: 'stopped' };
     } catch (error) {
-      return { ok: false, workspace: workspace.alias, action: 'stop', sessionId: record.sessionId, status: 'stopped', error: errorMessage(error) };
+      return { ok: false, workspace: workspace.alias, action: 'stop', sessionId: record.sessionId, error: errorMessage(error) };
     }
   }
 
-  async function stopSessionsForTask(taskId: string): Promise<{ stopped: number }> {
+  function stopSessionsForTask(taskId: string): Promise<{ stopped: number }> {
     const id = String(taskId || '').trim();
-    if (!id) return { stopped: 0 };
-    const records = [...sessions.values()].filter(record => record.attribution.taskId === id);
-    for (const record of records) removeSession(record);
-    await trackClose(records);
-    return { stopped: records.length };
+    if (!id) return Promise.resolve({ stopped: 0 });
+    const existing = taskCleanups.get(id);
+    if (existing) return existing;
+    const cleanup = (async () => {
+      const starts = [...pendingStarts].filter(pending => pending.attribution.taskId === id);
+      for (const pending of starts) pending.cancelled = true;
+      await Promise.all(starts.map(pending => pending.done));
+      const records = [...sessions.values()].filter(record => record.attribution.taskId === id);
+      await trackClose(records);
+      return { stopped: records.length };
+    })().finally(() => { taskCleanups.delete(id); });
+    taskCleanups.set(id, cleanup);
+    return cleanup;
   }
 
-  async function shutdown(): Promise<{ stopped: number }> {
-    const records = [...sessions.values()];
-    for (const record of records) removeSession(record);
-    const closing = trackClose(records);
-    await Promise.allSettled([closing, ...pendingCloses]);
-    return { stopped: records.length };
+  function shutdown(): Promise<{ stopped: number }> {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      const starts = [...pendingStarts];
+      for (const pending of starts) pending.cancelled = true;
+      await Promise.all(starts.map(pending => pending.done));
+      const records = [...sessions.values()];
+      await trackClose(records);
+      return { stopped: records.length };
+    })().finally(() => { shutdownPromise = null; });
+    return shutdownPromise;
   }
 
   async function createTab(record: BrowserSessionRecord, signal?: AbortSignal): Promise<BrowserTabRecord> {
@@ -461,12 +501,17 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
   function requireSession(
     workspace: AutomationWorkspace,
     args: BrowserArgs = {},
-    context: BrowserContext = {}
+    context: BrowserContext = {},
+    allowClosing = false
   ): BrowserSessionRecord {
     const sessionId = assertBrowserSessionId(args.sessionId);
     const record = sessions.get(sessionId);
-    if (!record) throw taskError('BROWSER_SESSION_NOT_FOUND', `Unknown or closed local browser session: ${sessionId}.`);
+    // Task/global cleanup revokes public use before awaiting resource teardown.
+    if (!record || (!allowClosing && (shutdownPromise || taskCleanups.has(record.attribution.taskId)))) {
+      throw taskError('BROWSER_SESSION_NOT_FOUND', `Unknown or closed local browser session: ${sessionId}.`);
+    }
     assertAutomationAttribution(record.attribution, workspace, args, context, { resource: 'browser' });
+    if (!allowClosing && closingSessions.has(sessionId)) throw taskError('BROWSER_SESSION_CLOSING', 'Wait for local browser cleanup to finish before using this session.');
     return record;
   }
 
@@ -510,15 +555,22 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     }
   }
 
+  function closeSession(record: BrowserSessionRecord): Promise<void> {
+    const existing = closingSessions.get(record.sessionId);
+    if (existing) return existing;
+    // Retain session and profile ownership until close succeeds. A failed close
+    // remains retryable and must not permit another driver to use its profile.
+    const closing = Promise.resolve().then(() => record.driver.close())
+      .then(() => removeSession(record))
+      .finally(() => { closingSessions.delete(record.sessionId); });
+    closingSessions.set(record.sessionId, closing);
+    return closing;
+  }
+
   async function trackClose(records: readonly BrowserSessionRecord[]): Promise<void> {
-    if (!records.length) return;
-    const closing = Promise.allSettled(records.map(record => record.driver.close())).then(() => undefined);
-    pendingCloses.add(closing);
-    try {
-      await closing;
-    } finally {
-      pendingCloses.delete(closing);
-    }
+    const results = await Promise.allSettled(records.map(closeSession));
+    const failures = results.filter(result => result.status === 'rejected');
+    if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Local browser cleanup failed.');
   }
 
   return Object.freeze({

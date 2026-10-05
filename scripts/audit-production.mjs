@@ -46,7 +46,6 @@ async function auditTarget(npmCli, label, prefix = '') {
       minTimeout: 1000,
       factor: 1,
       randomize: false,
-      unref: true,
       shouldRetry: ({ error }) => error instanceof AuditFailure && error.transient,
       onFailedAttempt: ({ error, attemptNumber, retriesLeft }) => {
         if (!(error instanceof AuditFailure) || !error.transient || retriesLeft === 0) return;
@@ -93,5 +92,3 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error(error instanceof Error ? error.message : String(error));
   }
 }
-
-export { isTransientAuditFailure };

@@ -152,6 +152,7 @@ async function startService(payload = {}) {
 }
 
 async function stopService() {
+  for (const request of pendingNativeRequests.values()) request.cancel('Rel.AI service is stopping.');
   const ownedServer = httpServer;
   httpServer = null;
   activeToken = '';
@@ -278,18 +279,19 @@ function callNative(method, payload = {}, options = {}) {
       if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
       return true;
     };
-    const onAbort = () => {
+    const cancel = reason => {
       if (!finish()) return;
       post({ type: 'native-cancel', id });
-      reject(nativeCancelledError(signal?.reason));
+      reject(nativeCancelledError(reason));
     };
-    const timer = setTimeout(() => {
+    const onAbort = () => cancel(signal?.reason);
+    const timer = timeoutMs > 0 ? setTimeout(() => {
       if (!finish()) return;
       post({ type: 'native-cancel', id });
       reject(new Error(`Native desktop request timed out: ${method}`));
-    }, timeoutMs);
-    timer.unref?.();
-    pendingNativeRequests.set(id, { resolve, reject, timer, signal, onAbort });
+    }, timeoutMs) : null;
+    timer?.unref?.();
+    pendingNativeRequests.set(id, { resolve, reject, timer, signal, onAbort, cancel });
     signal?.addEventListener('abort', onAbort, { once: true });
     post({ type: 'native-request', id, method, payload });
   });
@@ -311,6 +313,8 @@ function settleNativeRequest(message) {
 }
 
 function nativeRequestTimeoutMs(method, payload) {
+  // The user, rather than a machine operation, decides when the picker finishes.
+  if (method === 'pickFolder') return 0;
   const requested = Number(payload?.timeoutMs);
   if (method === 'browserOperation' && Number.isFinite(requested)) {
     return Math.max(5_000, Math.min(35_000, Math.floor(requested) + 5_000));

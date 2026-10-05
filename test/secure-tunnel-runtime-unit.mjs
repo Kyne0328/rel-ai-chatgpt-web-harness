@@ -447,6 +447,43 @@ try {
   assert.equal(diagnosis.checks.find(check => check.id === 'mcp_server_reachable')?.status, 'FAIL');
   assert.doesNotMatch(JSON.stringify(diagnosis), /local-secret|sk-doctor-secret/, 'doctor results must redact tunnel credentials before reaching the renderer');
 
+
+  {
+    const { mock } = await import('node:test');
+    let markSpawned;
+    const didSpawn = new Promise(resolve => { markSpawned = resolve; });
+    const hungDoctor = new EventEmitter();
+    hungDoctor.stdout = new EventEmitter();
+    hungDoctor.stderr = new EventEmitter();
+    hungDoctor.exitCode = null;
+    hungDoctor.kill = signal => { hungDoctor.killedWith = signal; return true; };
+    const boundedDoctor = createSecureTunnelRuntime({
+      spawnImpl: () => { markSpawned(); return hungDoctor; },
+      fetchImpl: fetchTunnel,
+      stopProcess: () => new Promise(() => {}),
+      stopProcessTimeoutMs: 50,
+      resolveExecutable: () => process.execPath,
+      makeEnvironment: makeTunnelProcessEnvironment,
+      stateDir
+    });
+    mock.timers.enable({ apis: ['setTimeout'] });
+    try {
+      const result = boundedDoctor.doctor({
+        tunnelId: 'tunnel_example123456', port: 3333,
+        localToken: 'local-fixture', apiKey: 'synthetic-doctor-key', timeoutMs: 1000
+      });
+      const rejected = assert.rejects(result, /doctor timed out after 1 seconds/);
+      await didSpawn;
+      mock.timers.tick(1000);
+      mock.timers.tick(50);
+      await rejected;
+      assert.equal(hungDoctor.killedWith, 'SIGKILL', 'the existing termination watchdog must attempt final cleanup');
+      assert.equal(hungDoctor.exitCode, null, 'a timeout result must not invent confirmation that the fake child exited');
+    } finally {
+      mock.timers.reset();
+    }
+  }
+
   const unavailableRuntime = createSecureTunnelRuntime({
     spawnImpl: fakeSpawn,
     fetchImpl: fetchTunnel,

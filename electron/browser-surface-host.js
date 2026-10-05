@@ -8,6 +8,7 @@ import { layoutSnapshotExpression, normalizeBrowserSnapshotDetail } from '../src
 const MAX_SNAPSHOT_CHARS = 64 * 1024;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
 const PERMISSION_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
+const PAGE_CLOSE_TIMEOUT_MS = 5_000;
 const DOWNLOAD_TEMP_ROOT = path.resolve(os.tmpdir(), 'relai-browser-downloads');
 const CONTROL_OWNERS = new Set(['ai', 'user']);
 const READ_ONLY_ACTIONS = new Set(['describe', 'snapshot', 'screenshot']);
@@ -43,7 +44,7 @@ function createBrowserSurfaceHost(options = {}) {
   let pinnedSessionId = '';
   let surfaceBounds = { visible: false, x: 0, y: 0, width: 1, height: 1 };
   let attached = null;
-  let closingAll = false;
+  let closingAll = null;
 
   async function run(payload = {}, options = {}) {
     throwIfAborted(options.signal);
@@ -68,6 +69,7 @@ function createBrowserSurfaceHost(options = {}) {
 
   async function startSession(payload = {}, options = {}) {
     throwIfAborted(options.signal);
+    if (closingAll) throw cancelledError('Embedded browser sessions are closing.');
     const nativeSessionId = `embedded_browser_${crypto.randomBytes(18).toString('base64url')}`;
     const profileDirectory = String(payload.profileDirectory || '').trim();
     const persistent = Boolean(profileDirectory);
@@ -102,6 +104,7 @@ function createBrowserSurfaceHost(options = {}) {
     publishState();
     try {
       await withAbort(openDashboard('#browser'), options.signal);
+      if (sessions.get(nativeSessionId) !== record || record.closePromise) throw cancelledError('Browser session closed during startup.');
       return {
         ok: true,
         nativeSessionId,
@@ -121,10 +124,12 @@ function createBrowserSurfaceHost(options = {}) {
     assertAiControl(record, 'open_page');
     const page = createPage(record, { active: true });
     await syncPageRuntime(record, page);
+    assertPageMutation(record, page, 'open_page');
     return { ok: true, nativeSessionId: record.nativeSessionId, nativePageId: page.nativePageId, ...describePage(record, page) };
   }
 
   function createPage(record, options = {}) {
+    if (sessions.get(record.nativeSessionId) !== record || record.closePromise) throw cancelledError('Browser session is closing.');
     const nativePageId = `embedded_page_${crypto.randomBytes(18).toString('base64url')}`;
     const view = options.webContents
       ? new WebContentsView({ webContents: options.webContents })
@@ -175,6 +180,7 @@ function createBrowserSurfaceHost(options = {}) {
     if (!READ_ONLY_ACTIONS.has(action)) assertAiControl(record, action);
     if (action !== 'describe') activate(record, page);
     await syncPageRuntime(record, page);
+    if (!READ_ONLY_ACTIONS.has(action)) assertPageMutation(record, page, action);
     const result = await operation(record, page, payload, options);
     if (action === 'navigate') await syncPageRuntime(record, page);
     return result;
@@ -238,13 +244,18 @@ function createBrowserSurfaceHost(options = {}) {
       const key = String(payload.key || '').trim();
       if (!key) throw new Error('browser interact press requires key.');
       await waitForTarget(page.webContents, payload.target, 'visible', timeoutMs, options.signal);
+      assertPageMutation(record, page, 'interact');
       await focusTarget(page.webContents, payload.target);
-      throwIfAborted(options.signal);
-      await withAiInput(record, page, async () => sendKey(page.webContents, key));
+      const assertInputAllowed = () => {
+        throwIfAborted(options.signal);
+        assertPageMutation(record, page, 'interact');
+      };
+      await withAiInput(record, page, async () => sendKey(page.webContents, key), assertInputAllowed);
     } else {
       if (interaction === 'select' && payload.selectValue == null) throw new Error('browser interact select requires selectValue.');
       await waitForTarget(page.webContents, payload.target, 'visible', timeoutMs, options.signal);
       throwIfAborted(options.signal);
+      assertPageMutation(record, page, 'interact');
       await runDomInteraction(page.webContents, interaction, payload);
     }
     publishState();
@@ -315,6 +326,8 @@ function createBrowserSurfaceHost(options = {}) {
     if (!file?.isFile()) throw new Error('Browser upload file is unavailable.');
     const marker = `relai-upload-${crypto.randomBytes(10).toString('hex')}`;
     await waitForTarget(page.webContents, payload.target, 'attached', timeoutFor(payload.timeoutMs), options.signal);
+    throwIfAborted(options.signal);
+    assertPageMutation(record, page, 'upload');
     await markTarget(page.webContents, payload.target, marker);
     const debuggerApi = await attachedDebugger(page.webContents);
     try {
@@ -324,7 +337,11 @@ function createBrowserSurfaceHost(options = {}) {
         selector: `[data-relai-upload-marker="${marker}"]`
       });
       if (!query?.nodeId) throw new Error('Browser upload target is not a file input.');
+      throwIfAborted(options.signal);
+      assertPageMutation(record, page, 'upload');
       await debuggerApi.sendCommand('DOM.setFileInputFiles', { nodeId: query.nodeId, files: [filePath] });
+      throwIfAborted(options.signal);
+      assertPageMutation(record, page, 'upload');
       await page.webContents.executeJavaScript(`(() => { const el = document.querySelector('[data-relai-upload-marker="${marker}"]'); if (el) { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); } })()`);
     } finally {
       await clearMarker(page.webContents, marker).catch(() => {});
@@ -335,6 +352,8 @@ function createBrowserSurfaceHost(options = {}) {
   async function beginDownload(record, page, payload, options = {}) {
     assertAiControl(record, 'download');
     await fs.promises.mkdir(DOWNLOAD_TEMP_ROOT, { recursive: true, mode: 0o700 });
+    throwIfAborted(options.signal);
+    assertPageMutation(record, page, 'download');
     const pending = createPendingDownload(record, page, timeoutFor(payload.timeoutMs));
     void pending.promise.catch(() => {});
     try {
@@ -363,35 +382,41 @@ function createBrowserSurfaceHost(options = {}) {
     return closeSession(nativeSessionId, { emit: false });
   }
 
-  async function closeSession(value, options = {}) {
+  function closeSession(value, options = {}) {
     const nativeSessionId = assertSessionId(value);
     const record = sessions.get(nativeSessionId);
-    if (!record) return { ok: true, nativeSessionId, status: 'closed' };
-    sessions.delete(nativeSessionId);
-    if (pinnedSessionId === nativeSessionId) pinnedSessionId = '';
-    if (activeSessionId === nativeSessionId) activeSessionId = sessions.keys().next().value || '';
-    for (const page of [...record.pages.values()]) await destroyPage(record, page, { emit: false });
-    if (record.downloadListener) record.electronSession.removeListener?.('will-download', record.downloadListener);
-    for (const entries of record.pendingDownloads.values()) {
-      for (const pending of entries) pending.cancel(browserError('BROWSER_OPERATION_CANCELLED', 'Browser session closed before download completed.'));
-    }
-    record.pendingDownloads.clear();
-    for (const pending of record.pendingPermissions.values()) settlePermissionRequest(record, pending, false);
-    record.pendingPermissions.clear();
-    record.permissionGrants.clear();
-    if (record.persistent) record.electronSession.setCertificateVerifyProc?.(null);
-    if (!record.persistent) {
-      await Promise.allSettled([
-        Promise.resolve(record.electronSession.clearStorageData?.()),
-        Promise.resolve(record.electronSession.clearCache?.())
-      ]);
-    }
-    if (options.emit === true && !closingAll) {
-      onEvent({ resource: 'browser', type: 'session_disconnected', nativeSessionId });
-    }
-    attachActiveView();
-    publishState();
-    return { ok: true, nativeSessionId, status: 'closed' };
+    if (!record) return Promise.resolve({ ok: true, nativeSessionId, status: 'closed' });
+    if (record.closePromise) return record.closePromise;
+    record.closePromise = Promise.resolve().then(async () => {
+      for (const page of [...record.pages.values()]) await destroyPage(record, page, { emit: false });
+      if (record.downloadListener) record.electronSession.removeListener?.('will-download', record.downloadListener);
+      for (const entries of record.pendingDownloads.values()) {
+        for (const pending of entries) pending.cancel(browserError('BROWSER_OPERATION_CANCELLED', 'Browser session closed before download completed.'));
+      }
+      record.pendingDownloads.clear();
+      for (const pending of record.pendingPermissions.values()) settlePermissionRequest(record, pending, false);
+      record.pendingPermissions.clear();
+      record.permissionGrants.clear();
+      if (record.persistent) record.electronSession.setCertificateVerifyProc?.(null);
+      if (!record.persistent) {
+        await Promise.allSettled([
+          Promise.resolve(record.electronSession.clearStorageData?.()),
+          Promise.resolve(record.electronSession.clearCache?.())
+        ]);
+      }
+      sessions.delete(nativeSessionId);
+      if (pinnedSessionId === nativeSessionId) pinnedSessionId = '';
+      if (activeSessionId === nativeSessionId) activeSessionId = sessions.keys().next().value || '';
+      if (options.emit === true && !closingAll) {
+        onEvent({ resource: 'browser', type: 'session_disconnected', nativeSessionId });
+      }
+      return { ok: true, nativeSessionId, status: 'closed' };
+    }).finally(() => {
+      record.closePromise = null;
+      attachActiveView();
+      publishState();
+    });
+    return record.closePromise;
   }
 
   async function clearProfileSession(value) {
@@ -499,16 +524,20 @@ function createBrowserSurfaceHost(options = {}) {
     return closeSession(record.nativeSessionId, { emit: true });
   }
 
-  async function closeAll() {
-    closingAll = true;
-    try {
-      for (const nativeSessionId of [...sessions.keys()]) await closeSession(nativeSessionId, { emit: false });
+  function closeAll() {
+    if (closingAll) return closingAll;
+    closingAll = Promise.resolve().then(async () => {
+      const failures = [];
+      for (const nativeSessionId of [...sessions.keys()]) {
+        try { await closeSession(nativeSessionId, { emit: false }); }
+        catch (error) { failures.push(error); }
+      }
       detachAttached();
       surfaceBounds = { visible: false, x: 0, y: 0, width: 1, height: 1 };
       publishState();
-    } finally {
-      closingAll = false;
-    }
+      if (failures.length) throw new AggregateError(failures, 'Some embedded browser sessions could not be closed. Retry cleanup.');
+    }).finally(() => { closingAll = null; });
+    return closingAll;
   }
 
   async function setBounds(payload = {}) {
@@ -543,10 +572,12 @@ function createBrowserSurfaceHost(options = {}) {
     const control = normalizeControlOwner(owner);
     activeSessionId = record.nativeSessionId;
     if (control === 'user') await openDashboard('#browser');
+    if (sessions.get(record.nativeSessionId) !== record || record.closePromise) throw cancelledError('Browser session closed before control changed.');
     return applyControl(record, control, reason);
   }
 
   async function applyControl(record, value, reason = '') {
+    if (sessions.get(record.nativeSessionId) !== record || record.closePromise) throw cancelledError('Browser session is closing.');
     record.control = value;
     record.handoffReason = value === 'user' ? String(reason || record.handoffReason || '').trim().slice(0, 80) : '';
     if (value === 'user') {
@@ -666,6 +697,7 @@ function createBrowserSurfaceHost(options = {}) {
   function configurePage(record, page) {
     const wc = page.webContents;
     wc.setWindowOpenHandler?.(details => {
+      if (record.closePromise || sessions.get(record.nativeSessionId) !== record) return { action: 'deny' };
       const target = String(details?.url || '');
       if (!supportedPageUrl(target, true)) return { action: 'deny' };
       const background = details?.disposition === 'background-tab';
@@ -688,7 +720,7 @@ function createBrowserSurfaceHost(options = {}) {
           if (!options?.webContents && target !== 'about:blank') {
             void child.webContents.loadURL(target).catch(error => {
               onError(error);
-              void destroyPage(record, child, { emit: true });
+              void destroyPage(record, child, { emit: true }).catch(onError);
             });
           }
           return child.webContents;
@@ -932,26 +964,33 @@ function createBrowserSurfaceHost(options = {}) {
     if (!queue.length) record.pendingDownloads.delete(page.webContents.id);
   }
 
-  async function destroyPage(record, page, options = {}) {
-    if (page.closing) return;
+  function destroyPage(record, page, options = {}) {
+    if (page.closePromise) return page.closePromise;
     page.closing = true;
-    if (attached?.page === page) detachAttached();
-    record.pages.delete(page.nativePageId);
-    if (record.activePageId === page.nativePageId) record.activePageId = record.pages.keys().next().value || '';
-    const pending = record.pendingDownloads.get(page.webContents.id) || [];
-    for (const entry of [...pending]) entry.cancel(browserError('BROWSER_OPERATION_CANCELLED', 'Browser page closed before download completed.'));
-    if (!page.webContents.isDestroyed?.()) page.webContents.close?.({ waitForBeforeUnload: false });
-    if (!page.webContents.isDestroyed?.()) page.webContents.destroy?.();
-    if (options.emit === true) {
-      onEvent({
-        resource: 'browser',
-        type: options.type || 'page_closed',
-        nativeSessionId: record.nativeSessionId,
-        nativePageId: page.nativePageId
-      });
-    }
-    attachActiveView();
-    publishState();
+    page.closePromise = Promise.resolve().then(async () => {
+      if (attached?.page === page) detachAttached();
+      const pending = record.pendingDownloads.get(page.webContents.id) || [];
+      for (const entry of [...pending]) entry.cancel(browserError('BROWSER_OPERATION_CANCELLED', 'Browser page closed before download completed.'));
+      await closeWebContents(page.webContents);
+      record.pages.delete(page.nativePageId);
+      if (record.activePageId === page.nativePageId) record.activePageId = record.pages.keys().next().value || '';
+      if (options.emit === true) {
+        onEvent({
+          resource: 'browser',
+          type: options.type || 'page_closed',
+          nativeSessionId: record.nativeSessionId,
+          nativePageId: page.nativePageId
+        });
+      }
+    }).catch(error => {
+      page.closing = false;
+      throw error;
+    }).finally(() => {
+      page.closePromise = null;
+      attachActiveView();
+      publishState();
+    });
+    return page.closePromise;
   }
 
   function activate(record, page) {
@@ -964,7 +1003,7 @@ function createBrowserSurfaceHost(options = {}) {
     const record = visibleRecord();
     const page = record ? activePage(record) : null;
     const win = getDashboardWindow();
-    if (!surfaceBounds.visible || !page || !win || win.isDestroyed?.()) {
+    if (!surfaceBounds.visible || !page || page.closing || record.closePromise || !win || win.isDestroyed?.()) {
       detachAttached();
       return;
     }
@@ -1058,6 +1097,7 @@ function createBrowserSurfaceHost(options = {}) {
     const id = assertSessionId(value);
     const record = sessions.get(id);
     if (!record) throw browserError('BROWSER_SESSION_NOT_FOUND', `Unknown or closed embedded browser session: ${id}.`);
+    if (record.closePromise) throw cancelledError('Browser session is closing.');
     return record;
   }
 
@@ -1068,12 +1108,43 @@ function createBrowserSurfaceHost(options = {}) {
     return page;
   }
 
+  function assertPageMutation(record, page, action) {
+    if (sessions.get(record.nativeSessionId) !== record || record.closePromise || record.pages.get(page.nativePageId) !== page || page.closing || page.webContents.isDestroyed?.()) {
+      throw cancelledError('Browser session or tab closed before the operation could finish.');
+    }
+    assertAiControl(record, action);
+  }
+
   function assertAiControl(record, action) {
     if (record.control !== 'user') return;
     throw browserError('BROWSER_USER_CONTROL_ACTIVE', `The user currently controls this browser session. Return control to AI before ${action.replaceAll('_', ' ')}.`);
   }
 
   return Object.freeze({ run, getState, setBounds, setControl, respondPermission, listSavedSites, clearSavedSite, clearSavedData, selectSession, selectTab, closeTab, stopActiveSession, closeAll });
+}
+
+function closeWebContents(contents) {
+  if (contents.isDestroyed?.()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      contents.off('destroyed', onDestroyed);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onDestroyed = () => finish();
+    const timer = setTimeout(() => finish(new Error('Browser page termination could not be confirmed. Retry cleanup.')), PAGE_CLOSE_TIMEOUT_MS);
+    timer.unref?.();
+    contents.once('destroyed', onDestroyed);
+    void Promise.resolve().then(async () => {
+      await contents.close?.({ waitForBeforeUnload: false });
+      if (!contents.isDestroyed?.()) await contents.destroy?.();
+      if (contents.isDestroyed?.()) finish();
+    }).catch(finish);
+  });
 }
 
 function profileDirectoryKey(value) {
@@ -1266,13 +1337,17 @@ async function sendKey(webContents, key) {
   webContents.sendInputEvent({ type: 'keyUp', ...base });
 }
 
-async function withAiInput(record, page, action) {
+async function withAiInput(record, page, action, assertInputAllowed) {
   return enqueuePageRuntime(page, async () => {
+    assertInputAllowed();
     const debuggerApi = await attachedDebugger(page.webContents);
+    assertInputAllowed();
     await debuggerApi.sendCommand('Input.setIgnoreInputEvents', { ignore: false });
     page.aiInputDepth += 1;
-    try { return await action(); }
-    finally {
+    try {
+      assertInputAllowed();
+      return await action();
+    } finally {
       page.aiInputDepth = Math.max(0, page.aiInputDepth - 1);
       await debuggerApi.sendCommand('Input.setIgnoreInputEvents', { ignore: record.control !== 'user' });
     }

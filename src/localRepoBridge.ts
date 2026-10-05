@@ -118,20 +118,6 @@ async function snapshotGitSummary(workspace: BridgeWorkspace, config: BridgeConf
   }
 }
 
-function relaiRead(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs = {}, context: BridgeContext = {}) {
-  const request = prepareReadRequest(workspace, config, args, context);
-  const results = request.paths.map((requested, index) => readSingleItem(
-    workspace,
-    config,
-    requested,
-    request.sessionActive,
-    request.maxBytes,
-    args,
-    readOptions(request, requested, index)
-  ));
-  return collectReadResults(workspace, results);
-}
-
 async function relaiReadAsync(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs = {}, context: BridgeContext = {}) {
   if (args.byteOffset !== undefined && (!args.outputRef || args.asResource === true)) {
     throw new Error('relai_read byteOffset requires outputRef and cannot be combined with asResource.');
@@ -363,21 +349,6 @@ function readRangeKey(value: unknown): string {
   return String(value ?? "").trim().replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
-function readSingleItem(workspace: BridgeWorkspace, config: BridgeConfig, requested: BridgeValue, sessionActive: boolean, maxBytes: number, args: BridgeArgs, options: BridgeRecord): BridgeRecord {
-  try {
-    const safe = resolveWorkspaceSourcePath(workspace, requested, { operation: "read" });
-    const stat = fs.statSync(safe.absolutePath);
-    if (!stat.isFile()) {
-      return stat.isDirectory()
-        ? { item: readDirectory(workspace, safe, args) }
-        : { skipped: { path: String(requested), reason: "not a file or directory" } };
-    }
-    return readFileResult(workspace, safe, stat, sessionActive, maxBytes, options, readTextContent(workspace, safe, stat, sessionActive));
-  } catch (error) {
-    return { skipped: { path: String(requested), reason: error instanceof Error ? error.message : String(error) } };
-  }
-}
-
 async function readSingleItemAsync(workspace: BridgeWorkspace, config: BridgeConfig, requested: BridgeValue, sessionActive: boolean, maxBytes: number, args: BridgeArgs, options: BridgeRecord): Promise<BridgeRecord> {
   try {
     const safe = resolveWorkspaceSourcePath(workspace, requested, { operation: "read" });
@@ -440,12 +411,6 @@ function finalizeReadContent(workspace: BridgeWorkspace, safe: BridgeRecord, sta
     sessionCache.setCachedRead(workspace.alias, safe.absolutePath, stat.mtimeMs, text, { sha256, bytes: data.length });
   }
   return { data, text, cacheHit: false, sha256 };
-}
-
-function readTextContent(workspace: BridgeWorkspace, safe: BridgeRecord, stat: fs.Stats, sessionActive: boolean): BridgeRecord {
-  const cached = cachedReadContent(workspace, safe, stat, sessionActive);
-  if (cached) return cached;
-  return finalizeReadContent(workspace, safe, stat, sessionActive, fs.readFileSync(safe.absolutePath));
 }
 
 async function readTextContentAsync(workspace: BridgeWorkspace, safe: BridgeRecord, stat: fs.Stats, sessionActive: boolean, options: BridgeRecord = {}, maxBytes = DEFAULT_MAX_READ_BYTES): Promise<BridgeRecord> {
@@ -1243,4 +1208,4 @@ function sha256Text(text: string): string {
   return crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
 }
 
-export { repoSnapshot, relaiRead, relaiReadAsync, workspaceWrite, workspaceReplace, relaiApplyPatch, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr, normalizeOpenAIPatchFormat, classifyStatusOwnership, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD, createStagedPayload, appendStagedPayload, writeStagedMetadata, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, workspaceTidyPlan, relaiWorkspaceTidyRun as workspaceTidyRun };
+export { repoSnapshot, relaiReadAsync, workspaceWrite, workspaceReplace, relaiApplyPatch, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr, normalizeOpenAIPatchFormat, classifyStatusOwnership, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD, createStagedPayload, appendStagedPayload, writeStagedMetadata, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, workspaceTidyPlan, relaiWorkspaceTidyRun as workspaceTidyRun };

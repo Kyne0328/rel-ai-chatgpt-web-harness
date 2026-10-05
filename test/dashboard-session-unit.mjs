@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mock } from 'node:test';
 
 import { isDashboardAuthorized } from '../src/http/auth.ts';
 import { clearDashboardSessions, createDashboardBootstrap } from '../src/http/dashboardSessions.ts';
@@ -123,10 +124,65 @@ try {
   assert.equal((await oldRequest).revision, 1);
   assert.equal((await api.fetchJson(api.DASHBOARD_DATA_URL)).revision, 2, 'an older request must not repopulate cache after invalidation');
   assert.equal(cacheFetches, 2, 'the refreshed response should remain cached after the stale request completes');
+  await verifyDashboardCache(api);
 } finally {
   if (originalFetch === undefined) delete globalThis.fetch; else globalThis.fetch = originalFetch;
   if (originalWindow === undefined) delete globalThis.window; else globalThis.window = originalWindow;
   if (originalLocation === undefined) delete globalThis.location; else globalThis.location = originalLocation;
 }
 
-console.log('Dashboard bootstrap, renewal, invalidation, and reauthentication tests passed.');
+
+async function verifyDashboardCache(api) {
+  api.invalidateCache();
+  mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
+  let requests = 0;
+  let success = true;
+  globalThis.fetch = async () => ({
+    ok: success,
+    status: success ? 200 : 503,
+    text: async () => JSON.stringify({ ok: success, revision: ++requests })
+  });
+  const read = (options = {}) => api.fetchJson('/cache', { timeout: 0, ...options });
+  try {
+    const first = await read();
+    assert.equal(await read(), first, 'fresh GET responses must reuse the cached result');
+    mock.timers.tick(999);
+    assert.equal(await read(), first, 'the default cache age is one second');
+    mock.timers.tick(1);
+    const refreshed = await read();
+    assert.notEqual(refreshed.revision, first.revision, 'an expired response must be fetched again');
+
+    for (const options of [{ method: 'POST' }, { cache: 'no-store' }, { cache: 'reload' }]) {
+      const uncached = await read(options);
+      assert.notEqual(uncached.revision, refreshed.revision, 'mutations and explicit bypasses must reach the network');
+      assert.equal(await read(), refreshed, 'uncached responses must not replace the GET cache');
+    }
+
+    mock.timers.tick(58_999);
+    assert.equal(await read({ cacheTtlMs: 120_000 }), refreshed, 'callers may reuse retained data beyond the default age');
+    mock.timers.tick(1);
+    const collected = await read({ cacheTtlMs: 120_000 });
+    assert.notEqual(collected.revision, refreshed.revision, 'the first-insertion retention deadline must survive later data refreshes');
+
+    const other = await api.fetchJson('/cache/other', { timeout: 0 });
+    api.invalidateCache('/cache');
+    assert.equal(await api.fetchJson('/cache/other', { timeout: 0 }), other, 'URL invalidation must preserve other cached URLs');
+    assert.notEqual((await read()).revision, collected.revision, 'URL invalidation must require a fresh request');
+    api.invalidateCache();
+    assert.notEqual((await api.fetchJson('/cache/other', { timeout: 0 })).revision, other.revision, 'global invalidation must clear every URL');
+
+    api.invalidateCache();
+    success = false;
+    const failed = await read();
+    assert.equal(failed.ok, false);
+    assert.notEqual((await read()).revision, failed.revision, 'failed responses must never be cached');
+    success = true;
+    const recovered = await read();
+    assert.equal(await read(), recovered, 'a successful retry must restore normal caching');
+  } finally {
+    api.invalidateCache();
+    mock.timers.reset();
+  }
+}
+
+console.log('Dashboard bootstrap, renewal, cache lifecycle, invalidation, and reauthentication tests passed.');

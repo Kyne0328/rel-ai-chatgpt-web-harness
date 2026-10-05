@@ -169,6 +169,9 @@ app.whenReady().then(async () => {
     passiveRouteStability.push(await measurePassiveRouteStability(win, passiveMcpSession, navigationCounts, route));
   }
   await passiveMcpSession.close();
+  const connectionSaveLifecycle = await exerciseConnectionSaveLifecycle(win);
+  const usageRequestOrdering = await exerciseUsageRequestOrdering(win);
+  const updateModalTransitions = await exerciseUpdateModalTransitions(win);
 
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
@@ -509,6 +512,9 @@ app.whenReady().then(async () => {
     modalInteractions,
     projectPersistence,
     passiveRouteStability,
+    connectionSaveLifecycle,
+    usageRequestOrdering,
+    updateModalTransitions,
     taskInteraction,
     taskSelectionStability,
     activityInteraction,
@@ -532,6 +538,202 @@ app.whenReady().then(async () => {
 
 // Exercise production React presentation through normal aggregate refreshes. The
 // fixture changes returned receipt data only; it never replaces feature DOM.
+
+
+
+async function exerciseUpdateModalTransitions(win) {
+  await win.webContents.executeJavaScript(`(async () => {
+    const module = await import('/public/dashboard-react.js');
+    const probe = { listener: null };
+    probe.stop = module.initUpdateAvailableModal({
+      bridge: {
+        getUpdateStatus: async () => ({ state: 'available', availableVersion: '1.2.0' }),
+        onUpdateStatus: listener => { probe.listener = listener; return () => { probe.listener = null; }; },
+        installUpdate: async () => ({ ok: true, status: { state: 'installing', availableVersion: '1.2.0' } })
+      }
+    });
+    window.__updateModalProbe = probe;
+  })()`);
+  await waitFor(win, `document.querySelector('.modal-title')?.textContent === 'Update available'`);
+  await win.webContents.executeJavaScript(`window.__updateModalProbe.listener({ state: 'installing', availableVersion: '1.2.0' })`);
+  await waitFor(win, `document.querySelector('.modal-title')?.textContent === 'Updating Rel.AI'`);
+  const installingLocked = await win.webContents.executeJavaScript(`!document.querySelector('.modal-close')`);
+  await win.webContents.executeJavaScript(`window.__updateModalProbe.listener({ state: 'downloaded', availableVersion: '1.2.0', error: 'Fixture update failed' })`);
+  await waitFor(win, `document.querySelector('.modal-title')?.textContent === 'Update could not install'`);
+  await win.webContents.executeJavaScript(`(() => {
+    const probe = window.__updateModalProbe;
+    probe.panel = document.querySelector('.modal-panel');
+    probe.button = document.querySelector('.modal-actions .primary');
+    probe.button.focus();
+    probe.listener({ state: 'downloaded', availableVersion: '1.2.0', error: 'Fixture retry available' });
+  })()`);
+  await waitForCapturePaint(win);
+  const repeated = await win.webContents.executeJavaScript(`(() => ({
+    samePanel: window.__updateModalProbe.panel === document.querySelector('.modal-panel'),
+    focusPreserved: window.__updateModalProbe.button === document.activeElement,
+    closeAvailable: Boolean(document.querySelector('.modal-close'))
+  }))()`);
+  await win.webContents.executeJavaScript(`document.querySelector('.modal-actions .primary').click()`);
+  await waitFor(win, `document.querySelector('.modal-title')?.textContent === 'Updating Rel.AI'`);
+  await win.webContents.executeJavaScript(`window.__updateModalProbe.listener({ state: 'downloaded', availableVersion: '1.2.0', error: 'Fixture retry failed' })`);
+  await waitFor(win, `document.querySelector('.modal-close')`);
+  await win.webContents.executeJavaScript(`document.querySelector('.modal-close').click()`);
+  await waitFor(win, `!document.querySelector('.modal-panel')`);
+  const closed = await win.webContents.executeJavaScript(`(() => {
+    window.__updateModalProbe.stop();
+    delete window.__updateModalProbe;
+    return { closed: !document.querySelector('.modal-panel'), focusReturned: document.activeElement?.id === 'pageTitle' };
+  })()`);
+  return { installingLocked, repeated, ...closed };
+}
+
+async function exerciseUsageRequestOrdering(win) {
+  await win.webContents.executeJavaScript(`(() => {
+    const hourMs = 60 * 60 * 1000;
+    const hour = Math.floor(Date.now() / hourMs) * hourMs;
+    // The earlier 24h request contains 2 actions; the selected 7d range contains
+    // 13. A stale result cannot pass merely by adopting the current button label.
+    const series = [[1, 2], [72, 11]].map(([hoursAgo, toolCalls]) => ({
+      hour: new Date(hour - hoursAgo * hourMs).toISOString().slice(0, 13),
+      requests: toolCalls, toolCalls, successes: toolCalls, failures: 0, executionMs: toolCalls * 10
+    }));
+    const probe = {
+      calls: [], pending: [],
+      snapshot: month => {
+        const rows = series.filter(row => row.hour.startsWith(month));
+        const totals = { requests: 0, toolCalls: 0, successes: 0, failures: 0, executionMs: 0, activeDays: new Set(rows.map(row => row.hour.slice(0, 10))).size };
+        for (const row of rows) for (const key of ['requests', 'toolCalls', 'successes', 'failures', 'executionMs']) totals[key] += row[key];
+        return { month, totals, series: rows };
+      }
+    };
+    window.__usageRequestProbe = probe;
+    window.relaiDesktop = {
+      getLocalUsage: month => {
+        probe.calls.push(month);
+        return new Promise((resolve, reject) => probe.pending.push({ month, resolve, reject }));
+      }
+    };
+    location.hash = '#usage';
+  })()`);
+  await waitFor(win, `window.__usageRequestProbe.pending.length > 0 && document.querySelector('[data-usage-range-option="7d"]')`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-usage-range-option="7d"]').click()`);
+  await waitFor(win, `document.querySelector('[data-usage-range-option="7d"]').getAttribute('aria-pressed') === 'true'`);
+  const monthRequestsDeduplicated = await win.webContents.executeJavaScript(`(() => {
+    const probe = window.__usageRequestProbe;
+    const deduplicated = probe.calls.length === new Set(probe.calls).size;
+    for (const request of probe.pending.splice(0)) request.resolve(window.__usageRequestProbe.snapshot(request.month));
+    return deduplicated;
+  })()`);
+  await waitFor(win, `document.querySelector('[data-usage-content]')?.getAttribute('aria-busy') !== 'true' && document.querySelector('.usage-overview')`);
+  const loadedRange = await win.webContents.executeJavaScript(`(() => {
+    const selected = document.querySelector('[data-usage-range-option][aria-pressed="true"]');
+    const actions = [...document.querySelectorAll('.usage-metric')].find(node => node.querySelector('.usage-metric-label')?.textContent === 'Actions');
+    return {
+      selectedRangeMatchesData: selected.dataset.usageRangeOption === '7d' && document.querySelector('.usage-overview').getAttribute('aria-label').includes(selected.title),
+      renderedActions: Number(actions?.querySelector('.usage-metric-value strong')?.textContent)
+    };
+  })()`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-usage-refresh]').click()`);
+  await waitFor(win, `window.__usageRequestProbe.pending.length > 0`);
+  await win.webContents.executeJavaScript(`window.__usageRequestProbe.pending.splice(0).forEach(request => request.reject(new Error('Fixture analytics failure')))`);
+  await waitFor(win, `document.querySelector('[data-usage-unavailable]')`);
+  const failed = await win.webContents.executeJavaScript(`document.querySelector('[data-usage-unavailable]').textContent.includes('Fixture analytics failure')`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-usage-retry]').click()`);
+  await waitFor(win, `window.__usageRequestProbe.pending.length > 0`);
+  await win.webContents.executeJavaScript(`window.__usageRequestProbe.pending.splice(0).forEach(request => request.resolve(window.__usageRequestProbe.snapshot(request.month)))`);
+  await waitFor(win, `document.querySelector('[data-usage-content]')?.getAttribute('aria-busy') !== 'true' && document.querySelector('.usage-overview')`);
+  const recovered = await win.webContents.executeJavaScript(`!document.querySelector('[data-usage-unavailable]') && !document.querySelector('[data-usage-refresh]').disabled`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-usage-refresh]').click()`);
+  await waitFor(win, `window.__usageRequestProbe.pending.length > 0`);
+  await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
+  await waitFor(win, `document.querySelector('.sessions-page')`);
+  const routeAfterLateResult = await win.webContents.executeJavaScript(`(async () => {
+    window.__usageRequestProbe.pending.splice(0).forEach(request => request.resolve(window.__usageRequestProbe.snapshot(request.month)));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    delete window.relaiDesktop;
+    delete window.__usageRequestProbe;
+    return location.hash;
+  })()`);
+  return { monthRequestsDeduplicated, ...loadedRange, failed, recovered, routeAfterLateResult };
+}
+
+async function exerciseConnectionSaveLifecycle(win) {
+  await win.webContents.executeJavaScript(`(() => {
+    const probe = { calls: [], pending: [], listeners: new Set() };
+    window.__connectionSaveProbe = probe;
+    window.relaiDesktop = {
+      getSettings: async () => ({
+        port: 3333, tunnelId: 'tunnel_primary1234', tunnelApiKeyConfigured: true,
+        additionalTunnels: [{ tunnelId: 'tunnel_secondary1234', label: 'Secondary' }],
+        additionalTunnelStatuses: [{ tunnelId: 'tunnel_secondary1234', state: 'starting' }]
+      }),
+      saveSettings: settings => {
+        probe.calls.push(settings);
+        return new Promise((resolve, reject) => probe.pending.push({ resolve, reject }));
+      },
+      onStatus: listener => { probe.listeners.add(listener); return () => probe.listeners.delete(listener); }
+    };
+    location.hash = '#settings/connection';
+  })()`);
+  await waitFor(win, `document.querySelector('#port')`);
+  const pending = await win.webContents.executeJavaScript(`(() => {
+    document.querySelector('#tunnelSettings').open = true;
+    document.querySelector('.connection-advanced-settings').open = true;
+    const port = document.querySelector('#port');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(port, '3344');
+    port.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  if (!pending) throw new Error('Connection form did not open.');
+  await waitFor(win, `document.querySelector('#tunnelSettings').dataset.unsavedChanges === 'true'`);
+  await win.webContents.executeJavaScript(`(() => {
+    const button = document.querySelector('#tunnelSettings .connection-actions button');
+    button.click();
+    button.click();
+  })()`);
+  await waitFor(win, `document.querySelector('#tunnelSettings .connection-actions button').disabled`);
+  const during = await win.webContents.executeJavaScript(`(() => {
+    const probe = window.__connectionSaveProbe;
+    const locked = ['tunnelId', 'tunnelApiKey', 'port'].every(id => document.getElementById(id).disabled);
+    for (const listener of probe.listeners) listener({
+      additionalTunnelStatuses: [{ tunnelId: 'tunnel_secondary1234', state: 'running' }]
+    });
+    probe.pending.shift().resolve({ ok: true });
+    return { calls: probe.calls.length, locked };
+  })()`);
+  await waitFor(win, `!document.querySelector('#port').disabled && document.querySelector('#tunnelSettings').dataset.unsavedChanges === 'false'`);
+  const after = await win.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('.additional-tunnel-row')].find(node => !node.dataset.primary);
+    const result = { port: document.querySelector('#port').value, latestTunnelStatus: row?.textContent.includes('Connected') === true };
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(document.querySelector('#port'), '3355');
+    document.querySelector('#port').dispatchEvent(new Event('input', { bubbles: true }));
+    return result;
+  })()`);
+  await waitFor(win, `document.querySelector('#tunnelSettings').dataset.unsavedChanges === 'true'`);
+  await win.webContents.executeJavaScript(`document.querySelector('#tunnelSettings .connection-actions button').click()`);
+  await waitFor(win, `window.__connectionSaveProbe.pending.length === 1`);
+  await win.webContents.executeJavaScript(`window.__connectionSaveProbe.pending.shift().reject(new Error('Fixture save failed'))`);
+  await waitFor(win, `document.querySelector('#tunnelSettings .connection-actions button').textContent === 'Try again'`);
+  const failed = await win.webContents.executeJavaScript(`(() => ({
+    editable: !document.querySelector('#port').disabled,
+    port: document.querySelector('#port').value,
+    dirty: document.querySelector('#tunnelSettings').dataset.unsavedChanges
+  }))()`);
+  await win.webContents.executeJavaScript(`document.querySelector('#tunnelSettings .connection-actions button').click()`);
+  await waitFor(win, `window.__connectionSaveProbe.pending.length === 1`);
+  await win.webContents.executeJavaScript(`window.__connectionSaveProbe.pending.shift().resolve({ ok: true })`);
+  await waitFor(win, `!document.querySelector('#port').disabled && document.querySelector('#tunnelSettings').dataset.unsavedChanges === 'false'`);
+  const recovered = await win.webContents.executeJavaScript(`(() => {
+    const result = { ports: window.__connectionSaveProbe.calls.map(call => call.port), dirty: document.querySelector('#tunnelSettings').dataset.unsavedChanges };
+    document.querySelectorAll('.toast-dismiss').forEach(button => button.click());
+    delete window.relaiDesktop;
+    delete window.__connectionSaveProbe;
+    location.hash = '#tasks';
+    return result;
+  })()`);
+  return { during, after, failed, recovered };
+}
+
 async function exerciseOperationDiagnostics(win) {
   const size = win.getSize();
   const zoom = win.webContents.getZoomFactor();

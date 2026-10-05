@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import './styles.css';
 import {
   ANALYTICS_USE_CASES,
@@ -47,50 +47,28 @@ export function createUsageRoute(useDashboardSlices) {
     const [analytics, setAnalytics] = useState(null);
     const [refreshToken, setRefreshToken] = useState(0);
     const [status, setStatus] = useState('Loading analytics…');
-    const loadingRef = useRef(false);
-    const pendingLiveRefreshRef = useRef(false);
-    const analyticsRef = useRef(null);
-
-    const load = useCallback(async ({ silent = false } = {}) => {
-      if (loadingRef.current) {
-        if (silent) pendingLiveRefreshRef.current = true;
-        return;
-      }
-      loadingRef.current = true;
-      let bounds;
-      try {
-        bounds = analyticsBounds(range, { customStart: start, customEnd: end });
-      } catch (error) {
-        loadingRef.current = false;
-        setLoadState({ status: 'error', message: messageOf(error) });
-        setStatus('Analytics could not be loaded.');
-        return;
-      }
-      if (!silent) {
+    useEffect(() => {
+      let active = true;
+      const load = async () => {
         setLoadState({ status: 'loading', message: '' });
         setStatus('Loading analytics…');
-      }
-      try {
-        const result = await loadAnalyticsData({ desktop: window.relaiDesktop, bounds, workspace });
-        analyticsRef.current = result;
-        setAnalytics(result);
-        setLoadState({ status: 'ready', message: '' });
-        setStatus(`Analytics updated for ${bounds.label}.`);
-      } catch (error) {
-        if (!silent || !analyticsRef.current) setLoadState({ status: 'error', message: messageOf(error) });
-        setStatus(silent ? 'Analytics could not be refreshed.' : 'Analytics could not be loaded.');
-      } finally {
-        loadingRef.current = false;
-        if (pendingLiveRefreshRef.current) {
-          pendingLiveRefreshRef.current = false;
-          queueMicrotask(() => { void load({ silent: true }); });
+        try {
+          const bounds = analyticsBounds(range, { customStart: start, customEnd: end });
+          const result = await loadAnalyticsData({ desktop: window.relaiDesktop, bounds, workspace });
+          if (!active) return;
+          setAnalytics(result);
+          setLoadState({ status: 'ready', message: '' });
+          setStatus(`Analytics updated for ${bounds.label}.`);
+        } catch (error) {
+          if (!active) return;
+          setLoadState({ status: 'error', message: messageOf(error) });
+          setStatus('Analytics could not be loaded.');
         }
-      }
-    }, [range, start, end, workspace]);
-
-    useEffect(() => {
+      };
       void load();
-    }, [load, refreshToken]);
+      // Monthly requests are shared by the data layer; retire only this consumer.
+      return () => { active = false; };
+    }, [range, start, end, workspace, refreshToken]);
 
     useEffect(() => {
       const syncFromRoute = () => {

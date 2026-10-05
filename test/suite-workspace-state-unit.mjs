@@ -30,7 +30,7 @@ async function case_auto_session_unit() {
     const { ensureSessionStarted, touchSessionPolicy, readSessionPolicy, resolvePolicy, writeSessionPolicy, SESSION_IDLE_TTL_MS } = __m6;
   
     const __m7 = await import("../src/localRepoBridge.js");
-    const { relaiRead, workspaceTidyPlan } = __m7;
+    const { relaiReadAsync, workspaceTidyPlan } = __m7;
   
     const __m8 = await import("../src/stateDatabase.ts");
     const { withStateDatabase } = __m8;
@@ -175,8 +175,8 @@ async function case_auto_session_unit() {
     const config = { stateDir };
     const workspace = { alias: 'ws', path: workspacePath };
     await writeSessionPolicy(config, 'ws', { workspaceRoot: workspacePath, taskId: 'task-read' });
-    const first = relaiRead(workspace, config, { paths: ['README.md'] });
-    const second = relaiRead(workspace, config, { paths: ['README.md'] });
+    const first = await relaiReadAsync(workspace, config, { paths: ['README.md'] });
+    const second = await relaiReadAsync(workspace, config, { paths: ['README.md'] });
     assert.equal(first.items[0]?.content, '# Auto session\n');
     assert.equal(first.items[0]?.cacheHit, false);
     assert.equal(second.items[0]?.content, '# Auto session\n');

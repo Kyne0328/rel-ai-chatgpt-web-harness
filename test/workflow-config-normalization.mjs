@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { normalizeConfig, ensureConfig, invalidateConfigCache } from "../src/config.js";
+import { normalizeConfig, ensureConfig, invalidateConfigCache, readConfig, writeConfig } from "../src/config.js";
 
 const exampleConfig = JSON.parse(fs.readFileSync(path.resolve('examples/config.example.json'), 'utf8'));
 assert.equal(exampleConfig.auditLogPath, '', 'the portable example must not mix Windows and Unix path syntax');
@@ -117,6 +117,64 @@ assert.equal(normalizeConfig({ telemetry: { sampleRatio: -1 } }).telemetry.sampl
       true,
       'invalid configuration must be preserved for diagnostics instead of deleted'
     );
+  } finally {
+    if (previous == null) delete process.env.REL_AI_MCP_CONFIG;
+    else process.env.REL_AI_MCP_CONFIG = previous;
+    invalidateConfigCache();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+{
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-config-backup-recovery-'));
+  const tmpConfig = path.join(tmpDir, 'config.json');
+  const previous = process.env.REL_AI_MCP_CONFIG;
+  process.env.REL_AI_MCP_CONFIG = tmpConfig;
+  try {
+    const saved = {
+      stateDir: tmpDir,
+      telemetry: { diagnosticsEnabled: false },
+      workspaces: { retained: { path: tmpDir, context: { snapshotMaxFiles: 81 } } }
+    };
+    writeConfig(saved);
+    writeConfig(saved);
+    const backup = fs.readFileSync(`${tmpConfig}.bak`, 'utf8');
+    fs.writeFileSync(tmpConfig, '{ interrupted config write');
+    invalidateConfigCache();
+    const recovered = ensureConfig();
+    assert.equal(recovered.workspaces.retained.path, tmpDir, 'valid backup must preserve configured workspaces');
+    assert.equal(recovered.workspaces.retained.context.snapshotMaxFiles, 81);
+    assert.equal(recovered.telemetry.diagnosticsEnabled, false, 'recovery must preserve user settings');
+    assert.equal(readConfig().workspaces.retained.path, tmpDir, 'cached reads must use the restored configuration');
+    assert.equal(JSON.parse(fs.readFileSync(tmpConfig, 'utf8')).workspaces.retained.path, tmpDir);
+    assert.equal(fs.readFileSync(`${tmpConfig}.bak`, 'utf8'), backup, 'recovery must not overwrite the last valid backup');
+    const invalid = fs.readdirSync(tmpDir).find(name => name.startsWith('config.json.invalid-'));
+    assert.equal(fs.readFileSync(path.join(tmpDir, invalid), 'utf8'), '{ interrupted config write');
+
+    fs.writeFileSync(tmpConfig, '{ recovery write failure');
+    invalidateConfigCache();
+    const renameSync = fs.renameSync;
+    fs.renameSync = (source, target, ...args) => {
+      if (path.resolve(String(target)) === tmpConfig) throw Object.assign(new Error('fixture replacement failure'), { code: 'EIO' });
+      return renameSync(source, target, ...args);
+    };
+    try {
+      assert.throws(() => ensureConfig(), error => error?.code === 'DURABLE_STATE_WRITE_FAILED', 'failed recovery replacement must propagate rather than reset to defaults');
+      assert.equal(fs.readFileSync(tmpConfig, 'utf8'), '{ recovery write failure', 'primary must remain present until replacement succeeds');
+      assert.equal(fs.readFileSync(`${tmpConfig}.bak`, 'utf8'), backup, 'failed recovery must retain a usable backup');
+    } finally {
+      fs.renameSync = renameSync;
+    }
+    invalidateConfigCache();
+    assert.equal(ensureConfig().workspaces.retained.path, tmpDir, 'a later startup must retry backup recovery after a failed replacement');
+
+    fs.rmSync(tmpConfig);
+    invalidateConfigCache();
+    assert.deepEqual(ensureConfig().workspaces, {}, 'missing-primary first-run behavior must not revive an old backup');
+
+    fs.writeFileSync(tmpConfig, '{ invalid primary');
+    fs.writeFileSync(`${tmpConfig}.bak`, '[]');
+    invalidateConfigCache();
+    assert.deepEqual(ensureConfig().workspaces, {}, 'a non-object backup must not replace invalid configuration');
   } finally {
     if (previous == null) delete process.env.REL_AI_MCP_CONFIG;
     else process.env.REL_AI_MCP_CONFIG = previous;

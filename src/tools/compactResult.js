@@ -1,16 +1,10 @@
+import { pruneEmpty } from './connectorHelpers.js';
+
 const REQUIRED_EMPTY_ARRAY_FIELDS = Object.freeze({
   'relai_process:list': new Set(['processes']),
   'relai_validate:diagnostics': new Set(['diagnostics'])
 });
 
-function pruneEmpty(value, preserveEmptyArrays = null) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  return Object.fromEntries(Object.entries(value).filter(([key, item]) => {
-    if (item == null) return false;
-    if (!Array.isArray(item) || item.length > 0) return true;
-    return preserveEmptyArrays?.has(key) === true;
-  }));
-}
 
 function slimCompactPublicResult(publicName, action, value) {
   if (!value || typeof value !== 'object') return value;

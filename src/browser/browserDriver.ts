@@ -99,12 +99,13 @@ async function launchBrowserDriver(options: LaunchBrowserDriverOptions): Promise
     recordsPersistentSites: true,
     createPage: (signal?: AbortSignal) => createNativePage(bridge, nativeSessionId, signal),
     close: async () => {
+      const result = objectValue(await bridge({ action: 'close_session', nativeSessionId }));
+      if (result.ok === false) throw new Error(String(result.error || 'Embedded browser session could not be closed.'));
       sessionDisconnectListeners.delete(nativeSessionId);
       sessionPageCreatedListeners.delete(nativeSessionId);
       for (const [pageId, entry] of pageListeners) {
         if (entry.nativeSessionId === nativeSessionId) pageListeners.delete(pageId);
       }
-      await bridge({ action: 'close_session', nativeSessionId });
     },
     onDisconnected: (listener: () => void) => { onDisconnected = listener; },
     onPageCreated: (listener: (page: BrowserPageDriver, active: boolean) => void) => { sessionPageCreatedListeners.set(nativeSessionId, listener); },
@@ -166,8 +167,9 @@ function createNativePageProxy(bridge: NativeBrowserBridge, nativeSessionId: str
       });
     },
     close: async () => {
+      const result = objectValue(await bridge({ action: 'close_page', nativeSessionId, nativePageId }));
+      if (result.ok === false) throw new Error(String(result.error || 'Embedded browser page could not be closed.'));
       pageListeners.delete(nativePageId);
-      await bridge({ action: 'close_page', nativeSessionId, nativePageId });
     },
     onClosed: (listener: () => void) => { listeners.onClosed = listener; },
     onCrashed: (listener: () => void) => { listeners.onCrashed = listener; }

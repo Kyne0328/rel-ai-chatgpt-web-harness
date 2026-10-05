@@ -3,6 +3,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { runProcess } from '../process.js';
+import { executionOutcome } from '../executionOutcome.js';
 
 import { getCurrentTaskAbortSignal } from '../toolActivity.js';
 import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
@@ -401,6 +402,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   const ephemeralChangedFiles = ephemeralPaths.filter(file => changedSet.has(file));
   return {
     ok: true,
+    ...executionOutcome(result),
     executed: result.executed === true,
     commandSucceeded,
     workspace: workspace.alias,
@@ -408,32 +410,14 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     commandSummary,
     cwd: cwd.relativePath,
     shell: executionLabel,
-    exitCode: result.exitCode,
-    durationMs: result.durationMs,
-    queueWaitMs: result.queueWaitMs || 0,
     stdout: result.stdout || '',
     stderr: result.stderr || '',
-    stdoutBytes: result.stdoutBytes || 0,
-    stderrBytes: result.stderrBytes || 0,
-    stdoutTruncated: result.stdoutTruncated === true,
-    stderrTruncated: result.stderrTruncated === true,
-    ...(result.stdoutOutputRef ? { stdoutOutputRef: result.stdoutOutputRef } : {}),
-    ...(result.stdoutSpillTruncated != null ? { stdoutSpillTruncated: result.stdoutSpillTruncated === true } : {}),
-    ...(result.stderrOutputRef ? { stderrOutputRef: result.stderrOutputRef } : {}),
-    ...(result.stderrSpillTruncated != null ? { stderrSpillTruncated: result.stderrSpillTruncated === true } : {}),
     timedOut,
     queueTimedOut: result.queueTimedOut === true,
-    ...(typeof result.rootExitConfirmed === 'boolean' ? { rootExitConfirmed: result.rootExitConfirmed } : {}),
-    ...(result.outputFinalizationTimedOut ? { outputFinalizationTimedOut: true } : {}),
-    ...(result.outputFinalizationError ? { outputFinalizationError: result.outputFinalizationError } : {}),
-    ...(result.mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError: result.mutationOwnershipPersistenceError } : {}),
     cancelled,
-    ...(result.terminationConfirmed != null ? { terminationConfirmed: result.terminationConfirmed === true } : {}),
-    ...(result.forcedTermination != null ? { forcedTermination: result.forcedTermination === true } : {}),
-    ...(result.signal ? { signal: result.signal } : {}),
     ...(deadlineTimedOut
       ? { error: `Timed out after ${Number(args.timeoutMs)}ms` }
-      : result.error ? { error: result.error } : {}),
+      : {}),
     ...(Object.keys(requestedEnv).length ? { environmentKeys: Object.keys(requestedEnv).sort((left, right) => left.localeCompare(right)) } : {}),
     changedFiles: changed.files,
     ...(ephemeralChangedFiles.length ? { ephemeralChangedFiles } : {}),

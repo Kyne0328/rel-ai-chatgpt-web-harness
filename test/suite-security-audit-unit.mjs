@@ -2,21 +2,56 @@
 // Pure and self-contained checks share one process; tests requiring process/global isolation remain standalone.
 // Add related regression checks here instead of creating another one-off test file.
 
-// Formerly audit-production-unit.mjs
+// Exercise the CLI boundary: retry timers must keep the process alive, and
+// advisory outages must remain distinct from actual vulnerability findings.
 async function case_audit_production_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("../scripts/audit-production.mjs");
-    const { isTransientAuditFailure } = __m1;
-  
-  assert.equal(isTransientAuditFailure({ stderr: 'npm warn audit network timeout at: https://registry.npmjs.org/-/npm/v1/security/advisories/bulk' }), true);
-  assert.equal(isTransientAuditFailure({ stderr: 'npm error code ETIMEDOUT' }), true);
-  assert.equal(isTransientAuditFailure({ stderr: '503 Service Unavailable' }), true);
-  assert.equal(isTransientAuditFailure({ stdout: '# npm audit report\n1 high severity vulnerability' }), false);
-  assert.equal(isTransientAuditFailure({ stdout: '# npm audit report\nmoderate vulnerability found' }), false);
-  
-  console.log('Production audit distinguishes advisory-service outages from vulnerability findings.');
+  const { default: assert } = await import('node:assert/strict');
+  const { default: fs } = await import('node:fs');
+  const { default: os } = await import('node:os');
+  const { default: path } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-audit-cli-'));
+  const fakeNpm = path.join(temp, 'npm.cjs');
+  const callsPath = path.join(temp, 'calls.json');
+  fs.writeFileSync(fakeNpm, `
+    const fs = require('node:fs');
+    const calls = fs.existsSync(process.env.REL_AI_AUDIT_TEST_CALLS)
+      ? JSON.parse(fs.readFileSync(process.env.REL_AI_AUDIT_TEST_CALLS, 'utf8')) : [];
+    calls.push(process.argv.slice(2));
+    fs.writeFileSync(process.env.REL_AI_AUDIT_TEST_CALLS, JSON.stringify(calls));
+    const mode = process.env.REL_AI_AUDIT_TEST_MODE;
+    const transient = mode === 'unavailable' || (mode === 'recover' && calls.length === 1);
+    if (transient) { process.stderr.write('ECONNRESET temporary registry failure\\n'); process.exitCode = 1; }
+    else if (mode === 'vulnerability') { process.stdout.write('1 high severity vulnerability\\n'); process.exitCode = 1; }
+    else process.stdout.write('found 0 vulnerabilities\\n');
+  `);
+  function run(mode) {
+    fs.rmSync(callsPath, { force: true });
+    const result = spawnSync(process.execPath, ['scripts/audit-production.mjs'], {
+      cwd: root, encoding: 'utf8', timeout: 10000, windowsHide: true,
+      env: { ...process.env, npm_execpath: fakeNpm,
+        REL_AI_AUDIT_TEST_MODE: mode, REL_AI_AUDIT_TEST_CALLS: callsPath }
+    });
+    return { ...result, calls: JSON.parse(fs.readFileSync(callsPath, 'utf8')) };
+  }
+  try {
+    const recovered = run('recover');
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(recovered.calls.length, 3, 'retry root, then continue to Electron');
+    assert.ok(recovered.calls.at(-1).includes('electron'));
+    const unavailable = run('unavailable');
+    assert.equal(unavailable.status, 0, unavailable.stderr);
+    assert.equal(unavailable.calls.length, 4, 'exhaust both targets without abandoning top-level await');
+    assert.match(unavailable.stderr, /continuing without a live advisory check/);
+    const vulnerable = run('vulnerability');
+    assert.equal(vulnerable.status, 1);
+    assert.equal(vulnerable.calls.length, 1, 'findings must fail immediately instead of retrying');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+  console.log('Production audit CLI retry, outage, and vulnerability behavior passed.');
 }
 await case_audit_production_unit();
 

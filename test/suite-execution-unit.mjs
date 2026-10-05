@@ -997,7 +997,10 @@ async function case_process_discovery_guidance_unit() {
   const processTool = getPublicToolSchemas().find(tool => tool.name === 'relai_process');
   assert.ok(processTool, 'relai_process must be present in the public MCP contract');
   assert.match(processTool.description, /direct executable \+ argv.*command string/i);
-  assert.match(processTool.description, /one-shot work belongs in relai_exec or relai_validate/i);
+  assert.match(processTool.description, /one-shot/i, 'managed process discovery must distinguish finite work');
+  for (const toolName of ['relai_exec', 'relai_validate']) {
+    assert.ok(processTool.description.includes(toolName), `managed process discovery must name ${toolName} for finite work`);
+  }
   
   const properties = processTool.inputSchema?.properties || {};
   for (const field of ['command', 'executable', 'argv', 'input']) {

@@ -483,7 +483,7 @@ async function case_read_connector_default_unit() {
     const assert = __m3.default;
   
     const __m4 = await import("../src/localRepoBridge.js");
-    const { relaiRead } = __m4;
+    const { relaiReadAsync } = __m4;
   
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-read-default-'));
   const wsRoot = path.join(tmp, 'repo');
@@ -497,19 +497,19 @@ async function case_read_connector_default_unit() {
   
   try {
     // Connector transport: default capped at 128 KB, truncated flag + range hint present.
-    const connector = relaiRead(workspace, config, { paths: ['big.txt'] }, { connector: true });
+    const connector = await relaiReadAsync(workspace, config, { paths: ['big.txt'] }, { connector: true });
     const connectorItem = connector.items[0];
     assert.equal(connectorItem.truncated, true, 'connector default must truncate a 300 KB file');
     assert.ok(connectorItem.returnedBytes <= 128 * 1024, `expected <=131072 bytes, got ${connectorItem.returnedBytes}`);
     assert.match(connectorItem.hint, /startLine/, 'truncated read must hint at line-range re-reads');
   
     // Local transport: 1 MB default returns the whole file.
-    const local = relaiRead(workspace, config, { paths: ['big.txt'] }, {});
+    const local = await relaiReadAsync(workspace, config, { paths: ['big.txt'] }, {});
     assert.equal(local.items[0].truncated, false, 'local default must return the full 300 KB file');
     assert.equal(local.items[0].hint, undefined, 'untruncated reads carry no hint');
   
     // Explicit maxBytes always wins over the connector default.
-    const explicit = relaiRead(workspace, config, { paths: ['big.txt'], maxBytes: 200000 }, { connector: true });
+    const explicit = await relaiReadAsync(workspace, config, { paths: ['big.txt'], maxBytes: 200000 }, { connector: true });
     assert.equal(explicit.items[0].truncated, true);
     assert.ok(explicit.items[0].returnedBytes > 128 * 1024, 'explicit maxBytes must override the connector default');
     assert.ok(explicit.items[0].returnedBytes <= 200000);
@@ -539,7 +539,7 @@ async function case_read_range_unit() {
     const path = __m4.default;
   
     const __m5 = await import("../src/localRepoBridge.js");
-    const { relaiRead } = __m5;
+    const { relaiReadAsync } = __m5;
   
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-read-range-'));
   const stateDir = path.join(root, 'state');
@@ -549,6 +549,7 @@ async function case_read_range_unit() {
   
   const workspace = { alias: 'sample', path: root };
   const config = { stateDir };
+  const originalReadFile = fs.promises.readFile;
   const originalReadFileSync = fs.readFileSync;
   let targetReads = 0;
   
@@ -557,8 +558,12 @@ async function case_read_range_unit() {
       if (path.resolve(String(file)) === path.resolve(target)) targetReads += 1;
       return originalReadFileSync.call(this, file, ...args);
     };
+    fs.promises.readFile = async function patchedReadFile(file, ...args) {
+      if (path.resolve(String(file)) === path.resolve(target)) targetReads += 1;
+      return originalReadFile.call(this, file, ...args);
+    };
   
-    const ranged = relaiRead(workspace, config, {
+    const ranged = await relaiReadAsync(workspace, config, {
       paths: ['sample.txt'],
       startLine: 2,
       endLine: 3,
@@ -576,7 +581,7 @@ async function case_read_range_unit() {
     assert.equal(ranged.items[0].writeGuidance, undefined);
     assert.equal(ranged.items[0].writeHint, undefined);
   
-    assert.throws(() => relaiRead(workspace, config, {
+    await assert.rejects(() => relaiReadAsync(workspace, config, {
       paths: ['sample.txt'],
       startLine: 4,
       endLine: 2
@@ -585,7 +590,7 @@ async function case_read_range_unit() {
     const unicodePath = path.join(root, 'unicode.txt');
     const unicode = 'é'.repeat(700);
     fs.writeFileSync(unicodePath, unicode, 'utf8');
-    const truncated = relaiRead(workspace, config, {
+    const truncated = await relaiReadAsync(workspace, config, {
       paths: ['unicode.txt'],
       maxBytes: 1001,
       guidanceMode: 'none'
@@ -597,7 +602,7 @@ async function case_read_range_unit() {
     // Per-path ranges: two files with different windows must resolve in one call.
     const second = path.join(root, 'second.txt');
     fs.writeFileSync(second, 'one\ntwo\nthree\nfour\nfive\n', 'utf8');
-    const perPath = relaiRead(workspace, config, {
+    const perPath = await relaiReadAsync(workspace, config, {
       paths: ['sample.txt', 'second.txt'],
       ranges: [
         { path: 'sample.txt', startLine: 1, endLine: 1 },
@@ -612,7 +617,7 @@ async function case_read_range_unit() {
     assert.deepEqual(perPath.items[1].lineRange, { startLine: 3, endLine: 4, totalLines: 6 });
   
     // A path without its own entry falls back to the batch-wide window.
-    const mixed = relaiRead(workspace, config, {
+    const mixed = await relaiReadAsync(workspace, config, {
       paths: ['sample.txt', 'second.txt'],
       startLine: 2,
       endLine: 2,
@@ -623,7 +628,7 @@ async function case_read_range_unit() {
     assert.equal(mixed.items[1].content, 'five\n', 'a listed path uses its own range to end of file');
   
     // Path spelling is normalized so './x' and 'x' name the same entry.
-    const normalized = relaiRead(workspace, config, {
+    const normalized = await relaiReadAsync(workspace, config, {
       paths: ['./second.txt'],
       ranges: [{ path: 'second.txt', startLine: 2, endLine: 2 }],
       guidanceMode: 'none'
@@ -632,7 +637,7 @@ async function case_read_range_unit() {
   
     // Repeated ranges for the same file preserve request order instead of collapsing
     // to the last path-keyed range.
-    const repeated = relaiRead(workspace, config, {
+    const repeated = await relaiReadAsync(workspace, config, {
       ranges: [
         { path: 'sample.txt', startLine: 1, endLine: 1 },
         { path: 'sample.txt', startLine: 3, endLine: 3 }
@@ -643,23 +648,24 @@ async function case_read_range_unit() {
     assert.equal(repeated.items[0].content, 'alpha\r\n');
     assert.equal(repeated.items[1].content, 'gamma\r\n');
   
-    assert.throws(() => relaiRead(workspace, config, {
+    await assert.rejects(() => relaiReadAsync(workspace, config, {
       paths: ['sample.txt'],
       ranges: [{ path: 'sample.txt' }]
     }), /requires startLine or endLine/);
-    assert.throws(() => relaiRead(workspace, config, {
+    await assert.rejects(() => relaiReadAsync(workspace, config, {
       paths: ['sample.txt'],
       ranges: [{ path: 'sample.txt', startLine: 4, endLine: 2 }]
     }), /endLine must be greater than or equal to startLine/);
-    assert.throws(() => relaiRead(workspace, config, {
+    await assert.rejects(() => relaiReadAsync(workspace, config, {
       paths: ['sample.txt'],
       ranges: [{ startLine: 1 }]
     }), /require a non-empty path/);
-    assert.throws(() => relaiRead(workspace, config, {
+    await assert.rejects(() => relaiReadAsync(workspace, config, {
       paths: ['sample.txt'],
       ranges: 'sample.txt'
     }), /ranges must be an array/);
   } finally {
+    fs.promises.readFile = originalReadFile;
     fs.readFileSync = originalReadFileSync;
     fs.rmSync(root, { recursive: true, force: true });
   }

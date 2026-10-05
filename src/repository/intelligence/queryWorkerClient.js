@@ -8,7 +8,6 @@ import { measurePerformancePhase } from '../../performanceObservability.js';
 import { acquireHostResources, hostResourceStats } from '../../hostResourceScheduler.js';
 
 const QUERY_WORKER_IDLE_EVICT_MS = 60_000;
-const QUERY_WORKER_COUNT = 4;
 const QUERY_WORKER_GLOBAL_COUNT = 4;
 const QUERY_WORKER_TIMEOUT_MS = 30_000;
 const QUERY_WORKER_QUEUE_TIMEOUT_MS = 30_000;
@@ -220,7 +219,6 @@ async function shutdownRepositoryQueryWorkers() {
 }
 
 export {
-  QUERY_WORKER_COUNT,
   QUERY_WORKER_GLOBAL_COUNT,
   QUERY_WORKER_IDLE_EVICT_MS,
   QUERY_WORKER_TIMEOUT_MS,

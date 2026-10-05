@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runProcess, summarizeCommand } from '../process.js';
+import { outputSpillOwner } from '../outputSpill.js';
 import { selectValidationLevel } from '../validationStrategy.js';
 import { resolvePolicy } from '../policyResolver.js';
 import { getCurrentTaskAbortSignal, getCurrentToolActivityContext } from '../toolActivity.js';
@@ -233,6 +234,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           signal,
           resourceClass: isClearlyReadOnlyExec({ command }) ? undefined : 'heavy',
           resourceOwner: workspace.alias,
+          outputSpillTaskId: outputSpillOwner({ taskId: currentTaskId, workspace: logicalWorkspaceAlias, principal: context.principal }),
           ...(fullOutput ? { maxOutputBytes: 16 * 1024 * 1024 } : {})
         }, config));
         } finally {

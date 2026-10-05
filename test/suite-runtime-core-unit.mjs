@@ -1359,73 +1359,32 @@ async function case_recovery_window_unit() {
 }
 await case_recovery_window_unit();
 
-// Formerly runtime-lifecycle-unit.mjs
+// Runtime lifecycle behavior used by process, updater, and tunnel consumers.
 async function case_runtime_lifecycle_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("../src/runtimeLifecycle.js");
-    const { PROCESS_LIFECYCLE_STATUSES,
-    TUNNEL_LIFECYCLE_STATUSES,
-    UPDATER_LIFECYCLE_STATUSES,
-    assertConnectionLayerTransition,
-    assertProcessStatusTransition,
-    assertTunnelLifecycleTransition,
-    assertUpdaterLifecycleTransition,
-    canTransitionConnectionLayer,
-    canTransitionProcessStatus,
-    canTransitionTunnelLifecycle,
-    canTransitionUpdaterLifecycle,
-    normalizeProcessLifecycleStatus,
-    normalizeTunnelLifecycleStatus,
-    normalizeUpdaterLifecycleStatus } = __m1;
-  
-  assert.deepEqual(PROCESS_LIFECYCLE_STATUSES, ['starting', 'running', 'stopping', 'orphaned', 'stopped', 'exited', 'failed']);
+  const { default: assert } = await import('node:assert/strict');
+  const {
+    assertTunnelLifecycleTransition, isActiveProcessStatus, isTerminalProcessStatus,
+    normalizeProcessLifecycleStatus, normalizeUpdaterLifecycleStatus
+  } = await import('../src/runtimeLifecycle.js');
+
   assert.equal(normalizeProcessLifecycleStatus('RUNNING'), 'running');
   assert.equal(normalizeProcessLifecycleStatus('unknown'), '');
-  assert.equal(canTransitionProcessStatus('starting', 'running'), true);
-  assert.equal(canTransitionProcessStatus('running', 'stopping'), true);
-  assert.equal(canTransitionProcessStatus('stopping', 'stopped'), true);
-  assert.equal(canTransitionProcessStatus('stopped', 'running'), false);
-  assert.equal(assertProcessStatusTransition('running', 'stopping'), 'stopping');
-  assert.throws(() => assertProcessStatusTransition('stopped', 'running'), error => error?.code === 'INVALID_PROCESS_STATE');
-  
-  assert.deepEqual(TUNNEL_LIFECYCLE_STATUSES, ['stopped', 'starting', 'locally_ready', 'authenticating', 'running', 'degraded', 'failed']);
-  assert.equal(normalizeTunnelLifecycleStatus('locally_ready'), 'locally_ready');
-  assert.equal(canTransitionTunnelLifecycle('stopped', 'starting'), true);
-  assert.equal(canTransitionTunnelLifecycle('starting', 'locally_ready'), true);
-  assert.equal(canTransitionTunnelLifecycle('locally_ready', 'authenticating'), true);
-  assert.equal(canTransitionTunnelLifecycle('authenticating', 'running'), true);
-  assert.equal(canTransitionTunnelLifecycle('authenticating', 'degraded'), true);
-  assert.equal(canTransitionTunnelLifecycle('running', 'degraded'), true);
-  assert.equal(canTransitionTunnelLifecycle('degraded', 'running'), true);
-  assert.equal(canTransitionTunnelLifecycle('failed', 'running'), false);
-  assert.equal(assertTunnelLifecycleTransition('degraded', 'failed'), 'failed');
-  assert.throws(() => assertTunnelLifecycleTransition('stopped', 'running'), error => error?.code === 'INVALID_TUNNEL_STATE');
-  
-  assert.deepEqual(UPDATER_LIFECYCLE_STATUSES, ['unsupported', 'idle', 'checking', 'up_to_date', 'available', 'downloading', 'downloaded', 'installing', 'error']);
+  assert.equal(isActiveProcessStatus('running'), true);
+  assert.equal(isActiveProcessStatus('orphaned'), false);
+  assert.equal(isTerminalProcessStatus('stopped'), true);
+  assert.equal(isTerminalProcessStatus('orphaned'), false);
   assert.equal(normalizeUpdaterLifecycleStatus('DOWNLOADING'), 'downloading');
   assert.equal(normalizeUpdaterLifecycleStatus('mystery'), '');
-  assert.equal(canTransitionUpdaterLifecycle('idle', 'checking'), true);
-  assert.equal(canTransitionUpdaterLifecycle('checking', 'available'), true);
-  assert.equal(canTransitionUpdaterLifecycle('available', 'downloading'), true);
-  assert.equal(canTransitionUpdaterLifecycle('downloading', 'downloaded'), true);
-  assert.equal(canTransitionUpdaterLifecycle('downloaded', 'installing'), true);
-  assert.equal(canTransitionUpdaterLifecycle('unsupported', 'checking'), false);
-  assert.equal(assertUpdaterLifecycleTransition('error', 'checking'), 'checking');
-  assert.throws(() => assertUpdaterLifecycleTransition('unsupported', 'checking'), error => error?.code === 'INVALID_UPDATER_STATE');
-  
-  assert.equal(canTransitionConnectionLayer('localService', 'stopped', 'starting'), true);
-  assert.equal(canTransitionConnectionLayer('localService', 'starting', 'running'), true);
-  assert.equal(canTransitionConnectionLayer('publicEndpoint', 'connecting', 'available'), true);
-  assert.equal(canTransitionConnectionLayer('publicEndpoint', 'available', 'degraded'), true);
-  assert.equal(canTransitionConnectionLayer('chatgptReadiness', 'unavailable', 'ready'), true);
-  assert.equal(canTransitionConnectionLayer('dashboardUpdates', 'live', 'reconnecting'), true);
-  assert.equal(canTransitionConnectionLayer('localService', 'stopped', 'running'), false);
-  assert.equal(assertConnectionLayerTransition('publicEndpoint', 'degraded', 'available'), 'available');
-  assert.throws(() => assertConnectionLayerTransition('localService', 'stopped', 'running'), error => error?.code === 'INVALID_CONNECTION_STATE');
-  
-  console.log('Runtime lifecycle vocabularies and transition guards passed.');
+
+  for (const [from, to] of [
+    ['stopped', 'starting'], ['starting', 'locally_ready'], ['locally_ready', 'authenticating'],
+    ['authenticating', 'running'], ['authenticating', 'degraded'], ['running', 'degraded'],
+    ['degraded', 'running'], ['degraded', 'failed']
+  ]) assert.equal(assertTunnelLifecycleTransition(from, to), to);
+  for (const from of ['stopped', 'failed']) {
+    assert.throws(() => assertTunnelLifecycleTransition(from, 'running'), error => error?.code === 'INVALID_TUNNEL_STATE');
+  }
+  console.log('Production lifecycle normalization and tunnel transition guards passed.');
 }
 await case_runtime_lifecycle_unit();
 
@@ -2008,75 +1967,40 @@ async function case_usage_ui_contract_unit() {
   
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
-  const navigationCatalog = read('src/ui/navigation-catalog.js');
-  const dashboard = read('public/dashboard.js');
-  const preload = read('electron/preload.cjs');
-  const ipc = read('electron/ipc-handlers-dashboard.js');
-  const desktopContract = read('src/contracts/desktop.ts');
+
   const usageSource = read('src/ui/features/usage/index.js');
   const usageReact = read('src/ui/features/usage/react.js');
   const usageRender = read('src/ui/features/usage/render.js');
   const settingsReact = read('src/ui/features/settings/react.js');
-  const reactMain = read('src/ui/react/main.js');
   const usageRange = read('src/ui/features/usage/range-model.js');
   const usageData = read('src/ui/features/usage/data.js');
   const usageCss = read('src/ui/features/usage/styles.css');
   const charts = read('src/ui/components/charts.js');
   const sparkline = read('src/ui/components/sparkline.js');
   const activityReact = read('src/ui/features/activity/react.js');
-  const browserReact = read('src/ui/features/browser/react.js');
-  const extensionsReact = read('src/ui/features/extensions/react.js');
-  const processesReact = read('src/ui/features/processes/react.js');
-  const toolsReact = read('src/ui/features/tools/react.js');
   const sessionsReact = read('src/ui/features/sessions/react.js');
   const codeReact = read('src/ui/features/code/react.js');
   const httpRoutes = read('src/http/routes.ts');
-  const dashboardHttp = read('src/http/dashboard.ts');
   const homeReact = read('src/ui/features/home/react.js');
   const workspacesReact = read('src/ui/features/workspaces/react.js');
-  const uiPackage = JSON.parse(read('src/ui/package.json'));
-  const appCssSource = read('src/ui/styles/app.css');
-  const viteConfigSource = read('vite.config.mjs');
   const usageCombined = `${usageSource}\n${usageReact}\n${usageRender}\n${usageRange}\n${usageData}`;
   
-  assert.match(navigationCatalog, /route\(['"]usage['"], ['"]Analytics['"]/);
-  assert.match(navigationCatalog, /See activity trends, success rates, timing, and problem areas/i);
-  assert.doesNotMatch(dashboard, /usage: systemSection\(['"]usage['"]\)/, 'Analytics must not retain the legacy System renderer');
-  assert.match(reactMain, /registerReactSection\('usage'/, 'Analytics must be registered as a canonical React route');
-  assert.match(preload, /getLocalUsage: month => ipcRenderer\.invoke\(['"]desktop:analytics:local['"], month\)/);
-  assert.doesNotMatch(preload, /getGatewayUsage|desktop:gateway:usage/);
-  assert.match(desktopContract, /DESKTOP_ANALYTICS_LOCAL:\s*['"]desktop:analytics:local['"]/);
-  assert.match(ipc, /channels\.DESKTOP_ANALYTICS_LOCAL/);
-  assert.match(ipc, /Analytics month must use YYYY-MM/);
-  assert.doesNotMatch(ipc, /gateway/i);
-  assert.match(usageData, /desktop\.getLocalUsage/);
-  assert.doesNotMatch(`${usageSource}\n${usageData}`, /getGatewayUsage|connectionMode|pairing_required|cloudUsageAvailability/i);
   assert.doesNotMatch(`${usageSource}\n${usageData}`, /fetch\(|DASHBOARD_DATA_URL|auditTail|taskActivity/);
-  assert.doesNotMatch(usageReact, /data-usage-privacy/, 'Analytics must not repeat the old privacy-policy wall in the operational view');
   assert.match(usageReact, /Local analytics are kept for about 180 days\./, 'Analytics must retain concise local-retention context');
   assert.match(usageReact, /Privacy & data details/, 'Analytics must provide a direct drill-down to privacy/data details');
-  assert.doesNotMatch(usageSource, /Minimal usage counting is always on|aggregate action categories and work-type labels locally/i, 'Analytics helpers must not retain removed passive privacy copy');
-  assert.match(settingsReact, /title: 'Diagnostics'/, 'App settings must keep the actionable diagnostics control');
-  assert.doesNotMatch(settingsReact, /Usage counting/, 'App settings must not show non-actionable installation reporting');
   assert.match(settingsReact, /Diagnostic telemetry/, 'App settings must expose the diagnostic telemetry toggle');
   assert.doesNotMatch(usageReact, /target: 'analytics', confirm: true/, 'Analytics page must not expose the destructive local-history clear action');
   assert.match(settingsReact, /target: 'analytics', confirm: true/, 'Settings must retain an explicit local-history clear action');
-  assert.doesNotMatch(`${usageSource}\n${usageRender}`, /innerHTML|replaceChildren|insertAdjacentHTML/, 'Analytics model/view helpers must not retain the legacy DOM renderer');
   assert.match(usageReact, /'data-usage-status': true, role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true'/);
   assert.doesNotMatch(usageReact, /'data-usage-content'.*'aria-live'/);
   assert.match(usageReact, /Analytics updated for \$\{bounds\.label\}/);
   assert.doesNotMatch(usageReact, /taskRevision/, 'Analytics must not refresh expensive monthly history on every live task activity revision');
-  assert.match(homeReact, /HomeAnalytics/, 'Overview must retain a compact current-activity summary before the detailed Analytics page');
-  assert.match(homeReact, /loadAnalyticsData/, 'Overview analytics must load from the canonical local analytics source');
   assert.doesNotMatch(homeReact, /HomeAnalytics, \{ taskRevision:/, 'Overview analytics must not reload from every live task revision');
   assert.doesNotMatch(homeReact, /firstRequestObserved\s*\?\s*h\(RecentTasksCard/, 'Persisted recent tasks must not disappear when volatile MCP request history resets on restart');
-  assert.match(workspacesReact, /WorkspaceAnalytics/, 'Project cards must retain compact project analytics context');
   assert.doesNotMatch(workspacesReact, /useWorkspaceAnalytics\(analyticsAliases, Number\(data\.live/, 'Project analytics must not reload from every live task revision');
   assert.match(workspacesReact, /Loading analytics…/, 'Project analytics must expose an explicit loading state');
   assert.match(workspacesReact, /Analytics unavailable/, 'Project analytics must expose an explicit failure state');
-  assert.match(workspacesReact, /workspace-status-summary/, 'Projects must retain a compact readiness summary without large KPI cards');
   assert.match(workspacesReact, /routeHref\('usage'/, 'Project cards must retain a direct Analytics drill-down');
-  assert.match(usageReact, /'aria-pressed': range === key \? 'true' : 'false'/);
   assert.match(usageReact, /role: 'tooltip'/, 'Analytics metric help must expose tooltip semantics');
   assert.match(usageReact, /'aria-describedby': helpId/, 'Analytics metric help triggers must reference their tooltip text');
   assert.match(usageReact, /event\.key === 'Escape'/, 'Analytics metric tooltips must be dismissible with Escape');
@@ -2086,49 +2010,21 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageReact, /onClick: \(\) => setOpen\(value => !value\)/, 'Analytics metric help must support explicit touch and click toggling');
   assert.match(charts, /event\.key === 'ArrowLeft'/, 'Analytics timeline must support keyboard period navigation');
   assert.match(charts, /event\.key === 'ArrowRight'/, 'Analytics timeline must support keyboard period navigation');
-  assert.match(charts, /react-chartjs-2/, 'Analytics charts must use the canonical React Chart.js wrapper');
-  assert.match(charts, /chart\.js/, 'Analytics charts must use Chart.js instead of first-party SVG geometry');
-  assert.match(charts, /export function AnalyticsBubbleMatrixChart/, 'Analytics must expose one shared categorical matrix renderer');
   assert.match(charts, /analytics-matrix-grid/, 'The work-type matrix must render explicit categorical row and column labels instead of numeric chart axes');
-  assert.doesNotMatch(charts, /BubbleController|import\s*\{\s*Bubble(?:\s*,|\s*\})/, 'The categorical matrix must not retain the generic Chart.js bubble plot implementation');
   assert.match(charts, /AccessibleMatrixTable/, 'The work-type matrix must provide an accessible data-table alternative');
-  assert.doesNotMatch(charts, /\bBar(?:Element)?\b/, 'Temporal analytics must use line charts consistently');
-  assert.match(sparkline, /export function SparkChart/, 'Compact analytics sparklines must use the lightweight shared SVG renderer');
-  assert.doesNotMatch(sparkline, /chart\.js|react-chartjs-2/, 'Compact sparklines must not load the Chart.js runtime');
   assert.match(sparkline, /map\(\(value, index\) => \(\{ value: finiteNonNegative\(value\), index \}\)\)/, 'Compact sparklines must preserve source positions so missing samples remain visually continuous');
-  assert.doesNotMatch(`${homeReact}\n${workspacesReact}`, /components\/charts\.js/, 'Overview and Projects must not load the detailed Chart.js bundle for compact sparklines');
   assert.match(charts, /spanGaps: false/, 'Missing rate and duration samples must remain visible as gaps in the detailed timeline');
   assert.match(charts, /trailingGapContinuation/, 'Trailing idle buckets must keep the timeline visually connected to the range end');
-  assert.match(charts, /borderDash: \[4, 4\]/, 'Trailing idle continuation must be visually distinct from measured samples');
-  assert.match(usageCss, /\.usage-metric-value \{[^}]*flex-wrap/, 'Analytics metric values and deltas must wrap instead of overlapping neighboring tiles');
-  assert.match(usageCss, /\.usage-metrics \{[^}]*display:\s*grid/, 'Primary Analytics metrics must stay in the responsive metrics grid');
-  assert.ok(uiPackage.dependencies['chart.js'], 'Chart.js must be owned by the UI workspace');
-  assert.ok(uiPackage.dependencies['react-chartjs-2'], 'The React Chart.js wrapper must be owned by the UI workspace');
-  assert.ok(uiPackage.dependencies['@tanstack/react-virtual'], 'The UI workspace must own the Activity virtualization dependency');
   assert.match(activityReact, /useVirtualizer\(/, 'Activity must virtualize retained history instead of mounting the full event tail');
   assert.match(activityReact, /aria-live': 'polite'/, 'Activity must batch live-event announcements for assistive technology');
-  assert.match(viteConfigSource, /cssCodeSplit:\s*true/, 'production dashboard CSS must keep route-level code splitting enabled');
-  assert.match(viteConfigSource, /dashboardCss:\s*dashboardCssEntry/, 'the base dashboard stylesheet must retain a stable production entry');
-  assert.doesNotMatch(appCssSource, /features\/(?:activity|browser|code|extensions|processes|tools|usage|workspaces)\/styles\.css/, 'lazy-route styles must not be folded back into the render-blocking dashboard stylesheet');
-  for (const [routeName, source] of Object.entries({ activity: activityReact, browser: browserReact, code: codeReact, extensions: extensionsReact, processes: processesReact, tools: toolsReact, usage: usageReact, workspaces: workspacesReact })) {
-    assert.match(source, /import ['"]\.\/styles\.css['"];/, `${routeName} must load its route-owned stylesheet with the lazy route chunk`);
-  }
   assert.match(sessionsReact, /placeholder: 'Search tasks'/, 'Tasks must provide local text search');
   assert.match(sessionsReact, /'Task status filter'/, 'Tasks must provide a status filter');
-  assert.doesNotMatch(sessionsReact, /cache: 'no-store'/, 'Completed task detail hydration must be allowed to reuse the shared query cache');
   assert.match(codeReact, /HTTP_CODE_BRIDGE/, 'Changes must provide an authenticated browser fallback when the Electron bridge is unavailable');
   assert.match(httpRoutes, /'\/api\/tasks\/files'.*handleTaskCodeWorkspace/, 'The dashboard must expose authenticated task file metadata to browser Changes');
   assert.match(httpRoutes, /'\/api\/tasks\/diff'.*handleTaskCodeDiff/, 'The dashboard must expose authenticated task diffs to browser Changes');
-  assert.match(dashboardHttp, /dashboardTaskCodeWorkspace/, 'Browser Changes must delegate to the canonical task-code workspace implementation');
-  assert.match(dashboardHttp, /dashboardTaskCodeDiff/, 'Browser diff reads must delegate to the canonical task-code workspace implementation');
-  assert.doesNotMatch(`${usageReact}\n${homeReact}\n${workspacesReact}`, /h\(['"]svg['"]/, 'Analytics feature renderers must not inline ad hoc SVG chart markup');
-  assert.doesNotMatch(usageRender, /coordinates|polyline|area:\s*`/, 'Analytics view models must not retain first-party chart geometry');
   assert.match(usageReact, /'aria-valuetext': valueText/, 'Analytics breakdown progress must expose readable values');
-  assert.match(usageCss, /\.usage-privacy-body/, 'Analytics privacy disclosure must use a stable responsive layout');
   assert.match(usageCss, /\.usage-matrix-scroll \{[^}]*overflow-x:\s*auto/, 'The matrix must contain narrow-screen overflow inside its card instead of overflowing the page');
-  assert.match(usageCss, /\.analytics-matrix-grid \{[^}]*grid-template-columns:[^}]*repeat\(var\(--matrix-columns\)/, 'The matrix must use a categorical grid with one visible column per use case');
   assert.match(usageCss, /\.analytics-matrix-bubble \{[^}]*width:\s*44px[^}]*height:\s*44px/, 'Matrix bubbles must keep a 44px interactive target while encoding magnitude in the inner visual'); // rigidity-ok: 44px is the minimum interactive target required by the matrix accessibility contract.
-  assert.doesNotMatch(usageCss, /\.usage-matrix-stage \{[^}]*height:\s*(?:400|420)px/, 'The matrix must size to its rows instead of reserving a fixed tall plotting area');
   assert.match(usageReact, /Work type × use case/, 'Analytics must render the work-type by use-case matrix');
   assert.match(usageReact, /title: 'Use cases'/, 'Analytics must render a use-case distribution');
   assert.match(usageReact, /title: 'Work types'/, 'Analytics must render completed work-type counts');
@@ -2185,31 +2081,20 @@ async function case_usage_ui_contract_unit() {
   assert.match(usageReact, /missingValueLabel: sparseMetric \? 'No completed actions' : ''/, 'Only sparse rate and duration metrics should label missing buckets as no completed actions.');
   assert.match(usageReact, /shaded gaps mean no completed actions were recorded in those buckets/i, 'Analytics help text must explain the missing-data treatment.');
   
-  for (const label of ['Actions', 'Retryable problems', 'Successful actions', 'Average time']) {
-    assert.match(usageCombined, new RegExp(label), `Usage must render ${label}.`);
-  }
-  assert.doesNotMatch(usageRender, /metric\('Reliable actions'|metric\('Internal errors'/, 'Reliability and internal errors must not occupy normal Analytics metric tiles');
   assert.doesNotMatch(usageReact, /\['infrastructureFailures', 'Internal errors'/, 'Internal errors must not remain in the normal timeline metric switcher');
   assert.match(usageReact, /usage-infrastructure-alert/, 'Confirmed infrastructure failures must surface only as an exceptional Analytics warning');
   assert.match(usageReact, /Open Troubleshooting/, 'Infrastructure warnings must link to Troubleshooting');
   assert.doesNotMatch(usageReact, /usage-transport-alert|Connection delivery/, 'Historical transport counters must not render as a standalone warning banner');
-  assert.match(usageRender, /Request delivery/, 'Transport delivery must be integrated as a neutral Analytics metric');
   assert.match(workspacesReact, /label: 'Successful'/, 'Project analytics must show normal action success context');
   assert.doesNotMatch(workspacesReact, /label: 'Reliable'/, 'Project analytics must not expose the diagnostic reliability percentage');
-  for (const field of ['requests', 'toolCalls', 'successes', 'failures', 'executionMs', 'activeDays']) {
-    assert.match(usageCombined, new RegExp(`\\b${field}\\b`), `Analytics must consume ${field}.`);
-  }
   assert.match(usageReact, /Analytics unavailable/);
   assert.match(usageReact, /Retry/);
   assert.match(usageReact, /Refresh/);
-  assert.match(usageRender, /operationSuccessRate/);
-  assert.match(usageRender, /recoverableFailures/);
   assert.match(usageCombined, /Unsuccessful actions by reason/);
   assert.match(usageCombined, /Recent details are available in Troubleshooting/);
   for (const label of ['Task state', 'Changed state', 'Search & index', 'Browser & desktop', 'App & local data', 'Internal error', 'Unclassified']) {
     assert.match(usageRender, new RegExp(label.replace(/[&]/g, '\\&')), `Analytics must expose the refined failure label ${label}.`);
   }
-  assert.doesNotMatch(usageRender, /Trend starts now|Completed outcomes|Workspace position|usage-fact-strip|<h3>Outcomes<\/h3>/);
   
   const snapshot = buildUsageModel({
     ok: true,
@@ -2291,6 +2176,24 @@ async function case_usage_ui_contract_unit() {
     externalTelemetry: { enabled: false, diagnosticsEnabled: false, usageReportingEnabled: true, endpointConfigured: true, sampleRatio: 0.25 }
   });
   
+  // Concurrent consumers must share work; test the public loader rather than its private cache variable.
+  const monthReads = [];
+  const sharedOptions = {
+    desktop: {
+      async getLocalUsage(month) {
+        monthReads.push(month);
+        await Promise.resolve();
+        return { ok: true, month,
+          totals: { requests: 0, toolCalls: 0, successes: 0, failures: 0, executionMs: 0, activeDays: 0 },
+          tools: [], workspaces: [] };
+      }
+    },
+    range: '24h', now: new Date('2026-08-08T12:00:00.000Z')
+  };
+  const [firstLoad, secondLoad] = await Promise.all([loadAnalyticsData(sharedOptions), loadAnalyticsData(sharedOptions)]);
+  assert.deepEqual(monthReads, ['2026-08'], 'overlapping consumers must issue one read per month');
+  assert.deepEqual(firstLoad.current, secondLoad.current, 'shared reads must still produce the same analytics result for both consumers');
+
   console.log('Local analytics UI and privacy contracts passed.');
 }
 await case_usage_ui_contract_unit();

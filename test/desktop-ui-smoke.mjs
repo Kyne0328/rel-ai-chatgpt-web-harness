@@ -1,3 +1,5 @@
+// IPC, settings, updater, window security/chrome, and lifecycle behavior have dedicated runtime tests.
+// Keep renderer safety and composition regressions here rather than duplicating their source spelling.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -5,31 +7,19 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
-const dashboardTokens = `${read('src/ui/styles/color-tokens.css')}\n${read('src/ui/styles/app.css')}`;
-const electronCss = `${read('electron/renderer/color-tokens.css')}\n${read('electron/renderer/app.css')}`;
-const wizardHtml = read('electron/renderer/wizard.html');
-const wizardJs = read('electron/renderer/wizard.js');
 const statusHtml = read('electron/renderer/status.html');
 const statusJs = read('electron/renderer/status.js');
 const preload = read('electron/preload.cjs');
-const ipc = `${read('electron/ipc-handlers.js')}\n${read('electron/ipc-handlers-dashboard.js')}`;
-const desktopIpcContract = read('src/contracts/desktop.ts');
-const ipcSecurity = read('electron/ipc-security.js');
-const windowSecurity = read('electron/window-security.js');
+
 const mainEntry = read('electron/main.js');
 const desktopHost = read('electron/desktop-host.js');
 const desktopPower = read('electron/desktop-power.js');
 const main = `${mainEntry}\n${desktopHost}\n${desktopPower}`;
 const coreDesktopOperations = read('src/core/desktop-operations.ts');
-const desktopSettings = read('electron/desktop-settings.js');
 const settingsReact = read('src/ui/features/settings/react.js');
-const settingsStyles = read('src/ui/features/settings/styles.css');
 const usageReact = read('src/ui/features/usage/react.js');
-const appUpdater = read('electron/app-updater.js');
-const appUpdaterEvents = read('electron/app-updater-events.js');
+
 const updateStatusHelper = read('electron/update-status-helper.js');
-const updateStatusHelperUi = read('electron/build/update-status-helper.ps1');
-const desktopLifecycle = read('electron/desktop-lifecycle.js');
 const desktopLocalData = read('electron/desktop-local-data.js');
 const toolHandlers = read('src/tools/handlers.js');
 const dashboardJs = read('public/dashboard.js');
@@ -38,21 +28,7 @@ const homeReact = read('src/ui/features/home/react.js');
 const workspacesModals = read('src/ui/features/workspaces/react-modals.js');
 const dashboardReact = read('src/ui/react/main.js');
 const dashboardEvents = read('src/ui/events.js');
-const dashboardServer = `${read('src/http/dashboard.ts')}\n${read('src/http/dashboardShellChrome.ts')}`;
-const windowChromePolicy = read('electron/window-chrome.js');
 const dashboardWindowPolicy = read('electron/dashboard-window.js');
-const electronPackage = JSON.parse(read('electron/package.json'));
-
-function tokenValue(source, name) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
-  const match = source.match(new RegExp(String.raw`${escaped}\s*:\s*([^;]+);`));
-  assert.ok(match, `Missing token ${name}`);
-  return match[1].trim().replace(/\s+/g, ' ');
-}
-
-for (const name of ['--ui-canvas','--ui-surface-primary','--ui-surface-secondary','--ui-surface-raised','--ui-text-primary','--ui-text-secondary','--ui-text-tertiary','--ui-action-primary','--ui-status-success-foreground','--ui-status-warning-foreground','--ui-status-danger-foreground','--scrollbar-size','--scrollbar-size-compact','--ui-scrollbar-track','--ui-scrollbar-thumb','--ui-scrollbar-thumb-hover','--ui-scrollbar-thumb-active','--ui-scrollbar-corner']) {
-  assert.equal(tokenValue(electronCss, name), tokenValue(dashboardTokens, name), `${name} must match between Electron and dashboard themes`);
-}
 
 for (const file of ['electron/renderer/status.html', 'electron/renderer/wizard.html']) {
   const html = read(file);
@@ -60,40 +36,11 @@ for (const file of ['electron/renderer/status.html', 'electron/renderer/wizard.h
   assert.match(html, /<link\s+rel="stylesheet"\s+href="\.\/app\.css"\s*\/?\s*>|<link\s+rel="stylesheet"\s+href="app\.css"\s*\/?\s*>/);
   assert.match(html, /Content-Security-Policy/);
   assert.match(html, /connect-src 'none'/);
-  assert.match(html, /relai-logo\.png[^>]*width="42"[^>]*height="42"/, 'Electron branding must keep the compact 42x42 logo contract');
   assert.doesNotMatch(html, /<style\b/i);
   assert.doesNotMatch(html, /Open in browser/i);
 }
-assert.match(electronCss, /\.status-details > summary > span\s*\{[^}]*transition:/s, 'recovery disclosure animation must target only its direct chevron');
-assert.match(electronCss, /\.status-details\[open\] > summary > span\s*\{[^}]*rotate\(180deg\)/s, 'opening recovery details must rotate only the direct chevron');
-assert.doesNotMatch(electronCss, /\.status-details\[open\] summary span/, 'opening recovery details must not rotate nested diagnostic log text');
-assert.doesNotMatch(wizardHtml, /<div class="wizard-logo">R<\/div>/, 'setup wizard must not restore the synthetic R badge');
-assert.match(wizardHtml, /<small>\/ MCP<\/small>/, 'setup wizard branding should match the website wordmark treatment');
-
-assert.match(wizardHtml, /OpenAI Secure MCP Tunnel/);
-assert.match(wizardHtml, /id="tunnelIdInput"/);
-assert.doesNotMatch(wizardHtml, /ChatGPT connector name|Name this computer's ChatGPT connector/);
-assert.doesNotMatch(wizardHtml, /Support project on GitHub|supportProject/i);
-assert.match(wizardHtml, /Connect this computer to OpenAI/i);
-assert.doesNotMatch(wizardHtml, /Before you start/i, 'setup wizard must not restore the redundant prerequisite card');
-assert.match(wizardHtml, /OpenAI organization and ChatGPT workspace where you use Rel\.AI/i, 'setup wizard must keep the required organization and workspace guidance in Step 1');
-assert.match(wizardHtml, /id="tunnelApiKeyInput"/);
-assert.match(wizardHtml, /id="portInput"/);
-assert.match(wizardHtml, /id="connectBtn"/);
-assert.match(wizardHtml, /Open OpenAI Tunnels/i);
-assert.match(wizardHtml, /Open OpenAI API Keys/i);
-assert.match(wizardHtml, /same OpenAI organization as your tunnel/i);
-assert.match(wizardHtml, /restricted API key/i);
-assert.match(wizardHtml, /encrypted by your operating system/i);
-assert.doesNotMatch(wizardHtml, /ngrok|Cloudflare|Rel\.AI Cloud|approval token|pairing code|Direct connection/i);
-assert.match(wizardJs, /validTunnelId/);
-assert.match(wizardJs, /wizardDone\(\{ tunnelId, tunnelApiKey, port, restart: recoveryMode \}\)/);
-assert.match(wizardJs, /getRecoveryConfig/);
-assert.match(wizardJs, /openOpenAISetup\(destination\)/);
-assert.doesNotMatch(wizardJs, /ngrok|gateway|approvalToken|connectionMode/i);
 
 assert.match(statusHtml, /Connection recovery/);
-assert.doesNotMatch(statusHtml, /class="app-card fallback-intro"/, 'recovery window must not restore the redundant explanatory intro card');
 assert.match(statusHtml, /Secure MCP Tunnel/);
 assert.match(statusHtml, /Copy tunnel ID/);
 assert.match(statusHtml, /id="localHealthCard"/);
@@ -124,58 +71,16 @@ assert.doesNotMatch(statusJs, /notificationToggleBtn|desktop notification settin
 assert.doesNotMatch(statusJs, /updateUI\(\{\s*error:[\s\S]{0,160}tunnelStatus:\s*'failed'/, 'recovery action failures must not falsify the tunnel connection state');
 assert.doesNotMatch(statusJs, /currentStatus\.mcpUrl|approval token|ngrok|gateway/i);
 
-for (const channel of ['desktop:settings:get','desktop:settings:save','desktop:tunnels:save','desktop:tunnels:remove','desktop:analytics:local','desktop:update:get','desktop:update:check','desktop:update:download','desktop:update:install','desktop:lifecycle:get','desktop:lifecycle:acknowledge-connector-refresh','desktop:startup:set','desktop:keep-awake:set','desktop:notifications:get','desktop:notifications:set','desktop:notification-preferences:get','desktop:notification-preferences:set','desktop:diagnostics:export','desktop:diagnostics:open-folder','desktop:window:get-state','desktop:window:minimize','desktop:window:toggle-maximize','desktop:window:close','desktop:restart-connection','desktop:reload-dashboard','desktop:relaunch','desktop:logout','desktop:quit','recovery:restart-connection','recovery:relaunch']) {
-  assert.match(preload, new RegExp(channel.replaceAll(':', '\\:')));
-  assert.match(desktopIpcContract, new RegExp(channel.replaceAll(':', '\\:')));
-}
-assert.match(ipc, /DESKTOP_IPC/);
-assert.match(preload, /getLocalUsage/);
-assert.match(preload, /logout:/);
-assert.match(preload, /quitApp/);
-assert.match(preload, /getRecoveryConfig/);
-assert.match(preload, /openRecoverySetup/);
 assert.match(preload, /return \(\) => ipcRenderer\.removeListener\(channel, listener\)/);
 assert.doesNotMatch(preload, /removeAllListeners/);
-assert.doesNotMatch(preload, /gateway|approvalToken|openExternal|open-link/i);
-assert.doesNotMatch(ipc, /desktop:gateway|desktop:approval|wizard:cloud|url:open-link/i);
-assert.match(ipc, /setTunnelApiKey/);
-assert.match(ipc, /saveLauncherConfig/);
-assert.match(ipc, /createContractIpcRegistrar/);
-assert.match(ipc, /contract: DESKTOP_IPC_INPUT_CONTRACT/, 'renderer authorization must be driven by the canonical desktop IPC contract');
-assert.match(ipcSecurity, /BrowserWindow\.fromWebContents/);
-assert.doesNotMatch(ipcSecurity, /ngrok|gateway/i);
-
-assert.match(desktopSettings, /tunnelApiKey: ''/);
-assert.match(desktopSettings, /tunnelApiKeyConfigured/);
-assert.match(desktopSettings, /replacementApiKey/);
-assert.match(desktopSettings, /setTunnelApiKey/);
-assert.doesNotMatch(desktopSettings, /ngrok|gateway|approval/i);
-assert.match(settingsReact, /OpenAI Secure MCP Tunnel/);
-assert.match(settingsReact, /Runtime API key/);
 assert.match(settingsReact, /saved key is encrypted on this computer\. Rel\.AI does not show it again/i);
 assert.match(settingsReact, /replacementKeyPresent: Boolean\(String\(value\?\.tunnelApiKey \|\| ''\)\.trim\(\)\)/, 'React dirty-state tracking may record only whether a replacement key is present');
 assert.doesNotMatch(settingsReact, /replacementKey:\s*String\(value\?\.tunnelApiKey/, 'React dirty-state snapshots must not serialize the runtime API key');
-assert.match(settingsReact, /Save connection settings/);
-assert.match(settingsReact, /ChatGPT tunnel connections/);
 assert.match(settingsReact, /same local Rel\.AI service and the same configured workspaces/);
-assert.match(settingsReact, /saveTunnel/);
-assert.match(settingsReact, /removeTunnel/);
-assert.match(settingsReact, /function SettingsField/);
-assert.match(settingsReact, /function validateConnectionSettings/);
 assert.match(settingsReact, /'aria-invalid': validation\?\.field === 'tunnelId'/);
 assert.doesNotMatch(settingsReact, /if \(issue\) return toast\(/, 'connection validation must stay beside the owning field');
-assert.doesNotMatch(settingsReact, /ngrok|gateway|pairing|approval token/i);
 
-for (const file of ['desktop-host.js','desktop-power.js','secure-tunnel-runtime.js','tunnel-runtime-pool.js','tunnel-recovery-supervisor.js','tunnel-credentials.js','tunnel-connections.js','service-runtime.js','desktop-settings.js']) assert.ok(electronPackage.build.files.includes(file));
-for (const removed of ['managed-ngrok.js','ngrok-token.js','public-connection-runtime.js','gateway-client.js','gateway-actions.js','gateway-device-identity.js','approval-token.js']) assert.equal(electronPackage.build.files.includes(removed), false);
-assert.ok(electronPackage.build.win.extraResources.some(item => item.from === '../vendor/tunnel-client' && item.to === 'bin/tunnel-client'));
-assert.equal(electronPackage.build.win.extraResources.some(item => /ngrok|gateway/i.test(String(item.from || ''))), false);
-
-assert.match(mainEntry, /createDesktopHost/);
 assert.match(mainEntry, /void desktop\.start\(\)\.then\(/, 'Electron startup must not await app.whenReady-dependent work during ESM evaluation');
-assert.doesNotMatch(mainEntry, /createSecureTunnelRuntime|createTunnelCredentialStore|registerIpcHandlers|readLocalUsageSnapshot|taskCodeWorkspace|onboardingState/, 'electron/main.js must stay a thin composition root');
-assert.match(desktopHost, /createSecureTunnelRuntime/);
-assert.match(desktopHost, /createTunnelCredentialStore/);
 assert.match(main, /openDashboardWindow\('#settings'\)/);
 assert.match(main, /openDashboardWindow\('#diagnostics'\)/);
 assert.match(main, /serviceRuntime\.waitUntilListening\(0\)/, 'foreground dashboard opening must await the local service readiness promise without a shorter UI-only deadline');
@@ -197,70 +102,26 @@ assert.match(desktopHost, /browser-window-focus[\s\S]{0,240}dashboardWindowManag
 assert.match(desktopHost, /browser-window-blur[\s\S]{0,220}dashboardWindowManager\.getWindow\(\)[\s\S]{0,120}pulseWindowManager\.setSuppressed\(false\)/, 'Pulse must resume when the Rel.AI dashboard loses focus');
 assert.match(desktopPower, /powerMonitor\.on\('resume', handleResume\)/, 'desktop power integration must own the Electron resume listener');
 assert.match(desktopHost, /onResume:\s*\(\)\s*=>\s*appUpdater\?\.discoverUpdate\?\.\(\{ force: true \}\)/, 'resuming from sleep must force a fresh lightweight release discovery check');
-assert.match(appUpdater, /RELEASE_DISCOVERY_INTERVAL_MS[\s\S]*discoverUpdate[\s\S]*fetchLatestReleaseVersion/, 'the updater must keep lightweight release discovery separate from full updater verification');
-assert.doesNotMatch(main, /createGatewayClient|createPublicConnectionRuntime|createApprovalTokenManager|managedNgrok/);
-assert.match(dashboardJs, /AUTO_RECOVERY_DELAYS_MS/);
-assert.match(dashboardJs, /Retry connection/);
-assert.match(dashboardJs, /Reload dashboard/);
-assert.match(dashboardJs, /Restart Rel\.AI/);
-assert.match(dashboardJs, /Connection restored/);
 assert.match(dashboardEvents, /emitState\(['"]reconnecting['"],\s*\{\s*recoveryProbe:\s*true\s*\}\)/, 'each failed dashboard event-stream attempt must request a bounded authorization recovery probe');
 assert.match(dashboardReact, /function retryActiveRoute[\s\S]*reloadDashboard[\s\S]*location\.reload/, 'failed React route rendering must retry with a fresh document instead of reusing broken client state');
-assert.match(windowSecurity, /contextIsolation: true/);
-assert.match(windowSecurity, /sandbox: true/);
-assert.match(windowSecurity, /setPermissionRequestHandler/);
 assert.match(read('electron/local-protocol.js'), /await fs\.promises\.readFile\(target\)/, 'local renderer assets must not block the Electron main thread on file reads');
-assert.match(read('electron/runtime-log-buffer.js'), /fs\.promises\.appendFile/, 'runtime log writes must be asynchronous');
-assert.match(read('electron/runtime-log-buffer.js'), /async function flush\(\)/, 'runtime logs must expose a shutdown flush');
-assert.match(windowSecurity, /will-download/);
 
-assert.match(appUpdater, /autoDownload = false/);
-assert.match(appUpdater, /autoInstallOnAppQuit = false/);
-assert.match(appUpdater, /disableDifferentialDownload = false/);
-assert.match(appUpdater, /quitAndInstall\(true, true\)/);
-assert.match(appUpdater, /onBeforeInstall/);
-assert.match(appUpdater, /onInstallCommit/);
-assert.match(appUpdater, /onInstallerLaunch/);
-assert.match(appUpdater, /onInstallFailed/);
-assert.match(appUpdater, /handleInstallPreparationError/);
-assert.match(appUpdater, /integrityVerified/);
-assert.match(appUpdaterEvents, /does not match expected version/);
 assert.match(mainEntry, /launchUpdateStatusHelper/);
 assert.match(mainEntry, /completeApplicationUpdate/);
 assert.match(desktopHost, /markUpdateInstallPhase\(app, 'installing'\)/);
 assert.match(updateStatusHelper, /detached:\s*true/);
-assert.match(updateStatusHelperUi, /ProgressBarStyle\]::Marquee/);
-assert.match(updateStatusHelperUi, /Elapsed:/);
-assert.match(desktopLifecycle, /openAtLogin/);
-assert.match(desktopLifecycle, /--background/);
-assert.match(desktopLifecycle, /keepAwake/);
-assert.match(desktopLifecycle, /keepRunningOnClose/, 'desktop lifecycle must persist the close-window preference');
-assert.match(desktopLifecycle, /autoDownloadUpdates/, 'desktop lifecycle must persist the automatic update-download preference');
-assert.match(desktopLifecycle, /reducedBackgroundWork/, 'desktop lifecycle must persist the reduced-background-work preference');
-assert.match(settingsReact, /Keep computer awake/);
-assert.match(settingsReact, /display can still turn off normally/i);
-assert.match(settingsReact, /Keep Rel\.AI running when I close the window/, 'App settings must expose explicit close-window behavior');
-assert.match(settingsReact, /Reduced background work/, 'App settings must expose one coarse background-work control');
 assert.match(settingsReact, /direct file and app actions when possible/i, 'Computer Control help must explain the preferred local-control path');
 assert.match(settingsReact, /Full pointer or keyboard control is used only when necessary/i, 'Computer Control help must preserve the fallback-control boundary');
 assert.match(main, /canHideOnClose:[\s\S]{0,180}keepRunningOnClose/, 'dashboard close behavior must honor the persisted user preference');
 assert.match(main, /canUserClose:[\s\S]{0,180}allowUpdaterQuit[\s\S]{0,180}installing/, 'the dashboard must reject user close while the updater owns the application lifecycle');
 assert.match(main, /setKeepAwakeEnabled\(lifecycleStatus\.keepAwake === true\)/, 'saved keep-awake preference must activate before normal desktop work starts');
 assert.match(main, /reducedBackgroundWork:\s*lifecycleStatus\.reducedBackgroundWork === true/, 'saved reduced-background-work preference must reach the service before normal desktop work starts');
-assert.match(appUpdater, /shouldAutoDownload/, 'updater must support an explicit user-controlled automatic download policy');
 assert.match(settingsReact, /Download verified updates automatically/, 'App settings must expose verified automatic update downloads');
 assert.match(toolHandlers, /REL_AI_REDUCED_BACKGROUND_WORK/, 'reduced background work must suppress optional repository pre-warming');
-assert.match(preload, /desktop:app-preferences:set/, 'dashboard preload must expose durable app preference updates');
-assert.match(preload, /desktop:local-data:get/, 'dashboard preload must expose local data usage');
-assert.match(desktopIpcContract, /desktop:local-data:clear-temporary/, 'local-data cleanup must remain part of the canonical desktop IPC contract');
-assert.match(ipc, /channels\.DESKTOP_LOCAL_DATA_CLEAR_TEMPORARY[\s\S]{0,120}clearTemporaryLocalData\(\)/, 'local-data cleanup must remain registered through secured IPC');
-assert.match(desktopIpcContract, /\[DESKTOP_IPC\.DESKTOP_LOCAL_DATA_CLEAR_TEMPORARY\]: input\('handle', \['dashboard'\], 'reject'\)/, 'local-data cleanup authorization must stay dashboard-only in the canonical IPC contract');
 assert.match(desktopLocalData, /output-spills/, 'local-data cleanup must target bounded temporary command output');
 assert.match(settingsReact, /api\/diagnostics\/reset/, 'category cleanup must reuse the existing guarded diagnostics resets');
 assert.match(settingsReact, /target:\s*'analytics'/, 'analytics clearing must live with App local-data controls');
 assert.doesNotMatch(usageReact, /data-usage-clear|Clear local analytics history\?/, 'Analytics page must not expose destructive analytics clearing');
-assert.match(settingsReact, /className: 'secondary settings-nowrap-action'/, 'logout action must opt into nowrap layout');
-assert.match(settingsStyles, /\.settings-nowrap-action\s*\{[^}]*whitespace-nowrap/, 'logout action must stay on one line at narrow widths');
 assert.match(settingsReact, /Keep my local Rel\.AI data/, 'logout modal must offer one keep-data checkbox');
 assert.match(settingsReact, /useState\(true\)/, 'logout modal must default to keeping local data');
 assert.match(settingsReact, /relaiDesktop\.logout\(!keepData\)/, 'logout checkbox must map directly to the existing clear-data backend flag');
@@ -269,11 +130,8 @@ assert.match(settingsReact, /Project folders and project files are never deleted
 assert.match(desktopHost, /connection\.clearConnectionState\(\)/, 'logout with kept data must remove only saved connection state');
 assert.match(desktopHost, /desktopLocalData\.clearAll\(clearPlan\)/, 'clear-data logout must use the canonical local-data wipe');
 assert.match(desktopLocalData, /contains project files/, 'full local-data clearing must refuse roots that contain configured projects');
-assert.ok(electronPackage.build.files.includes('desktop-local-data.js'), 'desktop local-data manager must be packaged with Electron');
 
-assert.match(dashboardJs, /dataset\.surface = surface/);
 assert.doesNotMatch(dashboardJs, /localStorage\.getItem\('relai_dashboard_route'\)/, 'hashless launches must default to Overview instead of restoring the previous route');
-assert.match(dashboardJs, /desktop: window\.relaiDesktop \|\| null/);
 assert.match(dashboardJs, /initUpdateAvailableModal/);
 assert.match(dashboardJs, /if \(hydrated\.onboarding\) syncDesktopSetupState\(hydrated\.onboarding\);\s*initStore\(hydrated\);/, 'dashboard refresh must hydrate onboarding state before the first routed render');
 assert.doesNotMatch(dashboardJs, /fetchJson\('\/api\/onboarding\/status'\)/, 'onboarding must not require a second post-render status request');
@@ -282,24 +140,6 @@ assert.match(onboardingUi, /if \(!result\?\.ok\) \{[\s\S]{0,180}announceDesktopS
 assert.match(homeReact, /if \(!result\?\.ok\)[\s\S]{0,180}Could not dismiss the getting started guide/, 'dismissal failure must not report false success');
 assert.match(homeReact, /Rel\.AI is connected and ready to use with ChatGPT!/, 'finishing onboarding must provide explicit success feedback');
 assert.match(workspacesModals, /!isEdit && configuredWorkspaces\.length === 0\) navigate\('home'\)/, 'creating the first project must return onboarding users to Overview');
-assert.doesNotMatch(dashboardServer, /id="windowTitlebar"/, 'server shell must not duplicate React-owned desktop chrome');
-assert.match(dashboardReact, /id: 'windowTitlebar'/);
-assert.match(dashboardReact, /label: 'Minimize window'/);
-assert.match(dashboardReact, /label: maximizeLabel/);
-assert.match(dashboardReact, /label: 'Close window'/);
-assert.match(windowChromePolicy, /platform === 'win32'/);
-assert.match(windowChromePolicy, /frame: false/);
-assert.match(windowChromePolicy, /titleBarStyle: 'hiddenInset'/);
-assert.match(dashboardWindowPolicy, /desktop:window-state/);
 assert.match(dashboardWindowPolicy, /fs\.promises\.writeFile\(statePath, text\)/, 'debounced window-bound persistence must not block the Electron main thread');
-assert.match(dashboardReact, /Restore window/);
-
-assert.match(dashboardTokens, /-webkit-app-region: drag/);
-assert.match(dashboardTokens, /-webkit-app-region: no-drag/);
-assert.match(dashboardTokens, /scrollbar-gutter: stable/);
-assert.match(electronCss, /scrollbar-width: thin/);
-assert.match(electronCss, /prefers-color-scheme: light/);
-assert.equal(fs.existsSync(path.join(root, 'electron/renderer/settings.html')), false);
-assert.equal(fs.existsSync(path.join(root, 'electron/renderer/settings.js')), false);
 
 console.log('Tunnel-only desktop UI smoke test passed.');

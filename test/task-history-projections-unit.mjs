@@ -4,8 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
+import { clearTaskHistory, flushTaskHistoryPersistence, readTaskHistory, readTaskHistoryPage, readRecentTaskHistoryEvents, readRecentTaskHistoryEventsPage, recordTaskActivityEvent } from '../src/taskHistoryStore.ts';
 import { openStateDatabase } from '../src/stateDatabase.ts';
-import { listSessionSummaries, listSessionSummaryPage, pruneSessionsAsync, readSession } from '../src/taskHistoryStorage.ts';
+import { listSessionSummaries, listSessionSummaryPage, pruneSessionsAsync, readSession, writeSession } from '../src/taskHistoryStorage.ts';
 import { readTaskIntegrity } from '../src/taskIntegrity.ts';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-history-projections-'));
@@ -69,6 +71,80 @@ try {
   db.prepare('DELETE FROM task_history WHERE id=?').run(session.id);
   assertAccounting();
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM task_history_summaries').get().n, 0);
+
+  const clearConfig = { stateDir: path.join(stateDir, 'clear-boundary') };
+  const historyDirectory = path.join(clearConfig.stateDir, 'sessions');
+  const stage = (id, eventId) => recordTaskActivityEvent(clearConfig, {
+    task: { id, taskId: id, sessionId: id, workspace: 'app', status: 'planning', title: eventId, startedAt: new Date().toISOString() },
+    activityEvent: { eventId, timestamp: new Date().toISOString(), summary: eventId }
+  }, { defer: true });
+
+  stage('old-task', 'old-event');
+  const oldFlush = flushTaskHistoryPersistence();
+  const clearing = clearTaskHistory(clearConfig);
+  assert.equal(clearTaskHistory(clearConfig), clearing, 'overlapping clears must share one bounded deletion');
+  await clearing;
+  await oldFlush;
+  assert.equal(readSession(historyDirectory, 'old-task'), null, 'an already-posted worker write must not resurrect cleared history');
+
+  stage('same-task', 'before-clear');
+  const oldSameTaskFlush = flushTaskHistoryPersistence();
+  const clearWithFreshEvents = clearTaskHistory(clearConfig);
+  stage('same-task', 'after-clear');
+  stage('fresh-task', 'fresh-event');
+  await clearWithFreshEvents;
+  await oldSameTaskFlush;
+  await flushTaskHistoryPersistence();
+  const sameTask = readSession(historyDirectory, 'same-task');
+  assert.ok(sameTask.events.some(event => event.eventId === 'after-clear'), 'fresh events must persist after deletion');
+  assert.equal(sameTask.events.some(event => event.eventId === 'before-clear'), false, 'fresh events must not merge cleared timeline data back in');
+  assert.ok(readSession(historyDirectory, 'fresh-task'), 'new tasks accepted during clear must survive');
+
+  const staleTime = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  for (const [name, read] of [
+    ['page', () => readTaskHistoryPage(clearConfig, { activeTaskIds: [] }).tasks],
+    ['full', () => readTaskHistory(clearConfig, {}, { activeTaskIds: [] })],
+    ['summary', () => readTaskHistory(clearConfig, {}, { activeTaskIds: [], summary: true })]
+  ]) {
+    await clearTaskHistory(clearConfig);
+    writeSession(historyDirectory, {
+      id: 'stale-reader-task', taskId: 'stale-reader-task', sessionId: 'stale-reader-task',
+      workspace: 'app', title: 'Persisted stale task', status: 'planning', state: 'planning',
+      startedAt: staleTime, updatedAt: staleTime, lastActivityAt: staleTime,
+      events: [{ eventId: 'stale-reader-event', timestamp: staleTime, summary: 'Old event' }]
+    });
+    const readerClear = clearTaskHistory(clearConfig);
+    stage('fresh-reader-task', `fresh-${name}`);
+    assert.equal(read().some(task => task.id === 'stale-reader-task'), false, `${name} reader must not reconcile a pre-clear stored row back into pending history`);
+    assert.deepEqual(readRecentTaskHistoryEvents(clearConfig), [], 'storage event readers must respect the clear boundary');
+    assert.deepEqual(readRecentTaskHistoryEventsPage(clearConfig).entries, [], 'paged event readers must respect the clear boundary');
+    await readerClear;
+    await flushTaskHistoryPersistence();
+    assert.equal(readSession(historyDirectory, 'stale-reader-task'), null, `${name} reader must not resurrect cleared history after flushing`);
+    assert.ok(readSession(historyDirectory, 'fresh-reader-task'), `${name} reader must preserve legitimate post-clear events`);
+  }
+
+  const originalExec = DatabaseSync.prototype.exec;
+  DatabaseSync.prototype.exec = function(sql) {
+    if (sql === 'DELETE FROM task_history') throw new Error('fixture history deletion failure');
+    return originalExec.call(this, sql);
+  };
+  try {
+    stage('pending-only', 'unsaved-before-failed-clear');
+    const failedClear = clearTaskHistory(clearConfig);
+    stage('pending-only', 'fresh-during-failed-clear');
+    await assert.rejects(failedClear, /fixture history deletion failure/, 'durable deletion failures must reach the caller');
+    assert.ok(readSession(historyDirectory, 'fresh-reader-task'), 'failed deletion must not claim persisted history was removed');
+  } finally {
+    DatabaseSync.prototype.exec = originalExec;
+  }
+  await flushTaskHistoryPersistence();
+  const restoredPending = readSession(historyDirectory, 'pending-only');
+  assert.ok(restoredPending.events.some(event => event.eventId === 'unsaved-before-failed-clear'), 'failed clear must restore unposted pre-clear events');
+  assert.ok(restoredPending.events.some(event => event.eventId === 'fresh-during-failed-clear'), 'rollback must merge rather than overwrite fresh same-task events');
+  await clearTaskHistory(clearConfig);
+  assert.equal(readSession(historyDirectory, 'fresh-reader-task'), null, 'a subsequent clear must recover after a failed deletion');
+  assert.equal(readSession(historyDirectory, 'pending-only'), null, 'a subsequent successful clear must delete restored pending history');
 } finally {
   db.close();
   fs.rmSync(stateDir, { recursive: true, force: true });

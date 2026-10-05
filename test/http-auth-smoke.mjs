@@ -61,17 +61,37 @@ try {
   assert.equal(listed.response.status, 200, `${JSON.stringify(listed.body)}\n${getStderr()}`);
   assert.equal(listed.body.result?.tools?.length, activeMcpToolCount);
 
+  const backupPath = `${configPath}.bak`;
+  assert.equal(fs.existsSync(backupPath), true, 'startup migration must leave a usable configuration backup');
+  // readConfig rechecks its cached file identity every 250ms.
   await new Promise(resolve => setTimeout(resolve, 300));
-  fs.writeFileSync(configPath, '{ invalid json');
-  const failedRequest = await session.request('tools/list', {}, { id: 9001 });
+  fs.writeFileSync(configPath, '{ invalid primary json');
+  const unauthorizedRecoverable = await fetch(`${base}/mcp`, {
+    method: 'POST', headers: mcpHeaders('tools/list'), body: mcpBody(9000, 'tools/list')
+  });
+  assert.equal(unauthorizedRecoverable.status, 401, 'recoverable configuration corruption must not bypass authentication');
+  const backupRecoveredRequest = await session.request('tools/list', {}, { id: 9001 });
+  assert.equal(backupRecoveredRequest.response.status, 200, `${JSON.stringify(backupRecoveredRequest.body)}\n${getStderr()}`);
+  assert.equal(backupRecoveredRequest.body?.result?.tools?.length, activeMcpToolCount, 'a valid backup must recover a corrupt primary without interrupting MCP');
+  assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).workspaces.repo.path, root, 'backup recovery must preserve the configured workspace');
+
+  await new Promise(resolve => setTimeout(resolve, 300));
+  fs.writeFileSync(configPath, '{ invalid primary json');
+  fs.writeFileSync(backupPath, '{ invalid backup json');
+  const unauthorizedUnrecoverable = await fetch(`${base}/mcp`, {
+    method: 'POST', headers: mcpHeaders('tools/list'), body: mcpBody(9002, 'tools/list')
+  });
+  assert.equal(unauthorizedUnrecoverable.status, 401, 'unrecoverable configuration corruption must not expose authenticated failure details');
+  const failedRequest = await session.request('tools/list', {}, { id: 9003 });
   assert.equal(failedRequest.response.status, 500);
   assert.equal(failedRequest.body?.jsonrpc, '2.0');
-  assert.equal(failedRequest.body?.id, 9001, 'unexpected MCP failures must preserve the JSON-RPC request id');
+  assert.equal(failedRequest.body?.id, 9003, 'unexpected MCP failures must preserve the JSON-RPC request id');
   assert.equal(failedRequest.body?.error?.code, -32603);
   assert.equal(failedRequest.body?.error?.message, 'Internal error.');
   assert.equal(child.exitCode, null, 'an unexpected MCP request failure must not terminate the server process');
   fs.writeFileSync(configPath, validConfig);
-  const recoveredRequest = await session.request('tools/list', {}, { id: 9002 });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const recoveredRequest = await session.request('tools/list', {}, { id: 9004 });
   assert.equal(recoveredRequest.response.status, 200, `${JSON.stringify(recoveredRequest.body)}\n${getStderr()}`);
   assert.equal(recoveredRequest.body?.result?.tools?.length, activeMcpToolCount, 'the same stateless MCP server must accept the next request after an internal error');
 

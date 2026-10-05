@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { toolResult } from '../src/mcp/results.js';
+import { executionOutcome } from '../src/executionOutcome.js';
+import { summarizeCommand } from '../src/process.js';
+import { compactCommandResult } from '../src/tools/connectorHelpers.js';
 import { fromJsonSchema } from '@modelcontextprotocol/server';
 
 import { serializeConnectorResult } from '../src/tools/connector.js';
@@ -101,6 +104,100 @@ for (const confirmed of [false, true]) {
   await assertValid(OP.VALIDATE_CHECKS, compacted, 'timeout safety evidence must satisfy the existing schema');
 }
 
+
+const admissionOutcome = {
+  executed: false, commandSucceeded: false, exitCode: -1, durationMs: 0,
+  admissionBlocked: true, queueWaitMs: 17, queueTimedOut: true,
+  errorCode: 'HOST_RESOURCE_QUEUE_TIMEOUT', blockedResource: 'heavy',
+  resourceReason: 'Physical memory is below the admission floor.', retryable: true,
+  resourcePressure: { state: 'pressured', physicalAvailableBytes: 0, requiredReservationBytes: 134217728 },
+  timedOut: false, cancelled: false, rootExitConfirmed: false,
+  terminationConfirmed: true, forcedTermination: false, mutationUnknown: false,
+  outputFinalizationTimedOut: false,
+  stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false,
+  stdoutOutputRef: 'spill_abcdefghijklmnopqrstuvwx',
+  stderrOutputRef: 'spill_yxwvutsrqponmlkjihgfedcb',
+  stdoutSpillTruncated: false, stderrSpillTruncated: true,
+  error: 'Host admission timed out before spawn.'
+};
+const privateExecution = { ...admissionOutcome, privateFixtureField: 'must not leak' };
+const outcome = executionOutcome(privateExecution);
+assert.deepEqual(outcome, admissionOutcome, 'one allowlist retains supplied execution facts without copying private fields');
+assert.deepEqual(executionOutcome({}), {}, 'missing execution facts must remain missing');
+const summarized = summarizeCommand(privateExecution);
+const compactSummary = compactCommandResult(summarized);
+const admittedExec = serializeConnectorResult({
+  publicName: 'relai_exec', action: '', operationName: OP.EXEC,
+  value: { ok: true, ...privateExecution },
+  args: { workspace: 'repo', executable: 'node', argv: ['fixture.js'] }
+});
+const admittedChecks = serializeConnectorResult({
+  publicName: 'relai_validate', action: 'checks', operationName: OP.VALIDATE_CHECKS,
+  value: { ok: false, validationStatus: 'failed', results: [summarized] },
+  args: { workspace: 'repo', checks: ['node fixture.js'] }
+});
+for (const [key, value] of Object.entries(admissionOutcome)) {
+  for (const [label, projected] of [
+    ['process summary', summarized], ['compact check', compactSummary],
+    ['public exec', admittedExec], ['public check', admittedChecks.results[0]],
+    ['framed exec', toolResult(admittedExec, false).structuredContent]
+  ]) assert.deepEqual(projected[key], value, `${label} must preserve supplied ${key}`);
+}
+assert.equal(Object.hasOwn(admittedExec, 'privateFixtureField'), false);
+assert.equal(Object.hasOwn(admittedChecks.results[0], 'privateFixtureField'), false);
+await assertValid(OP.EXEC, admittedExec, 'host admission evidence is already part of the declared exec contract');
+await assertValid(OP.VALIDATE_CHECKS, admittedChecks, 'validation retains command admission and output-recovery evidence');
+const completedSummary = compactCommandResult(summarizeCommand({
+  exitCode: 0, stdout: 'output hidden by compact presentation', stderr: '',
+  stdoutOutputRef: admissionOutcome.stdoutOutputRef, stdoutSpillTruncated: false,
+  timedOut: false, cancelled: false, forcedTermination: false
+}));
+assert.equal(completedSummary.stdout, undefined, 'ordinary successful-check presentation stays compact');
+assert.equal(completedSummary.stdoutOutputRef, admissionOutcome.stdoutOutputRef, 'successful compact checks retain recovery handles');
+assert.equal(completedSummary.stdoutSpillTruncated, false);
+assert.equal(completedSummary.cancelled, false);
+
+
+const nullableOutcome = { executed: false, commandSucceeded: false, exitCode: null, terminationConfirmed: null, durationMs: 0 };
+assert.deepEqual(executionOutcome({ ...nullableOutcome, error: null }), nullableOutcome, 'nullable execution facts survive without retaining undeclared nulls');
+const nullableSummary = compactCommandResult(summarizeCommand(nullableOutcome));
+assert.equal(nullableSummary.exitCode, null);
+assert.equal(nullableSummary.terminationConfirmed, null);
+const nullableExec = serializeConnectorResult({
+  publicName: 'relai_exec', action: '', operationName: OP.EXEC,
+  value: { ok: true, ...nullableOutcome },
+  args: { workspace: 'repo', executable: 'node', argv: ['fixture.js'] }
+});
+assert.equal(nullableExec.exitCode, null, 'both public pruning passes preserve a supplied null exit code');
+assert.equal(nullableExec.terminationConfirmed, null, 'unknown termination must not disappear during public pruning');
+await assertValid(OP.EXEC, nullableExec, 'nullable execution facts satisfy the existing schema');
+const nullableChecks = serializeConnectorResult({
+  publicName: 'relai_validate', action: 'checks', operationName: OP.VALIDATE_CHECKS,
+  value: { ok: false, results: [nullableSummary] }, args: { workspace: 'repo' }
+});
+assert.equal(nullableChecks.results[0].exitCode, null, 'nested check nulls survive the same projection');
+const emptyProcesses = serializeConnectorResult({
+  publicName: 'relai_process', action: 'list', operationName: OP.PROCESS_LIST,
+  value: { ok: true, processes: [], count: 0 }, args: {}
+});
+assert.deepEqual(emptyProcesses.processes, [], 'shared pruning retains required empty process arrays');
+const emptyDiagnostics = serializeConnectorResult({
+  publicName: 'relai_validate', action: 'diagnostics', operationName: OP.VALIDATE_DIAGNOSTICS,
+  value: { ok: true, diagnostics: [], results: [] }, args: { workspace: 'repo' }
+});
+assert.deepEqual(emptyDiagnostics.diagnostics, [], 'shared pruning retains required empty diagnostic arrays');
+assert.equal(emptyDiagnostics.results, undefined, 'optional empty arrays retain compact behavior');
+
+
+const requestedFullCheck = serializeConnectorResult({
+  publicName: 'relai_validate', action: 'checks', operationName: OP.VALIDATE_CHECKS,
+  value: { ok: true, validationStatus: 'passed', results: [{ ok: true, exitCode: 0, stdout: 'full bounded success tail', stderr: 'bounded warning' }], fullOutput: true },
+  args: { workspace: 'repo', fullOutput: true }
+});
+assert.equal(requestedFullCheck.results[0].stdout, 'full bounded success tail');
+assert.equal(requestedFullCheck.results[0].stderr, 'bounded warning');
+await assertValid(OP.VALIDATE_CHECKS, requestedFullCheck, 'explicit fullOutput uses existing output fields');
+
 const cap = 512 * 1024;
 const largeText = '\u0001'.repeat(700 * 1024);
 const explicitSafety = {
@@ -116,7 +213,7 @@ const oversizedExec = toolResult(serializeConnectorResult({
 }), false).structuredContent;
 assert.equal(oversizedExec.truncated, true);
 for (const [key, value] of Object.entries(explicitSafety)) {
-  if (['cancelled', 'cleanupPending'].includes(key)) continue; // The existing compact exec contract omits these values before MCP framing.
+  if (key === 'cleanupPending') continue; // This field is not part of the existing public exec contract.
   assert.equal(oversizedExec[key], value, `final MCP cap must preserve ${key}`);
 }
 const framedSafety = toolResult({ ok: false, ...explicitSafety, stdout: largeText }, true).structuredContent;

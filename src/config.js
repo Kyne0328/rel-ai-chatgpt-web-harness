@@ -5,11 +5,11 @@ import { assertSafeWorkspaceRoot } from './workspaceSafety.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { safeReadJson, realRootOf, clearRealRootCache } from './safety.js';
+import { realRootOf, clearRealRootCache } from './safety.js';
 import { discoverCommands } from './commandDiscovery.js';
 import { readProjectInstructions, summarizeProjectInstructions } from './projectInstructions.js';
 import { normalizeAllowedKeys } from './processEnvironment.js';
-import { writeJsonAtomic } from './durableState.ts';
+import { readJsonFile, writeJsonAtomic } from './durableState.ts';
 import { defaultStateDir } from './stateLayout.js';
 import { z } from 'zod';
 function getConfigPath() {
@@ -99,11 +99,19 @@ function readConfig(options = {}) {
     configCache.checkedAt = now;
     return configCache.config;
   }
-  const parsed = safeReadJson(configPath);
+  let recovered = false;
+  const parsed = readJsonFile(configPath, {
+    backup: true,
+    restoreBackup: false,
+    fallback: null,
+    validate: value => Boolean(value && typeof value === 'object' && !Array.isArray(value)),
+    onRecovery: () => { recovered = true; }
+  });
   if (!parsed) throw new Error(`Config file is corrupted or empty: ${configPath}. Fix or re-run: npm run init-config`);
   const config = normalizeConfig(parsed);
-  if (Number(parsed.version || 0) < config.version) {
-    writeJsonAtomic(configPath, config, { mode: 0o600, backup: true });
+  if (recovered || Number(parsed.version || 0) < config.version) {
+    if (recovered) fs.copyFileSync(configPath, `${configPath}.invalid-${Date.now()}`, fs.constants.COPYFILE_EXCL);
+    writeJsonAtomic(configPath, config, { mode: 0o600, backup: !recovered });
     stat = fs.statSync(configPath, { bigint: true });
   }
   configCache = { path: configPath, mtimeNs: stat.mtimeNs, size: stat.size, checkedAt: Date.now(), config };

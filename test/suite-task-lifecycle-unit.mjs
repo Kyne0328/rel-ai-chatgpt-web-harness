@@ -457,7 +457,7 @@ async function case_task_history_live_unit() {
     assert.equal(taskHistoryPersistenceSnapshot().healthy, false, 'task-history persistence failures must remain observable');
     assert.ok(taskHistoryPersistenceSnapshot().lastError);
     fs.rmSync(failureDatabase, { recursive: true, force: true });
-    clearTaskHistory(failureConfig);
+    await clearTaskHistory(failureConfig);
     assert.equal(taskHistoryPersistenceSnapshot().healthy, true, 'clearing the failed history should clear its persistence warning');
   
     const stormState = path.join(sandbox, 'persistence-storm');
@@ -484,7 +484,7 @@ async function case_task_history_live_unit() {
     assert.equal(stormFlush.pending, 50);
     assert.equal(taskHistoryPersistenceSnapshot().scheduledFlushes, 1, 'failed shared storage must retain only one backoff retry timer');
     fs.rmSync(stormDatabase, { recursive: true, force: true });
-    clearTaskHistory(stormConfig);
+    await clearTaskHistory(stormConfig);
     assert.equal(taskHistoryPersistenceSnapshot().scheduledFlushes, 0);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
@@ -974,7 +974,7 @@ async function case_task_history_store_unit() {
     assert.equal(readRecentTaskHistoryEvents(config, 1)[0]?.eventId, 'worker-projection-event',
       'task-history worker writes must update the indexed recent-event projection through SQLite triggers');
   
-    clearTaskHistory(config);
+    await clearTaskHistory(config);
     assert.equal(fs.existsSync(historyDir), false);
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });

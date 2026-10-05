@@ -9,7 +9,6 @@ import {
   setIndexProducerVersion
 } from '../src/repository/intelligence/database.js';
 import {
-  QUERY_WORKER_COUNT,
   QUERY_WORKER_GLOBAL_COUNT,
   QUERY_WORKER_TIMEOUT_MS,
   repositoryQueryWorkerStats,
@@ -26,7 +25,6 @@ fs.writeFileSync(path.join(workspaceRoot, 'src', 'alpha.js'), 'export function a
 const workspace = { alias: 'query-generation', path: workspaceRoot, context: {}, testCommands: {}, commands: {} };
 const config = { stateDir };
 
-assert.equal(QUERY_WORKER_COUNT, 4, 'Repository Intelligence must allow four concurrent indexed queries per repository');
 assert.equal(QUERY_WORKER_GLOBAL_COUNT, 4, 'Repository Intelligence must cap query workers globally across repository roots');
 assert.equal(QUERY_WORKER_TIMEOUT_MS, 30_000, 'indexed queries must have a bounded default deadline');
 

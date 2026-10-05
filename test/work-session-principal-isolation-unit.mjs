@@ -233,7 +233,7 @@ try {
   if (localAnalyticsModule) await localAnalyticsModule.flushLocalAnalytics();
   if (taskHistoryStore) {
     await taskHistoryStore.flushTaskHistoryPersistence();
-    taskHistoryStore.clearTaskHistory({ stateDir, auditLogPath });
+    await taskHistoryStore.clearTaskHistory({ stateDir, auditLogPath });
   }
   if (auditModule) await auditModule.clearAuditHistory({ stateDir, auditLogPath });
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;

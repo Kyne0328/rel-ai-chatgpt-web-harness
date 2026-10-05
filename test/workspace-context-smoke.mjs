@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { normalizeConfig, makeDefaultContextConfig } from "../src/config.js";
 import { updateWorkspace } from "../src/configEditor.js";
 import { collectTextFiles, createCollectionPathFilter } from "../src/safety.js";
-import { repoSnapshot, relaiRead } from "../src/localRepoBridge.js";
+import { repoSnapshot, relaiReadAsync } from "../src/localRepoBridge.js";
 import { relaiSearch } from "../src/bridge/search.js";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-context-'));
@@ -66,7 +66,7 @@ const snapshot = await repoSnapshot(workspace, config, { includeFiles: true });
 assert.equal(snapshot.effectiveMaxEntries, 1, 'workspace snapshot limit must control the initial repository map');
 assert.deepEqual(snapshot.files, ['src/app.js']);
 
-const directRead = relaiRead(workspace, config, { paths: ['docs/extra.txt'] });
+const directRead = await relaiReadAsync(workspace, config, { paths: ['docs/extra.txt'] });
 assert.match(directRead.items[0].content, /outside-context-marker/, 'direct reads must not be limited by snapshot include roots');
 const search = await relaiSearch(workspace, config, { pattern: 'outside-context-marker', fixed: true });
 assert.equal(search.matches[0].path, 'docs/extra.txt', 'search must cover files outside the initial snapshot include roots');

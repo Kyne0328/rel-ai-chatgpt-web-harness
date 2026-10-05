@@ -399,7 +399,7 @@ function createSecureTunnelRuntime({
     const completed = await collectDoctorOutput(doctorChild, {
       timeoutMs,
       maxBytes: DOCTOR_MAX_OUTPUT_BYTES,
-      stopProcess
+      stopProcess: stopOwnedProcess
     });
     let parsed;
     try {

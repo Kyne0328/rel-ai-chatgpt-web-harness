@@ -6,10 +6,10 @@ function publicExecInputSchema(inputSchema) {
     description: 'Forms: direct executable + argv, and shell command. Direct avoids shell parsing.',
     properties: {
       ...properties,
-      command: describe('command', 'Shell syntax. Multiline scripts or structured text can be supplied through input.'),
+      command: describe('command', 'Shell command string. The command form does not accept argv or input.'),
       executable: describe('executable', 'Executable launched directly with shell:false.'),
       argv: describe('argv', 'Arguments passed without shell parsing; keep each logical argument separate.'),
-      input: describe('input', 'Literal stdin for multiline scripts or structured text; quotes are preserved.'),
+      input: describe('input', 'Literal stdin for direct executable + argv mode, including multiline scripts or structured text; quotes are preserved.'),
       cwd: describe('cwd', 'Optional workspace-relative working directory.'),
       env: describe('env', 'Optional environment variables supplied directly to the child process. Durable tasks also receive the reserved REL_AI_EPHEMERAL_DIR scratch directory outside the project.'),
       ephemeralPaths: describe('ephemeralPaths', 'Exact new workspace-relative disposable files this command may create. Requires work_id. Rel.AI excludes matching changed files from default task commits and removes them at task end only if they remain untracked and unchanged.'),
@@ -26,7 +26,7 @@ function publicProcessInputSchema(inputSchema) {
     ...inputSchema,
     properties: {
       ...properties,
-      command: describe('command', 'Shell syntax for start; prefer executable + argv.'),
+      command: describe('command', 'Shell command string for start. Direct startup uses executable + argv.'),
       executable: describe('executable', 'Start executable directly with shell:false.'),
       argv: describe('argv', 'Literal arguments passed directly to executable without shell parsing.'),
       input: describe('input', 'UTF-8 input on start without closing the persistent stdin stream; PTYs get terminal input. Write sends input to the process or PTY.'),

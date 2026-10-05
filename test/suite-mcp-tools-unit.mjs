@@ -701,7 +701,8 @@ async function case_connector_result_contract_unit() {
       stderrTruncated: false, timedOut: false, environmentKeys: ['CI'], changedFiles: ['package-lock.json'], changedFilesTruncated: false, mutationTracking: 'git'
     }, {
       ok: false, workspace: 'repo', command: 'npm test', shell: 'PowerShell 7', exitCode: 1, durationMs: 120, stdout: 'running', stderr: 'failed', stdoutBytes: 7,
-      stderrBytes: 6, environmentKeys: ['CI'], changedFiles: ['package-lock.json'], mutationTracking: 'git', work_id: 'work_exec'
+      stderrBytes: 6, stdoutTruncated: false, stderrTruncated: false, timedOut: false,
+      environmentKeys: ['CI'], changedFiles: ['package-lock.json'], mutationTracking: 'git', work_id: 'work_exec'
     }),
     fixture('relai_process:read', 'relai_process', 'read', OP.PROCESS_READ, 'work_process', {
       ok: true, processId: 'proc_1', pid: 123, workspace: 'repo', workspaceId: 'repo', label: 'Server', kind: 'service', purpose: 'Serve.',
@@ -734,7 +735,7 @@ async function case_connector_result_contract_unit() {
       summary: 'Validated.', validationAt: '2026-08-05T00:00:00.000Z', changedFiles: ['src/index.js'], message: 'Validation passed.'
     }, {
       ok: true, workspace: 'repo', level: 'standard', checks: ['npm test'],
-      results: [{ command: 'npm test', ok: true, exitCode: 0, durationMs: 40, stdoutBytes: 5 }],
+      results: [{ command: 'npm test', ok: true, exitCode: 0, durationMs: 40, stdoutBytes: 5, stderrBytes: 0 }],
       validated: true, validationStatus: 'passed', completionKnown: true, endReason: 'explicit_completion', completionSource: 'relai_validate:checks',
       summary: 'Validated.', validationAt: '2026-08-05T00:00:00.000Z', changedFiles: ['src/index.js'], message: 'Validation passed.', work_id: 'work_checks'
     }),
