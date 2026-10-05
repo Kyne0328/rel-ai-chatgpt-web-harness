@@ -26,7 +26,7 @@ export function openModal({
   const finish = () => finishClose(state);
   const dismiss = async () => {
     if (_state !== state || !state.dismissEnabled || state.inlineSettle) return false;
-    const dialog = document.getElementById('__relai-modal-backdrop')?.querySelector('.modal-panel') || null;
+    const dialog = document.querySelector('.modal-panel') || null;
     if (dialog && hasUnsavedChanges(dialog)) {
       const confirmed = await showModalConfirmation({
         title: 'Discard changes?',

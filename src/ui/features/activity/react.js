@@ -16,7 +16,7 @@ import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { copyText } from '../../clipboard.js';
 import { getRouteParams, getWorkspaceFilter, navigate, replaceRouteParams, routeHref } from '../../router.js';
-import { timeAgo } from '../../utils.js';
+import { formatTerminalOutput, timeAgo } from '../../utils.js';
 import { activityEventId } from '../../activity-event.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import {
@@ -328,7 +328,6 @@ function ActivityView({ data = {} }) {
     const heading = inspectorHeadingRef.current;
     if (!(heading instanceof HTMLElement)) return;
     heading.focus({ preventScroll: true });
-    heading.scrollIntoView({ block: 'start', inline: 'nearest' });
   }, [selectedEventId, selectedEntry]);
 
   const syncRoute = useCallback(next => {
@@ -710,6 +709,9 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
   const target = activityTargetLabel(entry);
   const result = activityResultText(entry);
   const command = String(entry.command || '').trim();
+  const stdout = String(entry.stdout ?? entry.result?.stdout ?? entry.metadata?.stdout ?? '');
+  const stderr = String(entry.stderr ?? entry.result?.stderr ?? entry.metadata?.stderr ?? '');
+  const isCommandRun = Boolean(command) || Boolean(stdout) || Boolean(stderr) || entry.action === 'execute' || entry.metadata?.exitCode !== undefined;
   const fileLocation = activityFileLocation(entry);
   const error = activityErrorText(entry);
   const summaryText = distinctActivityText(message, heading) ? message : '';
@@ -753,6 +755,8 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
       ) : null,
       readableSection('Target', targetText),
       command ? h(CommandDetail, { command }) : null,
+      isCommandRun ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
+      isCommandRun ? h(StreamOutputDetail, { title: 'Standard error', output: stderr, stream: 'stderr' }) : null,
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
       readableSection('Error', errorText, 'activity-detail-error'),
@@ -799,6 +803,41 @@ function CommandDetail({ command }) {
       h('button', { type: 'button', className: 'secondary compact-button', onClick: () => { void copyCommand(); } }, copied ? 'Copied' : 'Copy command')
     ),
     h('pre', null, h('code', null, command))
+  );
+}
+
+function StreamOutputDetail({ title, output, stream = 'stdout' }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef(0);
+  useEffect(() => () => window.clearTimeout(timerRef.current), []);
+  const formatted = formatTerminalOutput(String(output || '')).trim();
+  const copyStream = async () => {
+    try {
+      await copyText(formatted);
+      setCopied(true);
+      window.clearTimeout(timerRef.current);
+      timerRef.current = window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      toast('Clipboard access failed.', { variant: 'error' });
+    }
+  };
+  return h('section', {
+    className: `activity-detail-section activity-detail-stream activity-stream-${stream}`,
+    'data-activity-stream': stream
+  },
+    h('div', { className: 'activity-detail-stream-head' },
+      h('h3', null, title),
+      formatted ? h('button', {
+        type: 'button',
+        className: 'secondary compact-button',
+        onClick: () => { void copyStream(); }
+      }, copied ? 'Copied' : `Copy ${title.toLowerCase()}`) : null
+    ),
+    formatted
+      ? h('pre', { tabIndex: 0, 'aria-label': `${title} output` },
+          h('code', null, formatted)
+        )
+      : h('p', { className: 'muted activity-stream-empty' }, `No ${title.toLowerCase()} recorded.`)
   );
 }
 

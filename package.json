@@ -179,6 +179,27 @@
     "type": "git",
     "url": "git+https://github.com/Kyne0328/rel-ai-chatgpt-web-harness.git"
   },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Rel.AI MCP",
+        "shortDescription": "Local coding agent for ChatGPT",
+        "longDescription": "Rel.AI gives ChatGPT controlled local access to authorized repositories, development tools, browser sessions, desktop actions, validation, and Git workflows on your computer.",
+        "developerName": "Kyne",
+        "category": "Developer Tools",
+        "capabilities": [
+          "Repository editing and code intelligence",
+          "Local command execution and validation",
+          "Browser and desktop automation",
+          "Git workflow support"
+        ],
+        "websiteURL": "https://kyne0328.github.io/rel-ai-chatgpt-web-harness/",
+        "supportURL": "https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/issues",
+        "privacyPolicyURL": "https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/blob/main/PRIVACY.md",
+        "termsOfServiceURL": "https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/blob/main/TERMS.md"
+      }
+    }
+  },
   "devDependencies": {
     "@electron/asar": "^4.3.1",
     "@eslint/js": "^10.0.1",

@@ -134,6 +134,7 @@ try {
   assert.ok(schema.inputSchema.properties.executable, 'connector schema must expose executable direct mode');
   assert.ok(schema.inputSchema.properties.argv, 'connector schema must expose direct argv');
   assert.ok(schema.inputSchema.properties.input, 'connector schema must expose direct stdin input');
+  assert.ok(schema.inputSchema.properties.ephemeralPaths, 'connector schema must expose exact disposable workspace paths');
 
   const secret = 'exec-secret-value';
   const context = { publicHttpOnly: true };
@@ -154,6 +155,16 @@ try {
   assert.ok(success.stderrBytes > 0);
   assert.deepEqual(success.environmentKeys, ['API_TOKEN', 'RELAI_EXEC_TEST']);
   assert.equal(Object.hasOwn(success, 'commandSummary'), false, 'connector response must not duplicate the audit-only summary');
+
+  const scratchProbe = await execCall({
+    executable: process.execPath,
+    argv: ['-e', 'process.stdout.write(process.env.REL_AI_EPHEMERAL_DIR || "")']
+  });
+  const scratchRoot = String(scratchProbe.stdout || '').trim();
+  assert.ok(path.isAbsolute(scratchRoot), 'durable exec must receive an absolute Rel.AI scratch directory');
+  assert.equal(path.relative(workspace, scratchRoot).startsWith('..'), true, 'durable exec scratch must live outside the repository');
+  assert.equal(fs.existsSync(scratchRoot), true, 'durable exec scratch directory must exist while the task is active');
+  assert.equal(scratchProbe.environmentKeys, undefined, 'reserved Rel.AI scratch environment must not be reported as caller-supplied environment');
 
   // Native SQLite writes fail only after the child has appended its counter.
   // A retry must never be needed to learn that the original command ran once.
@@ -567,6 +578,34 @@ try {
   assert.deepEqual(mutation.changedFiles, ['generated.txt']);
   assert.equal(mutation.mutationTracking, 'git');
   fs.rmSync(path.join(workspace, 'generated.txt'));
+
+  const ephemeralPath = 'generated-scratch.txt';
+  const ephemeralMutation = await execCall({
+    command: nodeCommand(path.join(workspace, 'scripts', 'mutate.js'), ephemeralPath),
+    ephemeralPaths: [ephemeralPath]
+  });
+  assert.equal(ephemeralMutation.ok, true);
+  assert.deepEqual(ephemeralMutation.changedFiles, [ephemeralPath]);
+  assert.deepEqual(ephemeralMutation.ephemeralChangedFiles, [ephemeralPath], 'only declared files actually created by the command may become ephemeral');
+  assert.equal(fs.existsSync(path.join(workspace, ephemeralPath)), true);
+
+  await assert.rejects(
+    () => callTool('relai_exec', {
+      workspace: 'app',
+      command: nodeCommand(path.join(workspace, 'scripts', 'mutate.js'), 'taskless-scratch.txt'),
+      ephemeralPaths: ['taskless-scratch.txt']
+    }, context),
+    error => error?.code === 'EPHEMERAL_PATHS_REQUIRE_WORK_ID',
+    'workspace ephemeral declarations must require durable task ownership'
+  );
+  await assert.rejects(
+    () => execCall({
+      command: nodeCommand(path.join(workspace, 'scripts', 'mutate.js'), 'pre-dirty.txt'),
+      ephemeralPaths: ['pre-dirty.txt']
+    }),
+    error => error?.code === 'EPHEMERAL_PATH_ALREADY_EXISTS',
+    'pre-existing workspace files must never be reclassified as disposable scratch'
+  );
 
   const quotedMutationPath = 'generated café file.txt';
   const quotedMutation = await execCall({

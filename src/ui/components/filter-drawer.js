@@ -59,7 +59,7 @@ function FilterDrawerContent({ value, resetValue, renderFields, onApply }) {
       key: field.key || `${field.type}-${field.label}-${index}`,
       onChange: value => changeField(field, value)
     }))),
-    h('div', { className: 'filter-drawer-footer', role: 'status', 'aria-live': 'polite' },
+    h('div', { className: 'filter-drawer-footer' },
       h('div', { className: 'filter-drawer-secondary-actions' },
         h('button', { type: 'button', className: 'secondary', disabled: busy, onClick: () => setDraft(clone(resetValue)) }, 'Reset'),
         h('button', { type: 'button', className: 'secondary', disabled: busy, onClick: closeDrawer }, 'Cancel')
@@ -71,6 +71,7 @@ function FilterDrawerContent({ value, resetValue, renderFields, onApply }) {
 
 function FilterField({ field, onChange }) {
   const radioId = React.useId();
+  const fallbackId = React.useId();
   if (field.type === 'radio') {
     const slug = `filter-${String(field.key || field.label || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
     const name = `${slug}-${radioId.replace(/[^a-z0-9]+/gi, '')}`;
@@ -88,15 +89,17 @@ function FilterField({ field, onChange }) {
       )))
     );
   }
-  return h('label', { className: 'filter-field', htmlFor: `filter-select-${field.key || 'field'}` },
+  const fieldId = `filter-select-${field.key || fallbackId}`;
+  return h('label', { className: 'filter-field', htmlFor: fieldId },
     h('span', null, field.label),
     h('select', {
-      id: `filter-select-${field.key || 'field'}`,
+      id: fieldId,
       disabled: field.disabled === true,
       value: field.value,
+      'aria-describedby': field.help ? `${fieldId}-help` : undefined,
       onChange: event => onChange(event.currentTarget.value)
     }, (field.options || []).map(option => h('option', { key: option.value, value: option.value }, option.label))),
-    field.help ? h('small', null, field.help) : null
+    field.help ? h('small', { id: `${fieldId}-help` }, field.help) : null
   );
 }
 

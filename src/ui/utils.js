@@ -35,3 +35,18 @@ export function formatDuration(milliseconds, options = {}) {
   const secondText = options.live && remainderSeconds ? ` ${remainderSeconds}s` : '';
   return `${hours}h${minuteText}${secondText}`;
 }
+
+export function formatTerminalOutput(raw) {
+  if (raw == null) return '';
+  const text = String(raw);
+  // Strip ANSI escape codes (CSI, OSC, etc.)
+  const stripped = text
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B\[[0-9;?]*[ -/]*[@-~]/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B[@-Z\\-_]/g, '');
+  // Normalize Windows CRLF and lone CR to standard LF
+  return stripped.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}

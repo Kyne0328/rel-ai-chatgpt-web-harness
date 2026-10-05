@@ -2,7 +2,8 @@ import { resolveWorkspace } from '../config.js';
 import { clearSessionPolicy, resolvePolicy } from '../policyResolver.js';
 import { readTaskHistorySession, readTaskHistorySessionRecord } from '../taskHistoryStore.ts';
 import { recordTaskValidationAffinity } from '../knowledgeStore.js';
-import { readTaskIntegrity } from '../taskIntegrity.ts';
+import { readTaskIntegrity, taskOwnedChangedFiles } from '../taskIntegrity.ts';
+import { cleanupTaskEphemeralDirectory, cleanupTaskWorkspaceEphemeralFiles } from '../taskEphemeral.ts';
 import { workspaceDirtyPaths } from '../repo/gitOps.js';
 import { createValidationFingerprint } from '../bridge/validationPlan.js';
 import { sanitizeCompletionSummary } from '../taskObservability.js';
@@ -46,7 +47,7 @@ async function completeTask(config, args = {}, handlerContext = {}) {
     validationLevel: authority?.validationLevel || '',
     validationAt: authority?.validationAt || '',
     validationFingerprint: validation.fingerprint,
-    changedFiles: authority?.taskOwnedChangedFiles || previous?.changedFiles || [],
+    changedFiles: authority ? taskOwnedChangedFiles(config, requestedTaskId, workspace.alias) : previous?.changedFiles || [],
     completionSource: WORK_FINISH_SOURCE,
     signal
   });
@@ -91,6 +92,8 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
   if (!taskId) {
     throw taskError('TASK_OWNERSHIP_MISMATCH', 'The active invocation has no valid logical task identity.');
   }
+  const authority = readTaskIntegrity(config, taskId, workspace.alias);
+  const scratchCleanup = await cleanupTaskScratch(config, workspace, taskId, authority, options.signal);
   const changedFiles = Array.isArray(options.changedFiles)
     ? unique(options.changedFiles.map(String).filter(Boolean))
     : changedFilesForTask(config, workspace.alias, taskId);
@@ -131,7 +134,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     changedFiles,
     residualChangedFiles,
     residualState,
-    message: completionMessage(completionSource, completion.duplicate === true, residualChangedFiles)
+    message: completionMessage(completionSource, completion.duplicate === true, residualChangedFiles, scratchCleanup)
   };
   try { recordTaskValidationAffinity(config, workspace, learningSession, result); }
   catch (error) { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] validation affinity learning:', error); }
@@ -212,7 +215,7 @@ async function factualValidationState(config, workspace, authority, options = {}
   if (fingerprint) {
     const validationScope = Array.isArray(authority.validationScope)
       ? authority.validationScope
-      : (authority.taskOwnedChangedFiles || []);
+      : taskOwnedChangedFiles(config, authority.taskId, workspace.alias);
     const currentFingerprint = await createValidationFingerprint(workspace, config, { paths: validationScope, signal: options.signal });
     if (currentFingerprint.fingerprint !== fingerprint) return { status: 'stale', fingerprint };
   }
@@ -230,16 +233,55 @@ function requireMatchingTaskContext(taskId) {
   return context;
 }
 
-function completionMessage(source, duplicate, residualChangedFiles = []) {
+async function cleanupTaskScratch(config, workspace, taskId, authority, signal) {
+  let workspaceCleanup = { removedPaths: [], skippedPaths: [], error: '' };
+  try {
+    workspaceCleanup = {
+      ...workspaceCleanup,
+      ...await cleanupTaskWorkspaceEphemeralFiles(
+        workspace,
+        config,
+        taskId,
+        authority?.ephemeralWorkspaceFiles || [],
+        { signal }
+      )
+    };
+  } catch (error) {
+    signal?.throwIfAborted?.();
+    workspaceCleanup.error = error instanceof Error ? error.message : String(error);
+  }
+
+  const directoryCleanup = cleanupTaskEphemeralDirectory(config, taskId, workspace.path);
+  return { workspace: workspaceCleanup, directory: directoryCleanup };
+}
+
+function completionScratchNote(cleanup) {
+  if (!cleanup) return '';
+  const removed = Array.isArray(cleanup.workspace?.removedPaths) ? cleanup.workspace.removedPaths.length : 0;
+  const preserved = Array.isArray(cleanup.workspace?.skippedPaths) ? cleanup.workspace.skippedPaths.length : 0;
+  const warnings = [
+    cleanup.workspace?.error,
+    cleanup.directory?.removed === false ? cleanup.directory?.error || 'task scratch directory could not be removed' : ''
+  ].filter(Boolean);
+  if (!removed && !preserved && !warnings.length) return '';
+  const notes = [];
+  if (removed) notes.push(`${removed} proven-ephemeral workspace file${removed === 1 ? '' : 's'} removed`);
+  if (preserved) notes.push(`${preserved} declared scratch file${preserved === 1 ? '' : 's'} preserved because ownership, hash, or Git state changed`);
+  if (warnings.length) notes.push(`scratch cleanup warning: ${warnings.join('; ')}`);
+  return ` Scratch cleanup: ${notes.join('; ')}.`;
+}
+
+function completionMessage(source, duplicate, residualChangedFiles = [], scratchCleanup = null) {
   if (duplicate) return 'Duplicate work-session completion request accepted idempotently.';
   const residualCount = Array.isArray(residualChangedFiles) ? residualChangedFiles.length : 0;
   const residualNote = residualCount
     ? ` ${residualCount} task-owned path${residualCount === 1 ? '' : 's'} remain as explicit preserved uncommitted work.`
     : ' Task-owned paths are reconciled with the current commit.';
+  const scratchNote = completionScratchNote(scratchCleanup);
   if (source === VALIDATE_CHECKS_SOURCE) {
-    return `Validation passed and this work session was completed in the same Rel.AI call. Other work sessions remain unchanged.${residualNote}`;
+    return `Validation passed and this work session was completed in the same Rel.AI call. Other work sessions remain unchanged.${residualNote}${scratchNote}`;
   }
-  return `Work-session completion accepted for this work_id. Other work sessions remain active and unchanged.${residualNote}`;
+  return `Work-session completion accepted for this work_id. Other work sessions remain active and unchanged.${residualNote}${scratchNote}`;
 }
 
 function normalizeCompletionSummary(value) {
@@ -247,7 +289,7 @@ function normalizeCompletionSummary(value) {
 }
 
 function changedFilesForTask(config, workspaceAlias, taskId) {
-  return readTaskIntegrity(config, taskId, workspaceAlias)?.taskOwnedChangedFiles || [];
+  return taskOwnedChangedFiles(config, taskId, workspaceAlias);
 }
 
 function unique(values) {

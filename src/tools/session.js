@@ -82,6 +82,9 @@ function enrichExecAudit(extra, value) {
   assignDefined(extra, 'timedOut', value?.timedOut === true);
   assignTruthy(extra, 'mutationTracking', value?.mutationTracking);
   assignDefined(extra, 'mutationUnknown', value?.mutationUnknown === true);
+  if (Array.isArray(value?.ephemeralChangedFiles) && value.ephemeralChangedFiles.length) {
+    extra.ephemeralChangedFiles = value.ephemeralChangedFiles.slice(0, 100);
+  }
   if (Array.isArray(value?.environmentKeys) && value.environmentKeys.length) {
     extra.environmentKeys = value.environmentKeys.slice(0, 100);
   }

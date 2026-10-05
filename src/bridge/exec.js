@@ -11,10 +11,11 @@ import { isPersistentAdbInvocation, resolveOneShotTimeoutMs } from '../execution
 import { outputSpillOwner } from '../outputSpill.js';
 import { runSpan } from '../telemetry.js';
 import { isReusableDependencyPath } from '../reusableDependencies.js';
-import { createCollectionPathFilter, isPathInside } from '../safety.js';
+import { createCollectionPathFilter, isPathInside, resolveSafePath } from '../safety.js';
 import { normalizeCommandEnv, normalizeExecutionInvocation, resolveCommandCwd } from '../executionInvocation.js';
 import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, statusMapFromOutput } from '../repo/gitStatus.js';
 import { redactCommandForAudit } from '../commandDisplay.js';
+import { withTaskEphemeralEnvironment } from '../taskEphemeral.ts';
 import { clampNumber } from './limits.js';
 const MAX_CHANGED_FILES = 200;
 const MAX_FILESYSTEM_MUTATION_FILES = 50_000;
@@ -164,6 +165,22 @@ function boundedChangedFiles(files) {
   return { files: uniqueFiles.slice(0, MAX_CHANGED_FILES), truncated: uniqueFiles.length > MAX_CHANGED_FILES };
 }
 
+function resolveRequestedEphemeralPaths(workspace, values, workSessionId) {
+  if (!Array.isArray(values) || values.length === 0) return [];
+  if (!workSessionId) {
+    throw processExecutionError('EPHEMERAL_PATHS_REQUIRE_WORK_ID', 'ephemeralPaths requires a durable work_id so Rel.AI can own and clean the declared scratch files.');
+  }
+  const resolved = [];
+  for (const value of values) {
+    const safe = resolveSafePath(workspace.path, value, { operation: 'write', label: 'Ephemeral workspace path' });
+    if (fs.existsSync(safe.absolutePath)) {
+      throw processExecutionError('EPHEMERAL_PATH_ALREADY_EXISTS', `Ephemeral workspace path already exists: ${safe.relativePath}. Only new disposable files can be declared ephemeral.`);
+    }
+    resolved.push(safe.relativePath);
+  }
+  return [...new Set(resolved)].sort((left, right) => left.localeCompare(right));
+}
+
 async function relaiExec(workspace, config, args = {}, context = {}) {
   const {
     command,
@@ -183,7 +200,10 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     throw error;
   }
   const cwd = resolveCommandCwd(workspace, args.cwd);
-  const env = normalizeCommandEnv(args.env);
+  const workSessionId = String(context.taskId || args.work_id || '').trim();
+  const ephemeralPaths = resolveRequestedEphemeralPaths(workspace, args.ephemeralPaths, workSessionId);
+  const requestedEnv = normalizeCommandEnv(args.env);
+  const env = withTaskEphemeralEnvironment(config, workSessionId, workspace, requestedEnv);
   const timeoutMs = resolveOneShotTimeoutMs(args, context, { minMs: 1000, maxMs: 86400000, fallbackMs: 120000 });
   const maxOutputBytes = clampNumber(args.maxOutputBytes, 1000, 16 * 1024 * 1024, 2 * 1024 * 1024);
   const signal = combineAbortSignals(
@@ -301,6 +321,8 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   const timedOut = result.timedOut === true || deadlineTimedOut;
   const cancelled = result.cancelled === true && !deadlineTimedOut;
   const commandSucceeded = result.exitCode === 0 && !timedOut && !cancelled;
+  const changedSet = new Set(changed.files);
+  const ephemeralChangedFiles = ephemeralPaths.filter(file => changedSet.has(file));
   return {
     ok: true,
     executed: result.executed === true,
@@ -332,8 +354,9 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     ...(deadlineTimedOut
       ? { error: `Timed out after ${Number(args.timeoutMs)}ms` }
       : result.error ? { error: result.error } : {}),
-    ...(Object.keys(env).length ? { environmentKeys: Object.keys(env).sort((left, right) => left.localeCompare(right)) } : {}),
+    ...(Object.keys(requestedEnv).length ? { environmentKeys: Object.keys(requestedEnv).sort((left, right) => left.localeCompare(right)) } : {}),
     changedFiles: changed.files,
+    ...(ephemeralChangedFiles.length ? { ephemeralChangedFiles } : {}),
     changedFilesTruncated: changed.truncated,
     mutationTracking,
     ...(mutationUnknown ? { mutationUnknown: true } : {})

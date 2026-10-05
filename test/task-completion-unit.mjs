@@ -8,6 +8,7 @@ import { resetTaskHistoryCaches } from "../src/taskHistoryStorage.ts";
 import { flushTaskHistoryPersistence } from "../src/taskHistoryStore.ts";
 import { readSessionPolicy } from "../src/policyResolver.js";
 import { readTaskIntegrity } from '../src/taskIntegrity.ts';
+import { taskEphemeralDirectory } from '../src/taskEphemeral.ts';
 import { withStateDatabase } from '../src/stateDatabase.ts';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -112,6 +113,57 @@ try {
   assert.equal(readOnlyCompletion.validationStatus, 'not_required');
   assert.equal(readOnlyCompletion.completionKnown, true);
   assert.deepEqual(readOnlyCompletion.changedFiles || [], [], 'read-only completion must not claim ambient repository changes');
+
+  resetToolActivity();
+  const scratchTask = await startTask('ephemeral-cleanup');
+  const scratchPath = 'task-cleanup.tmp';
+  const scratchExec = await callTool('relai_exec', {
+    workspace: 'app',
+    work_id: scratchTask,
+    executable: process.execPath,
+    argv: ['-e', [
+      "const fs=require('node:fs');",
+      "const path=require('node:path');",
+      `fs.writeFileSync(${JSON.stringify(scratchPath)}, 'workspace scratch\\n');`,
+      "fs.writeFileSync(path.join(process.env.REL_AI_EPHEMERAL_DIR, 'outside.tmp'), 'outside scratch\\n');"
+    ].join(' ')],
+    ephemeralPaths: [scratchPath]
+  }, { publicHttpOnly: true });
+  assert.deepEqual(scratchExec.ephemeralChangedFiles, [scratchPath]);
+  const scratchDirectory = taskEphemeralDirectory(readConfig(), scratchTask, workspace);
+  assert.equal(fs.existsSync(path.join(workspace, scratchPath)), true);
+  assert.equal(fs.existsSync(path.join(scratchDirectory, 'outside.tmp')), true);
+  assert.deepEqual(readTaskIntegrity(readConfig(), scratchTask, 'app').ephemeralWorkspaceFiles.map(item => item.path), [scratchPath]);
+  const scratchCompletion = await callTool('relai_work', {
+    action: 'finish', workspace: 'app', work_id: scratchTask,
+    summary: 'Disposable task artifacts were cleaned safely.'
+  }, { publicHttpOnly: true });
+  assert.equal(scratchCompletion.completionKnown, true);
+  assert.deepEqual(scratchCompletion.changedFiles || [], [], 'unchanged scratch must not be reported as deliverable task output');
+  assert.equal(fs.existsSync(path.join(workspace, scratchPath)), false, 'unchanged untracked task scratch must be removed at finish');
+  assert.equal(fs.existsSync(scratchDirectory), false, 'task-owned external scratch directory must be removed at finish');
+  assert.match(scratchCompletion.message, /1 proven-ephemeral workspace file removed/);
+
+  resetToolActivity();
+  const preservedScratchTask = await startTask('ephemeral-preserve-changed');
+  const preservedScratchPath = 'task-preserved.tmp';
+  await callTool('relai_exec', {
+    workspace: 'app',
+    work_id: preservedScratchTask,
+    executable: process.execPath,
+    argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(preservedScratchPath)}, 'initial scratch\\n')`],
+    ephemeralPaths: [preservedScratchPath]
+  }, { publicHttpOnly: true });
+  fs.writeFileSync(path.join(workspace, preservedScratchPath), 'changed after declaration\n');
+  const preservedScratchCompletion = await callTool('relai_work', {
+    action: 'finish', workspace: 'app', work_id: preservedScratchTask,
+    summary: 'Changed scratch is preserved instead of deleted.'
+  }, { publicHttpOnly: true });
+  assert.equal(fs.existsSync(path.join(workspace, preservedScratchPath)), true, 'changed scratch must never be deleted automatically');
+  assert.ok(preservedScratchCompletion.changedFiles.includes(preservedScratchPath), 'changed scratch must fall back to normal task output');
+  assert.match(preservedScratchCompletion.message, /preserved because ownership, hash, or Git state changed/);
+  fs.rmSync(path.join(workspace, preservedScratchPath), { force: true });
+
   const terminalProcessList = await callTool('relai_process', {
     action: 'list',
     workspace: 'app',

@@ -52,7 +52,6 @@ async function case_activity_controller_contract_unit() {
   assert.match(activityCss, /\.activity-row-trigger\s*\{[^}]*grid-template-columns:\s*92px\s+minmax\(0,\s*1fr\)/s, 'Activity rows must reserve a consistent leading status column');
   assert.match(activityCss, /\.activity-row-status\s*\{[^}]*grid-row:\s*1\s*\/\s*span\s*2/s, 'Activity status chips must align across both message and metadata rows');
   assert.match(activity, /focus\(\{ preventScroll: true \}\)/, 'stacked inspector selection must move focus without an intermediate browser scroll');
-  assert.match(activity, /scrollIntoView\(\{ block: 'start', inline: 'nearest' \}\)/, 'stacked inspector selection must reveal the inspector predictably');
   assert.match(activity, /Copy event JSON/, 'technical details must preserve the copy action');
   assert.match(activity, /'aria-expanded': treeRevision\.open/, 'the raw JSON tree toggle must expose its expanded state to assistive technology');
   assert.match(activity, /treeRevision\.open \? 'Collapse all' : 'Expand all'/, 'raw JSON controls must use one stateful expand/collapse toggle instead of duplicate opposite actions');
@@ -376,7 +375,6 @@ async function case_activity_scroll_unit() {
   assert.match(filterScrollResetBody, /tableWrapRef\.current\.scrollLeft = 0/, 'filter changes may reset horizontal table position');
   assert.doesNotMatch(filterScrollResetBody, /scrollTop/, 'Activity filter/live updates must not reset vertical reading position');
   assert.match(activity, /const jumpToLatest = useCallback[\s\S]*listPaneRef\.current\.scrollTop = 0/, 'the explicit Jump to latest action may return the list to the top');
-  assert.match(activity, /scrollIntoView\(\{ block: 'start', inline: 'nearest' \}\)/, 'only explicit stacked-inspector selection should scroll content into view');
   assert.match(css, /\.main\s*\{[^}]*@apply flex min-w-0 w-full flex-col/, 'the main dashboard column must expose remaining height to route content');
   assert.match(routeRootRule, /@apply flex min-w-0 flex-col/, 'route content must use a vertical flex layout');
   assert.match(routeRootRule, /flex:\s*1 0 auto/, 'route content must claim unused dashboard height without shrinking long pages');

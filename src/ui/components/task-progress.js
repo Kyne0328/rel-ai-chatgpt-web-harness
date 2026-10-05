@@ -46,7 +46,7 @@ export function taskProgressView(progress = {}, status = '', options = {}) {
   return {
     kind: 'indeterminate',
     className: classNames('task-progress', 'indeterminate', compact && 'compact'),
-    role: compact ? '' : 'status',
+    role: 'progressbar',
     ariaLabel: label,
     label,
     state: '',

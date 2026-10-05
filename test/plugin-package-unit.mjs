@@ -23,6 +23,10 @@ try {
   const sourceValidation = validatePlugin(root);
   assert.equal(sourceValidation.ok, true);
   assert.deepEqual(sourceValidation.skills, expectedSkills);
+  const sourcePackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const sourceListing = sourcePackage.extensions?.['com.openai']?.interface;
+  assert.equal(sourceListing?.developerName, 'Kyne');
+  assert.equal(sourceListing?.websiteURL, 'https://kyne0328.github.io/rel-ai-chatgpt-web-harness/');
 
   const metadata = packPlugin({ rootDir: root, destination: packDir });
   assert.ok(metadata?.filename, 'plugin packer must return artifact metadata');
@@ -36,6 +40,9 @@ try {
   const builtRoot = path.join(extractDir, 'package');
   const builtValidation = validatePlugin(builtRoot);
   assert.deepEqual(builtValidation.skills, expectedSkills);
+  const builtPackage = JSON.parse(fs.readFileSync(path.join(builtRoot, 'package.json'), 'utf8'));
+  assert.equal(builtPackage.extensions?.['com.openai']?.interface?.developerName, 'Kyne');
+  assert.equal(builtPackage.extensions?.['com.openai']?.interface?.websiteURL, 'https://kyne0328.github.io/rel-ai-chatgpt-web-harness/');
 
   const expected = [
     'skills/PROVENANCE.md',

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   CategoryScale,
   Chart as ChartJS,
@@ -216,6 +216,7 @@ export function AnalyticsTimelineChart({
 
 export function AnalyticsBubbleMatrixChart({ cells = [], xLabels = [], yLabels = [], className = '', ariaLabel = 'Activity matrix' }) {
   const bubbleRefs = useRef([]);
+  const [focusedCellIndex, setFocusedCellIndex] = useState(0);
   const normalized = useMemo(() => (Array.isArray(cells) ? cells : [])
     .map(cell => ({
       ...cell,
@@ -225,6 +226,7 @@ export function AnalyticsBubbleMatrixChart({ cells = [], xLabels = [], yLabels =
       share: Math.max(0, Number(cell?.share) || 0)
     }))
     .filter(cell => Number.isInteger(cell.x) && Number.isInteger(cell.y) && cell.value > 0), [cells]);
+  const activeCellIndex = (focusedCellIndex >= 0 && focusedCellIndex < normalized.length) ? focusedCellIndex : 0;
   const cellIndex = useMemo(() => new Map(normalized.map((cell, index) => [`${cell.y}:${cell.x}`, index])), [normalized]);
   const maxValue = Math.max(1, ...normalized.map(cell => cell.value));
   const minWidth = Math.max(720, 176 + xLabels.length * 74);
@@ -236,8 +238,9 @@ export function AnalyticsBubbleMatrixChart({ cells = [], xLabels = [], yLabels =
     if (event.key === 'Home') next = 0;
     else if (event.key === 'End') next = normalized.length - 1;
     else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) next = bubbleNeighborIndex(normalized, currentIndex, event.key);
-    if (next == null || next === currentIndex) return;
+    if (next == null || next === currentIndex || next < 0 || next >= normalized.length) return;
     event.preventDefault();
+    setFocusedCellIndex(next);
     bubbleRefs.current[next]?.focus?.();
   };
 
@@ -263,6 +266,7 @@ export function AnalyticsBubbleMatrixChart({ cells = [], xLabels = [], yLabels =
           h('button', {
             ref: element => { bubbleRefs.current[index] = element; },
             type: 'button',
+            tabIndex: activeCellIndex === index ? 0 : -1,
             className: 'analytics-matrix-bubble',
             style: {
               '--matrix-bubble-size': `${matrixBubbleSize(cell.value, maxValue)}px`,
@@ -270,6 +274,7 @@ export function AnalyticsBubbleMatrixChart({ cells = [], xLabels = [], yLabels =
             },
             'aria-label': `${workType} × ${useCase}: ${valueText}; ${shareText}`,
             title: `${workType} × ${useCase}: ${valueText}`,
+            onFocus: () => setFocusedCellIndex(index),
             onKeyDown: event => onBubbleKeyDown(event, index)
           },
           h('span', { className: 'analytics-matrix-tooltip', 'aria-hidden': 'true' },

@@ -1075,7 +1075,7 @@ function TelemetrySettings() {
     : lastDiagnosticFailure && (!lastDiagnosticSuccess || Date.parse(lastDiagnosticFailure) > Date.parse(lastDiagnosticSuccess))
       ? `Last delivery failed ${new Date(lastDiagnosticFailure).toLocaleString()}. Rel.AI will keep working and retry on later batches.`
       : lastDiagnosticSuccess
-        ? `Last diagnostic batch delivered ${new Date(lastDiagnosticSuccess).toLocaleString()}.`
+        ? ''
         : settings.diagnosticsActive
           ? 'Diagnostic exporter is ready. No successful batch has been recorded in this app session yet.'
           : 'Diagnostic exporter is not currently active.';
@@ -1090,7 +1090,7 @@ function TelemetrySettings() {
       help: 'Helps identify reliability and performance problems. Diagnostic traces can include tool and project identifiers, timings, and complete command text with common credential patterns redacted. Prompts, file contents, command output, and raw error messages are not added as telemetry fields.',
       onChange: value => void updateDiagnostics(value)
     }),
-    h('p', { className: 'settings-help', role: 'status' }, diagnosticDelivery)
+    diagnosticDelivery ? h('p', { className: 'settings-help', role: 'status' }, diagnosticDelivery) : null
   );
 }
 
@@ -1210,6 +1210,20 @@ function ApplicationUpdates({ lifecycle }) {
   };
   const updateReleaseChannel = async value => {
     if (typeof bridge.setAppPreferences !== 'function') return;
+    if (value === 'beta' && updateChannel !== 'beta') {
+      const confirmed = await confirmAction({
+        title: 'Switch to Beta release channel?',
+        message: 'Beta channel builds may contain bugs or won\'t run properly.',
+        detail: 'Beta releases receive pre-release builds intended for developers and testers. You may encounter unexpected errors, instability, or incomplete features.',
+        confirmLabel: 'I understand, switch to Beta',
+        cancelLabel: 'Stay on Stable',
+        danger: true
+      });
+      if (!confirmed) {
+        setStatus(c => ({ ...(c || {}) }));
+        return;
+      }
+    }
     setBusy('channel');
     try {
       const result = await bridge.setAppPreferences({ updateChannel: value });
@@ -1297,7 +1311,7 @@ function updateView(status = {}, autoDownload = false) {
   const availableVersion = status.availableVersion ? `v${status.availableVersion}` : '';
   if (state === 'unsupported') return { label: 'Manual update', tone: 'warn', description: status.supportReason || 'This build must be updated manually from GitHub Releases.' };
   if (state === 'checking') return { label: 'Checking', tone: 'working', description: 'Checking for a newer version of Rel.AI.' };
-  if (state === 'up_to_date') return { label: 'Up to date', tone: 'ok', description: 'Rel.AI checks automatically once per day.', action: { id: 'check', label: 'Check again', className: 'secondary' } };
+  if (state === 'up_to_date') return { label: 'Up to date', tone: 'ok', description: '', action: { id: 'check', label: 'Check again', className: 'secondary' } };
   if (state === 'available') return { label: 'Update available', tone: 'warn', description: autoDownload ? `${availableVersion || 'A newer version'} is available. Rel.AI will download it automatically without restarting.` : `${availableVersion || 'A newer version'} is available. Downloading does not restart Rel.AI.`, action: { id: 'download', label: `Download ${availableVersion || 'update'}`, className: 'primary' }, secondary: { id: 'check', label: 'Check again' } };
   if (state === 'downloading') return { label: 'Downloading', tone: 'working', description: `Downloading ${availableVersion || 'the update'}. You can keep using Rel.AI while it downloads.` };
   if (state === 'downloaded') {

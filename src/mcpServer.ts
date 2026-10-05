@@ -26,6 +26,7 @@ interface RelaiMcpServerOptions {
 const MCP_SERVER_INFO = Object.freeze({
   name: String(pkg.name),
   version: String(pkg.version),
+  websiteUrl: String(pkg.extensions?.['com.openai']?.interface?.websiteURL || pkg.homepage),
   toolSurfaceVersion: getToolSurfaceManifest().toolSurfaceVersion
 });
 const PUBLIC_TOOL_SCHEMAS = getPublicToolSchemas();

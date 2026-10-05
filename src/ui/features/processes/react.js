@@ -3,6 +3,7 @@ import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
+import { confirmAction } from '../../components/confirm-dialog.js';
 import { processListView } from './index.js';
 
 const h = React.createElement;
@@ -51,6 +52,14 @@ const ProcessRow = memo(function ProcessRow({ row }) {
   const [stopError, setStopError] = useState('');
   const stop = async () => {
     if (stopState === 'loading' || row.stopProcessId == null) return;
+    const confirmed = await confirmAction({
+      title: 'Stop background process?',
+      message: 'Are you sure you want to terminate "' + row.label + '"?',
+      detail: 'Any running commands or subprocesses associated with this process will be stopped immediately.',
+      confirmLabel: 'Stop process',
+      danger: true
+    });
+    if (!confirmed) return;
     setStopState('loading');
     setStopError('');
     const result = await postJson('/api/processes/stop', { processId: row.stopProcessId, graceMs: 3000 }, { timeout: 10000 });
@@ -231,7 +240,7 @@ function OutputBlock({ processId, stream, value, meta, active }) {
     ) : null,
     history?.gap ? h('div', { className: 'process-output-notice warning' }, 'A gap in this output could not be recovered from retained logs.') : null,
     error ? h('div', { className: 'process-output-error', role: 'alert' }, error) : null,
-    h('pre', { tabIndex: 0, 'aria-label': `Recent ${stream} output` }, String(visible || '').trim()),
+    h('pre', { tabIndex: 0, 'aria-label': `Recent ${stream} output` }, formatTerminalOutput(visible).trim()),
     canLoadEarlier ? h('div', { className: 'process-output-actions' },
       h('button', {
         className: 'secondary compact-button',
@@ -267,6 +276,19 @@ function formatBytes(value) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Process output could not be loaded.');
+}
+
+function formatTerminalOutput(raw) {
+  if (raw == null) return '';
+  const text = String(raw);
+  const stripped = text
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B\[[0-9;?]*[ -/]*[@-~]/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1B[@-Z\\-_]/g, '');
+  return stripped.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
 

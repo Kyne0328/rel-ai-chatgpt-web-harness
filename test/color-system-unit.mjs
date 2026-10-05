@@ -133,7 +133,12 @@ const rawColorAllowList = new Set([
 const literalPattern = /(?<!&)#[0-9a-f]{3,8}\b|rgba?\(|\brgb\(/i;
 for (const relativePath of authoredUiFiles) {
   if (rawColorAllowList.has(relativePath)) continue;
-  assert.doesNotMatch(read(relativePath), literalPattern, `${relativePath} must consume semantic tokens or generated CSS instead of raw colors`);
+  const content = read(relativePath);
+  const twMatches = content.match(/\b(?:text|bg|border)-(?:zinc|slate|gray|neutral|stone)-(?:100|200|300|400|500|600|700|800|900)\b/g);
+  if (twMatches) {
+    throw new Error(`File ${relativePath} contains ${twMatches.length} hardcoded Tailwind color utilities bypassing tokens: ${twMatches.slice(0, 5).join(', ')}`);
+  }
+  assert.doesNotMatch(content, literalPattern, `${relativePath} must consume semantic tokens or generated CSS instead of raw colors`);
 }
 
 assert.equal(fs.existsSync(path.join(root, 'src/ui/colorTokens.js')), false, 'the CommonJS color module must be deleted');

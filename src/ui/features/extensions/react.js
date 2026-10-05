@@ -471,7 +471,7 @@ function InstalledPanel({
             onAction: onClearFilters
           })
         : h('div', { className: 'flex flex-col gap-3' },
-            hasFilterActive ? h('div', { className: 'flex items-center justify-between text-xs text-zinc-400 px-1' },
+            hasFilterActive ? h('div', { className: 'flex items-center justify-between text-xs text-[var(--ui-text-tertiary)] px-1' },
               h('span', null, `Showing ${filtered.length} of ${installed.length} installed extensions`),
               h('button', {
                 type: 'button',
@@ -558,7 +558,7 @@ function DiscoverPanel({
             onAction: onClearFilters
           })
         : h('div', { className: 'flex flex-col gap-3' },
-            hasFilterActive ? h('div', { className: 'flex items-center justify-between text-xs text-zinc-400 px-1' },
+            hasFilterActive ? h('div', { className: 'flex items-center justify-between text-xs text-[var(--ui-text-tertiary)] px-1' },
               h('span', null, `Showing ${filtered.length} of ${catalog.length} catalog extensions`),
               h('button', {
                 type: 'button',
@@ -739,7 +739,7 @@ function PermissionBadgesList({ permissions = [] }) {
   if (!values.length) {
     return h('div', { className: 'extension-permissions-box' },
       h('div', { className: 'extension-permissions-header' }, 'Declared permissions'),
-      h('span', { className: 'text-[11px] text-zinc-400' }, 'No additional permissions')
+      h('span', { className: 'text-[11px] text-[var(--ui-text-tertiary)]' }, 'No additional permissions')
     );
   }
 
@@ -818,11 +818,11 @@ function ExtensionInspectorDialog({
                     extension.version ? h('span', { className: 'extension-version-tag' }, `v${extension.version}`) : null,
                     extension.autoInstall ? h('span', { className: 'extension-auto-install-pill' }, 'Managed tool') : null
                   ),
-                  h('p', { className: 'mt-1 text-sm text-zinc-300' }, extension.description),
-                  h('div', { className: 'flex flex-wrap items-center gap-3 mt-2 text-xs text-zinc-400' },
+                  h('p', { className: 'mt-1 text-sm text-[var(--ui-text-secondary)]' }, extension.description),
+                  h('div', { className: 'flex flex-wrap items-center gap-3 mt-2 text-xs text-[var(--ui-text-tertiary)]' },
                     h('span', null, 'Publisher: ', publisherUrl
-                      ? h('a', { href: publisherUrl, target: '_blank', rel: 'noopener noreferrer', className: 'text-zinc-200 underline' }, publisherName)
-                      : h('strong', { className: 'text-zinc-200' }, publisherName)
+                      ? h('a', { href: publisherUrl, target: '_blank', rel: 'noopener noreferrer', className: 'text-[var(--ui-text-primary)] underline' }, publisherName)
+                      : h('strong', { className: 'text-[var(--ui-text-primary)]' }, publisherName)
                     ),
                     extension.repository ? h('a', {
                       href: extension.repository,
@@ -874,7 +874,7 @@ function ExtensionInspectorDialog({
               ),
 
               h('div', { className: 'flex flex-col gap-2' },
-                h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-zinc-400' }, 'Declared permissions'),
+                h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-[var(--ui-text-tertiary)]' }, 'Declared permissions'),
                 (extension.permissions || []).length ? h('div', { className: 'grid gap-2' },
                   extension.permissions.map(perm => {
                     const meta = PERMISSION_METADATA[perm] || {
@@ -883,22 +883,22 @@ function ExtensionInspectorDialog({
                       description: perm,
                       icon: 'shield'
                     };
-                    return h('div', { key: perm, className: 'flex items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 p-2.5' },
-                      h('div', { className: 'p-1.5 rounded bg-zinc-800 text-zinc-300' }, h(Icon, { name: meta.icon, size: 14 })),
+                    return h('div', { key: perm, className: 'flex items-start gap-3 rounded-lg border border-[var(--ui-border-subtle)] bg-[var(--ui-surface-secondary)] p-2.5' },
+                      h('div', { className: 'p-1.5 rounded bg-[var(--ui-surface-raised)] text-[var(--ui-text-secondary)]' }, h(Icon, { name: meta.icon, size: 14 })),
                       h('div', { className: 'flex flex-col min-w-0' },
                         h('div', { className: 'flex items-center gap-2' },
-                          h('strong', { className: 'text-xs font-semibold text-zinc-200' }, meta.label),
-                          h('span', { className: 'text-[10px] text-zinc-500 uppercase' }, meta.category)
+                          h('strong', { className: 'text-xs font-semibold text-[var(--ui-text-primary)]' }, meta.label),
+                          h('span', { className: 'text-[11px] text-[var(--ui-text-tertiary)] uppercase' }, meta.category)
                         ),
-                        h('p', { className: 'text-xs text-zinc-400 mt-0.5' }, meta.description)
+                        h('p', { className: 'text-xs text-[var(--ui-text-secondary)] mt-0.5' }, meta.description)
                       )
                     );
                   })
-                ) : h('p', { className: 'text-xs text-zinc-400' }, 'This extension requests no additional permissions.')
+                ) : h('p', { className: 'text-xs text-[var(--ui-text-secondary)]' }, 'This extension requests no additional permissions.')
               ),
 
               Array.isArray(extension.files) && extension.files.length ? h('div', { className: 'flex flex-col gap-1.5' },
-                h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-zinc-400' }, `Package files and SHA-256 checksums (${extension.files.length})`),
+                h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-[var(--ui-text-tertiary)]' }, `Package files and SHA-256 checksums (${extension.files.length})`),
                 h('div', { className: 'extension-files-table-wrapper' },
                   h('table', { className: 'extension-files-table' },
                     h('thead', null,
@@ -911,7 +911,7 @@ function ExtensionInspectorDialog({
                     h('tbody', null,
                       extension.files.map(file => h('tr', { key: file.path },
                         h('td', null, file.path),
-                        h('td', { className: 'text-zinc-500 font-mono text-[10px]' }, file.sha256 ? `${file.sha256.slice(0, 16)}…` : '—'),
+                        h('td', { className: 'text-[var(--ui-text-tertiary)] font-mono text-[11px]' }, file.sha256 ? `${file.sha256.slice(0, 16)}…` : '—'),
                         h('td', null, h('span', { className: 'ok flex items-center gap-1 text-[11px]' }, h(Icon, { name: 'check', size: 11 }), 'Verified'))
                       ))
                     )
@@ -1098,8 +1098,8 @@ function DeveloperPanel({ installRoot }) {
   },
     h('div', { className: 'card p-5 flex flex-col gap-4' },
       h('div', null,
-        h('h3', { className: 'text-base font-bold text-zinc-100' }, 'How extensions work'),
-        h('p', { className: 'text-xs text-zinc-400 mt-0.5' }, 'Rel.AI extensions add reusable instructions and local tools to ChatGPT.')
+        h('h3', { className: 'text-base font-bold text-[var(--ui-text-primary)]' }, 'How extensions work'),
+        h('p', { className: 'text-xs text-[var(--ui-text-secondary)] mt-0.5' }, 'Rel.AI extensions add reusable instructions and local tools to ChatGPT.')
       ),
       h('div', { className: 'developer-flow-steps' },
         h('div', { className: 'developer-step-card' },
@@ -1144,8 +1144,8 @@ function DeveloperPanel({ installRoot }) {
     h('div', { className: 'developer-interactive-block' },
       h('div', { className: 'flex flex-wrap items-center justify-between gap-3' },
         h('div', null,
-          h('h3', { className: 'text-base font-bold text-zinc-100' }, 'Manifest templates'),
-          h('p', { className: 'text-xs text-zinc-400 mt-0.5' }, currentTemplate.description)
+          h('h3', { className: 'text-base font-bold text-[var(--ui-text-primary)]' }, 'Manifest templates'),
+          h('p', { className: 'text-xs text-[var(--ui-text-secondary)] mt-0.5' }, currentTemplate.description)
         ),
         h('div', { className: 'developer-template-selector' },
           Object.entries(TEMPLATES).map(([key, tpl]) => h('button', {
@@ -1175,8 +1175,8 @@ function DeveloperPanel({ installRoot }) {
 
     h('div', { className: 'layout-grid' },
       h('div', { className: 'card p-4 flex flex-col gap-3' },
-        h('h3', { className: 'text-sm font-bold text-zinc-100' }, 'Publisher repository workflow'),
-        h('ol', { className: 'extensions-guidelines list-decimal pl-4 text-xs text-zinc-300 flex flex-col gap-2' },
+        h('h3', { className: 'text-sm font-bold text-[var(--ui-text-primary)]' }, 'Publisher repository workflow'),
+        h('ol', { className: 'extensions-guidelines list-decimal pl-4 text-xs text-[var(--ui-text-secondary)] flex flex-col gap-2' },
           h('li', null, 'Initialize one repository with ', h('code', null, 'relai-extension init'), '. Use a globally unique publisher namespace.'),
           h('li', null, 'Add packages with ', h('code', null, 'relai-extension create <name>'), ' under ', h('code', null, 'extensions/<name>'), '. One repository can contain many extensions.'),
           h('li', null, 'Run ', h('code', null, 'relai-extension sync'), ' to update file checksums and ', h('code', null, 'publisher-catalog.json'), '. Run ', h('code', null, 'relai-extension validate'), ' before you publish.'),
@@ -1190,8 +1190,8 @@ function DeveloperPanel({ installRoot }) {
 
       installRoot ? h('div', { className: 'card p-4 flex flex-col justify-between gap-3' },
         h('div', { className: 'flex flex-col gap-1' },
-          h('h3', { className: 'text-sm font-bold text-zinc-100' }, 'Extension storage folder'),
-          h('p', { className: 'text-xs text-zinc-400' }, 'Rel.AI stores installed extension packages here. Create packages in a publisher repository. Let Rel.AI manage this folder:')
+          h('h3', { className: 'text-sm font-bold text-[var(--ui-text-primary)]' }, 'Extension storage folder'),
+          h('p', { className: 'text-xs text-[var(--ui-text-secondary)]' }, 'Rel.AI stores installed extension packages here. Create packages in a publisher repository. Let Rel.AI manage this folder:')
         ),
         h('div', { className: 'developer-path-banner' },
           h('code', { className: 'text-xs font-mono break-all' }, installRoot),
@@ -1212,11 +1212,11 @@ function DeveloperPanel({ installRoot }) {
 function EmptyExtensionsState({ icon, title, copy, actionLabel, onAction }) {
   return h('div', { className: 'card p-8' },
     h('div', { className: 'empty-state text-center' },
-      h('div', { className: 'empty-state-icon mx-auto mb-2 text-zinc-400' },
+      h('div', { className: 'empty-state-icon mx-auto mb-2 text-[var(--ui-text-tertiary)]' },
         h(Icon, { name: icon, size: 32 })
       ),
-      h('strong', { className: 'empty-state-title block text-base font-bold text-zinc-100' }, title),
-      h('p', { className: 'empty-state-copy mx-auto text-sm text-zinc-400 max-w-md mt-1' }, copy),
+      h('strong', { className: 'empty-state-title block text-base font-bold text-[var(--ui-text-primary)]' }, title),
+      h('p', { className: 'empty-state-copy mx-auto text-sm text-[var(--ui-text-secondary)] max-w-md mt-1' }, copy),
       actionLabel ? h('div', { className: 'empty-state-action mt-4' },
         h('button', { type: 'button', className: 'primary compact-button', onClick: onAction }, actionLabel)
       ) : null

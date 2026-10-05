@@ -9,6 +9,7 @@ import { readJsonFile } from './durableState.ts';
 import { getStateDir } from './statePaths.js';
 import { setStateMeta, stateDatabasePath, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
+import { fileSha256, resolveSafePath } from './safety.js';
 
 const STORE_VERSION = 1;
 // Integrity writes share durable-state.sqlite with short analytics transactions.
@@ -53,6 +54,7 @@ interface IntegrityAuthority extends Record<string, any> {
   updatedAt: string;
   baseline: RepositoryBaseline;
   taskOwnedChangedFiles: string[];
+  ephemeralWorkspaceFiles: Array<{ path: string; sha256: string; sizeBytes: number; markedAt: string }>;
   ambientChangedFiles: string[];
   externalChangedFiles: string[];
   mutationGeneration: number;
@@ -227,7 +229,7 @@ function readTaskIntegrity(config: IntegrityConfig, taskId: unknown, workspaceAl
 
 function taskOwnedChangedFiles(config: IntegrityConfig, taskId: unknown, workspaceAlias = ''): string[] {
   const authority = readTaskIntegrity(config, taskId, workspaceAlias);
-  return Array.isArray(authority?.taskOwnedChangedFiles) ? [...authority.taskOwnedChangedFiles] : [];
+  return deliverableTaskOwnedFiles(authority);
 }
 
 function taskCommitOwnership(config: IntegrityConfig, taskId: unknown, workspaceAlias = ''): OwnershipProjection {
@@ -235,7 +237,7 @@ function taskCommitOwnership(config: IntegrityConfig, taskId: unknown, workspace
     const authority = readTaskRow(db, taskId);
     if (!authority || (workspaceAlias && authority.workspace !== workspaceAlias)) return { ownedFiles: [], conflictingFiles: [] };
     const workspace = normalizeWorkspaceState(readWorkspaceRow(db, authority.workspace) || createWorkspaceState(authority.workspace));
-    return taskCommitOwnershipFromState(workspace, String(taskId || ''));
+    return filterEphemeralOwnership(taskCommitOwnershipFromState(workspace, String(taskId || '')), authority);
   }, { transaction: true, readonly: true });
 }
 
@@ -286,6 +288,7 @@ function applyIntegrityEvent(
   const tool = clean(event.tool);
   const timestamp = clean(event.ts) || new Date().toISOString();
   const changedFiles = exactChangedFiles(event);
+  const ephemeralChangedFiles = exactEphemeralChangedFiles(event).filter(file => changedFiles.includes(file));
   const mutation = eventMutatedCode(event) && (event.ok !== false || changedFiles.length > 0);
   normalizeWorkspaceState(workspaceState);
   if (Array.isArray(repositoryChanged)) reconcileWorkspaceOwners(workspaceState, repositoryChanged);
@@ -302,6 +305,7 @@ function applyIntegrityEvent(
   if (mutation) {
     authority.mutationGeneration += 1;
     authority.taskOwnedChangedFiles = unique([...authority.taskOwnedChangedFiles, ...changedFiles]);
+    updateEphemeralWorkspaceFiles(authority, workspace, changedFiles, ephemeralChangedFiles, timestamp);
     for (const file of changedFiles) addWorkspaceOwner(workspaceState, file, authority.taskId);
     authority.lastMutationAt = timestamp;
     authority.lastMutationTool = tool;
@@ -330,7 +334,13 @@ function applyIntegrityEvent(
     authority.cancelledAt = timestamp;
   }
   if (tool === OP.PUBLISH_COMMIT && event.ok !== false) {
-    for (const file of exactCommittedFiles(event)) removeWorkspaceOwner(workspaceState, file, authority.taskId);
+    const committedFiles = exactCommittedFiles(event);
+    for (const file of committedFiles) removeWorkspaceOwner(workspaceState, file, authority.taskId);
+    if (committedFiles.length && Array.isArray(authority.ephemeralWorkspaceFiles)) {
+      const committed = new Set(committedFiles);
+      authority.ephemeralWorkspaceFiles = authority.ephemeralWorkspaceFiles
+        .filter(record => !committed.has(normalizePath(record?.path)));
+    }
   }
 
   if (mutation || REPOSITORY_RECONCILE_TOOLS.has(tool)) {
@@ -395,9 +405,9 @@ function integrityProjection(authority: IntegrityAuthority, workspaceState: Work
     taskMutationGeneration: authority.mutationGeneration,
     taskValidatedMutationGeneration: authority.latestValidatedMutationGeneration,
     taskWorkspaceGeneration: workspaceState.generation,
-    taskOwnedChangedFiles: authority.taskOwnedChangedFiles,
-    taskUncommittedChangedFiles: ownership.ownedFiles,
-    taskConflictingChangedFiles: ownership.conflictingFiles,
+    taskOwnedChangedFiles: deliverableTaskOwnedFiles(authority),
+    taskUncommittedChangedFiles: filterEphemeralOwnership(ownership, authority).ownedFiles,
+    taskConflictingChangedFiles: filterEphemeralOwnership(ownership, authority).conflictingFiles,
     externalChangedFiles: authority.externalChangedFiles
   };
 }
@@ -432,6 +442,7 @@ function createAuthority(taskId: string, workspace: Record<string, any>, event: 
     updatedAt: timestamp,
     baseline,
     taskOwnedChangedFiles: [],
+    ephemeralWorkspaceFiles: [],
     ambientChangedFiles: baseline.changedFiles,
     externalChangedFiles: [],
     mutationGeneration: 0,
@@ -529,12 +540,102 @@ function exactChangedFiles(event: IntegrityEvent): string[] {
   return exactPaths(event.changedFiles);
 }
 
+function exactEphemeralChangedFiles(event: IntegrityEvent): string[] {
+  return exactPaths(event.ephemeralChangedFiles);
+}
+
 function exactCommittedFiles(event: IntegrityEvent): string[] {
   return exactPaths(event.committedFiles);
 }
 
 function exactPaths(values: unknown): string[] {
   return unique((Array.isArray(values) ? values : []).map(normalizePath).filter(Boolean));
+}
+
+function deliverableTaskOwnedFiles(authority: IntegrityAuthority | null | undefined): string[] {
+  const ephemeral = ephemeralWorkspacePathSet(authority);
+  return unique((Array.isArray(authority?.taskOwnedChangedFiles) ? authority.taskOwnedChangedFiles : [])
+    .map(normalizePath)
+    .filter(file => file && !ephemeral.has(file)));
+}
+
+function filterEphemeralOwnership(ownership: OwnershipProjection, authority: IntegrityAuthority | null | undefined): OwnershipProjection {
+  const ephemeral = ephemeralWorkspacePathSet(authority);
+  return {
+    ownedFiles: ownership.ownedFiles.filter(file => !ephemeral.has(normalizePath(file))),
+    conflictingFiles: ownership.conflictingFiles.filter(file => !ephemeral.has(normalizePath(file)))
+  };
+}
+
+function ephemeralWorkspacePathSet(authority: IntegrityAuthority | null | undefined): Set<string> {
+  const ephemeral = new Set<string>();
+  const workspaceRoot = clean(authority?.workspacePath);
+  for (const record of Array.isArray(authority?.ephemeralWorkspaceFiles) ? authority.ephemeralWorkspaceFiles : []) {
+    const file = normalizePath(record?.path);
+    const expectedSha256 = clean(record?.sha256).toLowerCase();
+    if (!file || !/^[a-f0-9]{64}$/.test(expectedSha256)) continue;
+    if (!workspaceRoot) {
+      ephemeral.add(file);
+      continue;
+    }
+    try {
+      const safe = resolveSafePath(workspaceRoot, file, { operation: 'read' });
+      if (!fs.existsSync(safe.absolutePath)) {
+        ephemeral.add(file);
+        continue;
+      }
+      const stat = fs.statSync(safe.absolutePath);
+      if (!stat.isFile()) continue;
+      if (Number.isSafeInteger(record?.sizeBytes) && Number(record.sizeBytes) !== stat.size) continue;
+      if (fileSha256(workspaceRoot, safe.relativePath) === expectedSha256) ephemeral.add(file);
+    } catch {}
+  }
+  return ephemeral;
+}
+
+function updateEphemeralWorkspaceFiles(
+  authority: IntegrityAuthority,
+  workspace: Record<string, any>,
+  changedFiles: string[],
+  ephemeralChangedFiles: string[],
+  timestamp: string
+): void {
+  const records = new Map<string, { path: string; sha256: string; sizeBytes: number; markedAt: string }>();
+  for (const record of Array.isArray(authority.ephemeralWorkspaceFiles) ? authority.ephemeralWorkspaceFiles : []) {
+    const file = normalizePath(record?.path);
+    const sha256 = clean(record?.sha256).toLowerCase();
+    if (!file || !/^[a-f0-9]{64}$/.test(sha256)) continue;
+    records.set(file, {
+      path: file,
+      sha256,
+      sizeBytes: Number.isSafeInteger(record?.sizeBytes) ? Number(record.sizeBytes) : 0,
+      markedAt: clean(record?.markedAt) || timestamp
+    });
+  }
+
+  const ephemeral = new Set(ephemeralChangedFiles.map(normalizePath).filter(Boolean));
+  for (const file of changedFiles.map(normalizePath).filter(Boolean)) {
+    if (!ephemeral.has(file)) records.delete(file);
+  }
+  for (const file of ephemeral) {
+    try {
+      const safe = resolveSafePath(workspace.path, file, { operation: 'read' });
+      const stat = fs.statSync(safe.absolutePath);
+      if (!stat.isFile()) {
+        records.delete(file);
+        continue;
+      }
+      records.set(file, {
+        path: safe.relativePath,
+        sha256: fileSha256(workspace.path, safe.relativePath),
+        sizeBytes: stat.size,
+        markedAt: timestamp
+      });
+    } catch {
+      records.delete(file);
+    }
+  }
+  authority.ephemeralWorkspaceFiles = [...records.values()].sort((left, right) => left.path.localeCompare(right.path));
 }
 
 function normalizeWorkspaceState(workspaceState: WorkspaceIntegrityState): WorkspaceIntegrityState {

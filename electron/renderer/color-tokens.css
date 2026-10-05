@@ -88,8 +88,8 @@
     --ui-action-primary-hover: #546b00;
     --ui-action-primary-active: #4e6500;
     --ui-action-primary-foreground: #ffffff;
-    --ui-focus-ring: #5a7200;
-    --ui-selection-background: #eef5dc;
+    --ui-focus-ring: #455900;
+    --ui-selection-background: #dbe8b8;
     --ui-status-info-foreground: #1769c2;
     --ui-status-info-background: #e5f0fb;
     --ui-status-info-border: #6a94bd;
@@ -156,8 +156,8 @@
   --ui-action-primary-hover: #546b00;
   --ui-action-primary-active: #4e6500;
   --ui-action-primary-foreground: #ffffff;
-  --ui-focus-ring: #5a7200;
-  --ui-selection-background: #eef5dc;
+  --ui-focus-ring: #455900;
+  --ui-selection-background: #dbe8b8;
   --ui-status-info-foreground: #1769c2;
   --ui-status-info-background: #e5f0fb;
   --ui-status-info-border: #6a94bd;

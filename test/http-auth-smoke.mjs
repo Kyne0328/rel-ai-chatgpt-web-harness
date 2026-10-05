@@ -97,6 +97,7 @@ try {
   assert.equal(legacyInitializeResponse.status, 200, `${JSON.stringify(legacyInitialize)}\n${getStderr()}`);
   assert.equal(legacyInitialize.result?.protocolVersion, '2025-11-25');
   assert.equal(legacyInitialize.result?.serverInfo?.name, 'rel-ai-mcp');
+  assert.equal(legacyInitialize.result?.serverInfo?.websiteUrl, 'https://kyne0328.github.io/rel-ai-chatgpt-web-harness/');
   assert.equal(legacyInitializeResponse.headers.get('mcp-session-id'), null);
 
   const legacyInitializedResponse = await fetch(`${base}/mcp`, {

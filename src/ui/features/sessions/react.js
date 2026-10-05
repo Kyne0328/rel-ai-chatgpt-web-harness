@@ -490,7 +490,6 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
     previousId.current = id;
     if (!window.matchMedia('(max-width: 760px)').matches) return;
     headingRef.current?.focus({ preventScroll: true });
-    headingRef.current?.scrollIntoView({ block: 'start', inline: 'nearest' });
   }, [id]);
 
   const identities = taskEntityView(session);

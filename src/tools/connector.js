@@ -236,6 +236,7 @@ function compactForConnector(name, value, args = {}) {
         error: value.error || undefined,
         environmentKeys: value.environmentKeys?.length ? value.environmentKeys : undefined,
         changedFiles: value.changedFiles?.length ? value.changedFiles : undefined,
+        ephemeralChangedFiles: value.ephemeralChangedFiles?.length ? value.ephemeralChangedFiles : undefined,
         changedFilesTruncated: value.changedFilesTruncated === true ? true : undefined,
         mutationTracking: value.mutationTracking || undefined,
         mutationUnknown: value.mutationUnknown === true ? true : undefined

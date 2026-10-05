@@ -219,7 +219,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_exec', title: 'Run Command',
-    description: 'Runs one-shot workspace commands via direct executable + argv or a command string. Durable work runs until exit/cancel; taskless work keeps a safety timeout.',
+    description: 'Runs one-shot workspace commands via direct executable + argv or a command string. Durable work runs until exit/cancel and receives REL_AI_EPHEMERAL_DIR for task-owned scratch outside Git; exact new in-project scratch files can be declared with ephemeralPaths. Taskless work keeps a safety timeout.',
     dashboard: { capabilities: ['execute'] }
   },
   {

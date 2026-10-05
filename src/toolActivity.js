@@ -1079,7 +1079,7 @@ function completedActivityStatus(result = {}, completionActivity = {}) {
 
 function applyActivityPatch(activity, patch = {}) {
   if (!activity || !patch || typeof patch !== 'object') return activity;
-  for (const key of ['category', 'action', 'status', 'title', 'summary', 'target', 'result', 'error']) {
+  for (const key of ['category', 'action', 'status', 'title', 'summary', 'target', 'result', 'error', 'command', 'stdout', 'stderr']) {
     if (patch[key] !== undefined) activity[key] = patch[key];
   }
   if (patch.metadata !== undefined) {

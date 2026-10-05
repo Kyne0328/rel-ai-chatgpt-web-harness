@@ -24,7 +24,8 @@
 .process-output-notice, .process-output-error { margin: .4rem 0; padding: .5rem .65rem; border: 1px solid var(--ui-border-subtle); border-radius: .45rem; background: var(--ui-surface-secondary); color: var(--ui-text-secondary); font-size: .72rem; line-height: 1.45; }
 .process-output-notice.warning { border-color: var(--ui-status-warning-border); color: var(--ui-text-primary); }
 .process-output-error { border-color: var(--ui-status-danger-border); color: var(--ui-text-primary); }
-.process-output-block pre { max-height: 14rem; min-height: 8rem; overflow: auto; margin: 0; padding: .75rem; border: 1px solid var(--ui-border-subtle); border-radius: .55rem; background: var(--ui-surface-secondary); white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.6; }
+.process-output-block pre { max-height: 14rem; min-height: 8rem; overflow: auto; margin: 0; padding: .75rem; border: 1px solid var(--ui-border-subtle); border-radius: .55rem; background: var(--ui-surface-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12.5px; line-height: 1.6; }
+.process-output-block code { font-family: inherit; font-size: inherit; line-height: inherit; color: var(--ui-text-primary); }
 .process-output-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; margin-top: .55rem; }
 .process-output-actions > span, .process-output-following { color: var(--ui-text-tertiary); font-size: .7rem; }
 .process-output-following { margin-top: .5rem; }
@@ -48,7 +49,7 @@
 .process-elapsed, .process-stop-state { color: var(--ui-text-secondary); font-size: .76rem; }
 .process-relationship { margin-top: .8rem; }
 .process-command-summary { display: grid; gap: .35rem; margin-top: .8rem; }
-.process-command-summary code { overflow-wrap: anywhere; padding: .65rem .75rem; border: 1px solid var(--ui-border-subtle); border-radius: .55rem; background: var(--ui-surface-secondary); font-size: .72rem; }
+.process-command-summary code { overflow-wrap: anywhere; white-space: pre-wrap; padding: .65rem .75rem; border: 1px solid var(--ui-border-subtle); border-radius: .55rem; background: var(--ui-surface-secondary); font-size: .72rem; font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
 .process-independent, .process-recovery { margin-top: .8rem; }
 .process-output-empty { margin-top: .65rem; padding: .75rem; border: 1px dashed var(--ui-border-default); border-radius: .55rem; color: var(--ui-text-secondary); font-size: .72rem; line-height: 1.5; }
 .recent-processes { border-top: 1px solid var(--ui-border-default); }

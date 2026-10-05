@@ -49,6 +49,7 @@ export interface ExecutionResult extends ProcessExit {
   readonly error?: string;
   readonly environmentKeys?: readonly string[];
   readonly changedFiles: readonly string[];
+  readonly ephemeralChangedFiles?: readonly string[];
   readonly changedFilesTruncated: boolean;
   readonly mutationTracking: MutationTrackingMode;
   readonly mutationUnknown?: true;

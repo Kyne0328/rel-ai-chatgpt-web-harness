@@ -138,6 +138,7 @@ const processRenderContext = {
   Icon: () => null,
   StatusPill: ({ label }) => label,
   processListView,
+  confirmAction: async () => true,
   postJson: async (...args) => { processStopRequests.push(args); return { ok: true }; },
   requestDashboardRefresh: () => { processRefreshes += 1; }
 };

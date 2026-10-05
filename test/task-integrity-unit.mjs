@@ -40,6 +40,7 @@ const failedPostCheckTask = 'failed-post-check-task';
 const unavailableTrackingTask = 'unavailable-tracking-task';
 const cancellationIntegrityTask = 'cancellation-integrity-task';
 const preExecutionTimeoutTask = 'pre-execution-timeout-task';
+const ephemeralTask = 'ephemeral-task';
 const event = (taskId, tool, extra = {}) => ({
   taskId,
   workspace: 'app',
@@ -158,6 +159,42 @@ try {
     ownedFiles: ['shared.js', 'task-two.js'],
     conflictingFiles: ['shared.js']
   });
+
+  await recordTaskIntegrityEvent(config, event(ephemeralTask, 'work.begin'));
+  const scratchFile = 'task-scratch.tmp';
+  fs.writeFileSync(path.join(workspacePath, scratchFile), 'temporary\n');
+  await recordTaskIntegrityEvent(config, event(ephemeralTask, 'exec', {
+    changedFiles: [scratchFile],
+    ephemeralChangedFiles: [scratchFile],
+    mutationTracking: 'git'
+  }));
+  let ephemeralAuthority = readTaskIntegrity(config, ephemeralTask, 'app');
+  assert.deepEqual(ephemeralAuthority.taskOwnedChangedFiles, [scratchFile], 'raw authority must retain provenance for ephemeral changes');
+  assert.deepEqual(ephemeralAuthority.ephemeralWorkspaceFiles.map(item => item.path), [scratchFile]);
+  assert.deepEqual(taskIntegrity.taskOwnedChangedFiles(config, ephemeralTask, 'app'), [], 'unchanged declared scratch must be excluded from deliverable task files');
+  assert.deepEqual(taskIntegrity.taskCommitOwnership(config, ephemeralTask, 'app'), {
+    ownedFiles: [],
+    conflictingFiles: []
+  }, 'unchanged declared scratch must be excluded from the default task commit scope');
+
+  fs.writeFileSync(path.join(workspacePath, scratchFile), 'promoted by later change\n');
+  assert.deepEqual(taskIntegrity.taskOwnedChangedFiles(config, ephemeralTask, 'app'), [scratchFile], 'a hash change must immediately stop treating scratch as disposable');
+  assert.deepEqual(taskIntegrity.taskCommitOwnership(config, ephemeralTask, 'app').ownedFiles, [scratchFile], 'changed scratch must return to normal commit ownership');
+
+  await recordTaskIntegrityEvent(config, event(ephemeralTask, 'exec', {
+    changedFiles: [scratchFile],
+    ephemeralChangedFiles: [scratchFile],
+    mutationTracking: 'git'
+  }));
+  assert.deepEqual(taskIntegrity.taskOwnedChangedFiles(config, ephemeralTask, 'app'), [], 'an explicit later scratch declaration may capture the new hash');
+  await recordTaskIntegrityEvent(config, event(ephemeralTask, 'publish.commit', {
+    committedFiles: [scratchFile]
+  }));
+  ephemeralAuthority = readTaskIntegrity(config, ephemeralTask, 'app');
+  assert.deepEqual(ephemeralAuthority.ephemeralWorkspaceFiles, [], 'an explicit commit must promote and retire ephemeral provenance');
+  assert.deepEqual(taskIntegrity.taskOwnedChangedFiles(config, ephemeralTask, 'app'), [scratchFile], 'explicitly committed scratch becomes normal task output');
+  assert.deepEqual(taskIntegrity.taskCommitOwnership(config, ephemeralTask, 'app').ownedFiles, [], 'committed paths must no longer remain uncommitted task ownership');
+  fs.rmSync(path.join(workspacePath, scratchFile), { force: true });
 
   await recordTaskIntegrityEvent(config, event(taskOne, 'validate.checks', {
     validationStatus: 'passed',

@@ -372,12 +372,17 @@
   .connection-status-link:hover { filter: brightness(1.08); }
 
   input, select, textarea {
-    @apply w-full rounded-lg px-3 outline-none transition-[border-color,box-shadow,background-color];
+    @apply w-full rounded-lg px-3 transition-[border-color,box-shadow,background-color];
     background: var(--ui-surface-secondary);
     border: 1px solid var(--ui-border-control);
   }
   input:hover, select:hover, textarea:hover { border-color: var(--ui-action-primary); }
-  input:focus, select:focus, textarea:focus { border-color: var(--ui-action-primary); box-shadow: 0 0 0 3px var(--ui-selection-background); }
+  input:focus, select:focus, textarea:focus {
+    border-color: var(--ui-action-primary);
+    outline: 2px solid var(--ui-focus-ring);
+    outline-offset: 1px;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
+  }
   input::placeholder, textarea::placeholder { color: var(--ui-text-tertiary); }
   textarea { @apply min-h-24 resize-y py-2.5; }
   label { @apply text-[12px] font-semibold; }

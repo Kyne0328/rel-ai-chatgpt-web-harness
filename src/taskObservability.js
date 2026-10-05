@@ -1,8 +1,15 @@
 
 import * as crypto from 'node:crypto';
-import { commandDisplayForInvocation, redactCommandForDisplay } from './commandDisplay.js';
+import { commandDisplayForInvocation, redactCommandForDisplay, redactCommandSecrets } from './commandDisplay.js';
 import { normalizeHistoricalTaskStatus } from './taskState.js';
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
+
+function sanitizeStreamText(value, maxLength = 64 * 1024) {
+  if (value == null) return '';
+  const text = redactCommandSecrets(String(value));
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}\n… [truncated]`;
+}
 const TASK_MODEL_VERSION = 3;
 const MAX_TITLE_LENGTH = 100;
 const MAX_OBJECTIVE_LENGTH = 500;
@@ -82,6 +89,8 @@ function buildToolActivityDetails(name, args = {}, value = null, error = null, o
   const summary = summaryForTool(name, args, value, normalizedError, operation, result);
   const progress = progressForTool(name, args, value, operationOk, options.phase);
   const command = name === OP.EXEC ? commandDisplayForInvocation(args) : '';
+  const stdout = (name === OP.EXEC || Boolean(value?.stdout)) && value?.stdout ? sanitizeStreamText(value.stdout) : undefined;
+  const stderr = (name === OP.EXEC || Boolean(value?.stderr)) && value?.stderr ? sanitizeStreamText(value.stderr) : undefined;
   const title = options.phase === 'running'
     ? operation || titleForTool(name, args) || 'Rel.AI tool operation'
     : terminalTitleForTool(name, args, result, status);
@@ -98,6 +107,8 @@ function buildToolActivityDetails(name, args = {}, value = null, error = null, o
     error: normalizedError,
     progress,
     ...(command ? { command } : {}),
+    ...(stdout ? { stdout } : {}),
+    ...(stderr ? { stderr } : {}),
     metadata: sanitizeActivityMetadata({
       ...(options.metadata || {}),
       pathCount: pathCount(args),
@@ -568,6 +579,8 @@ function sanitizeActivityEventRecord(event) {
     ? normalizeActivityError(value.error)
     : sanitizeDisplayText(value.error, MAX_SUMMARY_LENGTH);
   if (value.command != null) value.command = redactCommandForDisplay(value.command);
+  if (value.stdout != null) value.stdout = sanitizeStreamText(value.stdout);
+  if (value.stderr != null) value.stderr = sanitizeStreamText(value.stderr);
   if (value.tool && typeof value.tool === 'object') value.tool = sanitizeStructuredValue(value.tool, 0);
   if (value.target && typeof value.target === 'object') value.target = sanitizeStructuredValue(value.target, 0);
   if (value.result && typeof value.result === 'object') value.result = sanitizeStructuredValue(value.result, 0);
@@ -598,6 +611,8 @@ function buildSafeActivityProjection(record, options = {}) {
     result: event.result,
     error: event.error,
     command: event.command,
+    stdout: event.stdout,
+    stderr: event.stderr,
     metadata: event.metadata
   };
 }
@@ -772,6 +787,7 @@ export {
   sanitizeActivityEventRecord,
   sanitizeCompletionSummary,
   sanitizeDisplayText,
+  sanitizeStreamText,
   sanitizeTaskRecord,
   sanitizeTaskRecordForProjection,
 

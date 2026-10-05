@@ -416,9 +416,9 @@ function TaskProgress({ progress, status, compact = false }) {
   );
   if (view.kind === 'static') return h('div', attributes, label);
   if (view.kind === 'indeterminate') {
-    return h('div', attributes,
+    return h('div', { ...attributes, role: 'progressbar', 'aria-busy': 'true', 'aria-valuemin': 0, 'aria-valuemax': 100 },
       label,
-      h('div', { className: 'task-progress-track', 'aria-hidden': 'true' })
+      h('div', { className: 'task-progress-track' })
     );
   }
   return h('div', attributes,

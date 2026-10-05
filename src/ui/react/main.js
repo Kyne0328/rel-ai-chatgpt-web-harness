@@ -410,6 +410,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
               type: 'button',
               'aria-haspopup': 'dialog',
               'aria-expanded': paletteOpen ? 'true' : 'false',
+              'aria-label': 'Quick navigation',
               title: 'Open quick navigation',
               onClick: openPalette
             },
@@ -1093,33 +1094,36 @@ const ModalPortal = memo(function ModalPortal({ descriptor }) {
         id: '__relai-modal-backdrop',
         className: 'overlay-backdrop modal-backdrop',
         'data-react-overlay': 'modal'
-      }, h(Dialog.Content, {
-        asChild: true,
-        onEscapeKeyDown: event => {
-          if (descriptor.confirmation || !descriptor.dismissEnabled) event.preventDefault();
-        },
-        onPointerDownOutside: event => {
-          if (descriptor.confirmation || !descriptor.dismissEnabled) event.preventDefault();
-        },
-        onCloseAutoFocus: event => {
-          event.preventDefault();
-          if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
-          else document.getElementById('pageTitle')?.focus({ preventScroll: true });
-        }
-      }, h('div', { className: `modal-panel modal-${descriptor.size}` },
-        h('header', { className: 'modal-head', inert: descriptor.confirmation ? true : undefined },
-          h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, descriptor.title)),
-          descriptor.showClose ? h('button', {
-            type: 'button',
-            className: 'modal-close',
-            'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
-            onClick: () => { void descriptor.onDismiss?.(); }
-          }, h(CloseIcon)) : null
-        ),
-        h('div', { className: 'modal-body', inert: descriptor.confirmation ? true : undefined }, h(OverlayContent, { content: descriptor.content })),
-        descriptor.confirmation ? h(ModalConfirmation, { confirmation: descriptor.confirmation }) : null
-      )))
-    )
+      })
+    ),
+    h(Dialog.Content, {
+      asChild: true,
+      'aria-describedby': descriptor.description ? '__relai-modal-desc' : undefined,
+      onEscapeKeyDown: event => {
+        if (descriptor.confirmation || !descriptor.dismissEnabled) event.preventDefault();
+      },
+      onPointerDownOutside: event => {
+        if (descriptor.confirmation || !descriptor.dismissEnabled) event.preventDefault();
+      },
+      onCloseAutoFocus: event => {
+        event.preventDefault();
+        if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
+        else document.getElementById('pageTitle')?.focus({ preventScroll: true });
+      }
+    }, h('div', { className: `modal-panel modal-${descriptor.size}` },
+      h('header', { className: 'modal-head', inert: descriptor.confirmation ? true : undefined },
+        h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, descriptor.title)),
+        h(Dialog.Description, { id: '__relai-modal-desc', className: 'sr-only' }, descriptor.description || descriptor.title || 'Dialog'),
+        descriptor.showClose ? h('button', {
+          type: 'button',
+          className: 'modal-close',
+          'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
+          onClick: () => { void descriptor.onDismiss?.(); }
+        }, h(CloseIcon)) : null
+      ),
+      h('div', { className: 'modal-body', inert: descriptor.confirmation ? true : undefined }, h(OverlayContent, { content: descriptor.content })),
+      descriptor.confirmation ? h(ModalConfirmation, { confirmation: descriptor.confirmation }) : null
+    ))
   ));
 });
 
@@ -1200,26 +1204,29 @@ const DrawerPortal = memo(function DrawerPortal({ descriptor }) {
         id: '__relai-drawer-backdrop',
         className: 'overlay-backdrop drawer-backdrop',
         'data-react-overlay': 'drawer'
-      }, h(Dialog.Content, {
-        asChild: true,
-        onCloseAutoFocus: event => {
-          event.preventDefault();
-          if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
-          else document.getElementById('pageTitle')?.focus({ preventScroll: true });
-        }
-      }, h('div', { className: ['drawer-panel', descriptor.panelClass].filter(Boolean).join(' ') },
-        h('div', { className: 'drawer-head' },
-          h(Dialog.Title, { asChild: true }, h('h2', { className: 'drawer-title' }, descriptor.title)),
-          h('button', {
-            className: 'secondary compact-button',
-            type: 'button',
-            'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
-            onClick: descriptor.onDismiss
-          }, 'Close')
-        ),
-        h('div', { className: 'drawer-body' }, descriptor.content)
-      )))
-    )
+      })
+    ),
+    h(Dialog.Content, {
+      asChild: true,
+      'aria-describedby': descriptor.description ? '__relai-drawer-desc' : undefined,
+      onCloseAutoFocus: event => {
+        event.preventDefault();
+        if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
+        else document.getElementById('pageTitle')?.focus({ preventScroll: true });
+      }
+    }, h('div', { className: ['drawer-panel', descriptor.panelClass].filter(Boolean).join(' ') },
+      h('div', { className: 'drawer-head' },
+        h(Dialog.Title, { asChild: true }, h('h2', { className: 'drawer-title' }, descriptor.title)),
+        h(Dialog.Description, { id: '__relai-drawer-desc', className: 'sr-only' }, descriptor.description || descriptor.title || 'Drawer navigation'),
+        h('button', {
+          className: 'secondary compact-button',
+          type: 'button',
+          'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
+          onClick: descriptor.onDismiss
+        }, 'Close')
+      ),
+      h('div', { className: 'drawer-body' }, descriptor.content)
+    ))
   ));
 });
 
@@ -1228,8 +1235,13 @@ function CloseIcon() {
 }
 
 const ToastRegion = memo(function ToastRegion({ toasts }) {
-  if (!toasts.length) return null;
-  return createPortal(h('div', { className: 'toast-region', 'data-react-toast-region': 'true' },
+  return createPortal(h('div', {
+    className: 'toast-region',
+    role: 'region',
+    'aria-label': 'Notifications',
+    'aria-live': 'polite',
+    'data-react-toast-region': 'true'
+  },
     toasts.map(toast => h(ToastItem, { key: toast.id, toast }))
   ), document.body);
 });

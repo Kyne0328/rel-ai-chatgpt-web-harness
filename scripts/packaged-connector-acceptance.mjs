@@ -262,6 +262,7 @@ try {
   assert.equal(chatGptInitializeResponse.status, 200, JSON.stringify(chatGptInitialize));
   assert.equal(chatGptInitialize.result?.protocolVersion, '2025-11-25');
   assert.equal(chatGptInitialize.result?.serverInfo?.name, 'rel-ai-mcp');
+  assert.equal(chatGptInitialize.result?.serverInfo?.websiteUrl, 'https://kyne0328.github.io/rel-ai-chatgpt-web-harness/');
   assert.equal(chatGptInitializeResponse.headers.get('mcp-session-id'), null);
 
   const chatGptInitializedResponse = await freshFetch(`${base}/mcp`, {

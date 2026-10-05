@@ -1626,8 +1626,10 @@ async function case_task_progress_unit() {
   const running = taskProgressView(indeterminate, 'running');
   assert.equal(running.kind, 'indeterminate');
   assert.match(running.className, /task-progress indeterminate/);
-  assert.equal(running.role, 'status');
+  assert.equal(running.role, 'progressbar');
   assert.equal(running.label, 'Running command');
+  const runningCompact = taskProgressView(indeterminate, 'running', { compact: true });
+  assert.equal(runningCompact.role, 'progressbar');
   
   const determinate = taskProgressView({ mode: 'determinate', label: 'Checking files', percentage: 37 }, 'running');
   assert.equal(determinate.kind, 'determinate');
