@@ -4,9 +4,10 @@ import { getDiagnosticsReport, resetDiagnostics } from '../core/diagnostics.ts';
 import { readJsonBody, sendJson } from './io.ts';
 import type { HttpRouteContext } from './types.ts';
 
-function handleApiDiagnostics(ctx: HttpRouteContext): void {
+async function handleApiDiagnostics(ctx: HttpRouteContext): Promise<void> {
   const workspace = String(ctx.parsed.searchParams.get('workspace') || '').trim();
-  sendJson(ctx.res, 200, getDiagnosticsReport(ctx.options, workspace));
+  // The route registry authenticates a local dashboard session before this call.
+  sendJson(ctx.res, 200, await getDiagnosticsReport(ctx.options, workspace, { includeManagedProcessMemory: true }));
 }
 
 async function handleApiDiagnosticsReset(ctx: HttpRouteContext): Promise<void> {

@@ -66,7 +66,7 @@
 .activity-detail-command code { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--ui-text-primary); }
 .activity-detail-stream-head { @apply flex flex-wrap items-center justify-between gap-2; }
 .activity-detail-stream-head h3 { @apply text-[11px] font-bold; color: var(--ui-text-secondary); }
-.activity-detail-stream pre { margin: 0; max-height: 360px; min-height: 48px; overflow: auto; padding: 10px 12px; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; }
+.activity-detail-stream pre { margin: 0; max-height: 360px; min-height: 48px; overflow: auto; padding: 10px 12px; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-secondary); white-space: pre; overflow-wrap: normal; word-break: normal; }
 .activity-detail-stream code { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--ui-text-primary); }
 .activity-stream-stderr pre { border-color: var(--ui-status-danger-border); }
 .activity-stream-empty { font-size: 12px; margin: 4px 0 0; }

@@ -3,8 +3,16 @@ import { LRUCache } from 'lru-cache';
 const MAX_ENTRIES = 200;
 const MAX_METADATA_ENTRIES = 500;
 const MAX_BYTES_PER_ENTRY = 1024 * 1024;
-
-const cache = new LRUCache({ max: MAX_ENTRIES });
+// Count alone can retain 200 MiB of file text. Bound aggregate UTF-8 content
+// independently; this is a cache budget, not a measurement of JS heap overhead.
+const MAX_RETAINED_BYTES = 32 * 1024 * 1024;
+let evictions = 0;
+const cache = new LRUCache({
+  max: MAX_ENTRIES,
+  maxSize: MAX_RETAINED_BYTES,
+  sizeCalculation: entry => Math.max(1, entry.bytes),
+  dispose: (_entry, _key, reason) => { if (reason === 'evict') evictions += 1; }
+});
 const metadataCache = new LRUCache({ max: MAX_METADATA_ENTRIES });
 
 function cacheKey(alias, absPath) {
@@ -82,7 +90,10 @@ function invalidateAll() {
 }
 
 function cacheStats() {
-  return { entries: cache.size, metadataEntries: metadataCache.size };
+  return {
+    entries: cache.size, metadataEntries: metadataCache.size,
+    retainedBytes: cache.calculatedSize, maxRetainedBytes: MAX_RETAINED_BYTES, evictions
+  };
 }
 
 export {

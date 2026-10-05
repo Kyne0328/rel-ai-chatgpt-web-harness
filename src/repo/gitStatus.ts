@@ -23,17 +23,19 @@ interface ParsedGitStatus {
   readonly branch: string | null;
   readonly aheadBehind: GitAheadBehind | null;
   readonly unborn: boolean;
+  readonly repositoryHead?: string;
   readonly entries: GitStatusEntry[];
 }
 
 interface GitStatusArgsOptions {
   readonly branch?: boolean;
+  readonly version?: 1 | 2;
 }
 
 function gitStatusArgs(options: GitStatusArgsOptions = {}): string[] {
   return [
     'status',
-    '--porcelain=v1',
+    options.version === 2 ? '--porcelain=v2' : '--porcelain=v1',
     '-z',
     ...(options.branch === false ? [] : ['--branch']),
     '--untracked-files=all'
@@ -41,7 +43,58 @@ function gitStatusArgs(options: GitStatusArgsOptions = {}): string[] {
 }
 
 function parseGitStatus(output: unknown): ParsedGitStatus {
-  return parsePorcelainV1Z(String(output || ''));
+  const text = String(output || '');
+  return /^(?:# |[12u?!] )/.test(text) ? parsePorcelainV2Z(text) : parsePorcelainV1Z(text);
+}
+
+function parsePorcelainV2Z(text: string): ParsedGitStatus {
+  const records = text.split('\0');
+  const entries: string[] = [];
+  let head: string | undefined;
+  let branch = '';
+  let upstream = '';
+  let ahead = 0;
+  let behind = 0;
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index] || '';
+    if (!record) continue;
+    if (record.startsWith('# branch.oid ')) {
+      const value = record.slice(13);
+      if (value !== '(initial)' && !/^[a-f0-9]{40,64}$/i.test(value)) throw new Error('Invalid Git status HEAD.');
+      head = value === '(initial)' ? '' : value;
+    } else if (record.startsWith('# branch.head ')) {
+      const value = record.slice(14);
+      branch = value === '(detached)' ? 'HEAD (no branch)' : value;
+    } else if (record.startsWith('# branch.upstream ')) {
+      upstream = record.slice(18);
+    } else if (record.startsWith('# branch.ab ')) {
+      const match = /^# branch.ab \+(\d+) -(\d+)$/.exec(record);
+      if (!match) throw new Error('Invalid Git status ahead/behind counts.');
+      ahead = Number(match[1]);
+      behind = Number(match[2]);
+    } else if (record.startsWith('# ')) {
+      continue;
+    } else if (record.startsWith('? ') || record.startsWith('! ')) {
+      entries.push(`${record[0]}${record[0]} ${record.slice(2)}`);
+    } else {
+      const match = /^1 (\S{2}) (?:\S+ ){6}([\s\S]+)$/.exec(record)
+        || /^2 (\S{2}) (?:\S+ ){7}([\s\S]+)$/.exec(record)
+        || /^u (\S{2}) (?:\S+ ){8}([\s\S]+)$/.exec(record);
+      if (!match) throw new Error('Invalid Git status entry.');
+      entries.push(`${match[1]!.replaceAll('.', ' ')} ${match[2]}`);
+      if (record.startsWith('2 ')) {
+        const originalPath = records[++index];
+        if (!originalPath) throw new Error('Git rename/copy status is missing its source path.');
+        entries.push(originalPath);
+      }
+    }
+  }
+  const counts = [ahead ? `ahead ${ahead}` : '', behind ? `behind ${behind}` : ''].filter(Boolean);
+  const branchRaw = !branch ? '' : head === ''
+    ? `## No commits yet on ${branch}`
+    : `## ${branch}${upstream ? `...${upstream}` : ''}${counts.length ? ` [${counts.join(', ')}]` : ''}`;
+  const parsed = parsePorcelainV1Z([...(branchRaw ? [branchRaw] : []), ...entries, ''].join('\0'));
+  return { ...parsed, ...(head !== undefined ? { repositoryHead: head } : {}) };
 }
 
 function parsePorcelainV1Z(text: string): ParsedGitStatus {
@@ -117,13 +170,25 @@ function formatGitStatus(parsed: Pick<ParsedGitStatus, 'branchRaw' | 'entries'> 
   return lines.length ? `${lines.join('\n')}\n` : '';
 }
 
+function gitStatusEntryPaths(entry: Pick<GitStatusEntry, 'path' | 'originalPath' | 'indexStatus' | 'worktreeStatus'>): string[] {
+  return entry.originalPath && (entry.indexStatus === 'R' || entry.worktreeStatus === 'R')
+    ? [...new Set([entry.path, entry.originalPath])] : [entry.path];
+}
+
 function statusMapFromOutput(output: unknown): Map<string, string> {
   const map = new Map<string, string>();
   for (const entry of parseGitStatus(output).entries) {
-    map.set(entry.path, `${entry.indexStatus}${entry.worktreeStatus}`);
+    const status = `${entry.indexStatus}${entry.worktreeStatus}`;
+    map.set(entry.path, status);
+    // Both ends of a rename are mutations. Copies retain their source, so do
+    // not claim it merely because Git included the similarity record.
+    if (entry.originalPath && (entry.indexStatus === 'R' || entry.worktreeStatus === 'R')) {
+      // Destination content changes must not re-claim the already removed source.
+      map.set(entry.originalPath, `${entry.indexStatus === 'R' ? 'D' : ' '}${entry.worktreeStatus === 'R' ? 'D' : ' '}`);
+    }
   }
   return map;
 }
 
-export { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, formatGitStatus, statusMapFromOutput };
+export { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, formatGitStatus, statusMapFromOutput, gitStatusEntryPaths };
 export type { GitStatusEntry, GitStatusOwner, ParsedGitStatus };

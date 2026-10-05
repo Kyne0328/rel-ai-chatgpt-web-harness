@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { repositoryIndexPath } from './database.js';
 
 import {
   cancelRepositoryIndex,
@@ -39,6 +41,61 @@ const MERGED_ARRAY_FIELDS = new Set([
   'registrationSurfaces', 'recommendedReadOrder', 'seeds', 'files'
 ]);
 const SUM_FIELDS = new Set(['matchCount', 'definitionCount', 'referenceCount', 'callCount', 'impactedPathCount']);
+
+
+const OPTIONAL_CACHED_LOOKUP_BUDGET_MS = 250;
+const OPTIONAL_CACHED_LOOKUP_BACKOFF_MS = 5000;
+const optionalCachedLookups = new Map();
+
+async function runCachedRepositoryQuery(kind, workspace, config, options = {}) {
+  const startedAt = performance.now();
+  const unavailable = (reason, deferred = false) => ({
+    available: false, source: 'persistent-code-graph', cacheOnly: true,
+    status: deferred ? 'deferred' : 'unavailable', deferred, reason,
+    elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+    policy: 'Optional cached guidance is unavailable; source files and the source snapshot remain authoritative. No index was built by this lookup.'
+  });
+  if (options.signal?.aborted) throw options.signal.reason || new Error('Cached lookup cancelled.');
+  // Do not acquire a heavy lease or start a worker just to discover no cache.
+  let databaseFile;
+  try { databaseFile = repositoryIndexPath(config, workspace); } catch { return unavailable('cache_unavailable'); }
+  if (!fs.existsSync(databaseFile)) return unavailable('cache_missing');
+  if (options.optional !== true) return runRepositoryQuery(kind, workspace, config, {}, options);
+  const now = Date.now();
+  if ((optionalCachedLookups.get(databaseFile)?.untilMs || 0) > now) return unavailable('cached_lookup_backoff', true);
+  const attempt = { untilMs: now + OPTIONAL_CACHED_LOOKUP_BACKOFF_MS };
+  optionalCachedLookups.delete(databaseFile);
+  optionalCachedLookups.set(databaseFile, attempt);
+  while (optionalCachedLookups.size > 64) optionalCachedLookups.delete(optionalCachedLookups.keys().next().value);
+
+  const requestedBudget = Number(options.cachedLookupBudgetMs);
+  const budgetMs = Number.isFinite(requestedBudget) && requestedBudget > 0
+    ? Math.min(OPTIONAL_CACHED_LOOKUP_BUDGET_MS, requestedBudget) : OPTIONAL_CACHED_LOOKUP_BUDGET_MS;
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  let budgetExpired = false;
+  const timer = setTimeout(() => {
+    budgetExpired = true;
+    controller.abort(Object.assign(new Error('Optional cached lookup budget expired.'), { code: 'CACHED_LOOKUP_DEFERRED' }));
+  }, budgetMs);
+  timer.unref?.();
+  try {
+    const result = await runRepositoryQuery(kind, workspace, config, {}, { ...options, signal });
+    if (options.signal?.aborted) throw options.signal.reason || new Error('Cached lookup cancelled.');
+    if (optionalCachedLookups.get(databaseFile) === attempt) optionalCachedLookups.delete(databaseFile);
+    return result || unavailable('cache_unavailable');
+  } catch (error) {
+    // A real owner cancellation must never become a successful partial context.
+    if (options.signal?.aborted) {
+      if (optionalCachedLookups.get(databaseFile) === attempt) optionalCachedLookups.delete(databaseFile);
+      throw options.signal.reason || error;
+    }
+    attempt.untilMs = Date.now() + OPTIONAL_CACHED_LOOKUP_BACKOFF_MS;
+    return unavailable(budgetExpired ? 'cached_lookup_budget_exhausted' : 'cached_lookup_unavailable', budgetExpired);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function createRepositoryIntelligenceService() {
   const singleIndexedQuery = async (kind, workspace, config, args, options = {}) => {
@@ -93,8 +150,8 @@ function createRepositoryIntelligenceService() {
       nativeCodeInspect(workspace, config, { ...args, action: 'architecture' }, options),
     audit: (workspace, config = {}, args = {}, options = {}) =>
       inspectRepositoryCode(nativeCodeInspect, workspace, config, { ...args, action: 'audit' }, options),
-    cachedContext: (workspace, config = {}, options = {}) => runRepositoryQuery('cachedContext', workspace, config, {}, options),
-    cachedSummary: (workspace, config = {}, options = {}) => runRepositoryQuery('cachedSummary', workspace, config, {}, options),
+    cachedContext: (workspace, config = {}, options = {}) => runCachedRepositoryQuery('cachedContext', workspace, config, options),
+    cachedSummary: (workspace, config = {}, options = {}) => runCachedRepositoryQuery('cachedSummary', workspace, config, options),
     searchGraphContext: (workspace, config = {}, matches = [], options = {}) => runRepositoryQuery('searchGraphContext', workspace, config, { matches }, options),
     semanticSearch: (workspace, config = {}, args = {}, options = {}) => indexedQuery('semanticSearch', workspace, config, args, options),
     semanticRename: (workspace, semantic, options = {}) => planSemanticRename(workspace, semantic, options),

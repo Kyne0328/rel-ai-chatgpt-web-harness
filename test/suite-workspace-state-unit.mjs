@@ -1072,6 +1072,10 @@ async function case_workspace_multi_source_runtime_unit() {
     testCommands: {}
   };
   const config = { stateDir };
+  // This case checks source-root semantics for two tiny indexed fixtures.
+  // Admission behavior remains covered by dedicated low-pressure tests.
+  const { installDeterministicHostMemory } = await import('./helpers/deterministic-host-memory.mjs');
+  const restoreHostMemory = installDeterministicHostMemory();
   
   try {
     const snapshot = await repoSnapshot(workspace, config, { includeFiles: true });
@@ -1135,8 +1139,12 @@ async function case_workspace_multi_source_runtime_unit() {
         'delete-style disposal must remove the source-root intelligence cache');
     }
   } finally {
-    await repositoryIntelligence.shutdown();
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    try {
+      await repositoryIntelligence.shutdown();
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } finally {
+      restoreHostMemory();
+    }
   }
   
   console.log('Multi-source snapshot, read, lexical search, semantic search, structural inspect, and architecture paths passed.');

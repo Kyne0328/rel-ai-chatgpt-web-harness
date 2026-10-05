@@ -6,6 +6,7 @@ import {
   hasAgentCancellationHandle,
   isClearlyWorkspaceReadOnlyAdb,
   isPersistentAdbInvocation,
+  isPersistentProcessInvocation,
   resolveOneShotTimeoutMs
 } from '../src/executionControl.js';
 
@@ -51,6 +52,23 @@ assert.equal(isPersistentAdbInvocation('adb', ['logcat', '-d']), false);
 assert.equal(isPersistentAdbInvocation('adb', ['track-devices']), true);
 assert.equal(isPersistentAdbInvocation('adb', ['shell']), true);
 assert.equal(isPersistentAdbInvocation('adb', ['shell', 'getprop']), false);
+
+for (const [executable, argv] of [
+  ['C:\\Android\\emulator\\emulator.exe', ['-avd', 'Pixel_Test']],
+  ['emulator', ['@Pixel_Test', '-no-window']],
+  ['qemu-system-x86_64', ['-m', '2048', '-drive', 'file=fixture.img']],
+  ['tail', ['-F', 'fixture.log']],
+  ['journalctl', ['--follow']],
+  ['adb', ['logcat']]
+]) assert.equal(isPersistentProcessInvocation(executable, argv), true, `Expected managed-process routing for ${executable} ${argv.join(' ')}`);
+for (const [executable, argv] of [
+  ['emulator', ['-version']], ['emulator', ['-help']], ['emulator', ['-list-avds']],
+  ['emulator', ['-help-all']], ['qemu-system-x86_64', ['--version']],
+  ['qemu-system-x86_64', ['-machine', 'help']], ['qemu-img', ['info', 'fixture.img']],
+  ['adb', ['logcat', '-d']], ['adb', ['devices']], ['gradle', ['assembleDebug']],
+  ['tail', ['-n', '10', 'fixture.log']], ['journalctl', ['--since', 'today']],
+  ['npm', ['run', 'dev']], ['pwsh', ['-Command', 'emulator -avd Pixel_Test']]
+]) assert.equal(isPersistentProcessInvocation(executable, argv), false, `Finite or unproven invocation must retain exec routing: ${executable} ${argv.join(' ')}`);
 
 // Exercise the actual admission boundary without spawning a child or waiting
 // for a timer: an expired deadline must already be represented as an abort.

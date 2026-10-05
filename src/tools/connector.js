@@ -170,6 +170,13 @@ function compactForConnector(name, value, args = {}) {
         reusedChecks: value.reusedChecks,
         totalUnits: value.totalUnits,
         failedCheck: value.failedCheck,
+        admissionBlocked: value.admissionBlocked,
+        queueTimedOut: value.queueTimedOut,
+        errorCode: value.errorCode,
+        blockedResource: value.blockedResource,
+        resourceReason: value.resourceReason,
+        retryable: value.retryable,
+        resourcePressure: value.resourcePressure,
         timedOut: value.timedOut,
         cancelled: value.cancelled,
         validated: value.validated,
@@ -246,6 +253,7 @@ function compactForConnector(name, value, args = {}) {
         ephemeralChangedFiles: value.ephemeralChangedFiles?.length ? value.ephemeralChangedFiles : undefined,
         changedFilesTruncated: value.changedFilesTruncated === true ? true : undefined,
         mutationTracking: value.mutationTracking || undefined,
+        mutationTrackingDetails: value.mutationTrackingDetails || undefined,
         mutationUnknown: value.mutationUnknown === true ? true : undefined
       });
     case OP.PROCESS_LIST:

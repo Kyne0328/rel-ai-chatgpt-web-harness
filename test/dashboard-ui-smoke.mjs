@@ -205,7 +205,7 @@ const liveDiagnostics = renderDiagnostics({ live: true, operation: { id: 'operat
   phases: [{ phase: 'accepted', durationMs: 123, endedAt: '2026-10-05T01:00:00Z' }]
 } } } });
 assert.match(liveDiagnostics, /Waiting for this owner/);
-assert.match(liveDiagnostics, /<details><summary>Timing and ownership<\/summary>/, 'timing disclosure must use native keyboard-operable semantics');
+assert.match(liveDiagnostics, /<details><summary>Details<\/summary>/, 'diagnostic disclosure must use native keyboard-operable semantics');
 assert.match(liveDiagnostics, /role="status" aria-atomic="true"/);
 assert.doesNotMatch(liveDiagnostics.match(/role="status"[\s\S]*?<\/div>/)?.[0] || '', /data-clock-elapsed-start/, 'elapsed clocks must not create second-by-second live announcements');
 assert.match(liveDiagnostics, /data-clock-elapsed-start/);
@@ -219,6 +219,6 @@ assert.doesNotMatch(readyDiagnostics, /data-clock-elapsed-start/);
 const buildDiagnostics = renderToStaticMarkup(React.createElement(RuntimeBuildIdentity, {
   runtime: { buildIdentity: { buildId: 'runtime-a' } }, compatibility: { metadataMatches: true }
 }));
-assert.match(buildDiagnostics, /Connected runtime \(cached\): runtime-a/);
+assert.match(buildDiagnostics, /Runtime: runtime-a/);
 assert.match(buildDiagnostics, /Source\/build parity<\/dt><dd>Unknown/);
-assert.match(buildDiagnostics, /Historical operations may have run on a different build/);
+assert.match(buildDiagnostics, /role="tooltip"/);

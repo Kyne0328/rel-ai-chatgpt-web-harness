@@ -206,20 +206,27 @@ async function runCoalescedIndexing(workspace, config, databaseFile, state, opti
       throwIfAborted(options.signal);
       const revisionAtStart = state.changeRevision;
       const zoektOnly = mode === 'zoekt';
-      const selection = zoektOnly ? { paths: [] } : consumeRefreshSelection(state, mode, options.force === true);
       state.status = statusForMode(mode, metadata);
       state.lastError = null;
-      const resourceLease = await acquireHostResource('heavy', workspace.alias, { signal: options.signal });
-      const execution = runIndexWorker({
-        kind: mode,
-        workspace: serializableWorkspace(workspace),
-        databaseFile,
-        maxFiles: boundedMaxFiles(options.maxFiles || config?.repositoryIntelligence?.maxFiles),
-        paths: selection.paths,
-        zoektSettings: serializableZoektSettings(config)
+      const resourceLease = await acquireHostResource('heavy', workspace.alias, {
+        signal: options.signal, timeoutMs: options.indexQueueTimeoutMs,
+        deadlineAtMs: options.deadlineAtMs, reservationBytes: 768 * 1024 ** 2
       });
-      state.currentCancel = execution.cancel;
+      let execution = null;
       try {
+        // Detach/cancel can arrive after admission but before this continuation.
+        // Do not consume dirty paths or spawn a worker until it is checked.
+        throwIfAborted(options.signal);
+        const selection = zoektOnly ? { paths: [] } : consumeRefreshSelection(state, mode, options.force === true);
+        execution = runIndexWorker({
+          kind: mode,
+          workspace: serializableWorkspace(workspace),
+          databaseFile,
+          maxFiles: boundedMaxFiles(options.maxFiles || config?.repositoryIntelligence?.maxFiles),
+          paths: selection.paths,
+          zoektSettings: serializableZoektSettings(config)
+        });
+        state.currentCancel = execution.cancel;
         const defaultTimeoutMs = zoektOnly
           ? INDEX_FULL_TIMEOUT_MS
           : selection.paths === null ? INDEX_FULL_TIMEOUT_MS : INDEX_INCREMENTAL_TIMEOUT_MS;
@@ -262,7 +269,7 @@ async function runCoalescedIndexing(workspace, config, databaseFile, state, opti
           };
         }
       } finally {
-        if (state.currentCancel === execution.cancel) state.currentCancel = null;
+        if (execution && state.currentCancel === execution.cancel) state.currentCancel = null;
         resourceLease.release();
       }
       state.metadata = metadata;

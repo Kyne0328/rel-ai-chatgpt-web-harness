@@ -6,7 +6,7 @@ import { runProcess } from '../process.js';
 
 import { getCurrentTaskAbortSignal } from '../toolActivity.js';
 import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
-import { isPersistentAdbInvocation, resolveOneShotTimeoutMs } from '../executionControl.js';
+import { isPersistentProcessInvocation, resolveOneShotTimeoutMs } from '../executionControl.js';
 import { outputSpillOwner } from '../outputSpill.js';
 import { runSpan } from '../telemetry.js';
 import { isReusableDependencyPath } from '../reusableDependencies.js';
@@ -18,6 +18,8 @@ import { withTaskEphemeralEnvironment } from '../taskEphemeral.ts';
 import { clampNumber } from './limits.js';
 const MAX_CHANGED_FILES = 200;
 const MAX_FILESYSTEM_MUTATION_FILES = 50_000;
+const MAX_FILESYSTEM_MUTATION_ENTRIES = 100_000;
+const MAX_FILESYSTEM_MUTATION_MS = 5_000;
 
 function processExecutionError(code, message, retryable = false) {
   const error = /** @type {Error & { code: string, source: string, operation: string, retryable: boolean }} */ (new Error(message));
@@ -56,8 +58,19 @@ async function readGitStatusMap(workspace, config, signal) {
     signal
   }, config);
   throwIfAborted(signal);
-  if (result.exitCode !== 0 || result.stdoutTruncated) return null;
-  return statusMutationSnapshot(workspace, result.stdout);
+  const state = result.spawnError ? 'unavailable'
+    : result.stdoutTruncated ? 'output-limit'
+      : result.timedOut ? 'timed-out'
+        : result.cancelled ? 'cancelled'
+          : result.exitCode === 0 ? 'ok'
+            : /not a git repository/i.test(String(result.stderr || '')) ? 'not-repository' : 'failed';
+  return state === 'ok' ? mutationSnapshotResult(workspace, result.stdout) : { snapshot: null, state };
+}
+
+function mutationSnapshotResult(workspace, statusOutput) {
+  const snapshot = statusMutationSnapshot(workspace, statusOutput);
+  const complete = ![...snapshot.values()].some(value => /\0(?:unreadable:|outside)/.test(value));
+  return { snapshot, state: complete ? 'ok' : 'metadata-unreadable' };
 }
 
 function statusMutationSnapshot(workspace, statusOutput) {
@@ -77,75 +90,125 @@ function pathMetadataFingerprint(root, relativePath) {
     return [stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino].join(':');
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
-    return `missing:${String(code || '')}`;
+    return `${code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'unreadable'}:${String(code || '')}`;
   }
 }
 
-async function readFilesystemStatusMap(workspace, signal) {
+async function readFilesystemStatusMap(workspace, signal, limits = {}) {
   throwIfAborted(signal);
   const root = path.resolve(workspace.path);
-  // Mutation accounting is an integrity boundary, not a read-context boundary.
-  // Cover the whole workspace even when normal repository context is narrowed.
+  // cwd and context includeRoots are not mutation boundaries. Enumerate the
+  // workspace, but disclose excluded inputs instead of asserting full coverage.
   const shouldCollect = createCollectionPathFilter(root);
+  const maxEntries = clampNumber(limits.maxEntries, 1, MAX_FILESYSTEM_MUTATION_ENTRIES, MAX_FILESYSTEM_MUTATION_ENTRIES);
+  const maxFiles = clampNumber(limits.maxFiles, 1, MAX_FILESYSTEM_MUTATION_FILES, MAX_FILESYSTEM_MUTATION_FILES);
+  const maxMs = clampNumber(limits.maxMs, 1, MAX_FILESYSTEM_MUTATION_MS, MAX_FILESYSTEM_MUTATION_MS);
+  const startedAt = performance.now();
   const snapshot = new Map();
+  const observedPaths = new Set();
+  const scannedDirectories = new Set();
+  const reasons = new Set();
   const pending = [{ absolutePath: root, relativePath: '' }];
-  let complete = true;
+  let entryCount = 0;
   let fileCount = 0;
+  const exhausted = () => {
+    if (performance.now() - startedAt >= maxMs) {
+      reasons.add('time-limit');
+      return true;
+    }
+    return false;
+  };
+  const result = () => ({
+    snapshot, observedPaths, scannedDirectories,
+    complete: reasons.size === 0,
+    reasons: [...reasons].sort(),
+    entryCount, fileCount,
+    elapsedMs: Math.round(performance.now() - startedAt)
+  });
 
   while (pending.length) {
     throwIfAborted(signal);
+    if (exhausted()) break;
     const current = pending.pop();
     if (!current) break;
-    let entries;
     try {
-      entries = await fs.promises.readdir(current.absolutePath, { withFileTypes: true });
-    } catch {
-      complete = false;
-      continue;
-    }
-    for (const entry of entries) {
-      throwIfAborted(signal);
-      const relativePath = current.relativePath
-        ? `${current.relativePath}/${entry.name}`
-        : entry.name;
-      if (!shouldCollect(relativePath)) continue;
-      if (entry.isSymbolicLink()) {
-        complete = false;
-        continue;
-      }
-      const absolutePath = path.join(current.absolutePath, entry.name);
-      if (entry.isDirectory()) {
-        pending.push({ absolutePath, relativePath });
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      fileCount += 1;
-      if (fileCount > MAX_FILESYSTEM_MUTATION_FILES) {
-        return { snapshot, complete: false };
-      }
-      snapshot.set(relativePath, await pathMetadataFingerprintAsync(root, relativePath));
-      // A non-Git execution may need to inspect tens of thousands of files.
-      // Yield periodically so mutation accounting cannot monopolize the
-      // service event loop while retaining its whole-workspace coverage.
-      if (fileCount % 128 === 0) {
-        await new Promise(resolve => setImmediate(resolve));
+      // Unlike readdir, opendir does not materialize a huge flat directory
+      // before the entry/time budgets can be checked. Its iterator closes on
+      // early return, failure and cancellation.
+      const directory = await fs.promises.opendir(current.absolutePath, { bufferSize: 32 });
+      for await (const entry of directory) {
         throwIfAborted(signal);
+        if (exhausted()) return result();
+        if (entryCount >= maxEntries) {
+          reasons.add('entry-limit');
+          return result();
+        }
+        entryCount += 1;
+        const relativePath = current.relativePath
+          ? `${current.relativePath}/${entry.name}` : entry.name;
+        observedPaths.add(relativePath);
+        if (!shouldCollect(relativePath)) {
+          if (!isReusableDependencyPath(relativePath)) reasons.add('excluded-path');
+          continue;
+        }
+        const absolutePath = path.join(current.absolutePath, entry.name);
+        if (entry.isDirectory()) {
+          pending.push({ absolutePath, relativePath });
+          continue;
+        }
+        if (entry.isSymbolicLink()) reasons.add('symbolic-link');
+        else if (!entry.isFile()) {
+          reasons.add('unsupported-entry');
+          continue;
+        }
+        if (fileCount >= maxFiles) {
+          reasons.add('file-limit');
+          return result();
+        }
+        fileCount += 1;
+        try {
+          const stat = await fs.promises.lstat(absolutePath, { bigint: true });
+          snapshot.set(relativePath, [stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino].join(':'));
+        } catch (error) {
+          throwIfAborted(signal);
+          reasons.add(error?.code === 'ENOENT' ? 'entry-disappeared' : 'metadata-unreadable');
+        }
+        if (entryCount % 128 === 0) await new Promise(resolve => setImmediate(resolve));
       }
+      scannedDirectories.add(current.relativePath);
+    } catch (error) {
+      throwIfAborted(signal);
+      reasons.add(error?.code === 'ENOENT' ? 'directory-disappeared' : 'directory-unreadable');
     }
   }
-  return { snapshot, complete };
+  return result();
 }
 
-async function pathMetadataFingerprintAsync(root, relativePath) {
-  const absolute = path.resolve(root, relativePath);
-  if (!isPathInside(absolute, root)) return 'outside';
-  try {
-    const stat = await fs.promises.lstat(absolute, { bigint: true });
-    return [stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino].join(':');
-  } catch (error) {
-    const code = error && typeof error === 'object' && 'code' in error ? error.code : '';
-    return `missing:${String(code || '')}`;
+function filesystemPathKnown(snapshot, file) {
+  if (snapshot.snapshot.has(file)) return true;
+  let current = file;
+  while (current) {
+    const parent = path.posix.dirname(current);
+    const directory = parent === '.' ? '' : parent;
+    if (snapshot.scannedDirectories.has(directory) && !snapshot.observedPaths.has(current)) return true;
+    if (snapshot.observedPaths.has(current)) return false;
+    current = directory;
   }
+  return false;
+}
+
+function changedFilesystemFiles(before, after) {
+  // Unvisited paths are unknown, not additions/deletions. Compare only paths
+  // whose presence or absence was actually established in both snapshots.
+  const files = [...new Set([...before.snapshot.keys(), ...after.snapshot.keys()])]
+    .filter(file => filesystemPathKnown(before, file) && filesystemPathKnown(after, file))
+    .filter(file => before.snapshot.get(file) !== after.snapshot.get(file));
+  return boundedChangedFiles(files);
+}
+
+function filesystemCoverage(value) {
+  const { complete, reasons, entryCount, fileCount, elapsedMs } = value;
+  return { complete, reasons, entryCount, fileCount, elapsedMs };
 }
 
 function changedStatusFiles(before, after) {
@@ -190,12 +253,12 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     processArgv,
     executionLabel
   } = normalizeExecutionInvocation(args, 'relai_exec');
-  if (!command && isPersistentAdbInvocation(processExecutable, processArgv)) {
+  if (!command && isPersistentProcessInvocation(processExecutable, processArgv)) {
     const error = processExecutionError(
       'PERSISTENT_PROCESS_REQUIRED',
-      'This ADB command is a persistent stream or interactive session. Start it with relai_process action "start" so it has a stable processId and can be stopped independently of the task.'
+      'This command is a persistent application, stream or interactive session. Start it with relai_process action "start" so it has a stable processId and can be stopped independently of the task.'
     );
-    error.allowedAlternatives = ['Use relai_process action "start" for adb logcat streams, tracking commands, or an interactive adb shell.'];
+    error.allowedAlternatives = ['Use relai_process action "start" for emulators, persistent log streams, tracking commands, or interactive sessions.'];
     throw error;
   }
   const cwd = resolveCommandCwd(workspace, args.cwd);
@@ -214,12 +277,16 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   const commandSummary = redactCommandForAudit(displayCommand);
   let statusBefore = null;
   let filesystemBefore = null;
+  const mutationTrackingDetails = {};
   if (trackMutation) {
     try {
-      statusBefore = typeof context.preExecutionGitStatus === 'string'
-        ? statusMutationSnapshot(workspace, context.preExecutionGitStatus)
+      const before = typeof context.preExecutionGitStatus === 'string'
+        ? mutationSnapshotResult(workspace, context.preExecutionGitStatus)
         : await readGitStatusMap(workspace, config, signal);
+      statusBefore = before.snapshot;
+      mutationTrackingDetails.gitBefore = before.state;
       filesystemBefore = !statusBefore ? await readFilesystemStatusMap(workspace, signal) : null;
+      if (filesystemBefore) mutationTrackingDetails.filesystemBefore = filesystemCoverage(filesystemBefore);
     } catch (error) {
       if (!signal?.aborted) throw error;
       const timedOut = executionDeadlineExpired(context, signal);
@@ -271,7 +338,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       preserveOutputWhitespace: true,
       maxOutputBytes,
       signal,
-      resourceClass: 'heavy',
+      resourceClass: context.resourceClass === 'light' ? undefined : 'heavy',
       onPhase: event => context.onOperationPhase?.(event),
       resourceOwner: workspace.alias,
       outputSpillTaskId: outputSpillOwner({
@@ -299,25 +366,33 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     mutationTracking = 'declared-read-only';
   } else {
     try {
-      const statusAfter = await readGitStatusMap(workspace, config, signal);
+      const after = await readGitStatusMap(workspace, config, signal);
+      const statusAfter = after.snapshot;
+      mutationTrackingDetails.gitAfter = after.state;
       if (statusBefore && statusAfter) {
         changed = changedStatusFiles(statusBefore, statusAfter);
         mutationTracking = 'git';
+        mutationUnknown = mutationTrackingDetails.gitBefore !== 'ok' || after.state !== 'ok';
       } else if (!statusBefore && filesystemBefore) {
         const filesystemAfter = await readFilesystemStatusMap(workspace, signal);
-        changed = changedStatusFiles(filesystemBefore.snapshot, filesystemAfter.snapshot);
+        changed = changedFilesystemFiles(filesystemBefore, filesystemAfter);
+        mutationTrackingDetails.filesystemAfter = filesystemCoverage(filesystemAfter);
         mutationTracking = 'filesystem';
-        mutationUnknown = filesystemBefore.complete !== true || filesystemAfter.complete !== true;
+        mutationUnknown = filesystemBefore.complete !== true || filesystemAfter.complete !== true
+          || mutationTrackingDetails.gitBefore !== 'not-repository' || after.state !== 'not-repository';
       } else {
         changed = { files: [], truncated: false };
         mutationUnknown = true;
       }
-    } catch (error) {
-      if (!signal?.aborted) throw error;
+    } catch {
+      // The command already ran. A bookkeeping failure must preserve that
+      // outcome rather than invite an unsafe retry of the physical command.
+      mutationTrackingDetails.gitAfter = signal?.aborted ? 'cancelled' : 'failed';
       changed = { files: [], truncated: false };
       mutationUnknown = true;
     }
   }
+  if (changed.truncated) mutationUnknown = true;
   const deadlineTimedOut = executionDeadlineExpired(context, signal);
   const timedOut = result.timedOut === true || deadlineTimedOut;
   const cancelled = result.cancelled === true && !deadlineTimedOut;
@@ -364,8 +439,9 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     ...(ephemeralChangedFiles.length ? { ephemeralChangedFiles } : {}),
     changedFilesTruncated: changed.truncated,
     mutationTracking,
+    ...(trackMutation ? { mutationTrackingDetails } : {}),
     ...(mutationUnknown ? { mutationUnknown: true } : {})
   };
 }
 
-export { relaiExec };
+export { relaiExec, readFilesystemStatusMap, changedFilesystemFiles };

@@ -2,7 +2,7 @@ import { readSessionPolicy } from "../policyResolver.js";
 import { taskOwnedChangedFiles } from "../taskIntegrity.ts";
 import { runProcess, summarizeCommand } from "../process.js";
 import { resolveSafePath, isSecretPath } from "../safety.js";
-import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, formatGitStatus } from "./gitStatus.js";
+import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, formatGitStatus, gitStatusEntryPaths } from "./gitStatus.js";
 import type { GitStatusEntry, GitStatusOwner, ParsedGitStatus } from "./gitStatus.ts";
 import { checkGitRepository, readGitStatus } from './gitClient.ts';
 
@@ -123,18 +123,22 @@ function statusOwnerForFile(file: string, hasSession: boolean, baselineSet: Read
 
 function recordStatusEntry(groups: StatusGroups, entry: OwnedGitStatusEntry): void {
   groups.entries.push(entry);
-  if (entry.owner === 'session') {
-    groups.sessionChanged.push(entry.path);
-    if (entry.untracked) groups.untrackedSession.push(entry.path);
+  recordStatusPath(groups, entry.path, entry.owner, entry.untracked);
+}
+
+function recordStatusPath(groups: StatusGroups, file: string, owner: GitStatusOwner, untracked: boolean): void {
+  if (owner === 'session') {
+    groups.sessionChanged.push(file);
+    if (untracked) groups.untrackedSession.push(file);
     return;
   }
-  if (entry.owner === 'baseline') {
-    groups.baselineChanged.push(entry.path);
-    if (entry.untracked) groups.untrackedBaseline.push(entry.path);
+  if (owner === 'baseline') {
+    groups.baselineChanged.push(file);
+    if (untracked) groups.untrackedBaseline.push(file);
     return;
   }
-  groups.unknownChanged.push(entry.path);
-  if (entry.untracked) groups.untrackedUnknown.push(entry.path);
+  groups.unknownChanged.push(file);
+  if (untracked) groups.untrackedUnknown.push(file);
 }
 
 function classifyStatusOwnership(workspace: RepoWorkspace, config: RepoConfig, statusOutput: unknown, requestedTaskId = '') {
@@ -149,9 +153,11 @@ function classifyStatusOwnership(workspace: RepoWorkspace, config: RepoConfig, s
       ...parsedEntry,
       owner: statusOwnerForFile(parsedEntry.path, hasSession, baselineSet)
     });
+    // Display ownership groups follow Git's destination entry. Rename sources
+    // are retained separately in the exact dirty/task paths below.
   }
 
-  const dirtySet = new Set(groups.entries.map(entry => entry.path));
+  const dirtySet = new Set(groups.entries.flatMap(gitStatusEntryPaths));
   const requestedId = String(requestedTaskId || '').trim();
   const ownershipTaskId = requestedId || taskId;
   const taskTouched = ownershipTaskId
@@ -404,9 +410,10 @@ async function workspaceGitStatus(workspace: RepoWorkspace, config: RepoConfig, 
     branch: ownership.branch,
     aheadBehind: ownership.aheadBehind,
     unborn: ownership.unborn,
+    ...(parsed.repositoryHead !== undefined ? { repositoryHead: parsed.repositoryHead } : {}),
     status: truncateUtf8(formatGitStatus(ownership), maxBytes, "git status"),
     statusEntries: ownership.entries,
-    changedFiles: ownership.entries.map((entry) => entry.path),
+    changedFiles: [...new Set(ownership.entries.flatMap(gitStatusEntryPaths))],
     untrackedFiles: ownership.entries.filter((entry) => entry.untracked).map((entry) => entry.path),
     sessionChangedFiles,
     baselineChangedFiles: ownership.baselineChanged,

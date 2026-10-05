@@ -34,6 +34,8 @@ jobs:
         run: test -x electron/node_modules/electron/dist/electron
       - name: Run shared source gate
         run: xvfb-run --auto-servernum npm run test:all
+      - name: Enforce repository mutation accounting budget
+        run: npm run benchmark:mutation-accounting:strict
       - name: Enforce MCP startup performance budget
         run: npm run benchmark:mcp-startup
       - name: Enforce Repository Intelligence performance budget
@@ -78,6 +80,8 @@ jobs:
           node test/process-cancellation-unit.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node test/process-output-pipe-stall-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/test-resource-platform.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node test/installer-test-entrypoints-unit.mjs
       - name: Smoke-test native Windows dashboard chrome

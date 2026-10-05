@@ -15,5 +15,5 @@ Use this process flow: `start with explicit purpose -> determine readiness -> in
 4. Read logs incrementally with stdout/stderr offsets. Reuse `metadataRevision` after the first read so unchanged process metadata is not returned repeatedly.
 5. Reuse the same live process while it still serves the objective. Write stdin only when an interactive program actually expects it.
 6. When the runtime has produced enough evidence, return control to `rel-ai-debugging` for defect work or `rel-ai-verification` for proof instead of keeping process management as the active concern.
-7. Stop the process explicitly when it is no longer needed.
+7. Choose `lifecycle: "task"` for a service owned exclusively by this work session and needed only until finish/cancel. This opt-in requires the matching `work_id`. Omitted lifecycle remains `persistent` for compatibility and must be stopped explicitly when no longer needed. Never claim ownership of a pre-existing/shared Gradle, Java, adb or emulator process by its name alone. Read [resource workflow guidance](../rel-ai-workflow/references/resources.md) for queue pressure and cleanup uncertainty.
 8. Use `relai_exec` or `relai_validate` instead for one-shot tests, builds, checks, migrations that terminate, or release gates.

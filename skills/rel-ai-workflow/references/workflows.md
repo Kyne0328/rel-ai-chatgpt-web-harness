@@ -58,6 +58,10 @@ If stopping is authorized, target the exact finite operation ID. A stop request 
 4. After an authorized install/restart, reconnect and read the new runtime identity and start time. An earlier task narrative or the package filename is not evidence of which runtime is now serving calls. Respect active work and shutdown protections; deployment authority does not imply permission to terminate unrelated work.
 5. Exercise the changed tool route with a bounded safe acceptance check against the connected runtime. Record the actual runtime fingerprint with that result. Report implementation, source-test evidence, installed artifact identity, and live route verification as separate claims when only some are established.
 
+## Resource pressure and repository cost
+
+For heavy-work admission, explicit process lifetimes, honest mutation coverage, generated-output placement and opt-in Git tuning, follow [resource-aware execution](resources.md). Preserve stop/status access while work queues. Do not retry the physical command to retrieve a result or bypass a pressure queue.
+
 ## Managed processes
 
 Use `relai_process` action `start` only for a program that must persist or accept later input. Supply:

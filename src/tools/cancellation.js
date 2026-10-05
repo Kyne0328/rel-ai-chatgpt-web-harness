@@ -1,9 +1,10 @@
 'use strict';
 
+import { cleanupTaskManagedProcesses } from '../processManager.js';
 import { safeLogAudit } from '../audit.js';
 import { cancelFallbackExecution } from '../mcp/fallbackExecutions.js';
 import { clearSessionPolicy } from '../policyResolver.js';
-import { onToolActivity, releaseTaskCancellationHold, requestCurrentTaskCancellation, requestCurrentTaskOperationStop, taskError } from '../toolActivity.js';
+import { getCurrentToolActivityContext, onToolActivity, releaseTaskCancellationHold, requestCurrentTaskCancellation, requestCurrentTaskOperationStop, taskError } from '../toolActivity.js';
 import { readTaskHistorySession } from '../taskHistoryStore.ts';
 import { sanitizeDisplayText } from '../taskObservability.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
@@ -62,20 +63,15 @@ async function stopTaskOperations(config, args = {}) {
   };
 }
 
-async function cancelTask(config, args = {}) {
+async function cancelTask(config, args = {}, handlerContext = {}) {
   const taskId = String(args.work_id || '').trim();
   if (!taskId) throw taskError('TASK_ID_REQUIRED', 'work_id is required to cancel a work session.');
-
-  const reason = sanitizeDisplayText(args.reason || 'Work session cancelled by request.', 500);
-  const fallbackCancellation = cancelFallbackExecution(taskId, { config, reason });
-  const fallbackSettlement = fallbackCancellation.stopping === true && fallbackCancellation.settlement
-    ? fallbackCancellation.settlement
-    : null;
-
   const session = readTaskHistorySession(config, taskId);
   const workspace = String(session?.workspace || '').trim();
   if (session?.status === 'cancelled') {
-    if (workspace) clearSessionPolicy(config, workspace, taskId);
+    // callTool already verified the persisted task/principal. Terminal retries
+    // are read-only and have no live activity context: do not perform cleanup
+    // or request fallback cancellation again.
     return {
       ok: true,
       work_id: taskId,
@@ -89,31 +85,60 @@ async function cancelTask(config, args = {}) {
     };
   }
 
+  // Every new side effect still requires the exact active task context.
+  if (getCurrentToolActivityContext()?.taskId !== taskId) {
+    throw taskError('TASK_OWNERSHIP_MISMATCH', 'The supplied work_id does not match the active cancellation invocation.');
+  }
+  const reason = sanitizeDisplayText(args.reason || 'Work session cancelled by request.', 500);
+  const fallbackCancellation = cancelFallbackExecution(taskId, { config, reason });
+  const fallbackSettlement = fallbackCancellation.stopping === true && fallbackCancellation.settlement
+    ? fallbackCancellation.settlement
+    : null;
   const cancellation = requestCurrentTaskCancellation({
     reason,
     initiator: 'connector_client',
-    externalPending: Boolean(fallbackSettlement)
+    externalPending: Boolean(fallbackSettlement) || Boolean(workspace)
   });
   if (cancellation.status === 'cancelling' && cancellation.duplicate !== true) {
     auditCancellationWhenCommitted(config, { taskId, workspace, reason });
   }
-  if (fallbackSettlement) {
-    const releaseCancellationHold = () => releaseTaskCancellationHold(taskId);
-    void fallbackSettlement.then(releaseCancellationHold, releaseCancellationHold);
-  }
+  const cleanupPromise = workspace
+    ? cleanupCancelledTaskProcesses(config, workspace, taskId, handlerContext)
+    : Promise.resolve(null);
+  const releaseCancellationHold = () => releaseTaskCancellationHold(taskId);
+  const settlement = Promise.all([fallbackSettlement, cleanupPromise]);
+  void settlement.then(releaseCancellationHold, releaseCancellationHold);
+  const processCleanup = await cleanupPromise;
+  if (!fallbackSettlement) releaseCancellationHold();
   if (workspace) clearSessionPolicy(config, workspace, taskId);
+  const settledCancellation = fallbackSettlement ? cancellation : requestCurrentTaskCancellation({ reason, initiator: 'connector_client' });
 
   return {
     ok: true,
     work_id: cancellation.taskId,
-    status: cancellation.status,
+    status: settledCancellation.status,
     duplicate: cancellation.duplicate,
     endReason: cancellation.endReason,
     terminalReason: cancellation.terminalReason,
-    endedAt: cancellation.endedAt,
-    cancelledAt: cancellation.cancelledAt,
-    progress: cancellation.progress
+    endedAt: settledCancellation.endedAt,
+    cancelledAt: settledCancellation.cancelledAt,
+    progress: cancellation.progress,
+    ...(processCleanup ? { processCleanup } : {})
   };
+}
+
+async function cleanupCancelledTaskProcesses(config, workspace, taskId, context) {
+  try {
+    // Cancellation has already aborted the task signal. Cleanup has its own
+    // bounded termination waits and must still be allowed to settle.
+    return await cleanupTaskManagedProcesses(config, workspace, taskId, { ...context, taskId, workspace });
+  } catch (error) {
+    return {
+      attempted: 0, stopped: 0, preservedPersistent: 0, complete: false,
+      admissionBudgetMs: 0, stopGraceMs: 500, forceWaitMs: 2000, leftovers: [],
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }
 
 function auditCancellationWhenCommitted(config, { taskId, workspace, reason }) {

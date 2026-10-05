@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
+import { installDeterministicHostMemory } from './helpers/deterministic-host-memory.mjs';
 
 const callTool = (name, args, context = {}) => rawCallTool(name, args, { principal: 'local:trusted', ...context });
 
@@ -119,6 +120,9 @@ fs.writeFileSync(configPath, JSON.stringify({
   }
 }, null, 2));
 process.env.REL_AI_MCP_CONFIG = configPath;
+// Bounded fixture children exercise execution contracts; pressure policy has a
+// dedicated forced-low-memory suite and must not depend on unrelated host load.
+const restoreHostMemory = installDeterministicHostMemory();
 
 try {
 
@@ -658,7 +662,8 @@ try {
   resetToolActivity();
   const validatedContext = { publicHttpOnly: true };
   const validatedTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, validatedContext);
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: validatedTask.work_id, level: 'standard', complete: false }, validatedContext);
+  const initialValidation = await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: validatedTask.work_id, level: 'standard', complete: false }, validatedContext);
+  assert.equal(initialValidation.validationStatus, 'passed', JSON.stringify(initialValidation));
   await callTool('relai_exec', {
     workspace: 'app',
     work_id: validatedTask.work_id,
@@ -674,7 +679,8 @@ try {
   resetToolActivity();
   const mutationContext = { publicHttpOnly: true };
   const mutationTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, mutationContext);
-  await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: mutationTask.work_id, level: 'standard', complete: false }, mutationContext);
+  const beforeMutationValidation = await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: mutationTask.work_id, level: 'standard', complete: false }, mutationContext);
+  assert.equal(beforeMutationValidation.validationStatus, 'passed', JSON.stringify(beforeMutationValidation));
   await callTool('relai_exec', {
     workspace: 'app',
     work_id: mutationTask.work_id,
@@ -690,11 +696,15 @@ try {
 
   console.log('relai_exec unit and integration tests passed.');
 } finally {
-  await flushAuditWrites();
-  await repositoryIntelligence.shutdown();
-  if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
-  else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  removeTempAfterHandlesClose();
+  try {
+    await flushAuditWrites();
+    await repositoryIntelligence.shutdown();
+    if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
+    else process.env.REL_AI_MCP_CONFIG = previousConfig;
+    removeTempAfterHandlesClose();
+  } finally {
+    restoreHostMemory();
+  }
 }
 
 // Nested raw tool calls can leave Windows piped stdio referenced after app resources close.

@@ -124,7 +124,12 @@ async function createValidationFingerprint(workspace, config, options = {}) {
   if (repositoryWide) {
     for (const file of repositoryChangedFiles) repositoryDirtyFiles.push(await fingerprint(file));
   }
-  const repositoryHead = await readRepositoryHead(workspace, config, signal);
+  // Reuse only this operation's status snapshot. Porcelain v2 includes HEAD,
+  // so no second process is needed; independently invoked fingerprints still
+  // collect fresh status before and after a validation command.
+  const repositoryHead = typeof status?.repositoryHead === 'string'
+    ? status.repositoryHead
+    : status?.unborn === true ? '' : await readRepositoryHead(workspace, config, signal);
   const checks = {
     quick: detectVerifyChecks(workspace.path, 'quick'),
     standard: detectVerifyChecks(workspace.path, 'standard'),

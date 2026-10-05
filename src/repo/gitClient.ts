@@ -1,7 +1,8 @@
 import * as path from 'node:path';
-import { simpleGit, type SimpleGit, type StatusResult } from 'simple-git';
+import { simpleGit, type SimpleGit } from 'simple-git';
 import { resolveGitExecutable } from '../gitExecutable.js';
-import type { GitStatusEntry, ParsedGitStatus } from './gitStatus.ts';
+import { runProcess } from '../process.js';
+import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, type ParsedGitStatus } from './gitStatus.ts';
 
 type GitClientOptions = {
   readonly signal?: AbortSignal;
@@ -28,60 +29,26 @@ async function checkGitRepository(baseDir: string, options: GitClientOptions = {
 }
 
 async function readGitStatus(baseDir: string, options: GitClientOptions = {}): Promise<ParsedGitStatus> {
-  const git = createGitClient(baseDir, options);
-  const status = await git.status(['--untracked-files=all']);
-  const unborn = await hasNoHead(git);
-  return statusResult(status, unborn);
-}
-
-function statusResult(status: StatusResult, unborn: boolean): ParsedGitStatus {
-  const branch = status.current || null;
-  const ahead = Math.max(0, Number(status.ahead || 0));
-  const behind = Math.max(0, Number(status.behind || 0));
-  const aheadBehind = ahead || behind ? { ahead, behind } : null;
-  const entries: GitStatusEntry[] = status.files.map(file => ({
-    path: file.path,
-    ...(file.from ? { originalPath: file.from } : {}),
-    indexStatus: file.index,
-    worktreeStatus: file.working_dir,
-    untracked: file.index === '?' && file.working_dir === '?',
-    raw: file.from
-      ? `${file.index}${file.working_dir} ${file.from} -> ${file.path}`
-      : `${file.index}${file.working_dir} ${file.path}`
-  }));
-  return {
-    branchRaw: formatBranchRaw(branch, status.tracking, aheadBehind, unborn),
-    branch,
-    aheadBehind,
-    unborn,
-    entries
-  };
-}
-
-async function hasNoHead(git: SimpleGit): Promise<boolean> {
-  try {
-    await git.revparse(['--verify', 'HEAD']);
-    return false;
-  } catch {
-    return true;
+  options.signal?.throwIfAborted();
+  // Porcelain's branch header already distinguishes unborn HEAD. A second
+  // rev-parse both duplicates work and mistakes permission/timeout failures for
+  // an unborn repository. Keep this read bounded and use one coherent snapshot.
+  const result = await runProcess('git', gitStatusArgs({ version: 2 }), {
+    cwd: baseDir,
+    timeout: boundedTimeout(options.timeoutMs, 30_000),
+    maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
+    preserveOutputWhitespace: true,
+    ...(options.signal ? { signal: options.signal } : {})
+  });
+  options.signal?.throwIfAborted();
+  if (result.exitCode !== 0 || result.stdoutTruncated) {
+    const error = new Error(result.stdoutTruncated
+      ? 'Git status exceeded the internal output limit.'
+      : String(result.error || result.stderr || 'Git status failed.'));
+    Object.assign(error, { code: result.stdoutTruncated ? 'GIT_STATUS_TRUNCATED' : 'GIT_STATUS_FAILED' });
+    throw error;
   }
-}
-
-function formatBranchRaw(
-  branch: string | null,
-  tracking: string | null,
-  aheadBehind: ParsedGitStatus['aheadBehind'],
-  unborn: boolean
-): string {
-  if (!branch) return '';
-  if (unborn) return `## No commits yet on ${branch}`;
-  const base = tracking ? `## ${branch}...${tracking}` : `## ${branch}`;
-  if (!aheadBehind) return base;
-  const parts = [
-    ...(aheadBehind.ahead ? [`ahead ${aheadBehind.ahead}`] : []),
-    ...(aheadBehind.behind ? [`behind ${aheadBehind.behind}`] : [])
-  ];
-  return parts.length ? `${base} [${parts.join(', ')}]` : base;
+  return parseGitStatus(result.stdout);
 }
 
 function gitExecutableIsOnPath(executable: string): boolean {

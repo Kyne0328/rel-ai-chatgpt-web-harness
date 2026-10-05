@@ -4,7 +4,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { resolveWorkspace } from './config.js';
 import { runProcess } from './process.js';
-import { gitStatusArgs, parseGitStatus } from './repo/gitStatus.js';
+import { gitStatusArgs, parseGitStatus, gitStatusEntryPaths } from './repo/gitStatus.js';
 import { readJsonFile } from './durableState.ts';
 import { getStateDir } from './statePaths.js';
 import { setStateMeta, stateDatabasePath, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
@@ -501,11 +501,14 @@ async function repositoryStateForEvent(
   const statusOutput = statusResult.exitCode === 0 && !statusResult.stdoutTruncated
     ? String(statusResult.stdout || '')
     : undefined;
+  // A failed or truncated read cannot prove the tree is clean. Preserve
+  // existing owners until a later successful repository reconciliation.
+  if (statusOutput === undefined && tool !== OP.WORK_BEGIN) return { baseline: null, changedFiles: null };
   const parsed = statusOutput !== undefined
     ? parseGitStatus(statusOutput)
     : { branch: null, unborn: false, entries: [] };
-  const entries = (Array.isArray(parsed.entries) ? parsed.entries : []) as Array<Record<string, any>>;
-  const changedFiles: string[] = unique(entries.map(entry => normalizePath(entry.path)).filter(Boolean)).sort();
+  const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
+  const changedFiles: string[] = unique(entries.flatMap(gitStatusEntryPaths).map(normalizePath).filter(Boolean)).sort();
   if (tool !== OP.WORK_BEGIN) return { baseline: null, changedFiles, ...(statusOutput !== undefined ? { statusOutput } : {}) };
   const headResult = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: workspace.path,

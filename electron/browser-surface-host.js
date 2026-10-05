@@ -1185,8 +1185,14 @@ function targetResolverSource() {
     const exact = target.exact === true;
     const wanted = normalize(target.value);
     const matches = actual => exact ? normalize(actual) === wanted : normalize(actual).toLowerCase().includes(wanted.toLowerCase());
-    const referencedText = ids => normalize(String(ids || '').split(/\\s+/).map(id => document.getElementById(id)?.textContent || '').join(' '));
-    const labelText = el => normalize(el.labels ? [...el.labels].map(label => label.textContent || '').join(' ') : '');
+    const accessibleText = node => {
+      if (!node) return '';
+      if (node.nodeType === 3) return node.nodeValue || '';
+      if (node.nodeType !== 1 || node.getAttribute?.('aria-hidden') === 'true') return '';
+      return [...node.childNodes].map(accessibleText).join(' ');
+    };
+    const referencedText = ids => normalize(String(ids || '').split(/\\s+/).map(id => accessibleText(document.getElementById(id))).join(' '));
+    const labelText = el => normalize(el.labels ? [...el.labels].map(accessibleText).join(' ') : '');
     const nameOf = el => normalize(
       referencedText(el.getAttribute('aria-labelledby')) ||
       el.getAttribute('aria-label') ||

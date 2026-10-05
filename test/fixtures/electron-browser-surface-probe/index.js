@@ -17,7 +17,7 @@ app.whenReady().then(async () => {
       @media (min-width: 1000px) { #breakpoint::after { content: 'wide'; } }
       .spacer { height: 3000px; }
       #edge { position: fixed; right: 8px; bottom: 8px; }
-    </style></head><body><main><h1>Embedded browser fixture</h1><div id="breakpoint"></div><label for="name">Name</label><input id="name" placeholder="Your name"><button id="save" type="button" onclick="window.probeClicks=(window.probeClicks||0)+1">Save</button><button id="edge" type="button" onclick="window.probeEdgeClicks=(window.probeEdgeClicks||0)+1">Edge</button><div class="spacer"></div></main></body></html>`);
+    </style></head><body><main><h1>Embedded browser fixture</h1><div id="breakpoint"></div><label for="name">Name</label><input id="name" placeholder="Your name"><label for="release-title">Release title <span aria-hidden="true">*</span></label><input id="release-title" required><button id="save" type="button" onclick="window.probeClicks=(window.probeClicks||0)+1">Save</button><button id="edge" type="button" onclick="window.probeEdgeClicks=(window.probeEdgeClicks||0)+1">Edge</button><div class="spacer"></div></main></body></html>`);
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -83,6 +83,24 @@ app.whenReady().then(async () => {
       target: { by: 'label', value: 'Name', exact: true },
       input: 'Rel.AI embedded'
     });
+    await host.run({
+      action: 'interact',
+      nativeSessionId: started.nativeSessionId,
+      nativePageId: opened.nativePageId,
+      interaction: 'wait',
+      target: { by: 'role', value: 'textbox', name: 'Release title', exact: true },
+      state: 'visible',
+      timeoutMs: 1_000
+    });
+    await host.run({
+      action: 'interact',
+      nativeSessionId: started.nativeSessionId,
+      nativePageId: opened.nativePageId,
+      interaction: 'fill',
+      target: { by: 'label', value: 'Release title', exact: true },
+      input: 'v1.2.3'
+    });
+    const requiredFieldValue = await pageContents.executeJavaScript(`document.querySelector('#release-title').value`);
     const afterFill = await host.run({
       action: 'snapshot',
       nativeSessionId: started.nativeSessionId,
@@ -144,6 +162,7 @@ app.whenReady().then(async () => {
       navigated,
       snapshot: snapshot.snapshot,
       afterFill: afterFill.snapshot,
+      requiredFieldValue,
       screenshotBytes: screenshot.image.bytes,
       screenshotWidth: screenshot.image.width,
       screenshotHeight: screenshot.image.height,

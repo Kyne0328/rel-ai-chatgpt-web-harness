@@ -1,9 +1,12 @@
 // Hierarchical workspace/task reader-writer queue.
 //
-// Normal tool calls share a workspace-level read barrier and then acquire a
-// task-local reader/writer lane. This keeps calls within one logical task ordered
-// while allowing independent ChatGPT sessions/tasks to work in the same workspace
-// concurrently. Repository-global operations acquire the workspace barrier as a
+// Normal task-scoped tool calls share a workspace-level read barrier and then
+// acquire a task-local reader/writer lane. This keeps ordinary calls within one
+// logical task ordered while allowing independent ChatGPT sessions/tasks to work
+// in the same workspace concurrently. Source mutations use a separate workspace
+// mutation lane and may opt out of the task lane so long edits/commands remain
+// mutually exclusive without preventing safe reads or control-plane work in the
+// same task. Repository-global operations acquire the workspace barrier as a
 // writer, so commit, push, reset, restore, tidy, and worktree changes remain
 // exclusive across every task.
 //
@@ -337,21 +340,23 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
     throwIfWorkspaceMutationBlocked(workspace);
     const signal = mutationQueueSignal(workspace, options.signal);
     return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => {
-      const laneKey = taskKey(workspace, taskId);
-      return withLock(laneKey, mode, async (taskWaitMs, taskState) => {
-        return withLock(mutationKey(workspace), WRITE, async (mutationWaitMs, mutationState) => {
-          throwIfWorkspaceMutationBlocked(workspace);
-          const waitMs = workspaceWaitMs + taskWaitMs + mutationWaitMs;
-          notifyWait(options, waitMs, {
-            workspace,
-            taskId,
-            scope,
-            mode,
-            queued: workspaceState.queue.length + taskState.queue.length + mutationState.queue.length
-          });
-          return operation();
-        }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+      const enterMutationLane = (taskWaitMs = 0, taskState = null) => withLock(mutationKey(workspace), WRITE, async (mutationWaitMs, mutationState) => {
+        throwIfWorkspaceMutationBlocked(workspace);
+        const waitMs = workspaceWaitMs + taskWaitMs + mutationWaitMs;
+        notifyWait(options, waitMs, {
+          workspace,
+          taskId,
+          scope,
+          mode,
+          queued: workspaceState.queue.length + (taskState?.queue.length || 0) + mutationState.queue.length
+        });
+        return operation();
       }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+
+      if (options.bypassTaskLane === true) return enterMutationLane();
+      const laneKey = taskKey(workspace, taskId);
+      return withLock(laneKey, mode, (taskWaitMs, taskState) => enterMutationLane(taskWaitMs, taskState),
+        signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
     }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
   }
 

@@ -5,7 +5,7 @@ import { repositoryIndexPath } from './database.js';
 import { repositoryIndexStatus } from './indexer.js';
 import { repositoryIndexSnapshot } from './state.js';
 import { measurePerformancePhase } from '../../performanceObservability.js';
-import { acquireHostResource, hostResourceStats } from '../../hostResourceScheduler.js';
+import { acquireHostResources, hostResourceStats } from '../../hostResourceScheduler.js';
 
 const QUERY_WORKER_IDLE_EVICT_MS = 60_000;
 const QUERY_WORKER_COUNT = 4;
@@ -63,21 +63,14 @@ async function runPiscinaQuery(key, job, signal, timeoutMs = QUERY_WORKER_TIMEOU
   if (!activeControllersByRepository.has(key)) activeControllersByRepository.set(key, new Set());
   activeControllersByRepository.get(key).add(detachController);
 
-  let heavyLease = null;
-  let queryLease = null;
+  let resourceLease = null;
   let timer = null;
-  const queueStartedAt = Date.now();
   try {
     try {
-      queryLease = await acquireHostResource('repositoryQuery', key, {
+      resourceLease = await acquireHostResources(['repositoryQuery', 'heavy'], key, {
         signal: queueSignal,
-        timeoutMs: effectiveQueueTimeoutMs
-      });
-      const remainingQueueMs = effectiveQueueTimeoutMs - (Date.now() - queueStartedAt);
-      if (remainingQueueMs <= 0) throw Object.assign(new Error('Repository Intelligence query queue budget was exhausted before host admission.'), { code: 'HOST_RESOURCE_QUEUE_TIMEOUT' });
-      heavyLease = await acquireHostResource('heavy', key, {
-        signal: queueSignal,
-        timeoutMs: remainingQueueMs
+        timeoutMs: effectiveQueueTimeoutMs,
+        reservationBytes: 256 * 1024 ** 2
       });
     } catch (error) {
       if (queueSignal.aborted) throw queryAbortError(queueSignal.reason);
@@ -110,8 +103,7 @@ async function runPiscinaQuery(key, job, signal, timeoutMs = QUERY_WORKER_TIMEOU
     }
   } finally {
     if (timer) clearTimeout(timer);
-    heavyLease?.release();
-    queryLease?.release();
+    resourceLease?.release();
     const remaining = Number(activeByRepository.get(key) || 1) - 1;
     if (remaining > 0) activeByRepository.set(key, remaining);
     else activeByRepository.delete(key);

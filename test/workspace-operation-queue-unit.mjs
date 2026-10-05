@@ -129,6 +129,42 @@ await Promise.all([mutationA, mutationB]);
 assert.ok(mutationOrder.indexOf('mutation-b:start') > mutationOrder.indexOf('mutation-a:end'));
 assert.equal(pendingWorkspaceOperations(), 0);
 
+// A long mutation must not block safe inspection or control-plane work in the
+// same logical task. Mutation exclusivity is provided by the dedicated mutation
+// lane, not by holding the task-local writer lane for the command lifetime.
+const sameTaskMutationOrder = [];
+const sameTaskMutationStarted = deferred();
+const releaseSameTaskMutation = deferred();
+const sameTaskMutation = runWorkspaceOperation('same-task-mutation', async () => {
+  sameTaskMutationOrder.push('mutation:start');
+  sameTaskMutationStarted.resolve();
+  await releaseSameTaskMutation.promise;
+  sameTaskMutationOrder.push('mutation:end');
+}, { mode: 'write', scope: 'mutation', taskId: 'task-one', bypassTaskLane: true });
+await sameTaskMutationStarted.promise;
+const sameTaskInspection = runWorkspaceOperation('same-task-mutation', async () => {
+  sameTaskMutationOrder.push('read:start');
+  sameTaskMutationOrder.push('read:end');
+}, { mode: 'read', scope: 'task', taskId: 'task-one' });
+await sameTaskInspection;
+const sameTaskControl = runWorkspaceOperation('same-task-mutation', async () => {
+  sameTaskMutationOrder.push('control:start');
+  sameTaskMutationOrder.push('control:end');
+}, { mode: 'write', scope: 'task', taskId: 'task-one' });
+await sameTaskControl;
+assert.deepEqual(
+  sameTaskMutationOrder,
+  ['mutation:start', 'read:start', 'read:end', 'control:start', 'control:end'],
+  'same-task reads and control-plane writes must stay available while a mutation is running'
+);
+releaseSameTaskMutation.resolve();
+await sameTaskMutation;
+assert.deepEqual(
+  sameTaskMutationOrder,
+  ['mutation:start', 'read:start', 'read:end', 'control:start', 'control:end', 'mutation:end']
+);
+assert.equal(pendingWorkspaceOperations(), 0);
+
 // Calls inside one logical task retain deterministic reader/writer ordering.
 const sameTask = [];
 const sameTaskWrite = runWorkspaceOperation('shared', async () => {

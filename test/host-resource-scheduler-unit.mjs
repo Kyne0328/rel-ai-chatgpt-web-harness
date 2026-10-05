@@ -4,9 +4,14 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { installDeterministicHostMemory } from './helpers/deterministic-host-memory.mjs';
 
 process.env.REL_AI_MCP_PERSISTENT_PROCESS_LIMIT = '2';
+process.env.REL_AI_MCP_HEAVY_PROCESS_LIMIT = '1';
+
 process.env.REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS = '1000';
+await import('./host-memory-pressure-unit.js');
+const restoreHostMemory = installDeterministicHostMemory();
 
 const {
   acquireHostResource,
@@ -21,15 +26,20 @@ const {
   stopManagedProcess
 } = await import('../src/processManager.js');
 
-await verifyRoundRobinFairness();
-await verifyQueueCancellation();
-await verifyProcessDeadlineQueue();
-await verifyUnboundedHeavyAdmission();
-await verifyDefaultPersistentQueueTimeout();
-await verifyRepositoryQueryTimeoutExcludesQueueWait();
-await verifyPersistentCapacityIncludesRestartOrphans();
+try {
+  await verifyRoundRobinFairness();
+  await verifyQueueCancellation();
+  await verifyProcessDeadlineQueue();
+  await verifyBoundedHeavyAdmission();
+  await verifyQueuedIndexDetach();
+  await verifyDefaultPersistentQueueTimeout();
+  await verifyRepositoryQueryTimeoutExcludesQueueWait();
+  await verifyPersistentCapacityIncludesRestartOrphans();
+} finally {
+  restoreHostMemory();
+}
 
-console.log('Host resource scheduling, unbounded heavy execution, fairness, timeout, and restart-capacity tests passed.');
+console.log('Host resource scheduling, pressure-aware heavy execution, fairness, timeout, and restart-capacity tests passed.');
 
 async function verifyRoundRobinFairness() {
   const scheduler = createFairResourceScheduler({ heavy: 1 });
@@ -89,26 +99,45 @@ async function verifyProcessDeadlineQueue() {
   }
 }
 
-async function verifyUnboundedHeavyAdmission() {
-  const blockerA = await acquireHostResource('heavy', 'unbounded-a');
-  const blockerB = await acquireHostResource('heavy', 'unbounded-b');
+async function verifyBoundedHeavyAdmission() {
+  const blocker = await acquireHostResource('heavy', 'bounded-a');
   try {
-    assert.deepEqual(hostResourceStats().heavy, { limit: null, active: 2, queued: 0, queuedOwners: 0 });
+    assert.deepEqual(hostResourceStats().heavy, { limit: 1, active: 1, queued: 0, queuedOwners: 0 });
     const result = await runProcess(process.execPath, ['-e', 'process.exit(0)'], {
-      resourceClass: 'heavy',
-      resourceOwner: 'unbounded-c',
-      queueTimeoutMs: 1,
-      timeout: 3000
+      resourceClass: 'heavy', resourceOwner: 'bounded-b', queueTimeoutMs: 20, timeout: 3000
     });
-    assert.equal(result.exitCode, 0, 'heavy work should start immediately without an application-level admission cap');
-    assert.equal(result.queueTimedOut, undefined);
-    assert.equal(result.queueWaitMs, 0);
-    assert.deepEqual(hostResourceStats().heavy, { limit: null, active: 2, queued: 0, queuedOwners: 0 });
+    assert.equal(result.executed, false, 'heavy admission waits before spawning a child');
+    assert.equal(result.queueTimedOut, true);
+    assert.deepEqual(hostResourceStats().heavy, { limit: 1, active: 1, queued: 0, queuedOwners: 0 });
   } finally {
-    blockerA.release();
-    blockerB.release();
+    blocker.release();
   }
-  assert.deepEqual(hostResourceStats().heavy, { limit: null, active: 0, queued: 0, queuedOwners: 0 });
+  assert.deepEqual(hostResourceStats().heavy, { limit: 1, active: 0, queued: 0, queuedOwners: 0 });
+}
+
+async function verifyQueuedIndexDetach() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-index-admission-cancel-'));
+  const workspace = { alias: 'queued-index', path: path.join(root, 'repo'), context: {} };
+  const config = { stateDir: path.join(root, 'state') };
+  fs.mkdirSync(workspace.path, { recursive: true });
+  fs.writeFileSync(path.join(workspace.path, 'app.js'), 'export const value = 1;\n');
+  const blocker = await acquireHostResource('heavy', 'index-blocker');
+  let pending;
+  try {
+    pending = repositoryIntelligence.ensure(workspace, config, { watch: false });
+    const rejected = assert.rejects(pending, error => error.name === 'AbortError' || error.code === 'INDEX_ABORTED');
+    await waitFor(() => hostResourceStats().heavy.queued === 1, 'index admission to queue');
+    const detached = await repositoryIntelligence.dispose(workspace, config);
+    assert.equal(detached.ok, true);
+    await rejected;
+    assert.equal(hostResourceStats().heavy.queued, 0, 'detaching a workspace removes its queued index before spawning');
+    assert.equal(hostResourceStats().heavy.active, 1, 'only the blocker retains admission');
+  } finally {
+    blocker.release();
+    await pending?.catch(() => {});
+    await repositoryIntelligence.shutdown().catch(() => {});
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 }
 
 async function verifyDefaultPersistentQueueTimeout() {

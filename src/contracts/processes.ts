@@ -31,7 +31,10 @@ export interface ManagedProcessDto {
   cwd: string;
   status: ManagedProcessStatus;
   metadataRevision: string;
-  lifecycle: string;
+  lifecycle: 'persistent' | 'task';
+  terminationConfirmed?: boolean | null;
+  rootExitConfirmed?: boolean;
+  terminationError?: string;
 
   workSessionId: string | null;
   startedAt: string;

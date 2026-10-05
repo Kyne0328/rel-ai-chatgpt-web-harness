@@ -52,5 +52,6 @@ export interface ExecutionResult extends ProcessExit {
   readonly ephemeralChangedFiles?: readonly string[];
   readonly changedFilesTruncated: boolean;
   readonly mutationTracking: MutationTrackingMode;
+  readonly mutationTrackingDetails?: Readonly<Record<string, unknown>>;
   readonly mutationUnknown?: true;
 }

@@ -5,6 +5,10 @@ import { deriveConnectionState } from '../contracts/connection.ts';
 import type { DiagnosticResetTarget } from '../contracts/diagnostics.ts';
 import { ERROR_CODES } from '../contracts/errors.ts';
 import { buildDiagnosticReport } from '../diagnostics.js';
+import { hostResourceDiagnosticSnapshot } from '../hostResourceScheduler.js';
+import { resourceDiagnosticsSnapshot } from '../resourceDiagnostics.js';
+import { cacheStats } from '../sessionCache.js';
+import { sampleManagedProcessMemory } from '../processManager.js';
 import { clearLocalAnalytics } from '../localAnalytics.js';
 import * as productUx from '../productUx.js';
 import { taskHistoryPersistenceSnapshot } from '../taskHistoryStore.ts';
@@ -39,8 +43,26 @@ interface DiagnosticResetSuccess {
 
 export type DiagnosticResetOutcome = DiagnosticResetFailure | DiagnosticResetSuccess;
 
-export function getDiagnosticsReport(options: DiagnosticsRuntimeOptions, workspace = ''): Record<string, unknown> {
+export async function getDiagnosticsReport(
+  options: DiagnosticsRuntimeOptions,
+  workspace = '',
+  { includeManagedProcessMemory = false }: { includeManagedProcessMemory?: boolean } = {}
+): Promise<Record<string, unknown>> {
   const config = readConfig();
+  // Only the authenticated local dashboard route opts into owned-root details.
+  // This report is not an automatic telemetry or public MCP response.
+  let managedRoots = null;
+  if (includeManagedProcessMemory) {
+    try {
+      managedRoots = await sampleManagedProcessMemory(config, { workspace, limit: 20 }, { internal: true });
+    } catch {
+      managedRoots = {
+        scope: 'managed_roots_only', roots: [], sampledAt: null, cacheAgeMs: null,
+        totalRootCount: null, omittedRootCount: null, stale: true,
+        descendantAttribution: 'unknown', reason: 'Managed-root memory is unavailable for this authorized scope.'
+      };
+    }
+  }
   const profile = connection.readConnectionProfile();
   const connectionSummary = connection.buildConnectionSummary({
     host: profile.host || options.host || '127.0.0.1',
@@ -73,6 +95,7 @@ export function getDiagnosticsReport(options: DiagnosticsRuntimeOptions, workspa
     connection: connectionSummary,
     connectionState,
     tunnelHealth: desktopStatus?.tunnelHealth || null,
+    resourceDiagnostics: resourceDiagnosticsSnapshot(hostResourceDiagnosticSnapshot(), cacheStats(), managedRoots),
     runtimeLogs,
     auditLogs,
     taskHistoryPersistence: taskHistoryPersistenceSnapshot(),

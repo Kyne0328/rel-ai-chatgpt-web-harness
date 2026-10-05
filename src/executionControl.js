@@ -61,6 +61,30 @@ function isPersistentAdbInvocation(executable, argv = []) {
   return parsed.command === 'server' && String(parsed.args[0] || '').toLowerCase() === 'nodaemon';
 }
 
+function isPersistentProcessInvocation(executable, argv = []) {
+  if (isPersistentAdbInvocation(executable, argv)) return true;
+  const name = String(executable || '').replaceAll('\\', '/').split('/').pop().toLowerCase().replace(/\.exe$/, '');
+  const tokens = Array.isArray(argv) ? argv.map(value => String(value)) : [];
+  const lower = tokens.map(value => value.toLowerCase());
+  if (lower.some(value => ['-h', '--help', '-help', '-version', '--version'].includes(value))) return false;
+  if (name === 'emulator') {
+    if (lower.some(value => value === '-list-avds' || value.startsWith('-help-'))) return false;
+    // Only an explicit AVD launch is classified. Probe and unusual emulator
+    // subcommands retain ordinary finite-execution semantics.
+    return tokens.some(value => /^@[^\s]+$/.test(value))
+      || lower.some((value, index) => value === '-avd'
+        && Boolean(tokens[index + 1]) && !tokens[index + 1].startsWith('-'));
+  }
+  if (/^qemu-system-[a-z0-9_-]+$/.test(name)) {
+    const helpSelectors = new Set(['-machine', '-m', '-cpu', '-device', '-accel', '-chardev', '-netdev', '-display', '-audio']);
+    if (lower.some((value, index) => helpSelectors.has(value) && lower[index + 1] === 'help')) return false;
+    return true;
+  }
+  if (name === 'tail') return lower.some(value => value === '-f' || value === '--follow' || value.startsWith('--follow=') || /^-[a-z]*f[a-z]*$/.test(value));
+  if (name === 'journalctl') return lower.some(value => value === '-f' || value === '--follow');
+  return false;
+}
+
 function positiveNumber(value, fallback) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
@@ -70,5 +94,6 @@ export {
   hasAgentCancellationHandle,
   isClearlyWorkspaceReadOnlyAdb,
   isPersistentAdbInvocation,
+  isPersistentProcessInvocation,
   resolveOneShotTimeoutMs
 };

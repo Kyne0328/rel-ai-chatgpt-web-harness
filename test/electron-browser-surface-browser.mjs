@@ -53,6 +53,7 @@ try {
   assert.equal(probe.navigated.title, 'Embedded fixture');
   assert.match(probe.snapshot, /Embedded browser fixture/);
   assert.match(probe.afterFill, /Rel\.AI embedded/);
+  assert.equal(probe.requiredFieldValue, 'v1.2.3', 'exact semantic targets must ignore aria-hidden required markers just like the accessibility snapshot');
   assert.deepEqual(probe.initialViewport, { width: 1200, height: 750, breakpoint: '"wide"' });
   assert.deepEqual(probe.resizedViewport, probe.initialViewport, 'responsive layout must remain stable after the Rel.AI browser panel is resized');
   assert.deepEqual(probe.aiViewport, probe.initialViewport, 'returning control to AI must preserve the canonical viewport');

@@ -54,15 +54,15 @@ try {
     const controller = new AbortController();
     const scanStarted = deferred();
     const releaseScan = deferred();
-    const originalReaddir = fs.promises.readdir;
+    const originalOpendir = fs.promises.opendir;
     let intercepted = false;
-    fs.promises.readdir = async function (target, options) {
+    fs.promises.opendir = async function (target, options) {
       if (!intercepted && path.resolve(String(target)) === path.resolve(plainWorkspace)) {
         intercepted = true;
         scanStarted.resolve();
         await releaseScan.promise;
       }
-      return originalReaddir.call(this, target, options);
+      return originalOpendir.call(this, target, options);
     };
     try {
       const operation = runWorkspaceOperation('plain', () => relaiExec(plain, config, {
@@ -85,7 +85,7 @@ try {
       assert.match(cancelled.error || '', /cancel mutation accounting/);
       assert.equal(fs.existsSync(path.join(plainWorkspace, 'should-not-run.txt')), false);
     } finally {
-      fs.promises.readdir = originalReaddir;
+      fs.promises.opendir = originalOpendir;
     }
 
     const released = await runWorkspaceOperation('plain', async () => 'released', {
@@ -101,10 +101,10 @@ try {
   // mutation attribution as unknown rather than holding the lane.
   {
     const controller = new AbortController();
-    const originalReaddir = fs.promises.readdir;
+    const originalOpendir = fs.promises.opendir;
     let rootReads = 0;
-    fs.promises.readdir = async function (target, options) {
-      const entries = await originalReaddir.call(this, target, options);
+    fs.promises.opendir = async function (target, options) {
+      const entries = await originalOpendir.call(this, target, options);
       if (path.resolve(String(target)) === path.resolve(plainWorkspace)) {
         rootReads += 1;
         if (rootReads === 2) controller.abort(new Error('cancel post mutation accounting'));
@@ -122,7 +122,7 @@ try {
         taskId: 'post-scan-cancel'
       });
     } finally {
-      fs.promises.readdir = originalReaddir;
+      fs.promises.opendir = originalOpendir;
     }
     assert.equal(result.commandSucceeded, true);
     assert.equal(result.mutationUnknown, true, 'cancelled post-command accounting must report conservative unknown mutation attribution');

@@ -9,6 +9,7 @@ import { getWorkspaceFilter } from '../../router.js';
 
 import { timeAgo } from '../../utils.js';
 import { restartConnection } from './connection-recovery.js';
+import { ResourceDiagnostics } from './resource-diagnostics.js';
 
 const h = React.createElement;
 const LIVE_TAIL_REFRESH_DELAY_MS = 160;
@@ -217,6 +218,7 @@ function DiagnosticsView() {
       loadError ? h(DiagnosticUnavailable, { error: loadError, onRetry: () => void load() }) : null,
       report ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' },
         h(DiagnosticMetrics, { findings: view.findings }),
+        h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
         report.tunnelHealth ? h(TunnelHealthSummary, { health: report.tunnelHealth }) : null,
         tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null,
         h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),

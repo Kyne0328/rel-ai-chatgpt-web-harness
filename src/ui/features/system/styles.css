@@ -118,6 +118,25 @@
 .diagnostic-more-actions-menu button { @apply w-full justify-start; }
 .diagnostic-live-tail { @apply min-w-0; }
 .diagnostic-summary, .diagnostic-list { @apply flex min-w-0 flex-col gap-3; }
+.resource-diagnostics, .resource-diagnostics-body, .resource-diagnostics-lane { min-width: 0; }
+.resource-diagnostics .card-head { flex-wrap: wrap; }
+.resource-diagnostics .card-head p, .resource-diagnostics-note { @apply text-[12px] leading-5; color: var(--ui-text-secondary); overflow-wrap: anywhere; }
+.resource-diagnostics-actions { @apply flex flex-wrap items-center gap-2; }
+.resource-diagnostics-body { @apply flex flex-col gap-3; }
+.resource-diagnostics-reason { @apply text-[13px] font-medium; overflow-wrap: anywhere; }
+.resource-diagnostics-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 12px 20px; }
+.resource-diagnostics-metrics > div { min-width: 0; }
+.resource-diagnostics-metrics dt { @apply text-[11px]; color: var(--ui-text-secondary); }
+.resource-diagnostics-metrics dd { @apply text-[13px] font-semibold; margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.resource-diagnostics-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; }
+.resource-diagnostics-lane { @apply flex flex-col gap-3 rounded-lg border p-3; border-color: var(--ui-border-subtle); }
+.resource-diagnostics-lane h4, .resource-diagnostics-details h4 { @apply text-[13px] font-semibold; overflow-wrap: anywhere; }
+.resource-diagnostics-details { @apply border-t; border-color: var(--ui-border-subtle); min-width: 0; }
+.resource-diagnostics-details > summary { @apply min-h-11 cursor-pointer py-3 text-[12px] font-semibold; }
+.resource-diagnostics-details > p, .resource-diagnostics-details > dl, .resource-diagnostics-details > h4 { @apply mb-3; }
+.resource-diagnostics-decisions { @apply flex flex-col gap-2; }
+.resource-diagnostics-decisions li { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; overflow-wrap: anywhere; }
+.resource-diagnostics-decisions time { color: var(--ui-text-secondary); font-variant-numeric: tabular-nums; }
 .diagnostic-metric { @apply flex items-end justify-between gap-3; }
 .diagnostic-metric span { @apply text-[11px] font-semibold; color: var(--ui-text-secondary); }
 .diagnostic-metric strong { @apply text-2xl; }

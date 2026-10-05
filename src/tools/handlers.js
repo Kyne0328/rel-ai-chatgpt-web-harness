@@ -31,7 +31,8 @@ import { discoverRepositoryTopology, packageForPath } from '../workflow/topology
 import { createReviewCheckpoint, replayReviewCheckpoint } from '../reviewCheckpoints.js';
 import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
-import { getToolActivity } from '../toolActivity.js';
+import { getToolActivity, getCurrentTaskAbortSignal } from '../toolActivity.js';
+import { combineAbortSignals } from '../abortSignals.js';
 import { applyTaskProgressPatch } from './taskProgress.js';
 function resolveOptionalWorkspace(config, args = {}) {
   const reference = String(args.workspace || '').trim();
@@ -106,11 +107,14 @@ const taskContextHandler = async (config, inputArgs = {}, context = {}) => {
   }, knowledgeSettings(config).maxBootstrapBytes);
   const baseBootstrap = taskBootstrapFromSnapshot(snapshot, bootstrapMode);
   let cachedIntelligence = null;
+  const callerSignal = combineAbortSignals(context.signal, getCurrentTaskAbortSignal());
+  const cachedOptions = { signal: callerSignal, optional: true, cachedLookupBudgetMs: 250 };
   try {
     cachedIntelligence = bootstrapMode === 'full'
-      ? await repositoryIntelligence.cachedContext(workspace, config, { maxResults: 10 })
-      : await repositoryIntelligence.cachedSummary(workspace, config);
+      ? await repositoryIntelligence.cachedContext(workspace, config, { ...cachedOptions, maxResults: 10 })
+      : await repositoryIntelligence.cachedSummary(workspace, config, cachedOptions);
   } catch (error) {
+    if (callerSignal?.aborted) throw callerSignal.reason || error;
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] cached intelligence fallback:', error);
   }
   const bootstrap = {

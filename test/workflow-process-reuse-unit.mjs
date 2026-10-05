@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { installDeterministicHostMemory } from './helpers/deterministic-host-memory.mjs';
 import childProcess, { spawn } from 'node:child_process';
 import { once, EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
@@ -26,6 +27,9 @@ let testFailure;
 let cleanupFailure;
 const reservationCase = process.argv.find(value => value.startsWith('--reservation-case='))?.split('=')[1];
 if (reservationCase) assert.ok(['preaborted', 'timeout', 'restoration'].includes(reservationCase));
+// Assume 16 GiB total / 12 GiB available for real process/queue fixtures.
+// Keep real deadlines and capacity leases; pressure has dedicated tests.
+const restoreMemory = installDeterministicHostMemory();
 try {
   if (!reservationCase) {
   const first = await startManagedProcess(workspace, config, { command, kind: 'service', purpose: 'reuse fixture', startupWaitMs: 25 }, { taskId: 'task-a', principal: 'principal-a' });
@@ -84,29 +88,33 @@ try {
   testFailure = error;
   throw error;
 } finally {
-  const cleanupFailures = [];
-  for (const processId of [...new Set(started)]) {
-    try { await stopManagedProcess(config, { processId, graceMs: 50 }, { internal: true }); }
-    catch (error) { cleanupFailures.push(error); }
-  }
-  // Drain writes and close cached database handles for this isolated fixture.
-  for (const drain of [
-    () => flushAuditWrites(),
-    () => flushTaskHistoryPersistence(),
-    () => flushLocalAnalytics(config),
-    () => flushLocalAnalytics({ ...config, stateDir: path.join(stateRoot, 'restore-ordering') })
-  ]) {
-    try { await drain(); } catch (error) { cleanupFailures.push(error); }
-  }
-  if (previousConfig === undefined) delete process.env.REL_AI_MCP_CONFIG;
-  else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  for (const directory of [root, stateRoot]) {
-    try { await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
-    catch (error) { cleanupFailures.push(error); }
-  }
-  if (cleanupFailures.length) {
-    if (testFailure) console.error('Secondary fixture cleanup failure:', cleanupFailures);
-    else cleanupFailure = new AggregateError(cleanupFailures, 'Managed process fixture cleanup failed.');
+  try {
+    const cleanupFailures = [];
+    for (const processId of [...new Set(started)]) {
+      try { await stopManagedProcess(config, { processId, graceMs: 50 }, { internal: true }); }
+      catch (error) { cleanupFailures.push(error); }
+    }
+    // Drain writes and close cached database handles for this isolated fixture.
+    for (const drain of [
+      () => flushAuditWrites(),
+      () => flushTaskHistoryPersistence(),
+      () => flushLocalAnalytics(config),
+      () => flushLocalAnalytics({ ...config, stateDir: path.join(stateRoot, 'restore-ordering') })
+    ]) {
+      try { await drain(); } catch (error) { cleanupFailures.push(error); }
+    }
+    if (previousConfig === undefined) delete process.env.REL_AI_MCP_CONFIG;
+    else process.env.REL_AI_MCP_CONFIG = previousConfig;
+    for (const directory of [root, stateRoot]) {
+      try { await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }
+      catch (error) { cleanupFailures.push(error); }
+    }
+    if (cleanupFailures.length) {
+      if (testFailure) console.error('Secondary fixture cleanup failure:', cleanupFailures);
+      else cleanupFailure = new AggregateError(cleanupFailures, 'Managed process fixture cleanup failed.');
+    }
+  } finally {
+    restoreMemory();
   }
 }
 if (cleanupFailure) throw cleanupFailure;

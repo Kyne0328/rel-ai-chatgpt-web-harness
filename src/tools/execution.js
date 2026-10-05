@@ -4,7 +4,8 @@ import { principalFingerprint, principalForContext, principalKind } from '../mcp
 import { PRINCIPAL_KIND } from '../mcp/contracts.ts';
 
 import { combineAbortSignals } from '../abortSignals.ts';
-import { hasAgentCancellationHandle, isClearlyWorkspaceReadOnlyAdb } from '../executionControl.js';
+import { hasAgentCancellationHandle } from '../executionControl.js';
+import { isClearlyReadOnlyExec } from '../executionClassification.js';
 import { resolveWorkspace } from '../config.js';
 import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
@@ -22,15 +23,6 @@ import {
 import { maybeStartSession } from './session.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 
-const UNSAFE_READ_ONLY_GIT_OPTIONS = new Set([
-  '--ext-diff', '--textconv', '--filters', '--open-files-in-pager'
-]);
-const READ_ONLY_INSPECTION_EXECUTABLES = new Set([
-  'cat', 'dir', 'grep', 'head', 'ls', 'pwd', 'tail', 'wc', 'where', 'which'
-]);
-const READ_ONLY_FIND_UNSAFE_OPTIONS = new Set([
-  '-delete', '-exec', '-execdir', '-ok', '-okdir', '-fls', '-fprint', '-fprint0', '-fprintf'
-]);
 const DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 30_000;
 const WORK_FINISH_QUEUE_TIMEOUT_MS = 2_000;
 const DEFAULT_MUTATION_WATCHDOG_MS = 5 * 60_000;
@@ -112,6 +104,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           backgroundStatusMode,
           fallbackOperationId: context?.fallbackOperationId || '',
           mutationTrackingRequired: executionName !== OP.EXEC || !readOnlyExec,
+          resourceClass: readOnlyExec ? 'light' : 'heavy',
           ...(taskBaselineStatusOutput !== undefined ? { preExecutionGitStatus: taskBaselineStatusOutput } : {}),
           workspaceOverride: workspaceOverride || undefined
         }));
@@ -147,7 +140,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       const operationSignal = combineAbortSignals(requestSignal, finishActivity?.signal);
       timeline.transition('queued');
       const result = await runWorkspaceOperation(
-        executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || backgroundStatusMode
+        executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || executionName === OP.PROCESS_STOP || executionName === OP.PROCESS_READ || executionName === OP.PROCESS_LIST || backgroundStatusMode
           ? ''
           : workspaceOverride?.alias || effectiveArgs?.workspace,
         async () => {
@@ -223,7 +216,8 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             operation: String(finishActivity?.operation || executionName),
             startedAt: new Date().toISOString()
           },
-          timeline
+          timeline,
+          executionName === OP.EXEC || executionName === OP.EDIT
         )
       );
 
@@ -361,75 +355,6 @@ function queueScopeFor(executionName, definition, branchChange, readOnlyExec) {
   return scope === 'workspace' || scope === 'mutation' ? scope : 'task';
 }
 
-function isClearlyReadOnlyExec(args = {}) {
-  if (String(args.input || '').length > 0) return false;
-  if (args.env && typeof args.env === 'object' && Object.keys(args.env).length > 0) return false;
-  const command = String(args.command || '').trim();
-  if (command) {
-    const tokens = simpleShellCommandTokens(command);
-    if (!tokens) return false;
-    return isClearlyReadOnlyDirectExec(tokens[0], tokens.slice(1));
-  }
-  return isClearlyReadOnlyDirectExec(args.executable, args.argv);
-}
-
-function isClearlyReadOnlyDirectExec(executableValue, argvValue) {
-  const executable = path.basename(String(executableValue || '')).toLowerCase();
-  const argv = Array.isArray(argvValue) ? argvValue.map(value => String(value || '')) : [];
-  if (!argv.length) return false;
-  if (isClearlyWorkspaceReadOnlyAdb(executableValue, argv)) return true;
-  if (executable === 'node' || executable === 'node.exe') {
-    const first = argv[0].toLowerCase();
-    if (['--version', '-v', '--help', '-h'].includes(first)) return argv.length === 1;
-    return ['--check', '-c'].includes(first) && argv.length === 2 && !argv[1].startsWith('-');
-  }
-  const inspectionExecutable = executable.replace(/\.exe$/i, '');
-  if (READ_ONLY_INSPECTION_EXECUTABLES.has(inspectionExecutable)) return true;
-  if (inspectionExecutable === 'find' || inspectionExecutable === 'findstr') {
-    return !argv.some(value => READ_ONLY_FIND_UNSAFE_OPTIONS.has(value.toLowerCase()));
-  }
-  if (inspectionExecutable === 'diff') {
-    const options = argv.map(value => value.toLowerCase());
-    return !options.some((value, index) => value === '--output'
-      || value.startsWith('--output=')
-      || (index > 0 && options[index - 1] === '--output'));
-  }
-  if (inspectionExecutable === 'rg') {
-    const options = argv.map(value => value.toLowerCase());
-    return !options.some(value => value === '--pre' || value.startsWith('--pre='));
-  }
-  if (executable !== 'git' && executable !== 'git.exe') return false;
-  if (argv[0].startsWith('-')) return false;
-  const optionTokens = argv.slice(1).map(value => value.toLowerCase());
-  if (optionTokens.some(value => UNSAFE_READ_ONLY_GIT_OPTIONS.has(value)
-    || value === '--output'
-    || value.startsWith('--output='))) return false;
-  const command = argv[0].toLowerCase();
-  if (new Set([
-    'status', 'diff', 'log', 'show', 'rev-parse', 'ls-files', 'ls-tree',
-    'cat-file', 'grep', 'blame', 'shortlog', 'describe', 'merge-base', 'name-rev'
-  ]).has(command)) return true;
-  if (command === 'branch') {
-    return optionTokens.length === 0 || optionTokens.every(value => ['--show-current', '--list', '-a', '-r'].includes(value));
-  }
-  if (command === 'worktree') return argv.length === 2 && argv[1]?.toLowerCase() === 'list';
-  if (command === 'remote') return argv.length === 1 || optionTokens.every(value => value === '-v' || value === '--verbose');
-  if (command === 'config') {
-    const mode = String(argv[1] || '').toLowerCase();
-    if (!['--get', '--get-all', '--get-regexp', '--list', '-l'].includes(mode)) return false;
-    return argv.slice(2).every(value => !String(value).startsWith('-'));
-  }
-  return false;
-}
-
-function simpleShellCommandTokens(command) {
-  const text = String(command || '').trim();
-  if (!text || /[\r\n;&|<>`"'$()^]/.test(text)) return null;
-  const tokens = text.split(/\s+/).filter(Boolean);
-  if (tokens.length < 2) return null;
-  return tokens;
-}
-
 function gitSubcommandIndex(argv = []) {
   const tokens = argv.map(value => String(value || ''));
   for (let index = 0; index < tokens.length; index += 1) {
@@ -472,11 +397,12 @@ function detachedQueueTaskId(context = {}, queueScope = '') {
   return String(context?.requestId || '').trim();
 }
 
-function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = null, timeline = null) {
+function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = null, timeline = null, bypassTaskLane = false) {
   return {
     mode,
     scope,
     taskId,
+    ...(bypassTaskLane ? { bypassTaskLane: true } : {}),
     ...(owner ? { owner } : {}),
     ...(signal ? { signal } : {}),
     ...(queueTimeoutMs > 0 ? { queueTimeoutMs } : {}),

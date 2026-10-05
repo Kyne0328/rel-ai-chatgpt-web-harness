@@ -55,10 +55,60 @@ function buildDiagnosticReport(input = {}) {
     summary: countFindings(ordered),
     findings: ordered,
     tunnelHealth: normalizeTunnelHealth(input.tunnelHealth),
+    resourceDiagnostics: normalizeResourceDiagnostics(input.resourceDiagnostics),
     logs: { runtime, failedActivity }
   };
   report.reportText = formatDiagnosticReport(report);
   return report;
+}
+
+function normalizeResourceDiagnostics(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const select = (item, keys) => Object.fromEntries(keys.filter(key => item != null && Object.hasOwn(item, key)).map(key => [key, item[key]]));
+  const memoryKeys = ['sampledAtMs', 'rssBytes', 'heapUsedBytes', 'heapTotalBytes', 'externalBytes', 'arrayBuffersBytes', 'heapLimitBytes'];
+  const host = value.host || {};
+  const pressure = select(host.pressure, [
+    'state', 'reason', 'physicalTotalBytes', 'physicalAvailableBytes', 'physicalAvailableKind',
+    'commitUsedBytes', 'commitLimitBytes', 'commitAvailableBytes', 'commitEnforced',
+    'source', 'error', 'sampledAtMs', 'ageMs', 'stale', 'sampling', 'reservedBytes',
+    'activeReservations', 'reservationBytes', 'physicalFloorBytes', 'physicalRecoveryBytes',
+    'commitFloorBytes', 'commitRecoveryBytes', 'recoveryCount',
+    'pagesInputPerSecond', 'pageReadsPerSecond', 'pagingMeaning',
+    'settlingReservedBytes', 'settlingReservationCount', 'startupSettlingMs', 'oldestSettlingMs', 'settlingReason'
+  ]);
+  pressure.recentDecisions = (Array.isArray(host.pressure?.recentDecisions) ? host.pressure.recentDecisions : [])
+    .slice(-20).map(item => select(item, ['atMs', 'state', 'reason']));
+  const lanes = Object.fromEntries(Object.entries(host.lanes || {}).slice(0, 10)
+    .map(([name, lane]) => [name, select(lane, ['limit', 'active', 'queued', 'queuedOwners'])]));
+  const queues = Object.fromEntries(Object.entries(host.queues || {}).slice(0, 10)
+    .map(([name, queue]) => [name, select(queue, ['oldestWaitMs', 'blockedReason', 'maxQueued', 'maxQueuedPerOwner'])]));
+  const node = select(value.node, ['available', 'scope', 'pid', 'source', 'sampledAtMs', 'ageMs', 'stale', 'error', 'interpretation']);
+  node.current = value.node?.current ? select(value.node.current, memoryKeys) : null;
+  node.sampling = select(value.node?.sampling, ['intervalMs', 'maxSamples', 'mode', 'retainedSamples']);
+  node.samples = (Array.isArray(value.node?.samples) ? value.node.samples : []).slice(-60).map(item => select(item, memoryKeys));
+  node.trend = select(value.node?.trend, ['status', 'sampleCount', 'baselineAtMs', 'latestAtMs', 'durationMs', 'method']);
+  node.trend.baseline = select(value.node?.trend?.baseline, memoryKeys);
+  node.trend.deltaBytes = select(value.node?.trend?.deltaBytes, memoryKeys);
+  node.trend.slopeBytesPerMinute = select(value.node?.trend?.slopeBytesPerMinute, memoryKeys);
+  const managedRoots = select(value.managedRoots, ['scope', 'platform', 'sampledAt', 'cacheAgeMs', 'totalRootCount', 'omittedRootCount', 'descendantAttribution', 'stale', 'cached', 'sampledRootCount', 'error', 'reason']);
+  managedRoots.roots = (Array.isArray(value.managedRoots?.roots) ? value.managedRoots.roots : []).slice(0, 20).map(item => {
+    const root = select(item, ['processId', 'pid', 'label', 'kind', 'workspace', 'workSessionId', 'lifecycle', 'status', 'privateBytes', 'workingSetBytes', 'sampledAt', 'identityVerified', 'measurementStatus', 'reason']);
+    root.label = sanitizeText(root.label || '', 120);
+    const stale = managedRoots.stale === true || (typeof managedRoots.cacheAgeMs === 'number' && managedRoots.cacheAgeMs >= 5_000);
+    if (root.identityVerified !== true || root.measurementStatus !== 'measured' || stale) {
+      if (stale) { root.measurementStatus = 'unknown'; root.reason = 'Cached root sample is stale; refresh for current identity verification.'; }
+      root.privateBytes = null;
+      root.workingSetBytes = null;
+    }
+    return root;
+  });
+  return sanitizeDiagnosticValue({
+    host: { lanes, pressure, queues },
+    node,
+    children: select(value.children, ['measured', 'source', 'reason']),
+    caches: { fileReads: select(value.caches?.fileReads, ['entries', 'metadataEntries', 'retainedBytes', 'maxRetainedBytes', 'evictions']) },
+    managedRoots
+  });
 }
 
 function normalizeTunnelHealth(value) {
@@ -284,6 +334,38 @@ function formatDiagnosticReport(report) {
       lines.push(`  ${name}: ${component.status || 'unknown'} / ${component.state || 'unknown'}${component.reasonCode ? ` (${component.reasonCode})` : ''}`);
     }
   }
+  if (report.resourceDiagnostics) {
+    const { host = {}, node = {}, children = {} } = report.resourceDiagnostics;
+    const pressure = host?.pressure || {};
+    lines.push('', 'Host resources (cached admission snapshot):',
+      `  Pressure: ${pressure.state || 'unknown'}; reason: ${pressure.reason || 'unavailable'}; stale: ${pressure.stale !== false}`,
+      `  Physical available bytes: ${diagnosticNumber(pressure.physicalAvailableBytes)}; total bytes: ${diagnosticNumber(pressure.physicalTotalBytes)}`,
+      `  Commit used / limit / available bytes: ${diagnosticNumber(pressure.commitUsedBytes)} / ${diagnosticNumber(pressure.commitLimitBytes)} / ${diagnosticNumber(pressure.commitAvailableBytes)}; enforced: ${pressure.commitEnforced === true}`,
+      `  Reserved bytes: ${diagnosticNumber(pressure.reservedBytes)}; source: ${pressure.source || 'unknown'}; sampled at: ${diagnosticNumber(pressure.sampledAtMs)}; age ms: ${diagnosticNumber(pressure.ageMs)}`);
+    lines.push(`  Startup settling: ${diagnosticNumber(pressure.settlingReservedBytes)} reserved bytes, ${diagnosticNumber(pressure.settlingReservationCount)} reservations; oldest / minimum window ms: ${diagnosticNumber(pressure.oldestSettlingMs)} / ${diagnosticNumber(pressure.startupSettlingMs)}; ${pressure.settlingReason || 'no settling reason reported'}`);
+    lines.push(`  Pages in / disk reads per second: ${diagnosticRate(pressure.pagesInputPerSecond)} / ${diagnosticRate(pressure.pageReadsPerSecond)}; ${pressure.pagingMeaning || 'Paging rates unavailable; a sampled rate does not establish sustained memory thrashing.'}`);
+    for (const [name, lane] of Object.entries(host?.lanes || {}).slice(0, 10)) {
+      const queue = host?.queues?.[name] || {};
+      lines.push(`  ${name}: active ${diagnosticNumber(lane.active)} / limit ${diagnosticNumber(lane.limit)}, queued ${diagnosticNumber(lane.queued)}, oldest wait ms ${diagnosticNumber(queue.oldestWaitMs)}; ${queue.blockedReason || 'no queued blocker'}`);
+    }
+    const managed = report.resourceDiagnostics.managedRoots || {};
+    lines.push(`  Managed roots: ${managed.roots?.length || 0} shown / ${diagnosticNumber(managed.totalRootCount)} in authorized scope; cache age ms: ${diagnosticNumber(managed.cacheAgeMs)}; detached descendants: ${managed.descendantAttribution || 'unknown'}`);
+    for (const root of managed.roots || []) {
+      lines.push(`    ${root.label || root.processId || 'Managed process'}: PID ${diagnosticNumber(root.pid)}, ${root.status || 'unknown'}, lifecycle ${root.lifecycle || 'unknown'}; private bytes ${diagnosticNumber(root.privateBytes)}, working set bytes ${diagnosticNumber(root.workingSetBytes)}; sampled ${root.sampledAt || 'unknown'}; ${root.measurementStatus || 'unknown'}`);
+    }
+    const cache = report.resourceDiagnostics.caches?.fileReads || {};
+    lines.push(`  File-read cache: ${diagnosticNumber(cache.retainedBytes)} / ${diagnosticNumber(cache.maxRetainedBytes)} UTF-8 content bytes; entries ${diagnosticNumber(cache.entries)}; metadata ${diagnosticNumber(cache.metadataEntries)}; evictions ${diagnosticNumber(cache.evictions)} (not JS heap overhead)`);
+    const current = node?.current || {};
+    lines.push('Current Node process memory (separate from host pressure):',
+      `  RSS / heap used / heap total / external / ArrayBuffers bytes: ${diagnosticNumber(current.rssBytes)} / ${diagnosticNumber(current.heapUsedBytes)} / ${diagnosticNumber(current.heapTotalBytes)} / ${diagnosticNumber(current.externalBytes)} / ${diagnosticNumber(current.arrayBuffersBytes)}`,
+      `  Measurement status: ${node?.available === true ? 'available' : 'unavailable'}; sampled at: ${diagnosticNumber(node?.sampledAtMs)}; age ms: ${diagnosticNumber(node?.ageMs)}`,
+      `  Retained samples: ${diagnosticNumber(node?.trend?.sampleCount)}; window ms: ${diagnosticNumber(node?.trend?.durationMs)}; trend: ${node?.trend?.status || 'unavailable'}`);
+    if (node?.trend?.status === 'observed') {
+      lines.push(`  Observed first-to-last change bytes/minute: RSS ${diagnosticNumber(node.trend.slopeBytesPerMinute?.rssBytes)}, heap ${diagnosticNumber(node.trend.slopeBytesPerMinute?.heapUsedBytes)}, external ${diagnosticNumber(node.trend.slopeBytesPerMinute?.externalBytes)}`);
+    }
+    lines.push(`  ${node?.interpretation || 'These values do not measure the full Rel.AI process family or establish a memory leak.'}`,
+      `  Children: ${children?.reason || 'Memory not measured.'}`);
+  }
   lines.push(`Findings: ${report.summary.blocking} blocking, ${report.summary.warnings} warnings, ${report.summary.recommendations} recommendations`);
   for (const finding of report.findings) {
     lines.push('', `[${finding.severity.toUpperCase()}] ${finding.code}`, finding.title, `Impact: ${finding.impact}`, `Action: ${finding.recommendation}`);
@@ -303,6 +385,14 @@ function formatDiagnosticReport(report) {
     }
   }
   return sanitizeText(lines.join('\n'), 30000);
+}
+
+function diagnosticRate(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value.toFixed(1) : 'unknown';
+}
+
+function diagnosticNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value)) : 'unknown';
 }
 
 function dedupeFindings(findings) {

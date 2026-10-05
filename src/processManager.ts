@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { combineAbortSignals } from './abortSignals.ts';
 import { createManagedProcessList, type ManagedProcessDto, type ProcessState } from './contracts/processes.ts';
@@ -19,10 +19,13 @@ import { measurePerformancePhase, measurePerformancePhaseSync } from './performa
 import type { TelemetryConfig } from './telemetry.types.ts';
 import { getCurrentTaskAbortSignal, taskError } from './toolActivity.js';
 import { isActiveProcessStatus, isTerminalProcessStatus, normalizeProcessLifecycleStatus } from './runtimeLifecycle.js';
-import { HOST_PERSISTENT_PROCESS_LIMIT, acquireHostResource, hostResourceStats } from './hostResourceScheduler.js';
+import { HOST_PERSISTENT_PROCESS_LIMIT, acquireHostResource, acquireHostResources, hostResourceStats, hostResourceDiagnosticSnapshot } from './hostResourceScheduler.js';
 import { publishProcessLifecycleEvent } from './core/lifecycleEvents.ts';
+import { estimateProcessReservationBytes } from './hostMemoryPressure.js';
+import { sanitizeDisplayText } from './taskObservability.js';
 
 type LogStream = 'stdout' | 'stderr';
+type ProcessLifetime = 'persistent' | 'task';
 type StartupWaitResult = 'ready' | 'closed' | 'aborted';
 type InitialProcessState =
   | { readonly type: 'spawned' }
@@ -44,6 +47,7 @@ interface ManagedProcessConfig extends GenericRecord, TelemetryConfig {
 interface ManagedProcessArgs extends GenericRecord {
   readonly kind?: unknown;
   readonly purpose?: unknown;
+  readonly lifecycle?: unknown;
   readonly pty?: unknown;
   readonly columns?: unknown;
   readonly rows?: unknown;
@@ -121,7 +125,8 @@ interface NodePtyApi {
 
 interface HostResourceLease {
   readonly waitMs: number;
-  release(): void;
+  release(options?: { confirmedStopped?: boolean }): void;
+  releaseResource?(resourceClass: string): void;
 }
 
 interface ManagedProcessRecord extends GenericRecord {
@@ -134,12 +139,18 @@ interface ManagedProcessRecord extends GenericRecord {
   workSessionId: string;
   principalKey: string;
   reuseFingerprint: string;
-  lifecycle: string;
+  lifecycle: ProcessLifetime;
+  terminationConfirmed: boolean | null;
+  rootExitConfirmed: boolean;
+  terminationError: string;
+  stopPromise: Promise<ManagedProcessDto & GenericRecord> | null;
+  terminationInProgress: boolean;
   kind: string;
   purpose: string;
   command?: string;
   commandSummary: string;
   label: string;
+  diagnosticLabel: string;
   cwd: string;
   status: ProcessState;
   startedAt: string;
@@ -177,7 +188,7 @@ interface ManagedProcessRecord extends GenericRecord {
   logWritePromises: Record<LogStream, Promise<void>>;
   persistenceFailureHandled: boolean;
   discarded: boolean;
-  hostResourceRelease: (() => void) | null;
+  hostResourceRelease: ((options?: { confirmedStopped?: boolean }) => void) | null;
   queueWaitMs: number;
   lastPtyInputAtMs: number;
   lastPtyOutputAtMs: number;
@@ -225,6 +236,7 @@ interface ReuseFingerprintInput {
   readonly cwd?: unknown;
   readonly kind?: unknown;
   readonly purpose?: unknown;
+  readonly lifecycle?: ProcessLifetime;
   readonly pty?: boolean;
   readonly columns?: unknown;
   readonly rows?: unknown;
@@ -253,6 +265,8 @@ const DEFAULT_STARTUP_WAIT_MS = 750;
 const DEFAULT_PROCESS_COORDINATION_TIMEOUT_MS = 30_000;
 const DEFAULT_STOP_GRACE_MS = 3000;
 const DEFAULT_FORCE_WAIT_MS = 2000;
+const TASK_CLEANUP_BUDGET_MS = 10_000;
+const TASK_CLEANUP_CONCURRENCY = 2;
 const METADATA_FLUSH_DELAY_MS = 50;
 const METADATA_RESCAN_INTERVAL_MS = 30_000;
 const METADATA_PRUNE_INTERVAL_MS = 60_000;
@@ -305,6 +319,28 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
   const cwd = resolveCommandCwd(workspace, args.cwd, 'relai_process start');
   const env = normalizeCommandEnv(args.env, 'relai_process start');
   const workSessionId = String(context.taskId || args.work_id || '').trim();
+  const lifecycle = String(args.lifecycle ?? 'persistent').trim().toLowerCase();
+  if (lifecycle !== 'persistent' && lifecycle !== 'task') {
+    throw new Error('relai_process start lifecycle must be persistent or task.');
+  }
+  if (lifecycle === 'task' && (!workSessionId
+    || (context.connector === true && String(context.taskId || '').trim() !== workSessionId))) {
+    throw taskError('PROCESS_TASK_LIFETIME_REQUIRES_WORK_ID', 'Task-lifetime processes require an active owning work_id.');
+  }
+  if (args.work_id && context.taskId && String(args.work_id).trim() !== String(context.taskId).trim()) {
+    throw taskError('PROCESS_SESSION_MISMATCH', 'The supplied work_id does not match the active process owner.');
+  }
+
+  if (lifecycle === 'task') {
+    const requestedTask = asRecord(context.requestTaskContext);
+    const requestedSession = asRecord(requestedTask.session);
+    const boundWorkspace = String(requestedTask.taskId || '') === workSessionId
+      ? String(requestedSession.workspace || '').trim()
+      : workSessionWorkspace(config, workSessionId);
+    if (!boundWorkspace || !sameWorkspaceReference(boundWorkspace, workspace.alias)) {
+      throw taskError('PROCESS_TASK_WORKSPACE_REQUIRED', 'Task-lifetime processes require a durable work_id already bound to this workspace. Begin a work session with this workspace, or use the default persistent lifecycle.');
+    }
+  }
 
   const principalKey = principalKeyForContext(context);
   const environmentKeys = Object.keys(env).sort();
@@ -318,6 +354,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     cwd: cwd.relativePath,
     kind,
     purpose,
+    lifecycle,
     pty,
     columns,
     rows,
@@ -330,13 +367,17 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     60_000,
     DEFAULT_PROCESS_COORDINATION_TIMEOUT_MS
   );
+  const startupReservationBytes = estimateProcessReservationBytes(invocation.processExecutable, invocation.processArgv, {
+    persistent: true, commandString: invocation.command || ''
+  });
   const coordinationController = new AbortController();
   const coordinationTimer = setTimeout(() => {
-    coordinationController.abort(processCoordinationTimeoutError(coordinationTimeoutMs));
+    coordinationController.abort(processCoordinationTimeoutError(coordinationTimeoutMs, startupReservationBytes));
   }, coordinationTimeoutMs);
   coordinationTimer.unref?.();
   const coordinationSignal = combineAbortSignals(admissionSignal, coordinationController.signal);
   let releaseReuseReservation: (() => void) | null = null;
+  const startupReservation: { release: (() => void) | null } = { release: null };
   try {
     releaseReuseReservation = args.reuseExisting === false
       ? null
@@ -373,12 +414,18 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     workSessionId,
     principalKey,
     reuseFingerprint,
-    lifecycle: 'persistent',
+    lifecycle,
+    terminationConfirmed: null,
+    rootExitConfirmed: false,
+    terminationError: '',
+    stopPromise: null,
+    terminationInProgress: false,
     kind,
     purpose,
     command: invocation.displayCommand,
     commandSummary: redactCommandForAudit(invocation.displayCommand),
     label: String(args.label || '').trim().slice(0, 120) || redactCommandForAudit(invocation.displayCommand),
+    diagnosticLabel: sanitizeDisplayText(String(args.label || '').trim(), 120),
     cwd: cwd.relativePath,
     status: 'starting',
     startedAt: new Date().toISOString(),
@@ -453,19 +500,28 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       let resourceLease: HostResourceLease;
       try {
         await retireIdleInteractivePtysForCapacity(config);
-        resourceLease = await acquireHostResource('persistent', workspace.alias, { signal: coordinationSignal });
+        resourceLease = await acquireHostResources(['persistent', 'heavy'], workspace.alias, {
+          signal: coordinationSignal,
+          reservationBytes: startupReservationBytes
+        });
+        startupReservation.release = () => resourceLease.releaseResource?.('heavy');
         clearTimeout(coordinationTimer);
       } catch (error) {
         if (errorCode(error) === 'HOST_RESOURCE_ABORTED') {
+          if (!admissionSignal?.aborted && coordinationController.signal.aborted) {
+            throw coordinationController.signal.reason;
+          }
           throw cancellationError('Managed process startup was cancelled while waiting for host capacity.');
         }
         if (errorCode(error) === 'HOST_RESOURCE_QUEUE_TIMEOUT') {
-          const stats = hostResourceStats().persistent;
+          const blocker = managedStartupBlocker(startupReservationBytes);
+          const stats = blocker.stats;
           throw Object.assign(
-            new Error(`Persistent process capacity remained full while starting '${workspace.alias}'. Stop a persistent process and retry.`),
+            new Error(`Managed process startup for '${workspace.alias}' remained queued. ${blocker.message}`),
             {
               code: 'HOST_PROCESS_CAPACITY_EXHAUSTED',
               retryable: true,
+              blockedResource: blocker.resource,
               active: Number(stats?.active || 0),
               limit: Number(stats?.limit || HOST_PERSISTENT_PROCESS_LIMIT),
               queued: Number(stats?.queued || 0)
@@ -553,16 +609,32 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     try {
       measurePerformancePhaseSync('process.persistence', () => persistMetadata(config, record));
     } catch (error) {
-      record.discarded = true;
       record.persistenceFailureHandled = true;
       clearScheduledPersist(record);
-      await terminateManagedRecord(record, { graceMs: 0, forceWaitMs: DEFAULT_FORCE_WAIT_MS }).catch(() => null);
-      releaseManagedProcessResource(record);
-      record.child = null;
-      record.ptyProcess = null;
-      processes.delete(processId);
-      fs.rmSync(directory, { recursive: true, force: true });
-      throw new Error(`Could not persist managed process record: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      record.terminationInProgress = true;
+      const outcome = await terminateManagedRecord(record, { graceMs: 0, forceWaitMs: DEFAULT_FORCE_WAIT_MS })
+        .catch(() => ({ exited: false, forced: false }));
+      record.terminationInProgress = false;
+      record.terminationConfirmed = outcome.exited;
+      if (outcome.exited) {
+        record.discarded = true;
+        releaseManagedProcessResource(record);
+        record.child = null;
+        record.ptyProcess = null;
+        processes.delete(processId);
+        fs.rmSync(directory, { recursive: true, force: true });
+      } else {
+        record.status = 'orphaned';
+        record.endedAt = '';
+        record.terminationError = 'Startup persistence failed and descendant termination could not be confirmed.';
+        record.error = record.terminationError;
+        // Keep the in-memory identity and any recoverable on-disk evidence.
+        try { persistMetadata(config, record); } catch {}
+        notifyProcessState(record);
+      }
+      throw Object.assign(new Error(`Could not persist managed process record: ${error instanceof Error ? error.message : String(error)}`, { cause: error }), {
+        processId, terminationConfirmed: outcome.exited
+      });
     }
 
     const initial = await measurePerformancePhase('process.readiness', () => initialState);
@@ -629,6 +701,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
   });
   } finally {
     clearTimeout(coordinationTimer);
+    startupReservation.release?.();
     releaseReuseReservation?.();
   }
 }
@@ -954,14 +1027,13 @@ async function writeManagedProcess(config: ManagedProcessConfig, args: ManagedPr
 async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedProcessArgs = {}, context: ManagedProcessContext = {}) {
   const record = requireProcess(config, args.processId);
   assertProcessAccess(config, record, args, context, { requireSession: false });
-  let duplicate = TERMINAL_STATUSES.has(record.status);
-  if (!duplicate && record.status === 'orphaned' && record.runtimeId !== RUNTIME_ID) {
+  const duplicate = TERMINAL_STATUSES.has(record.status)
+    && (record.lifecycle !== 'task' || record.terminationConfirmed === true);
+  if (!duplicate && (record.runtimeId !== RUNTIME_ID || record.rootExitConfirmed || (!record.child && !record.ptyProcess))) {
     const identity = await verifyRestoredProcessIdentity(config, record);
-    if (identity === 'mismatch') throw restoredProcessIdentityError(record, identity);
-    if (identity === 'unverified') throw restoredProcessIdentityError(record, identity);
-    if (identity === 'dead') duplicate = false;
+    if (identity === 'mismatch' || identity === 'unverified') throw restoredProcessIdentityError(record, identity);
   }
-  if (!duplicate && !TERMINAL_STATUSES.has(record.status)) {
+  if (!duplicate) {
     await stopRecordInternal(config, record, {
       graceMs: clampNumber(args.graceMs, 0, 30000, DEFAULT_STOP_GRACE_MS)
     });
@@ -972,47 +1044,43 @@ async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedPro
   };
 }
 
-async function stopRecordInternal(config: ManagedProcessConfig, record: ManagedProcessRecord, options: StopRecordOptions = {}) {
-  const target = record.child || record.pid;
-  if (!target || !isProcessTreeAlive(target)) {
-    // PID death can be observed before Node emits ChildProcess "close". Reap
-    // the in-memory child/PTY handles here so a dead managed process cannot
-    // keep its workspace cwd and stdio pipes open after stop reports success.
-    if (record.child || record.ptyProcess) {
-      await terminateManagedRecord(record, {
-        graceMs: 0,
-        forceWaitMs: DEFAULT_FORCE_WAIT_MS
-      });
-    }
-    if (!TERMINAL_STATUSES.has(record.status)) {
-      finishRecord(config, record, {
-        status: 'stopped',
-        exitCode: record.exitCode,
-        signal: record.signal || 'unobserved'
-      });
-    }
-    await flushManagedProcessPersistence(config, record);
-    return processSnapshot(record);
-  }
+function stopRecordInternal(config: ManagedProcessConfig, record: ManagedProcessRecord, options: StopRecordOptions = {}): Promise<ManagedProcessDto & GenericRecord> {
+  if (record.stopPromise) return record.stopPromise;
+  const pending = Promise.resolve().then(() => stopRecordWithEvidence(config, record, options));
+  record.stopPromise = pending;
+  void pending.finally(() => {
+    if (record.stopPromise === pending) record.stopPromise = null;
+  }).catch(() => {});
+  return pending;
+}
 
+async function stopRecordWithEvidence(config: ManagedProcessConfig, record: ManagedProcessRecord, options: StopRecordOptions) {
   record.status = 'stopping';
   safePersistMetadata(config, record);
   notifyProcessState(record);
   const outcome = await terminateManagedRecord(record, {
     graceMs: clampNumber(options.graceMs, 0, 30000, DEFAULT_STOP_GRACE_MS),
-    forceWaitMs: DEFAULT_FORCE_WAIT_MS
-  });
+    forceWaitMs: clampNumber(options.forceWaitMs, 0, 30000, DEFAULT_FORCE_WAIT_MS)
+  }).catch(error => ({
+    exited: false, forced: false, error: error instanceof Error ? error.message : String(error)
+  }));
+  record.terminationConfirmed = outcome.exited;
+  record.terminationError = outcome.exited ? '' : outcome.error || 'Managed process descendant termination could not be confirmed.';
 
   if (!outcome.exited) {
+    // Retain identity, capacity ownership, and evidence for explicit recovery.
+    // Root exit or pipe closure is never sufficient tree-exit evidence.
     record.status = 'orphaned';
-    record.error = 'Managed process termination could not be confirmed.';
+    record.endedAt = '';
+    record.error = record.terminationError;
     safePersistMetadata(config, record);
     notifyProcessState(record);
-  } else if (record.status === 'stopping') {
+  } else {
+    if (!record.persistenceFailureHandled) record.error = '';
     finishRecord(config, record, {
       status: 'stopped',
       exitCode: typeof record.exitCode === 'number' ? record.exitCode : -1,
-      signal: outcome.forced ? 'SIGKILL' : 'SIGTERM'
+      signal: record.signal || (outcome.forced ? 'SIGKILL' : 'SIGTERM')
     });
   }
   await flushManagedProcessPersistence(config, record);
@@ -1048,6 +1116,221 @@ function listManagedProcesses(config: ManagedProcessConfig, args: ManagedProcess
         }
       : {}));
   return createManagedProcessList(items);
+}
+
+interface ManagedRootMemoryTarget {
+  readonly processId: string;
+  readonly pid: number | null;
+  readonly identity: string;
+}
+
+interface ManagedRootMemoryObservation {
+  readonly privateBytes: number | null;
+  readonly workingSetBytes: number | null;
+  readonly sampledAt: string | null;
+  readonly identityVerified: boolean;
+  readonly reason: string | null;
+}
+
+interface ManagedRootMemoryCacheEntry {
+  readonly atMs: number;
+  readonly observations: ReadonlyMap<string, ManagedRootMemoryObservation>;
+}
+
+const ROOT_MEMORY_MAX_ROOTS = 20;
+const ROOT_MEMORY_CACHE_MS = 5000;
+const ROOT_MEMORY_MAX_CACHE_ENTRIES = 8;
+const managedRootMemoryCache = new Map<string, ManagedRootMemoryCacheEntry>();
+let managedRootMemoryFlight: { key: string; promise: Promise<ManagedRootMemoryCacheEntry> } | null = null;
+let managedRootMemoryProbeAt = -Infinity;
+
+function unknownRootMemory(reason: string): ManagedRootMemoryObservation {
+  return { privateBytes: null, workingSetBytes: null, sampledAt: null, identityVerified: false, reason };
+}
+
+async function sampleManagedProcessMemory(
+  config: ManagedProcessConfig,
+  args: ManagedProcessArgs = {},
+  context: ManagedProcessContext = {}
+) {
+  const requestedWorkspace = resolveCallerWorkspace(config, args, context);
+  if (context.internal !== true && (!principalKeyForContext(context) || !requestedWorkspace)) {
+    throw taskError('PROCESS_ACCESS_DENIED', 'Managed-root diagnostics require an authorized principal and workspace, or explicit trusted local authority.');
+  }
+  assertRequestedWorkspaceBoundary(config, args, context, requestedWorkspace);
+  hydrateProcessMetadata(config);
+  // Filter authority before selecting PIDs, building cache keys, or probing.
+  const authorized = [...processes.values()].filter(record =>
+    sameWorkspaceReference(path.dirname(path.dirname(record.stdoutPath)), processRoot(config))
+    && !TERMINAL_STATUSES.has(record.status)
+    && (!requestedWorkspace || workspaceMatches(record, requestedWorkspace))
+    && canAccessProcess(config, record, args, context, { requireSession: false }))
+    .sort((left, right) => Date.parse(right.startedAt) - Date.parse(left.startedAt));
+  const selected = authorized.slice(0, clampNumber(args.limit, 1, ROOT_MEMORY_MAX_ROOTS, ROOT_MEMORY_MAX_ROOTS));
+  const targets = selected.map(record => ({
+    processId: record.processId,
+    pid: Number.isSafeInteger(record.pid) && Number(record.pid) > 0 ? Number(record.pid) : null,
+    identity: String(record.processCreationIdentity || '')
+  }));
+  const authorityKey = context.internal === true ? 'trusted-local-dashboard' : principalKeyForContext(context);
+  const key = crypto.createHash('sha256').update(JSON.stringify([
+    normalizeWorkspaceReference(processRoot(config)), authorityKey,
+    normalizeWorkspaceReference(requestedWorkspace), targets
+  ])).digest('base64url');
+  let entry = managedRootMemoryCache.get(key);
+  let fallbackReason = process.platform === 'win32' ? 'sampling_rate_limited' : 'unsupported_platform';
+  const cached = Boolean(entry && Date.now() - entry.atMs < ROOT_MEMORY_CACHE_MS);
+  if (process.platform === 'win32' && targets.length && !cached) {
+    if (managedRootMemoryFlight) {
+      // Join the one bounded probe, without creating a queue of OS samplers.
+      await managedRootMemoryFlight.promise;
+      entry = managedRootMemoryCache.get(key);
+    }
+    if ((!entry || Date.now() - entry.atMs >= ROOT_MEMORY_CACHE_MS)
+      && Date.now() - managedRootMemoryProbeAt >= ROOT_MEMORY_CACHE_MS) {
+      managedRootMemoryProbeAt = Date.now();
+      const promise = probeManagedRootMemory(targets).then(observations => {
+        const value = { atMs: Date.now(), observations };
+        managedRootMemoryCache.delete(key);
+        managedRootMemoryCache.set(key, value);
+        while (managedRootMemoryCache.size > ROOT_MEMORY_MAX_CACHE_ENTRIES) {
+          const oldest = managedRootMemoryCache.keys().next().value;
+          if (oldest === undefined) break;
+          managedRootMemoryCache.delete(oldest);
+        }
+        return value;
+      });
+      const flight = { key, promise };
+      managedRootMemoryFlight = flight;
+      try { entry = await promise; }
+      finally { if (managedRootMemoryFlight === flight) managedRootMemoryFlight = null; }
+    }
+  }
+  if (!targets.length) fallbackReason = 'no_authorized_active_roots';
+  const roots = targets.flatMap(target => {
+    const record = processes.get(target.processId);
+    if (!record || !canAccessProcess(config, record, args, context, { requireSession: false })) return [];
+    let observation = entry?.observations.get(target.processId) || unknownRootMemory(fallbackReason);
+    if (record.pid !== target.pid || record.processCreationIdentity !== target.identity || TERMINAL_STATUSES.has(record.status)) {
+      observation = unknownRootMemory('record_changed_during_sample');
+    }
+    return [{
+      processId: record.processId, pid: target.pid,
+      workspace: record.workspaceId, workSessionId: record.workSessionId || null,
+      ...(record.diagnosticLabel ? { label: record.diagnosticLabel } : {}),
+      kind: record.kind, lifecycle: record.lifecycle, status: record.status,
+      ...observation,
+      measurementStatus: observation.identityVerified ? 'measured' : 'unknown'
+    }];
+  });
+  return {
+    scope: 'managed_roots_only', platform: process.platform,
+    sampledAt: entry ? new Date(entry.atMs).toISOString() : null,
+    cacheAgeMs: entry ? Math.max(0, Date.now() - entry.atMs) : null,
+    cached, stale: Boolean(entry && Date.now() - entry.atMs >= ROOT_MEMORY_CACHE_MS),
+    totalRootCount: authorized.length,
+    omittedRootCount: Math.max(0, authorized.length - selected.length),
+    sampledRootCount: roots.filter(root => root.identityVerified).length,
+    roots, descendantAttribution: 'unknown'
+  };
+}
+
+async function probeManagedRootMemory(targets: readonly ManagedRootMemoryTarget[]): Promise<ReadonlyMap<string, ManagedRootMemoryObservation>> {
+  const observations = new Map<string, ManagedRootMemoryObservation>();
+  const eligible = targets.filter(target => target.pid && /^win32:\d+$/.test(target.identity));
+  for (const target of targets) observations.set(target.processId, unknownRootMemory('identity_unavailable'));
+  if (!eligible.length) return observations;
+  let rows: GenericRecord[];
+  try {
+    rows = await readWindowsManagedRootMemory(eligible);
+  } catch {
+    for (const target of eligible) observations.set(target.processId, unknownRootMemory('probe_failed_or_timed_out'));
+    return observations;
+  }
+  for (const target of eligible) {
+    const row = rows.find(candidate => candidate.pid === target.pid);
+    if (!row || row.unavailable === true) {
+      observations.set(target.processId, unknownRootMemory('root_unavailable'));
+      continue;
+    }
+    // DateTime.Ticks exceed JavaScript's integer precision. Require exact
+    // string identities in the same win32:<ticks> format used at launch.
+    if (typeof row.beforeIdentity !== 'string' || typeof row.afterIdentity !== 'string'
+      || row.beforeIdentity !== target.identity || row.afterIdentity !== target.identity) {
+      observations.set(target.processId, unknownRootMemory('identity_mismatch'));
+      continue;
+    }
+    const privateBytes = memoryCounter(row.privateBytes);
+    const workingSetBytes = memoryCounter(row.workingSetBytes);
+    const sampledAtMs = typeof row.sampledAt === 'string' ? Date.parse(row.sampledAt) : NaN;
+    if (privateBytes === null || workingSetBytes === null || !Number.isFinite(sampledAtMs)) {
+      observations.set(target.processId, unknownRootMemory('invalid_measurement'));
+      continue;
+    }
+    observations.set(target.processId, {
+      privateBytes, workingSetBytes, sampledAt: new Date(sampledAtMs).toISOString(),
+      identityVerified: true, reason: null
+    });
+  }
+  return observations;
+}
+
+function memoryCounter(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function readWindowsManagedRootMemory(targets: readonly ManagedRootMemoryTarget[]): Promise<GenericRecord[]> {
+  const systemRoot = String(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows');
+  const executable = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const identitiesByPid = new Map<number, string[]>();
+  for (const target of targets.slice(0, ROOT_MEMORY_MAX_ROOTS)) {
+    if (!Number.isSafeInteger(target.pid) || Number(target.pid) <= 0 || !/^win32:\d+$/.test(target.identity)) continue;
+    const pid = Number(target.pid);
+    const identities = identitiesByPid.get(pid) || [];
+    if (!identities.includes(target.identity)) identities.push(target.identity);
+    identitiesByPid.set(pid, identities);
+  }
+  const safePids = [...identitiesByPid.keys()];
+  const expectedAssignments = [...identitiesByPid].map(([pid, identities]) =>
+    '$expectedIdentities[' + pid + '] = @(' + identities.map(identity => '"' + identity + '"').join(',') + ')');
+  // Only exact, already-authorized root PIDs are inspected. No process-name,
+  // command-line, global enumeration, descendant lookup, or signalling occurs.
+  const script = [
+    '# RelAiManagedRootMemoryV1',
+    '$ErrorActionPreference = "Stop"',
+    '$targets = @(' + safePids.join(',') + ')',
+    '$expectedIdentities = @{}',
+    ...expectedAssignments,
+    '$results = @(foreach ($targetPid in $targets) {',
+    '  $before = $null; $after = $null',
+    '  try {',
+    '    $before = Get-Process -Id $targetPid -ErrorAction Stop',
+    '    $beforeIdentity = "win32:" + [string]$before.StartTime.ToUniversalTime().Ticks',
+    '    if ($expectedIdentities[$targetPid] -notcontains $beforeIdentity) { [pscustomobject]@{ pid = $targetPid; beforeIdentity = $beforeIdentity; afterIdentity = $beforeIdentity }; continue }',
+    '    $privateBytes = $before.PrivateMemorySize64; $workingSetBytes = $before.WorkingSet64',
+    '    $after = Get-Process -Id $targetPid -ErrorAction Stop',
+    '    $afterIdentity = "win32:" + [string]$after.StartTime.ToUniversalTime().Ticks',
+    '    [pscustomobject]@{ pid = $targetPid; beforeIdentity = $beforeIdentity; afterIdentity = $afterIdentity; privateBytes = $privateBytes; workingSetBytes = $workingSetBytes; sampledAt = [DateTime]::UtcNow.ToString("o") }',
+    '  } catch { [pscustomobject]@{ pid = $targetPid; unavailable = $true } }',
+    '  finally { if ($before) { $before.Dispose() }; if ($after) { $after.Dispose() } }',
+    '})',
+    '[Console]::Out.Write((ConvertTo-Json -InputObject @($results) -Compress))'
+  ].join('\n');
+  return new Promise((resolve, reject) => {
+    execFile(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      {
+        windowsHide: true, timeout: 2000, maxBuffer: 32768, encoding: 'utf8',
+        env: makeProcessEnvironment({ PSModulePath: path.join(path.dirname(executable), 'Modules') }, { allow: [] })
+      },
+      (error, stdout) => {
+        if (error) { reject(error); return; }
+        try {
+          const parsed: unknown = JSON.parse(String(stdout).replace(/^\uFEFF/, ''));
+          if (!Array.isArray(parsed)) throw new Error('Invalid managed-root memory response.');
+          resolve(parsed.slice(0, ROOT_MEMORY_MAX_ROOTS).map(asRecord));
+        } catch (parseError) { reject(parseError); }
+      });
+  });
 }
 
 function assertProcessAccess(config: ManagedProcessConfig, record: ManagedProcessRecord, args: ManagedProcessArgs = {}, context: ManagedProcessContext = {}, options: ProcessAccessOptions = {}): void {
@@ -1112,7 +1395,7 @@ function workSessionWorkspace(config: ManagedProcessConfig, taskId: unknown): st
   return String(readTaskHistorySession(config, id)?.workspace || '').trim();
 }
 
-function managedProcessReuseFingerprint({ workspaceId = '', workSessionId = '', principalKey = '', executionMode = '', command = '', input = '', cwd = '.', kind = '', purpose = '', pty = false, columns = 80, rows = 24, environment = [] }: ReuseFingerprintInput = {}): string {
+function managedProcessReuseFingerprint({ workspaceId = '', workSessionId = '', principalKey = '', executionMode = '', command = '', input = '', cwd = '.', kind = '', purpose = '', lifecycle = 'persistent', pty = false, columns = 80, rows = 24, environment = [] }: ReuseFingerprintInput = {}): string {
   return crypto.createHash('sha256').update(JSON.stringify([
     normalizeWorkspaceReference(workspaceId),
     String(workSessionId || '').trim(),
@@ -1123,6 +1406,7 @@ function managedProcessReuseFingerprint({ workspaceId = '', workSessionId = '', 
     String(cwd || '.').trim().replaceAll('\\', '/'),
     String(kind || '').trim().toLowerCase(),
     String(purpose || '').trim(),
+    lifecycle,
     pty === true,
     Number(columns) || 80,
     Number(rows) || 24,
@@ -1135,7 +1419,7 @@ function findReusableManagedProcess(reuseFingerprint: string): ManagedProcessRec
   return [...processes.values()].find(record =>
     record.reuseFingerprint === reuseFingerprint
     && ['starting', 'running'].includes(record.status)
-    && record.lifecycle === 'persistent'
+    && (record.lifecycle === 'persistent' || record.lifecycle === 'task')
     && !record.discarded
   ) || null;
 }
@@ -1202,10 +1486,44 @@ function managedProcessCoordinationAbortError(signal: AbortSignal, message: stri
   return cancellationError(message);
 }
 
-function processCoordinationTimeoutError(timeoutMs: number): Error {
+function managedStartupBlocker(reservationBytes: number) {
+  const diagnostic = asRecord(hostResourceDiagnosticSnapshot());
+  const lanes = asRecord(diagnostic.lanes);
+  const persistent = asRecord(lanes.persistent);
+  const heavy = asRecord(lanes.heavy);
+  const pressure = asRecord(diagnostic.pressure);
+  const queues = asRecord(diagnostic.queues);
+  if (Number(persistent.active) >= Number(persistent.limit) && Number(persistent.limit) > 0) {
+    return { resource: 'persistent', stats: persistent, message: 'Persistent process capacity remained full. Stop an owned persistent process or wait for one to exit before retrying.' };
+  }
+  if (Number(heavy.active) >= Number(heavy.limit) && Number(heavy.limit) > 0) {
+    return { resource: 'heavy', stats: heavy, message: 'Heavy-work capacity is full. Wait for an active build, test, or startup to settle before retrying.' };
+  }
+  if (pressure.state === 'pressured') {
+    return { resource: 'heavy', stats: heavy, message: String(pressure.reason || 'Host memory pressure is blocking startup.') + ' Wait for memory headroom to recover.' };
+  }
+  const reservedBytes = Number(pressure.reservedBytes || 0);
+  if (pressure.physicalAvailableBytes != null && pressure.stale !== true
+    && Number(pressure.physicalAvailableBytes) - reservedBytes - reservationBytes < Number(pressure.physicalFloorBytes)) {
+    return { resource: 'heavy', stats: heavy, message: `Physical memory headroom cannot accommodate the estimated ${Math.ceil(reservationBytes / (1024 * 1024))} MiB startup reservation while retaining the protected margin. Wait for memory headroom to recover.` };
+  }
+  if (pressure.commitEnforced === true && pressure.commitAvailableBytes != null && pressure.stale !== true
+    && Number(pressure.commitAvailableBytes) - reservedBytes - reservationBytes < Number(pressure.commitFloorBytes)) {
+    return { resource: 'heavy', stats: heavy, message: 'The startup reservation would consume protected system commit headroom. Wait for commit headroom to recover.' };
+  }
+  const queuedReason = String(asRecord(queues.heavy).blockedReason || '');
+  if (queuedReason) return { resource: 'heavy', stats: heavy, message: queuedReason };
+  if (pressure.state === 'unknown') {
+    return { resource: 'heavy', stats: heavy, message: String(pressure.reason || 'Host memory metrics are unavailable; startup remains conservatively queued.') };
+  }
+  return { resource: 'coordination', stats: heavy, message: 'Another process startup or resource coordination step is still settling. Retry after it finishes.' };
+}
+
+function processCoordinationTimeoutError(timeoutMs: number, reservationBytes = 0): Error {
+  const blocker = managedStartupBlocker(reservationBytes);
   return Object.assign(
-    new Error(`Managed process startup coordination exceeded ${timeoutMs}ms. Retry after the active startup or capacity recovery finishes.`),
-    { code: 'PROCESS_START_COORDINATION_TIMEOUT', retryable: true }
+    new Error(`Managed process startup coordination exceeded ${timeoutMs}ms. ${blocker.message}`),
+    { code: 'PROCESS_START_COORDINATION_TIMEOUT', retryable: true, blockedResource: blocker.resource }
   );
 }
 
@@ -1264,6 +1582,9 @@ function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotO
     status: record.status,
     metadataRevision: processMetadataRevision(record),
     lifecycle: record.lifecycle || 'persistent',
+    terminationConfirmed: record.terminationConfirmed,
+    rootExitConfirmed: record.rootExitConfirmed,
+    ...(record.terminationError ? { terminationError: record.terminationError } : {}),
 
     workSessionId: record.workSessionId || null,
     startedAt: record.startedAt,
@@ -1305,6 +1626,10 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
     record.exitCode,
     record.signal || '',
     record.error || '',
+    record.lifecycle,
+    record.terminationConfirmed,
+    record.rootExitConfirmed,
+    record.terminationError,
     Number(record.stdoutDroppedBytes || 0),
     Number(record.stderrDroppedBytes || 0),
     record.pty === true,
@@ -1315,12 +1640,39 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
 
 function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord, fields: Partial<ManagedProcessRecord>): void {
   if (TERMINAL_STATUSES.has(record.status) && record.endedAt) return;
+  record.rootExitConfirmed = true;
+  if ((record.stopPromise || record.terminationInProgress) && record.terminationConfirmed !== true) {
+    // The close event can race the tree terminator. Save root evidence, but
+    // let the terminator decide whether descendants and capacity are gone.
+    if (fields.exitCode !== undefined) record.exitCode = fields.exitCode;
+    if (fields.signal !== undefined) record.signal = fields.signal;
+    return;
+  }
+  if (record.lifecycle === 'task' && record.terminationConfirmed !== true && record.pid) {
+    clearInteractivePtyRetirement(record);
+    clearScheduledPersist(record);
+    resumeLogSources(record);
+    Object.assign(record, fields, {
+      status: 'orphaned',
+      endedAt: '',
+      terminationConfirmed: false,
+      terminationError: 'The managed root exited; descendant cleanup has not been confirmed.'
+    });
+    record.error = record.terminationError;
+    record.child = null;
+    if (record.ptyProcess) void disposeNodePtyResources(record.ptyProcess);
+    record.ptyProcess = null;
+    notifyProcessState(record);
+    if (!record.discarded) void drainLogWrites(config, record).then(() => queueMetadataPersist(config, record));
+    return;
+  }
   clearInteractivePtyRetirement(record);
   clearScheduledPersist(record);
   resumeLogSources(record);
   releaseManagedProcessResource(record);
   Object.assign(record, fields, { endedAt: new Date().toISOString() });
   record.child = null;
+  if (record.ptyProcess) void disposeNodePtyResources(record.ptyProcess);
   record.ptyProcess = null;
   notifyProcessState(record);
   if (!record.discarded) {
@@ -1331,7 +1683,8 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
 function releaseManagedProcessResource(record: ManagedProcessRecord): void {
   const release = record?.hostResourceRelease;
   record.hostResourceRelease = null;
-  try { release?.(); } catch {}
+  // Root exit alone cannot clear a persistent startup's settling credit.
+  try { release?.({ confirmedStopped: record.terminationConfirmed === true }); } catch {}
 }
 
 function interactivePtyIdleRetireMs(): number {
@@ -1464,10 +1817,14 @@ function metadataRecord(record: ManagedProcessRecord): GenericRecord {
     principalKey: record.principalKey || '',
     reuseFingerprint: record.reuseFingerprint || '',
     lifecycle: record.lifecycle || 'persistent',
+    terminationConfirmed: record.terminationConfirmed,
+    rootExitConfirmed: record.rootExitConfirmed,
+    terminationError: record.terminationError,
     kind: record.kind || 'service',
     purpose: record.purpose || '',
     commandSummary: record.commandSummary,
     label: record.label,
+    diagnosticLabel: record.diagnosticLabel,
     cwd: record.cwd,
     status: record.status,
     startedAt: record.startedAt,
@@ -1526,18 +1883,31 @@ function handlePersistenceFailure(config: ManagedProcessConfig, record: ManagedP
   clearScheduledLogFlushes(record);
   resumeLogSources(record);
   record.error = `Managed process persistence failed: ${error instanceof Error ? error.message : String(error)}`;
+  if (record.stopPromise || record.terminationInProgress) return;
+  record.terminationInProgress = true;
   void terminateManagedRecord(record, { graceMs: 0, forceWaitMs: DEFAULT_FORCE_WAIT_MS })
     .then(outcome => {
+      record.terminationInProgress = false;
+      record.terminationConfirmed = outcome.exited;
       record.status = outcome.exited ? 'failed' : 'orphaned';
-      if (outcome.exited) record.endedAt = new Date().toISOString();
-      record.child = null;
-      record.ptyProcess = null;
+      record.terminationError = outcome.exited ? '' : outcome.error || 'Persistence failed and descendant termination could not be confirmed.';
+      record.endedAt = outcome.exited ? new Date().toISOString() : '';
+      if (outcome.exited) {
+        releaseManagedProcessResource(record);
+        record.child = null;
+        record.ptyProcess = null;
+      }
       try { persistMetadata(config, record); } catch {}
+      notifyProcessState(record);
     })
-    .catch(() => {
+    .catch(error => {
+      record.terminationInProgress = false;
       record.status = 'orphaned';
-      record.child = null;
-      record.ptyProcess = null;
+      record.endedAt = '';
+      record.terminationConfirmed = false;
+      record.terminationError = error instanceof Error ? error.message : String(error);
+      try { persistMetadata(config, record); } catch {}
+      notifyProcessState(record);
     });
 }
 
@@ -1562,11 +1932,17 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       workSessionId: String(metadata.workSessionId || metadata.logicalTaskId || ''),
       principalKey: String(metadata.principalKey || ''),
       reuseFingerprint: String(metadata.reuseFingerprint || ''),
-      lifecycle: String(metadata.lifecycle || 'persistent'),
+      lifecycle: metadata.lifecycle === 'task' ? 'task' : 'persistent',
+      terminationConfirmed: typeof metadata.terminationConfirmed === 'boolean' ? metadata.terminationConfirmed : null,
+      rootExitConfirmed: metadata.rootExitConfirmed === true,
+      terminationError: String(metadata.terminationError || ''),
+      stopPromise: null,
+      terminationInProgress: false,
       kind: ['service', 'watcher', 'interactive'].includes(String(metadata.kind || '')) ? String(metadata.kind) : 'service',
       purpose: String(metadata.purpose || ''),
       commandSummary: String(metadata.commandSummary || ''),
       label: String(metadata.label || metadata.commandSummary || processId),
+      diagnosticLabel: sanitizeDisplayText(String(metadata.diagnosticLabel || ''), 120),
       cwd: String(metadata.cwd || '.'),
       status: normalizeProcessLifecycleStatus(metadata.status) || 'orphaned',
       startedAt: String(metadata.startedAt || ''),
@@ -1676,9 +2052,15 @@ function reconcileRestoredRecord(config: ManagedProcessConfig, record: ManagedPr
       record.error = 'Process PID is live after a Rel.AI restart; creation identity must be verified before recovery or termination.';
     }
   } else {
-    record.status = 'stopped';
-    record.endedAt = record.endedAt || new Date().toISOString();
+    record.rootExitConfirmed = true;
+    record.status = record.lifecycle === 'task' && record.terminationConfirmed !== true ? 'orphaned' : 'stopped';
+    record.endedAt = record.status === 'orphaned' ? '' : record.endedAt || new Date().toISOString();
     record.signal = record.signal || 'unobserved_restart';
+    if (record.status === 'orphaned') {
+      record.terminationConfirmed = false;
+      record.terminationError = 'The managed root exited before recovery; descendant cleanup has not been confirmed.';
+      record.error = record.terminationError;
+    }
   }
   try { persistMetadata(config, record); } catch {}
   return record;
@@ -1688,16 +2070,16 @@ async function verifyRestoredProcessIdentity(
   config: ManagedProcessConfig,
   record: ManagedProcessRecord
 ): Promise<'verified' | 'dead' | 'unverified' | 'mismatch'> {
-  if (record.runtimeId === RUNTIME_ID) {
+  if (record.runtimeId === RUNTIME_ID && !record.rootExitConfirmed && (record.child || record.ptyProcess)) {
     record.restartIdentityVerified = true;
     return 'verified';
   }
-  if (record.restartIdentityVerified) return 'verified';
   if (!record.pid || !isProcessTreeAlive(record.pid)) {
-    releaseManagedProcessResource(record);
+    if (process.platform !== 'win32' || record.terminationConfirmed === true) releaseManagedProcessResource(record);
     record.restartIdentityVerified = false;
-    record.status = 'stopped';
-    record.endedAt = record.endedAt || new Date().toISOString();
+    record.rootExitConfirmed = true;
+    record.status = record.lifecycle === 'task' && record.terminationConfirmed !== true ? 'orphaned' : 'stopped';
+    record.endedAt = record.status === 'orphaned' ? '' : record.endedAt || new Date().toISOString();
     record.signal = record.signal || 'unobserved_restart';
     try { persistMetadata(config, record); } catch {}
     return 'dead';
@@ -1831,6 +2213,84 @@ function activeProcessesForWorkSession(config: ManagedProcessConfig, workspaceAl
     && processNeedsTermination(item));
 }
 
+interface TaskProcessCleanupResult {
+  attempted: number;
+  stopped: number;
+  preservedPersistent: number;
+  complete: boolean;
+  admissionBudgetMs: number;
+  stopGraceMs: number;
+  forceWaitMs: number;
+  leftovers: { processId: string; status: string; reason: string }[];
+}
+
+async function cleanupTaskManagedProcesses(
+  config: ManagedProcessConfig,
+  workspaceAlias: string,
+  taskId: string,
+  context: ManagedProcessContext = {}
+): Promise<TaskProcessCleanupResult> {
+  const owner = String(taskId || '').trim();
+  const workspace = String(workspaceAlias || '').trim();
+  if (!owner || !workspace || String(context.taskId || '').trim() !== owner) {
+    throw taskError('PROCESS_SESSION_MISMATCH', 'Automatic process cleanup requires the exact owning work_id and workspace.');
+  }
+  hydrateProcessMetadata(config);
+  const records = [...processes.values()].filter(record =>
+    path.dirname(path.dirname(record.stdoutPath)) === processRoot(config)
+    && workspaceMatches(record, workspace)
+    && record.workSessionId === owner);
+  const accessArgs = { work_id: owner, workspace };
+  const accessContext = { ...context, taskId: owner, workspace };
+  const result: TaskProcessCleanupResult = {
+    attempted: 0, stopped: 0, preservedPersistent: 0, complete: true,
+    admissionBudgetMs: TASK_CLEANUP_BUDGET_MS,
+    stopGraceMs: 500, forceWaitMs: DEFAULT_FORCE_WAIT_MS, leftovers: []
+  };
+  const candidates: ManagedProcessRecord[] = [];
+  for (const record of records) {
+    if (record.lifecycle !== 'task') {
+      if (canAccessProcess(config, record, accessArgs, accessContext)
+        && (ACTIVE_STATUSES.has(record.status) || record.status === 'orphaned')) result.preservedPersistent += 1;
+      continue;
+    }
+    if (TERMINAL_STATUSES.has(record.status) && record.terminationConfirmed === true) continue;
+    if (!canAccessProcess(config, record, accessArgs, accessContext)) {
+      result.leftovers.push({ processId: record.processId, status: record.status, reason: 'Process ownership could not be verified; preserved without signalling.' });
+      continue;
+    }
+    candidates.push(record);
+  }
+  const deadlineAtMs = Date.now() + TASK_CLEANUP_BUDGET_MS;
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(TASK_CLEANUP_CONCURRENCY, candidates.length) }, async () => {
+    while (next < candidates.length) {
+      const record = candidates[next++]!;
+      if (Date.now() >= deadlineAtMs) {
+        result.leftovers.push({ processId: record.processId, status: record.status, reason: 'The bounded cleanup budget expired before this process was attempted. Stop this exact processId through the authorized process recovery action.' });
+        continue;
+      }
+      result.attempted += 1;
+      try {
+        const stopped = await stopManagedProcess(config, { ...accessArgs, processId: record.processId, graceMs: 500 }, accessContext);
+        if (stopped.terminationConfirmed === true && TERMINAL_STATUSES.has(stopped.status)) result.stopped += 1;
+        else result.leftovers.push({
+          processId: record.processId, status: record.status,
+          reason: record.terminationError || record.error || 'Descendant termination could not be confirmed; identity and cleanup evidence were retained.'
+        });
+      } catch (error) {
+        result.leftovers.push({
+          processId: record.processId, status: record.status,
+          reason: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  }));
+  result.leftovers.sort((left, right) => left.processId.localeCompare(right.processId));
+  result.complete = result.leftovers.length === 0;
+  return result;
+}
+
 async function stopAllManagedProcesses(config: ManagedProcessConfig): Promise<{ stopped: number; attempted: number; orphaned: number }> {
   hydrateProcessMetadata(config);
   await Promise.all([...processes.values()]
@@ -1874,22 +2334,20 @@ function pruneManagedProcesses(config: unknown): { removed: number } {
 }
 
 async function cleanupFailedStartup(config: ManagedProcessConfig, record: ManagedProcessRecord): Promise<ProcessTreeTerminationResult> {
-  const target = record.child || record.pid;
-  if (!target) {
+  // A concurrent cancellation may already own this stop. Never erase its
+  // confirmed tree-exit evidence by re-probing a root that it just terminated.
+  if (record.stopPromise) await record.stopPromise;
+  if (record.terminationConfirmed === true) return { exited: true, forced: false };
+  if (!record.child && !record.ptyProcess && !record.pid) {
     await drainLogWrites(config, record);
     return { exited: true, forced: false };
   }
-  const outcome = await terminateManagedRecord(record, {
-    graceMs: 0,
-    forceWaitMs: DEFAULT_FORCE_WAIT_MS
-  });
-  if (!outcome.exited) {
-    record.status = 'orphaned';
-    record.error = 'Managed process startup failed and descendant termination could not be confirmed.';
-    safePersistMetadata(config, record);
-  }
-  await drainLogWrites(config, record);
-  return outcome;
+  const result = await stopRecordInternal(config, record, { graceMs: 0, forceWaitMs: DEFAULT_FORCE_WAIT_MS });
+  return {
+    exited: result.terminationConfirmed === true,
+    forced: result.signal === 'SIGKILL',
+    ...(record.terminationError ? { error: record.terminationError } : {})
+  };
 }
 
 function processNeedsTermination(record: ManagedProcessRecord): boolean {
@@ -1905,19 +2363,15 @@ async function terminateManagedRecord(record: ManagedProcessRecord, options: Sto
   if (record.ptyProcess) {
     const ptyProcess = record.ptyProcess;
     const exitPromise = record.ptyExitPromise;
-    try { ptyProcess.kill(); } catch {}
-    const graceMs = clampNumber(options.graceMs, 0, 30000, DEFAULT_STOP_GRACE_MS);
-    const exited = await waitForPtyExit(exitPromise, Math.max(250, graceMs));
-    await disposeNodePtyResources(ptyProcess);
-    if (exited) {
-      return { exited: true, forced: false };
+    // Terminate the tree while its root still exists. PTY onExit proves only
+    // root exit and must not be promoted to descendant cleanup confirmation.
+    const outcome = await terminateProcessTree(record.pid, options);
+    if (outcome.exited) {
+      try { ptyProcess.kill(); } catch {}
+      await waitForPtyExit(exitPromise, 250);
+      await disposeNodePtyResources(ptyProcess);
     }
-    const fallback = await terminateProcessTree(record.pid, {
-      graceMs: 0,
-      forceWaitMs: clampNumber(options.forceWaitMs, 0, 30000, DEFAULT_FORCE_WAIT_MS)
-    });
-    await waitForPtyExit(exitPromise, 250);
-    return fallback;
+    return outcome;
   }
   const child = record.child;
   if (!child) return terminateProcessTree(record.pid, options);
@@ -2089,12 +2543,14 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 
 export {
   activeProcessesForWorkSession,
+  cleanupTaskManagedProcesses,
   listManagedProcesses,
   managedProcessStateRevision,
   onManagedProcessChange,
   pruneManagedProcesses,
   readManagedProcess,
   readManagedProcessLogRange,
+  sampleManagedProcessMemory,
   startManagedProcess,
   stopAllManagedProcesses,
   stopManagedProcess,

@@ -3,13 +3,13 @@ function publicExecInputSchema(inputSchema) {
   const describe = (name, description) => ({ ...properties[name], description });
   return {
     ...inputSchema,
-    description: 'Two execution forms are available: direct executable + argv, and shell command. Direct execution avoids shell parsing.',
+    description: 'Forms: direct executable + argv, and shell command. Direct avoids shell parsing.',
     properties: {
       ...properties,
-      command: describe('command', 'Shell command form for syntax that requires a shell. Multiline scripts or structured text can be supplied through input.'),
+      command: describe('command', 'Shell syntax. Multiline scripts or structured text can be supplied through input.'),
       executable: describe('executable', 'Executable launched directly with shell:false.'),
       argv: describe('argv', 'Arguments passed without shell parsing; keep each logical argument separate.'),
-      input: describe('input', 'Literal stdin for multiline scripts or structured text; preserves quote-sensitive content.'),
+      input: describe('input', 'Literal stdin for multiline scripts or structured text; quotes are preserved.'),
       cwd: describe('cwd', 'Optional workspace-relative working directory.'),
       env: describe('env', 'Optional environment variables supplied directly to the child process. Durable tasks also receive the reserved REL_AI_EPHEMERAL_DIR scratch directory outside the project.'),
       ephemeralPaths: describe('ephemeralPaths', 'Exact new workspace-relative disposable files this command may create. Requires work_id. Rel.AI excludes matching changed files from default task commits and removes them at task end only if they remain untracked and unchanged.'),
@@ -26,10 +26,10 @@ function publicProcessInputSchema(inputSchema) {
     ...inputSchema,
     properties: {
       ...properties,
-      command: describe('command', 'Shell command string for process start when shell syntax is required.'),
-      executable: describe('executable', 'Executable launched directly with shell:false for process start.'),
+      command: describe('command', 'Shell syntax for start; prefer executable + argv.'),
+      executable: describe('executable', 'Start executable directly with shell:false.'),
       argv: describe('argv', 'Literal arguments passed directly to executable without shell parsing.'),
-      input: describe('input', 'For direct start, optional initial UTF-8 stdin written without closing the persistent stdin stream; PTY starts write the same input to the terminal. For write, UTF-8 input is sent to the running process or PTY.'),
+      input: describe('input', 'UTF-8 input on start without closing the persistent stdin stream; PTYs get terminal input. Write sends input to the process or PTY.'),
       pty: describe('pty', 'For start, allocate a real pseudo-terminal. Only valid with kind:interactive.'),
       columns: describe('columns', 'For PTY start or write, terminal width from 1 to 1000 columns.'),
       rows: describe('rows', 'For PTY start or write, terminal height from 1 to 1000 rows.')
@@ -42,7 +42,7 @@ function publicEditInputSchema(inputSchema, maxBatchEdits) {
   const describe = (name, description) => ({ ...properties[name], description });
   return {
     ...inputSchema,
-    description: 'One primary edit form is accepted per call. Rel.AI validates the selected form before touching the workspace.',
+    description: 'One edit form per call, validated before workspace changes.',
     properties: {
       ...properties,
       workspace: describe('workspace', 'Configured project for this edit. Omit it only when direct filesystem access is enabled or a valid work_id already identifies a project.'),
@@ -56,9 +56,9 @@ function publicEditInputSchema(inputSchema, maxBatchEdits) {
       replacements: describe('replacements', 'Several exact oldText/newText replacements in one file.'),
       content: describe('content', 'Complete replacement content as text for one file. Large complete-file text writes are staged internally when needed.'),
       file: describe('file', 'Native ChatGPT file reference to stream into path without overwrite.'),
-      expectedSha256: describe('expectedSha256', 'Optional stale-write guard for direct, batch, symbol, and environment edits.'),
-      updateText: describe('updateText', 'Git unified diff or structured OpenAI patch text for patch-shaped changes. One logical patch can contain repository-wide changes when transport capacity permits.'),
-      envAction: describe('envAction', 'Secret-safe environment operation: list, set, remove, or compare.'),
+      expectedSha256: describe('expectedSha256', 'Stale-write guard for direct, batch, symbol and env edits.'),
+      updateText: describe('updateText', 'Git unified diff or structured OpenAI patch. One logical patch can contain repository-wide changes within transport limits.'),
+      envAction: describe('envAction', 'Secret-safe env: list, set, remove, compare.'),
       key: describe('key', 'Environment key used by envAction set or remove.'),
       value: describe('value', 'Environment value used by envAction set. Values are never returned.'),
       templatePath: describe('templatePath', 'Public environment template used by envAction compare.'),

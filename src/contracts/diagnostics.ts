@@ -24,6 +24,7 @@ export interface DiagnosticReportDto {
   summary: Record<string, number>;
   findings: DiagnosticFindingDto[];
   tunnelHealth?: Record<string, unknown> | null;
+  resourceDiagnostics?: Record<string, unknown> | null;
   logs: Record<string, unknown>;
   reportText: string;
 }

@@ -91,7 +91,7 @@ function publishValidationProgress({
 }
 
 function completedValidationUnits(results) {
-  return results.filter(item => item.cancelled !== true).length;
+  return results.filter(item => item.cancelled !== true && (item.executed !== false || item.reused === true)).length;
 }
 
 function checkResultStatus(summary) {

@@ -1,5 +1,6 @@
 .operation-diagnostics { @apply min-w-0 rounded-md p-3 text-xs; grid-column: 1 / -1; border: 1px solid var(--ui-border-subtle); background: var(--ui-surface-secondary); }
-.operation-diagnostics-title { @apply block text-sm; color: var(--ui-text-primary); }
+.operation-diagnostics-heading { @apply flex min-w-0 items-center gap-1.5; }
+.operation-diagnostics-title { @apply block min-w-0 text-sm; color: var(--ui-text-primary); }
 .operation-diagnostics p { @apply my-1; color: var(--ui-text-secondary); }
 .operation-diagnostics details { @apply mt-2; }
 .operation-diagnostics summary { @apply min-h-9 cursor-pointer py-2 font-semibold; overflow-wrap: anywhere; }
@@ -11,3 +12,9 @@
 .operation-phase-durations { @apply my-2 grid list-none gap-1 p-0; }
 .operation-phase-durations li { @apply flex flex-wrap justify-between gap-x-3; }
 .operation-diagnostics .operation-diagnostics-warning { @apply my-2 border-l-2 pl-2 font-semibold; color: var(--ui-text-primary); border-color: currentColor; }
+.operation-diagnostics-help { position: relative; display: inline-flex; flex: 0 0 auto; }
+.operation-diagnostics-help-trigger { display: grid; width: 32px; height: 32px; min-width: 32px; min-height: 32px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--ui-text-tertiary); font-size: 12px; font-weight: 700; line-height: 1; cursor: help; }
+.operation-diagnostics-help-trigger:hover, .operation-diagnostics-help-trigger:focus-visible { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
+.operation-diagnostics-help-trigger:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 1px; }
+.operation-diagnostics-tooltip { position: absolute; z-index: var(--z-toast); top: calc(100% + 4px); left: 0; width: min(320px, calc(100vw - 32px)); padding: 8px 10px; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); background: var(--ui-surface-raised); color: var(--ui-text-primary); box-shadow: var(--ui-shadow-popover); font-size: 12px; font-weight: 500; line-height: 1.5; opacity: 0; visibility: hidden; pointer-events: auto; }
+.operation-diagnostics-help.is-open .operation-diagnostics-tooltip { opacity: 1; visibility: visible; }

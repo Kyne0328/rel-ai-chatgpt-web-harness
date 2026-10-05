@@ -10,7 +10,8 @@ import { extensionCommandPathEntries } from './extensions/paths.js';
 import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
-import { acquireHostResource } from './hostResourceScheduler.js';
+import { acquireHostResource, hostResourceDiagnosticSnapshot } from './hostResourceScheduler.js';
+import { estimateProcessReservationBytes } from './hostMemoryPressure.js';
 import { clearCurrentMutationProcess, markCurrentMutationProcessUncertain, recordCurrentMutationProcess } from './mutationProcessOwnership.js';
 
 const TASKKILL_EXE = String.raw`C:\Windows\System32\taskkill.exe`;
@@ -71,6 +72,7 @@ interface RunProcessOptions {
   readonly cwd?: string;
   readonly signal?: AbortSignal;
   readonly queueTimeoutMs?: unknown;
+  readonly reservationBytes?: unknown;
   readonly maxOutputBytes?: unknown;
   readonly outputSpillTaskId?: unknown;
   readonly timeout?: unknown;
@@ -98,6 +100,12 @@ export interface RunProcessResult {
   readonly cancelled?: boolean;
   readonly timedOut: boolean;
   readonly queueTimedOut?: boolean;
+  readonly admissionBlocked?: boolean;
+  readonly errorCode?: string;
+  readonly blockedResource?: string;
+  readonly resourceReason?: string;
+  readonly retryable?: boolean;
+  readonly resourcePressure?: Readonly<Record<string, unknown>>;
   readonly spawnError?: boolean;
   readonly terminationConfirmed?: boolean;
   readonly rootExitConfirmed?: boolean;
@@ -441,12 +449,16 @@ async function runProcess(command: string, args: readonly string[] = [], options
   const queueStartedAt = Date.now();
   let resourceLease: ResourceLease | null = null;
   if (resourceClass) {
+    const requiredReservationBytes = Math.max(estimateProcessReservationBytes(command, args, options),
+      Number.isFinite(Number(options.reservationBytes)) ? Number(options.reservationBytes) : 0);
     reportPhase('host-queued');
     try {
       resourceLease = await acquireHostResource(
         resourceClass,
         String(options.resourceOwner || options.cwd || 'global'),
-        { signal: options.signal, timeoutMs: options.queueTimeoutMs }
+        { signal: options.signal, timeoutMs: options.queueTimeoutMs,
+          deadlineAtMs: options.deadlineAtMs,
+          reservationBytes: requiredReservationBytes }
       ) as ResourceLease;
     } catch (error) {
       const queueWaitMs = Date.now() - queueStartedAt;
@@ -455,6 +467,8 @@ async function runProcess(command: string, args: readonly string[] = [], options
           error: errorMessage(options.signal?.reason || 'Operation cancelled while waiting for host resources.'),
           timedOut: isTimeoutAbort(options.signal),
           cancelled: !isTimeoutAbort(options.signal),
+          queueTimedOut: isTimeoutAbort(options.signal),
+          admissionDetails: processAdmissionFailure(error, resourceClass, requiredReservationBytes),
           queueWaitMs
         });
       }
@@ -462,8 +476,13 @@ async function runProcess(command: string, args: readonly string[] = [], options
         return terminalQueueResult({
           error: errorMessage(error),
           queueTimedOut: true,
+          admissionDetails: processAdmissionFailure(error, resourceClass, requiredReservationBytes),
           queueWaitMs
         });
+      }
+      if (errorCode(error) === 'HOST_RESOURCE_QUEUE_FULL') {
+        return terminalQueueResult({ error: errorMessage(error),
+          admissionDetails: processAdmissionFailure(error, resourceClass, requiredReservationBytes), queueWaitMs });
       }
       throw error;
     }
@@ -841,13 +860,42 @@ function armPostExitPipeDrain(
   };
 }
 
-function terminalQueueResult(options: { readonly error: string; readonly cancelled?: boolean; readonly timedOut?: boolean; readonly queueTimedOut?: boolean; readonly queueWaitMs: number }): RunProcessResult {
+interface ProcessAdmissionFailure {
+  readonly admissionBlocked: true;
+  readonly errorCode: string;
+  readonly blockedResource: string;
+  readonly resourceReason: string;
+  readonly retryable: true;
+  readonly resourcePressure: Readonly<Record<string, unknown>>;
+}
+
+function processAdmissionFailure(error: unknown, resourceClass: string, requestedReservationBytes: number): ProcessAdmissionFailure {
+  const detail = error && typeof error === 'object' ? error as Record<string, unknown> : {};
+  const pressure = hostResourceDiagnosticSnapshot().pressure;
+  return {
+    admissionBlocked: true,
+    errorCode: errorCode(error),
+    blockedResource: String(detail.blockedResource || resourceClass),
+    resourceReason: String(detail.resourceReason || pressure.reason || 'Host resource admission did not complete.').slice(0, 500),
+    retryable: true,
+    resourcePressure: {
+      state: pressure.state, source: pressure.source, sampledAtMs: pressure.sampledAtMs, stale: pressure.stale,
+      physicalAvailableBytes: pressure.physicalAvailableBytes, physicalFloorBytes: pressure.physicalFloorBytes,
+      commitAvailableBytes: pressure.commitAvailableBytes, commitFloorBytes: pressure.commitFloorBytes,
+      commitEnforced: pressure.commitEnforced, reservedBytes: pressure.reservedBytes,
+      requiredReservationBytes: Math.max(Number(pressure.reservationBytes) || 0, requestedReservationBytes)
+    }
+  };
+}
+
+function terminalQueueResult(options: { readonly error: string; readonly cancelled?: boolean; readonly timedOut?: boolean; readonly queueTimedOut?: boolean; readonly queueWaitMs: number; readonly admissionDetails?: ProcessAdmissionFailure }): RunProcessResult {
   return {
     executed: false,
     exitCode: -1,
     stdout: '',
     stderr: '',
     error: options.error,
+    ...options.admissionDetails,
     cancelled: options.cancelled === true,
     ...((options.cancelled === true || options.timedOut === true) ? { terminationConfirmed: true, forcedTermination: false } : {}),
     timedOut: options.timedOut === true,
@@ -994,6 +1042,12 @@ function summarizeCommand(result: Partial<RunProcessResult> & Pick<RunProcessRes
     ...(result.stderrTruncated ? { stderrTruncated: true } : {}),
     ...(result.timedOut ? { timedOut: true } : {}),
     ...(result.queueTimedOut ? { queueTimedOut: true } : {}),
+    ...(result.admissionBlocked ? { admissionBlocked: true } : {}),
+    ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+    ...(result.blockedResource ? { blockedResource: result.blockedResource } : {}),
+    ...(result.resourceReason ? { resourceReason: result.resourceReason } : {}),
+    ...(result.retryable ? { retryable: true } : {}),
+    ...(result.resourcePressure ? { resourcePressure: result.resourcePressure } : {}),
     ...(result.cancelled ? { cancelled: true } : {}),
     ...(result.terminationConfirmed != null ? { terminationConfirmed: result.terminationConfirmed } : {}),
     ...(result.rootExitConfirmed != null ? { rootExitConfirmed: result.rootExitConfirmed } : {}),

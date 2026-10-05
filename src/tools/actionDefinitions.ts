@@ -224,7 +224,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_process', title: 'Manage Process',
-    description: 'Manages persistent services, watchers, and interactive programs with stable process identity. Startup accepts direct executable + argv or a command string; one-shot work belongs in relai_exec or relai_validate.',
+    description: 'Services, watchers and interactive programs with stable IDs. Start: direct executable + argv or command string. Default persistent survives finish/cancel. lifecycle:task needs work_id bound to this workspace; finish/cancel cleans only owned processes. Shared services survive; uncertain cleanup is reported. One-shot work: relai_exec/relai_validate.',
     annotations: annotations(false, true, false, true),
     dashboard: { capabilities: ['execute'] }, behavior: { executionClass: 'persistent_process', taskScope: 'optional' }
   },

@@ -10,6 +10,7 @@ import { buildWorkflowEvidenceReceipt, checkEvidenceReusable } from '../workflow
 import { sanitizeDisplayText } from '../taskObservability.js';
 import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
 import { resolveOneShotTimeoutMs } from '../executionControl.js';
+import { isClearlyReadOnlyExec } from '../executionClassification.js';
 import { finalizeValidationResult, normalizeCompletionSummary } from '../tools/completion.js';
 import { createValidationFingerprint, createValidationPlan, readValidationPlan } from './validationPlan.js';
 import { runSpan } from '../telemetry.js';
@@ -230,7 +231,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           commandString: command,
           timeout: resolveOneShotTimeoutMs(args, context, { minMs: 1000, maxMs: 24 * 60 * 60 * 1000, fallbackMs: 120000 }),
           signal,
-          resourceClass: 'heavy',
+          resourceClass: isClearlyReadOnlyExec({ command }) ? undefined : 'heavy',
           resourceOwner: workspace.alias,
           ...(fullOutput ? { maxOutputBytes: 16 * 1024 * 1024 } : {})
         }, config));
@@ -238,7 +239,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           activeChecks.delete(index);
         }
         const summary = boundCheckOutput({ command, cwd: unit.cwd || '.', ...summarizeCommand(result) }, tailChars);
-        executedUnits += 1;
+        if (result.executed === true) executedUnits += 1;
         indexedResults[index] = summary;
         if (summary.ok && currentTaskId) {
           const receipt = buildWorkflowEvidenceReceipt({
@@ -288,7 +289,9 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   const reusedChecks = reusedCheckIds.filter(Boolean);
 
   const interrupted = signal?.aborted === true;
-  const timedOut = isTimeoutAbort(signal) || results.some(item => item.timedOut === true);
+  const admissionFailure = results.find(item => item.executed === false && item.admissionBlocked === true);
+  const queueTimedOut = results.some(item => item.queueTimedOut === true);
+  const timedOut = isTimeoutAbort(signal) || queueTimedOut || results.some(item => item.timedOut === true);
   const cancelled = (interrupted && !isTimeoutAbort(signal)) || results.some(item => item.cancelled === true);
   const finalFingerprint = interrupted || cancelled
     ? currentFingerprint
@@ -320,6 +323,8 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
       : 'Validation passed for the current repository state.')
     : cancelled
       ? 'Validation was cancelled; partial results are preserved as evidence.'
+      : admissionFailure
+        ? `${executedUnits ? 'Some validation checks' : 'Validation checks'} did not start because host resource admission was blocked. ${admissionFailure.resourceReason || ''} Wait for memory headroom or active work to settle, then retry validation.`
       : scopeChanged
         ? 'Validation became stale because relevant repository content changed while checks were running.'
         : 'One or more requested validation checks failed; review the failing validation results, correct the checks or code, then rerun validation.';
@@ -337,7 +342,13 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     validationLevelReason,
     changedFiles,
     policy,
-    validated: results.length > 0,
+    validated: executedUnits + reusedUnits > 0,
+    ...(admissionFailure ? {
+      admissionBlocked: true, errorCode: admissionFailure.errorCode,
+      blockedResource: admissionFailure.blockedResource, resourceReason: admissionFailure.resourceReason,
+      retryable: true, resourcePressure: admissionFailure.resourcePressure
+    } : {}),
+    ...(queueTimedOut ? { queueTimedOut: true } : {}),
     validationStatus,
     ...(timedOut ? { timedOut: true } : {}),
     validationFingerprint,
@@ -356,7 +367,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   };
   if (!ok) return validationResult;
   if (!complete) return validationResult;
-  return finalizeValidationResult(config, workspace, validationResult, completionSummary, { signal, fallbackOperationId: context.fallbackOperationId });
+  return finalizeValidationResult(config, workspace, validationResult, completionSummary, { ...context, signal });
 }
 
 function resolveCompletionSummary(args = {}, context = {}) {

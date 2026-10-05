@@ -81,6 +81,7 @@ function enrichExecAudit(extra, value) {
   assignDefined(extra, 'stderrTruncated', value?.stderrTruncated === true);
   assignDefined(extra, 'timedOut', value?.timedOut === true);
   assignTruthy(extra, 'mutationTracking', value?.mutationTracking);
+  assignTruthy(extra, 'mutationTrackingDetails', value?.mutationTrackingDetails);
   assignDefined(extra, 'mutationUnknown', value?.mutationUnknown === true);
   if (Array.isArray(value?.ephemeralChangedFiles) && value.ephemeralChangedFiles.length) {
     extra.ephemeralChangedFiles = value.ephemeralChangedFiles.slice(0, 100);

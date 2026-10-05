@@ -10,7 +10,7 @@ import {
 import type { ActionMapping, ActionRegistry, CatalogToolDefinition, PublicActionContract } from './actionDefinitions.ts';
 import { ACTION_REGISTRY as RAW_ACTION_REGISTRY } from './actionRegistry.js';
 
-const TOOL_SURFACE_VERSION = 89;
+const TOOL_SURFACE_VERSION = 90;
 const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 
 type ToolActionCatalogEntry = Readonly<{
@@ -144,7 +144,7 @@ function inferCatalogAction(publicTool: string, args: Record<string, unknown>, a
       if (Object.hasOwn(args, 'removeUntracked')) return 'reset';
       return 'diff';
     case 'relai_process':
-      if (['kind', 'purpose', 'command', 'executable', 'argv', 'reuseExisting', 'pty', 'startupWaitMs', 'maxLogBytes']
+      if (['kind', 'purpose', 'command', 'executable', 'argv', 'lifecycle', 'reuseExisting', 'pty', 'startupWaitMs', 'maxLogBytes']
         .some(key => Object.hasOwn(args, key))) return 'start';
       if (nonEmptyArg(args, 'processId')) {
         if (['input', 'columns', 'rows'].some(key => Object.hasOwn(args, key))) return 'write';

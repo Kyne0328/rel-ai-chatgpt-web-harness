@@ -1,7 +1,34 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { diagnosticDuration, diagnosticTime, operationDiagnostics, runtimeBuildDiagnostics } from '../operation-diagnostics.js';
 
 const h = React.createElement;
+
+function DiagnosticHelp({ label = 'More information', children }) {
+  const [open, setOpen] = useState(false);
+  const tooltipId = `operation-diagnostics-help-${useId().replaceAll(':', '')}`;
+  return h('span', {
+    className: `operation-diagnostics-help${open ? ' is-open' : ''}`,
+    onPointerEnter: () => setOpen(true),
+    onPointerLeave: () => setOpen(false),
+    onFocus: () => setOpen(true),
+    onBlur: () => setOpen(false)
+  },
+  h('button', {
+    type: 'button',
+    className: 'operation-diagnostics-help-trigger',
+    'aria-label': label,
+    'aria-describedby': tooltipId,
+    'aria-expanded': open ? 'true' : 'false',
+    onClick: () => setOpen(value => !value),
+    onKeyDown: event => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        event.stopPropagation();
+      }
+    }
+  }, '?'),
+  h('span', { id: tooltipId, role: 'tooltip', className: 'operation-diagnostics-tooltip' }, children));
+}
 
 export function OperationDiagnostics({ operation, live = false }) {
   const [wasLive, setWasLive] = useState(live);
@@ -25,37 +52,37 @@ export function OperationDiagnostics({ operation, live = false }) {
   return h('section', { className: 'operation-diagnostics', 'data-operation-diagnostics': view.phase || 'unknown', 'aria-label': 'Operation diagnostics' },
     // Keep elapsed clocks outside the polite region: announce phase changes, not every second.
     h('div', { role: announce ? 'status' : undefined, 'aria-atomic': announce ? 'true' : undefined },
-      h('strong', { className: 'operation-diagnostics-title' }, view.title),
-      h('p', null, view.detail),
+      h('div', { className: 'operation-diagnostics-heading' },
+        h('strong', { className: 'operation-diagnostics-title' }, view.title),
+        view.detail ? h(DiagnosticHelp, { label: `About ${view.title}` }, view.detail) : null
+      ),
       view.warning ? h('p', { className: 'operation-diagnostics-warning' }, view.warning) : null
     ),
     h('details', null,
-      h('summary', null, 'Timing and ownership'),
-      view.currentElapsedMs !== null ? h('p', null, 'Current phase elapsed: ',
+      h('summary', null, 'Details'),
+      view.currentElapsedMs !== null ? h('p', null, 'Elapsed: ',
         h('span', { 'data-clock-elapsed-start': live ? view.phaseStartedAt : undefined }, diagnosticDuration(view.currentElapsedMs))) : null,
       h('dl', { className: 'operation-diagnostics-facts' }, ...facts.map(([label, value]) => h('div', { key: label },
         h('dt', null, label), h('dd', null, String(value))
       ))),
-      h('strong', null, 'Recorded phase durations'),
+      h('strong', null, 'Phase timing'),
       view.phases.length ? h('ul', { className: 'operation-phase-durations' }, ...view.phases.map((stage, index) => h('li', {
         key: `${stage.phase}:${stage.startedAt ?? 'unknown'}:${index}`
       }, h('span', null, stage.label), h('span', null, diagnosticDuration(stage.durationMs), stage.endedAt === null && stage.durationMs !== null ? ' so far' : ''))))
-        : h('p', null, 'Unknown. This record has no measured phase durations.'),
-      view.phasesTruncated ? h('p', null, 'Some recorded stages were omitted from this bounded timeline.') : null,
-      h('p', null, 'Elapsed time alone does not identify a stall. Missing measurements are shown as unknown.')
+        : h('p', null, 'No phase timing recorded.'),
+      view.phasesTruncated ? h('p', null, 'Some stages omitted.') : null
     )
   );
 }
 
 export function RuntimeBuildIdentity({ runtime, compatibility }) {
   const view = runtimeBuildDiagnostics(runtime, compatibility);
+  const help = `${view.parityReason} Cached parity applies only to the recorded source snapshot; historical events may have used another build.`;
   return h('details', { className: 'operation-diagnostics runtime-build-identity', 'data-runtime-build-identity': '' },
-    h('summary', null, 'Connected runtime (cached): ', view.buildId),
+    h('summary', null, 'Runtime: ', view.buildId),
     h('dl', { className: 'operation-diagnostics-facts' }, ...view.facts.map(([label, value]) => h('div', { key: label },
       h('dt', null, label), h('dd', null, value)
     ))),
-    h('p', null, view.parityReason),
-    h('p', null, 'Cached parity describes the source snapshot at the recorded comparison time. It does not verify every loaded module.'),
-    h('p', null, 'Current connection only. Historical operations may have run on a different build.')
+    h(DiagnosticHelp, { label: 'About runtime details' }, help)
   );
 }

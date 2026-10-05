@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { installDeterministicHostMemory } from './helpers/deterministic-host-memory.mjs';
 import { flushAuditWrites } from '../src/audit.js';
 import { flushLocalAnalytics } from '../src/localAnalytics.js';
 import { isProcessTreeAlive } from '../src/process.ts';
@@ -93,6 +94,8 @@ fs.writeFileSync(configPath, JSON.stringify({
   workspaces: { app: { path: workspace, commands: {}, testCommands: {} } }
 }, null, 2));
 process.env.REL_AI_MCP_CONFIG = configPath;
+// Assume 16 GiB total / 12 GiB available; test cancellation, not host pressure.
+const restoreMemory = installDeterministicHostMemory();
 
 try {
   const { callTool: rawCallTool } = await import('../src/tools.js');
@@ -189,16 +192,20 @@ try {
   assert.equal(cancellationRequestedAudit, true, 'two-phase cancellation must preserve the initial cancellation-request audit event');
   assert.equal(cancellationCommittedAudit, true, 'deferred task cancellation must persist a terminal cancellation audit event after owned work settles');
 } finally {
-  await stopAllManagedProcesses({ stateDir }).catch(() => {});
-  await flushAuditWrites();
-  await flushTaskHistoryPersistence();
-  await flushLocalAnalytics();
-  await repositoryIntelligence.shutdown();
-  resetTaskHistoryCaches();
-  resetToolActivity();
-  if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
-  else process.env.REL_AI_MCP_CONFIG = previousConfig;
-  await fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  try {
+    await stopAllManagedProcesses({ stateDir }).catch(() => {});
+    await flushAuditWrites();
+    await flushTaskHistoryPersistence();
+    await flushLocalAnalytics();
+    await repositoryIntelligence.shutdown();
+    resetTaskHistoryCaches();
+    resetToolActivity();
+    if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;
+    else process.env.REL_AI_MCP_CONFIG = previousConfig;
+    await fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } finally {
+    restoreMemory();
+  }
 }
 
 console.log('Explicit logical-task cancellation is exact, idempotent, terminal, persistent, and preserves partial progress.');
