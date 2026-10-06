@@ -1,8 +1,9 @@
+import { readGitObservation, readExactGitObservations } from '../repo/gitObservation.js';
 import * as crypto from "node:crypto";
 import { runProcess } from "../process.js";
 import { resolveSafePath, isSecretPath } from "../safety.js";
 import { classifyStatusOwnership } from "../repo/gitOps.js";
-import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, formatGitStatus } from "../repo/gitStatus.js";
+import { formatGitStatus } from "../repo/gitStatus.js";
 import { clampNumber } from "./limits.js";
 import { buildSensitiveReview } from "./sensitiveReview.js";
 import { buildUntrackedDiff, normalizePaths, truncateDiff } from './reviewDiff.js';
@@ -24,24 +25,22 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
   // Status must complete before any diff is read. Its canonical NUL-delimited paths
   // define the allowlist and prevent a speculative unscoped diff from ever loading
   // sensitive-file content into process memory.
-  const stat = await runProcess('git', gitStatusArgs(), {
-    cwd: workspace.path,
-    timeout: 30000,
-    maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
-    signal: context.signal
-  }, config);
+  const exactPaths = filterPath ? [filterPath] : taskOwnedPaths;
+  const stat = exactPaths?.length
+    ? await readExactGitObservations(workspace.path, config, exactPaths, { signal: context.signal })
+    : await readGitObservation(workspace.path, config, { signal: context.signal });
   if (stat.exitCode !== 0 || stat.stdoutTruncated) {
-    throw new Error(`git status failed for ${workspace.alias}: ${stat.stderr || (stat.stdoutTruncated ? 'output exceeded internal limit' : stat.exitCode)}`);
+    throw new Error(`Git review observation failed: ${stat.error || stat.stderr || 'output budget exhausted'}`);
   }
   const ownership = classifyStatusOwnership(workspace, config, stat.stdout || '');
-  const workspaceChangedPaths = normalizePaths(ownership.entries.map(entry => entry.path));
+  const workspaceChangedPaths = normalizePaths(ownership.entries.filter(entry => !entry.opaqueDirectory).map(entry => entry.path));
   const scopedPaths = reviewedScope === 'task'
     ? workspaceChangedPaths.filter(file => taskOwnedPaths.includes(file))
     : workspaceChangedPaths;
   const changedPaths = filterPath ? scopedPaths.filter(file => file === filterPath) : scopedPaths;
   const excludedWorkspaceFiles = reviewedScope === 'task'
     ? workspaceChangedPaths.filter(file => !taskOwnedPaths.includes(file))
-    : [];
+    : ownership.entries.filter(entry => entry.opaqueDirectory).map(entry => entry.path);
   const sensitivePaths = [...new Set(changedPaths.filter(item => isSecretPath(item)))];
   if (filterPath && sensitivePaths.length > 0 && !redactSensitive) {
     throw new Error(`Sensitive path review requires redactSensitive:true: ${filterPath}`);
@@ -114,7 +113,7 @@ function resolveReviewFilter(workspace, rawPath, redactSensitive) {
 async function runOrdinaryDiff(workspace, config, staged, paths, pathScoped, signal) {
   if (pathScoped && paths.length === 0) return { stdout: '', stderr: '', exitCode: 0 };
   const args = ['diff', ...(staged ? ['--staged'] : [])];
-  if (paths.length > 0) args.push('--', ...paths);
+  if (paths.length > 0) args.push('--', ...paths.map(file => `:(literal)${file}`));
   return runProcess('git', args, { cwd: workspace.path, timeout: 60000, signal }, config);
 }
 

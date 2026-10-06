@@ -9,7 +9,7 @@ import { isClearlyReadOnlyExec } from '../executionClassification.js';
 import { resolveWorkspace } from '../config.js';
 import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
-import { claimTaskChangedFiles, ensureTaskBaseline } from '../taskIntegrity.ts';
+import { claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths } from '../taskIntegrity.ts';
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { blockWorkspaceMutations, runWorkspaceOperation } from '../workspaceOperationQueue.js';
 import { isProcessTreeAlive } from '../process.ts';
@@ -84,6 +84,9 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
 
       const invokeHandler = async (args, signal = requestSignal) => {
         if (typeof definition?.handler !== 'function') throw new Error(`Tool '${name}' has no executable handler.`);
+        if (executionName === OP.EDIT && workspace && taskId && args?.path && args?.dryRun !== true) {
+          await captureNativeMutationPaths(config, taskId, workspace.alias, [String(args.path)]);
+        }
         if (executionName !== OP.EXEC) timeline.transition('running', { executed: true });
         const handled = await measurePerformancePhase('tool.execution', () => definition.handler(config, args || {}, {
           connector: Boolean(context?.publicHttpOnly),
@@ -95,6 +98,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           signal,
           onOperationPhase: event => timeline.transition(event.phase, event),
           ...(deadlineAtMs > 0 ? { deadlineAtMs } : {}),
+          beforeNativeMutation: workspace && taskId ? paths => captureNativeMutationPaths(config, taskId, workspace.alias, paths) : undefined,
           principal: context?.principal,
 
           transportType: context?.transportType,

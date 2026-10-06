@@ -210,7 +210,7 @@ async function runCoalescedIndexing(workspace, config, databaseFile, state, opti
       state.lastError = null;
       const resourceLease = await acquireHostResource('heavy', workspace.alias, {
         signal: options.signal, timeoutMs: options.indexQueueTimeoutMs,
-        deadlineAtMs: options.deadlineAtMs, reservationBytes: 768 * 1024 ** 2
+        deadlineAtMs: options.deadlineAtMs
       });
       let execution = null;
       try {

@@ -3,6 +3,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { runProcess } from '../process.js';
+import { readGitObservation } from '../repo/gitObservation.js';
 import { executionOutcome } from '../executionOutcome.js';
 
 import { getCurrentTaskAbortSignal } from '../toolActivity.js';
@@ -13,7 +14,7 @@ import { runSpan } from '../telemetry.js';
 import { isReusableDependencyPath } from '../reusableDependencies.js';
 import { createCollectionPathFilter, isPathInside, resolveSafePath } from '../safety.js';
 import { normalizeCommandEnv, normalizeExecutionInvocation, resolveCommandCwd } from '../executionInvocation.js';
-import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, statusMapFromOutput } from '../repo/gitStatus.js';
+import { statusMapFromOutput, parseGitStatus } from '../repo/gitStatus.js';
 import { redactCommandForAudit } from '../commandDisplay.js';
 import { withTaskEphemeralEnvironment } from '../taskEphemeral.ts';
 import { clampNumber } from './limits.js';
@@ -51,13 +52,7 @@ async function readGitStatusMap(workspace, config, signal) {
   // Git's leading status column explicitly so branch output is no longer needed as a
   // whitespace sentinel for records such as " M file.js".
   throwIfAborted(signal);
-  const result = await runProcess('git', gitStatusArgs({ branch: false }), {
-    cwd: workspace.path,
-    timeout: 30000,
-    maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
-    preserveOutputWhitespace: true,
-    signal
-  }, config);
+  const result = await readGitObservation(workspace.path, config, { branch: false, timeoutMs: 350, signal, optional: true });
   throwIfAborted(signal);
   const state = result.spawnError ? 'unavailable'
     : result.stdoutTruncated ? 'output-limit'
@@ -71,16 +66,19 @@ async function readGitStatusMap(workspace, config, signal) {
 function mutationSnapshotResult(workspace, statusOutput) {
   const snapshot = statusMutationSnapshot(workspace, statusOutput);
   const complete = ![...snapshot.values()].some(value => /\0(?:unreadable:|outside)/.test(value));
-  return { snapshot, state: complete ? 'ok' : 'metadata-unreadable' };
+  const opaqueDirectories = snapshot.opaqueDirectories;
+  return { snapshot, state: !complete ? 'metadata-unreadable' : snapshot.allPaths.size > MAX_CHANGED_FILES ? 'partial-path-limit' : opaqueDirectories.length ? 'partial-untracked' : 'ok', opaqueDirectories };
 }
 
 function statusMutationSnapshot(workspace, statusOutput) {
   const root = path.resolve(workspace.path);
   const statuses = statusMapFromOutput(statusOutput);
-  return new Map([...statuses.entries()].map(([file, status]) => [
-    file,
-    `${status}\0${pathMetadataFingerprint(root, file)}`
-  ]));
+  const opaqueDirectories = parseGitStatus(statusOutput).entries.filter(entry => entry.opaqueDirectory).map(entry => entry.path);
+  // Metadata reads are bounded even when Git returns many flat untracked files.
+  const selected = [...statuses.entries()].sort((left, right) => Number(left[1] === '??') - Number(right[1] === '??')).slice(0, MAX_CHANGED_FILES);
+  return Object.assign(new Map(selected.map(([file, status]) => [file, `${status}\0${pathMetadataFingerprint(root, file)}`])), {
+    allPaths: new Set(statuses.keys()), opaqueDirectories
+  });
 }
 
 function pathMetadataFingerprint(root, relativePath) {
@@ -207,15 +205,12 @@ function changedFilesystemFiles(before, after) {
   return boundedChangedFiles(files);
 }
 
-function filesystemCoverage(value) {
-  const { complete, reasons, entryCount, fileCount, elapsedMs } = value;
-  return { complete, reasons, entryCount, fileCount, elapsedMs };
-}
-
 function changedStatusFiles(before, after) {
   if (!before || !after) return { files: [], truncated: false };
   const all = new Set([...before.keys(), ...after.keys()]);
   const files = [...all]
+    .filter(file => (before.has(file) || (!before.allPaths.has(file) && !before.opaqueDirectories.some(root => file.startsWith(root))))
+      && (after.has(file) || (!after.allPaths.has(file) && !after.opaqueDirectories.some(root => file.startsWith(root)))))
     .filter(file => before.get(file) !== after.get(file))
     .sort((left, right) => left.localeCompare(right));
   return boundedChangedFiles(files);
@@ -277,7 +272,6 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   const trackMutation = context.mutationTrackingRequired !== false;
   const commandSummary = redactCommandForAudit(displayCommand);
   let statusBefore = null;
-  let filesystemBefore = null;
   const mutationTrackingDetails = {};
   if (trackMutation) {
     try {
@@ -286,8 +280,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
         : await readGitStatusMap(workspace, config, signal);
       statusBefore = before.snapshot;
       mutationTrackingDetails.gitBefore = before.state;
-      filesystemBefore = !statusBefore ? await readFilesystemStatusMap(workspace, signal) : null;
-      if (filesystemBefore) mutationTrackingDetails.filesystemBefore = filesystemCoverage(filesystemBefore);
+      mutationTrackingDetails.opaqueDirectoriesBefore = before.opaqueDirectories || [];
     } catch (error) {
       if (!signal?.aborted) throw error;
       const timedOut = executionDeadlineExpired(context, signal);
@@ -370,17 +363,11 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       const after = await readGitStatusMap(workspace, config, signal);
       const statusAfter = after.snapshot;
       mutationTrackingDetails.gitAfter = after.state;
+      mutationTrackingDetails.opaqueDirectoriesAfter = after.opaqueDirectories || [];
       if (statusBefore && statusAfter) {
         changed = changedStatusFiles(statusBefore, statusAfter);
         mutationTracking = 'git';
         mutationUnknown = mutationTrackingDetails.gitBefore !== 'ok' || after.state !== 'ok';
-      } else if (!statusBefore && filesystemBefore) {
-        const filesystemAfter = await readFilesystemStatusMap(workspace, signal);
-        changed = changedFilesystemFiles(filesystemBefore, filesystemAfter);
-        mutationTrackingDetails.filesystemAfter = filesystemCoverage(filesystemAfter);
-        mutationTracking = 'filesystem';
-        mutationUnknown = filesystemBefore.complete !== true || filesystemAfter.complete !== true
-          || mutationTrackingDetails.gitBefore !== 'not-repository' || after.state !== 'not-repository';
       } else {
         changed = { files: [], truncated: false };
         mutationUnknown = true;
@@ -394,7 +381,8 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     }
   }
   if (changed.truncated) mutationUnknown = true;
-  const deadlineTimedOut = executionDeadlineExpired(context, signal);
+  // Optional accounting expiry must never change the physical command outcome.
+  const deadlineTimedOut = result.timedOut === true;
   const timedOut = result.timedOut === true || deadlineTimedOut;
   const cancelled = result.cancelled === true && !deadlineTimedOut;
   const commandSucceeded = result.exitCode === 0 && !timedOut && !cancelled;

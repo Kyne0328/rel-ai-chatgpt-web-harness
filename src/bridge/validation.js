@@ -326,7 +326,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     : cancelled
       ? 'Validation was cancelled; partial results are preserved as evidence.'
       : admissionFailure
-        ? `${executedUnits ? 'Some validation checks' : 'Validation checks'} did not start because host resource admission was blocked. ${admissionFailure.resourceReason || ''} Wait for memory headroom or active work to settle, then retry validation.`
+        ? `${executedUnits ? 'Some validation checks' : 'Validation checks'} did not start because host resource admission was blocked. ${admissionFailure.resourceReason || ''} Wait for an execution slot to become available, then retry validation.`
       : scopeChanged
         ? 'Validation became stale because relevant repository content changed while checks were running.'
         : 'One or more requested validation checks failed; review the failing validation results, correct the checks or code, then rerun validation.';
@@ -348,7 +348,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     ...(admissionFailure ? {
       admissionBlocked: true, errorCode: admissionFailure.errorCode,
       blockedResource: admissionFailure.blockedResource, resourceReason: admissionFailure.resourceReason,
-      retryable: true, resourcePressure: admissionFailure.resourcePressure
+      retryable: true
     } : {}),
     ...(queueTimedOut ? { queueTimedOut: true } : {}),
     validationStatus,

@@ -11,8 +11,7 @@ import { extensionCommandPathEntries } from './extensions/paths.js';
 import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
-import { acquireHostResource, hostResourceDiagnosticSnapshot } from './hostResourceScheduler.js';
-import { estimateProcessReservationBytes } from './hostMemoryPressure.js';
+import { acquireHostResource } from './hostResourceScheduler.js';
 import { clearCurrentMutationProcess, markCurrentMutationProcessUncertain, recordCurrentMutationProcess } from './mutationProcessOwnership.js';
 
 const TASKKILL_EXE = String.raw`C:\Windows\System32\taskkill.exe`;
@@ -73,7 +72,6 @@ interface RunProcessOptions {
   readonly cwd?: string;
   readonly signal?: AbortSignal;
   readonly queueTimeoutMs?: unknown;
-  readonly reservationBytes?: unknown;
   readonly maxOutputBytes?: unknown;
   readonly outputSpillTaskId?: unknown;
   readonly timeout?: unknown;
@@ -450,16 +448,13 @@ async function runProcess(command: string, args: readonly string[] = [], options
   const queueStartedAt = Date.now();
   let resourceLease: ResourceLease | null = null;
   if (resourceClass) {
-    const requiredReservationBytes = Math.max(estimateProcessReservationBytes(command, args, options),
-      Number.isFinite(Number(options.reservationBytes)) ? Number(options.reservationBytes) : 0);
     reportPhase('host-queued');
     try {
       resourceLease = await acquireHostResource(
         resourceClass,
         String(options.resourceOwner || options.cwd || 'global'),
         { signal: options.signal, timeoutMs: options.queueTimeoutMs,
-          deadlineAtMs: options.deadlineAtMs,
-          reservationBytes: requiredReservationBytes }
+          deadlineAtMs: options.deadlineAtMs }
       ) as ResourceLease;
     } catch (error) {
       const queueWaitMs = Date.now() - queueStartedAt;
@@ -469,21 +464,23 @@ async function runProcess(command: string, args: readonly string[] = [], options
           timedOut: isTimeoutAbort(options.signal),
           cancelled: !isTimeoutAbort(options.signal),
           queueTimedOut: isTimeoutAbort(options.signal),
-          admissionDetails: processAdmissionFailure(error, resourceClass, requiredReservationBytes),
+          admissionDetails: processAdmissionFailure(error, resourceClass),
           queueWaitMs
         });
       }
       if (errorCode(error) === 'HOST_RESOURCE_QUEUE_TIMEOUT') {
+        const deadlineAtMs = Number(options.deadlineAtMs);
         return terminalQueueResult({
           error: errorMessage(error),
+          timedOut: Number.isFinite(deadlineAtMs) && deadlineAtMs > 0 && Date.now() >= deadlineAtMs,
           queueTimedOut: true,
-          admissionDetails: processAdmissionFailure(error, resourceClass, requiredReservationBytes),
+          admissionDetails: processAdmissionFailure(error, resourceClass),
           queueWaitMs
         });
       }
       if (errorCode(error) === 'HOST_RESOURCE_QUEUE_FULL') {
         return terminalQueueResult({ error: errorMessage(error),
-          admissionDetails: processAdmissionFailure(error, resourceClass, requiredReservationBytes), queueWaitMs });
+          admissionDetails: processAdmissionFailure(error, resourceClass), queueWaitMs });
       }
       throw error;
     }
@@ -867,25 +864,16 @@ interface ProcessAdmissionFailure {
   readonly blockedResource: string;
   readonly resourceReason: string;
   readonly retryable: true;
-  readonly resourcePressure: Readonly<Record<string, unknown>>;
 }
 
-function processAdmissionFailure(error: unknown, resourceClass: string, requestedReservationBytes: number): ProcessAdmissionFailure {
+function processAdmissionFailure(error: unknown, resourceClass: string): ProcessAdmissionFailure {
   const detail = error && typeof error === 'object' ? error as Record<string, unknown> : {};
-  const pressure = hostResourceDiagnosticSnapshot().pressure;
   return {
     admissionBlocked: true,
     errorCode: errorCode(error),
     blockedResource: String(detail.blockedResource || resourceClass),
-    resourceReason: String(detail.resourceReason || pressure.reason || 'Host resource admission did not complete.').slice(0, 500),
-    retryable: true,
-    resourcePressure: {
-      state: pressure.state, source: pressure.source, sampledAtMs: pressure.sampledAtMs, stale: pressure.stale,
-      physicalAvailableBytes: pressure.physicalAvailableBytes, physicalFloorBytes: pressure.physicalFloorBytes,
-      commitAvailableBytes: pressure.commitAvailableBytes, commitFloorBytes: pressure.commitFloorBytes,
-      commitEnforced: pressure.commitEnforced, reservedBytes: pressure.reservedBytes,
-      requiredReservationBytes: Math.max(Number(pressure.reservationBytes) || 0, requestedReservationBytes)
-    }
+    resourceReason: String(detail.resourceReason || 'Host concurrency admission did not complete.').slice(0, 500),
+    retryable: true
   };
 }
 

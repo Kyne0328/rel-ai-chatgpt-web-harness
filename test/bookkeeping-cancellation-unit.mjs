@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,52 +42,33 @@ const config = {
 const app = { alias: 'app', path: gitWorkspace, commands: {}, testCommands: {} };
 const plain = { alias: 'plain', path: plainWorkspace, commands: {}, testCommands: {} };
 
-function deferred() {
-  let resolve;
-  const promise = new Promise(value => { resolve = value; });
-  return { promise, resolve };
-}
-
 try {
-  // Cancellation during the non-Git pre-exec filesystem snapshot must prevent the
-  // command from starting and must release the mutation lane.
+  // Cancellation during a native Git bookkeeping probe prevents physical execution.
   {
     const controller = new AbortController();
-    const scanStarted = deferred();
-    const releaseScan = deferred();
-    const originalOpendir = fs.promises.opendir;
+    const originalSpawn = childProcess.spawn;
     let intercepted = false;
-    fs.promises.opendir = async function (target, options) {
-      if (!intercepted && path.resolve(String(target)) === path.resolve(plainWorkspace)) {
+    childProcess.spawn = function (command, args, options) {
+      const child = originalSpawn.call(this, command, args, options);
+      if (!intercepted && args?.includes('status') && options.cwd === plainWorkspace) {
         intercepted = true;
-        scanStarted.resolve();
-        await releaseScan.promise;
+        controller.abort(new Error('cancel mutation accounting'));
       }
-      return originalOpendir.call(this, target, options);
+      return child;
     };
+    syncBuiltinESMExports();
     try {
-      const operation = runWorkspaceOperation('plain', () => relaiExec(plain, config, {
+      const cancelled = await runWorkspaceOperation('plain', () => relaiExec(plain, config, {
         executable: process.execPath,
         argv: ['-e', "require('node:fs').writeFileSync('should-not-run.txt','ran')"]
-      }, { signal: controller.signal }), {
-        mode: 'write',
-        scope: 'mutation',
-        taskId: 'pre-scan-cancel'
-      });
-      await scanStarted.promise;
-      controller.abort(new Error('cancel mutation accounting'));
-      releaseScan.resolve();
-      const cancelled = await operation;
-      assert.equal(cancelled.executed, false, 'pre-command accounting cancellation must not start the requested command');
+      }, { signal: controller.signal }), { mode: 'write', scope: 'mutation', taskId: 'pre-probe-cancel' });
+      assert.equal(intercepted, true);
+      assert.equal(cancelled.executed, false);
       assert.equal(cancelled.commandSucceeded, false);
       assert.equal(cancelled.cancelled, true);
-      // The requested command never started, so it cannot have unknown mutations.
       assert.equal(cancelled.mutationUnknown, false);
-      assert.match(cancelled.error || '', /cancel mutation accounting/);
       assert.equal(fs.existsSync(path.join(plainWorkspace, 'should-not-run.txt')), false);
-    } finally {
-      fs.promises.opendir = originalOpendir;
-    }
+    } finally { childProcess.spawn = originalSpawn; syncBuiltinESMExports(); }
 
     const released = await runWorkspaceOperation('plain', async () => 'released', {
       mode: 'write',
@@ -101,19 +83,17 @@ try {
   // mutation attribution as unknown rather than holding the lane.
   {
     const controller = new AbortController();
-    const originalOpendir = fs.promises.opendir;
+    const originalSpawn = childProcess.spawn;
     let rootReads = 0;
-    fs.promises.opendir = async function (target, options) {
-      const entries = await originalOpendir.call(this, target, options);
-      if (path.resolve(String(target)) === path.resolve(plainWorkspace)) {
-        rootReads += 1;
-        if (rootReads === 2) controller.abort(new Error('cancel post mutation accounting'));
-      }
-      return entries;
+    childProcess.spawn = function (command, args, options) {
+      const child = originalSpawn.call(this, command, args, options);
+      if (args?.includes('status') && options.cwd === gitWorkspace && ++rootReads === 2) controller.abort(new Error('cancel post mutation accounting'));
+      return child;
     };
+    syncBuiltinESMExports();
     let result;
     try {
-      result = await runWorkspaceOperation('plain', () => relaiExec(plain, config, {
+      result = await runWorkspaceOperation('app', () => relaiExec(app, config, {
         executable: process.execPath,
         argv: ['-e', "require('node:fs').writeFileSync('post-command.txt','ran')"]
       }, { signal: controller.signal }), {
@@ -122,12 +102,12 @@ try {
         taskId: 'post-scan-cancel'
       });
     } finally {
-      fs.promises.opendir = originalOpendir;
+      childProcess.spawn = originalSpawn; syncBuiltinESMExports();
     }
     assert.equal(result.commandSucceeded, true);
     assert.equal(result.mutationUnknown, true, 'cancelled post-command accounting must report conservative unknown mutation attribution');
     assert.deepEqual(result.changedFiles, []);
-    assert.equal(fs.existsSync(path.join(plainWorkspace, 'post-command.txt')), true);
+    assert.equal(fs.existsSync(path.join(gitWorkspace, 'post-command.txt')), true);
 
     const released = await runWorkspaceOperation('plain', async () => 'released', {
       mode: 'write',

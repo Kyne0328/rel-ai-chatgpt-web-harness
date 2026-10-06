@@ -1,8 +1,8 @@
+import { readGitObservation } from './repo/gitObservation.js';
 import { getCurrentToolActivityContext } from './toolActivity.js';
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { runProcess } from './process.js';
-import { gitStatusArgs, parseGitStatus } from "./repo/gitStatus.js";
+import { parseGitStatus } from "./repo/gitStatus.js";
 import { getStateDir } from './statePaths.js';
 import {
   setStateMeta,
@@ -153,11 +153,7 @@ async function captureBaselineState(workspaceRoot) {
   try {
     // Keep the branch record first so process-output normalization cannot strip
     // the leading status column from records such as " M file.js".
-    const result = await runProcess('git', gitStatusArgs(), {
-      cwd: workspaceRoot,
-      timeout: 15000,
-      maxOutputBytes: 8 * 1024 * 1024
-    });
+    const result = await readGitObservation(workspaceRoot, {}, { timeoutMs: 500 });
     if (result.exitCode !== 0 || result.stdoutTruncated) {
       return { ok: false, files: [], error: String(result.error || result.stderr || result.stdout || `git status exited ${result.exitCode}`).trim() };
     }

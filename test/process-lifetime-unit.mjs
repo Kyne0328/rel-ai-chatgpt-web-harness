@@ -60,7 +60,7 @@ try {
   const finished = await callTool('relai_work', { action: 'finish', workspace: 'app', work_id: first.work_id, summary: 'Finish task-lifetime fixture.' });
   assert.equal(finished.processCleanup.complete, true);
   assert.equal(finished.processCleanup.stopped, 1);
-  assert.deepEqual(ownedReleaseCalls, [{ confirmedStopped: true }], 'only confirmed tree cleanup provides early settling-credit release proof');
+  assert.deepEqual(ownedReleaseCalls, [undefined], 'task cleanup releases its concurrency slot exactly once');
   assert.equal(finished.processCleanup.preservedPersistent, 1);
   assert.equal(isProcessTreeAlive(owned.pid), false);
   assert.equal(isProcessTreeAlive(persistent.pid), true, 'persistent services survive finish');
@@ -154,7 +154,7 @@ try {
   await writeManagedProcess(config, { processId: naturalPersistent.processId, input: 'exit\n' }, { ...ownerContext, taskId: naturalTask.work_id });
   const naturalDeadline = Date.now() + 5000;
   while (!naturalReleaseCalls.length && Date.now() < naturalDeadline) await new Promise(resolve => setTimeout(resolve, 10));
-  assert.deepEqual(naturalReleaseCalls, [{ confirmedStopped: false }], 'natural root exit is not tree proof and retains settling credit');
+  assert.deepEqual(naturalReleaseCalls, [undefined], 'root exit releases the concurrency slot without memory settling credits');
   const natural = await startManagedProcess(workspace, config, {
     ...startArgs, lifecycle: 'task', purpose: 'Natural root exit evidence.',
     argv: ['-e', 'setTimeout(() => process.exit(0), 2000)']

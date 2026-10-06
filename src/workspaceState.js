@@ -1,9 +1,9 @@
+import { readGitObservation } from './repo/gitObservation.js';
 
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { classifyStatusOwnership } from "./repo/gitOps.js";
-import { gitStatusArgs } from "./repo/gitStatus.js";
 import { resolveGitExecutable } from "./gitExecutable.js";
 import { runProcess } from "./process.js";
 
@@ -131,7 +131,7 @@ async function refreshWorkspaceGitState(cacheKey, cached, alias, workspace, conf
       return base;
     }
     const [status, remotes] = await Promise.all([
-      runProcess('git', gitStatusArgs(), { cwd: workspacePath, timeout: 5000, maxOutputBytes: 512 * 1024 }, config),
+      readGitObservation(workspacePath, config, { coalesce: true, maxOutputBytes: 512 * 1024 }),
       runProcess('git', ['remote'], { cwd: workspacePath, timeout: 5000, maxOutputBytes: 128 * 1024 }, config)
     ]);
     const next = { ...base };

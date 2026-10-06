@@ -1,18 +1,15 @@
 import os from 'node:os';
-import { createHostMemoryMonitor, createMemoryAdmissionController } from './hostMemoryPressure.js';
+import { createHostMemoryMonitor } from './hostMemoryPressure.js';
 
 const availableParallelism = Math.max(1, Number(os.availableParallelism?.() || os.cpus().length || 1));
 const DEFAULT_PERSISTENT_PROCESS_LIMIT = Math.min(12, Math.max(4, availableParallelism * 2));
-const DEFAULT_HEAVY_LIMIT = Math.min(4, Math.max(1, Math.floor(availableParallelism / 2)), Math.max(1, Math.floor(os.totalmem() / (2 * 1024 ** 3))));
+const DEFAULT_HEAVY_LIMIT = Math.min(4, Math.max(1, Math.floor(availableParallelism / 2)));
 const DEFAULT_QUEUE_TIMEOUT_MS = 30_000;
 // Queries have their own pool: they must not queue behind builds or command startup.
 const HOST_REPOSITORY_QUERY_LIMIT = configuredLimit('REL_AI_MCP_REPOSITORY_QUERY_LIMIT',
-  Math.min(8, Math.max(2, availableParallelism), Math.max(2, Math.floor(os.totalmem() / (1024 ** 3)))));
+  Math.min(8, Math.max(2, availableParallelism)));
 const HOST_PERSISTENT_PROCESS_LIMIT = configuredLimit('REL_AI_MCP_PERSISTENT_PROCESS_LIMIT', DEFAULT_PERSISTENT_PROCESS_LIMIT);
 const HOST_HEAVY_LIMIT = configuredLimit('REL_AI_MCP_HEAVY_PROCESS_LIMIT', DEFAULT_HEAVY_LIMIT);
-const configuredReservationMb = Number(process.env.REL_AI_MCP_HEAVY_RESERVATION_MB);
-const HOST_HEAVY_RESERVATION_BYTES = (Number.isFinite(configuredReservationMb) && configuredReservationMb > 0
-  ? Math.max(128, Math.min(32768, configuredReservationMb)) : 128) * 1024 ** 2;
 const HOST_PERSISTENT_QUEUE_TIMEOUT_MS = configuredTimeout('REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS', DEFAULT_QUEUE_TIMEOUT_MS);
 const HOST_HEAVY_QUEUE_TIMEOUT_MS = configuredTimeout('REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS', DEFAULT_QUEUE_TIMEOUT_MS);
 
@@ -20,12 +17,11 @@ let ticketSequence = 0;
 
 /**
  * Owner-fair admission with atomic multi-lane acquisition. No ticket holds one
- * lane while waiting for another. The memory gate affects only the heavy lane;
- * repository/control work can still make progress while heavy work is paused.
+ * lane while waiting for another. Only occupied concurrency slots delay work;
+ * host memory measurements never affect execution or queue admission.
  * Leases bound finite operations/startup, not descendant CPU or OS job trees.
  */
 function createFairResourceScheduler(limits = {}, {
-  admission = null,
   onWorkChange = () => {},
   now = Date.now,
   defaultTimeoutMs = DEFAULT_QUEUE_TIMEOUT_MS,
@@ -85,10 +81,9 @@ function createFairResourceScheduler(limits = {}, {
         return false;
       }
     }
-    const decision = admission?.canAdmit(ticket.resources, ticket.options) || { allowed: true };
-    ticket.blockedResource = decision.allowed ? null : ticket.resources.includes('heavy') ? 'heavy' : ticket.primary;
-    ticket.blockedReason = decision.allowed ? null : decision.reason;
-    return decision.allowed;
+    ticket.blockedResource = null;
+    ticket.blockedReason = null;
+    return true;
   }
 
   function admit(ticket) {
@@ -97,16 +92,9 @@ function createFairResourceScheduler(limits = {}, {
     remove(ticket);
     const resources = new Set(ticket.resources);
     for (const resource of resources) lanes.get(resource).active += 1;
-    const releaseReservation = admission?.reserve(ticket.resources, ticket.options) || (() => {});
-    let reservationReleased = false;
-    let releasingAll = false;
     function releaseResource(resource) {
       if (!resources.delete(resource)) return;
       lanes.get(resource).active = Math.max(0, lanes.get(resource).active - 1);
-      if (resource === 'heavy' && !reservationReleased) {
-        reservationReleased = true;
-        releaseReservation({ settleUntilFreshSample: !releasingAll && resources.has('persistent') });
-      }
       pump();
     }
     ticket.resolve({
@@ -115,13 +103,8 @@ function createFairResourceScheduler(limits = {}, {
       owner: ticket.owner,
       waitMs: Math.max(0, now() - ticket.queuedAt),
       releaseResource,
-      release(options = {}) {
-        releasingAll = true;
+      release() {
         for (const resource of [...resources]) releaseResource(resource);
-        if (options?.confirmedStopped === true) {
-          releaseReservation({ confirmedStopped: true });
-          pump();
-        }
       }
     });
   }
@@ -184,7 +167,7 @@ function createFairResourceScheduler(limits = {}, {
       const primary = resources.includes('heavy') ? 'heavy' : resources[0];
       const lane = lanes.get(primary);
       const ticket = {
-        id: ++ticketSequence, primary, resources, owner: ownerKey, options,
+        id: ++ticketSequence, primary, resources, owner: ownerKey,
         signal: options.signal, resolve, reject, queuedAt, deadlineAtMs, timeoutMs,
         queued: true, timer: null, onAbort: null, blockedReason: null
       };
@@ -264,22 +247,13 @@ function configuredTimeout(name, fallback) {
   return positiveTimeout(process.env[name], fallback);
 }
 
-let hostResourceScheduler;
-const hostMemoryMonitor = createHostMemoryMonitor({ onSample: () => {
-  hostMemoryAdmission.diagnostics();
-  hostResourceScheduler?.pump();
-} });
-const hostMemoryAdmission = createMemoryAdmissionController({
-  monitor: hostMemoryMonitor, reservationBytes: HOST_HEAVY_RESERVATION_BYTES
-});
-hostResourceScheduler = createFairResourceScheduler({
+// Diagnostic sampling is explicit and cannot pump or gate an execution queue.
+const hostMemoryMonitor = createHostMemoryMonitor();
+const hostResourceScheduler = createFairResourceScheduler({
+  gitObservation: 2,
   repositoryQuery: HOST_REPOSITORY_QUERY_LIMIT,
   persistent: HOST_PERSISTENT_PROCESS_LIMIT,
   heavy: HOST_HEAVY_LIMIT
-}, {
-  admission: hostMemoryAdmission,
-  onWorkChange: stats => hostMemoryMonitor.setEnabled(
-    stats.heavy.active + stats.heavy.queued > 0 || hostMemoryAdmission.hasPendingSettlements())
 });
 
 function acquireHostResources(resourceClasses, owner, options = {}) {
@@ -303,7 +277,7 @@ function hostResourceStats() {
 function hostResourceDiagnosticSnapshot() {
   return {
     lanes: hostResourceScheduler.stats(),
-    pressure: hostMemoryAdmission.diagnostics(),
+    pressure: { ...hostMemoryMonitor.snapshot(), admissionEnforced: false },
     queues: hostResourceScheduler.diagnostics()
   };
 }

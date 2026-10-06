@@ -1,13 +1,13 @@
+import { taskOwnedChangedFiles } from '../taskIntegrity.ts';
+import { readGitObservation } from '../repo/gitObservation.js';
 import { randomBytes } from 'node:crypto';
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeJsonAtomic } from "../durableState.ts";
-import { runProcess } from "../process.js";
 import { resolveSafePath, fileSha256 } from "../safety.js";
 import { getStateDir } from '../statePaths.js';
 import { appendOperation, makeOperationId } from "../journal.js";
 import { classifyStatusOwnership } from "../repo/gitOps.js";
-import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs } from "../repo/gitStatus.js";
 import { clampNumber } from "./limits.js";
 
 const TIDY_PLAN_TTL_MS = 15 * 60 * 1000;
@@ -83,15 +83,18 @@ function scanUntrackedSessionFiles(workspace, ownership, maxCandidates) {
 }
 
 async function readTidyOwnership(workspace, config, taskId = '') {
-  const status = await runProcess("git", gitStatusArgs(), {
-    cwd: workspace.path,
-    timeout: 30000,
-    maxOutputBytes: INTERNAL_STATUS_MAX_BYTES
-  }, config);
+  const status = await readGitObservation(workspace.path, config);
   if (status.exitCode !== 0 || status.stdoutTruncated) {
     throw new Error(`git status failed for ${workspace.alias}: ${status.stderr || (status.stdoutTruncated ? "output exceeded internal limit" : status.exitCode)}`);
   }
-  return classifyStatusOwnership(workspace, config, status.stdout || "", taskId);
+  const known = taskId ? taskOwnedChangedFiles(config, taskId, workspace.alias) : [];
+  let output = status.stdout || '';
+  for (let offset = 0; offset < known.length; offset += 100) {
+    const exact = await readGitObservation(workspace.path, config, { paths: known.slice(offset, offset + 100) });
+    if (exact.exitCode !== 0 || exact.stdoutTruncated) throw new Error('Could not verify exact tidy file ownership.');
+    output += exact.stdout;
+  }
+  return classifyStatusOwnership(workspace, config, output, taskId);
 }
 
 async function workspaceTidyPlan(workspace, config, args = {}) {

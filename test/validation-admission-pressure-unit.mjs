@@ -1,34 +1,13 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import fs from 'node:fs';
-import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { syncBuiltinESMExports } from 'node:module';
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
-import { installDeterministicHostMemory } from './helpers/deterministic-host-memory.mjs';
-
-// Bound the test wait, not the production pressure policy.
+import { installForcedLowHostMemory } from './helpers/forced-low-host-memory.mjs';
 const previousQueueTimeout = process.env.REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS;
 process.env.REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS = '100';
-const restoreMemory = installDeterministicHostMemory();
-const readFile = fsPromises.readFile;
-const execFile = childProcess.execFile;
-const gib = 1024 ** 3;
-os.freemem = () => 0;
-fsPromises.readFile = function (file, ...args) {
-  if (String(file) === '/proc/meminfo') return Promise.resolve('MemTotal: 16777216 kB\nMemAvailable: 0 kB\nCommitted_AS: 1048576 kB\nCommitLimit: 16777216 kB\n');
-  return readFile.call(this, file, ...args);
-};
-childProcess.execFile = function (file, args, options, callback) {
-  if (Array.isArray(args) && args.some(value => String(value).includes('Win32_PerfFormattedData_PerfOS_Memory'))) {
-    queueMicrotask(() => callback(null, JSON.stringify({ AvailableBytes: 0, CommittedBytes: gib, CommitLimit: 16 * gib }), ''));
-    return { kill() { return true; } };
-  }
-  return execFile.call(this, file, args, options, callback);
-};
-syncBuiltinESMExports();
-
+const restoreMemory = installForcedLowHostMemory();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-pressure-'));
 const repo = path.join(root, 'repo');
 fs.mkdirSync(repo);
@@ -49,10 +28,9 @@ const { flushAuditWrites } = await import('../src/audit.js');
 const config = { stateDir: path.join(root, 'state') };
 const workspace = { alias: 'validation-pressure', path: repo, commands: {}, testCommands: {} };
 
+const blockers = [];
 try {
-  await assert.rejects(acquireHostResource('heavy', 'pressure-primer', { timeoutMs: 50 }),
-    error => error.code === 'HOST_RESOURCE_QUEUE_TIMEOUT');
-  assert.equal(hostResourceDiagnosticSnapshot().pressure.state, 'pressured');
+  assert.equal(hostResourceDiagnosticSnapshot().pressure.admissionEnforced, false);
   const readOnly = await relaiVerify(workspace, config, { checks: ['git diff --check'], complete: false });
   assert.equal(readOnly.ok, true, JSON.stringify(readOnly));
   assert.equal(readOnly.results[0].executed, true);
@@ -60,6 +38,12 @@ try {
   assert.equal(readOnly.completedUnits, 1);
   assert.equal(readOnly.validated, true);
 
+  const allowed = await relaiVerify(workspace, config, { checks: ['npm run check'], complete: false });
+  assert.equal(allowed.ok, true, JSON.stringify(allowed));
+  assert.equal(allowed.results[0].executed, true);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'started', 'package commands execute under very low reported RAM');
+  fs.rmSync(marker);
+  for (let i = 0; i < hostResourceDiagnosticSnapshot().lanes.heavy.limit; i++) blockers.push(await acquireHostResource('heavy', 'occupied-slot'));
   const blocked = await relaiVerify(workspace, config, { checks: ['npm run check'], complete: false });
   assert.equal(blocked.ok, false, JSON.stringify(blocked));
   assert.equal(blocked.admissionBlocked, true);
@@ -71,18 +55,18 @@ try {
   assert.equal(blocked.completedUnits, 0);
   assert.equal(blocked.validated, false);
   assert.equal(blocked.blockedResource, 'heavy');
-  assert.equal(blocked.resourcePressure.physicalAvailableBytes, 0);
-  assert.equal(blocked.resourcePressure.requiredReservationBytes, 768 * 1024 ** 2);
-  assert.match(blocked.resourceReason, /memory|physical|headroom/i);
+  assert.equal(blocked.resourcePressure, undefined);
+  assert.match(blocked.resourceReason, /capacity/i);
+  assert.equal(blocked.cancelled, false, 'capacity expiry is not a caller cancellation');
   assert.match(blocked.nextAction, /did not start|retry/i);
   assert.doesNotMatch(blocked.nextAction, /correct the checks or code/i);
-  assert.equal(fs.existsSync(marker), false, 'package hooks must remain gated under low physical memory');
+  assert.equal(fs.existsSync(marker), false, 'commands wait only when all execution slots are occupied');
   const compact = compactCommandResult(blocked.results[0]);
   assert.equal(compact.admissionBlocked, true);
   assert.equal(compact.queueTimedOut, true);
   assert.equal(compact.errorCode, 'HOST_RESOURCE_QUEUE_TIMEOUT');
   assert.equal(compact.blockedResource, 'heavy');
-  assert.equal(compact.resourcePressure.physicalAvailableBytes, 0);
+  assert.equal(compact.resourcePressure, undefined);
   const publicResult = serializeConnectorResult({ publicName: 'relai_validate', action: 'checks',
     operationName: OP.VALIDATE_CHECKS, value: blocked, args: { workspace: workspace.alias } });
   assert.equal(publicResult.admissionBlocked, true);
@@ -92,8 +76,9 @@ try {
   for (const field of ['admissionBlocked', 'queueTimedOut', 'errorCode', 'blockedResource', 'resourceReason', 'resourcePressure']) {
     assert.ok(schema.properties[field], 'validation output schema retains ' + field);
   }
-  console.log('Forced-low-pressure validation: read-only Git runs; npm stays unspawned with admission provenance.');
+  console.log('Very low reported memory permits validation; actual occupied slots still produce explicit queue timeout provenance.');
 } finally {
+  for (const blocker of blockers) blocker.release();
   await flushAuditWrites();
   restoreMemory();
   if (previousQueueTimeout === undefined) delete process.env.REL_AI_MCP_HEAVY_QUEUE_TIMEOUT_MS;

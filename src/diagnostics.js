@@ -68,16 +68,11 @@ function normalizeResourceDiagnostics(value) {
   const memoryKeys = ['sampledAtMs', 'rssBytes', 'heapUsedBytes', 'heapTotalBytes', 'externalBytes', 'arrayBuffersBytes', 'heapLimitBytes'];
   const host = value.host || {};
   const pressure = select(host.pressure, [
-    'state', 'reason', 'physicalTotalBytes', 'physicalAvailableBytes', 'physicalAvailableKind',
-    'commitUsedBytes', 'commitLimitBytes', 'commitAvailableBytes', 'commitEnforced',
-    'source', 'error', 'sampledAtMs', 'ageMs', 'stale', 'sampling', 'reservedBytes',
-    'activeReservations', 'reservationBytes', 'physicalFloorBytes', 'physicalRecoveryBytes',
-    'commitFloorBytes', 'commitRecoveryBytes', 'recoveryCount',
-    'pagesInputPerSecond', 'pageReadsPerSecond', 'pagingMeaning',
-    'settlingReservedBytes', 'settlingReservationCount', 'startupSettlingMs', 'oldestSettlingMs', 'settlingReason'
+    'physicalTotalBytes', 'physicalAvailableBytes', 'physicalAvailableKind',
+    'commitUsedBytes', 'commitLimitBytes', 'commitAvailableBytes',
+    'source', 'error', 'sampledAtMs', 'ageMs', 'stale', 'sampling', 'admissionEnforced',
+    'pagesInputPerSecond', 'pageReadsPerSecond', 'pagingMeaning'
   ]);
-  pressure.recentDecisions = (Array.isArray(host.pressure?.recentDecisions) ? host.pressure.recentDecisions : [])
-    .slice(-20).map(item => select(item, ['atMs', 'state', 'reason']));
   const lanes = Object.fromEntries(Object.entries(host.lanes || {}).slice(0, 10)
     .map(([name, lane]) => [name, select(lane, ['limit', 'active', 'queued', 'queuedOwners'])]));
   const queues = Object.fromEntries(Object.entries(host.queues || {}).slice(0, 10)
@@ -337,12 +332,10 @@ function formatDiagnosticReport(report) {
   if (report.resourceDiagnostics) {
     const { host = {}, node = {}, children = {} } = report.resourceDiagnostics;
     const pressure = host?.pressure || {};
-    lines.push('', 'Host resources (cached admission snapshot):',
-      `  Pressure: ${pressure.state || 'unknown'}; reason: ${pressure.reason || 'unavailable'}; stale: ${pressure.stale !== false}`,
-      `  Physical available bytes: ${diagnosticNumber(pressure.physicalAvailableBytes)}; total bytes: ${diagnosticNumber(pressure.physicalTotalBytes)}`,
-      `  Commit used / limit / available bytes: ${diagnosticNumber(pressure.commitUsedBytes)} / ${diagnosticNumber(pressure.commitLimitBytes)} / ${diagnosticNumber(pressure.commitAvailableBytes)}; enforced: ${pressure.commitEnforced === true}`,
-      `  Reserved bytes: ${diagnosticNumber(pressure.reservedBytes)}; source: ${pressure.source || 'unknown'}; sampled at: ${diagnosticNumber(pressure.sampledAtMs)}; age ms: ${diagnosticNumber(pressure.ageMs)}`);
-    lines.push(`  Startup settling: ${diagnosticNumber(pressure.settlingReservedBytes)} reserved bytes, ${diagnosticNumber(pressure.settlingReservationCount)} reservations; oldest / minimum window ms: ${diagnosticNumber(pressure.oldestSettlingMs)} / ${diagnosticNumber(pressure.startupSettlingMs)}; ${pressure.settlingReason || 'no settling reason reported'}`);
+    lines.push('', 'Host resources (memory readings are diagnostic only):',
+      `  Physical available / total bytes: ${diagnosticNumber(pressure.physicalAvailableBytes)} / ${diagnosticNumber(pressure.physicalTotalBytes)}; commit available bytes: ${diagnosticNumber(pressure.commitAvailableBytes)}`,
+      `  Commit used / limit / available bytes: ${diagnosticNumber(pressure.commitUsedBytes)} / ${diagnosticNumber(pressure.commitLimitBytes)} / ${diagnosticNumber(pressure.commitAvailableBytes)}`,
+      `  Source: ${pressure.source || 'unknown'}; sampled at: ${diagnosticNumber(pressure.sampledAtMs)}; age ms: ${diagnosticNumber(pressure.ageMs)}`);
     lines.push(`  Pages in / disk reads per second: ${diagnosticRate(pressure.pagesInputPerSecond)} / ${diagnosticRate(pressure.pageReadsPerSecond)}; ${pressure.pagingMeaning || 'Paging rates unavailable; a sampled rate does not establish sustained memory thrashing.'}`);
     for (const [name, lane] of Object.entries(host?.lanes || {}).slice(0, 10)) {
       const queue = host?.queues?.[name] || {};

@@ -1,3 +1,5 @@
+import { captureNativeMutationPaths } from './taskIntegrity.ts';
+import { readGitObservation } from './repo/gitObservation.js';
 import fs from 'node:fs';
 import * as path from "node:path";
 import * as crypto from "node:crypto";
@@ -11,7 +13,7 @@ import { resolveBudget } from "./budgetResolver.ts";
 import * as sessionCache from "./sessionCache.js";
 import { relaiGitCommit, relaiGitPush, relaiGitDraftPr, classifyStatusOwnership } from "./repo/gitOps.js";
 import { runProcess } from "./process.js";
-import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs } from "./repo/gitStatus.js";
+import { INTERNAL_STATUS_MAX_BYTES } from "./repo/gitStatus.js";
 import { clampNumber } from "./bridge/limits.js";
 import { relaiVerify } from "./bridge/validation.js";
 import { relaiHttpProbe } from "./bridge/httpProbe.js";
@@ -99,11 +101,7 @@ async function repoSnapshot(workspace: BridgeWorkspace, config: BridgeConfig, ar
 // (non-git workspace, git missing) is silent: the snapshot stays useful without it.
 async function snapshotGitSummary(workspace: BridgeWorkspace, config: BridgeConfig) {
   try {
-    const stat = await runProcess("git", gitStatusArgs(), {
-      cwd: workspace.path,
-      timeout: 5000,
-      maxOutputBytes: INTERNAL_STATUS_MAX_BYTES
-    }, config);
+    const stat = await readGitObservation(workspace.path, config, { coalesce: true });
     if (stat.exitCode !== 0 || stat.stdoutTruncated) return null;
     const ownership = classifyStatusOwnership(workspace, config, stat.stdout || "");
     return {
@@ -614,6 +612,7 @@ function handleWriteDirect(workspace: BridgeWorkspace, config: BridgeConfig, arg
   if (typeof args.content !== "string") throw new Error("Full-file edit requires content as a string containing the entire target file.");
   assertDirectWriteAllowed(relativePath, args.content);
   return performFullFileWrite(workspace, config, relativePath, args.content, {
+    work_id: args.work_id,
     dryRun: Boolean(args.dryRun),
     suppressJournal: args.suppressJournal === true,
     expectedSha256: String(args.expectedSha256 || "").trim()
@@ -669,6 +668,7 @@ function handleWriteCommit(workspace: BridgeWorkspace, config: BridgeConfig, arg
     throw new Error(`Staged edit payload size mismatch for writeId ${writeId}. Abort it and start again.`);
   }
   const result = performFullFileWrite(workspace, config, payload.path, content, {
+    work_id: args.work_id,
     dryRun: Boolean(args.dryRun),
     staged: true,
     writeId,
@@ -839,6 +839,7 @@ function workspaceReplace(workspace: BridgeWorkspace, config: BridgeConfig, args
   };
 
   if (changed && !dryRun) {
+    if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, [safe.relativePath]);
     const write = writeTextFileSafe(workspace.path, safe.relativePath, nextContent);
     const verifiedSha256 = fileSha256(workspace.path, safe.relativePath);
     if (verifiedSha256 !== write.sha256 || verifiedSha256 !== newSha256) {
@@ -903,6 +904,7 @@ function performFullFileWrite(workspace: BridgeWorkspace, config: BridgeConfig, 
   };
 
   if (changed && !dryRun) {
+    if (options.work_id) captureNativeMutationPaths(config, String(options.work_id), workspace.alias, [safe.relativePath]);
     const write = writeTextFileSafe(workspace.path, safe.relativePath, newContent);
     const verifiedSha256 = fileSha256(workspace.path, safe.relativePath);
     if (verifiedSha256 !== write.sha256) {

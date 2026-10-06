@@ -1,5 +1,6 @@
 import { runProcess, summarizeCommand } from "../process.js";
 import { resolveSafePath } from "../safety.js";
+import { literalObservationPaths } from '../repo/gitObservation.js';
 
 // resolveSafePath validates these as filesystem paths, but git reads them as
 // pathspecs: "*" or "." after `--` matches the whole worktree, so a single-file
@@ -11,13 +12,14 @@ function normalizePaths(workspace, paths) {
   if (!Array.isArray(paths) || paths.length === 0) {
     throw new Error('relai_changes action "restore" requires at least one path.');
   }
-  return paths.map((item) => {
+  const selected = paths.map((item) => {
     const relativePath = resolveSafePath(workspace.path, item, { operation: "restore" }).relativePath;
     if (PATHSPEC_MAGIC.test(relativePath) || relativePath === ".") {
       throw new Error(`relai_changes action "restore" requires literal file paths, not patterns: ${relativePath}. Use relai_changes action "reset" to discard the entire workspace after approval.`);
     }
     return relativePath;
   });
+  return literalObservationPaths(workspace.path, selected);
 }
 
 async function relaiRestorePaths(workspace, config, args = {}) {

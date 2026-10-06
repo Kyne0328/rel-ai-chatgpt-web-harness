@@ -10,6 +10,7 @@ interface GitStatusEntry {
   readonly untracked: boolean;
   readonly raw: string;
   readonly owner?: GitStatusOwner;
+  readonly opaqueDirectory?: boolean;
 }
 
 /** Ahead/behind counts are part of the exported Git status contract. */
@@ -30,15 +31,23 @@ interface ParsedGitStatus {
 interface GitStatusArgsOptions {
   readonly branch?: boolean;
   readonly version?: 1 | 2;
+  readonly untracked?: 'normal' | 'all';
+  readonly paths?: readonly string[];
 }
 
 function gitStatusArgs(options: GitStatusArgsOptions = {}): string[] {
+  if (options.untracked === 'all' && (!options.paths?.length || options.paths.length > 200
+    || options.paths.some(file => !file || file.startsWith('/') || /^[A-Za-z]:/.test(file) || file.endsWith('/') || file.includes('\0') || file.split('/').some(part => part === '.' || part === '..' || part === '.git')))) {
+    throw new Error('Untracked-file enumeration requires a bounded file scope.');
+  }
   return [
+    '--no-optional-locks',
     'status',
     options.version === 2 ? '--porcelain=v2' : '--porcelain=v1',
     '-z',
     ...(options.branch === false ? [] : ['--branch']),
-    '--untracked-files=all'
+    `--untracked-files=${options.untracked || 'normal'}`,
+    ...(options.paths?.length ? ['--', ...options.paths.map(file => `:(literal)${file}`)] : [])
   ];
 }
 
@@ -130,6 +139,7 @@ function parsePorcelainV1Z(text: string): ParsedGitStatus {
       indexStatus,
       worktreeStatus,
       untracked: indexStatus === '?' && worktreeStatus === '?',
+      ...(indexStatus === '?' && worktreeStatus === '?' && path.endsWith('/') ? { opaqueDirectory: true } : {}),
       raw: originalPath
         ? `${indexStatus}${worktreeStatus} ${originalPath} -> ${path}`
         : `${indexStatus}${worktreeStatus} ${path}`
@@ -171,6 +181,7 @@ function formatGitStatus(parsed: Pick<ParsedGitStatus, 'branchRaw' | 'entries'> 
 }
 
 function gitStatusEntryPaths(entry: Pick<GitStatusEntry, 'path' | 'originalPath' | 'indexStatus' | 'worktreeStatus'>): string[] {
+  if (entry.path.endsWith('/')) return [];
   return entry.originalPath && (entry.indexStatus === 'R' || entry.worktreeStatus === 'R')
     ? [...new Set([entry.path, entry.originalPath])] : [entry.path];
 }
@@ -178,6 +189,7 @@ function gitStatusEntryPaths(entry: Pick<GitStatusEntry, 'path' | 'originalPath'
 function statusMapFromOutput(output: unknown): Map<string, string> {
   const map = new Map<string, string>();
   for (const entry of parseGitStatus(output).entries) {
+    if (entry.opaqueDirectory) continue;
     const status = `${entry.indexStatus}${entry.worktreeStatus}`;
     map.set(entry.path, status);
     // Both ends of a rename are mutations. Copies retain their source, so do

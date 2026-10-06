@@ -1,0 +1,146 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
+import { readGitObservation } from '../src/repo/gitObservation.ts';
+import { gitStatusArgs, parseGitStatus, statusMapFromOutput } from '../src/repo/gitStatus.ts';
+import { relaiExec } from '../src/bridge/exec.js';
+import { workspaceWrite, workspaceReplace } from '../src/localRepoBridge.ts';
+import { relaiGitCommit, workspaceGitStatus } from '../src/repo/gitOps.ts';
+import { recordTaskIntegrityEvent, readTaskIntegrity, taskCommitOwnership } from '../src/taskIntegrity.ts';
+import { ensureSessionStarted } from '../src/policyResolver.js';
+import { workspaceTidyPlan } from '../src/bridge/tidy.js';
+import { acquireHostResource } from '../src/hostResourceScheduler.js';
+import { relaiRestorePaths } from '../src/bridge/restore.js';
+
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-tiered-git-'));
+const repo = path.join(temp, 'repo');
+fs.mkdirSync(repo);
+const config = { stateDir: path.join(temp, 'state'), workspaces: { fixture: { path: repo, commands: {} } } };
+const workspace = { alias: 'fixture', path: repo };
+const git = (...args) => childProcess.execFileSync(GIT_EXECUTABLE, args, { cwd: repo, encoding: 'utf8', stdio: 'pipe' });
+const event = (taskId, tool, result = {}) => recordTaskIntegrityEvent(config, {
+  taskId, workspace: 'fixture', taskIdentityVersion: 2, tool, ok: true, ...result
+});
+const originalSpawn = childProcess.spawn;
+const probes = [];
+let active = 0;
+let maximum = 0;
+const byRepo = new Map();
+childProcess.spawn = function (command, args, options) {
+  const child = originalSpawn.call(this, command, args, options);
+  if (args?.includes('status')) {
+    probes.push([...args]);
+    active++;
+    maximum = Math.max(maximum, active);
+    const cwd = options.cwd;
+    byRepo.set(cwd, (byRepo.get(cwd) || 0) + 1);
+    assert.equal(byRepo.get(cwd), 1, 'one native Git status process per repository');
+    child.once('close', () => { active--; byRepo.set(cwd, byRepo.get(cwd) - 1); });
+  }
+  return child;
+};
+syncBuiltinESMExports();
+try {
+  git('init', '-q');
+  git('config', 'user.name', 'Tiered Test');
+  git('config', 'user.email', 'tiered@example.test');
+  fs.mkdirSync(path.join(repo, 'src'));
+  fs.writeFileSync(path.join(repo, 'src', 'app.txt'), 'original\n');
+  git('add', '.');
+  git('commit', '-qm', 'initial');
+  fs.mkdirSync(path.join(repo, 'firmware-extract'));
+  for (let i = 0; i < 2000; i++) fs.writeFileSync(path.join(repo, 'firmware-extract', `file-${i}.txt`), 'user file\n');
+  assert.throws(() => gitStatusArgs({ untracked: 'all' }), /bounded file scope/);
+  const summary = await readGitObservation(repo, config);
+  assert.equal(summary.exitCode, 0);
+  assert.deepEqual(parseGitStatus(summary.stdout).entries.filter(entry => entry.opaqueDirectory).map(entry => entry.path), ['firmware-extract/']);
+  assert.equal(statusMapFromOutput(summary.stdout).has('firmware-extract/'), false);
+  await assert.rejects(readGitObservation(repo, config, { paths: ['firmware-extract'] }), /directory paths/);
+  await assert.rejects(readGitObservation(repo, config, { paths: ['.'] }), /relative file paths/);
+  await assert.rejects(relaiRestorePaths(workspace, config, { paths: ['firmware-extract'] }), /directory paths/);
+
+  await event('native', 'work.begin');
+  await ensureSessionStarted(config, 'fixture', repo, { taskId: 'native' });
+  assert.deepEqual(readTaskIntegrity(config, 'native', 'fixture').baseline.opaqueDirectories, ['firmware-extract/']);
+  const opendir = fs.promises.opendir;
+  fs.promises.opendir = async () => { throw new Error('Unexpected bookkeeping crawl'); };
+  let command;
+  try {
+    command = await relaiExec(workspace, config, { executable: process.execPath,
+      argv: ['-e', "require('node:fs').writeFileSync('firmware-extract/file-0.txt','command output')"] }, { resourceClass: 'light' });
+  } finally { fs.promises.opendir = opendir; }
+  assert.equal(command.commandSucceeded, true);
+  assert.equal(command.timedOut, false);
+  assert.equal(command.mutationUnknown, true);
+  assert.deepEqual(command.changedFiles, [], 'opaque directories are not retroactively claimed');
+  await event('native', 'exec', command);
+  assert.deepEqual(taskCommitOwnership(config, 'native', 'fixture').ownedFiles, []);
+  const blockers = [await acquireHostResource('gitObservation', 'busy-1'), await acquireHostResource('gitObservation', 'busy-2')];
+  try {
+    const start = performance.now();
+    const allowed = await relaiExec(workspace, config, { executable: process.execPath,
+      argv: ['-e', "console.log('completed while Git bookkeeping was busy')"] }, { resourceClass: 'light' });
+    assert.equal(allowed.commandSucceeded, true);
+    assert.equal(allowed.timedOut, false);
+    assert.equal(allowed.mutationUnknown, true);
+    assert.ok(performance.now() - start < 500, 'ordinary execution skips occupied bookkeeping capacity');
+    const head = git('rev-parse', 'HEAD').trim();
+    const refused = await relaiGitCommit(workspace, config, { message: 'blocked observation', paths: ['src/app.txt'] });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /No files were staged or committed/);
+    assert.equal(git('rev-parse', 'HEAD').trim(), head);
+    assert.equal(git('diff', '--cached', '--name-only').trim(), '');
+  } finally { for (const blocker of blockers) blocker.release(); }
+
+  const added = workspaceWrite(workspace, config, { work_id: 'native', path: 'firmware-extract/native.txt', content: 'native output\n' });
+  await event('native', 'edit', added);
+  await event('native', 'validate.checks', { validationStatus: 'passed' });
+  assert.deepEqual(taskCommitOwnership(config, 'native', 'fixture').ownedFiles, ['firmware-extract/native.txt']);
+  const status = await workspaceGitStatus(workspace, config, { work_id: 'native' });
+  assert.ok(status.sessionChangedFiles.includes('firmware-extract/native.txt'));
+  assert.equal(status.sessionChangedFiles.includes('firmware-extract/'), false);
+  const tidy = await workspaceTidyPlan(workspace, config, { work_id: 'native' });
+  assert.deepEqual(tidy.candidates.map(item => item.path), ['firmware-extract/native.txt']);
+  const whole = await relaiGitCommit(workspace, config, { message: 'unsafe broad commit', addAll: true });
+  assert.equal(whole.ok, false);
+  const commit = await relaiGitCommit(workspace, config, { work_id: 'native', message: 'native output', _taskOwnedPaths: ['firmware-extract/native.txt'] });
+  assert.equal(commit.ok, true, JSON.stringify(commit));
+  assert.equal(git('ls-files', 'firmware-extract').trim(), 'firmware-extract/native.txt', 'commit never stages the opaque directory');
+  await event('native', 'publish.commit', { committedFiles: commit.paths });
+  fs.appendFileSync(path.join(repo, 'firmware-extract/native.txt'), 'later user edit\n');
+  const later = workspaceReplace(workspace, config, { work_id: 'native', path: 'firmware-extract/native.txt', oldText: 'native output', newText: 'new native output' });
+  await event('native', 'edit', later);
+  assert.ok(taskCommitOwnership(config, 'native', 'fixture').conflictingFiles.includes('firmware-extract/native.txt'), 'later user changes to a previously committed native file remain protected');
+
+  await event('other', 'work.begin');
+  await ensureSessionStarted(config, 'fixture', repo, { taskId: 'other' });
+  const replaced = workspaceReplace(workspace, config, { work_id: 'other', path: 'firmware-extract/file-1.txt', oldText: 'user file', newText: 'edited file' });
+  await event('other', 'edit', replaced);
+  assert.ok(taskCommitOwnership(config, 'other', 'fixture').conflictingFiles.includes('firmware-extract/file-1.txt'), 'existing user files remain protected');
+  const otherTidy = await workspaceTidyPlan(workspace, config, { work_id: 'other' });
+  assert.equal(otherTidy.candidates.some(item => item.path === 'firmware-extract/file-1.txt'), false);
+
+  const count = probes.length;
+  await Promise.all(Array.from({ length: 6 }, () => readGitObservation(repo, config, { coalesce: true })));
+  assert.equal(probes.length, count + 1, 'simultaneous compatible summaries share one probe');
+  await Promise.all(Array.from({ length: 4 }, () => readGitObservation(repo, config)));
+  const peers = [path.join(temp, 'peer-one'), path.join(temp, 'peer-two')];
+  for (const [i, peer] of peers.entries()) git('worktree', 'add', '-qb', `peer-${i}`, peer);
+  await Promise.all([repo, ...peers].flatMap(directory => Array.from({ length: 3 }, () => readGitObservation(directory, config))));
+  assert.ok(maximum <= 2);
+  for (const args of probes) {
+    if (!args.includes('--untracked-files=all')) continue;
+    const boundary = args.indexOf('--');
+    assert.ok(boundary >= 0 && boundary < args.length - 1);
+    assert.ok(args.slice(boundary + 1).every(file => file.startsWith(':(literal)') && !file.endsWith('/')));
+  }
+  console.log('Tiered Git accounting: opaque trees, command success, native ownership, scoped commit/tidy, coalescing and bounded probes passed.');
+} finally {
+  childProcess.spawn = originalSpawn;
+  syncBuiltinESMExports();
+  fs.rmSync(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}

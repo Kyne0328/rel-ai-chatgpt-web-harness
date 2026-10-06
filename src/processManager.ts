@@ -21,7 +21,6 @@ import { getCurrentTaskAbortSignal, taskError } from './toolActivity.js';
 import { isActiveProcessStatus, isTerminalProcessStatus, normalizeProcessLifecycleStatus } from './runtimeLifecycle.js';
 import { HOST_PERSISTENT_PROCESS_LIMIT, acquireHostResource, acquireHostResources, hostResourceStats, hostResourceDiagnosticSnapshot } from './hostResourceScheduler.js';
 import { publishProcessLifecycleEvent } from './core/lifecycleEvents.ts';
-import { estimateProcessReservationBytes } from './hostMemoryPressure.js';
 import { sanitizeDisplayText } from './taskObservability.js';
 
 type LogStream = 'stdout' | 'stderr';
@@ -125,7 +124,7 @@ interface NodePtyApi {
 
 interface HostResourceLease {
   readonly waitMs: number;
-  release(options?: { confirmedStopped?: boolean }): void;
+  release(): void;
   releaseResource?(resourceClass: string): void;
 }
 
@@ -188,7 +187,7 @@ interface ManagedProcessRecord extends GenericRecord {
   logWritePromises: Record<LogStream, Promise<void>>;
   persistenceFailureHandled: boolean;
   discarded: boolean;
-  hostResourceRelease: ((options?: { confirmedStopped?: boolean }) => void) | null;
+  hostResourceRelease: (() => void) | null;
   queueWaitMs: number;
   lastPtyInputAtMs: number;
   lastPtyOutputAtMs: number;
@@ -367,12 +366,9 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     60_000,
     DEFAULT_PROCESS_COORDINATION_TIMEOUT_MS
   );
-  const startupReservationBytes = estimateProcessReservationBytes(invocation.processExecutable, invocation.processArgv, {
-    persistent: true, commandString: invocation.command || ''
-  });
   const coordinationController = new AbortController();
   const coordinationTimer = setTimeout(() => {
-    coordinationController.abort(processCoordinationTimeoutError(coordinationTimeoutMs, startupReservationBytes));
+    coordinationController.abort(processCoordinationTimeoutError(coordinationTimeoutMs));
   }, coordinationTimeoutMs);
   coordinationTimer.unref?.();
   const coordinationSignal = combineAbortSignals(admissionSignal, coordinationController.signal);
@@ -501,8 +497,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       try {
         await retireIdleInteractivePtysForCapacity(config);
         resourceLease = await acquireHostResources(['persistent', 'heavy'], workspace.alias, {
-          signal: coordinationSignal,
-          reservationBytes: startupReservationBytes
+          signal: coordinationSignal
         });
         startupReservation.release = () => resourceLease.releaseResource?.('heavy');
         clearTimeout(coordinationTimer);
@@ -514,7 +509,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
           throw cancellationError('Managed process startup was cancelled while waiting for host capacity.');
         }
         if (errorCode(error) === 'HOST_RESOURCE_QUEUE_TIMEOUT') {
-          const blocker = managedStartupBlocker(startupReservationBytes);
+          const blocker = managedStartupBlocker();
           const stats = blocker.stats;
           throw Object.assign(
             new Error(`Managed process startup for '${workspace.alias}' remained queued. ${blocker.message}`),
@@ -1486,12 +1481,11 @@ function managedProcessCoordinationAbortError(signal: AbortSignal, message: stri
   return cancellationError(message);
 }
 
-function managedStartupBlocker(reservationBytes: number) {
+function managedStartupBlocker() {
   const diagnostic = asRecord(hostResourceDiagnosticSnapshot());
   const lanes = asRecord(diagnostic.lanes);
   const persistent = asRecord(lanes.persistent);
   const heavy = asRecord(lanes.heavy);
-  const pressure = asRecord(diagnostic.pressure);
   const queues = asRecord(diagnostic.queues);
   if (Number(persistent.active) >= Number(persistent.limit) && Number(persistent.limit) > 0) {
     return { resource: 'persistent', stats: persistent, message: 'Persistent process capacity remained full. Stop an owned persistent process or wait for one to exit before retrying.' };
@@ -1499,28 +1493,14 @@ function managedStartupBlocker(reservationBytes: number) {
   if (Number(heavy.active) >= Number(heavy.limit) && Number(heavy.limit) > 0) {
     return { resource: 'heavy', stats: heavy, message: 'Heavy-work capacity is full. Wait for an active build, test, or startup to settle before retrying.' };
   }
-  if (pressure.state === 'pressured') {
-    return { resource: 'heavy', stats: heavy, message: String(pressure.reason || 'Host memory pressure is blocking startup.') + ' Wait for memory headroom to recover.' };
-  }
-  const reservedBytes = Number(pressure.reservedBytes || 0);
-  if (pressure.physicalAvailableBytes != null && pressure.stale !== true
-    && Number(pressure.physicalAvailableBytes) - reservedBytes - reservationBytes < Number(pressure.physicalFloorBytes)) {
-    return { resource: 'heavy', stats: heavy, message: `Physical memory headroom cannot accommodate the estimated ${Math.ceil(reservationBytes / (1024 * 1024))} MiB startup reservation while retaining the protected margin. Wait for memory headroom to recover.` };
-  }
-  if (pressure.commitEnforced === true && pressure.commitAvailableBytes != null && pressure.stale !== true
-    && Number(pressure.commitAvailableBytes) - reservedBytes - reservationBytes < Number(pressure.commitFloorBytes)) {
-    return { resource: 'heavy', stats: heavy, message: 'The startup reservation would consume protected system commit headroom. Wait for commit headroom to recover.' };
-  }
   const queuedReason = String(asRecord(queues.heavy).blockedReason || '');
   if (queuedReason) return { resource: 'heavy', stats: heavy, message: queuedReason };
-  if (pressure.state === 'unknown') {
-    return { resource: 'heavy', stats: heavy, message: String(pressure.reason || 'Host memory metrics are unavailable; startup remains conservatively queued.') };
-  }
+
   return { resource: 'coordination', stats: heavy, message: 'Another process startup or resource coordination step is still settling. Retry after it finishes.' };
 }
 
-function processCoordinationTimeoutError(timeoutMs: number, reservationBytes = 0): Error {
-  const blocker = managedStartupBlocker(reservationBytes);
+function processCoordinationTimeoutError(timeoutMs: number): Error {
+  const blocker = managedStartupBlocker();
   return Object.assign(
     new Error(`Managed process startup coordination exceeded ${timeoutMs}ms. ${blocker.message}`),
     { code: 'PROCESS_START_COORDINATION_TIMEOUT', retryable: true, blockedResource: blocker.resource }
@@ -1683,8 +1663,7 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
 function releaseManagedProcessResource(record: ManagedProcessRecord): void {
   const release = record?.hostResourceRelease;
   record.hostResourceRelease = null;
-  // Root exit alone cannot clear a persistent startup's settling credit.
-  try { release?.({ confirmedStopped: record.terminationConfirmed === true }); } catch {}
+  try { release?.(); } catch {}
 }
 
 function interactivePtyIdleRetireMs(): number {

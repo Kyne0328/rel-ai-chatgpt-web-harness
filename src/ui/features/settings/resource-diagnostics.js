@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { StatusPill } from '../../components/pill.js';
 
 const h = React.createElement;
-const LANE_LABELS = Object.freeze({ heavy: 'Heavy commands and checks', repositoryQuery: 'Repository queries', persistent: 'Persistent processes' });
+const LANE_LABELS = Object.freeze({ gitObservation: 'Git status checks', heavy: 'Heavy commands and checks', repositoryQuery: 'Repository queries', persistent: 'Persistent processes' });
 
 export function ResourceDiagnostics({ resources = {}, onRefresh }) {
   const [refreshing, setRefreshing] = useState(false);
@@ -13,10 +13,9 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
   const trend = node.trend || {};
   const fileReadCache = resources?.caches?.fileReads || {};
   const stale = pressure.stale !== false;
-  const state = stale ? 'unknown' : pressure.state || 'unknown';
-  const stateLabel = state === 'normal' ? 'Normal pressure' : state === 'pressured' ? 'Memory pressure' : 'Pressure unknown';
+  const state = !stale && known(pressure.physicalAvailableBytes) ? 'normal' : 'unknown';
+  const stateLabel = state === 'normal' ? 'Memory readings available' : 'Memory readings unavailable';
   const lanes = Object.entries(host.lanes || {}).slice(0, 10);
-  const decisions = Array.isArray(pressure.recentDecisions) ? pressure.recentDecisions.slice(-10).reverse() : [];
   const refresh = async () => {
     if (refreshing || !onRefresh) return;
     setRefreshing(true);
@@ -32,7 +31,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
     ),
     h('div', { className: 'card-body resource-diagnostics-body' },
       h('p', { className: 'resource-diagnostics-reason', role: 'status' },
-        pressure.reason || 'No host pressure sample is available.',
+        'Memory readings are informational.',
         stale ? ' Host measurements are stale or unavailable.' : ''),
       h('dl', { className: 'resource-diagnostics-metrics' },
         metric('Available physical memory', bytes(pressure.physicalAvailableBytes)),
@@ -51,23 +50,16 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
       h('details', { className: 'resource-diagnostics-details', 'data-resource-technical': '' },
         h('summary', null, 'Technical resource details'),
       h('p', { className: 'resource-diagnostics-note' },
-        `Source: ${pressure.source || 'unknown'} · ${sampleAge(pressure.ageMs)} · ${pressure.commitEnforced === true ? 'Commit admission enforced' : 'Commit admission unavailable'}`,
+        `Source: ${pressure.source || 'unknown'} · ${sampleAge(pressure.ageMs)}`,
         pressure.error ? ` · ${pressure.error}` : ''),
       h('dl', { className: 'resource-diagnostics-metrics' },
         metric('Available physical memory', bytes(pressure.physicalAvailableBytes)),
         metric('Total physical memory', bytes(pressure.physicalTotalBytes)),
         metric('Commit used / limit', `${bytes(pressure.commitUsedBytes)} / ${bytes(pressure.commitLimitBytes)}`),
         metric('Commit headroom', bytes(pressure.commitAvailableBytes)),
-        metric('Reserved for active and settling work', bytes(pressure.reservedBytes)),
-        metric('Minimum heavy-work reservation', bytes(pressure.reservationBytes)),
-        metric('Startup bytes awaiting resample', bytes(pressure.settlingReservedBytes)),
-        metric('Startup reservations settling', count(pressure.settlingReservationCount)),
-        metric('Oldest settling / minimum window', `${milliseconds(pressure.oldestSettlingMs)} / ${milliseconds(pressure.startupSettlingMs)}`),
         metric('Pages read in / second', rate(pressure.pagesInputPerSecond)),
-        metric('Page disk reads / second', rate(pressure.pageReadsPerSecond)),
-        metric('Physical / commit reserve floor', `${bytes(pressure.physicalFloorBytes)} / ${bytes(pressure.commitFloorBytes)}`)
+        metric('Page disk reads / second', rate(pressure.pageReadsPerSecond))
       ),
-      pressure.settlingReservationCount > 0 || pressure.settlingReservedBytes > 0 ? h('p', { className: 'resource-diagnostics-note' }, pressure.settlingReason || 'Startup work has released its slot. Its memory estimate remains reserved until a fresh host sample covers the settling window.') : null,
       h('p', { className: 'resource-diagnostics-note' }, pressure.pagingMeaning || 'Paging rates are unavailable. A sampled rate alone does not establish sustained memory thrashing.'),
       h('details', { className: 'resource-diagnostics-details' },
         h('summary', null, 'Current Node process memory'),
@@ -99,12 +91,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
           : h('p', { className: 'resource-diagnostics-note' }, 'Trend unavailable: at least three successful samples spanning ten seconds are required.'),
         h('p', { className: 'resource-diagnostics-note' }, `Full process-family memory: unmeasured. ${resources?.children?.reason || 'No process-family memory probe is run by this snapshot.'}`)
       ),
-      h(ManagedRootMemory, { snapshot: resources?.managedRoots }),
-      decisions.length ? h('details', { className: 'resource-diagnostics-details' },
-        h('summary', null, 'Recent pressure decisions'),
-        h('ul', { className: 'resource-diagnostics-decisions' }, decisions.map((decision, index) => h('li', { key: `${decision.atMs}:${index}` },
-          h('time', null, sampleTime(decision.atMs)), h('span', null, `${decision.state || 'unknown'}: ${decision.reason || 'No reason supplied'}`))))
-      ) : null
+      h(ManagedRootMemory, { snapshot: resources?.managedRoots })
       )
     )
   );

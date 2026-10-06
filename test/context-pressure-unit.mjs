@@ -12,7 +12,7 @@ const restoreMemory = installForcedLowHostMemory();
 const { repositoryIntelligence } = await import('../src/repository/intelligence/service.js');
 const { repositoryIndexPath, openIndexDatabase, ensureIndexSchema, beginGeneration, finishGeneration } = await import('../src/repository/intelligence/database.js');
 const { repositoryQueryWorkerStats } = await import('../src/repository/intelligence/queryWorkerClient.js');
-const { hostResourceDiagnosticSnapshot } = await import('../src/hostResourceScheduler.js');
+const { hostResourceDiagnosticSnapshot, acquireHostResource } = await import('../src/hostResourceScheduler.js');
 const evidence = [];
 
 function fixture(name, cached = false) {
@@ -33,6 +33,7 @@ function fixture(name, cached = false) {
   return { directory, workspace, config, configPath };
 }
 
+const blockers = [];
 try {
   const missing = fixture('missing');
   const before = hostResourceDiagnosticSnapshot();
@@ -50,9 +51,10 @@ try {
   assert.equal(repositoryQueryWorkerStats().liveWorkerCount, 0);
 
   const cached = fixture('cached', true);
+  for (let i = 0; i < hostResourceDiagnosticSnapshot().lanes.repositoryQuery.limit; i++) blockers.push(await acquireHostResource('repositoryQuery', 'occupied-query-slot'));
   const pending = repositoryIntelligence.cachedSummary(cached.workspace, cached.config, { optional: true, cachedLookupBudgetMs: 120 });
   await new Promise(resolve => setTimeout(resolve, 30));
-  assert.equal(hostResourceDiagnosticSnapshot().pressure.state, 'pressured');
+  assert.equal(hostResourceDiagnosticSnapshot().pressure.admissionEnforced, false);
   assert.equal(hostResourceDiagnosticSnapshot().lanes.repositoryQuery.queued, 1);
   const deferred = await pending;
   assert.equal(deferred.available, false);
@@ -61,7 +63,7 @@ try {
   assert.ok(deferred.elapsedMs < 600);
   assert.equal(hostResourceDiagnosticSnapshot().lanes.heavy.queued, 0, 'optional budget expiry must remove its heavy ticket');
   assert.equal(hostResourceDiagnosticSnapshot().lanes.repositoryQuery.queued, 0);
-  assert.equal(repositoryQueryWorkerStats().liveWorkerCount, 0, 'pressure must prevent a query worker from spawning');
+  assert.equal(repositoryQueryWorkerStats().liveWorkerCount, 0, 'occupied query slots prevent a worker from spawning');
   for (let i = 0; i < 5; i += 1) {
     const retry = await repositoryIntelligence.cachedContext(cached.workspace, cached.config, { optional: true });
     assert.equal(retry.reason, 'cached_lookup_backoff', 'repeated optional requests must not churn worker startup');
@@ -79,7 +81,11 @@ try {
   assert.equal(hostResourceDiagnosticSnapshot().lanes.repositoryQuery.queued, 0);
   await assert.rejects(repositoryIntelligence.cachedSummary(missing.workspace, missing.config, { optional: true, signal: controller.signal }), error => error === reason);
   evidence.push({ phase: 'forced-low-service', missing: absent, existing: deferred, workers: repositoryQueryWorkerStats().liveWorkerCount });
+  for (const blocker of blockers.splice(0)) blocker.release();
+  const ready = await repositoryIntelligence.cachedSummary(cancelled.workspace, cancelled.config, { queryTimeoutMs: 5000 });
+  assert.equal(ready.available, true, 'cached repository queries execute despite very low reported memory');
 } finally {
+  for (const blocker of blockers) blocker.release();
   await repositoryIntelligence.shutdown();
   restoreMemory();
 }
@@ -111,9 +117,12 @@ try {
       assert.ok(context.payload.bootstrap, 'Tiny context must finish without leaving the client with only a pending receipt: ' + JSON.stringify(context));
       assert.equal(context.payload.bootstrap.mode, 'compact');
       assert.equal(Number.isInteger(context.payload.bootstrap.fileCount), true);
-      assert.equal(context.payload.bootstrap.repositoryIntelligence.available, false);
-      assert.equal(context.payload.bootstrap.repositoryIntelligence.cacheOnly, true);
-      assert.equal(context.payload.bootstrap.repositoryIntelligence.status, mode.endsWith('existing') ? 'deferred' : 'unavailable');
+      if (!mode.endsWith('existing')) assert.equal(context.payload.bootstrap.repositoryIntelligence.available, false);
+      else assert.equal(typeof context.payload.bootstrap.repositoryIntelligence.available, 'boolean');
+      if (!context.payload.bootstrap.repositoryIntelligence.available) {
+        assert.equal(context.payload.bootstrap.repositoryIntelligence.cacheOnly, true);
+        assert.equal(context.payload.bootstrap.repositoryIntelligence.status, mode.endsWith('existing') ? 'deferred' : 'unavailable');
+      }
       assert.ok(context.elapsedMs < 1_000, JSON.stringify(context));
       const read = await rpc('relai_read', { workspace: 'fixture', paths: ['index.js'] });
       assert.equal(read.payload.returnedCount, 1);

@@ -1,8 +1,8 @@
+import { readGitObservation } from './gitObservation.js';
 import * as path from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import { resolveGitExecutable } from '../gitExecutable.js';
-import { runProcess } from '../process.js';
-import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, type ParsedGitStatus } from './gitStatus.ts';
+import { parseGitStatus, type ParsedGitStatus } from './gitStatus.ts';
 
 type GitClientOptions = {
   readonly signal?: AbortSignal;
@@ -33,13 +33,7 @@ async function readGitStatus(baseDir: string, options: GitClientOptions = {}): P
   // Porcelain's branch header already distinguishes unborn HEAD. A second
   // rev-parse both duplicates work and mistakes permission/timeout failures for
   // an unborn repository. Keep this read bounded and use one coherent snapshot.
-  const result = await runProcess('git', gitStatusArgs({ version: 2 }), {
-    cwd: baseDir,
-    timeout: boundedTimeout(options.timeoutMs, 30_000),
-    maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
-    preserveOutputWhitespace: true,
-    ...(options.signal ? { signal: options.signal } : {})
-  });
+  const result = await readGitObservation(baseDir, {}, { version: 2, signal: options.signal, timeoutMs: options.timeoutMs });
   options.signal?.throwIfAborted();
   if (result.exitCode !== 0 || result.stdoutTruncated) {
     const error = new Error(result.stdoutTruncated

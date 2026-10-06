@@ -40,7 +40,7 @@ try {
   restoreHostMemory();
 }
 
-console.log('Host resource scheduling, pressure-aware heavy execution, fairness, timeout, and restart-capacity tests passed.');
+console.log('Host resource scheduling, bounded heavy execution, fairness, timeout, and restart-capacity tests passed.');
 
 async function verifyRoundRobinFairness() {
   const scheduler = createFairResourceScheduler({ heavy: 1 });

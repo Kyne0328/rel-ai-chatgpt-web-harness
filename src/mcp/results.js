@@ -434,8 +434,8 @@ function fitStructuredResult(value, maxBytes) {
 
 function operationNeedsAttention(operation) {
   const result = operation?.result || operation || {};
-  return result.terminationConfirmed === false || result.mutationUnknown === true || result.cleanupPending === true
-    || (Array.isArray(result.results) && result.results.some(item => item?.terminationConfirmed === false || item?.mutationUnknown === true || item?.cleanupPending === true));
+  return result.terminationConfirmed === false || result.cleanupPending === true
+    || (Array.isArray(result.results) && result.results.some(item => item?.terminationConfirmed === false || item?.cleanupPending === true));
 }
 
 function operationPriority(operation, target) {

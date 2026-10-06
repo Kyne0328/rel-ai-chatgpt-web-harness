@@ -56,6 +56,7 @@ export const EVERYDAY_TEST_FILES = [
   "session-cache-byte-budget-unit.mjs",
   "resource-diagnostics-unit.mjs",
   "git-mutation-accounting-unit.mjs",
+  "git-observation-tiered-unit.mjs",
   "extension-conda-prefix-unit.mjs",
   "extension-extraction-failure-unit.mjs",
   "extension-source-concurrency-unit.mjs",

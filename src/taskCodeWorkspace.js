@@ -1,10 +1,11 @@
+import { readGitObservation, readExactGitObservations } from './repo/gitObservation.js';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { resolveWorkspace } from './config.js';
 import { runProcess } from './process.js';
-import { gitStatusArgs, parseGitStatus } from './repo/gitStatus.js';
+import { parseGitStatus } from './repo/gitStatus.js';
 import { collectOptionsFromWorkspace, createCollectionPathFilter, isSecretPath, looksBinary, resolveSafePath } from './safety.js';
 import { readTaskHistorySessionRecord } from './taskHistoryStore.ts';
 import { readTaskIntegrity, taskOwnedChangedFiles } from './taskIntegrity.ts';
@@ -97,7 +98,7 @@ function resolveTaskCodeContext(config, taskIdValue) {
 }
 
 async function listLiveTaskChanges(config, context) {
-  const repositoryChanges = await repositoryChangedEntries(config, context.executionPath);
+  const repositoryChanges = await repositoryChangedEntries(config, context.executionPath, taskOwnedChangedFiles(config, context.taskId, context.taskWorkspaceAlias));
   const ownedChanges = new Set(
     taskOwnedChangedFiles(config, context.taskId, context.taskWorkspaceAlias)
       .map(normalizePath)
@@ -350,13 +351,8 @@ async function readHistoricalTaskDiff(config, context, requestedPath, historical
   };
 }
 
-async function repositoryChangedEntries(config, cwd) {
-  const status = await runProcess('git', gitStatusArgs(), {
-    cwd,
-    timeout: GIT_TIMEOUT_MS,
-    maxOutputBytes: MAX_GIT_OUTPUT_BYTES,
-    preserveOutputWhitespace: true
-  }, config).catch(() => null);
+async function repositoryChangedEntries(config, cwd, paths = []) {
+  const status = await (paths.length ? readExactGitObservations(cwd, config, paths) : readGitObservation(cwd, config, { coalesce: true })).catch(() => null);
   if (!status || status.exitCode !== 0 || status.stdoutTruncated) return [];
   const parsed = parseGitStatus(status.stdout || '');
   return (parsed.entries || []).map(entry => ({

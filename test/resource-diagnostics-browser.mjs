@@ -66,12 +66,11 @@ try {
   await page.goto(`${base}/dashboard?token=${encodeURIComponent(token)}#diagnostics`);
   const panel = page.locator('[data-diagnostic-region="resources"]');
   await panel.waitFor({ state: 'visible' });
-  await page.waitForFunction(() => document.querySelector('[data-diagnostic-region="resources"]')?.textContent.includes('Normal pressure'));
+  await page.waitForFunction(() => document.querySelector('[data-diagnostic-region="resources"]')?.textContent.includes('Memory readings available'));
   assert.equal(await panel.locator('[data-resource-technical]').evaluate(element => element.open), false);
   assert.doesNotMatch(await panel.innerText(), /Minimum heavy-work reservation|Bounded memory observations/);
   await panel.getByText('Technical resource details', { exact: true }).click();
-  assert.match(await panel.innerText(), /Minimum heavy-work reservation/);
-  assert.match(await panel.innerText(), /Startup slot released; memory estimate awaits a fresh host sample/);
+  assert.doesNotMatch(await panel.innerText(), /Minimum heavy-work reservation|Startup slot released/);
   assert.match(await metricText(page, 'Available physical memory'), /4.00 GiB/);
   assert.equal(await metricText(page, 'Pages read in / second'), '12.5');
   assert.equal(await metricText(page, 'Page disk reads / second'), '3.0');
@@ -108,26 +107,26 @@ try {
   }
 
   await refreshTo('stale');
-  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('stale fixture'));
-  assert.match(await panel.innerText(), /Pressure unknown/);
-  assert.doesNotMatch(await panel.innerText(), /Normal pressure/);
+  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('stale or unavailable'));
+  assert.match(await panel.innerText(), /Memory readings unavailable/);
+  assert.doesNotMatch(await panel.innerText(), /Memory readings available/);
   assert.match(await panel.innerText(), /stale or unavailable/);
   assert.match(await panel.innerText(), /Stale sample/);
   assert.equal(await panel.locator('[data-managed-root-id="root-high"]').locator('.resource-diagnostics-metrics > div').filter({ has: page.getByText('Private bytes', { exact: true }) }).locator('dd').innerText(), 'Unknown');
   assert.doesNotMatch(await panel.locator('[data-managed-root-id="root-high"]').innerText(), /128.0 MiB/);
 
   await refreshTo('unknown');
-  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('unknown fixture'));
+  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('Memory readings are informational'));
   assert.equal(await metricText(page, 'Available physical memory'), 'Unknown');
   assert.equal(await metricText(page, 'Commit headroom'), 'Unknown');
   assert.equal(await metricText(page, 'Pages read in / second'), 'Unknown');
-  assert.match(await panel.innerText(), /Commit admission unavailable/);
+  assert.match(await panel.innerText(), /Memory readings are informational/);
   assert.doesNotMatch(await panel.innerText(), /NaN|undefined/);
 
   await refreshTo('pressured');
-  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('pressure fixture'));
-  assert.match(await panel.innerText(), /Memory pressure/);
-  assert.match(await panel.innerText(), /Waiting for memory headroom/);
+  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('Memory readings are informational'));
+  assert.match(await panel.innerText(), /Memory readings available/);
+  assert.doesNotMatch(await panel.innerText(), /Waiting for memory headroom/);
   const quietCount = requestCount;
   await page.waitForTimeout(1_200);
   assert.equal(requestCount, quietCount, 'the resource panel must not start its own polling loop');
@@ -260,7 +259,7 @@ function resourceFixture(state) {
     connection: { token: 'set', tunnelId: 'fixture' },
     connectionState: { publicEndpoint: { status: 'ready' } },
     resourceDiagnostics: {
-      host: { pressure, lanes: { heavy: { active: 1, limit: 2, queued: state === 'pressured' ? 3 : 0 } }, queues: { heavy: { oldestWaitMs: 20_000, blockedReason: state === 'pressured' ? 'Waiting for memory headroom' : '', maxQueued: 32, maxQueuedPerOwner: 8 } } },
+      host: { pressure, lanes: { heavy: { active: 1, limit: 2, queued: state === 'pressured' ? 3 : 0 } }, queues: { heavy: { oldestWaitMs: 20_000, blockedReason: state === 'pressured' ? 'Waiting for an execution slot' : '', maxQueued: 32, maxQueuedPerOwner: 8 } } },
       node: { available: true, scope: 'current-node-process', pid: 123, current: memory, ageMs: 0, samples: [memory], sampling: { intervalMs: 5_000, maxSamples: 60 }, trend: { status: 'observed', sampleCount: 3, durationMs: 10_000, baselineAtMs: now - 10_000, baseline: memory, slopeBytesPerMinute: { rssBytes: 0, heapUsedBytes: 0, externalBytes: 0 } } },
 
       managedRoots: {

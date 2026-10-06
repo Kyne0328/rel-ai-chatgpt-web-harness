@@ -1,8 +1,9 @@
+import { readGitObservation } from './gitObservation.js';
 import { readSessionPolicy } from "../policyResolver.js";
-import { taskOwnedChangedFiles } from "../taskIntegrity.ts";
+import { taskOwnedChangedFiles, taskCommitOwnership, readTaskIntegrity } from "../taskIntegrity.ts";
 import { runProcess, summarizeCommand } from "../process.js";
 import { resolveSafePath, isSecretPath } from "../safety.js";
-import { INTERNAL_STATUS_MAX_BYTES, gitStatusArgs, parseGitStatus, formatGitStatus, gitStatusEntryPaths } from "./gitStatus.js";
+import { INTERNAL_STATUS_MAX_BYTES, parseGitStatus, formatGitStatus, gitStatusEntryPaths } from "./gitStatus.js";
 import type { GitStatusEntry, GitStatusOwner, ParsedGitStatus } from "./gitStatus.ts";
 import { checkGitRepository, readGitStatus } from './gitClient.ts';
 
@@ -69,20 +70,15 @@ function assertPatchUpdateSafe(workspace: RepoWorkspace, _config: RepoConfig, _a
 
 function readBaselineOwnership(workspace: RepoWorkspace, config: RepoConfig, taskId = ''): BaselineOwnership {
   try {
-
     const session = readSessionPolicy(config, workspace.alias, taskId);
-    // Presence of a (non-expired) session file — not presence of a baselineDirty
-    // key — is what marks ownership as knowable. A session that started against a
-    // clean worktree has no baselineDirty entry, but it is still a real session:
-    // everything dirty now is genuinely session-owned.
     if (!session || session.baselineCaptured !== true) return { baselineDirty: [], baselineSource: null, taskId: '' };
+    const integrity = readTaskIntegrity(config, String(taskId || session.taskId || ''), workspace.alias);
     return {
-      baselineDirty: Array.isArray(session.baselineDirty) ? session.baselineDirty : [],
-      baselineSource: "session",
-      taskId: String(session.taskId || '').trim()
+      baselineDirty: [...(Array.isArray(session.baselineDirty) ? session.baselineDirty : []), ...(integrity?.baseline.changedFiles || []), ...(integrity?.baseline.opaqueDirectories || [])],
+      baselineSource: 'session', taskId: String(session.taskId || '').trim()
     };
   } catch (error) {
-    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] session policy read:', error);
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task baseline read:', error);
     return { baselineDirty: [], baselineSource: null, taskId: '' };
   }
 }
@@ -118,12 +114,12 @@ function statusGroups(): StatusGroups {
 
 function statusOwnerForFile(file: string, hasSession: boolean, baselineSet: ReadonlySet<string>): GitStatusOwner {
   if (!hasSession) return "unknown";
-  return baselineSet.has(file) ? "baseline" : "session";
+  return baselineSet.has(file) || [...baselineSet].some(root => root.endsWith("/") && file.startsWith(root)) ? "baseline" : "session";
 }
 
 function recordStatusEntry(groups: StatusGroups, entry: OwnedGitStatusEntry): void {
   groups.entries.push(entry);
-  recordStatusPath(groups, entry.path, entry.owner, entry.untracked);
+  if (!entry.opaqueDirectory) recordStatusPath(groups, entry.path, entry.owner, entry.untracked);
 }
 
 function recordStatusPath(groups: StatusGroups, file: string, owner: GitStatusOwner, untracked: boolean): void {
@@ -148,10 +144,13 @@ function classifyStatusOwnership(workspace: RepoWorkspace, config: RepoConfig, s
   const groups = statusGroups();
   const parsed = isParsedGitStatus(statusOutput) ? statusOutput : parseGitStatus(statusOutput);
 
+  const claimProjection = requestedTaskId || taskId ? taskCommitOwnership(config, String(requestedTaskId || taskId), workspace.alias) : { ownedFiles: [], conflictingFiles: [] };
+  const explicitClaims = new Set(claimProjection.ownedFiles.filter(file => !claimProjection.conflictingFiles.includes(file)));
+  const conflictingClaims = new Set(claimProjection.conflictingFiles);
   for (const parsedEntry of parsed.entries) {
     recordStatusEntry(groups, {
       ...parsedEntry,
-      owner: statusOwnerForFile(parsedEntry.path, hasSession, baselineSet)
+      owner: parsedEntry.opaqueDirectory ? "unknown" : baselineSet.has(parsedEntry.path) ? "baseline" : conflictingClaims.has(parsedEntry.path) ? "unknown" : explicitClaims.has(parsedEntry.path) ? "session" : statusOwnerForFile(parsedEntry.path, hasSession, baselineSet)
     });
     // Display ownership groups follow Git's destination entry. Rename sources
     // are retained separately in the exact dirty/task paths below.
@@ -397,6 +396,20 @@ async function workspaceGitStatus(workspace: RepoWorkspace, config: RepoConfig, 
     parsed = parseGitStatus('');
     statusError = error instanceof Error ? error.message : String(error);
   }
+  const knownPaths = Array.isArray(args._taskOwnedPaths) ? args._taskOwnedPaths.map(String)
+    : args.work_id ? safeTaskOwnedChangedFiles(config, String(args.work_id), workspace.alias) : [];
+  const visiblePaths = new Set(parsed.entries.flatMap(gitStatusEntryPaths));
+  const opaqueRoots = parsed.entries.filter(entry => entry.opaqueDirectory).map(entry => entry.path);
+  const missingPaths = knownPaths.filter(file => statusError || (!visiblePaths.has(file) && opaqueRoots.some(root => file.startsWith(root))));
+  if (missingPaths.length) {
+    const entries = new Map(parsed.entries.map(entry => [entry.path, entry]));
+    for (let offset = 0; offset < missingPaths.length; offset += 100) {
+      const exact = await readGitObservation(workspace.path, config, { paths: missingPaths.slice(offset, offset + 100), signal: args.signal });
+      if (exact.exitCode !== 0 || exact.stdoutTruncated) { statusError = exact.error || exact.stderr || 'Exact Git observation failed.'; break; }
+      for (const entry of parseGitStatus(exact.stdout).entries) entries.set(entry.path, entry);
+    }
+    parsed = { ...parsed, entries: [...entries.values()] };
+  }
   const ownership = classifyStatusOwnership(workspace, config, parsed, args.work_id);
   const taskScoped = Boolean(String(args.work_id || '').trim());
   const sessionChangedFiles = taskScoped ? ownership.sessionTouched : ownership.sessionChanged;
@@ -447,11 +460,20 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
     allowSensitive: authorization.authorizedPaths.has(normalizeGitPath(item))
   }).relativePath))];
   const addAll = workspaceAddAll;
-  const statusRead = workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes });
+  const statusRead = workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes, _taskOwnedPaths: paths });
   statusRead.catch(() => {});
   await repoProbe;
   const statusBefore = await statusRead;
 
+  if (!statusBefore.ok) {
+    return { ok: false, workspace: workspace.alias, message, addAll, paths: [], statusBefore,
+      error: 'Git observation did not establish the selected file state. No files were staged or committed.' };
+  }
+
+  if (addAll && statusBefore.statusEntries.some(entry => entry.opaqueDirectory)) {
+    return { ok: false, workspace: workspace.alias, message, addAll, paths: [], statusBefore,
+      error: 'Untracked directories have incomplete file ownership. Select explicit file paths to commit.' };
+  }
   if (addAll && explicitPaths) {
     return {
       ok: false,
@@ -523,7 +545,7 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
     return runProcess("git", ["read-tree", tree], { cwd: workspace.path, timeout: 60000 }, config);
   };
   if (paths.length > 0) {
-    const add = await runProcess("git", ["add", "--", ...paths], { cwd: workspace.path, timeout: 60000 }, config);
+    const add = await runProcess("git", ["add", "--", ...paths.map(file => `:(literal)${file}`)], { cwd: workspace.path, timeout: 60000 }, config);
     if (add.exitCode !== 0) {
       const indexRestore = await restoreIndex();
       return {
@@ -536,20 +558,20 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
         indexRestored: indexRestore?.exitCode === 0
       };
     }
-    const commit = await runProcess("git", ["commit", "--only", "-m", message, "--", ...paths], {
+    const commit = await runProcess("git", ["commit", "--only", "-m", message, "--", ...paths.map(file => `:(literal)${file}`)], {
       cwd: workspace.path,
       timeout: clampNumber(args.timeoutMs, 1000, 86400000, 120000)
     }, config);
     if (commit.exitCode !== 0) await restoreIndex();
     if (commit.exitCode === 0) {
-      const normalizeIndex = await runProcess("git", ["reset", "--quiet", "HEAD", "--", ...paths], {
+      const normalizeIndex = await runProcess("git", ["reset", "--quiet", "HEAD", "--", ...paths.map(file => `:(literal)${file}`)], {
         cwd: workspace.path,
         timeout: 60000
       }, config);
       if (normalizeIndex.exitCode !== 0) {
         throw new Error(`Commit succeeded but the visible Git index could not be reconciled for the committed paths: ${normalizeIndex.stderr || normalizeIndex.stdout || normalizeIndex.exitCode}`);
       }
-      const stagedSelected = await runProcess("git", ["diff", "--cached", "--name-only", "--", ...paths], {
+      const stagedSelected = await runProcess("git", ["diff", "--cached", "--name-only", "--", ...paths.map(file => `:(literal)${file}`)], {
         cwd: workspace.path,
         timeout: 60000
       }, config);
@@ -653,13 +675,7 @@ async function workspaceDirtyPaths(
   for (let index = 0; index < normalized.length; index += 100) {
     options.signal?.throwIfAborted?.();
     const chunk = normalized.slice(index, index + 100);
-    const status = await runProcess("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ...chunk], {
-      cwd: workspace.path,
-      timeout: 60000,
-      maxOutputBytes: INTERNAL_STATUS_MAX_BYTES,
-      preserveOutputWhitespace: true,
-      ...(options.signal ? { signal: options.signal } : {})
-    }, config);
+    const status = await readGitObservation(workspace.path, config, { paths: chunk, branch: false, signal: options.signal });
     options.signal?.throwIfAborted?.();
     if (status.exitCode !== 0 || status.stdoutTruncated) {
       throw new Error(`Could not inspect task-owned residual workspace state: ${status.stderr || status.stdout || status.exitCode}`);

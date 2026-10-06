@@ -227,7 +227,7 @@ async function case_baseline_tracking_unit() {
   
   const policyResolverSource = fs.readFileSync(new URL('../src/policyResolver.js', import.meta.url), 'utf8');
   assert.doesNotMatch(policyResolverSource, /spawnSync/, 'session baseline capture must never block the MCP event loop');
-  assert.match(policyResolverSource, /await runProcess\('git'/, 'session baseline capture must use the asynchronous process runner');
+  assert.match(policyResolverSource, /await readGitObservation\(/, 'session baseline capture must use the asynchronous process runner');
     const __m10 = await import("../src/localRepoBridge.js");
     const { classifyStatusOwnership } = __m10;
   

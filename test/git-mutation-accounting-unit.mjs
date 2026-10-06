@@ -119,8 +119,8 @@ try {
   const dirtyAgain = await execute(workspace, "require('node:fs').appendFileSync('new café.txt', 'again\\n')");
   assert.deepEqual(dirtyAgain.changedFiles, ['new café.txt']);
   const many = await execute(workspace, "const fs=require('node:fs');for(let i=0;i<205;i++)fs.writeFileSync('new-'+i+'.txt','x')");
-  assert.equal(many.changedFiles.length, 200);
-  assert.equal(many.changedFilesTruncated, true);
+  assert.ok(many.changedFiles.length > 0 && many.changedFiles.length <= 200, 'metadata sampling stays bounded');
+  assert.equal(many.mutationTrackingDetails.gitAfter, 'partial-path-limit');
   assert.equal(many.mutationUnknown, true, 'bounded returned paths must not imply complete ownership');
   git('checkout', '--detach', 'HEAD');
   const detached = await readGitStatus(repo);
@@ -130,9 +130,10 @@ try {
 
   fs.mkdirSync(path.join(plain, 'nested'));
   const outsideCwd = await execute(plainWorkspace, "require('node:fs').writeFileSync('../outside.txt','visible')", { cwd: 'nested' });
-  assert.deepEqual(outsideCwd.changedFiles, ['outside.txt'], 'cwd and context filters do not confine mutations');
-  assert.equal(outsideCwd.mutationTracking, 'filesystem');
-  assert.equal(outsideCwd.mutationUnknown, undefined);
+  assert.deepEqual(outsideCwd.changedFiles, [], 'arbitrary non-Git commands do not trigger discovery crawls');
+  assert.equal(fs.existsSync(path.join(plain, 'outside.txt')), true, 'incomplete accounting does not stop the command');
+  assert.equal(outsideCwd.mutationTracking, 'unavailable');
+  assert.equal(outsideCwd.mutationUnknown, true);
   assert.equal(outsideCwd.mutationTrackingDetails.gitBefore, 'not-repository');
   fs.mkdirSync(path.join(plain, 'build'));
   fs.writeFileSync(path.join(plain, 'build', 'input.txt'), 'ignored input');

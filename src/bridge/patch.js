@@ -1,3 +1,4 @@
+import { captureNativeMutationPaths } from '../taskIntegrity.ts';
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { runProcess, summarizeCommand } from "../process.js";
@@ -55,6 +56,8 @@ async function relaiApplyPatch(workspace, config, args = {}, context = {}) {
   // must report changedFiles:[].
   const hashOf = (rel) => (fs.existsSync(path.join(workspace.path, rel)) ? fileSha256(workspace.path, rel) : null);
   const beforeHashes = new Map(touchedPaths.map((rel) => [rel, hashOf(rel)]));
+  if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, touchedPaths);
+  await context.beforeNativeMutation?.(touchedPaths);
   const apply = await runProcess("git", ["apply", "-"], { cwd: workspace.path, input: patch, timeout: timeoutMs, signal: context.signal }, config);
   const changedFiles = apply.exitCode === 0
     ? touchedPaths.filter((rel) => hashOf(rel) !== beforeHashes.get(rel))
@@ -139,6 +142,8 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, con
   }
   const changedSnapshots = plan.snapshots.filter(snapshot => plan.changedFiles.includes(snapshot.path));
   const changedStates = plan.states.filter(state => plan.changedFiles.includes(state.path));
+  if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, touchedPaths);
+  await context.beforeNativeMutation?.(touchedPaths);
   beginStructuredPatchTransaction(config, workspace, changedSnapshots, changedStates);
   const applied = applyStructuredPlan(workspace, plan);
   if (!applied.ok) {

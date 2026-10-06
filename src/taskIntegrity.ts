@@ -1,10 +1,11 @@
+import { readGitObservation } from './repo/gitObservation.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { resolveWorkspace } from './config.js';
 import { runProcess } from './process.js';
-import { gitStatusArgs, parseGitStatus, gitStatusEntryPaths } from './repo/gitStatus.js';
+import { parseGitStatus, gitStatusEntryPaths } from './repo/gitStatus.js';
 import { readJsonFile } from './durableState.ts';
 import { getStateDir } from './statePaths.js';
 import { setStateMeta, stateDatabasePath, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
@@ -43,6 +44,8 @@ interface RepositoryBaseline {
   head: string;
   unborn: boolean;
   changedFiles: string[];
+  opaqueDirectories?: string[];
+  observationComplete?: boolean;
 }
 
 interface IntegrityAuthority extends Record<string, any> {
@@ -104,6 +107,7 @@ interface RepositoryEventState {
   baseline: RepositoryBaseline | null;
   changedFiles: string[] | null;
   statusOutput?: string;
+  opaqueDirectories?: string[];
 }
 
 class TaskIntegrityError extends Error {
@@ -133,7 +137,7 @@ async function recordTaskIntegrityEvent(config: IntegrityConfig, event: Integrit
     return await withIntegrityTransactionRetry(config, db => {
       if (!taskId) {
         const workspaceState = normalizeWorkspaceState(readWorkspaceRow(db, workspace.alias) || createWorkspaceState(workspace.alias));
-        applyWorkspaceIntegrityEvent(workspaceState, event, repository.changedFiles);
+        applyWorkspaceIntegrityEvent(workspaceState, event, repository.changedFiles, repository.opaqueDirectories);
         writeWorkspaceRow(db, workspace.alias, workspaceState);
         return null;
       }
@@ -151,7 +155,7 @@ async function recordTaskIntegrityEvent(config: IntegrityConfig, event: Integrit
       }
       const ownedWorkspace = resolveWorkspace(config, authority.workspace || workspaceAlias);
       const workspaceState = readWorkspaceRow(db, ownedWorkspace.alias) || createWorkspaceState(ownedWorkspace.alias);
-      const projection = applyIntegrityEvent(authority, workspaceState, ownedWorkspace, event, repository.changedFiles);
+      const projection = applyIntegrityEvent(authority, workspaceState, ownedWorkspace, event, repository.changedFiles, repository.opaqueDirectories);
       writeTaskRow(db, taskId, authority);
       writeWorkspaceRow(db, ownedWorkspace.alias, workspaceState);
       return projection;
@@ -205,7 +209,7 @@ async function captureTaskBaseline(
     authority.baseline = repository.baseline;
     authority.ambientChangedFiles = repository.baseline.changedFiles;
     const state = normalizeWorkspaceState(readWorkspaceRow(db, workspaceAlias) || createWorkspaceState(workspaceAlias));
-    reconcileWorkspaceOwners(state, repository.baseline.changedFiles);
+    reconcileWorkspaceOwners(state, repository.baseline.changedFiles, repository.baseline.opaqueDirectories);
     for (const file of repository.baseline.changedFiles) {
       if (!state.uncommittedOwners[file]?.length) addWorkspaceOwner(state, file, AMBIENT_OWNER);
     }
@@ -256,6 +260,38 @@ function claimTaskChangedFiles(config: IntegrityConfig, taskId: unknown, workspa
   });
 }
 
+// Capture only known native-edit paths beneath an opaque baseline directory.
+function captureNativeMutationPaths(config: IntegrityConfig, taskId: string, workspaceAlias: string, paths: readonly string[]): void {
+  const authority = readTaskIntegrity(config, taskId, workspaceAlias);
+  if (!authority) return;
+  const roots = authority.baseline.opaqueDirectories || [];
+  const dirty = exactPaths(paths).map(file => resolveSafePath(authority.workspacePath, file, { operation: 'write', allowSensitive: true }).relativePath).filter(file => {
+    if (!fs.existsSync(path.resolve(authority.workspacePath, file))) return false;
+    const previous = authority.nativeFileStates?.[file];
+    if (previous) return previous !== nativeFileState(authority.workspacePath, file);
+    return authority.baseline.observationComplete === false || roots.some(root => file.startsWith(root));
+  });
+  if (!dirty.length) return;
+  withIntegrityTransaction(config, db => {
+    const current = readTaskRow(db, taskId);
+    if (!current) return;
+    const state = normalizeWorkspaceState(readWorkspaceRow(db, workspaceAlias) || createWorkspaceState(workspaceAlias));
+    for (const file of dirty) {
+      if (!state.uncommittedOwners[file]?.length) addWorkspaceOwner(state, file, AMBIENT_OWNER);
+    }
+    current.baseline.changedFiles = unique([...current.baseline.changedFiles, ...dirty]);
+    writeTaskRow(db, taskId, current);
+    writeWorkspaceRow(db, workspaceAlias, state);
+  });
+}
+
+function nativeFileState(root: string, file: string): string {
+  try {
+    const stat = fs.lstatSync(resolveSafePath(root, file, { allowSensitive: true }).absolutePath, { bigint: true });
+    return [stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino].join(':');
+  } catch { return 'unavailable'; }
+}
+
 function releaseTaskChangedFiles(config: IntegrityConfig, taskId: unknown, workspaceAlias: unknown, changedFiles: unknown[] = []): OwnershipProjection {
   const owner = clean(taskId);
   const workspace = clean(workspaceAlias);
@@ -283,7 +319,8 @@ function applyIntegrityEvent(
   workspaceState: WorkspaceIntegrityState,
   workspace: Record<string, any>,
   event: IntegrityEvent,
-  repositoryChanged: string[] | null = null
+  repositoryChanged: string[] | null = null,
+  opaqueDirectories: string[] = []
 ): IntegrityProjection {
   const tool = clean(event.tool);
   const timestamp = clean(event.ts) || new Date().toISOString();
@@ -291,7 +328,7 @@ function applyIntegrityEvent(
   const ephemeralChangedFiles = exactEphemeralChangedFiles(event).filter(file => changedFiles.includes(file));
   const mutation = eventMutatedCode(event) && (event.ok !== false || changedFiles.length > 0);
   normalizeWorkspaceState(workspaceState);
-  if (Array.isArray(repositoryChanged)) reconcileWorkspaceOwners(workspaceState, repositoryChanged);
+  if (Array.isArray(repositoryChanged)) reconcileWorkspaceOwners(workspaceState, repositoryChanged, opaqueDirectories);
   if (tool === OP.WORK_BEGIN && Array.isArray(repositoryChanged)) {
     for (const file of exactPaths(repositoryChanged)) {
       if (!workspaceState.uncommittedOwners[file]?.length) addWorkspaceOwner(workspaceState, file, AMBIENT_OWNER);
@@ -307,6 +344,10 @@ function applyIntegrityEvent(
     authority.taskOwnedChangedFiles = unique([...authority.taskOwnedChangedFiles, ...changedFiles]);
     updateEphemeralWorkspaceFiles(authority, workspace, changedFiles, ephemeralChangedFiles, timestamp);
     for (const file of changedFiles) addWorkspaceOwner(workspaceState, file, authority.taskId);
+    if (tool === OP.EDIT) {
+      authority.nativeFileStates ||= {};
+      for (const file of changedFiles.slice(0, 200)) authority.nativeFileStates[file] = nativeFileState(authority.workspacePath, file);
+    }
     authority.lastMutationAt = timestamp;
     authority.lastMutationTool = tool;
     authority.validationResult = authority.validationResult === 'passed' ? 'stale' : authority.validationResult;
@@ -353,13 +394,13 @@ function applyIntegrityEvent(
   return integrityProjection(authority, workspaceState);
 }
 
-function applyWorkspaceIntegrityEvent(workspaceState: WorkspaceIntegrityState, event: IntegrityEvent, repositoryChanged: string[] | null = null): void {
+function applyWorkspaceIntegrityEvent(workspaceState: WorkspaceIntegrityState, event: IntegrityEvent, repositoryChanged: string[] | null = null, opaqueDirectories: string[] = []): void {
   const tool = clean(event.tool);
   const timestamp = clean(event.ts) || new Date().toISOString();
   const changedFiles = exactChangedFiles(event);
   const mutation = eventMutatedCode(event) && (event.ok !== false || changedFiles.length > 0);
   normalizeWorkspaceState(workspaceState);
-  if (Array.isArray(repositoryChanged)) reconcileWorkspaceOwners(workspaceState, repositoryChanged);
+  if (Array.isArray(repositoryChanged)) reconcileWorkspaceOwners(workspaceState, repositoryChanged, opaqueDirectories);
   if (!mutation) return;
   for (const file of changedFiles) addWorkspaceOwner(workspaceState, file, AMBIENT_OWNER);
   workspaceState.generation += 1;
@@ -491,12 +532,7 @@ async function repositoryStateForEvent(
     || Boolean(clean(event?.validationStatus));
   if (!needsChangedFiles) return { baseline: null, changedFiles: null };
   options.signal?.throwIfAborted?.();
-  const statusResult = await runProcess('git', gitStatusArgs(), {
-    cwd: workspace.path,
-    timeout: 30_000,
-    maxOutputBytes: 8 * 1024 * 1024,
-    ...(options.signal ? { signal: options.signal } : {})
-  }, config);
+  const statusResult = await readGitObservation(workspace.path, config, { signal: options.signal, timeoutMs: 500 });
   options.signal?.throwIfAborted?.();
   const statusOutput = statusResult.exitCode === 0 && !statusResult.stdoutTruncated
     ? String(statusResult.stdout || '')
@@ -508,8 +544,9 @@ async function repositoryStateForEvent(
     ? parseGitStatus(statusOutput)
     : { branch: null, unborn: false, entries: [] };
   const entries = Array.isArray(parsed.entries) ? parsed.entries : [];
+  const opaqueDirectories = entries.filter(entry => entry.opaqueDirectory).map(entry => entry.path);
   const changedFiles: string[] = unique(entries.flatMap(gitStatusEntryPaths).map(normalizePath).filter(Boolean)).sort();
-  if (tool !== OP.WORK_BEGIN) return { baseline: null, changedFiles, ...(statusOutput !== undefined ? { statusOutput } : {}) };
+  if (tool !== OP.WORK_BEGIN) return { baseline: null, changedFiles, opaqueDirectories, ...(statusOutput !== undefined ? { statusOutput } : {}) };
   const headResult = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: workspace.path,
     timeout: 30_000,
@@ -520,11 +557,14 @@ async function repositoryStateForEvent(
   const head = headResult.exitCode === 0 && !headResult.stdoutTruncated ? String(headResult.stdout || '').trim() : '';
   return {
     changedFiles,
+    opaqueDirectories,
     ...(statusOutput !== undefined ? { statusOutput } : {}),
     baseline: {
       branch: parsed.branch || '',
       head,
       unborn: parsed.unborn === true || Boolean(parsed.branch && !head),
+      opaqueDirectories,
+      observationComplete: statusOutput !== undefined,
       changedFiles
     }
   };
@@ -552,7 +592,7 @@ function exactCommittedFiles(event: IntegrityEvent): string[] {
 }
 
 function exactPaths(values: unknown): string[] {
-  return unique((Array.isArray(values) ? values : []).map(normalizePath).filter(Boolean));
+  return unique((Array.isArray(values) ? values : []).map(normalizePath).filter(file => file && !file.endsWith('/')));
 }
 
 function deliverableTaskOwnedFiles(authority: IntegrityAuthority | null | undefined): string[] {
@@ -661,7 +701,7 @@ function normalizeWorkspaceState(workspaceState: WorkspaceIntegrityState): Works
 function addWorkspaceOwner(workspaceState: WorkspaceIntegrityState, file: unknown, owner: unknown): void {
   const normalizedFile = normalizePath(file);
   const normalizedOwner = clean(owner);
-  if (!normalizedFile || !normalizedOwner) return;
+  if (!normalizedFile || !normalizedOwner || normalizedFile.endsWith('/')) return;
   workspaceState.uncommittedOwners[normalizedFile] = unique([
     ...(workspaceState.uncommittedOwners[normalizedFile] || []),
     normalizedOwner
@@ -671,16 +711,16 @@ function addWorkspaceOwner(workspaceState: WorkspaceIntegrityState, file: unknow
 function removeWorkspaceOwner(workspaceState: WorkspaceIntegrityState, file: unknown, owner: unknown): void {
   const normalizedFile = normalizePath(file);
   const normalizedOwner = clean(owner);
-  if (!normalizedFile || !normalizedOwner) return;
+  if (!normalizedFile || !normalizedOwner || normalizedFile.endsWith('/')) return;
   const owners = (workspaceState.uncommittedOwners[normalizedFile] || []).filter(value => value !== normalizedOwner);
   if (owners.length) workspaceState.uncommittedOwners[normalizedFile] = owners;
   else delete workspaceState.uncommittedOwners[normalizedFile];
 }
 
-function reconcileWorkspaceOwners(workspaceState: WorkspaceIntegrityState, repositoryChanged: unknown): void {
+function reconcileWorkspaceOwners(workspaceState: WorkspaceIntegrityState, repositoryChanged: unknown, opaqueDirectories: readonly string[] = []): void {
   const dirty = new Set(exactPaths(repositoryChanged));
   for (const file of Object.keys(workspaceState.uncommittedOwners)) {
-    if (!dirty.has(file)) delete workspaceState.uncommittedOwners[file];
+    if (!dirty.has(file) && !opaqueDirectories.some(directory => file.startsWith(directory))) delete workspaceState.uncommittedOwners[file];
   }
   for (const file of dirty) {
     if (!workspaceState.uncommittedOwners[file]?.length) addWorkspaceOwner(workspaceState, file, AMBIENT_OWNER);
@@ -847,6 +887,7 @@ function errorCode(error: unknown): string {
 export {
   TaskIntegrityError,
   claimTaskChangedFiles,
+  captureNativeMutationPaths,
   readTaskIntegrity,
   readWorkspaceIntegrity,
   recordTaskIntegrityEvent,

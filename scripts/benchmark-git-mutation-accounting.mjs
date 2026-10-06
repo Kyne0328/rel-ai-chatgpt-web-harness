@@ -110,10 +110,11 @@ try {
   }
   git('mv', 'src/file-1.txt', 'src/renamed café.txt');
   results.push(await samples('dirty raw porcelain v1', rawStatus));
-  const expectedEntries = files + Math.ceil(files / 10) + 1;
+  const expectedEntries = Math.ceil(files / 10) + 2;
   results.push(await samples('dirty v2 entries + HEAD', async () => {
     const value = await readGitStatus(repo);
     assert.equal(value.entries.length, expectedEntries);
+    assert.ok(value.entries.some(entry => entry.path === 'untracked/' && entry.opaqueDirectory), 'normal summaries collapse the untracked tree');
     assert.ok(value.entries.some(entry => entry.originalPath === 'src/file-1.txt'));
     assert.equal(value.entries.some(entry => entry.path.startsWith('ignored/')), false);
   }));
