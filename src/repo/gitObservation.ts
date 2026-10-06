@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { runProcess, type RunProcessResult } from '../process.ts';
 import { createFairResourceScheduler, acquireHostResource, hostResourceStats } from '../hostResourceScheduler.js';
 import { gitStatusArgs, INTERNAL_STATUS_MAX_BYTES } from './gitStatus.ts';
+import { runWithoutMutationProcessOwnership } from '../mutationProcessOwnership.js';
 
 interface ObservationOptions {
   signal?: AbortSignal | undefined;
@@ -79,8 +80,9 @@ export async function readGitObservation(
         return failedObservation('Git bookkeeping capacity is occupied.');
       }
       globalLease = await acquireHostResource('gitObservation', root, { signal, timeoutMs });
-      const result = await runProcess('git', args, { cwd: root, signal, timeout: timeoutMs,
-        maxOutputBytes, preserveOutputWhitespace: true }, config);
+      const result = await runWithoutMutationProcessOwnership(() => runProcess('git', args, {
+        cwd: root, signal, timeout: timeoutMs, maxOutputBytes, preserveOutputWhitespace: true
+      }, config));
       if (result.executed && (result.timedOut || result.cancelled) && result.terminationConfirmed === false) {
         // Do not create more potentially runaway children while their predecessor
         // remains unconfirmed. Ordinary execution can still proceed without accounting.

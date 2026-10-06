@@ -16,6 +16,12 @@ function runWithMutationProcessOwnership(config, workspace, callback) {
   return ownershipContext.run({ config, workspace: alias }, callback);
 }
 
+// Internal observations must not inherit the mutating command's ownership.
+// This is deliberately a scoped callback, not a public process/tool option.
+function runWithoutMutationProcessOwnership(callback) {
+  return ownershipContext.run(undefined, callback);
+}
+
 function recordCurrentMutationProcess(pidValue) {
   const current = ownershipContext.getStore();
   const pid = Number(pidValue);
@@ -112,5 +118,6 @@ export {
   markCurrentMutationProcessUncertain,
   recordCurrentMutationProcess,
   removeMutationProcessRecord,
+  runWithoutMutationProcessOwnership,
   runWithMutationProcessOwnership
 };

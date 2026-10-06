@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 
 import { runProcess, isProcessTreeAlive, terminateProcessTree } from '../src/process.ts';
 import { assertNoRecoveredMutationProcess } from '../src/tools/execution.js';
+import { readGitObservation } from '../src/repo/gitObservation.ts';
 import {
   listMutationProcessRecords,
   markCurrentMutationProcessUncertain,
@@ -19,6 +21,45 @@ const config = { stateDir: path.join(root, 'state') };
 const workspace = 'repo';
 
 try {
+  if (process.platform === 'win32') {
+    // Reproduce Sagip's race: bookkeeping exits just before its cancellation
+    // reaches the Windows tree terminator. This fixture has no descendants.
+    const probeRoot = path.join(root, 'bookkeeping-probe');
+    fs.mkdirSync(probeRoot);
+    const originalSpawn = childProcess.spawn;
+    const controller = new AbortController();
+    let probePid = 0;
+    childProcess.spawn = function(command, args, options) {
+      if (args?.includes('status') && options?.cwd === probeRoot) {
+        const child = originalSpawn.call(this, process.execPath,
+          ['-e', 'setTimeout(() => process.stdout.write(""), 100)'], options);
+        probePid = child.pid;
+        child.once('exit', () => controller.abort(new DOMException('Bookkeeping deadline raced root exit.', 'TimeoutError')));
+        return child;
+      }
+      return originalSpawn.call(this, command, args, options);
+    };
+    syncBuiltinESMExports();
+    try {
+      await runWithMutationProcessOwnership(config, 'bookkeeping-owner', async () => {
+        const probe = await readGitObservation(probeRoot, config, { signal: controller.signal, timeoutMs: 3000 });
+        assert.equal(probePid > 0, true);
+        assert.equal(probe.rootExitConfirmed, true);
+        assert.equal(probe.terminationConfirmed, false);
+        assert.equal(probe.timedOut, true);
+        assert.deepEqual(listMutationProcessRecords(config, 'bookkeeping-owner'), [],
+          'a timed-out read-only Git observation must never create a workspace mutation quarantine');
+        // Returning from observation must restore the surrounding mutation owner.
+        recordCurrentMutationProcess(probePid);
+        const marker = listMutationProcessRecords(config, 'bookkeeping-owner');
+        assert.equal(marker.length, 1);
+        removeMutationProcessRecord(marker[0]); // Known descendant-free test fixture only.
+      });
+    } finally {
+      childProcess.spawn = originalSpawn;
+      syncBuiltinESMExports();
+    }
+  }
   const result = await runWithMutationProcessOwnership(config, workspace, () => runProcess(
     process.execPath,
     ['-e', 'process.stdout.write("done")'],
