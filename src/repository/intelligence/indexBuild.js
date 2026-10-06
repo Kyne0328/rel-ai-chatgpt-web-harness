@@ -24,15 +24,19 @@ import {
   setIndexParserVersion,
   setIndexProducerVersion
 } from './database.js';
-import { enhancedResolverLanguages, isTestPath, languageForPath, PARSER_VERSION, structuralLanguages } from './languages.js';
+import { enhancedResolverLanguages, isTestPath, languageForPath, lexicalSearchText, PARSER_VERSION, structuralLanguages } from './languages.js';
 import { intelligenceRuntimeFingerprint, intelligenceWorkspaceFingerprint } from './producer.js';
 import { parseSourceFile } from './treeSitter.js';
 import { rebuildZoektIndex } from './zoekt.js';
 
 const DEFAULT_MAX_INDEX_FILES = 100000;
 const MAX_INDEXED_FILE_BYTES = 1024 * 1024;
-const WRITE_BATCH_SIZE = 100;
-const PARSE_CONCURRENCY = 8;
+const WRITE_BATCH_SIZE = 20;
+const PARSE_CONCURRENCY = 2;
+const GENERATED_STRUCTURAL_MIN_BYTES = 64 * 1024;
+const GENERATED_STRUCTURAL_SAMPLE_BYTES = 256 * 1024;
+const GENERATED_STRUCTURAL_AVG_LINE_BYTES = 1024;
+const GENERATED_STRUCTURAL_LANGUAGES = new Set(['javascript', 'typescript', 'tsx', 'css', 'html']);
 const relationshipResolutionCaches = new Map();
 
 async function executeRepositoryIndexJob(job, signal) {
@@ -414,12 +418,43 @@ async function parseCandidate(candidate) {
   }
   if (looksBinary(data)) return { parsed: null, skipped: 'binary' };
   try {
-    const parsed = await parseSourceFile({ relativePath: candidate.path, source: data.toString('utf8') });
+    const source = data.toString('utf8');
+    const parsed = shouldSkipStructuralParsing(candidate, data)
+      ? generatedLexicalResult(candidate.path, candidate.language, source)
+      : await parseSourceFile({ relativePath: candidate.path, source });
     candidate.contentHash ||= crypto.createHash('sha256').update(data).digest('hex');
     return { parsed };
   } catch (error) {
     return { parsed: null, transientError: boundedErrorMessage(error) };
   }
+}
+
+function shouldSkipStructuralParsing(candidate, data) {
+  if (!GENERATED_STRUCTURAL_LANGUAGES.has(String(candidate?.language || ''))) return false;
+  if (!Buffer.isBuffer(data) || data.length < GENERATED_STRUCTURAL_MIN_BYTES) return false;
+  const sampleBytes = Math.min(data.length, GENERATED_STRUCTURAL_SAMPLE_BYTES);
+  let lineBreaks = 0;
+  for (let index = 0; index < sampleBytes; index += 1) {
+    if (data[index] === 10) lineBreaks += 1;
+  }
+  return sampleBytes / Math.max(1, lineBreaks + 1) >= GENERATED_STRUCTURAL_AVG_LINE_BYTES;
+}
+
+function generatedLexicalResult(relativePath, language, source) {
+  return {
+    path: relativePath,
+    language,
+    parser: 'lexical-generated',
+    parseError: false,
+    structuralStatus: 'generated',
+    structuralError: '',
+    symbols: [],
+    occurrences: [],
+    imports: [],
+    relations: [],
+    resolver: null,
+    searchText: lexicalSearchText(relativePath, source, [])
+  };
 }
 
 function indexMetadata(
@@ -449,6 +484,7 @@ function indexMetadata(
     sourceFileCount: stats.fileCount, discoveredFileCount: scan.mode === 'full' ? scan.discoveredFiles : stats.fileCount,
     indexedBytes: stats.indexedBytes, skippedLargeFiles: scan.skippedLargeFiles, collectionSkippedCount: scan.collectionSkippedCount,
     structuralFileCount: stats.structuralFileCount,
+    structuralSkippedGeneratedFileCount: stats.structuralSkippedGeneratedFileCount,
     structuralDegradedFileCount: stats.structuralDegradedFileCount,
     symbolCount: stats.symbolCount,
     occurrenceCount: stats.occurrenceCount,
@@ -466,7 +502,7 @@ function indexMetadata(
     languageIntelligence: { structuralLanguages: structuralLanguages().length, enhancedLanguages: enhancedResolverLanguages() },
     policy: runtimeStale
       ? 'The self-hosted repository intelligence source differs from the connected runtime. Derived graph data is stale until the runtime is restarted; source remains authoritative.'
-      : 'Persistent derived index with worker-isolated parsing, bounded incremental refresh, producer-version invalidation, and periodic full reconciliation. Source remains authoritative.',
+      : 'Persistent derived index with worker-isolated parsing, generated-bundle structural bypass, bounded incremental refresh, producer-version invalidation, and periodic full reconciliation. Source remains authoritative.',
     workspace: workspace.alias
   };
 }

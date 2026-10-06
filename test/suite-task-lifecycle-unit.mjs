@@ -509,7 +509,7 @@ async function case_task_history_storage_unit() {
     const path = __m3.default;
   
     const __m4 = await import("../src/taskHistoryStorage.ts");
-    const { listRecentSessionEvents, listSessionSummaries, listSessions, readSession, resetTaskHistoryCaches, writeSession, writeSessionAsync } = __m4;
+    const { findSessionsContaining, listRecentSessionEvents, listSessionSummaries, listSessions, readSession, resetTaskHistoryCaches, writeSession, writeSessionAsync } = __m4;
   
     const __m5 = await import("../src/stateDatabase.ts");
     const { openStateDatabase, stateDatabasePath, withStateDatabase } = __m5;
@@ -597,6 +597,12 @@ async function case_task_history_storage_unit() {
     assert.equal(recentEvents[0]?.workspace, 'repo');
     assert.equal(recentEvents[0]?.taskId, summaryId);
     assert.equal(recentEvents[0]?.sessionId, summaryId);
+    const projectedSearch = findSessionsContaining(directory, ['Summary remains available.'], { workspace: 'repo', limit: 5 });
+    assert.equal(projectedSearch[0]?.id, summaryId,
+      'task-history search must find summary-projected content without scanning every canonical task payload');
+    const eventIdentitySearch = findSessionsContaining(directory, ['summary-49'], { workspace: 'repo', limit: 5 });
+    assert.equal(eventIdentitySearch[0]?.id, summaryId,
+      'task-history search must preserve event-identity continuity through the event projection');
   
     const corruptId = 'corrupt-summary-row';
     withStateDatabase(config, db => {

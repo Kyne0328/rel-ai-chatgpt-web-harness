@@ -949,6 +949,7 @@ function indexStats(db) {
   const counts = db.prepare(`
     SELECT count(*) AS files, coalesce(sum(size_bytes),0) AS bytes, coalesce(max(mtime_ms),0) AS newest,
            coalesce(sum(CASE WHEN parser='tree-sitter' THEN 1 ELSE 0 END),0) AS structural,
+           coalesce(sum(CASE WHEN parser='lexical-generated' THEN 1 ELSE 0 END),0) AS generated_lexical,
            coalesce(sum(parse_error),0) AS parse_errors
     FROM files
   `).get();
@@ -956,7 +957,8 @@ function indexStats(db) {
   const occurrenceCount = Number(db.prepare('SELECT count(*) AS count FROM occurrences').get().count || 0);
   return {
     fileCount: Number(counts.files || 0), indexedBytes: Number(counts.bytes || 0), newestMtimeMs: Number(counts.newest || 0),
-    structuralFileCount: Number(counts.structural || 0), structuralDegradedFileCount: Number(counts.parse_errors || 0), symbolCount, occurrenceCount
+    structuralFileCount: Number(counts.structural || 0), structuralSkippedGeneratedFileCount: Number(counts.generated_lexical || 0),
+    structuralDegradedFileCount: Number(counts.parse_errors || 0), symbolCount, occurrenceCount
   };
 }
 

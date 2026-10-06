@@ -168,7 +168,7 @@ jobs:
         run: |
           set -euo pipefail
           npm run benchmark:mcp-startup
-          node scripts/repository-intelligence-benchmark.mjs --files 5000 --mutations 50 --json --max-full-ms 30000 --max-incremental-ms 5000 --max-restart-reuse-ms 5000
+          node scripts/repository-intelligence-benchmark.mjs --files 5000 --mutations 50 --generated-bundle-kb 300 --json --max-full-ms 30000 --max-incremental-ms 5000 --max-restart-reuse-ms 5000 --max-peak-rss-growth-mb 384
           xvfb-run --auto-servernum npm run benchmark:observability:strict
       - name: Verify complete frontend browser behavior
         run: xvfb-run --auto-servernum npm run test:frontend

@@ -23,6 +23,12 @@ const workspaceRoot = path.join(root, 'workspace');
 fs.mkdirSync(path.join(workspaceRoot, 'src'), { recursive: true });
 fs.writeFileSync(path.join(workspaceRoot, 'src', 'alpha.js'), 'export function alpha() { return 1; }\n');
 fs.writeFileSync(path.join(workspaceRoot, 'src', 'beta.js'), 'export function beta() { return alpha(); }\n');
+fs.mkdirSync(path.join(workspaceRoot, 'public', 'dashboard-chunks'), { recursive: true });
+fs.writeFileSync(
+  path.join(workspaceRoot, 'public', 'dashboard-chunks', 'generated.js'),
+  `const generatedMarker=1;${'const bundledValue=generatedMarker;'.repeat(5000)}`,
+  'utf8'
+);
 
 const workspace = { alias: 'worker-test', path: workspaceRoot, context: {}, testCommands: {}, commands: {} };
 const config = { stateDir };
@@ -39,7 +45,15 @@ try {
   assert.equal(initial.workerIsolated, true);
   assert.equal(initial.scanMode, 'full');
   assert.equal(initial.runtimeStatus, 'ready');
-  assert.ok(initial.sourceFileCount >= 2);
+  assert.ok(initial.sourceFileCount >= 3);
+  assert.equal(initial.structuralSkippedGeneratedFileCount, 1,
+    'large minified/generated bundles must remain lexically indexed without building structural occurrence graphs');
+  const initialDb = openIndexDatabase(repositoryIndexPath(config, workspace), { readonly: true });
+  try {
+    const generated = initialDb.prepare("SELECT parser FROM files WHERE path='public/dashboard-chunks/generated.js'").get();
+    assert.equal(generated?.parser, 'lexical-generated');
+    assert.equal(Number(initialDb.prepare("SELECT COUNT(*) AS n FROM occurrences o JOIN files f ON f.id=o.file_id WHERE f.path='public/dashboard-chunks/generated.js'").get().n), 0);
+  } finally { initialDb.close(); }
   assert.equal(repositoryIntelligence.status(workspace, config).watching, true,
     'interactive Repository Intelligence should retain live workspace watching');
 

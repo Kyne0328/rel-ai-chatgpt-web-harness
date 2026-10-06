@@ -6,6 +6,7 @@ import { Worker } from 'node:worker_threads';
 import type { TaskDto } from './contracts/tasks.ts';
 import { getStateDir } from './statePaths.js';
 import { setStateMeta, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
+import { TASK_HISTORY_EVENT_SEARCH_SCHEMA_SQL } from './taskHistoryProjectionSchema.ts';
 import { normalizeTaskProgress, sanitizeTaskRecord } from './taskObservability.js';
 import { canonicalizeActivityEvents } from './taskEventIdentity.js';
 import { upsertTaskHistorySession } from './taskHistoryPersistence.ts';
@@ -134,23 +135,47 @@ function findSessionsContaining(directory: string, values: unknown, options: Ses
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
-    const filters = [`(${needles.map(() => 'instr(lower(payload), ?) > 0').join(' OR ')})`];
-    const parameters: Array<string | number> = [...needles];
+    ensureTaskHistoryEventSearchProjection(db);
+    const needleFilters = needles.map(() => `(
+      instr(lower(summary.payload), ?) > 0
+      OR instr(lower(summary.id), ?) > 0
+      OR EXISTS (
+        SELECT 1 FROM task_history_event_search AS event
+        WHERE event.task_id = summary.id
+          AND (
+            instr(event.search_text, ?) > 0
+            OR instr(lower(event.event_key), ?) > 0
+            OR instr(lower(event.session_id), ?) > 0
+          )
+      )
+    )`);
+    const filters = [`(${needleFilters.join(' OR ')})`];
+    const parameters: Array<string | number> = [];
+    for (const needle of needles) parameters.push(needle, needle, needle, needle, needle);
     const workspace = String(options.workspace || '').trim();
     const excludeWorkspace = String(options.excludeWorkspace || '').trim();
     if (workspace) {
-      filters.push("COALESCE(json_extract(payload, '$.workspace'), '') = ?");
+      filters.push('summary.workspace = ?');
       parameters.push(workspace);
     } else if (excludeWorkspace) {
-      filters.push("COALESCE(json_extract(payload, '$.workspace'), '') <> ?");
+      filters.push('summary.workspace <> ?');
       parameters.push(excludeWorkspace);
     }
     const limit = Math.min(MAX_HISTORY_QUERY_SESSIONS, Math.max(1, Math.floor(Number(options.limit) || 40)));
     parameters.push(limit);
-    const rows = db.prepare(`SELECT id,updated_at_ms,payload FROM task_history
-      WHERE ${filters.join(' AND ')}
-      ORDER BY updated_at_ms DESC,id ASC
-      LIMIT ?`).all(...parameters) as unknown as TaskHistoryRow[];
+    const rows = db.prepare(`
+      WITH candidates AS (
+        SELECT summary.id, summary.updated_at_ms
+        FROM task_history_summaries AS summary
+        WHERE ${filters.join(' AND ')}
+        ORDER BY summary.updated_at_ms DESC, summary.id ASC
+        LIMIT ?
+      )
+      SELECT history.id, history.updated_at_ms, history.payload
+      FROM candidates
+      JOIN task_history AS history ON history.id = candidates.id
+      ORDER BY candidates.updated_at_ms DESC, candidates.id ASC
+    `).all(...parameters) as unknown as TaskHistoryRow[];
     return parseSessionRows(db, rows);
   }, { transaction: true }) as StoredTaskSession[];
 }
@@ -362,17 +387,20 @@ function removeSession(directory: string, id: unknown): void {
   }, { transaction: true });
 }
 
+function ensureTaskHistoryEventSearchProjection(db: DatabaseSync): void {
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_history_event_search'").get();
+  if (!exists) db.exec(TASK_HISTORY_EVENT_SEARCH_SCHEMA_SQL);
+}
+
 function removeWorkspaceSessions(config: TaskHistoryConfig = {}, workspaceValue: unknown): string[] {
   const workspace = String(workspaceValue || '').trim();
   if (!workspace) return [];
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
-    const rows = db.prepare('SELECT id,payload FROM task_history').all() as unknown as TaskHistoryRow[];
+    const rows = db.prepare('SELECT id FROM task_history_summaries WHERE workspace=?').all(workspace) as unknown as Array<{ id: string }>;
     const removed: string[] = [];
     const remove = db.prepare('DELETE FROM task_history WHERE id=?');
     for (const row of rows) {
-      const session = parseStoredSession(row.payload);
-      if (!session || String(session.workspace || '').trim() !== workspace) continue;
       remove.run(String(row.id));
       removed.push(String(row.id));
     }

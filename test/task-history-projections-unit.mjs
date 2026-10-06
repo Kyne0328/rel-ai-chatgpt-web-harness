@@ -7,7 +7,7 @@ import { once } from 'node:events';
 import { DatabaseSync } from 'node:sqlite';
 import { clearTaskHistory, flushTaskHistoryPersistence, readTaskHistory, readTaskHistoryPage, readRecentTaskHistoryEvents, readRecentTaskHistoryEventsPage, recordTaskActivityEvent } from '../src/taskHistoryStore.ts';
 import { openStateDatabase } from '../src/stateDatabase.ts';
-import { listSessionSummaries, listSessionSummaryPage, pruneSessionsAsync, readSession, writeSession } from '../src/taskHistoryStorage.ts';
+import { listSessionSummaries, listSessionSummaryPage, pruneSessionsAsync, readSession, removeWorkspaceSessions, writeSession } from '../src/taskHistoryStorage.ts';
 import { readTaskIntegrity } from '../src/taskIntegrity.ts';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-history-projections-'));
@@ -145,6 +145,14 @@ try {
   await clearTaskHistory(clearConfig);
   assert.equal(readSession(historyDirectory, 'fresh-reader-task'), null, 'a subsequent clear must recover after a failed deletion');
   assert.equal(readSession(historyDirectory, 'pending-only'), null, 'a subsequent successful clear must delete restored pending history');
+
+  const projectedDirectory = path.join(stateDir, 'sessions');
+  writeSession(projectedDirectory, { id: 'remove-by-workspace', workspace: 'remove-me', status: 'completed', events: [{ eventId: 'remove-event' }] });
+  writeSession(projectedDirectory, { id: 'keep-by-workspace', workspace: 'keep-me', status: 'completed', events: [{ eventId: 'keep-event' }] });
+  assert.deepEqual(removeWorkspaceSessions({ stateDir }, 'remove-me'), ['remove-by-workspace'],
+    'workspace cleanup must use the summary projection instead of materializing every canonical task payload');
+  assert.equal(readSession(projectedDirectory, 'remove-by-workspace'), null);
+  assert.ok(readSession(projectedDirectory, 'keep-by-workspace'));
 } finally {
   db.close();
   fs.rmSync(stateDir, { recursive: true, force: true });

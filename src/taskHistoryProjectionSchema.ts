@@ -19,6 +19,21 @@ function summaryValues(id: string, stamp: string, payload: string): string {
     ${summaryPayload(payload)}, length(CAST(${payload} AS BLOB))`;
 }
 
+function boundedJsonSearchText(payload: string, path: string, maxBytes = 2000): string {
+  return `substr(COALESCE(CAST(json_extract(${payload}, '${path}') AS TEXT), ''), 1, ${maxBytes})`;
+}
+
+function eventSearchText(payload: string): string {
+  const fields = [
+    ['$.eventId', 500], ['$.operationId', 500], ['$.id', 500], ['$.summary', 2000], ['$.message', 2000],
+    ['$.title', 1000], ['$.tool', 500], ['$.action', 500], ['$.command', 2000], ['$.path', 2000],
+    ['$.error.code', 1000], ['$.error.message', 2000]
+  ] as const;
+  return `CASE WHEN json_valid(${payload}) THEN lower(trim(${fields
+    .map(([field, limit]) => boundedJsonSearchText(payload, field, limit))
+    .join(" || ' ' || ")})) ELSE '' END`;
+}
+
 const TASK_HISTORY_PROJECTION_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS task_history_summaries(
   id TEXT PRIMARY KEY, updated_at_ms INTEGER NOT NULL,
@@ -66,4 +81,41 @@ BEGIN UPDATE task_history_storage_usage SET bytes=bytes-${value('OLD')} WHERE ki
 }).join('\n')}
 `;
 
-export { TASK_HISTORY_PROJECTION_SCHEMA_SQL };
+const TASK_HISTORY_EVENT_SEARCH_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS task_history_event_search(
+  task_id TEXT NOT NULL,
+  event_key TEXT NOT NULL,
+  workspace TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  search_text TEXT NOT NULL,
+  PRIMARY KEY(task_id,event_key)
+) STRICT;
+CREATE INDEX IF NOT EXISTS task_history_event_search_workspace_idx
+  ON task_history_event_search(workspace,task_id);
+INSERT OR REPLACE INTO task_history_event_search(task_id,event_key,workspace,session_id,search_text)
+  SELECT task_id,event_key,workspace,session_id,${eventSearchText('payload')} FROM task_history_events;
+CREATE TRIGGER IF NOT EXISTS task_history_event_search_after_insert
+AFTER INSERT ON task_history_events
+BEGIN
+  INSERT INTO task_history_event_search(task_id,event_key,workspace,session_id,search_text)
+    VALUES(NEW.task_id,NEW.event_key,NEW.workspace,NEW.session_id,${eventSearchText('NEW.payload')})
+    ON CONFLICT(task_id,event_key) DO UPDATE SET
+      workspace=excluded.workspace,session_id=excluded.session_id,search_text=excluded.search_text;
+END;
+CREATE TRIGGER IF NOT EXISTS task_history_event_search_after_update
+AFTER UPDATE OF event_key,workspace,session_id,payload ON task_history_events
+BEGIN
+  DELETE FROM task_history_event_search WHERE task_id=OLD.task_id AND event_key=OLD.event_key;
+  INSERT INTO task_history_event_search(task_id,event_key,workspace,session_id,search_text)
+    VALUES(NEW.task_id,NEW.event_key,NEW.workspace,NEW.session_id,${eventSearchText('NEW.payload')})
+    ON CONFLICT(task_id,event_key) DO UPDATE SET
+      workspace=excluded.workspace,session_id=excluded.session_id,search_text=excluded.search_text;
+END;
+CREATE TRIGGER IF NOT EXISTS task_history_event_search_after_delete
+AFTER DELETE ON task_history_events
+BEGIN
+  DELETE FROM task_history_event_search WHERE task_id=OLD.task_id AND event_key=OLD.event_key;
+END;
+`;
+
+export { TASK_HISTORY_EVENT_SEARCH_SCHEMA_SQL, TASK_HISTORY_PROJECTION_SCHEMA_SQL };
