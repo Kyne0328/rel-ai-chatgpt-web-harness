@@ -59,7 +59,7 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
     port: settings.port ?? current.port,
     tunnelId: settings.tunnelId ?? current.tunnelId,
     token: current.token
-  });
+  }, { allowLocalOnly: current.tunnelId === '' });
   const replacementApiKey = String(settings.tunnelApiKey || '').trim();
   if (replacementApiKey) normalizeApiKey(replacementApiKey);
 
@@ -67,14 +67,14 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
   const tunnelIdChanged = String(next.tunnelId || '') !== String(current.tunnelId || '');
   const connectionChanged = portChanged || tunnelIdChanged || Boolean(replacementApiKey);
   const notificationChange = typeof settings.notificationsEnabled === 'boolean';
-  if (connectionChanged) {
+  const previousStatus = getCurrentStatus() || {};
+  if (portChanged || (connectionChanged && previousStatus.serverRunning !== true)) {
     const restartBlock = String(canRestart('saving connection settings') || '');
     if (restartBlock) throw new Error(restartBlock);
   }
 
   const previousApiKey = replacementApiKey ? String(getTunnelApiKey() || '') : '';
   const previousNotifications = getNotificationsEnabled() !== false;
-  const previousStatus = getCurrentStatus() || {};
   const canReconnectWithoutLocalRestart = connectionChanged
     && !portChanged
     && previousStatus.serverRunning === true

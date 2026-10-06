@@ -25,7 +25,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
   return h('section', { className: 'card resource-diagnostics', 'data-diagnostic-region': 'resources', 'aria-labelledby': 'resource-diagnostics-heading' },
     h('div', { className: 'card-head' },
       h('div', null, h('h3', { id: 'resource-diagnostics-heading' }, 'System resources'),
-        h('p', null, 'Admission limits, cached host headroom, and current Node process memory.')),
+        h('p', null, 'Memory availability and running work.')),
       h('div', { className: 'resource-diagnostics-actions' },
         h(StatusPill, { label: stateLabel, tone: state === 'normal' ? 'neutral' : 'warning' }),
         onRefresh ? h('button', { className: 'secondary', type: 'button', disabled: refreshing, onClick: () => void refresh() }, refreshing ? 'Refreshing…' : 'Refresh resources') : null)
@@ -34,6 +34,22 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
       h('p', { className: 'resource-diagnostics-reason', role: 'status' },
         pressure.reason || 'No host pressure sample is available.',
         stale ? ' Host measurements are stale or unavailable.' : ''),
+      h('dl', { className: 'resource-diagnostics-metrics' },
+        metric('Available physical memory', bytes(pressure.physicalAvailableBytes)),
+        metric('Total physical memory', bytes(pressure.physicalTotalBytes)),
+        metric('Rel.AI service memory', bytes(current.rssBytes))),
+      h('div', { className: 'resource-diagnostics-lanes', 'aria-label': 'Resource admission lanes' }, lanes.length ? lanes.map(([name, lane]) => {
+        const queue = host.queues?.[name] || {};
+        return h('section', { className: 'resource-diagnostics-lane', key: name },
+          h('h4', null, LANE_LABELS[name] || name),
+          h('dl', { className: 'resource-diagnostics-metrics' },
+            metric('Active / limit', `${count(lane.active)} / ${count(lane.limit)}`),
+            metric('Queued', count(lane.queued))),
+          lane.queued > 0 ? h('p', { className: 'resource-diagnostics-note' }, queue.blockedReason || 'Waiting for a slot.') : null
+        );
+      }) : h('p', { className: 'resource-diagnostics-note' }, 'Lane limits are unavailable.')),
+      h('details', { className: 'resource-diagnostics-details', 'data-resource-technical': '' },
+        h('summary', null, 'Technical resource details'),
       h('p', { className: 'resource-diagnostics-note' },
         `Source: ${pressure.source || 'unknown'} · ${sampleAge(pressure.ageMs)} · ${pressure.commitEnforced === true ? 'Commit admission enforced' : 'Commit admission unavailable'}`,
         pressure.error ? ` · ${pressure.error}` : ''),
@@ -53,18 +69,6 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
       ),
       pressure.settlingReservationCount > 0 || pressure.settlingReservedBytes > 0 ? h('p', { className: 'resource-diagnostics-note' }, pressure.settlingReason || 'Startup work has released its slot. Its memory estimate remains reserved until a fresh host sample covers the settling window.') : null,
       h('p', { className: 'resource-diagnostics-note' }, pressure.pagingMeaning || 'Paging rates are unavailable. A sampled rate alone does not establish sustained memory thrashing.'),
-      h('div', { className: 'resource-diagnostics-lanes', 'aria-label': 'Resource admission lanes' }, lanes.length ? lanes.map(([name, lane]) => {
-        const queue = host.queues?.[name] || {};
-        return h('section', { className: 'resource-diagnostics-lane', key: name },
-          h('h4', null, LANE_LABELS[name] || name),
-          h('dl', { className: 'resource-diagnostics-metrics' },
-            metric('Active / limit', `${count(lane.active)} / ${count(lane.limit)}`),
-            metric('Queued', count(lane.queued)),
-            metric('Queue capacity / per owner', `${count(queue.maxQueued)} / ${count(queue.maxQueuedPerOwner)}`),
-            metric('Oldest queue wait', milliseconds(queue.oldestWaitMs))),
-          h('p', { className: 'resource-diagnostics-note' }, queue.blockedReason || (lane.queued > 0 ? 'Waiting for admission.' : 'No queued work.'))
-        );
-      }) : h('p', { className: 'resource-diagnostics-note' }, 'Lane limits are unavailable.')),
       h('details', { className: 'resource-diagnostics-details' },
         h('summary', null, 'Current Node process memory'),
         h('p', { className: 'resource-diagnostics-note' }, `PID ${count(node.pid)} · ${sampleAge(node.ageMs)}${node.available === true ? '' : ' · Measurement unavailable'}`),
@@ -101,6 +105,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
         h('ul', { className: 'resource-diagnostics-decisions' }, decisions.map((decision, index) => h('li', { key: `${decision.atMs}:${index}` },
           h('time', null, sampleTime(decision.atMs)), h('span', null, `${decision.state || 'unknown'}: ${decision.reason || 'No reason supplied'}`))))
       ) : null
+      )
     )
   );
 }

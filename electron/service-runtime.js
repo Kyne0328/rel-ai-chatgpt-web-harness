@@ -227,8 +227,22 @@ function createDesktopServiceRuntime(deps) {
 
   async function startTunnel({ runToken, guiConfig, apiKey, actualPort, timing = null }) {
     const localUrl = `http://127.0.0.1:${actualPort}`;
+    if (!guiConfig.tunnelId) {
+      setStatus({ serverRunning: true, tunnelStatus: 'disabled', tunnelId: '',
+        tunnelHealthUrl: '', mcpUrl: '', localMcpUrl: `${localUrl}/mcp`, localUrl, error: '', errorCode: '' });
+      await syncAdditionalTunnels(actualPort, guiConfig.token);
+      return getCurrentStatus();
+    }
     let result;
     try {
+      // A former pooled connection may be taking over the legacy launcher slot.
+      // Confirm that its pooled process stopped before launching the replacement.
+      if (tunnelConnections?.list?.().some(item => item.tunnelId === guiConfig.tunnelId)) {
+        const synchronized = await syncAdditionalTunnels(actualPort, guiConfig.token);
+        if (synchronized.error || synchronized.connections?.some(item => item.tunnelId === guiConfig.tunnelId)) {
+          throw new Error('The previous tunnel process could not be stopped. Retry the connection.');
+        }
+      }
       connection.writeConnectionProfile({
         host: '127.0.0.1',
         port: actualPort,
@@ -297,7 +311,8 @@ function createDesktopServiceRuntime(deps) {
     }
     if (!port || !localToken) return { connections: [], results: [] };
     try {
-      const connections = tunnelConnections.runtimeConnections();
+      const launcherTunnelId = getCurrentStatus().tunnelId;
+      const connections = tunnelConnections.runtimeConnections().filter(item => item.tunnelId !== launcherTunnelId);
       return await additionalTunnelRuntime.sync({ connections, port, localToken });
     } catch (error) {
       runtimeLogs.append?.('Additional Secure MCP Tunnel connections could not be started.', {
@@ -337,9 +352,9 @@ function createDesktopServiceRuntime(deps) {
       configModule.ensureConfig();
       const guiConfig = readGuiConfig();
       guiConfig.port = normalizePort(guiConfig.port || 3333);
-      guiConfig.tunnelId = normalizeTunnelId(guiConfig.tunnelId);
-      const apiKey = tunnelCredentials.getApiKey();
-      if (!apiKey) throw new Error('OpenAI tunnel runtime API key is required. Open Connection settings to finish setup.');
+      if (guiConfig.tunnelId) guiConfig.tunnelId = normalizeTunnelId(guiConfig.tunnelId);
+      const apiKey = guiConfig.tunnelId ? tunnelCredentials.getApiKey() : '';
+      if (guiConfig.tunnelId && !apiKey) throw new Error('OpenAI tunnel runtime API key is required. Open Connection settings to finish setup.');
       if (!guiConfig.token && createToken) {
         guiConfig.token = connection.generateToken(32);
         connection.writeLaunchEnv({ REL_AI_MCP_TOKEN: guiConfig.token });

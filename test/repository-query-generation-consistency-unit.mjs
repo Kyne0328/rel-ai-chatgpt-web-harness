@@ -25,7 +25,7 @@ fs.writeFileSync(path.join(workspaceRoot, 'src', 'alpha.js'), 'export function a
 const workspace = { alias: 'query-generation', path: workspaceRoot, context: {}, testCommands: {}, commands: {} };
 const config = { stateDir };
 
-assert.equal(QUERY_WORKER_GLOBAL_COUNT, 4, 'Repository Intelligence must cap query workers globally across repository roots');
+assert.equal(QUERY_WORKER_GLOBAL_COUNT, (await import('../src/hostResourceScheduler.js')).HOST_REPOSITORY_QUERY_LIMIT, 'query pool and admission must use the same host limit');
 assert.equal(QUERY_WORKER_TIMEOUT_MS, 30_000, 'indexed queries must have a bounded default deadline');
 
 try {

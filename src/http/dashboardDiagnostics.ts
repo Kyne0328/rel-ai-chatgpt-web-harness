@@ -7,7 +7,9 @@ import type { HttpRouteContext } from './types.ts';
 async function handleApiDiagnostics(ctx: HttpRouteContext): Promise<void> {
   const workspace = String(ctx.parsed.searchParams.get('workspace') || '').trim();
   // The route registry authenticates a local dashboard session before this call.
-  sendJson(ctx.res, 200, await getDiagnosticsReport(ctx.options, workspace, { includeManagedProcessMemory: true }));
+  sendJson(ctx.res, 200, await getDiagnosticsReport(ctx.options, workspace, {
+    includeManagedProcessMemory: true, refreshResources: true
+  }));
 }
 
 async function handleApiDiagnosticsReset(ctx: HttpRouteContext): Promise<void> {

@@ -1573,6 +1573,7 @@ async function case_additional_tunnel_remove_failure() {
   const begin = source.indexOf('  async function removeAdditionalTunnel(tunnelId) {');
   const end = source.indexOf('  async function setKeepAwake(', begin);
   const remove = runInNewContext(source.slice(begin, end) + '\nremoveAdditionalTunnel', {
+    currentDesktopSettings: () => ({ tunnelId: 'tunnel_other123456' }),
     tunnelConnections: { remove: () => ({ ok: true, removed: true }), list: () => [] },
     serviceRuntime: { isListening: () => true, restartAdditionalTunnels: async () => ({ error: 'fixture stop failed', connections: [{ tunnelId: 'fixture', state: 'failed' }] }) }
   });
@@ -1672,3 +1673,103 @@ async function case_logout_connection_clear_failure() {
   }
 }
 await case_logout_connection_clear_failure();
+
+async function case_uniform_tunnel_management() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const os = (await import('node:os')).default;
+  const path = (await import('node:path')).default;
+  const { runInNewContext } = await import('node:vm');
+  const { createTunnelConnectionStore } = await import('../electron/tunnel-connections.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-uniform-tunnels-'));
+  const safeStorage = { isEncryptionAvailable: () => true,
+    encryptString: value => Buffer.from(value), decryptString: value => value.toString() };
+  const store = createTunnelConnectionStore({ stateDir: directory, safeStorage });
+  const original = 'tunnel_first123456';
+  const second = 'tunnel_second123456';
+  const renamed = 'tunnel_renamed123456';
+  let config = { port: 3333, token: 'local-token', tunnelId: original };
+  let key = 'runtime-first-123456';
+  let reconnects = 0;
+  let failReconnect = false;
+  const settingsUpdates = [];
+  const source = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
+  const begin = source.indexOf('  async function saveAdditionalTunnel(input = {}) {');
+  const end = source.indexOf('  async function setKeepAwake(', begin);
+  const handlers = runInNewContext(source.slice(begin, end) + '\n({ saveAdditionalTunnel, removeAdditionalTunnel })', {
+    currentDesktopSettings: () => ({ ...config }),
+    readGuiConfig: () => ({ ...config }),
+    tunnelConnections: store,
+    tunnelCredentials: { getApiKey: () => key, setApiKey: value => { key = value; }, clear: () => { key = ''; } },
+    updateDesktopSettings: async (settings, options = {}) => {
+      if (!options.allowExistingTunnel && store.list().some(item => item.tunnelId === settings.tunnelId)) throw new Error('Already configured');
+      settingsUpdates.push(settings);
+      config.tunnelId = settings.tunnelId;
+      if (settings.tunnelApiKey) key = settings.tunnelApiKey;
+      return { ok: true, status: { serverRunning: true } };
+    },
+    serviceRuntime: { isListening: () => true, restartAdditionalTunnels: async () => ({
+      connections: store.list().filter(item => item.tunnelId !== config.tunnelId).map(item => ({ ...item, state: 'running' }))
+    }) },
+    additionalTunnelRuntime: { snapshot: () => ({ connections: [] }) },
+    connection: {
+      writeLaunchEnv: value => { config = { port: Number(value.REL_AI_MCP_PORT), token: value.REL_AI_MCP_TOKEN, tunnelId: value.REL_AI_MCP_TUNNEL_ID }; },
+      writeConnectionProfile: () => {}
+    },
+    configModule: { getConfigPath: () => 'fixture' },
+    options: { saveLauncherConfig: value => { config = { ...value }; } },
+    restartConnection: async () => { reconnects++; if (failReconnect) { failReconnect = false; throw new Error('fixture reconnect failure'); } return { serverRunning: true, tunnelStatus: config.tunnelId ? 'running' : 'disabled' }; }
+  });
+  try {
+    await handlers.saveAdditionalTunnel({ originalTunnelId: original, tunnelId: original, label: 'Personal', apiKey: '' });
+    assert.equal(store.launcherLabel(original), 'Personal');
+    assert.equal(key, 'runtime-first-123456', 'editing the first connection retains its encrypted key');
+    await handlers.saveAdditionalTunnel({ tunnelId: second, label: 'School', apiKey: 'runtime-school-123456' });
+    const changed = await handlers.saveAdditionalTunnel({ originalTunnelId: second, tunnelId: renamed, label: 'Work', apiKey: '' });
+    assert.equal(changed.ok, true);
+    assert.equal(store.runtimeConnections()[0].apiKey, 'runtime-school-123456', 'renaming an existing ID retains its stored key');
+    assert.equal(store.list()[0].tunnelId, renamed);
+    assert.equal(JSON.stringify(changed).includes('runtime-school-123456'), false);
+    await assert.rejects(() => handlers.saveAdditionalTunnel({ originalTunnelId: original, tunnelId: renamed, label: 'Duplicate' }), /Already configured/);
+    await handlers.removeAdditionalTunnel(original);
+    assert.equal(config.tunnelId, renamed, 'removing the first row retains the other connection');
+    assert.equal(settingsUpdates.at(-1).tunnelApiKey, 'runtime-school-123456');
+    assert.equal(store.launcherLabel(renamed), 'Work');
+    assert.equal(store.list().length, 0, 'promoted connection is not started twice');
+    failReconnect = true;
+    await assert.rejects(() => handlers.removeAdditionalTunnel(renamed), /fixture reconnect failure/);
+    assert.equal(config.tunnelId, renamed, 'failed removal restores the previous connection');
+    assert.equal(key, 'runtime-school-123456');
+    await handlers.removeAdditionalTunnel(renamed);
+    assert.equal(config.tunnelId, '', 'the final tunnel can be removed');
+    assert.equal(config.port, 3333);
+    assert.equal(config.token, 'local-token', 'removal retains local authentication');
+    assert.equal(key, '', 'removal clears the final runtime key');
+    assert.equal(reconnects, 3);
+    await assert.rejects(() => handlers.saveAdditionalTunnel({ originalTunnelId: renamed, tunnelId: renamed, apiKey: 'runtime-old-123456' }), /no longer exists/);
+    store.upsert({ tunnelId: renamed, label: 'Remaining connection', apiKey: 'runtime-remaining-123456' });
+    const remaining = await handlers.saveAdditionalTunnel({ originalTunnelId: renamed, tunnelId: renamed, label: 'Edited without a launcher tunnel' });
+    assert.equal(remaining.ok, true, 'remaining rows stay editable after removing the launcher connection');
+    assert.equal(config.tunnelId, '');
+    await handlers.removeAdditionalTunnel(renamed);
+    const added = await handlers.saveAdditionalTunnel({ tunnelId: second, label: 'New connection', apiKey: 'runtime-new-123456' });
+    assert.equal(added.ok, true, 'a tunnel can be added again after the final removal');
+    assert.equal(config.tunnelId, second);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+}
+await case_uniform_tunnel_management();
+
+{
+  const { deriveConnectionState } = await import('../src/contracts/connection.ts');
+  const assert = (await import('node:assert/strict')).default;
+  for (const tunnelStatus of ['failed', 'stopped']) {
+    const connected = deriveConnectionState({ serverRunning: true, tunnelStatus,
+      error: 'One tunnel is offline', errorCode: 'tunnel_authentication_failed',
+      additionalTunnelStatuses: [{ tunnelId: 'tunnel_peer123456', state: 'running' }] });
+    assert.equal(connected.publicEndpoint.status, 'available', 'any healthy tunnel establishes overall connectivity');
+    assert.equal(connected.chatgptReadiness.status, 'ready');
+    assert.equal(connected.error, null, 'individual tunnel errors belong in their connection rows');
+  }
+  assert.equal(deriveConnectionState({ serverRunning: true, tunnelStatus: 'failed',
+    additionalTunnelStatuses: [{ state: 'running', enabled: false }] }).publicEndpoint.status, 'unavailable');
+}

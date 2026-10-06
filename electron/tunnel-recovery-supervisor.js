@@ -52,7 +52,7 @@ function createTunnelRecoverySupervisor({
       scheduleInitial(status.error || 'The Secure MCP Tunnel stopped unexpectedly.');
       return snapshot();
     }
-    if (tunnelStatus === 'stopped' && !attemptInFlight) reset(true);
+    if (tunnelStatus === 'disabled' || (tunnelStatus === 'stopped' && !attemptInFlight)) reset(true);
     return snapshot();
   }
 
@@ -98,7 +98,7 @@ function createTunnelRecoverySupervisor({
       const tunnelStatus = String(status?.tunnelStatus || status?.state || '');
       const errorCode = String(status?.errorCode || '');
       const recoveryMode = String(status?.tunnelRecoveryMode || status?.recoveryMode || '');
-      if (tunnelStatus === 'running' || (tunnelStatus === 'degraded' && recoveryMode === 'in_place') || isTerminalTunnelCode(errorCode) || status?.serverRunning === false) return status;
+      if (tunnelStatus === 'running' || tunnelStatus === 'disabled' || (tunnelStatus === 'degraded' && recoveryMode === 'in_place') || isTerminalTunnelCode(errorCode) || status?.serverRunning === false) return status;
       throw new RetryableTunnelStatus(status);
     }, {
       retries: Infinity,

@@ -139,6 +139,7 @@ assert.doesNotMatch(readyDiagnostics, /data-clock-elapsed-start/);
 const buildDiagnostics = renderToStaticMarkup(React.createElement(RuntimeBuildIdentity, {
   runtime: { buildIdentity: { buildId: 'runtime-a' } }, compatibility: { metadataMatches: true }
 }));
-assert.match(buildDiagnostics, /Runtime: runtime-a/);
+assert.match(buildDiagnostics, /Runtime details/);
+assert.match(buildDiagnostics, /Build ID<\/dt><dd>runtime-a/);
 assert.match(buildDiagnostics, /Source\/build parity<\/dt><dd>Unknown/);
 assert.match(buildDiagnostics, /role="tooltip"/);

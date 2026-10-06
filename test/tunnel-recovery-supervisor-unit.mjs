@@ -152,3 +152,23 @@ function deferred() {
   assert.equal(restarts, 1);
   stoppedSupervisor.cancel();
 }
+
+{
+  let calls = 0;
+  const scheduled = [];
+  const supervisor = createTunnelRecoverySupervisor({
+    restartConnection: async () => { calls++; return { serverRunning: true, tunnelStatus: 'disabled' }; },
+    setTimer: callback => { const timer = { callback, cancelled: false }; scheduled.push(timer); return timer; },
+    clearTimer: timer => { timer.cancelled = true; }
+  });
+  const disabled = await supervisor.retryNow();
+  assert.equal(disabled.tunnelStatus, 'disabled', 'removing the last connection completes without automatic retries');
+  assert.equal(calls, 1);
+  assert.equal(scheduled.length, 0);
+  supervisor.observe({ state: 'degraded', recoveryMode: 'restart' });
+  assert.equal(supervisor.snapshot().scheduled, true);
+  supervisor.observe({ state: 'disabled' });
+  assert.equal(supervisor.snapshot().scheduled, false, 'intentional disconnection cancels an already scheduled retry');
+  assert.equal(scheduled[0].cancelled, true);
+  supervisor.cancel();
+}

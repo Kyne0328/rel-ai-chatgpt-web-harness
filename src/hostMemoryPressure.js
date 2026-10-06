@@ -32,7 +32,7 @@ async function readHostMemorySample() {
       const output = await new Promise((resolve, reject) => {
         execFile(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
           '$m = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory -ErrorAction Stop; [Console]::Out.Write(($m | Select-Object AvailableBytes,CommittedBytes,CommitLimit,PagesInputPersec,PageReadsPersec | ConvertTo-Json -Compress))'
-        ], { windowsHide: true, timeout: 2000, maxBuffer: 8192, encoding: 'utf8',
+        ], { windowsHide: true, timeout: 5000, maxBuffer: 8192, encoding: 'utf8',
           env: makeProcessEnvironment({ PSModulePath: path.join(path.dirname(executable), 'Modules') }, { allow: [] }) },
         (error, stdout) => error ? reject(error) : resolve(stdout));
       });

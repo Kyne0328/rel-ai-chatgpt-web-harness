@@ -225,6 +225,13 @@ try {
   assert.equal(result.activityLiveStability.frozen, true, JSON.stringify(result.activityLiveStability));
   assert.equal(result.activityLiveStability.resumed, true, JSON.stringify(result.activityLiveStability));
   assert.ok(result.activityLiveStability.messageAfterResume.length > 0, JSON.stringify(result.activityLiveStability));
+  assert.deepEqual(result.uniformTunnels.actions, [{ edit: true, remove: true, special: false }, { edit: true, remove: true, special: false }]);
+  assert.deepEqual(result.uniformTunnels.saves, [
+    { original: 'tunnel_first123456', id: 'tunnel_first123456', key: '' },
+    { original: 'tunnel_second123456', id: 'tunnel_school123456', key: '' }
+  ]);
+  assert.deepEqual(result.uniformTunnels.removed, ['tunnel_first123456']);
+  assert.equal(result.uniformTunnels.remaining, true);
   const operationDiagnostics = result.operationDiagnostics;
   assert.deepEqual(operationDiagnostics.legacy, { unknownTiming: true, unknownTermination: true, liveClocks: 0 });
   assert.equal(operationDiagnostics.keyboardExpanded, true, 'native timing disclosure must open from the keyboard');
@@ -234,8 +241,8 @@ try {
   }, 'repeated aggregate polls must preserve disclosure, focus, measured durations and quiet live status');
   assert.deepEqual(operationDiagnostics.collecting, { samePanel: true, expanded: true, sameLiveRegion: true });
   assert.deepEqual(operationDiagnostics.ready, {
-    samePanel: true, sameLiveRegion: true, noLiveClock: true, uncertaintyVisible: true, cachedBuild: true, parityUnknown: true
-  }, 'result readiness must preserve the live region, stop clocks, and retain uncertainty/build provenance');
+    samePanel: true, sameLiveRegion: true, noLiveClock: true, uncertaintyVisible: true, runtimeHidden: true
+  }, 'result readiness must preserve the live region, stop clocks, and retain termination uncertainty');
   assert.ok(operationDiagnostics.narrow.viewportWidth >= 300 && operationDiagnostics.narrow.viewportWidth <= 375);
   assert.equal(operationDiagnostics.narrow.horizontalOverflow, false, 'expanded operation diagnostics must reflow on a narrow viewport');
   assert.equal(operationDiagnostics.narrow.factsContained, true, 'long blocker identifiers must stay inside the inspector');

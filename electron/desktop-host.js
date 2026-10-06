@@ -15,7 +15,7 @@ import { createDesktopTray } from './desktop-tray.js';
 import { desktopStatusFailure, initialDesktopStatus, normalizeDesktopStatus } from './desktop-status.js';
 import { createDiagnosticFiles } from './diagnostic-files.js';
 import { registerIpcHandlers } from './ipc-handlers.js';
-import { hasExistingConfig, isManualUpdateInstall } from './launcher-utils.js';
+import { hasExistingConfig, isManualUpdateInstall, readGuiConfig } from './launcher-utils.js';
 import { installLocalProtocol, localRendererUrl, registerLocalScheme } from './local-protocol.js';
 import { createRecoveryWindowManager } from './recovery-window.js';
 import { createPulseWindowManager } from './pulse-window.js';
@@ -564,28 +564,30 @@ async function createDesktopHost(options = {}) {
   function savePrimaryLauncherConfig(config = {}) {
     const requestedTunnelId = String(config?.tunnelId || '').trim();
     if (requestedTunnelId && tunnelConnections.list().some(connection => connection.tunnelId === requestedTunnelId)) {
-      throw new Error('This Tunnel ID is already configured as an additional ChatGPT tunnel. Remove it there before making it the primary connection.');
+      throw new Error('This Tunnel ID is already configured.');
     }
     return options.saveLauncherConfig(config);
   }
 
   function currentDesktopSettings() {
+    const settings = readDesktopSettings({
+      tunnelApiKeyConfigured: tunnelCredentials.status().apiKeyConfigured,
+      notificationsEnabled: desktopNotifications.getPreferences().enabled,
+      tunnelErrorCode: currentStatus.errorCode,
+      tunnelError: currentStatus.error
+    });
     return {
-      ...readDesktopSettings({
-        tunnelApiKeyConfigured: tunnelCredentials.status().apiKeyConfigured,
-        notificationsEnabled: desktopNotifications.getPreferences().enabled,
-        tunnelErrorCode: currentStatus.errorCode,
-        tunnelError: currentStatus.error
-      }),
+      ...settings,
+      tunnelLabel: tunnelConnections.launcherLabel(settings.tunnelId),
       additionalTunnels: tunnelConnections.list(),
       additionalTunnelStatuses: additionalTunnelRuntime.snapshot().connections
     };
   }
 
-  function updateDesktopSettings(settings) {
+  function updateDesktopSettings(settings, { allowExistingTunnel = false } = {}) {
     const requestedTunnelId = String(settings?.tunnelId || '').trim();
-    if (requestedTunnelId && tunnelConnections.list().some(connection => connection.tunnelId === requestedTunnelId)) {
-      throw new Error('This Tunnel ID is already configured as an additional ChatGPT tunnel. Remove it there before making it the primary connection.');
+    if (!allowExistingTunnel && requestedTunnelId && tunnelConnections.list().some(connection => connection.tunnelId === requestedTunnelId)) {
+      throw new Error('This Tunnel ID is already configured.');
     }
     return saveDesktopSettings(settings, {
       setNotificationsEnabled: desktopNotifications.setEnabled,
@@ -602,8 +604,20 @@ async function createDesktopHost(options = {}) {
 
   async function saveAdditionalTunnel(input = {}) {
     const primaryTunnelId = currentDesktopSettings().tunnelId;
+    if (input.originalTunnelId && input.originalTunnelId !== primaryTunnelId
+      && !tunnelConnections.list().some(item => item.tunnelId === input.originalTunnelId)) {
+      throw new Error('This tunnel connection no longer exists.');
+    }
+    if ((input.originalTunnelId && input.originalTunnelId === primaryTunnelId) || (!primaryTunnelId && !input.originalTunnelId)) {
+      const label = String(input.label || 'Connection 1').trim();
+      if (label.length > 80) throw new Error('Use a connection name of 80 characters or fewer.');
+      const settings = await updateDesktopSettings({ tunnelId: input.tunnelId, tunnelApiKey: input.apiKey });
+      tunnelConnections.setLauncherLabel(input.tunnelId, label);
+      return { ...settings, saved: true, connection: { tunnelId: input.tunnelId, label },
+        connections: tunnelConnections.list(), statuses: additionalTunnelRuntime.snapshot().connections };
+    }
     if (String(input.tunnelId || '').trim() === primaryTunnelId) {
-      throw new Error('This Tunnel ID is already the primary ChatGPT connection.');
+      throw new Error('This Tunnel ID is already configured.');
     }
     const connection = tunnelConnections.upsert(input);
     const runtime = await serviceRuntime.restartAdditionalTunnels();
@@ -621,6 +635,7 @@ async function createDesktopHost(options = {}) {
   }
 
   async function removeAdditionalTunnel(tunnelId) {
+    if (tunnelId === currentDesktopSettings().tunnelId) return removeLauncherTunnel();
     const removed = tunnelConnections.remove(tunnelId);
     const runtime = serviceRuntime.isListening()
       ? await serviceRuntime.restartAdditionalTunnels()
@@ -632,6 +647,38 @@ async function createDesktopHost(options = {}) {
       connections: tunnelConnections.list(),
       statuses: runtime.connections || []
     };
+  }
+
+  async function removeLauncherTunnel() {
+    const next = tunnelConnections.runtimeConnections().find(item => item.enabled && !item.credentialError);
+    if (next) {
+      const result = await updateDesktopSettings({ tunnelId: next.tunnelId, tunnelApiKey: next.apiKey }, { allowExistingTunnel: true });
+      if (result.saved || result.ok) {
+        tunnelConnections.setLauncherLabel(next.tunnelId, next.label);
+        tunnelConnections.remove(next.tunnelId);
+      }
+      await serviceRuntime.restartAdditionalTunnels();
+      return { ...result, removed: Boolean(result.saved || result.ok), connections: tunnelConnections.list(), statuses: additionalTunnelRuntime.snapshot().connections };
+    }
+    const previous = readGuiConfig();
+    const previousKey = tunnelCredentials.getApiKey();
+    try {
+      connection.writeLaunchEnv({ REL_AI_MCP_PORT: String(previous.port), REL_AI_MCP_TOKEN: previous.token,
+        REL_AI_MCP_TUNNEL_ID: '', REL_AI_MCP_LOCAL_ONLY: '1' }, { replace: true });
+      connection.writeConnectionProfile({ host: '127.0.0.1', port: previous.port, tunnelId: '',
+        tunnelProvider: 'openai-secure-mcp', configPath: configModule.getConfigPath() }, { replace: true });
+      tunnelCredentials.clear();
+      const status = await restartConnection();
+      if (status?.serverRunning !== true || status?.tunnelStatus !== 'disabled') {
+        throw new Error('The tunnel could not be disconnected. Previous connection settings will be restored.');
+      }
+    } catch (error) {
+      options.saveLauncherConfig(previous);
+      if (previousKey) tunnelCredentials.setApiKey(previousKey);
+      await restartConnection();
+      throw error;
+    }
+    return { ok: true, removed: true, connections: tunnelConnections.list(), statuses: additionalTunnelRuntime.snapshot().connections };
   }
 
   async function setKeepAwake(enabled) {

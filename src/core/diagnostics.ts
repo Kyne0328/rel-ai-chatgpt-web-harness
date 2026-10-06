@@ -5,7 +5,7 @@ import { deriveConnectionState } from '../contracts/connection.ts';
 import type { DiagnosticResetTarget } from '../contracts/diagnostics.ts';
 import { ERROR_CODES } from '../contracts/errors.ts';
 import { buildDiagnosticReport } from '../diagnostics.js';
-import { hostResourceDiagnosticSnapshot } from '../hostResourceScheduler.js';
+import { hostResourceDiagnosticSnapshot, refreshHostResourceDiagnostics } from '../hostResourceScheduler.js';
 import { resourceDiagnosticsSnapshot } from '../resourceDiagnostics.js';
 import { cacheStats } from '../sessionCache.js';
 import { sampleManagedProcessMemory } from '../processManager.js';
@@ -46,9 +46,10 @@ export type DiagnosticResetOutcome = DiagnosticResetFailure | DiagnosticResetSuc
 export async function getDiagnosticsReport(
   options: DiagnosticsRuntimeOptions,
   workspace = '',
-  { includeManagedProcessMemory = false }: { includeManagedProcessMemory?: boolean } = {}
+  { includeManagedProcessMemory = false, refreshResources = false }: { includeManagedProcessMemory?: boolean; refreshResources?: boolean } = {}
 ): Promise<Record<string, unknown>> {
   const config = readConfig();
+  const hostResources = refreshResources ? await refreshHostResourceDiagnostics() : hostResourceDiagnosticSnapshot();
   // Only the authenticated local dashboard route opts into owned-root details.
   // This report is not an automatic telemetry or public MCP response.
   let managedRoots = null;
@@ -95,7 +96,7 @@ export async function getDiagnosticsReport(
     connection: connectionSummary,
     connectionState,
     tunnelHealth: desktopStatus?.tunnelHealth || null,
-    resourceDiagnostics: resourceDiagnosticsSnapshot(hostResourceDiagnosticSnapshot(), cacheStats(), managedRoots),
+    resourceDiagnostics: resourceDiagnosticsSnapshot(hostResources, cacheStats(), managedRoots),
     runtimeLogs,
     auditLogs,
     taskHistoryPersistence: taskHistoryPersistenceSnapshot(),

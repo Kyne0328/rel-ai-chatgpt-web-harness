@@ -1038,7 +1038,7 @@ async function case_workspace_multi_source_runtime_unit() {
     const { relaiSearch } = __m5;
   
     const __m6 = await import("../src/repository/intelligence/queryWorkerClient.js");
-    const { repositoryQueryWorkerStats } = __m6;
+    const { repositoryQueryWorkerStats, QUERY_WORKER_GLOBAL_COUNT } = __m6;
   
     const __m7 = await import("../src/repository/intelligence/service.js");
     const { repositoryIntelligence } = __m7;
@@ -1110,7 +1110,7 @@ async function case_workspace_multi_source_runtime_unit() {
       'semantic search must fan out across attached source roots');
     assert.equal(Array.isArray(semantic.retrieval?.sources), true,
       'multi-source semantic search must preserve per-source retrieval degradation metadata');
-    assert.ok(repositoryQueryWorkerStats().liveWorkerCount <= 4,
+    assert.ok(repositoryQueryWorkerStats().liveWorkerCount <= QUERY_WORKER_GLOBAL_COUNT,
       'attached source roots must share the global query worker budget');
   
     const symbol = await repositoryIntelligence.codeInspect(workspace, config, {

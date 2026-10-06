@@ -11,6 +11,7 @@ const MIB = 1024 ** 2;
 
 await verifyLowHeadroomCostClasses();
 verifyCostEstimates();
+verifyLowMemoryLaptops();
 await verifyOwnerFairness();
 await verifyMemoryReservations();
 await verifyPersistentStartupSettling();
@@ -403,5 +404,23 @@ function verifyBoundedDiagnostics() {
   assert.ok(snapshots.length <= 20);
   for (let index = 1; index < snapshots.length; index += 1) {
     assert.ok(snapshots[index].atMs - snapshots[index - 1].atMs >= 10_000);
+  }
+}
+
+function verifyLowMemoryLaptops() {
+  for (const gigabytes of [4, 8]) {
+    const total = gigabytes * GIB;
+    const admission = createMemoryAdmissionController({ monitor: { snapshot: () => ({
+      sampledAtMs: 1, stale: false, physicalTotalBytes: total,
+      physicalAvailableBytes: GIB, commitEnforced: true, commitLimitBytes: 2 * total,
+      commitAvailableBytes: 2 * GIB
+    }) } });
+    assert.equal(admission.canAdmit(['heavy'], { reservationBytes: 128 * MIB }).allowed, true,
+      `${gigabytes} GB host with 1 GB available can start an ordinary command`);
+    assert.equal(admission.canAdmit(['heavy'], { reservationBytes: 768 * MIB }).allowed, false,
+      `${gigabytes} GB host with 1 GB available queues a build to retain OS headroom`);
+    assert.equal(admission.canAdmit(['repositoryQuery'], {}).allowed, true,
+      'queries remain available independently of heavy-command admission');
+    assert.equal(admission.diagnostics().physicalFloorBytes, total * 0.08);
   }
 }

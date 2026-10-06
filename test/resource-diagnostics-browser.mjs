@@ -67,6 +67,9 @@ try {
   const panel = page.locator('[data-diagnostic-region="resources"]');
   await panel.waitFor({ state: 'visible' });
   await page.waitForFunction(() => document.querySelector('[data-diagnostic-region="resources"]')?.textContent.includes('Normal pressure'));
+  assert.equal(await panel.locator('[data-resource-technical]').evaluate(element => element.open), false);
+  assert.doesNotMatch(await panel.innerText(), /Minimum heavy-work reservation|Bounded memory observations/);
+  await panel.getByText('Technical resource details', { exact: true }).click();
   assert.match(await panel.innerText(), /Minimum heavy-work reservation/);
   assert.match(await panel.innerText(), /Startup slot released; memory estimate awaits a fresh host sample/);
   assert.match(await metricText(page, 'Available physical memory'), /4.00 GiB/);
@@ -165,6 +168,13 @@ try {
   assert.equal(actual.ok, true);
   assert.equal(actual.resourceDiagnostics.node.scope, 'current-node-process');
   assert.ok(actual.resourceDiagnostics.node.current.rssBytes > 0);
+  assert.ok(actual.resourceDiagnostics.host.pressure.physicalTotalBytes > 0, 'idle diagnostics must take a host sample');
+  assert.ok(Number.isFinite(actual.resourceDiagnostics.host.pressure.physicalAvailableBytes));
+  assert.equal(actual.resourceDiagnostics.host.pressure.stale, false);
+  if (process.platform === 'win32') {
+    assert.equal(actual.resourceDiagnostics.host.pressure.source, 'windows-memory-counters');
+    assert.ok(Number.isFinite(actual.resourceDiagnostics.host.pressure.commitAvailableBytes));
+  }
   assert.ok(actual.resourceDiagnostics.node.samples.length <= 60);
   assert.equal(actual.resourceDiagnostics.node.sampling.intervalMs >= 5_000, true);
   assert.equal(actual.resourceDiagnostics.children.measured, false);

@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { readGuiConfig, hasExistingConfig } from '../electron/launcher-utils.js';
+import { importResourceModule } from '../electron/resource-path.js';
 import { saveLauncherConfig } from '../electron/launcher-config.js';
 import { createDesktopServiceRuntime } from '../electron/service-runtime.js';
 
@@ -377,6 +379,20 @@ try {
   const terminalFailure = await terminalRuntime.startServer();
   assert.equal(terminalFailure.tunnelStatus, 'failed');
   assert.equal(terminalFailure.errorCode, 'tunnel_runtime_unavailable', 'permanent local tunnel runtime failures must remain terminal through the desktop service layer');
+
+  const connectionState = await importResourceModule('src/connectionProfile.js');
+  connectionState.writeLaunchEnv({ REL_AI_MCP_PORT: '3333', REL_AI_MCP_TOKEN: 'local-token',
+    REL_AI_MCP_TUNNEL_ID: '', REL_AI_MCP_LOCAL_ONLY: '1' }, { replace: true });
+  assert.equal(hasExistingConfig(), true, 'the desktop reopens after the last tunnel is removed');
+  assert.equal(readGuiConfig().tunnelId, '');
+  const localOnly = await terminalRuntime.restartConnection();
+  assert.equal(localOnly.serverRunning, true);
+  assert.equal(localOnly.tunnelStatus, 'disabled', 'local-only mode does not attempt a tunnel startup');
+  assert.equal(localOnly.localMcpUrl, terminalFailure.localMcpUrl, 'removing a tunnel retains the actual listening port');
+  saveLauncherConfig({ port: 4444 });
+  assert.equal(readGuiConfig().tunnelId, '', 'saving a local port preserves intentional disconnection');
+  saveLauncherConfig({ tunnelId: 'tunnel_restored123456' });
+  assert.equal(readGuiConfig().tunnelId, 'tunnel_restored123456', 'adding a connection clears local-only mode');
 } finally {
   if (previousState === undefined) delete process.env.REL_AI_MCP_STATE_DIR; else process.env.REL_AI_MCP_STATE_DIR = previousState;
   if (previousConfig === undefined) delete process.env.REL_AI_MCP_CONFIG; else process.env.REL_AI_MCP_CONFIG = previousConfig;

@@ -4,7 +4,6 @@ import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { openModal } from '../../components/modal.js';
 import { StatusPill } from '../../components/pill.js';
-import { RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection, tunnelRuntimeView } from '../../connection-state.js';
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
@@ -126,7 +125,7 @@ function ConnectionPage({ data }) {
   const tunnelId = String(data.desktopStatus?.tunnelId || data.connection?.tunnelId || '');
   const primaryTunnel = tunnelId ? {
     tunnelId,
-    label: 'Primary connection',
+    label: 'Connection 1',
     state: String(data.desktopStatus?.tunnelStatus || ''),
     retry: {
       scheduled: Boolean(data.desktopStatus?.tunnelNextRetryAt),
@@ -261,10 +260,9 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
   const [saved, setSaved] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [open, setOpen] = useState(expanded);
-  const [showSecret, setShowSecret] = useState(false);
   const [validation, setValidation] = useState(null);
   const [saveState, setSaveState] = useState('idle');
-  const firstInputRef = useRef(null);
+  const [tunnelBusy, setTunnelBusy] = useState(false);
   const saveInFlightRef = useRef(false);
   const desktop = window.relaiDesktop;
 
@@ -276,6 +274,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
       const next = {
         port: Number(settings.port || 3333),
         tunnelId: String(settings.tunnelId || ''),
+        tunnelLabel: String(settings.tunnelLabel || 'Connection 1'),
         tunnelApiKey: '',
         tunnelApiKeyConfigured: settings.tunnelApiKeyConfigured === true,
         tunnelErrorCode: String(settings.tunnelErrorCode || ''),
@@ -295,7 +294,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
   useEffect(() => {
     const handler = event => {
       setOpen(true);
-      if (event.detail?.focus) window.requestAnimationFrame(() => firstInputRef.current?.focus({ preventScroll: true }));
+      if (event.detail?.focus) window.requestAnimationFrame(() => document.querySelector('.additional-tunnel-row button, .additional-tunnels-heading button')?.focus({ preventScroll: true }));
     };
     window.addEventListener('relai:connection-open-settings', handler);
     return () => window.removeEventListener('relai:connection-open-settings', handler);
@@ -334,8 +333,9 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
     setForm(current => ({ ...current, ...patch }));
   };
   const save = async () => {
-    if (saveInFlightRef.current) return;
-    const issue = validateConnectionSettings(form);
+    if (saveInFlightRef.current || tunnelBusy) return;
+    const issue = !Number.isInteger(form.port) || form.port < 1024 || form.port > 65535
+      ? { field: 'port', message: 'Enter a local connection port from 1024 to 65535.' } : null;
     if (issue) {
       setValidation(issue);
       setOpen(true);
@@ -346,7 +346,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
     setSaveState('saving');
     setValidation(null);
     try {
-      const result = await desktop.saveSettings({ port: form.port, tunnelId: form.tunnelId, tunnelApiKey: form.tunnelApiKey });
+      const result = await desktop.saveSettings({ port: form.port });
       setForm(current => ({
         ...current,
         tunnelApiKey: '',
@@ -381,50 +381,30 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
     onToggle: event => setOpen(event.currentTarget.open),
     'data-unsaved-changes': dirty ? 'true' : 'false'
   },
-    h('summary', { className: 'connector-details-summary' }, h('span', null, h('strong', null, 'Connection settings'), h('small', null, 'Secure tunnel credentials and local port'))),
+    h('summary', { className: 'connector-details-summary' }, h('span', null, h('strong', null, 'Connection settings'), h('small', null, 'Manage tunnels and the local port'))),
     h('div', { className: 'card-body settings-panel-body' },
-      h('p', { className: 'muted' }, 'Use these settings when connecting this computer for the first time or fixing a connection problem.'),
-      h(SettingsField, { label: 'Tunnel ID', help: 'The OpenAI Secure MCP Tunnel ID for this computer.', error: validation?.field === 'tunnelId' ? validation.message : '', inputId: 'tunnelId' },
-        h('input', {
-          id: 'tunnelId', type: 'text', value: form.tunnelId, autoComplete: 'off', spellCheck: false, disabled: saveState === 'saving',
-          ref: firstInputRef, 'data-connection-field': 'tunnelId', 'aria-invalid': validation?.field === 'tunnelId' ? 'true' : undefined,
-          'aria-describedby': describedBy('tunnelId'), onChange: event => update({ tunnelId: event.currentTarget.value.trim() })
-        })
-      ),
-      h(SettingsField, {
-        label: 'Runtime API key',
-        help: form.tunnelApiKeyConfigured ? 'The saved key is encrypted on this computer. Rel.AI does not show it again.' : 'Create a runtime API key for this Secure MCP Tunnel in OpenAI Platform.',
-        error: validation?.field === 'tunnelApiKey' ? validation.message : '', inputId: 'tunnelApiKey'
-      },
-        h('div', { className: 'password-field' },
-          h('input', {
-            id: 'tunnelApiKey', type: showSecret ? 'text' : 'password', value: form.tunnelApiKey, disabled: saveState === 'saving',
-            placeholder: form.tunnelApiKeyConfigured ? 'Stored securely. Enter a new key only to replace it.' : 'Paste runtime API key',
-            autoComplete: 'off', spellCheck: false, 'data-connection-field': 'tunnelApiKey',
-            'aria-invalid': validation?.field === 'tunnelApiKey' ? 'true' : undefined, 'aria-describedby': describedBy('tunnelApiKey'),
-            onChange: event => update({ tunnelApiKey: event.currentTarget.value.trim() })
-          }),
-          h('button', { className: 'secondary compact-button password-toggle', type: 'button', onClick: () => setShowSecret(value => !value) }, showSecret ? 'Hide' : 'Show')
-        )
-      ),
-      credentialError ? h('div', { className: 'connection-key-error', role: 'alert' }, credentialError) : null,
-      h(AdditionalTunnelConnections, {
-        primary: primaryTunnel,
+      h(TunnelConnections, {
+        primary: form.tunnelId ? { ...primaryTunnel, tunnelId: form.tunnelId, label: form.tunnelLabel, error: credentialError, apiKeyConfigured: form.tunnelApiKeyConfigured } : null,
         connections: form.additionalTunnels,
         statuses: form.additionalTunnelStatuses,
         desktop,
-        onChange: ({ connections, statuses }) => setForm(current => ({
-          ...current,
-          additionalTunnels: connections,
-          additionalTunnelStatuses: statuses
-        }))
+        disabled: saveState === 'saving',
+        onBusyChange: setTunnelBusy,
+        onChange: async ({ connections, statuses }) => {
+          setForm(current => ({ ...current, additionalTunnels: connections, additionalTunnelStatuses: statuses }));
+          const settings = await desktop.getSettings();
+          setForm(current => ({ ...current, tunnelId: settings.tunnelId || '', tunnelLabel: settings.tunnelLabel || 'Connection 1',
+            tunnelApiKeyConfigured: settings.tunnelApiKeyConfigured === true,
+            tunnelErrorCode: settings.tunnelErrorCode || '', tunnelError: settings.tunnelError || '',
+            additionalTunnels: settings.additionalTunnels || [], additionalTunnelStatuses: settings.additionalTunnelStatuses || [] }));
+        }
       }),
       h('details', { className: 'settings-advanced connection-advanced-settings' },
         h('summary', null, 'Advanced local settings'),
         h('div', { className: 'settings-panel-body' },
           h(SettingsField, { label: 'Local connection port', help: 'Change this only when port 3333 conflicts with another local application.', error: validation?.field === 'port' ? validation.message : '', inputId: 'port' },
             h('input', {
-              id: 'port', className: 'settings-number-control', type: 'number', min: '1024', max: '65535', step: '1', value: form.port, disabled: saveState === 'saving',
+              id: 'port', className: 'settings-number-control', type: 'number', min: '1024', max: '65535', step: '1', value: form.port, disabled: saveState === 'saving' || tunnelBusy,
               'data-connection-field': 'port', 'aria-invalid': validation?.field === 'port' ? 'true' : undefined,
               'aria-describedby': describedBy('port'), onChange: event => update({ port: Number(event.currentTarget.value) })
             })
@@ -432,20 +412,24 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
         )
       ),
       h('div', { className: 'connection-actions' },
-        h('div', { className: 'muted' }, 'Changing the tunnel reconnects the tunnel only. Changing the local port restarts the full Rel.AI connection.'),
-        h('button', { className: 'primary', type: 'button', disabled: saveState === 'saving', onClick: () => void save() },
-          saveState === 'saving' ? 'Saving and restarting…' : saveState === 'saved' ? 'Connection settings saved' : saveState === 'error' ? 'Try again' : 'Save connection settings')
+        h('div', { className: 'muted' }, 'Changing the local port restarts the Rel.AI service.'),
+        h('button', { className: 'primary', type: 'button', disabled: saveState === 'saving' || tunnelBusy, onClick: () => void save() },
+          saveState === 'saving' ? 'Saving and restarting…' : saveState === 'saved' ? 'Local settings saved' : saveState === 'error' ? 'Try again' : 'Save local settings')
       )
     )
   );
 }
 
-function AdditionalTunnelConnections({ primary = null, connections = [], statuses = [], desktop, onChange }) {
+function TunnelConnections({ primary = null, connections = [], statuses = [], desktop, onChange, disabled = false, onBusyChange }) {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState({ label: '', tunnelId: '', apiKey: '' });
+  const [draft, setDraft] = useState({ label: '', tunnelId: '', apiKey: '', originalTunnelId: '', apiKeyConfigured: false });
   const [showSecret, setShowSecret] = useState(false);
   const [busy, setBusy] = useState('');
   const [validation, setValidation] = useState(null);
+  const busyRef = useRef(false);
+  const nameInputRef = useRef(null);
+  useEffect(() => { onBusyChange?.(Boolean(busy)); }, [busy, onBusyChange]);
+  useEffect(() => { if (open) nameInputRef.current?.focus(); }, [open, draft.originalTunnelId]);
 
   const statusFor = tunnelId => statuses.find(status => status.tunnelId === tunnelId) || null;
   const rows = [
@@ -458,59 +442,71 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
     setDraft(current => ({ ...current, ...patch }));
   };
   const add = async () => {
-    const issue = validateAdditionalTunnel(draft);
+    if (disabled || busyRef.current) return;
+    const issue = validateAdditionalTunnel(draft) || (rows.some(row => row.connection.tunnelId === draft.tunnelId && row.connection.tunnelId !== draft.originalTunnelId)
+      ? { field: 'tunnelId', message: 'This tunnel is already configured.' } : null);
     if (issue) {
       setValidation(issue);
       setOpen(true);
       return;
     }
+    busyRef.current = true;
     setBusy('add');
     try {
       const result = await desktop.saveTunnel({
         label: draft.label,
+        originalTunnelId: draft.originalTunnelId || undefined,
         tunnelId: draft.tunnelId,
-        apiKey: draft.apiKey
+        apiKey: draft.apiKey,
+        enabled: draft.enabled
       });
-      onChange?.({
+      await onChange?.({
         connections: Array.isArray(result?.connections) ? result.connections : connections,
         statuses: Array.isArray(result?.statuses) ? result.statuses : statuses
       });
-      setDraft({ label: '', tunnelId: '', apiKey: '' });
       setShowSecret(false);
       requestDashboardRefresh();
       if (result?.ok === false) {
-        toast(result?.status?.error || 'The tunnel was saved, but it could not connect.', { variant: 'error' });
+        setDraft(current => ({ ...current, originalTunnelId: result.connection?.tunnelId || current.tunnelId, apiKey: '', apiKeyConfigured: true }));
+        toast(result?.error || result?.status?.error || 'The tunnel was saved, but it could not connect.', { variant: 'error' });
       } else {
-        toast('ChatGPT tunnel added.', { variant: 'success' });
+        toast(draft.originalTunnelId ? 'ChatGPT tunnel saved.' : 'ChatGPT tunnel added.', { variant: 'success' });
         setOpen(false);
+        setDraft({ label: '', tunnelId: '', apiKey: '', originalTunnelId: '', apiKeyConfigured: false });
       }
     } catch (error) {
       toast(messageOf(error), { variant: 'error' });
     } finally {
+      busyRef.current = false;
       setBusy('');
     }
   };
   const remove = async connection => {
+    if (disabled || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(connection.tunnelId);
     const confirmed = await confirmAction({
       title: `Remove ${connection.label}?`,
       message: 'Remove this ChatGPT tunnel from Rel.AI?',
-      detail: 'This stops only this tunnel-client connection. The primary tunnel, local projects, tasks, and other ChatGPT tunnel connections are not changed.',
+      detail: 'This disconnects this ChatGPT tunnel. Your local projects and tasks stay available.',
       confirmLabel: 'Remove tunnel',
       danger: true
     });
-    if (!confirmed) return;
-    setBusy(connection.tunnelId);
+    if (!confirmed) { busyRef.current = false; setBusy(''); return; }
     try {
       const result = await desktop.removeTunnel(connection.tunnelId);
-      onChange?.({
+      await onChange?.({
         connections: Array.isArray(result?.connections) ? result.connections : [],
         statuses: Array.isArray(result?.statuses) ? result.statuses : []
       });
+      if (result?.ok === false) throw new Error(result.error || 'The tunnel could not be removed.');
+      if (draft.originalTunnelId === connection.tunnelId) setOpen(false);
       requestDashboardRefresh();
       toast('ChatGPT tunnel removed.', { variant: 'success' });
     } catch (error) {
       toast(messageOf(error), { variant: 'error' });
     } finally {
+      busyRef.current = false;
       setBusy('');
     }
   };
@@ -519,12 +515,13 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
     h('div', { className: 'additional-tunnels-heading' },
       h('div', null,
         h('strong', { id: 'additionalTunnelsTitle' }, 'ChatGPT tunnel connections'),
-        h('p', { className: 'settings-help' }, 'Each ChatGPT account can use its own Secure MCP Tunnel. Every tunnel reaches this same local Rel.AI service and the same configured workspaces.')
+        h('p', { className: 'settings-help' }, 'All tunnels connect to this computer’s projects.')
       ),
       h('button', {
         className: 'secondary compact-button',
         type: 'button',
-        onClick: () => setOpen(value => !value),
+        disabled: disabled || Boolean(busy),
+        onClick: () => { setDraft({ label: '', tunnelId: '', apiKey: '', originalTunnelId: '', apiKeyConfigured: false }); setValidation(null); setShowSecret(false); setOpen(value => !value); },
         'aria-expanded': String(open),
         'aria-controls': 'additionalTunnelForm'
       }, open ? 'Cancel' : 'Add tunnel')
@@ -537,21 +534,22 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
           const view = tunnelRuntimeView(status);
           return h('div', {
             className: 'additional-tunnel-row',
-            key: connection.tunnelId,
-            'data-primary': row.primary ? 'true' : undefined
+            key: connection.tunnelId
           },
             h('div', { className: 'additional-tunnel-copy' },
-              h('strong', null, connection.label || (row.primary ? 'Primary connection' : connection.tunnelId)),
-              h('small', null, row.primary ? 'Primary ChatGPT tunnel' : 'Additional ChatGPT tunnel'),
+              h('strong', null, connection.label || connection.tunnelId),
               h('span', { className: 'mono' }, connection.tunnelId),
-              !row.primary && status?.error ? h('small', { className: 'additional-tunnel-error' }, status.error) : null
+              status?.error ? h('small', { className: 'additional-tunnel-error' }, status.error) : null
             ),
             h('div', { className: 'additional-tunnel-actions' },
               h(StatusPill, { label: view.label, tone: view.tone }),
-              row.primary ? null : h('button', {
+              h('button', { className: 'secondary compact-button', type: 'button', disabled: disabled || Boolean(busy),
+                onClick: () => { setDraft({ label: connection.label || '', tunnelId: connection.tunnelId, apiKey: '', originalTunnelId: connection.tunnelId, apiKeyConfigured: connection.apiKeyConfigured !== false, enabled: connection.enabled !== false }); setValidation(null); setShowSecret(false); setOpen(true); }
+              }, 'Edit'),
+              h('button', {
                 className: 'secondary compact-button',
                 type: 'button',
-                disabled: Boolean(busy),
+                disabled: disabled || Boolean(busy),
                 onClick: () => void remove(connection)
               }, busy === connection.tunnelId ? 'Removing…' : 'Remove')
             )
@@ -567,6 +565,8 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
         inputId: 'additionalTunnelLabel'
       }, h('input', {
         id: 'additionalTunnelLabel',
+        ref: nameInputRef,
+        disabled: disabled || Boolean(busy),
         type: 'text',
         value: draft.label,
         maxLength: 80,
@@ -582,6 +582,7 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
         inputId: 'additionalTunnelId'
       }, h('input', {
         id: 'additionalTunnelId',
+        disabled: disabled || Boolean(busy),
         type: 'text',
         value: draft.tunnelId,
         autoComplete: 'off',
@@ -598,9 +599,10 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
       }, h('div', { className: 'password-field' },
         h('input', {
           id: 'additionalTunnelApiKey',
+          disabled: disabled || Boolean(busy),
           type: showSecret ? 'text' : 'password',
           value: draft.apiKey,
-          placeholder: 'Paste runtime API key',
+          placeholder: draft.apiKeyConfigured ? 'Saved securely. Enter a key to replace it.' : 'Paste runtime API key',
           autoComplete: 'off',
           spellCheck: false,
           'aria-invalid': validation?.field === 'apiKey' ? 'true' : undefined,
@@ -615,7 +617,7 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
       )),
       h('div', { className: 'additional-tunnel-form-actions' },
         h('a', { className: 'buttonlike secondary compact-button', href: 'https://platform.openai.com/settings/organization/tunnels', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI Tunnels'),
-        h('button', { className: 'primary', type: 'button', disabled: busy === 'add', onClick: () => void add() }, busy === 'add' ? 'Adding…' : 'Add ChatGPT tunnel')
+        h('button', { className: 'primary', type: 'button', disabled: disabled || Boolean(busy), onClick: () => void add() }, busy === 'add' ? 'Adding…' : 'Add ChatGPT tunnel')
       )
     ) : null
   );
@@ -624,7 +626,7 @@ function AdditionalTunnelConnections({ primary = null, connections = [], statuse
 function validateAdditionalTunnel(value) {
   if (String(value.label || '').trim().length > 80) return { field: 'label', message: 'Use a connection name of 80 characters or fewer.' };
   if (!/^tunnel_[A-Za-z0-9_-]{8,200}$/.test(String(value.tunnelId || '').trim())) return { field: 'tunnelId', message: 'Enter a valid OpenAI Secure MCP Tunnel ID beginning with tunnel_.' };
-  if (String(value.apiKey || '').trim().length < 12 || /\s/.test(String(value.apiKey || '').trim())) return { field: 'apiKey', message: 'Enter the runtime API key for this tunnel with no spaces.' };
+  if ((!value.apiKeyConfigured || value.apiKey) && (String(value.apiKey || '').trim().length < 12 || /\s/.test(String(value.apiKey || '').trim()))) return { field: 'apiKey', message: 'Enter the runtime API key for this tunnel with no spaces.' };
   return null;
 }
 
@@ -645,19 +647,9 @@ function tunnelConnectionStatusSummary(statuses = []) {
   return parts.join(' · ');
 }
 
-function validateConnectionSettings(value) {
-  if (!Number.isInteger(value.port) || value.port < 1024 || value.port > 65535) return { field: 'port', message: 'Enter a local connection port from 1024 to 65535.' };
-  if (!/^tunnel_[A-Za-z0-9_-]{8,200}$/.test(value.tunnelId)) return { field: 'tunnelId', message: 'Enter a valid OpenAI Secure MCP Tunnel ID beginning with tunnel_.' };
-  if (!value.tunnelApiKeyConfigured && !value.tunnelApiKey) return { field: 'tunnelApiKey', message: 'Enter the OpenAI Secure MCP Tunnel runtime API key.' };
-  if (value.tunnelApiKey && (value.tunnelApiKey.length < 12 || /\s/.test(value.tunnelApiKey))) return { field: 'tunnelApiKey', message: 'Enter a valid runtime API key with no spaces.' };
-  return null;
-}
-
 function connectionSnapshot(value) {
   return JSON.stringify({
-    port: Number(value?.port || 0),
-    tunnelId: String(value?.tunnelId || '').trim(),
-    replacementKeyPresent: Boolean(String(value?.tunnelApiKey || '').trim())
+    port: Number(value?.port || 0)
   });
 }
 
@@ -1601,7 +1593,6 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
         h('strong', null, runtimeNotice.title),
         h('div', null, runtimeNotice.message)
       ) : null,
-      h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }),
       developer.name ? h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': developer.username ? `${developer.name} on GitHub (@${developer.username})` : `${developer.name} on GitHub` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')) : null,
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
     ),

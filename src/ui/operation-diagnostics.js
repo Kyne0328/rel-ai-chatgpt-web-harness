@@ -93,6 +93,7 @@ export function runtimeBuildDiagnostics(runtime = {}, compatibility = {}) {
   return {
     buildId: text(identity.buildId) || 'Unknown',
     facts: [
+      ['Build ID', text(identity.buildId) || 'Unknown'],
       ['Source revision', text(identity.sourceRevision) || 'Unknown'],
       ['Dirty source', typeof identity.dirty === 'boolean' ? (identity.dirty ? 'Yes' : 'No') : 'Unknown'],
       ['Source fingerprint', text(identity.sourceFingerprint) || 'Unknown'],

@@ -56,6 +56,7 @@ try {
   const tunnelOnly = await saveDesktopSettings({ tunnelApiKey: 'sk-runtime-tunnel-only-123456' }, {
     ...runtimeActions,
     getCurrentStatus: () => ({ serverRunning: true, tunnelStatus: 'running' }),
+    canRestart: () => 'An active task blocks a full service restart.',
     restartConnection: async () => { tunnelRestarts += 1; return { serverRunning: true, tunnelStatus: 'running' }; }
   });
   assert.equal(tunnelOnly.ok, true);

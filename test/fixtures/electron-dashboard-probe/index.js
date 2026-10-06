@@ -170,6 +170,7 @@ app.whenReady().then(async () => {
   }
   await passiveMcpSession.close();
   const connectionSaveLifecycle = await exerciseConnectionSaveLifecycle(win);
+  const uniformTunnels = await exerciseUniformTunnels(win);
   const usageRequestOrdering = await exerciseUsageRequestOrdering(win);
   const updateModalTransitions = await exerciseUpdateModalTransitions(win);
 
@@ -513,6 +514,7 @@ app.whenReady().then(async () => {
     projectPersistence,
     passiveRouteStability,
     connectionSaveLifecycle,
+    uniformTunnels,
     usageRequestOrdering,
     updateModalTransitions,
     taskInteraction,
@@ -694,7 +696,7 @@ async function exerciseConnectionSaveLifecycle(win) {
   await waitFor(win, `document.querySelector('#tunnelSettings .connection-actions button').disabled`);
   const during = await win.webContents.executeJavaScript(`(() => {
     const probe = window.__connectionSaveProbe;
-    const locked = ['tunnelId', 'tunnelApiKey', 'port'].every(id => document.getElementById(id).disabled);
+    const locked = document.getElementById('port').disabled;
     for (const listener of probe.listeners) listener({
       additionalTunnelStatuses: [{ tunnelId: 'tunnel_secondary1234', state: 'running' }]
     });
@@ -703,7 +705,7 @@ async function exerciseConnectionSaveLifecycle(win) {
   })()`);
   await waitFor(win, `!document.querySelector('#port').disabled && document.querySelector('#tunnelSettings').dataset.unsavedChanges === 'false'`);
   const after = await win.webContents.executeJavaScript(`(() => {
-    const row = [...document.querySelectorAll('.additional-tunnel-row')].find(node => !node.dataset.primary);
+    const row = [...document.querySelectorAll('.additional-tunnel-row')].find(node => node.textContent.includes('tunnel_secondary1234'));
     const result = { port: document.querySelector('#port').value, latestTunnelStatus: row?.textContent.includes('Connected') === true };
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(document.querySelector('#port'), '3355');
     document.querySelector('#port').dispatchEvent(new Event('input', { bubbles: true }));
@@ -771,7 +773,7 @@ async function exerciseOperationDiagnostics(win) {
   try {
     await waitFor(win, `window.__relaiDiagnosticsFetches > 0 && document.querySelector('.activity-row-trigger')?.textContent.includes('Operation diagnostics fixture')`);
     await win.webContents.executeJavaScript(`document.querySelector('.activity-row-trigger').click()`);
-    await waitFor(win, `document.querySelector('[data-operation-diagnostics="unknown"]') && document.querySelector('[data-runtime-build-identity]')?.textContent.includes('diagnostic-build')`);
+    await waitFor(win, `document.querySelector('[data-operation-diagnostics="unknown"]')`);
     const legacy = await win.webContents.executeJavaScript(`(() => {
       const panel = document.querySelector('[data-operation-diagnostics]');
       const fields = [...panel.querySelectorAll('dl > div')];
@@ -870,8 +872,7 @@ async function exerciseOperationDiagnostics(win) {
         sameLiveRegion: panel.querySelector('[role="status"]') === window.__relaiDiagnosticsStatus,
         noLiveClock: panel.querySelectorAll('[data-clock-elapsed-start]').length === 0,
         uncertaintyVisible: panel.querySelector('.operation-diagnostics-warning')?.textContent.includes('termination is unconfirmed') === true,
-        cachedBuild: build.textContent.includes('diagnostic-build'),
-        parityUnknown: [...build.querySelectorAll('dl > div')].some(node => node.querySelector('dt')?.textContent === 'Source/build parity' && node.querySelector('dd')?.textContent === 'Unknown')
+        runtimeHidden: build === null
       };
     })()`);
     return { legacy, keyboardExpanded, repeated, narrow, collecting, ready };
@@ -1354,4 +1355,65 @@ async function waitFor(win, expression, timeoutMs = 10000) {
 
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function exerciseUniformTunnels(win) {
+  await win.webContents.executeJavaScript(`(() => {
+    const settings = { port: 3333, tunnelId: 'tunnel_first123456', tunnelLabel: 'Personal', tunnelApiKeyConfigured: true,
+      additionalTunnels: [{ tunnelId: 'tunnel_second123456', label: 'School', apiKeyConfigured: true }], additionalTunnelStatuses: [] };
+    const probe = window.__uniformTunnelProbe = { settings, saves: [], removes: [] };
+    const result = () => ({ ok: true, connections: settings.additionalTunnels, statuses: settings.additionalTunnelStatuses });
+    window.relaiDesktop = {
+      getSettings: async () => structuredClone(settings), saveSettings: async () => ({ ok: true }),
+      saveTunnel: async input => {
+        probe.saves.push(input);
+        if (input.originalTunnelId === settings.tunnelId) { settings.tunnelId = input.tunnelId; settings.tunnelLabel = input.label; }
+        else settings.additionalTunnels = settings.additionalTunnels.map(item => item.tunnelId === input.originalTunnelId ? { ...item, tunnelId: input.tunnelId, label: input.label } : item);
+        return result();
+      },
+      removeTunnel: async id => { probe.removes.push(id); settings.additionalTunnels = settings.additionalTunnels.filter(item => item.tunnelId !== id); if (settings.tunnelId === id) settings.tunnelId = ''; return result(); }
+    };
+    location.hash = '#settings/connection';
+  })()`);
+  await waitFor(win, `document.querySelectorAll('.additional-tunnel-row').length === 2`);
+  const actions = await win.webContents.executeJavaScript(`(() => {
+    document.querySelector('#tunnelSettings').open = true;
+    return [...document.querySelectorAll('.additional-tunnel-row')].map(row => ({
+      edit: [...row.querySelectorAll('button')].some(button => button.textContent === 'Edit'),
+      remove: [...row.querySelectorAll('button')].some(button => button.textContent === 'Remove'),
+      special: row.textContent.includes('Primary')
+    }));
+  })()`);
+  async function editRow(id, label, nextId) {
+    await win.webContents.executeJavaScript(`(() => {
+      const row = [...document.querySelectorAll('.additional-tunnel-row')].find(row => row.textContent.includes(${JSON.stringify(id)}));
+      [...row.querySelectorAll('button')].find(button => button.textContent === 'Edit').click();
+    })()`);
+    await waitFor(win, `document.querySelector('#additionalTunnelId')?.value === ${JSON.stringify(id)}`);
+    await win.webContents.executeJavaScript(`(() => {
+      for (const [id, value] of [['additionalTunnelLabel', ${JSON.stringify(label)}], ['additionalTunnelId', ${JSON.stringify(nextId)}]]) {
+        const input = document.getElementById(id);
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    })()`);
+    await waitFor(win, `document.querySelector('#additionalTunnelLabel')?.value === ${JSON.stringify(label)}`);
+    await win.webContents.executeJavaScript(`document.querySelector('.additional-tunnel-form-actions button').click()`);
+    await waitFor(win, `!document.querySelector('#additionalTunnelForm')`);
+  }
+  await editRow('tunnel_first123456', 'Personal updated', 'tunnel_first123456');
+  await editRow('tunnel_second123456', 'School updated', 'tunnel_school123456');
+  await win.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('.additional-tunnel-row')].find(row => row.textContent.includes('tunnel_first123456'));
+    [...row.querySelectorAll('button')].find(button => button.textContent === 'Remove').click();
+  })()`);
+  await waitFor(win, `document.querySelector('.modal-actions')`);
+  await win.webContents.executeJavaScript(`[...document.querySelectorAll('.modal-actions button')].find(button => button.textContent === 'Remove tunnel').click()`);
+  await waitFor(win, `document.querySelectorAll('.additional-tunnel-row').length === 1`);
+  const updated = await win.webContents.executeJavaScript(`(() => ({
+    saves: window.__uniformTunnelProbe.saves.map(item => ({ original: item.originalTunnelId, id: item.tunnelId, key: item.apiKey })),
+    removed: window.__uniformTunnelProbe.removes, remaining: document.querySelector('.additional-tunnel-row').textContent.includes('School updated')
+  }))()`);
+  await win.webContents.executeJavaScript(`(() => { delete window.relaiDesktop; delete window.__uniformTunnelProbe; location.hash = '#tasks'; })()`);
+  return { actions, ...updated };
 }

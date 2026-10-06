@@ -79,7 +79,7 @@ export function RuntimeBuildIdentity({ runtime, compatibility }) {
   const view = runtimeBuildDiagnostics(runtime, compatibility);
   const help = `${view.parityReason} Cached parity applies only to the recorded source snapshot; historical events may have used another build.`;
   return h('details', { className: 'operation-diagnostics runtime-build-identity', 'data-runtime-build-identity': '' },
-    h('summary', null, 'Runtime: ', view.buildId),
+    h('summary', null, 'Runtime details'),
     h('dl', { className: 'operation-diagnostics-facts' }, ...view.facts.map(([label, value]) => h('div', { key: label },
       h('dt', null, label), h('dd', null, value)
     ))),

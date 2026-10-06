@@ -5,10 +5,10 @@ import { repositoryIndexPath } from './database.js';
 import { repositoryIndexStatus } from './indexer.js';
 import { repositoryIndexSnapshot } from './state.js';
 import { measurePerformancePhase } from '../../performanceObservability.js';
-import { acquireHostResources, hostResourceStats } from '../../hostResourceScheduler.js';
+import { acquireHostResources, hostResourceStats, HOST_REPOSITORY_QUERY_LIMIT } from '../../hostResourceScheduler.js';
 
 const QUERY_WORKER_IDLE_EVICT_MS = 60_000;
-const QUERY_WORKER_GLOBAL_COUNT = 4;
+const QUERY_WORKER_GLOBAL_COUNT = HOST_REPOSITORY_QUERY_LIMIT;
 const QUERY_WORKER_TIMEOUT_MS = 30_000;
 const QUERY_WORKER_QUEUE_TIMEOUT_MS = 30_000;
 const QUERY_WORKER_FILE = fileURLToPath(new URL('./queryWorker.js', import.meta.url));
@@ -66,10 +66,9 @@ async function runPiscinaQuery(key, job, signal, timeoutMs = QUERY_WORKER_TIMEOU
   let timer = null;
   try {
     try {
-      resourceLease = await acquireHostResources(['repositoryQuery', 'heavy'], key, {
+      resourceLease = await acquireHostResources(['repositoryQuery'], key, {
         signal: queueSignal,
-        timeoutMs: effectiveQueueTimeoutMs,
-        reservationBytes: 256 * 1024 ** 2
+        timeoutMs: effectiveQueueTimeoutMs
       });
     } catch (error) {
       if (queueSignal.aborted) throw queryAbortError(queueSignal.reason);

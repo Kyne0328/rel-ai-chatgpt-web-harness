@@ -25,7 +25,7 @@ function hasExistingConfig() {
   const env = connection.readLaunchEnv();
   try {
     normalizePort(env.REL_AI_MCP_PORT || profile.port || 0);
-    normalizeTunnelId(env.REL_AI_MCP_TUNNEL_ID || profile.tunnelId || '');
+    if (env.REL_AI_MCP_LOCAL_ONLY !== '1') normalizeTunnelId(env.REL_AI_MCP_TUNNEL_ID || profile.tunnelId || '');
     return Boolean(env.REL_AI_MCP_PORT || profile.port);
   } catch {
     return false;
@@ -79,7 +79,7 @@ function readGuiConfig() {
   return {
     port: normalizePort(env.REL_AI_MCP_PORT || profile.port || 3333),
     token: String(env.REL_AI_MCP_TOKEN || '').trim(),
-    tunnelId: normalizeTunnelId(env.REL_AI_MCP_TUNNEL_ID || profile.tunnelId || '')
+    tunnelId: env.REL_AI_MCP_LOCAL_ONLY === '1' ? '' : normalizeTunnelId(env.REL_AI_MCP_TUNNEL_ID || profile.tunnelId || '')
   };
 }
 

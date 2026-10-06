@@ -3,6 +3,7 @@ import { fetchJson } from '../../api.js';
 import { copyText } from '../../clipboard.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
+import { RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { getWorkspaceFilter } from '../../router.js';
@@ -15,13 +16,16 @@ const h = React.createElement;
 const LIVE_TAIL_REFRESH_DELAY_MS = 160;
 const DEFAULT_FILTERS = Object.freeze({ search: '', scope: 'all', severity: 'all', source: 'all' });
 
-export function createDiagnosticsRoute() {
+const RUNTIME_SLICES = Object.freeze(['runtime', 'runtimeCompatibility']);
+
+export function createDiagnosticsRoute(useDashboardSlices) {
   return function DiagnosticsRoute() {
-    return h(DiagnosticsView);
+    const data = useDashboardSlices(RUNTIME_SLICES);
+    return h(DiagnosticsView, { runtime: data.runtime, runtimeCompatibility: data.runtimeCompatibility });
   };
 }
 
-function DiagnosticsView() {
+function DiagnosticsView({ runtime, runtimeCompatibility }) {
   const [report, setReport] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -219,6 +223,7 @@ function DiagnosticsView() {
       report ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' },
         h(DiagnosticMetrics, { findings: view.findings }),
         h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
+        h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }),
         report.tunnelHealth ? h(TunnelHealthSummary, { health: report.tunnelHealth }) : null,
         tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null,
         h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),

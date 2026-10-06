@@ -13,12 +13,13 @@ import { fetchJson } from '../../api.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
-import { OperationDiagnostics, RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
+import { OperationDiagnostics } from '../../components/operation-diagnostics.js';
 import { toast } from '../../components/toast.js';
 import { copyText } from '../../clipboard.js';
 import { getRouteParams, getWorkspaceFilter, navigate, replaceRouteParams, routeHref } from '../../router.js';
 import { formatTerminalOutput, timeAgo } from '../../utils.js';
 import { activityEventId } from '../../activity-event.js';
+import { operationDiagnostics } from '../../operation-diagnostics.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import {
   activityAbsoluteTime,
@@ -701,7 +702,7 @@ function ActivitySpacerRow({ height }) {
   );
 }
 
-function ActivityInspector({ entry, runtime, runtimeCompatibility, sessionIndex, headingRef, copyState, onCopy }) {
+function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
       h('div', { className: 'inspector-empty' }, h('strong', null, 'Select an activity'))
@@ -759,7 +760,6 @@ function ActivityInspector({ entry, runtime, runtimeCompatibility, sessionIndex,
           }, 'Task activity')
         )
       ) : null,
-      h(OperationDiagnostics, { key: activityEventId(entry), operation: entry, live: group === 'active' }),
       readableSection('Target', targetText),
       command ? h(CommandDetail, { command }) : null,
       isCommandRun ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
@@ -767,9 +767,9 @@ function ActivityInspector({ entry, runtime, runtimeCompatibility, sessionIndex,
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
       readableSection('Error', errorText, 'activity-detail-error'),
-      h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }),
-      h('details', { className: 'activity-detail-technical' },
+      h('details', { className: 'activity-detail-technical', open: group === 'active' || Boolean(operationDiagnostics(entry).warning) },
         h('summary', null, 'Technical details'),
+        h(OperationDiagnostics, { key: activityEventId(entry), operation: entry, live: group === 'active' }),
         h('div', { className: 'activity-detail-fields' },
           fields.map(([label, value]) => h('div', { className: 'detail-field', key: label },
             h('span', { className: 'detail-field-label' }, label),

@@ -19,6 +19,17 @@ function createTunnelConnectionStore({
     return readState(filePath).connections.map(publicConnection);
   }
 
+  function launcherLabel(tunnelId) {
+    const value = readState(filePath).launcherConnection;
+    return value?.tunnelId === tunnelId ? value.label : 'Connection 1';
+  }
+
+  function setLauncherLabel(tunnelId, label) {
+    const state = readState(filePath);
+    state.launcherConnection = { tunnelId: normalizeTunnelId(tunnelId), label: normalizeLabel(label, tunnelId) };
+    writeState(filePath, state);
+  }
+
   function runtimeConnections() {
     return readState(filePath).connections.map(connection => {
       const metadata = publicConnection(connection);
@@ -41,8 +52,13 @@ function createTunnelConnectionStore({
     if (replacementKey) normalizeApiKey(replacementKey);
 
     const state = readState(filePath);
-    const index = state.connections.findIndex(connection => connection.tunnelId === tunnelId);
+    const originalTunnelId = input.originalTunnelId ? normalizeTunnelId(input.originalTunnelId) : tunnelId;
+    const index = state.connections.findIndex(connection => connection.tunnelId === originalTunnelId);
     const existing = index >= 0 ? state.connections[index] : null;
+    if (originalTunnelId !== tunnelId && state.connections.some(connection => connection.tunnelId === tunnelId)) {
+      throw new Error('This Tunnel ID is already configured.');
+    }
+    if (input.originalTunnelId && !existing) throw new Error('This tunnel connection no longer exists.');
     if (!existing && !replacementKey) throw new Error('Runtime API key is required for a new tunnel connection.');
     if (!existing && state.connections.length >= MAX_CONNECTIONS) {
       throw new Error(`Rel.AI supports up to ${MAX_CONNECTIONS} additional tunnel connections on one computer.`);
@@ -65,7 +81,7 @@ function createTunnelConnectionStore({
     const state = readState(filePath);
     const next = state.connections.filter(connection => connection.tunnelId !== tunnelId);
     if (next.length === state.connections.length) return { removed: false, tunnelId };
-    writeState(filePath, { version: STATE_VERSION, connections: next });
+    writeState(filePath, { ...state, connections: next });
     return { removed: true, tunnelId };
   }
 
@@ -91,6 +107,8 @@ function createTunnelConnectionStore({
 
   return Object.freeze({
     list,
+    launcherLabel,
+    setLauncherLabel,
     runtimeConnections,
     upsert,
     remove,
@@ -122,6 +140,10 @@ function readState(filePath) {
     validateState(state);
     return {
       version: STATE_VERSION,
+      ...(state.launcherConnection ? { launcherConnection: {
+        tunnelId: normalizeTunnelId(state.launcherConnection.tunnelId),
+        label: normalizeLabel(state.launcherConnection.label, state.launcherConnection.tunnelId)
+      } } : {}),
       connections: state.connections.map(connection => ({
         tunnelId: normalizeTunnelId(connection.tunnelId),
         label: normalizeLabel(connection.label, connection.tunnelId),

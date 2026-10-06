@@ -8,6 +8,7 @@ import { installDeterministicHostMemory } from './helpers/deterministic-host-mem
 
 process.env.REL_AI_MCP_PERSISTENT_PROCESS_LIMIT = '2';
 process.env.REL_AI_MCP_HEAVY_PROCESS_LIMIT = '1';
+process.env.REL_AI_MCP_REPOSITORY_QUERY_LIMIT = '6';
 
 process.env.REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS = '1000';
 await import('./host-memory-pressure-unit.js');
@@ -195,7 +196,14 @@ async function verifyRepositoryQueryTimeoutExcludesQueueWait() {
       queryQueueTimeoutMs: 5000
     });
     assert.equal(warmSummary?.available, true, 'warm-up must prove the query worker is ready before queue timing is measured');
-    for (let index = 0; index < 4; index += 1) {
+    const heavy = await acquireHostResource('heavy', 'build-blocker');
+    try {
+      const independent = await repositoryIntelligence.cachedSummary(workspace, config, { queryTimeoutMs: 1000, queryQueueTimeoutMs: 1000 });
+      assert.equal(independent.available, true, 'repository reads run while the heavy command lane is fully occupied');
+      assert.equal(hostResourceStats().heavy.queued, 0);
+      assert.equal(hostResourceStats().repositoryQuery.limit, 6, 'query concurrency is configurable above four');
+    } finally { heavy.release(); }
+    for (let index = 0; index < hostResourceStats().repositoryQuery.limit; index += 1) {
       blockers.push(await acquireHostResource('repositoryQuery', `ri-blocker-${index}`));
     }
     const query = repositoryIntelligence.cachedSummary(workspace, config, {

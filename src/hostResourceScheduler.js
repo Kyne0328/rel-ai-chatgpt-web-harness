@@ -5,7 +5,9 @@ const availableParallelism = Math.max(1, Number(os.availableParallelism?.() || o
 const DEFAULT_PERSISTENT_PROCESS_LIMIT = Math.min(12, Math.max(4, availableParallelism * 2));
 const DEFAULT_HEAVY_LIMIT = Math.min(4, Math.max(1, Math.floor(availableParallelism / 2)), Math.max(1, Math.floor(os.totalmem() / (2 * 1024 ** 3))));
 const DEFAULT_QUEUE_TIMEOUT_MS = 30_000;
-const HOST_REPOSITORY_QUERY_LIMIT = 4;
+// Queries have their own pool: they must not queue behind builds or command startup.
+const HOST_REPOSITORY_QUERY_LIMIT = configuredLimit('REL_AI_MCP_REPOSITORY_QUERY_LIMIT',
+  Math.min(8, Math.max(2, availableParallelism), Math.max(2, Math.floor(os.totalmem() / (1024 ** 3)))));
 const HOST_PERSISTENT_PROCESS_LIMIT = configuredLimit('REL_AI_MCP_PERSISTENT_PROCESS_LIMIT', DEFAULT_PERSISTENT_PROCESS_LIMIT);
 const HOST_HEAVY_LIMIT = configuredLimit('REL_AI_MCP_HEAVY_PROCESS_LIMIT', DEFAULT_HEAVY_LIMIT);
 const configuredReservationMb = Number(process.env.REL_AI_MCP_HEAVY_RESERVATION_MB);
@@ -306,7 +308,14 @@ function hostResourceDiagnosticSnapshot() {
   };
 }
 
+// Explicit local diagnostics may request a sample even while the scheduler is idle.
+// The monitor coalesces concurrent requests and enforces its sampling interval.
+async function refreshHostResourceDiagnostics() {
+  await hostMemoryMonitor.refresh();
+  return hostResourceDiagnosticSnapshot();
+}
+
 export {
-  HOST_PERSISTENT_PROCESS_LIMIT, acquireHostResource, acquireHostResources,
-  createFairResourceScheduler, hostResourceStats, hostResourceDiagnosticSnapshot
+  HOST_PERSISTENT_PROCESS_LIMIT, HOST_REPOSITORY_QUERY_LIMIT, acquireHostResource, acquireHostResources,
+  createFairResourceScheduler, hostResourceStats, hostResourceDiagnosticSnapshot, refreshHostResourceDiagnostics
 };
