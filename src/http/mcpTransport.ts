@@ -59,6 +59,7 @@ type HeaderValidation = HeaderValidationSuccess | HeaderValidationFailure;
 
 interface HttpAbortScope {
   signal: AbortSignal;
+  deliverySignal: AbortSignal;
   dispose: () => void;
 }
 
@@ -242,7 +243,8 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
           authInfo,
           requestHeaders: ctx.req.headers,
           requestId,
-          signal: requestAbort.signal
+          signal: requestAbort.signal,
+          deliverySignal: requestAbort.deliverySignal
         });
         if (transportResponse) {
           finishRequest(!transportResponse.body?.error);
@@ -390,18 +392,28 @@ function expectedMcpName(method: string, params: JsonRecord = {}): string {
 
 function createHttpRequestAbortScope(
   req: IncomingMessage,
-  _res: ServerResponse<IncomingMessage>
+  res: ServerResponse<IncomingMessage>
 ): HttpAbortScope {
   const controller = new AbortController();
+  const deliveryController = new AbortController();
   const onRequestAborted = (): void => {
     if (!controller.signal.aborted) controller.abort(new Error('HTTP MCP request was aborted by the client.'));
   };
+  const onResponseClosed = (): void => {
+    if (!res.writableFinished && !deliveryController.signal.aborted) {
+      deliveryController.abort(new Error('HTTP MCP response connection closed before delivery.'));
+    }
+  };
   req.once('aborted', onRequestAborted);
+  res.once('close', onResponseClosed);
   if (req.aborted) onRequestAborted();
+  if (res.destroyed && !res.writableFinished) onResponseClosed();
   return {
     signal: controller.signal,
+    deliverySignal: AbortSignal.any([controller.signal, deliveryController.signal]),
     dispose(): void {
       req.off('aborted', onRequestAborted);
+      res.off('close', onResponseClosed);
     }
   };
 }

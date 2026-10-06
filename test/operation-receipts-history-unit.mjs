@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fallbackExecutionsPage, fallbackExecutionStatus, resetFallbackExecutions, startFallbackExecution, enableFallbackCompletionNotice, peekFallbackCompletionNotices, acknowledgeFallbackCompletionDelivery } from '../src/mcp/fallbackExecutions.js';
+import { fallbackExecutionsPage, fallbackExecutionStatus, resetFallbackExecutions, startFallbackExecution, enableFallbackCompletionNotice, peekFallbackCompletionNotices, acknowledgeFallbackCompletionDelivery, waitForFallbackExecution, cancelFallbackExecution, updateFallbackExecutionPhase } from '../src/mcp/fallbackExecutions.js';
 import { principalFingerprint, createStdioPrincipal } from '../src/mcp/principal.ts';
 import { enrichWithFallbackCompletions, registerReturnedFallbackCompletions } from '../src/mcp/toolInvocation.js';
 import { createActivityEvent } from '../src/taskObservability.js';
@@ -13,6 +13,8 @@ import { toolResult } from '../src/mcp/results.js';
 import { jsonBytes } from '../src/tools/responseBudget.js';
 import { taskAuditContext } from '../src/tools/task.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
+import { HANDLERS } from '../src/tools/handlers.js';
+import { getPublicToolSchemas, getToolSchemas } from '../src/tools/schema.js';
 
 for (const operation of [OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY]) {
   const audit = taskAuditContext({}, null, 'observed-terminal-task', operation, true);
@@ -25,6 +27,7 @@ const principal = createStdioPrincipal();
 const scope = principalFingerprint(principal);
 let db;
 try {
+  await testBoundedResultWaits();
   let executions = 0;
   const first = startFallbackExecution({ config, scopeId: 'authorized-workspace-fixture', noticeScope: scope, workspace: 'app', tool: 'relai_edit', signature: 'mutation-one', run: async () => { executions += 1; return toolResult({ ok: true, changed: true, stdout: '🐱'.repeat(1000) }, false); } });
   await first.record.promise;
@@ -115,3 +118,81 @@ try {
   db?.close(); resetFallbackExecutions(); fs.rmSync(stateDir, { recursive: true, force: true });
 }
 console.log('Retained operation retrieval, lost-response retry, history scoping and pagination checks passed.');
+
+async function testBoundedResultWaits() {
+  const context = { connector: true, principal, backgroundStatusMode: true };
+  const options = { config, noticeScope: scope, workspace: 'app' };
+  let sequence = 0;
+  function pending() {
+    let release;
+    let runs = 0;
+    const gate = new Promise(resolve => { release = resolve; });
+    const operation = startFallbackExecution({ ...options, scopeId: `result-wait-${++sequence}`, tool: 'relai_exec', signature: `wait-${sequence}`,
+      run: async () => { runs++; await gate; return toolResult({ ok: true, marker: 'original-result' }, false); } });
+    return { ...operation, release, runs: () => runs };
+  }
+  const operation = pending();
+  const args = { workspace: 'app', operationId: operation.record.operationId };
+  const waiting = HANDLERS.operationResult(config, args, context);
+  const status = await relaiStatus(config, args, context);
+  assert.equal(status.backgroundOperation.status, 'running', 'status stays immediate while result retrieval waits');
+  const immediate = await HANDLERS.operationResult(config, { ...args, waitMs: 0 }, context);
+  assert.equal(immediate.backgroundOperation.status, 'running');
+  const foreign = await HANDLERS.operationResult(config, args, { ...context, principal: createStdioPrincipal(), signal: AbortSignal.timeout(100) });
+  assert.equal(foreign.errorCode, 'OPERATION_NOT_FOUND', 'foreign result must be rejected before waiting');
+  const wrongWorkspace = await waitForFallbackExecution(args.operationId, { ...options, workspace: 'other', signal: AbortSignal.timeout(100) });
+  assert.equal(wrongWorkspace, null);
+  const wrongTask = await waitForFallbackExecution(args.operationId, { ...options, workId: 'another-task', signal: AbortSignal.timeout(100) });
+  assert.equal(wrongTask, null);
+  operation.release();
+  const completed = await waiting;
+  assert.equal(completed.backgroundOperation.result.marker, 'original-result');
+  assert.equal(completed.backgroundOperation.operationId, args.operationId);
+  assert.equal(operation.runs(), 1, 'result wait must not execute the command again');
+
+  const held = pending();
+  const shortWait = await waitForFallbackExecution(held.record.operationId, { ...options, waitMs: 15 });
+  assert.equal(shortWait.status, 'running');
+  assert.equal(held.record.controller.signal.aborted, false, 'wait timeout must not cancel background work');
+  const deadlineWait = await waitForFallbackExecution(held.record.operationId, { ...options, waitMs: 5000, deadlineAtMs: Date.now() + 15 });
+  assert.equal(deadlineWait.status, 'running', 'an inherited deadline caps the wait');
+  const abort = new AbortController();
+  const abortedWait = HANDLERS.operationResult(config, { workspace: 'app', operationId: held.record.operationId }, { ...context, signal: abort.signal });
+  abort.abort(new Error('caller disconnected'));
+  await assert.rejects(abortedWait, /caller disconnected/);
+  assert.equal(held.record.controller.signal.aborted, false, 'disconnect cancels retrieval, not its existing execution');
+  const cancelledWait = waitForFallbackExecution(held.record.operationId, options);
+  cancelFallbackExecution(held.record.operationId, { config, reason: 'cancel the operation itself' });
+  held.release();
+  assert.equal((await cancelledWait).status, 'cancelled', 'operation cancellation wakes result retrieval');
+
+  const occupied = Array.from({ length: 4 }, pending);
+  const waiters = occupied.map(item => waitForFallbackExecution(item.record.operationId, options));
+  const excess = pending();
+  assert.equal((await waitForFallbackExecution(excess.record.operationId, { ...options, signal: AbortSignal.timeout(100) })).status, 'running',
+    'excess result waits return a receipt without occupying another tunnel slot');
+  occupied.forEach(item => item.release());
+  assert.ok((await Promise.all(waiters)).every(item => item.status === 'completed'));
+  const freshWait = waitForFallbackExecution(excess.record.operationId, options);
+  excess.release();
+  assert.equal((await freshWait).status, 'completed', 'settlement, timeouts and aborts release waiter admission');
+
+  const failed = startFallbackExecution({ ...options, scopeId: 'failed-result-wait', tool: 'relai_exec', signature: 'failed-wait', run: async () => { throw new Error('fixture command failed'); } });
+  const failure = await waitForFallbackExecution(failed.record.operationId, options);
+  assert.equal(failure.status, 'failed');
+  assert.match(failure.error, /fixture command failed/);
+
+  const polling = pending();
+  const started = polling.record.startedAtMs;
+  const initial = fallbackExecutionStatus(polling.record.operationId, { now: () => started + 2000 });
+  const older = fallbackExecutionStatus(polling.record.operationId, { now: () => started + 180000 });
+  assert.ok(initial.pollAfterMs < 5000, 'recent work must not recommend a 30-second polling gap');
+  assert.ok(older.pollAfterMs >= 60000, 'long-running work retains backoff');
+  updateFallbackExecutionPhase(polling.record.operationId, 'persisting', config);
+  assert.ok(fallbackExecutionStatus(polling.record.operationId, { now: () => started + 180000 }).pollAfterMs < 5000,
+    'finalization recommends prompt retrieval even for an older operation');
+  polling.release(); await polling.record.promise;
+  const schema = getPublicToolSchemas().find(tool => tool.name === 'relai_work');
+  assert.equal(schema.inputSchema.properties.waitMs.type, 'integer', 'waitMs must be discoverable');
+  assert.equal(getToolSchemas().find(tool => tool.name === 'relai_work').inputSchema.properties.waitMs.maximum, 5000, 'the executable contract bounds waitMs');
+}

@@ -24,6 +24,11 @@ await assert.rejects(validateExecutableOperationInput(OP.SEARCH_TEXT, { workspac
   return result.errorCode === 'INVALID_TOOL_ARGUMENTS' && result.validation.issues.some(issue => issue.field === 'maxFiles');
 });
 const sdkIssue = issue => toolArgumentError({ publicTool: 'fixture', schema: { properties: { known: {} } }, issues: [issue] }).validation.issues[0].field;
+for (const waitMs of [-1, 5001, 1.5]) {
+  await assert.rejects(validateExecutableOperationInput(OP.WORK_RESULT, { operationId: 'fallback_abcdefghijklmnopqrstuvwx', waitMs }), /argument|valid|schema/i);
+}
+await validateExecutableOperationInput(OP.WORK_RESULT, { operationId: 'fallback_abcdefghijklmnopqrstuvwx', waitMs: 0 });
+await validateExecutableOperationInput(OP.WORK_RESULT, { operationId: 'fallback_abcdefghijklmnopqrstuvwx', waitMs: 5000 });
 assert.equal(sdkIssue({ message: 'data/maxFiles must be <= 200' }), 'maxFiles');
 assert.equal(sdkIssue({ message: 'data/queries/0 must be string' }), 'queries.0');
 assert.equal(sdkIssue({ message: 'data/a~1b/0/c~0d must be string' }), 'a/b.0.c~d');

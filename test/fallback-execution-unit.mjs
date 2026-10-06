@@ -136,6 +136,58 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function testConnectorInlineGrace() {
+  const config = { stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'relai-inline-grace-')) };
+  const read = readMessage('short-http-read');
+  let executions = 0;
+  const response = await handleTransportFallbackRequest(config, read, {
+    principal: 'inline-grace-fixture', transportType: 'streamable-http',
+    executeToolResult: async () => { executions++; await delay(1100); return toolResult({ ok: true, marker: 'short-read' }, false); }
+  });
+  assert.equal(response.body.result.structuredContent.marker, 'short-read', 'a read lasting over one second should complete in one HTTP call');
+  assert.equal(executions, 1);
+  response.onDelivered?.();
+
+  const independent = readMessage('independent-http-read');
+  independent.params.arguments.independent = true;
+  const receipt = await handleTransportFallbackRequest(config, independent, {
+    principal: 'inline-grace-fixture', transportType: 'streamable-http',
+    executeToolResult: async () => { await delay(1100); return toolResult({ ok: true }, false); }
+  });
+  assert.equal(receipt.body.result.structuredContent.status, 'running');
+  assert.ok(receipt.body.result.structuredContent.elapsedMs < 2500, 'independent work keeps the short receipt grace');
+  await delay(120);
+
+  const controller = new AbortController();
+  const disconnectedRead = readMessage('disconnected-http-read');
+  let complete;
+  let operationId;
+  let backgroundSignal;
+  const deferred = new Promise(resolve => { complete = resolve; });
+  const waiting = handleTransportFallbackRequest(config, disconnectedRead, {
+    principal: 'inline-grace-fixture', transportType: 'streamable-http', signal: controller.signal,
+    executeToolResult: async (_config, _name, _args, options) => {
+      operationId = options.fallbackOperationId;
+      backgroundSignal = options.signal;
+      await deferred; return toolResult({ ok: true, marker: 'retained-after-disconnect' }, false);
+    }
+  });
+  await delay(20);
+  controller.abort(new Error('transport disconnected'));
+  await assert.rejects(waiting, /transport disconnected/);
+  assert.equal(backgroundSignal.aborted, false, 'request disconnection stops inline waiting without cancelling detached work');
+  complete(); await delay(20);
+  const replay = await handleTransportFallbackRequest(config, disconnectedRead, {
+    principal: 'inline-grace-fixture', transportType: 'streamable-http',
+    executeToolResult: async () => { throw new Error('must replay the existing result'); }
+  });
+  assert.equal(replay.body.result.structuredContent.marker, 'retained-after-disconnect');
+  assert.equal(fallbackExecutionStatus(operationId).status, 'completed');
+  replay.onDelivered?.();
+  resetFallbackExecutions();
+  fs.rmSync(config.stateDir, { recursive: true, force: true });
+}
+
 function seedTask(config, taskId) {
   recordTaskHistoryEvent(config, {
     taskId,
@@ -157,6 +209,7 @@ assert.equal(DEFAULT_FALLBACK_GRACE_MS, 1_000, 'background fallback should detac
 resetFallbackExecutions();
 await testTerminalElapsedClocks();
 await testCompletionReceiptIsolation();
+await testConnectorInlineGrace();
 
 const phaseStartedAt = Date.now();
 const phaseExecution = startFallbackExecution({

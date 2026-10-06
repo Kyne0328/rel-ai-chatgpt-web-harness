@@ -8,7 +8,7 @@ import { startFallbackExecution, resetFallbackExecutions } from '../src/mcp/fall
 import { normalizeTunnelLogRecord } from '../electron/tunnel-log-parser.js';
 import { createTunnelRuntimePool } from '../electron/tunnel-runtime-pool.js';
 import { startHttpTestServer, stopHttpTestServer, localHttpFetch } from './helpers/http-test-server.mjs';
-import { createHttpMcpSession } from './helpers/http-mcp.mjs';
+import { createHttpMcpSession, mcpBody, mcpHeaders } from './helpers/http-mcp.mjs';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-shared-tunnel-'));
 let child;
@@ -139,6 +139,45 @@ try {
   const health = await localHttpFetch(`${server.base}/health`);
   assert.equal(health.status, 200);
   console.log('Two clients sharing one MCP service passed 40 concurrent reads with overlapping JSON-RPC IDs.');
+  const tool = async (name, args) => {
+    const reply = await clients[0].request('tools/call', { name, arguments: args });
+    assert.equal(reply.response.status, 200);
+    assert.equal(reply.body.result.isError, false, JSON.stringify(reply.body));
+    return reply.body.result.structuredContent;
+  };
+  const task = await tool('relai_work', { action: 'begin', workspace: 'fixture', title: 'HTTP result wait', objective: 'Verify result delivery without restarting commands.',
+    steps: [{ id: 'verify', title: 'Verify HTTP result retrieval', status: 'in_progress' }] });
+  const taskArgs = { workspace: 'fixture', work_id: task.work_id };
+  const receipt = await tool('relai_exec', { ...taskArgs, executable: process.execPath,
+    argv: ['-e', 'setTimeout(() => process.stdout.write("original-command-result\\n"), 2000)'], maxOutputBytes: 1024 });
+  assert.equal(receipt.status, 'running');
+  const resultArgs = { ...taskArgs, operationId: receipt.operationId };
+  const immediate = await tool('relai_work', { ...resultArgs, action: 'result', waitMs: 0 });
+  assert.equal(immediate.backgroundOperation.status, 'running');
+  const completed = await tool('relai_work', { ...resultArgs, action: 'result' });
+  assert.equal(completed.backgroundOperation.status, 'completed', 'default HTTP result lookup waits for the original execution');
+  assert.equal(completed.backgroundOperation.result.exitCode, 0);
+  assert.equal(completed.backgroundOperation.result.stdout, 'original-command-result\n');
+  assert.equal(completed.backgroundOperation.operationId, receipt.operationId);
+  const replay = await tool('relai_work', { ...resultArgs, action: 'result', waitMs: 0 });
+  assert.equal(replay.backgroundOperation.result.stdout, completed.backgroundOperation.result.stdout);
+
+  const second = await tool('relai_exec', { ...taskArgs, executable: process.execPath,
+    argv: ['-e', 'setTimeout(() => process.stdout.write("survived-disconnect\\n"), 2000)'], maxOutputBytes: 1024 });
+  assert.equal(second.status, 'running');
+  const abort = new AbortController();
+  const disconnected = fetch(`${server.base}/mcp`, {
+    method: 'POST', signal: abort.signal, headers: mcpHeaders('tools/call', { token, name: 'relai_work' }),
+    body: mcpBody('disconnect-result', 'tools/call', { name: 'relai_work', arguments: { ...taskArgs, action: 'result', operationId: second.operationId } })
+  });
+  const abortTimer = setTimeout(() => abort.abort(), 50);
+  try { await assert.rejects(disconnected, error => error.name === 'AbortError'); } finally { clearTimeout(abortTimer); }
+  const survived = await tool('relai_work', { ...taskArgs, action: 'result', operationId: second.operationId });
+  assert.equal(survived.backgroundOperation.status, 'completed', 'HTTP retrieval disconnect must leave the existing execution running');
+  assert.equal(survived.backgroundOperation.result.stdout, 'survived-disconnect\n');
+  await tool('relai_work', { ...taskArgs, action: 'plan', steps: [{ id: 'verify', title: 'Verify HTTP result retrieval', status: 'completed' }] });
+  await tool('relai_work', { ...taskArgs, action: 'finish', summary: 'HTTP result waits, immediate lookup, replay and disconnected retrieval passed.' });
+  console.log('HTTP result waits returned terminal results and preserved background work across retrieval disconnects.');
 } finally {
   await stopHttpTestServer(child);
   // Cleanup uses async filesystem operations; allow in-flight reads to finish before removing the fixture.

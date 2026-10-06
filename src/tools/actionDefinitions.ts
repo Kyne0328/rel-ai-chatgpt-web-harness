@@ -188,7 +188,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. status lists receipts. result retrieves operationId. history pages authorized records. context restores continuity. stop with operationId stops one command. Task stop/cancel stops all. Keep the plan current. Finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
+    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. status lists receipts immediately. result retrieves operationId, waiting up to 5s for completion; waitMs:0 returns immediately. history pages authorized records. context restores continuity. stop with operationId stops one command. Task stop/cancel stops all. Keep the plan current. Finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },

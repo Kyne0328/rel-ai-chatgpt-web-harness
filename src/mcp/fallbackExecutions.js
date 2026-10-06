@@ -11,6 +11,9 @@ import { FALLBACK_EXECUTION_STATUS } from './contracts.ts';
 import { publishMcpEvent } from './events.ts';
 
 const DEFAULT_FALLBACK_GRACE_MS = 1_000;
+const MAX_FALLBACK_RESULT_WAIT_MS = 5_000;
+const MAX_CONCURRENT_RESULT_WAITS = 4;
+const fallbackResultWaiters = new Map();
 const FALLBACK_RECORD_TTL_MS = 15 * 60_000;
 const MAX_FALLBACK_RECORDS = 128;
 const MAX_COMPLETION_NOTICES = 16;
@@ -133,6 +136,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
       persistFallbackRecord(config, record);
       deliverFallbackCompletion(config, record);
       return { ok: false, error };
+    }).finally(() => {
+      for (const notify of fallbackResultWaiters.get(record.operationId) || []) notify();
     });
 
   executionsByOperationId.set(record.operationId, record);
@@ -315,6 +320,39 @@ function fallbackExecutionStatus(reference, options = {}) {
   return records.findLast(record => record.status === FALLBACK_EXECUTION_STATUS.RUNNING) || records.at(-1) || null;
 }
 
+async function waitForFallbackExecution(reference, options = {}) {
+  options.signal?.throwIfAborted();
+  const operation = fallbackExecutionStatus(reference, options);
+  const record = operation && executionsByOperationId.get(operation.operationId);
+  const requestedWaitMs = Number(options.waitMs ?? MAX_FALLBACK_RESULT_WAIT_MS);
+  const deadlineWaitMs = Number(options.deadlineAtMs) > 0
+    ? Math.max(0, Number(options.deadlineAtMs) - Date.now()) : MAX_FALLBACK_RESULT_WAIT_MS;
+  const waitMs = Math.min(MAX_FALLBACK_RESULT_WAIT_MS, deadlineWaitMs, Math.max(0, requestedWaitMs || 0));
+  const waiterCount = [...fallbackResultWaiters.values()].reduce((count, listeners) => count + listeners.size, 0);
+  // Wait only on this process's existing execution, after the same scope checks
+  // as an immediate lookup. Never start/recover work to satisfy a result wait.
+  if (!record?.promise || operation.status !== FALLBACK_EXECUTION_STATUS.RUNNING
+    || waitMs <= 0 || waiterCount >= MAX_CONCURRENT_RESULT_WAITS) return operation;
+  await new Promise((resolve, reject) => {
+    const listeners = fallbackResultWaiters.get(record.operationId) || new Set();
+    fallbackResultWaiters.set(record.operationId, listeners);
+    const cleanup = () => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
+      listeners.delete(onSettled);
+      if (!listeners.size) fallbackResultWaiters.delete(record.operationId);
+    };
+    const onSettled = () => { cleanup(); resolve(); };
+    const onAbort = () => { cleanup(); reject(options.signal.reason); };
+    const timer = setTimeout(onSettled, waitMs);
+    listeners.add(onSettled);
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+  });
+  options.signal?.throwIfAborted();
+  return fallbackExecutionStatus(reference, options);
+}
+
 function publicFallbackRecord(record, now = Date.now) {
   if (!record) return null;
   const structured = record.result?.structuredContent || record.persistedResult || record.result?.result || null;
@@ -357,7 +395,11 @@ function fallbackPollAfterMs(record, now = Date.now) {
   const current = timeValue(now);
   const started = Number(record.startedAtMs || Date.parse(record.startedAt) || current);
   const elapsed = Math.max(0, current - started);
-  if (elapsed < 60_000) return 30_000;
+  if (record.cancellationRequestedAt || ['stopping', 'exited', 'draining-output', 'drained', 'reconciling', 'persisting'].includes(record.phase)) return 1_000;
+  if (elapsed < 10_000) return 1_000;
+  if (elapsed < 30_000) return 5_000;
+  if (elapsed < 60_000) return 10_000;
+  if (elapsed < 2 * 60_000) return 30_000;
   if (elapsed < 5 * 60_000) return 60_000;
   return 120_000;
 }
@@ -867,6 +909,9 @@ function fallbackSignature(tool, args = {}) {
 }
 
 function resetFallbackExecutions() {
+  for (const listeners of fallbackResultWaiters.values()) {
+    for (const notify of [...listeners]) notify();
+  }
   executionsByOperationId.clear();
   pendingCompletionDeliveries.clear();
 }
@@ -882,6 +927,7 @@ export {
   registerFallbackCompletionDelivery,
   enableFallbackCompletionNotice,
   fallbackExecutionStatus,
+  waitForFallbackExecution,
   fallbackExecutionsStatus,
   fallbackExecutionsPage,
   fallbackOperationReceipt,

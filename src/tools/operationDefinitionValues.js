@@ -254,8 +254,8 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.WORK_RESULT,
     title: "Retrieve Retained Operation Result",
-    description: "Read-only. Retrieve the existing result by operationId without executing or resubmitting its mutation. Results may expire; absence is not proof that side effects did not occur. Use returned output references for paginated stream reads.",
-    inputSchema: {type: 'object', properties: {workspace: {type: 'string'}, operationId: {type: 'string', pattern: '^fallback_[A-Za-z0-9_-]{20,160}$'}, maxResponseBytes: {type: 'integer', minimum: 2048, maximum: 524288}}, required: ['operationId'], additionalProperties: false},
+    description: "Read-only. Retrieve the existing result by operationId without executing or resubmitting its mutation. Connector retrieval waits up to five seconds for running work; waitMs:0 returns immediately. Results may expire; absence is not proof that side effects did not occur. Use returned output references for paginated stream reads.",
+    inputSchema: {type: 'object', properties: {workspace: {type: 'string'}, operationId: {type: 'string', pattern: '^fallback_[A-Za-z0-9_-]{20,160}$'}, waitMs: {type: 'integer', minimum: 0, maximum: 5000}, maxResponseBytes: {type: 'integer', minimum: 2048, maximum: 524288}}, required: ['operationId'], additionalProperties: false},
     handlerName: 'operationResult', behavior: {taskScope: 'optional'}
   },
   {

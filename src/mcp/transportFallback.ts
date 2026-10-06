@@ -53,6 +53,8 @@ const TRANSPORT_RESILIENT_OPERATION_NAMES = new Set([
   'process.start',
   'process.list'
 ]);
+const HTTP_SHORT_OPERATION_GRACE_MS = 5_000;
+const HTTP_SHORT_OPERATION_NAMES = new Set(['snapshot', 'read', 'search.text']);
 
 async function handleTransportFallbackRequest(config: any, message: any, options: any = {}) {
   if (!isTransportFallbackRequestCandidate(config, message, options)) return null;
@@ -85,6 +87,9 @@ async function handleTransportFallbackRequest(config: any, message: any, options
       scopeOnly: true,
       deliveryAware: true,
       persistFallback: false,
+      synchronousFallbackGraceMs: options.synchronousFallbackGraceMs
+        ?? ((validated.value as Record<string, unknown>).independent !== true && HTTP_SHORT_OPERATION_NAMES.has(String(definition?.operationName || ''))
+          ? Math.min(HTTP_SHORT_OPERATION_GRACE_MS, bounds.maxDurationMs) : DEFAULT_FALLBACK_GRACE_MS),
       requireTerminalResult: definition?.operationName === 'work.begin'
     });
   }
@@ -246,7 +251,7 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
   }
 
   if (!started.reused && graceMs > 0) {
-    const settled = await waitForFallbackGrace(started.record.promise, graceMs);
+    const settled = await waitForFallbackGrace(started.record.promise, graceMs, options.deliverySignal || options.signal);
     if (settled.kind === 'settled') {
       if (settled.value.ok || (settled.value.cancelled && settled.value.result)) return successResponse(message.id, settled.value.result, deliveryCallback(config, started.record, options));
       return successResponse(message.id, toolResult({
@@ -327,18 +332,26 @@ function replayFallbackResult(requestId: any, workId: any, record: any, onDelive
   }, true), onDelivered);
 }
 
-async function waitForFallbackGrace(execution: any, graceMs: any) {
+async function waitForFallbackGrace(execution: any, graceMs: any, signal?: AbortSignal) {
   let timer;
+  let onAbort: (() => void) | undefined;
   try {
+    signal?.throwIfAborted();
     return await Promise.race([
       execution.then((value: any) => ({ kind: 'settled', value })),
       new Promise((resolve: any) => {
         timer = setTimeout(() => resolve({ kind: 'pending' }), graceMs);
         timer.unref?.();
-      })
+      }),
+      ...(signal ? [new Promise((_, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      })] : [])
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
   }
 }
 

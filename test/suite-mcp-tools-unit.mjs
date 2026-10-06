@@ -1218,7 +1218,16 @@ async function case_http_transport_io_unit() {
   const disconnectedScope = createHttpRequestAbortScope(disconnectedReq, disconnectedRes);
   disconnectedRes.emit('close');
   assert.equal(disconnectedScope.signal.aborted, false, 'losing the response connection must not be treated as client cancellation after Rel.AI accepted the request');
+  assert.equal(disconnectedScope.deliverySignal.aborted, true, 'response loss must stop waiting to deliver while preserving the accepted execution');
   disconnectedScope.dispose();
+  assert.equal(disconnectedRes.listenerCount('close'), 0);
+  const deliveredReq = new EventEmitter();
+  const deliveredRes = new EventEmitter();
+  deliveredRes.writableFinished = true;
+  const deliveredScope = createHttpRequestAbortScope(deliveredReq, deliveredRes);
+  deliveredRes.emit('close');
+  assert.equal(deliveredScope.deliverySignal.aborted, false, 'normal response completion must not abort delivery');
+  deliveredScope.dispose();
 
   console.log('HTTP body decoding, bounded draining, response framing, and abort-scope regressions passed.');
 }

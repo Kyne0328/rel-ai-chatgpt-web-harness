@@ -13,7 +13,7 @@ import { readProjectInstructions, summarizeProjectInstructions } from '../projec
 import { workspaceGitStatus } from '../repo/gitOps.js';
 import { runtimeCompatibility } from '../runtimeCompatibility.js';
 import { getToolActivity } from '../toolActivity.js';
-import { fallbackExecutionStatus, fallbackExecutionsPage, fallbackOperationReceipt } from '../mcp/fallbackExecutions.js';
+import { fallbackExecutionStatus, fallbackExecutionsPage, fallbackOperationReceipt, waitForFallbackExecution } from '../mcp/fallbackExecutions.js';
 import { boundResponsePayload, responseByteLimit } from './responseBudget.js';
 import { principalFingerprint } from '../mcp/principal.ts';
 import { authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.ts';
@@ -40,7 +40,12 @@ async function relaiStatus(config, args = {}, context = {}) {
   const backgroundReference = String(args.operationId || args.work_id || '').trim();
   const operationOptions = { config, workId: args.work_id, workspace: args.workspace, ...(context.connector ? { noticeScope: principalFingerprint(context.principal) } : {}) };
   const foundOperation = backgroundReference ? fallbackExecutionStatus(backgroundReference, operationOptions) : null;
-  const detailedOperation = context.connector && foundOperation && !workspaceAliases.includes(foundOperation.workspace) ? null : foundOperation;
+  let detailedOperation = context.connector && foundOperation && !workspaceAliases.includes(foundOperation.workspace) ? null : foundOperation;
+  if (context.resultWaitMs > 0 && detailedOperation?.status === 'running') {
+    detailedOperation = await waitForFallbackExecution(args.operationId, {
+      ...operationOptions, waitMs: context.resultWaitMs, signal: context.signal, deadlineAtMs: context.deadlineAtMs
+    });
+  }
   const backgroundOperation = args.operationId && args.includeResult !== false ? { ...fallbackOperationReceipt(detailedOperation), ...detailedOperation } : fallbackOperationReceipt(detailedOperation);
   const operationPage = args.work_id ? fallbackExecutionsPage(args.work_id, { ...operationOptions, limit: args.operationLimit, cursor: args.operationCursor }) : null;
   const backgroundOperations = operationPage?.operations || [];

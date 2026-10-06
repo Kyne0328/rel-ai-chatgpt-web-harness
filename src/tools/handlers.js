@@ -200,7 +200,9 @@ const HANDLERS = Object.freeze({
   restorePaths: inWorkspace((workspace, config, args) => relaiRestorePaths(workspace, config, args)),
   resetWorkspace: inWorkspace((workspace, config, args) => relaiResetWorkspace(workspace, config, args)),
   status: relaiStatus,
-  operationResult: (config, args, context) => relaiStatus(config, { ...args, includeResult: true }, context),
+  operationResult: (config, args, context) => relaiStatus(config, { ...args, includeResult: true }, {
+    ...context, resultWaitMs: args.waitMs ?? (context?.connector ? 5000 : 0)
+  }),
   workspaceHistory,
   gitCommit: inWorkspace(async (workspace, config, args, context) => {
     const commitArgs = withTaskOwnedCommitContext(config, workspace, args, context);
