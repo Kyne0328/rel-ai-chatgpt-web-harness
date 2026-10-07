@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
 import { once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 import { openStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
 import { relaiVerify } from '../src/bridge/validation.js';
 import fs from 'node:fs';
@@ -292,7 +293,7 @@ async function verifyPolicyContention() {
   assert.ok(Date.now() - corruptStarted < 250, 'non-busy errors must not consume the busy retry budget');
   assert.equal(fs.existsSync(corruptMarker), false, 'a non-busy policy error must not launch a check');
 
-  for (const mode of ['transient', 'deadline', 'abort', 'held', 'expired']) {
+  for (const mode of ['reader-release', 'transient', 'deadline', 'abort', 'held', 'expired']) {
     const config = { stateDir: path.join(temp, 'policy-contention-' + mode) };
     const database = openStateDatabase(config);
     database.exec('PRAGMA journal_mode=DELETE');
@@ -304,12 +305,33 @@ async function verifyPolicyContention() {
       db.exec('BEGIN IMMEDIATE');
       parentPort.postMessage('locked');
       parentPort.once('message', delay => {
-        setTimeout(() => { db.exec('COMMIT'); db.close(); }, delay);
+        // This transaction only holds a lock. COMMIT would need an exclusive
+        // lock in DELETE mode and can fail while policy initialization reads.
+        setTimeout(() => { db.exec('ROLLBACK'); db.close(); }, delay);
       });
     `, { eval: true, execArgv: [], workerData: stateDatabasePath(config) });
-    const exited = once(writer, 'exit');
+    const workerDeadline = AbortSignal.timeout(5000);
+    const exited = once(writer, 'exit', { signal: workerDeadline });
+    // Observe failures immediately; the awaited promise below still reports them.
+    void exited.catch(() => {});
     try {
-      await once(writer, 'message');
+      assert.deepEqual(await once(writer, 'message', { signal: workerDeadline }), ['locked']);
+      if (mode === 'reader-release') {
+        const reader = new DatabaseSync(stateDatabasePath(config));
+        try {
+          reader.exec('BEGIN');
+          const query = reader.prepare('SELECT key, value FROM state_meta ORDER BY key');
+          const before = query.all();
+          assert.ok(before.length > 0, 'the regression must hold a real shared read lock');
+          writer.postMessage(0);
+          assert.deepEqual(await exited, [0], 'the lock-only writer must release while a reader is active');
+          assert.deepEqual(query.all(), before, 'releasing the lock must preserve the reader snapshot');
+          reader.exec('COMMIT');
+        } finally {
+          reader.close();
+        }
+        continue;
+      }
       const marker = path.join(temp, 'policy-check-' + mode);
       const command = 'node -e ' + JSON.stringify('require("node:fs").writeFileSync(' + JSON.stringify(marker) + ',"ran")');
       const controller = new AbortController();
@@ -343,7 +365,7 @@ async function verifyPolicyContention() {
         if (abortTimer) clearTimeout(abortTimer);
       }
       if (mode !== 'transient') writer.postMessage(0);
-      await exited;
+      assert.deepEqual(await exited, [0], 'the policy contention fixture must exit cleanly');
     } finally {
       await writer.terminate();
     }

@@ -56,21 +56,23 @@ export async function smokeDesktopLifecycle({ executable, argv = ['--background'
     if (!receipt) throw new Error(`Desktop did not report verified renderer readiness.\n${output}`);
     await delay(stableMs);
     assertRunning();
-    terminateImpl(child, 'SIGTERM');
-    const stopped = await boundedClose(closed, shutdownMs);
+    // Ask the main process to run its shutdown coordinator. Signalling the
+    // whole group first kills Chromium's zygote/GPU helpers during that work.
+    child.kill('SIGTERM');
+    const stopped = await boundedShutdown(closed, child, shutdownMs);
     if (!stopped) throw new Error('Desktop did not finish its intentional shutdown.');
-    if (stopped.code !== 0) throw new Error(`Desktop shutdown was not clean (code ${stopped.code}, signal ${stopped.signal}).\n${output}`);
+    if (stopped.code !== 0 || stopped.signal) throw new Error(`Desktop shutdown was not clean (code ${stopped.code}, signal ${stopped.signal}).\n${output}`);
     passed = true;
     result = { ready: true, rendererCount: receipt.rendererCount, shutdownClean: true, runDirectory };
   } catch (error) {
     failure = error;
   } finally {
     try {
-      if (!exit && child.pid) {
+      if (child.pid && (!exit || ownedProcessesRunning(child))) {
         terminateImpl(child, 'SIGTERM');
-        if (!await boundedClose(closed, shutdownMs)) {
+        if (!await boundedShutdown(closed, child, shutdownMs)) {
           terminateImpl(child, 'SIGKILL');
-          if (!await boundedClose(closed, shutdownMs)) {
+          if (!await boundedShutdown(closed, child, shutdownMs)) {
             const cleanupError = new Error(`Smoke-owned child ${child.pid} termination could not be confirmed; preserve ${runDirectory}.`);
             failure = failure ? new AggregateError([failure, cleanupError], 'Desktop smoke failed and process cleanup is unconfirmed.') : cleanupError;
           }
@@ -86,13 +88,50 @@ export async function smokeDesktopLifecycle({ executable, argv = ['--background'
 }
 
 function terminateOwned(child, signal) {
-  if (!child.pid || child.exitCode !== null || child.signalCode) return;
+  if (!child.pid) return;
   try {
-    if (process.platform === 'win32') child.kill(signal);
+    if (process.platform === 'win32') {
+      if (child.exitCode === null && !child.signalCode) child.kill(signal);
+    }
     else process.kill(-child.pid, signal);
   } catch (error) {
     if (error.code !== 'ESRCH') throw error;
   }
+}
+function ownedProcessesRunning(child) {
+  if (!child.pid) return false;
+  if (process.platform === 'win32') return child.exitCode === null && !child.signalCode;
+  try { process.kill(-child.pid, 0); }
+  catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
+  if (process.platform !== 'linux') return true;
+  // Linux can retain already-dead, reparented Chromium helpers as zombies.
+  // They have exited and cannot be signalled; only live group members
+  // block shutdown. A read error other than a racing process exit stays fatal.
+  for (const pid of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(pid)) continue;
+    let stat;
+    try { stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); }
+    catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ESRCH') continue;
+      throw error;
+    }
+    const [state, , group] = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    if (Number(group) === child.pid && state !== 'Z' && state !== 'X') return true;
+  }
+  return false;
+}
+async function boundedShutdown(closed, child, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const stopped = await boundedClose(closed, timeoutMs);
+  if (!stopped) return null;
+  while (ownedProcessesRunning(child)) {
+    if (Date.now() >= deadline) return null;
+    await delay(25);
+  }
+  return stopped;
 }
 function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 async function boundedClose(closed, timeoutMs) {
