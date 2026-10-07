@@ -202,6 +202,124 @@ function seedTask(config, taskId) {
   });
 }
 
+
+async function testSkillSnapshotDelivery() {
+  const { runTestProcess } = await import('./helpers/run-test-process.mjs');
+  const { fileURLToPath } = await import('node:url');
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-skill-delivery-'));
+  try {
+    const result = await runTestProcess(process.execPath, [fileURLToPath(import.meta.url), '--skill-delivery-root', fixture], {
+      cwd: process.cwd(), timeoutMs: 120000
+    });
+    process.stdout.write(result.stdout || '');
+    process.stderr.write(result.stderr || '');
+    assert.equal(result.terminationUncertain, false);
+    assert.equal(result.exitCode, 0, 'skill snapshot delivery worker failed');
+  } finally {
+    await fs.promises.rm(fixture, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}
+
+async function runSkillSnapshotDeliveryWorker(directory) {
+  const root = path.resolve(directory);
+  assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+  assert.match(path.basename(root), /^relai-skill-delivery-/);
+  assert.deepEqual(fs.readdirSync(root), []);
+  const repo = path.join(root, 'repo');
+  const skillsRoot = path.join(repo, '.agents', 'skills');
+  const stateDir = path.join(root, 'state');
+  fs.mkdirSync(skillsRoot, { recursive: true });
+  // The project alone supplies the final 100 skills. No user skill or real
+  // extension recovery state participates in this delivery fixture.
+  for (let index = 0; index < 400; index += 1) {
+    const name = index < 300 ? 'invalid name' : 'skill-' + String(index - 300).padStart(3, '0');
+    const folder = (index < 300 ? 'noise-' : 'valid-') + String(index).padStart(3, '0');
+    const target = path.join(skillsRoot, folder);
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, 'SKILL.md'), '---\nname: ' + name + '\ndescription: Synthetic delivery fixture.\n---\nFixture body.\n');
+  }
+  const configFile = path.join(root, 'config.json');
+  fs.writeFileSync(configFile, JSON.stringify({
+    version: 3, stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl'),
+    workspaces: { skills: { path: repo, commands: {}, testCommands: {} } }
+  }));
+  const previousConfig = process.env.REL_AI_MCP_CONFIG;
+  const previousBackground = process.env.REL_AI_REDUCED_BACKGROUND_WORK;
+  process.env.REL_AI_MCP_CONFIG = configFile;
+  process.env.REL_AI_REDUCED_BACKGROUND_WORK = '1';
+  const { readConfig } = await import('../src/config.js');
+  const { flushAuditWrites } = await import('../src/audit.js');
+  const { repositoryIntelligence } = await import('../src/repository/intelligence/service.js');
+  const config = readConfig();
+  const options = {
+    principal: 'local:trusted', transportType: 'streamable-http', synchronousFallbackGraceMs: 10000
+  };
+  let wireId = 1;
+  const request = () => {
+    const value = readMessage('skill-page-' + wireId++);
+    value.params.name = 'relai_snapshot';
+    value.params.arguments = { workspace: 'skills' };
+    return value;
+  };
+  const snapshot = () => handleTransportFallbackRequest(config, request(), options);
+  resetFallbackExecutions();
+  try {
+    let response = await snapshot();
+    let pages = 0;
+    let previousUnits = -1;
+    let previousOperation;
+    let lastDelivery;
+    while (pages < 100) {
+      const output = response?.body?.result?.structuredContent;
+      assert.equal(response?.body?.result?.isError, false, output?.error);
+      assert.equal(output?.ok, true);
+      assert.ok(output.skillDiscovery, 'the actual fallback handler must return skill discovery control facts');
+      assert.equal(typeof response.onDelivered, 'function');
+      assert.notEqual(output.operationId, previousOperation, 'delivered pages must release their exact replay identity');
+      assert.ok(output.skillDiscovery.work.totalUnits > previousUnits, 'confirmed delivery allows the same snapshot arguments to advance discovery');
+      if (output.skillDiscovery.resumable || output.skillDiscovery.resumed) {
+        assert.doesNotMatch(output.warning || '', /Reuse the prior result/);
+      }
+      // A late duplicate callback for the preceding response must not release
+      // this newer terminal page, even though the public arguments are equal.
+      lastDelivery?.();
+      const replay = await snapshot();
+      assert.deepEqual(replay.body.result, response.body.result, 'an undelivered terminal skill page must replay verbatim');
+      assert.equal(replay.body.result.structuredContent.operationId, output.operationId);
+      pages += 1;
+      if (output.skillDiscovery.complete) {
+        assert.ok(pages > 1, 'fixture must cross the public page budget');
+        assert.equal(output.skills.length, 100);
+        assert.ok(output.skills.some(skill => skill.name === 'skill-099' && skill.source === 'project'));
+        replay.onDelivered();
+        break;
+      }
+      assert.equal(output.skillDiscovery.resumable, true);
+      previousUnits = output.skillDiscovery.work.totalUnits;
+      previousOperation = output.operationId;
+      // Only the terminal response that is now considered delivered is
+      // acknowledged. No record-level or early receipt acknowledgement is used.
+      replay.onDelivered();
+      lastDelivery = response.onDelivered;
+      response = await snapshot();
+    }
+    assert.ok(pages < 100, 'stable fixture must finish within its bounded page allowance');
+    process.stdout.write('Real skill snapshot fallback replay and delivery tests passed (' + pages + ' pages).\n');
+  } finally {
+    resetFallbackExecutions();
+    await flushAuditWrites();
+    await repositoryIntelligence.shutdown();
+    if (previousConfig === undefined) delete process.env.REL_AI_MCP_CONFIG; else process.env.REL_AI_MCP_CONFIG = previousConfig;
+    if (previousBackground === undefined) delete process.env.REL_AI_REDUCED_BACKGROUND_WORK; else process.env.REL_AI_REDUCED_BACKGROUND_WORK = previousBackground;
+  }
+}
+
+const skillDeliveryRootIndex = process.argv.indexOf('--skill-delivery-root');
+if (skillDeliveryRootIndex >= 0) {
+  await runSkillSnapshotDeliveryWorker(process.argv[skillDeliveryRootIndex + 1]);
+  process.exit(0);
+}
+
 const transientSandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-fallback-transient-'));
 const transientConfig = { stateDir: transientSandbox, auditLogPath: path.join(transientSandbox, 'audit.jsonl') };
 
@@ -210,6 +328,7 @@ resetFallbackExecutions();
 await testTerminalElapsedClocks();
 await testCompletionReceiptIsolation();
 await testConnectorInlineGrace();
+await testSkillSnapshotDelivery();
 
 const phaseStartedAt = Date.now();
 const phaseExecution = startFallbackExecution({

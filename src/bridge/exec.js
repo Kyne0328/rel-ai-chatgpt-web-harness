@@ -52,7 +52,7 @@ async function readGitStatusMap(workspace, config, signal) {
   // Git's leading status column explicitly so branch output is no longer needed as a
   // whitespace sentinel for records such as " M file.js".
   throwIfAborted(signal);
-  const result = await readGitObservation(workspace.path, config, { branch: false, timeoutMs: 350, signal, optional: true });
+  const result = await readGitObservation(workspace.path, config, { branch: false, timeoutMs: process.platform === 'win32' ? 2000 : 350, signal, optional: true });
   throwIfAborted(signal);
   const state = result.spawnError ? 'unavailable'
     : result.stdoutTruncated ? 'output-limit'

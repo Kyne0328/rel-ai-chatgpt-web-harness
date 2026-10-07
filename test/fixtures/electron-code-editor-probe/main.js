@@ -37,7 +37,7 @@ app.whenReady().then(async () => {
       const module = await import('/public/dashboard-react.js');
       let snapshot = {
         tasks: [
-          { work_id: 'probe-task', title: 'Changes viewer probe', status: 'running', workspace: 'app', changedFiles: ['src/example.js', 'src/new.js'] },
+          { work_id: 'probe-task', changeRevision: 1, title: 'Changes viewer probe', status: 'running', workspace: 'app', changedFiles: ['src/example.js', 'src/new.js'] },
           { work_id: 'no-change-task', title: 'No changes', status: 'completed', workspace: 'app', changedFiles: [] },
           { work_id: 'support-only-task', title: 'Support only', status: 'completed', workspace: 'app', changedFiles: ['tools/helper.jar'] }
         ],
@@ -86,9 +86,10 @@ app.whenReady().then(async () => {
         const box = document.querySelector(selector)?.getBoundingClientRect();
         return box ? { width: box.width, height: box.height, top: box.top, left: box.left } : null;
       };
+      window.relaiCodeProbe.setRevision(2);
       snapshot = {
         ...snapshot,
-        tasks: snapshot.tasks.map(task => ({ ...task, updatedAt: '2026-09-06T03:20:00.000Z' })),
+        tasks: snapshot.tasks.map(task => task.work_id === 'probe-task' ? { ...task, changeRevision: 2 } : task),
         live: { revisions: { task: 2 } }
       };
       listeners.forEach(listener => listener());
@@ -117,6 +118,8 @@ app.whenReady().then(async () => {
           };
         }),
         sameEditorAfterLiveUpdate: editorBefore === document.querySelector('.monaco-diff-editor'),
+        sameModelAfterLiveUpdate: model === liveEditor?.getModel?.(),
+        freshModelAfterLiveUpdate: liveEditor?.getModel?.()?.getValue?.() || '',
         modelLanguage,
         modelValue,
         tokenColors,
@@ -132,6 +135,20 @@ app.whenReady().then(async () => {
           monaco: rectFor('.monaco-editor:not(.gutter)')
         }
       };
+      // Older same-path responses must not overwrite the latest task revision.
+      window.relaiCodeProbe.setRevision(3, 300);
+      snapshot = { ...snapshot, tasks: snapshot.tasks.map(task => task.work_id === 'probe-task' ? { ...task, changeRevision: 3 } : task) };
+      listeners.forEach(listener => listener());
+      await wait(35);
+      window.relaiCodeProbe.setRevision(4, 20);
+      snapshot = { ...snapshot, tasks: snapshot.tasks.map(task => task.work_id === 'probe-task' ? { ...task, changeRevision: 4 } : task) };
+      listeners.forEach(listener => listener());
+      await wait(350);
+      result.modelAfterOutOfOrderRefresh = liveEditor?.getModel?.()?.getValue?.() || '';
+      window.relaiCodeProbe.setRevision(5, 20);
+      document.querySelector('[data-code-refresh]')?.click();
+      await wait(100);
+      result.modelAfterManualRefresh = liveEditor?.getModel?.()?.getValue?.() || '';
       // Navigate to another file without unmounting Changes. The URL and the
       // rendered diff must agree even when the task itself has not changed.
       location.hash = '#code?task=probe-task&file=src%2Fexample.js';

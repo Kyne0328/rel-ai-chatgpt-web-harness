@@ -28,12 +28,17 @@ async function checkGitRepository(baseDir: string, options: GitClientOptions = {
   return createGitClient(baseDir, options).checkIsRepo();
 }
 
-async function readGitStatus(baseDir: string, options: GitClientOptions = {}): Promise<ParsedGitStatus> {
+async function readGitStatus(
+  baseDir: string,
+  options: GitClientOptions = {},
+  config: Parameters<typeof readGitObservation>[1] = {}
+): Promise<ParsedGitStatus> {
   options.signal?.throwIfAborted();
   // Porcelain's branch header already distinguishes unborn HEAD. A second
   // rev-parse both duplicates work and mistakes permission/timeout failures for
   // an unborn repository. Keep this read bounded and use one coherent snapshot.
-  const result = await readGitObservation(baseDir, {}, { version: 2, signal: options.signal, timeoutMs: options.timeoutMs });
+  // Preserve the caller's state/output ownership for this independent probe.
+  const result = await readGitObservation(baseDir, config, { version: 2, signal: options.signal, timeoutMs: options.timeoutMs });
   options.signal?.throwIfAborted();
   if (result.exitCode !== 0 || result.stdoutTruncated) {
     const error = new Error(result.stdoutTruncated

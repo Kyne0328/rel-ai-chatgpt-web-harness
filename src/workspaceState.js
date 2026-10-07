@@ -1,3 +1,5 @@
+import { workspaceMutationBlockSummary, onWorkspaceMutationBlockChange } from './workspaceOperationQueue.js';
+import { workspaceMutationSafetySummary, onMutationProcessRecoveryChange } from './mutationProcessOwnership.js';
 import { readGitObservation } from './repo/gitObservation.js';
 
 
@@ -5,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { classifyStatusOwnership } from "./repo/gitOps.js";
 import { resolveGitExecutable } from "./gitExecutable.js";
-import { runProcess } from "./process.js";
+import { runReadOnlyProcess } from "./process.js";
 
 const configuredWorkspaceStateTtlMs = Number(process.env.REL_AI_MCP_WORKSPACE_STATE_TTL_MS || 5000);
 const WORKSPACE_GIT_STATE_TTL_MS = Number.isFinite(configuredWorkspaceStateTtlMs) ? Math.max(0, configuredWorkspaceStateTtlMs) : 5000;
@@ -13,9 +15,42 @@ const gitStateCache = new Map();
 const workspaceStateListeners = new Set();
 let workspaceStateVersion = 0;
 let refreshQueue = Promise.resolve();
+const projectionContexts = new Map();
+const mutationProjectionSignatures = new Map();
+
+function currentMutationBlock(alias) {
+  const context = projectionContexts.get(alias);
+  return context
+    ? workspaceMutationSafetySummary(context.config, alias, context.workspace?.path || '')
+    : workspaceMutationBlockSummary(alias);
+}
+
+function publishMutationProjection(alias, mutationBlock) {
+  const signature = JSON.stringify(mutationBlock);
+  if (mutationProjectionSignatures.get(alias) === signature) return;
+  mutationProjectionSignatures.set(alias, signature);
+  workspaceStateVersion += 1;
+  for (const listener of workspaceStateListeners) {
+    try { listener({ alias, state: { mutationBlock }, version: workspaceStateVersion }); } catch { /* Projection only. */ }
+  }
+}
+
+onWorkspaceMutationBlockChange(({ alias, mutationBlock }) => {
+  publishMutationProjection(alias, projectionContexts.has(alias) ? currentMutationBlock(alias) : mutationBlock);
+});
+
+onMutationProcessRecoveryChange(() => {
+  for (const alias of projectionContexts.keys()) publishMutationProjection(alias, currentMutationBlock(alias));
+});
 
 function buildWorkspaceStates(config, tasks = [], activity = {}) {
   pruneWorkspaceGitStateCache(config, activity);
+  for (const alias of projectionContexts.keys()) {
+    if (!Object.hasOwn(config.workspaces || {}, alias)) {
+      projectionContexts.delete(alias);
+      mutationProjectionSignatures.delete(alias);
+    }
+  }
   const states = {};
   for (const [alias, workspace] of Object.entries(config.workspaces || {})) {
     states[alias] = workspaceState(alias, workspace, config, tasks, activity);
@@ -24,6 +59,9 @@ function buildWorkspaceStates(config, tasks = [], activity = {}) {
 }
 
 function workspaceState(alias, workspace, config, tasks, activity) {
+  projectionContexts.set(alias, { config, workspace });
+  const mutationBlock = currentMutationBlock(alias);
+  mutationProjectionSignatures.set(alias, JSON.stringify(mutationBlock));
   const recentTasks = tasks.filter(task => task.workspace === alias);
   const lastTask = recentTasks[0] || null;
   const lastValidation = recentTasks.find(task => task.validation !== 'not_run') || null;
@@ -38,6 +76,7 @@ function workspaceState(alias, workspace, config, tasks, activity) {
       activeCalls: currentTask.activeCalls || 0,
       taskId: currentTask.id || currentTask.taskId || ''
     } : null,
+    mutationBlock,
     lastTask,
     lastValidation: lastValidation ? { status: lastValidation.validation, completedAt: lastValidation.completedAt } : null
   };
@@ -132,7 +171,7 @@ async function refreshWorkspaceGitState(cacheKey, cached, alias, workspace, conf
     }
     const [status, remotes] = await Promise.all([
       readGitObservation(workspacePath, config, { coalesce: true, maxOutputBytes: 512 * 1024 }),
-      runProcess('git', ['remote'], { cwd: workspacePath, timeout: 5000, maxOutputBytes: 128 * 1024 }, config)
+      runReadOnlyProcess('git', ['remote'], { cwd: workspacePath, timeout: 5000, maxOutputBytes: 128 * 1024 }, config)
     ]);
     const next = { ...base };
     if (status.exitCode === 0 && !status.stdoutTruncated) {
@@ -170,7 +209,7 @@ function commitWorkspaceGitState(cacheKey, cached, alias, next) {
   if (!changed) return;
   workspaceStateVersion += 1;
   for (const listener of workspaceStateListeners) {
-    try { listener({ alias, state: next, version: workspaceStateVersion }); }
+    try { listener({ alias, state: { ...next, mutationBlock: currentMutationBlock(alias) }, version: workspaceStateVersion }); }
     catch (error) { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] workspace state listener:', error); }
   }
 }

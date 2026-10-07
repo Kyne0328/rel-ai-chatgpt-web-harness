@@ -42,6 +42,9 @@ const viteCli = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
 const electronBuilderCli = packageBin(path.join(electronRoot, 'node_modules', 'electron-builder'), 'electron-builder');
 const platformEnvironment = { ...process.env, REL_AI_TARGET_PLATFORM: platform, REL_AI_TARGET_ARCH: targetArch };
 
+// Verify source-built native assets before any output cleanup or package generation.
+runNode('Windows process-controller integrity', path.join(root, 'scripts', 'generate-windows-process-job-native.mjs'), ['--check']);
+
 if (mode === 'unpacked') {
   runNode('unpacked output cleanup', path.join(root, 'scripts', 'clean.mjs'), ['--electron']);
 }

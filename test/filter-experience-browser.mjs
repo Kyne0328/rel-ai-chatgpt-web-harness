@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getTaskHistoryDir, writeSession } from '../src/taskHistoryStorage.ts';
+import { getStateDir } from '../src/statePaths.js';
+import { runWithMutationProcessOwnership, recordCurrentMutationProcess } from '../src/mutationProcessOwnership.js';
 import { startHttpTestServer, stopHttpTestServer } from './helpers/http-test-server.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +27,12 @@ const config = {
 };
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 seedSessions(getTaskHistoryDir(config));
+assert.equal(path.resolve(getStateDir(config)), path.resolve(stateDir), 'Recovery fixture must use its own isolated state directory.');
+const recoveryMarker = runWithMutationProcessOwnership(config, 'app', () => recordCurrentMutationProcess(process.pid), workspace);
+const seededRecovery = JSON.parse(fs.readFileSync(recoveryMarker, 'utf8'));
+seededRecovery.startedAt = '2000-01-01T00:00:00.000Z';
+fs.writeFileSync(recoveryMarker, JSON.stringify(seededRecovery));
+const recoveryBytes = fs.readFileSync(recoveryMarker, 'utf8');
 const { child: server, port } = await startHttpTestServer({ root, configPath, token, stateDir });
 let child;
 try {
@@ -44,6 +52,10 @@ try {
   assert.equal(code, 0, `Filter browser probe failed. stdout=${stdout} stderr=${stderr}`);
   const result = JSON.parse(fs.readFileSync(outputPath, 'utf8'));
   assert.equal(result.error, undefined, result.error ? `${result.error}\n${(result.failures || []).join('\n')}` : undefined);
+  assert.deepEqual(result.persistedRecovery.before, { projectBlocked: true, readyAbsent: true, overviewAttention: true });
+  assert.deepEqual(result.persistedRecovery.after, result.persistedRecovery.before, 'Current recovery status must survive a historical Activity filter change.');
+  assert.match(result.persistedRecovery.activityRoute, /time=24h/);
+  assert.equal(fs.readFileSync(recoveryMarker, 'utf8'), recoveryBytes, 'Dashboard reads and filtering must preserve the seeded recovery record.');
   assert.deepEqual(result.shared, {
     searchVisible: true,
     searchLabel: 'Search activity',
@@ -77,7 +89,10 @@ try {
   assert.equal(result.diagnostics.liveTailActiveLabel, 'Pause live updates');
   assert.equal(result.diagnostics.liveTailStarted, true);
   assert.equal(result.diagnostics.liveTailStopped, true);
-  assert.equal(result.diagnostics.searchEmpty, true);
+  assert.equal(result.diagnostics.searchEmpty, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.diagnostics.pendingSearchCleared, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.diagnostics.pendingFilterRemovalPreserved, true, JSON.stringify(result.diagnostics));
+  assert.equal(result.diagnostics.pendingDrawerSearchPreserved, true, JSON.stringify(result.diagnostics));
   assert.equal(result.diagnostics.technicalFindingCodesGated, true);
   assert.equal(result.diagnostics.findingSeveritiesReadable, true);
   assert.deepEqual(result.diagnostics.applied.chips.sort(), ['Scope: Failed activity', 'Severity: Blocking']);

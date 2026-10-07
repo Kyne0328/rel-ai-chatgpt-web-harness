@@ -60,9 +60,12 @@ assert.match(desktop, /Structured local OS actions/i);
 assert.match(desktop, /relai_computer is the UI fallback/i);
 
 const computer = descriptions.get('relai_computer');
-assert.match(computer, /final fallback for local desktop input/i);
-assert.match(computer, /structured local and browser capabilities/i);
-assert.match(computer, /per-app approval/i);
+assert.match(computer, /Local desktop fallback after structured tools and relai_browser/i, 'Computer control must follow structured and browser tools in routing');
+assert.match(computer, /Requires Computer control and per-app approval/i);
+assert.match(computer, /Pixels\/OCR require verified app-window capture and fail closed if unavailable/i, 'Public routing must retain the app-only pixel privacy boundary');
+assert.match(computer, /Browsers are view-only; use relai_browser/i);
+assert.match(computer, /Terminals\/IDEs are click-only; use relai_desktop to type/i);
+assert.match(computer, /One session drives input/i);
 
 const decisions = [
   ['Research today\'s AI news', /Public-web research/i, null],

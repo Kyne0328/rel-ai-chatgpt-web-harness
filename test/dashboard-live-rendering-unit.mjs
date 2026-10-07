@@ -199,7 +199,30 @@ assert.match(refreshCoordinatorSource, /_refreshLiveEvents = \[\]/, 'each aggreg
 assert.match(refreshCoordinatorSource, /needsCatchUp[\s\S]*live-refresh-overflow/, 'buffer overflow must schedule an authoritative catch-up refresh instead of silently dropping state');
 assert.match(functionSource(dashboard, 'bufferLiveEventDuringRefresh'), /MAX_REFRESH_LIVE_EVENTS[\s\S]*_refreshLiveEventOverflow = true/, 'refresh buffering must stay bounded and record overflow');
 
-assert.match(settingsReact, /saveSettings\(\{ port: form\.port, tunnelId: form\.tunnelId, tunnelApiKey: form\.tunnelApiKey \}\)[\s\S]*requestDashboardRefresh\(\)/, 'Secure tunnel configuration changes must refresh canonical dashboard state');
+// Connection editing now uses saveTunnel; exercise its real callback rather than
+// requiring the obsolete combined port/credential saveSettings call shape.
+{
+  const start = settingsReact.indexOf('  const add = async () => {', settingsReact.indexOf('function TunnelConnections'));
+  const end = settingsReact.indexOf('  const remove = async connection => {', start);
+  assert.ok(start >= 0 && end > start);
+  for (const fails of [false, true]) {
+    let saves = 0;
+    let refreshes = 0;
+    const context = {
+      disabled: false, busyRef: { current: false }, rows: [], connections: [], statuses: [],
+      draft: { label: 'Fixture', tunnelId: 'fixture-tunnel', apiKey: 'fixture-key', enabled: true },
+      validateAdditionalTunnel: () => null,
+      desktop: { saveTunnel: async () => { saves += 1; if (fails) throw new Error('fixture save rejected'); return { ok: true }; } },
+      onChange: async () => {}, requestDashboardRefresh: () => { refreshes += 1; },
+      setValidation() {}, setOpen() {}, setBusy() {}, setShowSecret() {}, setDraft() {}, toast() {}, messageOf: String
+    };
+    vm.runInNewContext(settingsReact.slice(start, end) + '\n globalThis.save = add;', context);
+    await context.save();
+    assert.equal(saves, 1);
+    assert.equal(refreshes, fails ? 0 : 1, 'a saved tunnel must refresh canonical dashboard state');
+    assert.equal(context.busyRef.current, false);
+  }
+}
 
 function dashboardRefreshHarness() {
   let state = { live: { streamId: 'a', revisions: { tasks: 1 } } };
@@ -287,6 +310,104 @@ for (const streamId of ['a', 'b']) {
   h.requests.shift()({ live: { streamId: 'c', revisions: { tasks: 8 } } });
   await third;
   assert.equal(h.queued.length, 0);
+}
+
+
+{
+  const source = read('src/ui/features/code/react.js');
+  const callbackSource = (name, suffix) => {
+    const start = source.indexOf('  const ' + name + ' = useCallback(');
+    const end = source.indexOf(suffix, start) + suffix.length;
+    assert.ok(start >= 0 && end > start);
+    return source.slice(start, end);
+  };
+  const requests = [];
+  let displayed = null;
+  let route = 'code';
+  const context = {
+    useCallback: fn => fn,
+    workspaceRequestRef: { current: 0 }, diffRequestRef: { current: 0 },
+    taskIdRef: { current: 'task-a' }, filePathRef: { current: 'src/a.js' }, pendingDiffPathRef: { current: '' },
+    bridge: {
+      get: async () => ({ changedFiles: ['src/a.js'] }),
+      diff: () => new Promise((resolve, reject) => requests.push({ resolve, reject }))
+    },
+    currentRoutePath: () => route,
+    readRequestedTaskId: () => 'task-a', readRequestedFilePath: () => 'src/a.js',
+    changedTextFiles: workspace => workspace.changedFiles,
+    setWorkspace() {}, setWorkspaceError() {}, setFilePath() {},
+    setDiffFile: file => { displayed = file; },
+    setViewerMessage() {}, setViewerTone() {}, replaceRouteParams() {},
+    emptyViewerMessage: () => '', messageFor: String
+  };
+  vm.runInNewContext(callbackSource('loadDiff', '  }, [bridge]);') + '\n'
+    + callbackSource('refreshWorkspace', '  }, [bridge, loadDiff]);')
+    + '\n globalThis.load = loadDiff; globalThis.refresh = refreshWorkspace;', context);
+  const refresh = context.refresh('task-a');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 1, 'same-path refresh must load the selected diff');
+  requests.shift().resolve({ content: 'revision-two' });
+  await refresh;
+  assert.equal(displayed.content, 'revision-two');
+  const stale = context.load('task-a', 'src/a.js');
+  const latest = context.load('task-a', 'src/a.js');
+  requests[1].resolve({ content: 'latest-revision' });
+  await latest;
+  requests[0].resolve({ content: 'older-revision' });
+  await stale;
+  requests.length = 0;
+  assert.equal(displayed.content, 'latest-revision', 'old in-flight diff must not overwrite a newer response');
+  const departed = context.load('task-a', 'src/a.js');
+  route = 'activity';
+  requests.shift().reject(new Error('late old-route error'));
+  await departed;
+  assert.equal(displayed.content, 'latest-revision', 'late failures must not alter a different route');
+  assert.match(source, /selectedTask\?\.changeRevision/, 'live refresh must track the selected task revision');
+
+  let assignments = 0;
+  let restorations = 0;
+  const editor = { setModel() { assignments += 1; }, saveViewState: () => ({ selected: 3 }), restoreViewState() { restorations += 1; } };
+  const monaco = { editor: { createModel(content, language) { return {
+    value: content, language, disposed: false, getValue() { return this.value; }, setValue(value) { this.value = value; },
+    getLanguageId() { return this.language; }, dispose() { this.disposed = true; }
+  }; } } };
+  const modelContext = {};
+  vm.runInNewContext(functionSource(source, 'applyDiffModels') + '\n' + functionSource(source, 'clearDiffModels') + '\n globalThis.apply = applyDiffModels;', modelContext);
+  const models = { current: [] };
+  modelContext.apply(monaco, editor, models, { work_id: 'task-a', path: 'src/a.js', content: 'one', baseContent: 'zero' });
+  const originalModels = [...models.current];
+  const firstAssignments = assignments;
+  modelContext.apply(monaco, editor, models, { work_id: 'task-a', path: 'src/a.js', content: 'two', baseContent: 'zero' });
+  assert.equal(models.current[1], originalModels[1]);
+  assert.equal(models.current[1].getValue(), 'two');
+  assert.equal(assignments, firstAssignments, 'same file content updates must not detach Monaco models');
+  assert.equal(restorations, 1, 'same file refresh must restore editor selection and scroll state');
+}
+
+
+{
+  const { buildDashboardTaskDelta } = await import('../src/core/dashboard-data.ts');
+  const task = { id: 'revision-fixture', title: 'Unchanged summary', workspace: 'fixture', status: 'running', changedFiles: ['src/a.js'], updatedAt: '2026-01-01T00:00:00Z' };
+  const first = buildDashboardTaskDelta({}, [{ revision: 41, task }]).taskUpdates[0];
+  const second = buildDashboardTaskDelta({}, [{ revision: 42, task }]).taskUpdates[0];
+  assert.equal(first.changeRevision, 41);
+  assert.equal(second.changeRevision, 42, 'the production task projection must retain its authoritative per-task activity revision');
+  const { changeRevision: _first, ...firstSummary } = first;
+  const { changeRevision: _second, ...secondSummary } = second;
+  assert.deepEqual(firstSummary, secondSummary, 'fixture summaries stay identical while the actual task revision changes');
+  const source = read('src/ui/features/code/react.js');
+  const context = { classifyTaskChangedFiles: files => ({ productChangedFileCount: files.length }) };
+  vm.runInNewContext(functionSource(source, 'codeTasks') + '\n' + functionSource(source, 'taskId') + '\n' + functionSource(source, 'taskLabel') + '\n globalThis.tasks = codeTasks;', context);
+  assert.notEqual(context.tasks({ tasks: [first] })[0].changeRevision, context.tasks({ tasks: [second] })[0].changeRevision);
+}
+
+
+{
+  const { repositorySummary } = await import('../src/ui/features/workspaces/model.js');
+  const summary = repositorySummary({ exists: true, isGit: false, mutationBlock: { blocked: true } });
+  assert.equal(summary.label, 'Changes blocked');
+  assert.match(summary.description, /Read-only inspection remains available/);
+  assert.doesNotMatch(summary.description, /File and command actions are available/);
 }
 
 console.log('Dashboard live rendering contracts passed.');

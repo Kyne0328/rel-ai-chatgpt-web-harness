@@ -3,6 +3,7 @@ import * as path from 'node:path';
 
 import { readJsonFile, writeJsonAtomic } from '../durableState.ts';
 import { getStateDir } from '../statePaths.js';
+import { acquireExtensionOperation, extensionOperationIsHeld } from './operationLock.js';
 
 const SCHEMA_VERSION = 1;
 const MARKER_PATTERN = /^\.install-transaction-([a-z0-9][a-z0-9.-]{0,79})\.json$/;
@@ -24,8 +25,25 @@ function completeExtensionInstallTransaction(config, id) {
   try { fs.rmSync(markerPath(config, id), { force: true }); } catch {}
 }
 
-function recoverInterruptedExtensionInstalls(config) {
+function recoverInterruptedExtensionInstalls(config, options = {}) {
   const root = extensionRoot(config);
+  if (!fs.existsSync(root)) return { ok: true, recovered: 0, errors: [] };
+  const ownsLease = options.lease && extensionOperationIsHeld(config, options.lease);
+  if (!ownsLease && extensionOperationIsHeld(config)) {
+    return { ok: true, recovered: 0, errors: [], skipped: true, busy: true };
+  }
+  let lease;
+  try {
+    lease = ownsLease ? options.lease : acquireExtensionOperation(config);
+  } catch (error) {
+    if (error?.code === 'EXTENSION_OPERATION_BUSY') return { ok: true, recovered: 0, errors: [], skipped: true, busy: true };
+    return { ok: false, recovered: 0, errors: [{ error: error instanceof Error ? error.message : String(error) }] };
+  }
+  try { return recoverUnderLease(root); }
+  finally { if (!ownsLease) lease.release(); }
+}
+
+function recoverUnderLease(root) {
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return { ok: true, recovered: 0, errors: [] }; }
   const errors = [];

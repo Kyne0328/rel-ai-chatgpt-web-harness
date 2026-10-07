@@ -1,6 +1,6 @@
 import { readGitObservation, readExactGitObservations } from '../repo/gitObservation.js';
 import * as crypto from "node:crypto";
-import { runProcess } from "../process.js";
+import { runReadOnlyProcess } from "../process.js";
 import { resolveSafePath, isSecretPath } from "../safety.js";
 import { classifyStatusOwnership } from "../repo/gitOps.js";
 import { formatGitStatus } from "../repo/gitStatus.js";
@@ -12,6 +12,7 @@ const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 
 async function relaiDiff(workspace, config, args = {}, context = {}) {
   const staged = Boolean(args.staged);
+  const maxBytes = clampNumber(args.maxBytes, 1000, 5 * 1024 * 1024, DEFAULT_MAX_DIFF_BYTES);
   const redactSensitive = args.redactSensitive === true;
   const filterPath = resolveReviewFilter(workspace, args.path, redactSensitive);
   const taskOwnedPaths = Array.isArray(args._taskOwnedPaths)
@@ -25,7 +26,7 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
   // Status must complete before any diff is read. Its canonical NUL-delimited paths
   // define the allowlist and prevent a speculative unscoped diff from ever loading
   // sensitive-file content into process memory.
-  const exactPaths = filterPath ? [filterPath] : taskOwnedPaths;
+  const exactPaths = filterPath ? [filterPath] : reviewedScope === 'task' ? taskOwnedPaths : null;
   const stat = exactPaths?.length
     ? await readExactGitObservations(workspace.path, config, exactPaths, { signal: context.signal })
     : await readGitObservation(workspace.path, config, { signal: context.signal });
@@ -33,13 +34,24 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
     throw new Error(`Git review observation failed: ${stat.error || stat.stderr || 'output budget exhausted'}`);
   }
   const ownership = classifyStatusOwnership(workspace, config, stat.stdout || '');
+  // Exact task observations intentionally omit unrelated paths. Obtain a bounded
+  // metadata-only inventory for the excluded-files receipt, without widening the
+  // diff allowlist or recursively enumerating unrelated untracked directories.
+  const inventory = reviewedScope === 'task' && exactPaths?.length
+    ? await readGitObservation(workspace.path, config, { signal: context.signal })
+    : stat;
+  if (inventory.exitCode !== 0 || inventory.stdoutTruncated) {
+    throw new Error(`Git review inventory failed: ${inventory.error || inventory.stderr || 'output budget exhausted'}`);
+  }
+  const inventoryOwnership = inventory === stat ? ownership : classifyStatusOwnership(workspace, config, inventory.stdout || '');
+  const inventoryPaths = normalizePaths(inventoryOwnership.entries.filter(entry => !entry.opaqueDirectory).map(entry => entry.path));
   const workspaceChangedPaths = normalizePaths(ownership.entries.filter(entry => !entry.opaqueDirectory).map(entry => entry.path));
   const scopedPaths = reviewedScope === 'task'
     ? workspaceChangedPaths.filter(file => taskOwnedPaths.includes(file))
     : workspaceChangedPaths;
   const changedPaths = filterPath ? scopedPaths.filter(file => file === filterPath) : scopedPaths;
   const excludedWorkspaceFiles = reviewedScope === 'task'
-    ? workspaceChangedPaths.filter(file => !taskOwnedPaths.includes(file))
+    ? inventoryPaths.filter(file => !taskOwnedPaths.includes(file))
     : ownership.entries.filter(entry => entry.opaqueDirectory).map(entry => entry.path);
   const sensitivePaths = [...new Set(changedPaths.filter(item => isSecretPath(item)))];
   if (filterPath && sensitivePaths.length > 0 && !redactSensitive) {
@@ -50,16 +62,15 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
     ? changedPaths.filter(item => !isSecretPath(item))
     : changedPaths;
   const pathScoped = reviewedScope === 'task' || filterPath != null || sensitivePaths.length > 0;
-  const diff = await runOrdinaryDiff(workspace, config, staged, ordinaryPaths, pathScoped, context.signal);
+  const diff = await runOrdinaryDiff(workspace, config, staged, ordinaryPaths, pathScoped, context.signal, maxBytes);
   let diffText = diff.stdout || '';
   if (!staged) {
     const untracked = new Set(ownership.entries.filter(entry => entry.untracked && !isSecretPath(entry.path)).map(entry => entry.path));
-    diffText += buildUntrackedDiff(workspace, changedPaths.filter(file => untracked.has(file)));
+    diffText += buildUntrackedDiff(workspace, changedPaths.filter(file => untracked.has(file)), Math.max(0, maxBytes - Buffer.byteLength(diffText)));
   }
   const sensitiveReview = redactSensitive
     ? await buildSensitiveReview(workspace, config, sensitivePaths, ownership, staged)
     : [];
-  const maxBytes = clampNumber(args.maxBytes, 1000, 5 * 1024 * 1024, DEFAULT_MAX_DIFF_BYTES);
   const reviewedFiles = normalizePaths(changedPaths);
   const scopedOwnership = scopeOwnership(ownership, new Set(reviewedFiles));
   const reviewHash = crypto.createHash("sha256").update(diffText).update(JSON.stringify(sensitiveReview)).digest("hex");
@@ -110,11 +121,11 @@ function resolveReviewFilter(workspace, rawPath, redactSensitive) {
   }).relativePath;
 }
 
-async function runOrdinaryDiff(workspace, config, staged, paths, pathScoped, signal) {
+async function runOrdinaryDiff(workspace, config, staged, paths, pathScoped, signal, maxBytes) {
   if (pathScoped && paths.length === 0) return { stdout: '', stderr: '', exitCode: 0 };
   const args = ['diff', ...(staged ? ['--staged'] : [])];
   if (paths.length > 0) args.push('--', ...paths.map(file => `:(literal)${file}`));
-  return runProcess('git', args, { cwd: workspace.path, timeout: 60000, signal }, config);
+  return runReadOnlyProcess('git', args, { cwd: workspace.path, timeout: 60000, signal, maxOutputBytes: maxBytes }, config);
 }
 
 export { relaiDiff };

@@ -38,6 +38,16 @@ async function case_computer_manager_unit() {
       mimeType: 'image/png', data: Buffer.from(`shot:${displayId || 'primary'}`).toString('base64'),
       bytes: 10, width: displayId === 'display-side' ? 1280 : 1920, height: displayId === 'display-side' ? 1024 : 1080
     }),
+    assertAppInputTarget: async () => {},
+    async screenshotApp(app, displayId) {
+      const image = await this.screenshot(displayId);
+      return { ...image, bytes: Buffer.byteLength(image.data, 'base64'), provenance: {
+        scope: 'app-window', method: 'win32-print-window', app,
+        windowId: '1001', processId: 42, processStartedAt: '100000',
+        displayId: displayId || 'display-main', capturedAt: Date.now(),
+        coordinateSpace: 'window-local-pixels', originX: 0, originY: 0
+      } };
+    },
     move: async (displayId, point) => calls.push(['move', displayId, point]),
     click: async (displayId, point) => calls.push(['click', displayId, point]),
     doubleClick: async (displayId, point) => calls.push(['doubleClick', displayId, point]),
@@ -91,6 +101,24 @@ async function case_computer_manager_unit() {
     error => error?.code === 'COMPUTER_APP_APPROVAL_REQUIRED'
   );
   await runComputerAction(workspace, enabledConfig, { action: 'approve_app', app: APP }, contextA);
+  // An app label never authorizes the legacy display capture path.
+  let unsafeCaptures = 0;
+  const unsupportedContext = { ...contextA, computerAdapter: { ...adapter, screenshotApp: undefined,
+    screenshot: async () => { unsafeCaptures += 1; throw new Error('must not capture display'); }
+  }, semanticAdapter: { supported: () => false, engine: 'fixture', observe: async () => ({ available: false }) } };
+  for (const action of ['screenshot', 'observe', 'wait_for_change', 'wait_for_stable']) {
+    await assert.rejects(() => runComputerAction(workspace, enabledConfig, { action, app: APP, timeoutMs: 100 }, unsupportedContext),
+      error => error.code === 'COMPUTER_APP_CAPTURE_UNAVAILABLE');
+  }
+  assert.equal(unsafeCaptures, 0);
+  for (const patch of [{ app: 'another-app' }, { displayId: 'wrong' }, { scope: 'display' }, { windowId: '' }, { processId: 0 }, { capturedAt: Date.now() - 60_000 }]) {
+    const badContext = { ...contextA, computerAdapter: { ...adapter, async screenshotApp(app, displayId) {
+      const image = await adapter.screenshotApp(app, displayId);
+      return { ...image, provenance: { ...image.provenance, ...patch } };
+    } } };
+    await assert.rejects(() => runComputerAction(workspace, enabledConfig, { action: 'screenshot', app: APP, displayId: 'display-side' }, badContext),
+      error => error.code === 'COMPUTER_APP_CAPTURE_UNAVAILABLE');
+  }
   const statusA = await readComputerStatus(enabledConfig, contextA);
   const statusBBeforeApproval = await readComputerStatus(enabledConfig, contextB);
   assert.ok(statusA.approvedApps.includes(APP));
@@ -103,6 +131,7 @@ async function case_computer_manager_unit() {
   const capture = await runComputerAction(workspace, enabledConfig, { action: 'screenshot', app: APP, displayId: 'display-side' }, contextA);
   assert.equal(capture.displayId, 'display-side');
   assert.equal(capture.app, APP);
+  assert.equal(capture.engine, 'win32-print-window', 'reported image engine must match actual app-native capture');
   assert.equal(capture.image.mimeType, 'image/png');
   assert.equal(capture.image.width, 1280);
   assert.equal(capture.image.height, 1024);
@@ -297,8 +326,53 @@ async function case_computer_manager_unit() {
   await runComputerAction(workspace, enabledConfig, {
     action: 'click', app: APP, observationId: scaledCapture.observationId, x: 640, y: 360
   }, scaledContextA);
-  assert.deepEqual(scaledCalls, [['click', undefined, { x: 960, y: 540 }]], 'observation-space coordinates must map back to physical display pixels');
+  assert.deepEqual(scaledCalls, [['click', 'display-main', { x: 960, y: 540 }]], 'observation-space coordinates must map back to physical display pixels');
   
+
+  const offsetCalls = [];
+  const offsetAdapter = {
+    ...adapter,
+    async screenshotApp(app, displayId) {
+      const source = await adapter.screenshotApp(app, displayId);
+      return { ...source, width: 640, height: 480, provenance: { ...source.provenance, originX: 100, originY: 200 } };
+    },
+    click: async (displayId, point) => offsetCalls.push([displayId, point])
+  };
+  const offsetContext = { ...contextA, computerAdapter: offsetAdapter };
+  const offsetImage = await runComputerAction(workspace, enabledConfig, { action: 'screenshot', app: APP, displayId: 'display-side' }, offsetContext);
+  await runComputerAction(workspace, enabledConfig, { action: 'click', app: APP, observationId: offsetImage.observationId, x: 10, y: 20 }, offsetContext);
+  assert.deepEqual(offsetCalls, [['display-side', { x: 110, y: 220 }]], 'window-local image coordinates must include the verified display origin');
+
+
+  const deniedCalls = [];
+  const deniedAdapter = {
+    ...offsetAdapter,
+    assertAppInputTarget: async () => { throw new Error('fixture occlusion or stale geometry'); },
+    move: async () => deniedCalls.push('move'), click: async () => deniedCalls.push('click'),
+    doubleClick: async () => deniedCalls.push('double'), rightClick: async () => deniedCalls.push('right'),
+    drag: async () => deniedCalls.push('drag'), scroll: async () => deniedCalls.push('scroll'),
+    typeText: async () => deniedCalls.push('type'), pressKey: async () => deniedCalls.push('key')
+  };
+  for (const input of [
+    { action: 'move', x: 10, y: 20 }, { action: 'click', x: 10, y: 20 },
+    { action: 'double_click', x: 10, y: 20 }, { action: 'right_click', x: 10, y: 20 },
+    { action: 'drag', x: 10, y: 20, toX: 30, toY: 40 },
+    { action: 'scroll', x: 10, y: 20, direction: 'down' },
+    { action: 'type', text: 'fixture' }, { action: 'key', key: 'enter' }, { action: 'hotkey', keys: ['ctrl', 's'] }
+  ]) {
+    await assert.rejects(() => runComputerAction(workspace, enabledConfig, { ...input, app: APP, observationId: offsetImage.observationId }, { ...contextA, computerAdapter: deniedAdapter }),
+      error => error.code === 'COMPUTER_INPUT_TARGET_UNVERIFIED');
+  }
+  assert.deepEqual(deniedCalls, [], 'an unverified window must receive no native input calls');
+  await assert.rejects(() => runComputerAction(workspace, enabledConfig, { action: 'click', app: APP, observationId: offsetImage.observationId, x: 1, y: 1 },
+    { ...contextA, computerAdapter: { ...offsetAdapter, assertAppInputTarget: undefined } }), error => error.code === 'COMPUTER_INPUT_TARGET_UNVERIFIED');
+  await assert.rejects(() => runComputerAction(workspace, enabledConfig, { action: 'scroll', app: APP, observationId: offsetImage.observationId, direction: 'down' }, offsetContext),
+    error => error.code === 'COMPUTER_INPUT_TARGET_UNVERIFIED');
+  const keyboardChecks = [];
+  await runComputerAction(workspace, enabledConfig, { action: 'key', app: APP, observationId: offsetImage.observationId, key: 'enter' },
+    { ...contextA, computerAdapter: { ...offsetAdapter, assertAppInputTarget: async (_app, target) => keyboardChecks.push(target), pressKey: async () => {} } });
+  assert.equal(keyboardChecks[0].requiresFocus, true, 'observation-based keyboard input must verify foreground ownership');
+
   let screenState = 0;
   const stateCalls = [];
   const stateAdapter = {
@@ -683,3 +757,89 @@ async function case_midscene_computer_adapter_unit() {
   console.log('Midscene computer adapter caches connected devices, invalidates screenshots after input, preserves bounded screenshots, and retries failed device initialization.');
 }
 await case_midscene_computer_adapter_unit();
+
+// Canonical app resolution uses metadata only; captions never grant authority.
+async function case_app_target_reliability() {
+  const assert = (await import('node:assert/strict')).default;
+  const { selectAppTarget, isResolvedAppApproved } = await import('../src/computer/appTarget.ts');
+  const { runComputerAction } = await import('../src/computerManager.js');
+  const { getToolActionCatalog } = await import('../src/tools/actionCatalog.js');
+  const base = { windowId: '1001', processId: 123, processStartedAt: '100000',
+    executablePath: 'C:\\Fixture\\notes.exe', processName: 'notes',
+    productName: 'Friendly Notes', fileDescription: 'Notes Editor', title: 'Draft α', visible: true, displayId: 'display-main' };
+  for (const alias of ['notes.exe', 'Friendly Notes', 'Notes Editor', 'C:\\Fixture\\notes.exe']) {
+    const result = selectAppTarget(alias, [base]);
+    assert.equal(result.canonicalApp, 'notes');
+    assert.equal(isResolvedAppApproved(result, ['Friendly Notes']), true);
+  }
+  const { assertComputerTierAllowed } = await import('../src/computer/computerPolicy.ts');
+  const windowsNotepad = selectAppTarget('notepad', [{ ...base, processName: 'notepad', productName: 'Microsoft® Windows® Operating System', fileDescription: 'Notepad' }]);
+  for (const name of windowsNotepad.policyNames) assert.doesNotThrow(() => assertComputerTierAllowed(name, 'type'), 'generic Windows product prose must not falsely classify Notepad as Opera');
+  const renamedBrowser = selectAppTarget('friendly', [{ ...base, processName: 'friendly', productName: 'Google Chrome' }]);
+  assert.ok(renamedBrowser.policyNames.includes('google chrome'), 'recognized browser product identity preserves stricter tier even with a different executable label');
+  const unicode = { ...base, processName: '笔记', productName: '我的笔记', title: '中文标题' };
+  assert.equal(selectAppTarget('我的笔记', [unicode]).canonicalApp, '笔记');
+  assert.equal(selectAppTarget('Draft α', [base]).approvalBasis, 'title');
+  assert.equal(isResolvedAppApproved(selectAppTarget('Draft α', [base]), ['Draft α']), false);
+  const second = { ...base, windowId: '1002', title: 'Draft β' };
+  assert.throws(() => selectAppTarget('notes', [base, second]), error => error.code === 'COMPUTER_APP_TARGET_AMBIGUOUS' && error.message.includes('1002'));
+  assert.equal(selectAppTarget('notes', [base, { ...second, foreground: true }]).windowId, '1002');
+  assert.equal(selectAppTarget('notes', [base, second], { windowTitle: 'β' }).windowId, '1002');
+  assert.equal(selectAppTarget('notes', [base, second], { windowId: '1001' }).windowId, '1001');
+  const bound = selectAppTarget('Friendly Notes', [base]);
+  const replacement = { ...base, windowId: '1003', processId: 124, processStartedAt: '200000' };
+  assert.equal(selectAppTarget('Friendly Notes', [replacement], { binding: bound }).reacquired, true);
+  assert.throws(() => selectAppTarget('Friendly Notes', [{ ...replacement, executablePath: 'C:\\Other\\notes.exe' }], { binding: bound }), /No matching authorized/);
+  assert.throws(() => selectAppTarget('Friendly Notes', [{ ...replacement, title: 'Other document' }], { binding: bound }), /No matching authorized/);
+  assert.throws(() => selectAppTarget('Friendly Notes', [replacement, { ...replacement, windowId: '1004' }], { binding: bound }), /Several windows/);
+  const host = { ...base, processName: 'ApplicationFrameHost', executablePath: 'C:\\Windows\\ApplicationFrameHost.exe', productName: 'Windows' };
+  assert.throws(() => selectAppTarget('ApplicationFrameHost', [host]), /No matching authorized/);
+  const packaged = { ...host, content: { windowId: '2001', processId: 222, processStartedAt: '300000', executablePath: 'C:\\Apps\\CalculatorApp.exe', processName: 'CalculatorApp', packageFamily: 'Microsoft.WindowsCalculator_abc', applicationId: 'Calculator' } };
+  assert.equal(selectAppTarget('Calculator', [packaged]).canonicalApp, 'calculatorapp');
+  assert.equal(isResolvedAppApproved(selectAppTarget('Calculator', [packaged]), ['ApplicationFrameHost']), false);
+
+  const workspace = { alias: 'canonical-fixture' };
+  const config = { computerControl: { enabled: true } };
+  let candidate = base;
+  let semanticCalls = 0;
+  const semanticAdapter = {
+    engine: 'synthetic-uia', supported: () => true,
+    warmup: async () => ({ supported: true, available: true, ocrAvailable: false }),
+    resolveAppTarget: async (app, options) => selectAppTarget(app, [candidate], options),
+    observe: async (_app, _max, _perception, _signal, target) => {
+      semanticCalls += 1; assert.equal(target.windowId, candidate.windowId);
+      return { supported: true, available: true, window: { title: candidate.title, processName: candidate.processName, processId: candidate.processId },
+        elements: [{ targetId: 'e1', source: 'uia', role: 'Button', name: 'Fixture', enabled: true, displayId: 'display-main', x: 1, y: 1, width: 10, height: 10, centerX: 6, centerY: 6 }] };
+    }, shutdown: async () => {}
+  };
+  const computerAdapter = { engine: 'synthetic', typeText: async () => assert.fail('Restricted alias reached keyboard input') };
+  const context = { computerAdapter, semanticAdapter, conversationId: 'alias-policy-fixture', principal: 'alias-policy-fixture' };
+  await runComputerAction(workspace, config, { action: 'approve_app', app: 'Friendly Notes' }, context);
+  const observed = await runComputerAction(workspace, config, { action: 'observe', app: 'Friendly Notes', perception: 'semantic' }, context);
+  assert.equal(observed.semanticAvailable, true);
+  await runComputerAction(workspace, config, { action: 'observe', app: 'Draft α', perception: 'semantic' }, context);
+  assert.equal(semanticCalls, 2, 'caption selector succeeds only for separately approved canonical app');
+  const spoofContext = { ...context, conversationId: 'title-only-fixture' };
+  await runComputerAction(workspace, config, { action: 'approve_app', app: 'Draft α' }, spoofContext);
+  await assert.rejects(() => runComputerAction(workspace, config, { action: 'observe', app: 'Draft α' }, spoofContext), /approv/i);
+  for (const [processName, productName] of [['chrome', 'Google Chrome'], ['code', 'Visual Studio Code'], ['WindowsTerminal', 'Windows Terminal']]) {
+    candidate = { ...base, processName, productName, executablePath: 'C:\\Fixture\\' + processName + '.exe' };
+    const restricted = { ...context, conversationId: 'canonical-tier-' + processName };
+    await runComputerAction(workspace, config, { action: 'approve_app', app: productName }, restricted);
+    await assert.rejects(() => runComputerAction(workspace, config, { action: 'type', app: productName, text: 'never' }, restricted), /read.only|view.only|click.only|relai_browser|relai_desktop/i);
+  }
+  const catalog = getToolActionCatalog().filter(entry => entry.publicTool === 'relai_computer');
+  for (const action of ['observe', 'screenshot', 'wait_for_change', 'click', 'type', 'key', 'hotkey']) {
+    const schema = catalog.find(entry => entry.action === action)?.inputSchema?.properties;
+    assert.equal(schema.windowTitle.maxLength, 500);
+    assert.equal(schema.windowId.type, 'string');
+    if (['type', 'key', 'hotkey'].includes(action)) assert.equal(schema.observationId.type, 'string');
+  }
+  assert.equal(catalog.find(entry => entry.action === 'approve_app').fields.includes('windowTitle'), false);
+  const { resolveToolOperation } = await import('../src/tools/actionCatalog.js');
+  assert.throws(() => resolveToolOperation('relai_computer', { workspace: 'fixture', action: 'approve_app', app: 'notes', windowTitle: 'Draft' }), /Unsupported field/);
+  assert.equal(resolveToolOperation('relai_computer', { workspace: 'fixture', action: 'type', app: 'notes', text: 'fixture', observationId: 'obs_fixture', windowTitle: 'Draft' }).operationArgs.observationId, 'obs_fixture');
+  console.log('Canonical aliases, Unicode, window choice, same-identity reacquisition, packaged identity composition and resolved app tiers passed.');
+}
+await case_app_target_reliability();
+

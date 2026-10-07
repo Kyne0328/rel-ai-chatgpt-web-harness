@@ -760,6 +760,87 @@ function persistSession(directory: string, session: TaskRecord, options: Persist
   schedulePendingDirectoryFlush(directory);
 }
 
+/**
+ * Wait for this task's queued snapshots, then admit synchronously in the same
+ * turn that observes no writer. A separate await-then-admit pair would reopen
+ * the race with another request beginning a worker write.
+ */
+async function withTaskHistoryPersistenceBarrier<T>(
+  config: TaskHistoryConfig,
+  taskId: unknown,
+  admit: () => T,
+  options: { signal?: AbortSignal; deadlineAtMs?: number } = {}
+): Promise<T> {
+  let admissionStarted = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const directory = getTaskHistoryDir(config);
+    const key = pendingSessionKey(directory, cleanTaskId(taskId));
+    const waitMs = Math.min(5000, Number(options.deadlineAtMs) > 0
+      ? Math.max(0, Number(options.deadlineAtMs) - Date.now()) : 5000);
+    const timeout = new AbortController();
+    const signal = options.signal ? AbortSignal.any([options.signal, timeout.signal]) : timeout.signal;
+    const expire = () => timeout.abort(new DOMException('Durable task admission wait expired.', 'TimeoutError'));
+    // Keep this timer referenced: a stalled, unref'ed worker must not make a
+    // one-shot client exit before admission reports its bounded failure.
+    timer = setTimeout(expire, waitMs);
+    if (waitMs === 0) expire();
+    for (;;) {
+      assertHistoryAdmissionNotAborted(signal);
+      const clearing = clearingDirectories.get(directory);
+      if (clearing) {
+        await waitForHistoryAdmission(clearing, signal);
+        continue;
+      }
+      const pending = pendingSessions.get(key);
+      if (!pending) {
+        admissionStarted = true;
+        return admit();
+      }
+      const succeeded = await waitForHistoryAdmission(flushPendingSession(key, pending), signal);
+      if (!succeeded) throw new Error('The pending task-history write failed.');
+    }
+  } catch (cause) {
+    if (admissionStarted || (cause && typeof cause === 'object' && 'executed' in cause && cause.executed === false)) throw cause;
+    const error = new Error('Background operation was not started because its task history could not be persisted.', { cause }) as Error & { code: string; executed: boolean };
+    error.code = 'FALLBACK_PERSISTENCE_FAILED';
+    error.executed = false;
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function assertHistoryAdmissionNotAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const error = new Error(signal.reason?.name === 'TimeoutError'
+    ? 'Timed out waiting for durable task history before background admission.'
+    : 'Request cancelled before durable background admission.', { cause: signal.reason }) as Error & { code: string; executed: boolean };
+  error.code = signal.reason?.name === 'TimeoutError' ? 'TIMEOUT' : 'CANCELLED';
+  error.executed = false;
+  throw error;
+}
+
+async function waitForHistoryAdmission<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return pending;
+  assertHistoryAdmissionNotAborted(signal);
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => {
+          try { assertHistoryAdmissionNotAborted(signal); } catch (error) { reject(error); }
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      })
+    ]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 function schedulePendingDirectoryFlush(directory: string, delay = TASK_HISTORY_FLUSH_MS): void {
   if (pendingFlushTimers.has(directory)) return;
   const timer = setTimeout(() => {
@@ -1021,7 +1102,8 @@ export {
   recordTaskHistoryEvent,
   recordWorkflowEvidence,
   recordWorkflowEvidenceBatch,
-  taskHistoryPersistenceSnapshot
+  taskHistoryPersistenceSnapshot,
+  withTaskHistoryPersistenceBarrier
 };
 
 export type { TaskActivitySnapshot, TaskRecord };

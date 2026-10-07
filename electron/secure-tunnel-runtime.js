@@ -303,6 +303,10 @@ function createSecureTunnelRuntime({
             recoveryMode: '',
             tunnelHealth: operational.health || state.tunnelHealth
           });
+        } else {
+          // Healthy samples still carry fresh counters; keep diagnostics current
+          // without moving lastConnectedAt or restarting the healthy process.
+          update({ tunnelHealth: operational.health || state.tunnelHealth, transportFailureStreak: 0 });
         }
         continue;
       }

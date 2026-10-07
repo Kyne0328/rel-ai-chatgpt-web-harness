@@ -243,7 +243,16 @@ function DiagnosticFilterBar({ filters, sources, summary, live, onChange, onClea
   const updateSearch = value => {
     setSearch(value);
     window.clearTimeout(searchTimerRef.current);
-    searchTimerRef.current = window.setTimeout(() => onChange({ ...filters, search: value.trim().toLowerCase() }), 120);
+    searchTimerRef.current = window.setTimeout(() => {
+      searchTimerRef.current = 0;
+      onChange(current => ({ ...current, search: value.trim().toLowerCase() }));
+    }, 120);
+  };
+  const clear = () => {
+    window.clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = 0;
+    setSearch('');
+    onClear();
   };
   return h('section', { className: 'filter-bar', 'aria-label': 'Troubleshooting filters' },
     h('div', { className: 'filter-bar-controls' },
@@ -276,7 +285,7 @@ function DiagnosticFilterBar({ filters, sources, summary, live, onChange, onClea
     }, h('span', null, `${filter.label}: ${filter.value}`), h(Icon, { name: 'close', size: 12 })))) : null,
     h('div', { className: 'filter-bar-footer' },
       h('span', { className: 'filter-summary', role: 'status', 'aria-live': 'polite' }, summary),
-      h('button', { type: 'button', className: 'secondary filter-clear-button', hidden: !hasDiagnosticFilters(filters), onClick: () => { setSearch(''); onClear(); } }, 'Clear all')
+      h('button', { type: 'button', className: 'secondary filter-clear-button', hidden: !hasDiagnosticFilters(filters), onClick: clear }, 'Clear all')
     )
   );
 }
@@ -329,12 +338,12 @@ function openDiagnosticFilters({ filters, sources, onChange }) {
     },
     onApply(draft) {
       const scope = draft.scope || 'all';
-      onChange({
-        ...filters,
+      onChange(current => ({
+        ...current,
         scope,
         severity: draft.severity || 'all',
         source: scope === 'findings' ? 'all' : draft.source || 'all'
-      });
+      }));
     }
   });
 }

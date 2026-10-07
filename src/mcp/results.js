@@ -232,12 +232,38 @@ function truncateUtf8Head(text, maxBytes) {
   return `${buffer.subarray(0, allowed).toString('utf8').replace(/\uFFFD+$/u, '')}${marker}`;
 }
 
+function compactSkillDiscovery(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  // Discovery status is control information. Copy only its bounded public
+  // facts, never skill contents, source paths or arbitrary nested metadata.
+  const result = {};
+  for (const key of ['complete', 'resumable', 'truncated', 'resumed']) {
+    if (typeof value[key] === 'boolean') result[key] = value[key];
+  }
+  for (const key of ['reason', 'source', 'scanId', 'expiresAt', 'restartReason', 'next',
+    'consistency', 'observationStartedAt', 'observationEndedAt']) {
+    if (typeof value[key] === 'string') result[key] = utf8Head(value[key], key === 'next' ? 512 : 128);
+  }
+  if (Number.isSafeInteger(value.limit) && value.limit >= 0) result.limit = value.limit;
+  if (value.work && typeof value.work === 'object' && !Array.isArray(value.work)) {
+    const work = {};
+    for (const key of ['units', 'bytes', 'totalUnits', 'totalBytes']) {
+      if (Number.isSafeInteger(value.work[key]) && value.work[key] >= 0) work[key] = value.work[key];
+    }
+    if (Object.keys(work).length) result.work = work;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
 function compactToolResult(payload, originalBytes) {
   if (!payload || typeof payload !== 'object') return { ok: false, truncated: true, originalBytes };
+  const bootstrapDiscovery = compactSkillDiscovery(payload.bootstrap?.skillDiscovery);
   const compact = {
     ok: payload.ok !== false,
     truncated: true,
     originalBytes,
+    skillDiscovery: compactSkillDiscovery(payload.skillDiscovery),
+    bootstrap: bootstrapDiscovery ? { skillDiscovery: bootstrapDiscovery } : undefined,
     workspace: boundedText(scalarText(payload.workspace), 512),
     work_id: payload.work_id || null,
     processId: payload.processId,
@@ -302,7 +328,7 @@ function compactToolResult(payload, originalBytes) {
   // Identity/status fields are scalars, never a second copy of workspace config
   // or an arbitrary nested payload. Keep the fixed envelope bounded as well.
   for (const [key, value] of Object.entries(bounded)) {
-    if (['backgroundOperation', 'backgroundOperations', 'results', 'completedOperations', 'timeline', 'items', 'skipped', 'errorDetails'].includes(key)) continue;
+    if (['backgroundOperation', 'backgroundOperations', 'results', 'completedOperations', 'timeline', 'items', 'skipped', 'errorDetails', 'skillDiscovery', 'bootstrap'].includes(key)) continue;
     if (value && typeof value === 'object') bounded[key] = boundedText(scalarText(value), 512);
     else if (typeof value === 'string' && !['message', 'error', 'summary', 'nextAction', 'stdout', 'stderr'].includes(key)) {
       bounded[key] = boundedText(value, 512);
@@ -408,7 +434,7 @@ function fitStructuredResult(value, maxBytes) {
   if (jsonBytes(result) <= maxBytes) return result;
   // Final bounded receipt for pathological metadata: no execution success or
   // termination certainty is invented when optional detail must be omitted.
-  const keys = ['ok', 'truncated', 'originalBytes', 'operationId', 'work_id', 'errorCode', 'executed', 'commandSucceeded', 'exitCode', 'timedOut', 'cancelled', 'rootExitConfirmed', 'terminationConfirmed', 'mutationUnknown', 'cleanupPending', 'stdoutOutputRef', 'stderrOutputRef'];
+  const keys = ['ok', 'truncated', 'originalBytes', 'skillDiscovery', 'bootstrap', 'operationId', 'work_id', 'errorCode', 'executed', 'commandSucceeded', 'exitCode', 'timedOut', 'cancelled', 'rootExitConfirmed', 'terminationConfirmed', 'mutationUnknown', 'cleanupPending', 'stdoutOutputRef', 'stderrOutputRef'];
   const receipt = Object.fromEntries(keys.filter(key => result[key] !== undefined).map(key => [key, result[key]]));
   if (result.results?.[0]) {
     const first = Object.fromEntries(keys.filter(key => result.results[0][key] !== undefined).map(key => [key, result.results[0][key]]));

@@ -12,6 +12,7 @@ const publicRoot = process.env.REL_AI_GENERATED_PUBLIC_ROOT
 try {
   verifyColorTokens();
   verifyUiContracts();
+  verifyGenerator('generate-windows-process-job-native.mjs', 'Generated Windows process controller is stale. Run node scripts/generate-windows-process-job-native.mjs --write on Windows.');
   if (!verifyDashboardGeneratedState(root, publicRoot)) throw staleDashboardError();
   console.log('Generated dashboard assets are current.');
 } catch (error) {

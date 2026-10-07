@@ -1,9 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { runProcess, type RunProcessResult } from '../process.ts';
+import { runProcess, runOwnedReadOnlyProcess, reconcileReadOnlyProcessTermination, internalReadOnlyProcessOutcome, type RunProcessResult } from '../process.ts';
 import { createFairResourceScheduler, acquireHostResource, hostResourceStats } from '../hostResourceScheduler.js';
 import { gitStatusArgs, INTERNAL_STATUS_MAX_BYTES } from './gitStatus.ts';
-import { runWithoutMutationProcessOwnership } from '../mutationProcessOwnership.js';
 
 interface ObservationOptions {
   signal?: AbortSignal | undefined;
@@ -18,7 +17,7 @@ interface ObservationOptions {
 
 const repositories = new Map<string, ReturnType<typeof createFairResourceScheduler>>();
 const observations = new Map<string, Promise<RunProcessResult>>();
-const suspendedRepositories = new Set<string>();
+const suspendedRepositories = new Map<string, { evidence: object; release: () => void }>();
 
 // Scopes are literal files, never directories or Git pathspec expressions.
 export function literalObservationPaths(cwd: string, paths: readonly string[]): string[] {
@@ -47,6 +46,13 @@ export async function readGitObservation(
 ): Promise<RunProcessResult> {
   let root = path.resolve(cwd);
   try { root = fs.realpathSync.native(root); } catch {}
+  // Only this runtime's retained, privately owned native jobs can settle a
+  // suspension. Missing proof and legacy/unowned uncertainty remain unchanged.
+  for (const [suspendedRoot, pending] of suspendedRepositories) {
+    if (!reconcileReadOnlyProcessTermination(pending.evidence)) continue;
+    suspendedRepositories.delete(suspendedRoot);
+    pending.release();
+  }
   if (suspendedRepositories.has(root)) {
     return failedObservation('A previous Git probe has unconfirmed termination; further bookkeeping probes are suspended.');
   }
@@ -74,30 +80,62 @@ export async function readGitObservation(
     let localLease: Awaited<ReturnType<typeof local.acquire>> | null = null;
     let globalLease: Awaited<ReturnType<typeof acquireHostResource>> | null = null;
     let retainCapacity = false;
+    const localScheduler = local;
+    const releaseCapacity = (): void => {
+      globalLease?.release();
+      localLease?.release();
+      const state = localScheduler.stats().probe;
+      if (state.active === 0 && state.queued === 0 && repositories.get(root) === localScheduler) {
+        localScheduler.dispose();
+        repositories.delete(root);
+      }
+    };
     try {
       localLease = await local.acquire('probe', root, { signal, timeoutMs });
       if (options.optional && hostResourceStats().gitObservation.active >= hostResourceStats().gitObservation.limit) {
         return failedObservation('Git bookkeeping capacity is occupied.');
       }
       globalLease = await acquireHostResource('gitObservation', root, { signal, timeoutMs });
-      const result = await runWithoutMutationProcessOwnership(() => runProcess('git', args, {
+      const result = await runOwnedReadOnlyProcess('git', args, {
         cwd: root, signal, timeout: timeoutMs, maxOutputBytes, preserveOutputWhitespace: true
-      }, config));
-      if (result.executed && (result.timedOut || result.cancelled) && result.terminationConfirmed === false) {
+      }, config);
+      if (result.executed && result.terminationConfirmed === false) {
         // Do not create more potentially runaway children while their predecessor
         // remains unconfirmed. Ordinary execution can still proceed without accounting.
         retainCapacity = true;
-        suspendedRepositories.add(root);
+        suspendedRepositories.set(root, { evidence: result, release: releaseCapacity });
+      }
+      // Process completion does not make cancelled, partial or unsettled
+      // output usable. A later proof permits only a fresh observation.
+      if (result.timedOut || result.cancelled || result.terminationConfirmed === false
+        || result.stdoutTruncated || result.stdoutSpillTruncated || result.outputFinalizationTimedOut) {
+        return internalReadOnlyProcessOutcome({
+          ...result, observedExitCode: result.exitCode, exitCode: result.exitCode === 0 ? -1 : result.exitCode,
+          errorCode: result.errorCode || 'GIT_OBSERVATION_INCOMPLETE',
+          error: result.error || 'Git observation did not settle with complete output.'
+        });
       }
       return result;
     } catch (error) {
-      if (options.signal?.aborted) throw options.signal.reason;
-      return failedObservation(String((error as Error).message || error), deadline.aborted
-        || (error as { code?: string }).code === 'HOST_RESOURCE_QUEUE_TIMEOUT');
+      const outcome = error as Partial<RunProcessResult> & { code?: string };
+      const uncertainExecution = outcome.executed === true && outcome.terminationConfirmed === false;
+      if (uncertainExecution) {
+        // Setup/finalization failures can throw after a child started. They own
+        // the same capacity as an uncertain returned result.
+        retainCapacity = true;
+        suspendedRepositories.set(root, { evidence: error as object, release: releaseCapacity });
+      }
+      if (options.signal?.aborted && !uncertainExecution) throw options.signal.reason;
+      return failedObservation(String((error as Error).message || error),
+        outcome.timedOut === true || deadline.aborted || outcome.code === 'HOST_RESOURCE_QUEUE_TIMEOUT', {
+          executed: outcome.executed === true,
+          ...(outcome.code ? { errorCode: String(outcome.code) } : {}),
+          ...(typeof outcome.rootExitConfirmed === 'boolean' ? { rootExitConfirmed: outcome.rootExitConfirmed } : {}),
+          ...(typeof outcome.terminationConfirmed === 'boolean' ? { terminationConfirmed: outcome.terminationConfirmed } : {}),
+          ...(outcome.cancelled === true ? { cancelled: true } : {})
+        });
     } finally {
-      if (!retainCapacity) { globalLease?.release(); localLease?.release(); }
-      const state = local.stats().probe;
-      if (state.active === 0 && state.queued === 0) { local.dispose(); repositories.delete(root); }
+      if (!retainCapacity) releaseCapacity();
     }
   }
 }
@@ -122,8 +160,8 @@ export async function readExactGitObservations(
   return { ...result, stdout: chunks.join(''), stdoutBytes: bytes };
 }
 
-function failedObservation(error: string, timedOut = false): RunProcessResult {
-  return { executed: false, exitCode: -1, stdout: '', stderr: '', error,
+function failedObservation(error: string, timedOut = false, outcome: Partial<RunProcessResult> = {}): RunProcessResult {
+  return internalReadOnlyProcessOutcome({ executed: false, exitCode: -1, stdout: '', stderr: '', error,
     timedOut, cancelled: false, queueWaitMs: 0, durationMs: 0,
-    stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false };
+    stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false, ...outcome });
 }

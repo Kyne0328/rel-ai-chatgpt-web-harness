@@ -7,6 +7,8 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+. (Join-Path $PSScriptRoot 'windows-app-capture.ps1')
+. (Join-Path $PSScriptRoot 'windows-app-targets.ps1')
 
 $script:OcrAvailable = $false
 $script:OcrEngine = $null
@@ -208,34 +210,23 @@ function Get-UiaTargetEntries([System.Windows.Automation.AutomationElement]$Wind
   }
 }
 
-function Get-OcrTargets([System.Windows.Rect]$WindowRect, [int]$MaxElements) {
+function Get-OcrTargets([string]$App, [object]$Match, [int]$MaxElements) {
   $targets = [System.Collections.Generic.List[object]]::new()
   if (-not $script:OcrAvailable -or $MaxElements -le 0) { return $targets }
   $script:OcrError = ''
 
-  $virtual = [System.Windows.Forms.SystemInformation]::VirtualScreen
-  $windowBox = [System.Drawing.Rectangle]::FromLTRB(
-    [int][Math]::Floor($WindowRect.Left),
-    [int][Math]::Floor($WindowRect.Top),
-    [int][Math]::Ceiling($WindowRect.Right),
-    [int][Math]::Ceiling($WindowRect.Bottom)
-  )
-  $capture = [System.Drawing.Rectangle]::Intersect($virtual, $windowBox)
-  if ($capture.Width -le 1 -or $capture.Height -le 1) { return $targets }
-  if ($capture.Width -gt [Windows.Media.Ocr.OcrEngine]::MaxImageDimension -or $capture.Height -gt [Windows.Media.Ocr.OcrEngine]::MaxImageDimension) {
-    return $targets
-  }
-
+  $script:OcrProvenance = $null
   $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ('relai-ocr-' + [guid]::NewGuid().ToString('N') + '.png')
   $bitmap = $null
   $graphics = $null
   $stream = $null
   try {
-    $bitmap = [System.Drawing.Bitmap]::new($capture.Width, $capture.Height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen($capture.Left, $capture.Top, 0, 0, $capture.Size)
+    $nativeCapture = Get-AppPixelCapture $App $Match
+    $bitmap = $nativeCapture.Bitmap
+    $capture = $nativeCapture.Bounds
+    $script:OcrProvenance = $nativeCapture.Provenance
+    if ($capture.Width -gt [Windows.Media.Ocr.OcrEngine]::MaxImageDimension -or $capture.Height -gt [Windows.Media.Ocr.OcrEngine]::MaxImageDimension) { throw 'Application window exceeds the OCR size limit.' }
     $bitmap.Save($tempPath, [System.Drawing.Imaging.ImageFormat]::Png)
-    $graphics.Dispose(); $graphics = $null
     $bitmap.Dispose(); $bitmap = $null
 
     $storageFile = Await-WinRt ([Windows.Storage.StorageFile]::GetFileFromPathAsync($tempPath)) ([Windows.Storage.StorageFile])
@@ -359,8 +350,8 @@ function Normalize-Perception([object]$Value) {
   return $perception
 }
 
-function Observe-App([string]$App, [int]$MaxElements, [string]$Perception) {
-  $match = Find-AppWindow $App
+function Observe-App([string]$App, [int]$MaxElements, [string]$Perception, [object]$AppTarget) {
+  $match = if ($AppTarget) { Get-VerifiedAppWindow $AppTarget } else { Find-AppWindow $App }
   if ($null -eq $match) {
     return [pscustomobject]@{ supported = $true; available = $false; reason = 'No matching visible application window was found.' }
   }
@@ -373,8 +364,10 @@ function Observe-App([string]$App, [int]$MaxElements, [string]$Perception) {
   $uia = Get-UiaTargetEntries $window $uiaLimit
   $uiaTargets = @($uia.Entries | ForEach-Object { $_.Target })
   $ocrTargets = @()
+  $script:OcrProvenance = $null
+  $script:OcrError = ''
   if ($perception -eq 'hybrid' -or ($perception -eq 'auto' -and $uiaTargets.Count -eq 0)) {
-    $ocrTargets = @(Get-OcrTargets $currentWindow.BoundingRectangle $MaxElements)
+    $ocrTargets = @(Get-OcrTargets $App $match $MaxElements)
   }
   $elements = Merge-Targets $uiaTargets $ocrTargets $MaxElements
 
@@ -390,8 +383,9 @@ function Observe-App([string]$App, [int]$MaxElements, [string]$Perception) {
     supported = $true
     available = $true
     perception = $perception
-    ocrAvailable = [bool]$script:OcrAvailable
+    ocrAvailable = [bool]($script:OcrAvailable -and -not $script:OcrError)
     ocrReason = $script:OcrError
+    pixelProvenance = $script:OcrProvenance
     window = $windowResult
     elements = $elements
     count = $elements.Count
@@ -484,17 +478,21 @@ function Invoke-NativeTarget([System.Windows.Automation.AutomationElement]$Eleme
   return [pscustomobject]@{ handled = $false; method = 'semantic-center-click'; reason = 'No safe native activation pattern is available.' }
 }
 
-function Activate-App([string]$App, [int]$MaxElements, [string]$Perception, [object]$Target) {
-  $match = Find-AppWindow $App
+function Activate-App([string]$App, [int]$MaxElements, [string]$Perception, [object]$Target, [object]$AppTarget) {
+  $match = if ($AppTarget) { Get-VerifiedAppWindow $AppTarget } else { Find-AppWindow $App }
   if ($null -eq $match) {
     return [pscustomobject]@{ supported = $true; available = $false; handled = $false; reason = 'No matching visible application window was found.' }
   }
   if ((Safe-Text $Target.source 20).ToLowerInvariant() -eq 'ocr') {
-    $observation = Observe-App $App $MaxElements 'hybrid'
+    $observation = Observe-App $App $MaxElements 'hybrid' $AppTarget
     $current = Find-OcrTarget @($observation.elements) $Target
     if ($null -eq $current) {
       return [pscustomobject]@{ supported = $true; available = $false; handled = $false; reason = 'OCR target is stale or ambiguous.' }
     }
+    $null = Assert-AppInputTarget $App ([pscustomobject]@{
+      provenance = $observation.pixelProvenance; width = $observation.pixelProvenance.windowWidth; height = $observation.pixelProvenance.windowHeight
+      points = @([pscustomobject]@{ x = $current.centerX; y = $current.centerY }); requiresFocus = $false
+    })
     return [pscustomobject]@{ supported = $true; available = $true; handled = $false; method = 'ocr-center-click'; target = $current }
   }
 
@@ -514,8 +512,8 @@ function Activate-App([string]$App, [int]$MaxElements, [string]$Perception, [obj
   }
 }
 
-function Set-AppValue([string]$App, [int]$MaxElements, [object]$Target, [string]$Text) {
-  $match = Find-AppWindow $App
+function Set-AppValue([string]$App, [int]$MaxElements, [object]$Target, [string]$Text, [object]$AppTarget) {
+  $match = if ($AppTarget) { Get-VerifiedAppWindow $AppTarget } else { Find-AppWindow $App }
   if ($null -eq $match) {
     return [pscustomobject]@{ supported = $true; available = $false; handled = $false; reason = 'No matching visible application window was found.' }
   }
@@ -549,15 +547,21 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
     if ($action -eq 'warmup') {
       $null = [System.Windows.Automation.AutomationElement]::RootElement
       $result = [pscustomobject]@{ supported = $true; available = $true; ocrAvailable = [bool]$script:OcrAvailable; ocrReason = $script:OcrError }
+    } elseif ($action -eq 'app_targets') {
+      $result = Get-AppWindowCandidates $request.binding ([string]$request.windowId)
+    } elseif ($action -eq 'verify_input_target') {
+      $result = Assert-AppInputTarget ([string]$request.app) $request.target
+    } elseif ($action -eq 'screenshot_app') {
+      $result = Get-AppScreenshot ([string]$request.app) ([string]$request.displayId) $request.appTarget
     } elseif ($action -eq 'observe') {
       $maxElements = [Math]::Max(1, [Math]::Min(300, [int]$request.maxElements))
-      $result = Observe-App ([string]$request.app) $maxElements (Normalize-Perception $request.perception)
+      $result = Observe-App ([string]$request.app) $maxElements (Normalize-Perception $request.perception) $request.appTarget
     } elseif ($action -eq 'activate') {
       $maxElements = [Math]::Max(1, [Math]::Min(300, [int]$request.maxElements))
-      $result = Activate-App ([string]$request.app) $maxElements (Normalize-Perception $request.perception) $request.target
+      $result = Activate-App ([string]$request.app) $maxElements (Normalize-Perception $request.perception) $request.target $request.appTarget
     } elseif ($action -eq 'set_value') {
       $maxElements = [Math]::Max(1, [Math]::Min(300, [int]$request.maxElements))
-      $result = Set-AppValue ([string]$request.app) $maxElements $request.target ([string]$request.text)
+      $result = Set-AppValue ([string]$request.app) $maxElements $request.target ([string]$request.text) $request.appTarget
     } else {
       throw "Unsupported UIA helper action '$action'."
     }

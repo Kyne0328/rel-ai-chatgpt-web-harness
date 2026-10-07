@@ -6,7 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gzipSync } from 'node:zlib';
 import sevenZip from '7zip-bin';
-import { discoverSkills } from '../src/skillDiscovery.js';
+import { discoverSkillInventory } from '../src/skillDiscovery.js';
 import { makeDefaultConfig, invalidateConfigCache, writeConfig } from '../src/config.js';
 import {
   addDashboardExtensionSource,
@@ -401,7 +401,7 @@ try {
   assert.equal(installed.ready, true);
   assert.equal(listInstalledExtensions(config).find(item => item.id === manifest.id)?.version, '1.0.0');
 
-  const skills = discoverSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') });
+  const skills = completeSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') });
   const extensionSkill = skills.find(item => item.name === 'sample-extension');
   assert.equal(extensionSkill?.source, 'extension');
   assert.equal(extensionSkill?.path, 'extension:sample-extension');
@@ -451,7 +451,7 @@ try {
   assert.equal(systemInstalled.ready, true);
   assert.deepEqual(systemInstalled.missingCommands, []);
   assert.equal(fs.existsSync(managedExtensionCommandPath(config, systemCommand)), false);
-  assert.equal(discoverSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') }).some(item => item.name === systemManifest.id), true);
+  assert.equal(completeSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') }).some(item => item.name === systemManifest.id), true);
   process.env.PATH = originalPath;
 
   const missingInstalled = await installExtension(config, missingManifest.id, { catalogUrl });
@@ -460,7 +460,7 @@ try {
   assert.deepEqual(missingInstalled.missingCommands, [missingCommand]);
   assert.match(missingInstalled.error, /missing required command/i);
   assert.equal(fs.existsSync(managedExtensionCommandPath(config, missingCommand)), false);
-  assert.equal(discoverSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') }).some(item => item.name === missingManifest.id), false);
+  assert.equal(completeSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') }).some(item => item.name === missingManifest.id), false);
 
   const removedSystem = removeExtension(config, systemManifest.id);
   assert.equal(removedSystem.removed, true);
@@ -487,7 +487,7 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(managedMetadata, 'utf8')).extensionId, cliManifest.id);
   if (process.platform !== 'win32') assert.notEqual(fs.statSync(managedCommand).mode & 0o111, 0);
 
-  const cliSkills = discoverSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') });
+  const cliSkills = completeSkills({ path: root }, { config, userRoot: path.join(root, 'user-skills') });
   assert.equal(cliSkills.find(item => item.name === cliManifest.id)?.source, 'extension');
 
   const removedCli = removeExtension(config, cliManifest.id);
@@ -783,4 +783,13 @@ function responseJson(value) {
     status: 200,
     headers: { 'content-type': 'application/json' }
   });
+}
+
+function completeSkills(workspace, options) {
+  for (let pages = 0; pages < 1000; pages++) {
+    const value = discoverSkillInventory(workspace, options);
+    if (value.discovery.complete) return value.skills;
+    assert.equal(value.discovery.resumable, true, JSON.stringify(value.discovery));
+  }
+  throw new Error('Extension skill inventory failed to complete its bounded pages.');
 }

@@ -1,3 +1,5 @@
+import type { ResolvedAppTarget } from './appTarget.ts';
+
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
 const PRIMARY_DISPLAY_KEY = '__primary__';
 
@@ -19,7 +21,32 @@ type ComputerImage = Readonly<{
   height: number;
 }>;
 
-type ComputerScreenshotOptions = Readonly<{ fresh?: boolean }>;
+type ComputerPixelProvenance = Readonly<{
+  scope: 'app-window';
+  method: 'win32-print-window' | 'windows-graphics-capture';
+  app: string;
+  windowId: string;
+  processId: number;
+  processStartedAt: string;
+  displayId: string;
+  capturedAt: number;
+  coordinateSpace: 'window-local-pixels';
+  originX: number;
+  originY: number;
+  inputMappingReliable?: boolean;
+  targetIdentity?: ResolvedAppTarget;
+  frameQpc100ns?: number;
+  requestQpc100ns?: number;
+}>;
+type ComputerAppInputTarget = Readonly<{
+  provenance: ComputerPixelProvenance;
+  width: number;
+  height: number;
+  points: readonly ComputerPoint[];
+  requiresFocus?: boolean;
+}>;
+type ComputerAppImage = ComputerImage & Readonly<{ provenance: ComputerPixelProvenance }>;
+type ComputerScreenshotOptions = Readonly<{ fresh?: boolean; signal?: AbortSignal; target?: ResolvedAppTarget; windowId?: string; windowTitle?: string }>;
 
 type ComputerEnvironment = Readonly<{
   available?: boolean;
@@ -76,6 +103,10 @@ interface ComputerAdapter {
   listDisplays(): Promise<ComputerDisplay[]>;
   size(displayId?: string): Promise<{ width: number; height: number }>;
   screenshot(displayId?: string, options?: ComputerScreenshotOptions): Promise<ComputerImage>;
+  // This method must obtain pixels from the verified application window itself.
+  // Implementations must never crop or forward a display screenshot.
+  screenshotApp?(app: string, displayId?: string, options?: ComputerScreenshotOptions): Promise<ComputerAppImage>;
+  assertAppInputTarget?(app: string, target: ComputerAppInputTarget): Promise<void>;
   invalidateScreenshot?(displayId?: string): void;
   move(displayId: string | undefined, point: ComputerPoint): Promise<void>;
   click(displayId: string | undefined, point: ComputerPoint): Promise<void>;
@@ -302,5 +333,5 @@ function positiveInteger(value: unknown, label: string): number {
 
 export { createMidsceneComputerAdapter };
 export type {
-  ComputerAdapter, ComputerImage, ComputerPoint, ScrollDirection
+  ComputerAdapter, ComputerImage, ComputerAppImage, ComputerAppInputTarget, ComputerPixelProvenance, ComputerPoint, ScrollDirection
 };

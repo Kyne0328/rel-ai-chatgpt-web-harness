@@ -55,7 +55,7 @@ function WorkspacesView({ data = {} }) {
     [workspaces, healthByAlias]
   );
   const findings = useMemo(() => actionableFindings(health), [health]);
-  const availableCount = views.filter(view => view.available).length;
+  const availableCount = views.filter(view => view.ready).length;
   const [modal, setModal] = useState(null);
   const analyticsAliases = useMemo(() => views.map(view => view.alias), [views]);
   const analyticsState = useWorkspaceAnalytics(analyticsAliases);
@@ -204,6 +204,10 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
       ),
       h(StatusPill, { label: view.statusLabel })
     ),
+    view.mutationBlock ? h('div', { className: 'workspace-warning', role: 'status', 'data-workspace-mutation-block': view.alias },
+      h('span', null, view.mutationBlock.message),
+      h('a', { className: 'buttonlike secondary', href: '#diagnostics' }, 'Review diagnostics')
+    ) : null,
     view.healthWarning ? h('div', { className: 'workspace-warning' },
       h('span', null, view.healthWarning),
       h('button', { className: 'secondary', type: 'button', onClick: event => onRepair(workspace, event.currentTarget) }, 'Fix folder')

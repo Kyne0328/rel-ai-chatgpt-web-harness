@@ -85,7 +85,7 @@ const taskContextHandler = async (config, inputArgs = {}, context = {}) => {
     maxEntries: bootstrapMode === 'full' ? undefined : 64,
     includeFiles: bootstrapMode === 'full',
     instructionPath: args.instructionPath
-  });
+  }, context);
   const hostContextSummary = String(args.contextSummary || '').trim().slice(0, 3000);
   const taskQuery = [task.objective, task.title, hostContextSummary].filter(Boolean).join(' ');
   const recoveredSession = context?.requestTaskContext?.session;
@@ -157,8 +157,8 @@ const HANDLERS = Object.freeze({
   startTask: startTaskHandler,
   taskContext: taskContextHandler,
   taskPlan: taskPlanHandler,
-  repoSnapshot: inWorkspace(async (workspace, config, args) => {
-    const result = await repoSnapshot(workspace, config, args);
+  repoSnapshot: inWorkspace(async (workspace, config, args, context) => {
+    const result = await repoSnapshot(workspace, config, args, context);
     scheduleIntelligenceWarmup(workspace, config);
     return result;
   }),

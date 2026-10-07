@@ -14,6 +14,8 @@ import {
   recordTaskIntegrityEvent
 } from '../src/taskIntegrity.ts';
 import { runWorkspaceOperation } from '../src/workspaceOperationQueue.js';
+import { executeToolCall } from '../src/tools/execution.js';
+import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-bookkeeping-cancel-'));
@@ -42,6 +44,15 @@ const config = {
 const app = { alias: 'app', path: gitWorkspace, commands: {}, testCommands: {} };
 const plain = { alias: 'plain', path: plainWorkspace, commands: {}, testCommands: {} };
 
+function statusProbe(args, options, cwd) {
+  const requestFlag = args?.indexOf('-RequestPath') ?? -1;
+  if (requestFlag >= 0) {
+    const request = JSON.parse(fs.readFileSync(args[requestFlag + 1], 'utf8'));
+    return request.args.includes('status') && request.cwd === cwd;
+  }
+  return args?.includes('status') && options.cwd === cwd;
+}
+
 try {
   // Cancellation during a native Git bookkeeping probe prevents physical execution.
   {
@@ -50,7 +61,7 @@ try {
     let intercepted = false;
     childProcess.spawn = function (command, args, options) {
       const child = originalSpawn.call(this, command, args, options);
-      if (!intercepted && args?.includes('status') && options.cwd === plainWorkspace) {
+      if (!intercepted && statusProbe(args, options, plainWorkspace)) {
         intercepted = true;
         controller.abort(new Error('cancel mutation accounting'));
       }
@@ -87,20 +98,20 @@ try {
     let rootReads = 0;
     childProcess.spawn = function (command, args, options) {
       const child = originalSpawn.call(this, command, args, options);
-      if (args?.includes('status') && options.cwd === gitWorkspace && ++rootReads === 2) controller.abort(new Error('cancel post mutation accounting'));
+      if (statusProbe(args, options, gitWorkspace) && ++rootReads === 2) controller.abort(new Error('cancel post mutation accounting'));
       return child;
     };
     syncBuiltinESMExports();
     let result;
     try {
-      result = await runWorkspaceOperation('app', () => relaiExec(app, config, {
-        executable: process.execPath,
-        argv: ['-e', "require('node:fs').writeFileSync('post-command.txt','ran')"]
-      }, { signal: controller.signal }), {
-        mode: 'write',
-        scope: 'mutation',
-        taskId: 'post-scan-cancel'
+      const args = { workspace: 'app', executable: process.execPath,
+        argv: ['-e', "require('node:fs').writeFileSync('post-command.txt','ran')"] };
+      const wrapped = await executeToolCall({ config, name: OP.EXEC, executionName: OP.EXEC,
+        effectiveArgs: args, context: { signal: controller.signal }, started: Date.now(),
+        definition: { behavior: { concurrencyScope: 'mutation' },
+          handler: (_config, input, context) => relaiExec(app, config, input, context) }
       });
+      result = wrapped.value;
     } finally {
       childProcess.spawn = originalSpawn; syncBuiltinESMExports();
     }
@@ -109,12 +120,11 @@ try {
     assert.deepEqual(result.changedFiles, []);
     assert.equal(fs.existsSync(path.join(gitWorkspace, 'post-command.txt')), true);
 
-    const released = await runWorkspaceOperation('plain', async () => 'released', {
-      mode: 'write',
-      scope: 'mutation',
-      taskId: 'after-post-scan-cancel'
+    const released = await executeToolCall({ config, name: OP.EDIT, executionName: OP.EDIT,
+      effectiveArgs: { workspace: 'app' }, context: { signal: AbortSignal.timeout(2000) }, started: Date.now(),
+      definition: { behavior: { concurrencyScope: 'mutation' }, handler: async () => 'released' }
     });
-    assert.equal(released, 'released', 'post-command bookkeeping cancellation must release the mutation lane');
+    assert.equal(released.value, 'released', 'post-command bookkeeping cancellation must release the same workspace mutation lane');
   }
 
   // Deferred task-baseline capture must honor cancellation before running Git.

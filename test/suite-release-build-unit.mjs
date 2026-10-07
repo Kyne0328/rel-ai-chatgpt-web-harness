@@ -852,7 +852,7 @@ async function case_release_distribution_unit() {
     const { platformReleaseArtifactNames, releaseArtifactNames } = __m7;
   
     const __m8 = await import("../scripts/generate-sbom.mjs");
-    const { nativeReleaseComponents } = __m8;
+    const { appendNativeReleaseComponents, nativeReleaseComponents } = __m8;
   
     const __m9 = await import("../scripts/validate-installed-release.mjs");
     const { assertDisposableReleaseRunner, findPreviousReleaseAsset, parseStableVersion, verifyDownloadedAssetBytes } = __m9;
@@ -993,14 +993,64 @@ async function case_release_distribution_unit() {
   function verifyNativeSbomCoverage() {
     const tunnelManifest = JSON.parse(read('vendor/tunnel-client/manifest.json'));
     const zoektManifest = JSON.parse(read('vendor/zoekt/manifest.json'));
-    const components = nativeReleaseComponents(tunnelManifest, zoektManifest);
-    assert.equal(components.length, 12, 'SBOM must include every shipped tunnel-client and Zoekt platform artifact');
+    const windowsManifest = JSON.parse(read('src/windows-process-job-host.manifest.json'));
+    const components = nativeReleaseComponents(tunnelManifest, zoektManifest, windowsManifest);
+    assert.equal(components.length, 14, 'SBOM must include tunnel-client, Zoekt, the Windows helper, and its bundled NativeAOT runtime');
     assert.equal(new Set(components.map(component => component['bom-ref'])).size, components.length, 'native SBOM references must be unique');
     assert.equal(components.filter(component => component.name === 'OpenAI tunnel-client').length, 4);
     assert.equal(components.filter(component => component.name === 'Zoekt search').length, 4);
     assert.equal(components.filter(component => component.name === 'Zoekt index').length, 4);
-    assert.ok(components.every(component => component.hashes?.[0]?.alg === 'SHA-256' && /^[a-f0-9]{64}$/.test(component.hashes[0].content)),
-      'every pinned native release component must carry its manifest SHA-256');
+    assert.ok(components.filter(component => component.type === 'application').every(component =>
+      component.hashes?.[0]?.alg === 'SHA-256' && /^[a-f0-9]{64}$/.test(component.hashes[0].content)),
+      'every shipped native executable must carry its manifest SHA-256');
+
+    const helper = components.find(component => component.name === 'Rel.AI Windows process-job host');
+    const runtime = components.find(component => component.name === '.NET NativeAOT runtime');
+    const property = (component, name) => component.properties.find(entry => entry.name === name)?.value;
+    assert.equal(helper.hashes[0].content, windowsManifest.binarySha256);
+    assert.equal(helper.version, undefined, 'the helper has no independently declared release version');
+    assert.equal(property(helper, 'rel.ai.file'), 'src/windows-process-job-host.exe');
+    assert.equal(property(helper, 'rel.ai.buildSdk'), windowsManifest.provenance.companion.sdk);
+    for (const field of ['nativeSourceSha256', 'hostSourceSha256', 'projectSourceSha256']) {
+      assert.equal(property(helper, `rel.ai.${field}`), windowsManifest[field]);
+    }
+    assert.equal(runtime.type, 'library');
+    assert.equal(runtime.version, windowsManifest.provenance.companion.runtime);
+    assert.equal(runtime.hashes, undefined, 'the whole executable hash must not be misattributed to the embedded runtime');
+    assert.deepEqual(runtime.licenses, [{ license: { id: 'MIT' } }]);
+    assert.match(read('src/windows-process-job-licenses/LICENSE.TXT'), /The MIT License/);
+    assert.equal(property(runtime, 'rel.ai.bundledIn'), helper['bom-ref']);
+    assert.equal(property(runtime, 'rel.ai.runtimeIdentifier'), windowsManifest.provenance.companion.runtimeIdentifier);
+    assert.equal(components.filter(component => /SDK|mscorlib|System[.]Core/.test(component.name)).length, 0,
+      'build tools and fallback framework references are not shipped runtime inventory');
+
+    const npmComponent = { type: 'library', name: 'fixture-package', 'bom-ref': 'npm-fixture' };
+    const document = {
+      metadata: { component: { 'bom-ref': 'root-fixture' } },
+      components: [npmComponent],
+      dependencies: [{ ref: 'root-fixture', dependsOn: ['npm-fixture'] }, { ref: 'npm-fixture', dependsOn: [] }]
+    };
+    appendNativeReleaseComponents(document, components);
+    const once = structuredClone(document);
+    appendNativeReleaseComponents(document, components);
+    assert.deepEqual(document, once, 'native inventory merging must be idempotent');
+    assert.equal(document.components[0], npmComponent, 'npm inventory must be preserved');
+    assert.ok(document.dependencies.find(entry => entry.ref === 'root-fixture').dependsOn.includes(helper['bom-ref']));
+    assert.deepEqual(document.dependencies.find(entry => entry.ref === helper['bom-ref']).dependsOn, [runtime['bom-ref']],
+      'the dependency graph must identify the runtime embedded in the helper');
+    assert.ok(document.dependencies.find(entry => entry.ref === 'root-fixture').dependsOn.includes('npm-fixture'));
+
+    const changed = structuredClone(windowsManifest);
+    changed.binarySha256 = '1'.repeat(64);
+    changed.provenance.companion.runtime = '99.1.2';
+    changed.provenance.companion.sdk = '99.1.300';
+    const updated = nativeReleaseComponents(tunnelManifest, zoektManifest, changed);
+    assert.equal(updated.find(component => component.name === helper.name).hashes[0].content, changed.binarySha256);
+    assert.equal(updated.find(component => component.name === runtime.name).version, '99.1.2',
+      'inventory must follow current provenance rather than a hard-coded runtime version');
+    delete changed.provenance.companion.runtime;
+    assert.throws(() => nativeReleaseComponents(tunnelManifest, zoektManifest, changed), /companion runtime provenance/);
+    assert.throws(() => nativeReleaseComponents(tunnelManifest, zoektManifest), /companion provenance/);
   }
   
   async function verifyInstalledReleaseSafety() {

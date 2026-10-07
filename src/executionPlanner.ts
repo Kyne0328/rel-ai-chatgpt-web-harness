@@ -1,9 +1,10 @@
 
 
+import { beginStructuredPatchTransaction, prepareStructuredPatchEntry, completeStructuredPatchTransaction, recoverStructuredPatchTransaction } from './structuredPatchTransaction.js';
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { workspaceReplace, workspaceWrite, relaiApplyPatch, relaiVerify, relaiDiff, createStagedPayload, appendStagedPayload, writeStagedMetadata, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD } from "./localRepoBridge.js";
+import { workspaceReplace, workspaceWrite, relaiApplyPatch, relaiVerify, relaiDiff, createStagedPayload, appendStagedPayload, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD } from "./localRepoBridge.js";
 import { makeOperationId, appendOperation } from "./journal.js";
 import { resolveSafePath } from "./safety.js";
 import { runEnvOperation } from "./envOperations.js";
@@ -31,6 +32,7 @@ interface PlannerContext extends PlannerRecord {
 
 interface ApplyEditOptions {
   suppressJournal?: boolean;
+  work_id?: string;
 }
 
 interface BatchFailureOptions {
@@ -48,19 +50,19 @@ interface EditSnapshot extends PlannerRecord {
 
 const STAGED_CHUNK_BYTES = 12000;
 
-async function runStagedWrite(workspace: PlannerWorkspace, config: PlannerConfig, path: string, content: string, dryRun: boolean, suppressJournal = false, expectedSha256 = ''): Promise<PlannerResult> {
+async function runStagedWrite(workspace: PlannerWorkspace, config: PlannerConfig, path: string, content: string, dryRun: boolean, suppressJournal = false, expectedSha256 = '', work_id?: string): Promise<PlannerResult> {
   const chunks: string[] = [];
   let offset = 0;
   while (offset < content.length) {
     chunks.push(content.slice(offset, offset + STAGED_CHUNK_BYTES));
     offset += STAGED_CHUNK_BYTES;
   }
-  const startResult = workspaceWrite(workspace, config, { stage: 'start', path, content: chunks[0], dryRun, suppressJournal, expectedSha256 });
+  const startResult = workspaceWrite(workspace, config, { stage: 'start', path, work_id, content: chunks[0], dryRun, suppressJournal, expectedSha256 });
   const { writeId } = startResult;
   for (let i = 1; i < chunks.length; i++) {
     workspaceWrite(workspace, config, { stage: 'append', writeId, content: chunks[i], suppressJournal });
   }
-  return workspaceWrite(workspace, config, { stage: 'commit', writeId, dryRun, suppressJournal });
+  return workspaceWrite(workspace, config, { stage: 'commit', writeId, work_id, dryRun, suppressJournal });
 }
 
 // Apply one logical edit: exact replacement when oldText is given, otherwise a
@@ -88,6 +90,7 @@ async function applyOneEdit(workspace: PlannerWorkspace, config: PlannerConfig, 
     }
     const result = workspaceReplace(workspace, config, {
       path,
+      work_id: options.work_id,
       oldText: edit.oldText,
       newText: edit.newText,
       occurrence: edit.occurrence,
@@ -106,10 +109,10 @@ async function applyOneEdit(workspace: PlannerWorkspace, config: PlannerConfig, 
       const result = workspaceWrite(workspace, config, { path, content: edit.content, expectedSha256: edit.expectedSha256, dryRun: true, suppressJournal: true });
       return { ...result, path, plannerPath: 'write:staged' };
     }
-    const result = await runStagedWrite(workspace, config, path, edit.content, false, options.suppressJournal === true, edit.expectedSha256);
+    const result = await runStagedWrite(workspace, config, path, edit.content, false, options.suppressJournal === true, edit.expectedSha256, options.work_id);
     return { ...result, path, plannerPath: 'write:staged' };
   }
-  const result = workspaceWrite(workspace, config, { path, content: edit.content, expectedSha256: edit.expectedSha256, dryRun, suppressJournal: options.suppressJournal === true });
+  const result = workspaceWrite(workspace, config, { path, work_id: options.work_id, content: edit.content, expectedSha256: edit.expectedSha256, dryRun, suppressJournal: options.suppressJournal === true });
   return { ...result, path, plannerPath: 'write' };
 }
 
@@ -322,12 +325,8 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
       return { ...result, plannerPath: 'write:staged', plannerReason: 'content chunk provided — appending to a staged full-file write' };
     }
     if (payload.kind !== 'patch') throw new Error('Staged payload is a full-file write, not a patch. Append content instead.');
-    appendStagedPayload(config, workspace, writeId, args.updateText);
-    payload.bytes += Buffer.byteLength(args.updateText, 'utf8');
-    payload.chunkCount += 1;
-    payload.updatedAt = new Date().toISOString();
-    writeStagedMetadata(config, workspace, writeId, payload);
-    return { ok: true, workspace: workspace.alias, operation: 'stagedPatch:append', writeId, chunks: payload.chunkCount };
+    const appended = appendStagedPayload(config, workspace, writeId, args.updateText);
+    return { ok: true, workspace: workspace.alias, operation: 'stagedPatch:append', writeId, chunks: appended.chunkCount };
   }
 
   if (stage === 'commit' || stage === 'abort') {
@@ -387,20 +386,34 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
   const snapshots = snapshotCapture.snapshots;
   const results: PlannerResult[] = [];
   let allOk = true;
-  for (const edit of args.edits) {
-    signal?.throwIfAborted?.();
-    try {
-      const r = await applyOneEdit(workspace, config, edit, false, { suppressJournal: true });
+  let rollback: PlannerRecord | null = null;
+  let transaction: PlannerRecord | null = null;
+  beginStructuredPatchTransaction(config, workspace, snapshots, snapshots.map(snapshot => ({
+    path: snapshot.path, exists: snapshot.exists, content: snapshot.content
+  })));
+  try {
+    for (const edit of args.edits) {
+      signal?.throwIfAborted?.();
+      const preview = await applyOneEdit(workspace, config, edit, true, { suppressJournal: true });
+      signal?.throwIfAborted?.();
+      if (preview.ok === false) throw new Error(preview.error || 'Edit preflight failed.');
+      prepareStructuredPatchEntry(config, workspace, edit.path, preview.newSha256 || preview.result?.newSha256);
+      const r = await applyOneEdit(workspace, config, edit, false, { suppressJournal: true, work_id: args.work_id });
       results.push(r);
-      if (r.ok === false) allOk = false;
-    } catch (error) {
-      results.push({ ok: false, path: edit.path, error: error instanceof Error ? error.message : String(error) });
-      allOk = false;
-      break;
+      if (r.ok === false) throw new Error(r.error || 'Edit application failed.');
+    }
+    signal?.throwIfAborted?.();
+    transaction = completeStructuredPatchTransaction(config, workspace);
+  } catch (error) {
+    results.push({ ok: false, path: args.edits[Math.min(results.length, args.edits.length - 1)]?.path, error: error instanceof Error ? error.message : String(error) });
+    allOk = false;
+    try {
+      const recovered = recoverStructuredPatchTransaction(config, workspace);
+      rollback = { ok: !recovered.committed, ...recovered };
+    } catch (recoveryError) {
+      rollback = { ok: false, recoveryPending: true, error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) };
     }
   }
-  let rollback: PlannerRecord | null = null;
-  if (!allOk) rollback = restoreEditSnapshots(snapshots);
   const changedFiles = allOk
     ? [...new Set(results.flatMap(item => Array.isArray(item.changedFiles) ? item.changedFiles : []))]
     : [];
@@ -425,6 +438,7 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
     replacementCount: metrics.replacementCount,
     snapshotBytes: snapshotCapture.bytes,
     changedFiles,
+    ...(transaction ? { transaction } : {}),
     ...(compactResults ? { resultDetailsCompacted: true } : {}),
     ...(rollback ? { rollback } : {}),
     ...(!allOk ? batchFailureDetails(results, {
@@ -478,25 +492,6 @@ function captureEditSnapshots(workspace: PlannerWorkspace, edits: PlannerEdit[])
     });
   }
   return { snapshots: [...snapshots.values()], bytes };
-}
-
-function restoreEditSnapshots(snapshots: EditSnapshot[]): PlannerRecord {
-  const errors: Array<{ path: string; error: string }> = [];
-  for (const snapshot of snapshots) {
-    try {
-      if (!snapshot.exists) {
-        fs.rmSync(snapshot.absolutePath, { force: true });
-        continue;
-      }
-      if (snapshot.content === null) throw new Error(`Missing rollback snapshot content for ${snapshot.path}.`);
-      fs.mkdirSync(path.dirname(snapshot.absolutePath), { recursive: true });
-      fs.writeFileSync(snapshot.absolutePath, snapshot.content);
-      if (snapshot.mode != null) fs.chmodSync(snapshot.absolutePath, snapshot.mode);
-    } catch (error) {
-      errors.push({ path: snapshot.path, error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  return { ok: errors.length === 0, restored: snapshots.map(item => item.path), errors };
 }
 
 function formatBatchResults(results: PlannerResult[], compact: boolean): PlannerResult[] {

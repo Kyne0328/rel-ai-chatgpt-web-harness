@@ -66,12 +66,16 @@ async function importNativeArtifact(workspace, config, args = {}, options = {}) 
     throw new Error('ChatGPT artifact metadata did not match the downloaded content length.');
   }
 
+  const stagingPath = path.join(path.dirname(verified.absolutePath), `.relai-import-${crypto.randomUUID()}.tmp`);
+  let stagingOwned = false;
+  let cleanupPending = false;
   let handle;
   let reader;
   let bytes = 0;
   const hash = crypto.createHash('sha256');
   try {
-    handle = await fs.promises.open(verified.absolutePath, 'wx', 0o600);
+    handle = await fs.promises.open(stagingPath, 'wx', 0o600);
+    stagingOwned = true;
     reader = response.body.getReader();
     while (true) {
       options.signal?.throwIfAborted?.();
@@ -89,10 +93,17 @@ async function importNativeArtifact(workspace, config, args = {}, options = {}) 
     await handle.sync();
     await handle.close();
     handle = null;
+    options.signal?.throwIfAborted?.();
+    const destination = resolveSafePath(workspace.path, verified.relativePath, { operation: 'write', label: 'Artifact destination' });
+    // An exclusive hard link publishes complete bytes atomically without replacing
+    // a destination created by another writer during the download.
+    await fs.promises.link(stagingPath, destination.absolutePath);
+    try { await fs.promises.rm(stagingPath); stagingOwned = false; } catch { cleanupPending = true; }
   } catch (error) {
     try { await reader?.cancel(error); } catch {}
     try { await handle?.close(); } catch {}
-    try { await fs.promises.rm(verified.absolutePath, { force: true }); } catch {}
+    if (!reader) { try { await response.body.cancel(error); } catch {} }
+    if (stagingOwned) { try { await fs.promises.rm(stagingPath, { force: true }); } catch {} }
     throw error;
   }
 
@@ -113,6 +124,7 @@ async function importNativeArtifact(workspace, config, args = {}, options = {}) 
     operation: 'artifact_import',
     path: verified.relativePath,
     changed: true,
+    ...(cleanupPending ? { cleanupPending: true } : {}),
     changedFiles: [verified.relativePath],
     bytes,
     sha256,

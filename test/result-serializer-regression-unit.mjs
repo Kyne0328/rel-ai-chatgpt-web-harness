@@ -224,6 +224,68 @@ const unknownSafety = toolResult({ ok: true, stdout: largeText }, false).structu
 assert.equal(Object.hasOwn(unknownSafety, 'terminationConfirmed'), false, 'missing safety facts must not become false');
 assert.equal(Object.hasOwn(unknownSafety, 'executed'), false);
 
+
+const discoveryStatus = {
+  complete: false, resumable: true, truncated: true, resumed: true,
+  reason: 'work-budget', source: 'project', scanId: 'fixture-skill-scan',
+  consistency: 'sequential-observations',
+  observationStartedAt: '2026-10-07T00:00:00.000Z',
+  observationEndedAt: '2026-10-07T00:00:01.000Z',
+  expiresAt: '2026-10-07T00:01:00.000Z',
+  next: 'Repeat relai_snapshot with the same workspace to continue skill discovery.',
+  work: { units: 2048, bytes: 65536, totalUnits: 4096, totalBytes: 131072 }
+};
+for (const [publicName, operationName, value] of [
+  ['relai_snapshot', OP.SNAPSHOT, {
+    skills: [], skillDiscovery: discoveryStatus, projectInstructions: { content: largeText }
+  }],
+  ['relai_work', OP.WORK_CONTEXT, {
+    work_id: 'work_skill_status_fixture',
+    bootstrap: { skillDiscovery: discoveryStatus, projectInstructions: { content: largeText } }
+  }]
+]) {
+  const action = publicName === 'relai_work' ? 'context' : '';
+  const publicResult = serializeConnectorResult({
+    publicName, action, operationName,
+    value: { ok: true, workspace: 'repo', ...value }, args: { workspace: 'repo', ...(action ? { action } : {}) }
+  });
+  const framed = toolResult(publicResult, false).structuredContent;
+  assert.equal(framed.truncated, true, 'fixture must exercise the final MCP compaction path');
+  const retained = publicName === 'relai_snapshot' ? framed.skillDiscovery : framed.bootstrap?.skillDiscovery;
+  assert.deepEqual(retained, discoveryStatus, 'oversized public results must retain incomplete discovery and continuation facts');
+  assert.ok(Buffer.byteLength(JSON.stringify(framed)) <= cap);
+  await assertValid(operationName, framed, 'bounded discovery control facts must satisfy the public output schema');
+}
+const malformedDiscovery = {
+  ...discoveryStatus,
+  next: '\u0001'.repeat(cap),
+  consistency: '\u0001'.repeat(cap),
+  observationStartedAt: { privateFixtureField: largeText },
+  observationEndedAt: '\u0001'.repeat(cap),
+  reason: { privateFixtureField: largeText },
+  work: { ...discoveryStatus.work, bytes: -1, totalBytes: Infinity, privateFixtureField: largeText },
+  privateFixtureField: { content: largeText }
+};
+const boundedDiscovery = toolResult({
+  ok: true, skillDiscovery: malformedDiscovery,
+  bootstrap: { skillDiscovery: malformedDiscovery, privateFixtureField: largeText },
+  projectInstructions: { content: largeText }
+}, false).structuredContent;
+for (const retained of [boundedDiscovery.skillDiscovery, boundedDiscovery.bootstrap.skillDiscovery]) {
+  assert.equal(retained.complete, false);
+  assert.equal(retained.resumable, true);
+  assert.equal(retained.reason, undefined, 'structured values cannot become discovery prose');
+  assert.ok(Buffer.byteLength(retained.next) <= 512, 'continuation text has its own byte bound');
+  assert.ok(Buffer.byteLength(retained.consistency) <= 128, 'consistency metadata has its own byte bound');
+  assert.equal(retained.observationStartedAt, undefined, 'structured values cannot become observation timestamps');
+  assert.ok(Buffer.byteLength(retained.observationEndedAt) <= 128, 'observation timestamps have their own byte bound');
+  assert.deepEqual(retained.work, { units: 2048, totalUnits: 4096 }, 'only valid known counters survive');
+  assert.equal(retained.privateFixtureField, undefined);
+}
+assert.deepEqual(Object.keys(boundedDiscovery.bootstrap), ['skillDiscovery']);
+assert.ok(Buffer.byteLength(JSON.stringify(boundedDiscovery)) <= cap);
+assert.equal(unknownSafety.skillDiscovery, undefined, 'compaction must not invent discovery status');
+
 const diagnostic = { ok: false, command: '\u0001'.repeat(1000), ...explicitSafety, stdout: '\u0001'.repeat(6000), stderr: '\u0001'.repeat(6000) };
 const operations = Array.from({ length: 80 }, (_, index) => ({
   operationId: `op-${index}`, workspace: 'repo', status: index === 1 ? 'running' : 'completed',

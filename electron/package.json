@@ -99,6 +99,7 @@
       "desktop-local-data.js",
       "desktop-notifications.js",
       "desktop-lifecycle.js",
+      "desktop-smoke-readiness.js",
       "shutdown-coordinator.js",
       "controller-runtime.js",
       "service-runtime.js",

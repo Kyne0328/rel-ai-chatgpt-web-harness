@@ -208,11 +208,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node test/app-updater-unit.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/windows-process-job-native-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/windows-process-job-native-unit.mjs --companion
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:pty
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node test/windows-bookkeeping-ownership-unit.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:RELAI_NATIVE_APP_CAPTURE_FIXTURE = '1'
+          node test/computer-app-capture-native.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:RELAI_NATIVE_APP_CAPTURE_FIXTURE
+          $env:RELAI_NATIVE_WGC_FIXTURE = '1'
+          node test/computer-wgc-native.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:RELAI_NATIVE_WGC_FIXTURE
           node test/process-cancellation-unit.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node test/process-output-pipe-stall-unit.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node test/installer-test-entrypoints-unit.mjs
+      - name: Enforce Windows repository mutation accounting budget
+        run: npm run benchmark:mutation-accounting:strict
       - name: Smoke-test native Windows dashboard chrome
         run: npm run test:custom-chrome-browser
       - name: Verify Windows dashboard visual baseline

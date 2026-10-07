@@ -14,6 +14,7 @@ try {
   verifyPromotionPreflight();
   verifyReleaseBump();
   verifyPackageContracts();
+  verifyNativeControllerIntegrity();
   verifyWorkflowContracts();
   verifyTunnelClientTamperDetection();
   console.log('Cross-platform release workflow smoke test passed.');
@@ -41,6 +42,13 @@ function copyFixture() {
     'src/ui/package.json',
     'src/packageMetadata.js',
     'src/version.js',
+    'src/windows-process-job.ps1',
+    'src/windows-process-job-host.cs',
+    'src/windows-process-job-host.csproj',
+    'src/windows-process-job-host.exe',
+    'src/windows-process-job-host.manifest.json',
+    'src/windowsProcessJobArtifacts.js',
+    'scripts/generate-windows-process-job-native.mjs',
     'scripts/release-check.mjs',
     'scripts/promote-release.mjs',
     'scripts/platform-architecture.mjs',
@@ -125,6 +133,22 @@ function verifyReleaseBump() {
   assert.ok(fs.readFileSync(changelogPath, 'utf8').includes(`## [${changelogVersion}] — 2099-01-02`));
 }
 
+function verifyNativeControllerIntegrity() {
+  run('generate-windows-process-job-native.mjs', ['--check']);
+  for (const relative of ['src/windows-process-job-host.exe', 'src/windows-process-job-host.cs']) {
+    const file = path.join(tmp, relative);
+    const original = fs.readFileSync(file);
+    try {
+      fs.appendFileSync(file, '\nfixture tamper');
+      const result = runWithEnv('generate-windows-process-job-native.mjs');
+      assert.notEqual(result.status, 0, 'stale or modified native assets must fail read-only integrity checks');
+      assert.match(`${result.stdout}${result.stderr}`, /size mismatch|digest mismatch|source is stale/);
+      assert.deepEqual(fs.readFileSync(file), Buffer.concat([original, Buffer.from('\nfixture tamper')]), 'verification must not repair assets');
+    } finally { fs.writeFileSync(file, original); }
+  }
+  run('generate-windows-process-job-native.mjs', ['--check']);
+}
+
 function verifyPackageContracts() {
   const rootPackage = readJson('package.json');
   const electronPackage = readJson('electron/package.json');
@@ -143,6 +167,8 @@ function verifyPackageContracts() {
   assert.equal(electronPackage.allowScripts?.['node-pty@1.1.0'], true, 'Electron installs must explicitly approve the pinned node-pty native build under npm 12');
   assert.match(String(rootPackage.scripts.check || ''), /verify:node-pty[\s\S]*verify:generated/, 'the static parent gate must verify the native PTY runtime before generated assets');
   assert.match(String(rootPackage.scripts['test:all'] || ''), /npm run check[\s\S]*npm run test:security[\s\S]*npm run test:electron[\s\S]*npm run test:integration[\s\S]*npm run test:unit/, 'the aggregate source gate must preserve static, security, Electron, integration, and everyday regression parents');
+  assert.match(String(rootPackage.scripts['test:pty'] || ''), /node test\/process-pty-unit\.mjs/, 'one named gate owns cross-platform managed PTY coverage');
+  assert.match(String(rootPackage.scripts['test:all'] || ''), /npm run test:pty/, 'the default source aggregate must retain PTY coverage on every platform');
   assert.match(String(rootPackage.scripts['test:integration'] || ''), /run-repository-intelligence-tests\.mjs/, 'the integration parent must preserve Repository Intelligence coverage');
   assert.match(String(rootPackage.scripts['test:release'] || ''), /test:all[\s\S]*release-workflow-smoke\.mjs[\s\S]*audit:production[\s\S]*audit:packaging/, 'the release source parent must preserve source, workflow, and dependency audit gates');
   assert.match(String(rootPackage.scripts.check || ''), /knip:production/, 'the release source parent must retain production reachability through test:all -> check');
@@ -177,6 +203,12 @@ function verifyPackageContracts() {
 
   const generatedCheck = fs.readFileSync(path.join(tmp, 'scripts', 'check-generated.mjs'), 'utf8');
   assert.match(generatedCheck, /verifyDashboardGeneratedState/, 'generated-asset verification must use the platform-independent source and output integrity manifest');
+  assert.match(generatedCheck, /verifyGenerator\('generate-windows-process-job-native\.mjs'/, 'the generated gate must verify native artifacts without regeneration');
+  const packageSource = fs.readFileSync(path.join(tmp, 'scripts', 'electron-package.mjs'), 'utf8');
+  const nativeGuard = packageSource.indexOf("runNode('Windows process-controller integrity'");
+  const cleanup = packageSource.indexOf("runNode('unpacked output cleanup'");
+  assert.ok(nativeGuard >= 0 && nativeGuard < cleanup, 'native integrity must precede package output cleanup');
+  assert.match(packageSource.slice(nativeGuard, cleanup), /\['--check'\]/);
   assert.doesNotMatch(generatedCheck, /mergeConfig|viteConfig|git\s+diff|runNpm/, 'generated-asset verification must not rebuild or repair tracked files before reporting staleness');
 
   assert.equal(electronPackage.build.electronUpdaterCompatibility, '>=2.16');
@@ -274,6 +306,31 @@ function verifyWorkflowContracts() {
   assert.match(windowsCi, /needs:\s+test/, 'Windows packaging must wait for the shared CI gate');
   assert.doesNotMatch(windowsCi, /npm run test:all/, 'Windows packaging must not rerun the cross-platform source suite');
   assert.ok(windowsPackageIndex >= 0, 'normal Windows CI must keep packaging after its platform checks');
+  for (const [name, platformGate] of [['normal CI', windowsCi], ['release', windowsRelease]]) {
+    const performanceStep = platformGate.replaceAll('\r\n', '\n').split('      - name: Enforce Windows repository mutation accounting budget\n')[1]?.split('\n      - ')[0];
+    assert.ok(performanceStep, `${name} must have a dedicated Windows mutation accounting gate`);
+    assert.match(platformGate, /runs-on: windows-latest/);
+    assert.match(performanceStep, /^ {8}run: npm run benchmark:mutation-accounting:strict\s*$/m,
+      `${name} must use the single-owner strict benchmark without overriding its budgets`);
+    assert.doesNotMatch(performanceStep, /continue-on-error:|if:/,
+      `${name} must fail the job when the Windows budget fails`);
+    assert.equal(platformGate.split('npm run benchmark:mutation-accounting:strict').length - 1, 1);
+    const strictIndex = platformGate.indexOf('npm run benchmark:mutation-accounting:strict');
+    const packageIndex = platformGate.indexOf(name === 'normal CI' ? 'npm run electron:build:windows' : 'npm run electron:dist:windows');
+    assert.ok(strictIndex < packageIndex, `${name} must enforce Windows performance before packaging`);
+    assert.match(platformGate, /node test\/windows-bookkeeping-ownership-unit\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+      `${name} must execute the native Windows bookkeeping regression and propagate its failure`);
+    assert.match(platformGate, /node test\/windows-process-job-native-unit\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+      `${name} must verify native owned-process lifetime and propagate its failure`);
+    assert.match(platformGate, /node test\/windows-process-job-native-unit\.mjs --companion\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+      `${name} must verify the shipped native companion and propagate failure`);
+    assert.match(platformGate, /npm run test:pty\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+      `${name} must exercise the real managed Windows PTY adapter`);
+    assert.match(platformGate, /\$env:RELAI_NATIVE_APP_CAPTURE_FIXTURE = '1'[\s\S]*node test\/computer-app-capture-native\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+      `${name} must opt into synthetic-only native app-pixel acceptance and propagate failure`);
+    assert.match(platformGate, /\$env:RELAI_NATIVE_WGC_FIXTURE = '1'[\s\S]*node test\/computer-wgc-native\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+      `${name} must run explicit-window WGC acceptance and propagate failure`);
+  }
   assert.match(windowsCi, /node test\/process-cancellation-unit\.mjs/, 'normal Windows CI must exercise process-tree cancellation on Windows');
   assert.match(windowsCi, /node test\/process-output-pipe-stall-unit\.mjs/, 'normal Windows CI must exercise descendant output-pipe shutdown on Windows');
   assert.ok(linuxCiStart >= 0, 'normal CI must keep a dedicated Linux packaging job');
@@ -291,7 +348,7 @@ function verifyWorkflowContracts() {
   assert.match(windowsRelease, /node test\/process-output-pipe-stall-unit\.mjs/, 'Windows release packaging must exercise descendant output-pipe shutdown on Windows');
   assert.match(macRelease, /node test\/process-cancellation-unit\.mjs/, 'macOS release packaging must exercise process-tree cancellation on macOS');
   assert.match(macRelease, /node test\/process-output-pipe-stall-unit\.mjs/, 'macOS release packaging must exercise descendant output-pipe shutdown on macOS');
-  assert.doesNotMatch(windowsRelease, /npm run test:release|npm run test:frontend|benchmark:/, 'Windows release packaging must keep only platform-specific validation');
+  assert.doesNotMatch(windowsRelease, /npm run test:release|npm run test:frontend|benchmark:(?!mutation-accounting:strict(?:\s|$))/, 'Windows release packaging must keep only platform-specific validation');
   for (const platformSection of [windowsRelease, linuxRelease, macRelease]) {
     assert.match(platformSection, /- release-gate/, 'every platform release build must wait for the shared release gate');
   }

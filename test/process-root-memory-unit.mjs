@@ -27,6 +27,8 @@ try {
     kind: 'service', purpose: 'RAW_PURPOSE_SENTINEL', label: 'Explicit safe fixture label', startupWaitMs: 20
   }, context);
   const metadata = JSON.parse(fs.readFileSync(path.join(config.stateDir, 'processes', managed.processId, 'metadata.json'), 'utf8'));
+  const rootIdentity = metadata.windowsJobOwned ? metadata.windowsRootCreationIdentity : metadata.processCreationIdentity;
+  const rootIdentityField = metadata.windowsJobOwned ? 'windowsRootCreationIdentity' : 'processCreationIdentity';
   process.env.RELAI_ROOT_SAMPLE_SECRET = 'fixture-only-sensitive-value';
   process.env.PSModulePath = 'fixture-untrusted-module-path';
   if (process.platform === 'win32') {
@@ -46,6 +48,10 @@ try {
     const data = {
       ...metadata, processId, runtimeId: 'previous-runtime',
       label: 'RAW_COMMAND_FALLBACK_SENTINEL', diagnosticLabel: '',
+      // Synthetic legacy records describe the caller root, not a copied private
+      // controller or a native job directory owned by another managed ID.
+      windowsJobOwned: false, windowsJobDirectory: '', windowsRootPid: null, windowsRootCreationIdentity: '',
+      pid: managed.pid, processCreationIdentity: rootIdentity,
       ...fields
     };
     fs.writeFileSync(path.join(directory, 'metadata.json'), JSON.stringify(data));
@@ -101,7 +107,7 @@ try {
     Date.now = () => realNow() + clockOffset;
     advanceSampleWindow();
     const measuredRow = () => ({
-      pid: managed.pid, beforeIdentity: metadata.processCreationIdentity, afterIdentity: metadata.processCreationIdentity,
+      pid: managed.pid, beforeIdentity: rootIdentity, afterIdentity: rootIdentity,
       privateBytes: 123456, workingSetBytes: 234567, sampledAt: new Date().toISOString()
     });
     reply = [measuredRow()];
@@ -132,12 +138,12 @@ try {
 
     for (const field of ['beforeIdentity', 'afterIdentity']) {
       advanceSampleWindow();
-      reply = [{ ...measuredRow(), [field]: 'win32:' + (BigInt(metadata.processCreationIdentity.slice(6)) + 1n) }];
+      reply = [{ ...measuredRow(), [field]: 'win32:' + (BigInt(rootIdentity.slice(6)) + 1n) }];
       const mismatch = await sampleManagedProcessMemory(config, { workspace: 'app' }, context);
       assert.ok(mismatch.roots.every(item => item.reason === 'identity_mismatch' && item.privateBytes === null));
     }
     advanceSampleWindow();
-    reply = [{ ...measuredRow(), beforeIdentity: Number(metadata.processCreationIdentity.slice(6)) }];
+    reply = [{ ...measuredRow(), beforeIdentity: Number(rootIdentity.slice(6)) }];
     assert.ok((await sampleManagedProcessMemory(config, { workspace: 'app' }, context)).roots.every(item => item.reason === 'identity_mismatch'),
       'numeric conversion of DateTime ticks must never be accepted as verified identity');
     advanceSampleWindow();
@@ -155,9 +161,9 @@ try {
     reply = [measuredRow()];
     const current = activeProcessesForWorkSession(config, 'app', context.taskId).find(item => item.processId === managed.processId);
     assert.ok(current);
-    duringProbe = () => { current.processCreationIdentity = 'win32:638111111111111111'; };
+    duringProbe = () => { current[rootIdentityField] = 'win32:638111111111111111'; };
     const changed = await sampleManagedProcessMemory(config, { workspace: 'app' }, context);
-    current.processCreationIdentity = metadata.processCreationIdentity;
+    current[rootIdentityField] = rootIdentity;
     duringProbe = null;
     assert.equal(changed.roots.find(item => item.processId === managed.processId).reason, 'record_changed_during_sample');
     assert.equal(changed.roots.find(item => item.processId === managed.processId).privateBytes, null);

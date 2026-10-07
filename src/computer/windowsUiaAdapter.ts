@@ -1,6 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
+import { selectAppTarget, type AppWindowCandidate, type AppTargetOptions, type ResolvedAppTarget } from './appTarget.ts';
+import type { ComputerAppImage, ComputerAppInputTarget, ComputerPixelProvenance } from './midsceneAdapter.ts';
+import { appCaptureUnavailable, appInputTargetUnverified, validateAppImage, validateAppPixelProvenance } from './appCapture.ts';
 
 type SemanticSource = 'uia' | 'ocr';
 type SemanticPerception = 'auto' | 'semantic' | 'hybrid';
@@ -38,6 +41,7 @@ type SemanticObservation = Readonly<{
   perception?: SemanticPerception;
   ocrAvailable?: boolean;
   ocrReason?: string;
+  pixelProvenance?: ComputerPixelProvenance;
   window?: SemanticWindow;
   elements?: SemanticTarget[];
   count?: number;
@@ -61,36 +65,45 @@ type SemanticActivation = Readonly<{
 
 interface ComputerSemanticAdapter {
   readonly engine: string;
+  resolveAppTarget?(app: string, options?: AppTargetOptions, signal?: AbortSignal): Promise<ResolvedAppTarget>;
   supported(): boolean;
   warmup(signal?: AbortSignal): Promise<SemanticWarmup>;
   observe(
     app: string,
     maxElements?: number,
     perception?: SemanticPerception,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    appTarget?: ResolvedAppTarget
   ): Promise<SemanticObservation>;
   activate(
     app: string,
     target: SemanticTarget,
     maxElements?: number,
     perception?: SemanticPerception,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    appTarget?: ResolvedAppTarget
   ): Promise<SemanticActivation>;
   setValue(
     app: string,
     target: SemanticTarget,
     text: string,
     maxElements?: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    appTarget?: ResolvedAppTarget
   ): Promise<SemanticActivation>;
+  screenshotApp?(app: string, displayId?: string, options?: { fresh?: boolean; signal?: AbortSignal; target?: ResolvedAppTarget; windowId?: string; windowTitle?: string }): Promise<ComputerAppImage>;
+  assertAppInputTarget?(app: string, target: ComputerAppInputTarget): Promise<void>;
   shutdown(): Promise<void>;
 }
 
 type RequestPayload =
   | Readonly<{ action: 'warmup' }>
-  | Readonly<{ action: 'observe'; app: string; maxElements: number; perception: SemanticPerception }>
-  | Readonly<{ action: 'activate'; app: string; maxElements: number; perception: SemanticPerception; target: SemanticTarget }>
-  | Readonly<{ action: 'set_value'; app: string; maxElements: number; target: SemanticTarget; text: string }>;
+  | Readonly<{ action: 'app_targets'; binding?: ResolvedAppTarget; windowId?: string }>
+  | Readonly<{ action: 'screenshot_app'; app: string; displayId?: string; appTarget?: ResolvedAppTarget }>
+  | Readonly<{ action: 'verify_input_target'; app: string; target: ComputerAppInputTarget }>
+  | Readonly<{ action: 'observe'; app: string; maxElements: number; perception: SemanticPerception; appTarget?: ResolvedAppTarget }>
+  | Readonly<{ action: 'activate'; app: string; maxElements: number; perception: SemanticPerception; target: SemanticTarget; appTarget?: ResolvedAppTarget }>
+  | Readonly<{ action: 'set_value'; app: string; maxElements: number; target: SemanticTarget; text: string; appTarget?: ResolvedAppTarget }>;
 type RequestOverride = (payload: RequestPayload, signal?: AbortSignal) => Promise<unknown>;
 type SpawnProcess = typeof spawn;
 
@@ -125,6 +138,8 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
   let nextRequestId = 1;
   let stderrTail = '';
   let warmupPromise: Promise<SemanticWarmup> | null = null;
+  let cleanupPromise: Promise<void> | null = null;
+  let containmentFailure: Error | null = null;
   const pending = new Map<string, PendingRequest>();
 
   function supported(): boolean {
@@ -135,23 +150,43 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
     signal?.throwIfAborted?.();
     if (!supported()) return { supported: false, available: false, ocrAvailable: false };
     if (!warmupPromise) {
-      warmupPromise = request({ action: 'warmup' })
+      warmupPromise = request({ action: 'warmup' }, signal)
         .then(normalizeWarmup)
         .catch(error => {
           warmupPromise = null;
           throw error;
         });
     }
-    const result = await warmupPromise;
-    signal?.throwIfAborted?.();
-    return result;
+    const abortWarmup = () => {
+      if (child && pending.size) void failProcess(signal?.reason instanceof Error ? signal.reason : new Error('Windows UI Automation warmup cancelled.'), child);
+    };
+    signal?.addEventListener('abort', abortWarmup, { once: true });
+    try {
+      const result = await warmupPromise;
+      signal?.throwIfAborted?.();
+      return result;
+    } finally { signal?.removeEventListener('abort', abortWarmup); }
   }
 
-  async function observe(
+  async function resolveAppTarget(app: string, options: AppTargetOptions = {}, signal?: AbortSignal): Promise<ResolvedAppTarget> {
+    if (!supported()) throw appCaptureUnavailable('App target resolution is currently available only on Windows.');
+    signal?.throwIfAborted?.();
+    const result = await request({ action: 'app_targets', ...(options.binding ? { binding: options.binding } : {}), ...(options.windowId ? { windowId: options.windowId } : {}) }, signal) as Record<string, unknown>;
+    if (result?.truncated === true) throw Object.assign(new Error('Application discovery reached its bounded window limit. Use windowId to select a specific approved window.'), { code: 'COMPUTER_APP_TARGET_AMBIGUOUS' });
+    const candidates = Array.isArray(result?.candidates) ? result.candidates as AppWindowCandidate[] : [];
+    return selectAppTarget(app, candidates, options);
+  }
+
+  async function observe(app: string, maxElements = DEFAULT_MAX_ELEMENTS, perception: SemanticPerception = 'auto', signal?: AbortSignal, appTarget?: ResolvedAppTarget): Promise<SemanticObservation> {
+    return withDeadline(signal, deadline => observeWithinDeadline(app, maxElements, perception, deadline, appTarget));
+  }
+
+  async function observeWithinDeadline(
     app: string,
     maxElements = DEFAULT_MAX_ELEMENTS,
     perception: SemanticPerception = 'auto',
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    appTarget?: ResolvedAppTarget
   ): Promise<SemanticObservation> {
     if (!supported()) return { supported: false, available: false, reason: 'Windows UI Automation is available only on Windows.' };
     const normalizedApp = requiredApp(app);
@@ -161,9 +196,40 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
       action: 'observe',
       app: normalizedApp,
       maxElements: boundedInteger(maxElements, 1, MAX_ELEMENTS, DEFAULT_MAX_ELEMENTS),
-      perception: normalizedPerception
+      perception: normalizedPerception,
+      ...(appTarget ? { appTarget } : {})
     }, signal);
-    return normalizeObservation(result, normalizedPerception);
+    return normalizeObservation(result, normalizedPerception, normalizedApp);
+  }
+
+  async function assertAppInputTarget(app: string, target: ComputerAppInputTarget): Promise<void> {
+    if (!supported()) throw appInputTargetUnverified();
+    validateAppPixelProvenance(target.provenance, app, target.provenance.displayId, Date.now() - 30_000);
+    const result = await request({ action: 'verify_input_target', app: requiredApp(app), target }) as Record<string, unknown>;
+    if (result?.verified !== true || result.windowId !== target.provenance.windowId || result.processId !== target.provenance.processId) throw appInputTargetUnverified();
+  }
+
+  async function screenshotApp(app: string, displayId?: string, options: { target?: ResolvedAppTarget; windowId?: string; windowTitle?: string; signal?: AbortSignal } = {}): Promise<ComputerAppImage> {
+    return withDeadline(options.signal, deadline => screenshotWithinDeadline(app, displayId, options, deadline));
+  }
+
+  async function screenshotWithinDeadline(app: string, displayId: string | undefined, options: { target?: ResolvedAppTarget; windowId?: string; windowTitle?: string }, signal: AbortSignal): Promise<ComputerAppImage> {
+    if (!supported()) throw appCaptureUnavailable('App-only native capture is currently supported only on Windows.');
+    const normalizedApp = requiredApp(app);
+    const requestedAt = Date.now();
+    let target = options.target || await resolveAppTarget(normalizedApp, { ...(options.windowId ? { windowId: options.windowId } : {}), ...(options.windowTitle ? { windowTitle: options.windowTitle } : {}), ...(displayId ? { displayId } : {}) }, signal);
+    if (!options.target && target.approvalBasis === 'title') throw appCaptureUnavailable('A window title can select only an already approved application identity; use the executable or product name first.');
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const result = await request({ action: 'screenshot_app', app: normalizedApp, ...(displayId ? { displayId } : {}), ...(target ? { appTarget: target } : {}) }, signal);
+        return validateAppImage(result, normalizedApp, displayId, requestedAt);
+      } catch (error) {
+        // Retry once only after metadata revalidation of the same bound identity.
+        // Denial/protection and timeout never trigger provider/identity changes.
+        if (attempt > 0 || !target || !/APP_TARGET_STALE|WGC_SOURCE_CHANGED/.test(error instanceof Error ? error.message : String(error))) throw error;
+        target = await resolveAppTarget(normalizedApp, { binding: target, ...(options.windowId ? { windowId: options.windowId } : {}), ...(options.windowTitle ? { windowTitle: options.windowTitle } : {}), ...(displayId ? { displayId } : {}) }, signal);
+      }
+    }
   }
 
   async function activate(
@@ -171,7 +237,8 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
     target: SemanticTarget,
     maxElements = DEFAULT_MAX_ELEMENTS,
     perception: SemanticPerception = 'auto',
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    appTarget?: ResolvedAppTarget
   ): Promise<SemanticActivation> {
     if (!supported()) return { supported: false, available: false, handled: false, reason: 'Windows UI Automation is available only on Windows.' };
     const normalizedApp = requiredApp(app);
@@ -184,6 +251,7 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
       app: normalizedApp,
       maxElements: boundedInteger(maxElements, 1, MAX_ELEMENTS, DEFAULT_MAX_ELEMENTS),
       perception: normalizePerception(perception),
+      ...(appTarget ? { appTarget } : {}),
       target: normalizedTarget
     });
     return normalizeActivation(result);
@@ -194,7 +262,8 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
     target: SemanticTarget,
     text: string,
     maxElements = DEFAULT_MAX_ELEMENTS,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    appTarget?: ResolvedAppTarget
   ): Promise<SemanticActivation> {
     if (!supported()) return { supported: false, available: false, handled: false, reason: 'Windows UI Automation is available only on Windows.' };
     const normalizedApp = requiredApp(app);
@@ -208,6 +277,7 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
       app: normalizedApp,
       maxElements: boundedInteger(maxElements, 1, MAX_ELEMENTS, DEFAULT_MAX_ELEMENTS),
       target: normalizedTarget,
+      ...(appTarget ? { appTarget } : {}),
       text: normalizedText
     });
     return normalizeActivation(result);
@@ -216,28 +286,29 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
   async function request(payload: RequestPayload, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted?.();
     if (requestOverride) return requestOverride(payload, signal);
+    if (cleanupPromise) await cleanupPromise;
+    signal?.throwIfAborted?.();
+    if (containmentFailure) throw containmentFailure;
     const process = ensureProcess();
     const id = `uia_${nextRequestId++}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         if (!pending.has(id)) return;
-        failProcess(new Error(`Windows UI Automation helper timed out after ${timeoutMs}ms.${stderrTail ? ` ${stderrTail}` : ''}`));
+        void failProcess(Object.assign(new Error(`Windows UI Automation helper timed out after ${timeoutMs}ms.`), { code: 'COMPUTER_HELPER_TIMEOUT' }), process);
       }, timeoutMs);
-      timer.unref?.();
       const entry: PendingRequest = { resolve, reject, timer, ...(signal ? { signal } : {}) };
       if (signal) {
         entry.abortHandler = () => {
           if (!pending.has(id)) return;
-          pending.delete(id);
-          clearTimeout(timer);
-          try { signal.throwIfAborted(); } catch (error) { reject(error); }
+          const error = signal.reason instanceof Error ? signal.reason : new Error('Windows UI Automation request cancelled.');
+          void failProcess(error, process);
         };
         signal.addEventListener('abort', entry.abortHandler, { once: true });
       }
       pending.set(id, entry);
       process.stdin.write(`${JSON.stringify({ id, ...payload })}\n`, 'utf8', error => {
         if (!error || !pending.has(id)) return;
-        failProcess(error);
+        void failProcess(error, process);
       });
     });
   }
@@ -256,9 +327,9 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
     created.stderr.on('data', chunk => {
       stderrTail = `${stderrTail}${String(chunk)}`.slice(-4000).trim();
     });
-    created.once('error', error => failProcess(error));
+    created.once('error', error => { if (child === created) void failProcess(error, created); });
     created.once('exit', (code, signal) => {
-      failProcess(new Error(`Windows UI Automation helper exited (${code ?? signal ?? 'unknown'}).${stderrTail ? ` ${stderrTail}` : ''}`));
+      if (child === created) void failProcess(new Error(`Windows UI Automation helper exited (${code ?? signal ?? 'unknown'}).${stderrTail ? ` ${stderrTail}` : ''}`), created);
     });
     return created;
   }
@@ -289,36 +360,68 @@ function createWindowsUiaAdapter(options: WindowsUiaAdapterOptions = {}): Comput
     else entry.reject(value);
   }
 
-  function failProcess(error: Error): void {
+  function failProcess(error: Error, expected: ChildProcessWithoutNullStreams | null = child): Promise<void> {
+    if (expected !== child) return cleanupPromise || Promise.resolve();
     const active = child;
     child = null;
     reader?.close();
     reader = null;
     warmupPromise = null;
-    for (const id of [...pending.keys()]) settlePending(id, false, error);
-    if (active && active.exitCode === null && !active.killed) active.kill();
+    // Detach pending results before termination. Late stdout/exit from an old
+    // helper must never complete a request or affect its successor.
+    const entries = [...pending.values()];
+    pending.clear();
+    for (const entry of entries) {
+      clearTimeout(entry.timer);
+      if (entry.signal && entry.abortHandler) entry.signal.removeEventListener('abort', entry.abortHandler);
+    }
+    const cleanup = (async () => {
+      const confirmed = await terminateOwnedHelper(active);
+      const failure = Object.assign(error, { terminationConfirmed: confirmed });
+      if (!confirmed) containmentFailure = Object.assign(new Error('The owned computer helper did not confirm termination. Further requests are blocked.'), { code: 'COMPUTER_HELPER_TERMINATION_UNCONFIRMED' });
+      for (const entry of entries) entry.reject(failure);
+    })();
+    cleanupPromise = cleanup;
+    void cleanup.finally(() => { if (cleanupPromise === cleanup) cleanupPromise = null; });
+    return cleanup;
   }
 
-  async function shutdown(): Promise<void> {
-    const active = child;
-    child = null;
-    reader?.close();
-    reader = null;
-    warmupPromise = null;
-    for (const id of [...pending.keys()]) settlePending(id, false, new Error('Windows UI Automation helper stopped.'));
-    if (!active || active.exitCode !== null || active.killed) return;
-    active.stdin.end();
-    await new Promise<void>(resolve => {
-      const timer = setTimeout(() => {
-        if (active.exitCode === null && !active.killed) active.kill();
-        resolve();
-      }, 500);
-      timer.unref?.();
-      active.once('exit', () => { clearTimeout(timer); resolve(); });
+  function terminateOwnedHelper(active: ChildProcessWithoutNullStreams | null): Promise<boolean> {
+    if (!active || active.exitCode !== null || active.signalCode !== null) return Promise.resolve(true);
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (confirmed: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        active.removeListener('exit', onExit);
+        resolve(confirmed);
+      };
+      const onExit = () => finish(true);
+      active.once('exit', onExit);
+      const timer = setTimeout(() => finish(active.exitCode !== null || active.signalCode !== null), 1500);
+      // Kill by the retained ChildProcess handle only, never enumerate or kill
+      // by a remembered PID. A successful kill call is not an exit receipt.
+      try { active.kill('SIGKILL'); } catch { finish(false); }
+      if (active.exitCode !== null || active.signalCode !== null) finish(true);
     });
   }
 
-  return Object.freeze({ engine: 'windows-uia', supported, warmup, observe, activate, setValue, shutdown });
+  async function shutdown(): Promise<void> {
+    if (cleanupPromise) await cleanupPromise;
+    await failProcess(new Error('Windows UI Automation helper stopped.'));
+    if (containmentFailure) throw containmentFailure;
+  }
+
+  async function withDeadline<T>(signal: AbortSignal | undefined, action: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    const timer = setTimeout(() => controller.abort(Object.assign(new Error(`Computer helper operation exceeded ${timeoutMs}ms.`), { code: 'COMPUTER_HELPER_TIMEOUT' })), timeoutMs);
+    try { combined.throwIfAborted(); return await action(combined); }
+    finally { clearTimeout(timer); }
+  }
+
+  return Object.freeze({ engine: 'windows-uia', supported, warmup, resolveAppTarget, observe, screenshotApp, assertAppInputTarget, activate, setValue, shutdown });
 }
 
 function normalizeWarmup(value: unknown): SemanticWarmup {
@@ -331,7 +434,7 @@ function normalizeWarmup(value: unknown): SemanticWarmup {
   };
 }
 
-function normalizeObservation(value: unknown, fallbackPerception: SemanticPerception): SemanticObservation {
+function normalizeObservation(value: unknown, fallbackPerception: SemanticPerception, app: string): SemanticObservation {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Windows UI Automation helper returned an invalid observation.');
   const source = value as Record<string, unknown>;
   if (source.supported === false) return { supported: false, available: false, reason: boundedString(source.reason, 1000) };
@@ -340,6 +443,9 @@ function normalizeObservation(value: unknown, fallbackPerception: SemanticPercep
     ? source.elements.slice(0, MAX_ELEMENTS).map(normalizeTarget).filter((target): target is SemanticTarget => Boolean(target))
     : [];
   const window = normalizeWindow(source.window);
+  const pixelProvenance = elements.some(target => target.source === 'ocr')
+    ? validateAppPixelProvenance(source.pixelProvenance, app, window?.displayId)
+    : undefined;
   return {
     supported: true,
     available: true,
@@ -347,6 +453,7 @@ function normalizeObservation(value: unknown, fallbackPerception: SemanticPercep
     ocrAvailable: source.ocrAvailable === true,
     ...(boundedString(source.ocrReason, 500) ? { ocrReason: boundedString(source.ocrReason, 500) } : {}),
     ...(window ? { window } : {}),
+    ...(pixelProvenance ? { pixelProvenance } : {}),
     elements,
     count: elements.length,
     truncated: source.truncated === true || (Array.isArray(source.elements) && source.elements.length > MAX_ELEMENTS)

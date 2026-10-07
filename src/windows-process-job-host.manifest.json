@@ -1,0 +1,52 @@
+{
+  "protocol": 1,
+  "runtime": "nativeaot-win-x64",
+  "nativeSourceSha256": "ad295fe82418ccd37418a8df6485e3983fe0132d87b90b41c78ec52a049b3d40",
+  "hostSourceSha256": "6ad20465f0d5c0f4797ad7ed0fa46b04ab4c1b9fcf2a9da62a99fde640f14ca9",
+  "projectSourceSha256": "bc8608908ae38e3c0fe3b68a54ed2f3ce7dee0180702a045adef5f4dd85cc9f9",
+  "binarySha256": "faa986434fa5e36c7f728e30bf69788590344bbe7efc27ffefafbeac8b3321f6",
+  "binaryBytes": 1457152,
+  "provenance": {
+    "fallback": {
+      "compilerVersion": "4.8.9221.0 built by: NET481REL1LAST_25H2",
+      "compilerOptions": "/optimize+ /platform:anycpu",
+      "powershell": "5.1.26100.9549",
+      "compilerSha256": "46809206887326d2d24db1eff1f3064de972c3451abe766b49111450a5e08e00",
+      "references": [
+        {
+          "sha256": "5bffb20e1217bad314143d7e5c4c809bf9f522e8a0a063c8e7e9b25113de26eb",
+          "version": "4.8.9345.0 built by: NET481REL1LAST_25H2_C",
+          "identity": "mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+        },
+        {
+          "sha256": "2b3c17c6208a0b4b6beb94e1a066f99ba06cdb2ea919479e99d47e8c6d96dc71",
+          "version": "4.8.9340.0 built by: NET481REL1LAST_25H2_B",
+          "identity": "System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+        },
+        {
+          "sha256": "fd1097aed825d392a5dc8d19384381d4bb2a43498ea1c9d917f5d80c66600e1b",
+          "version": "4.8.9347.0 built by: NET481REL1LAST_25H2_B",
+          "identity": "System.Core, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+        },
+        {
+          "sha256": "83e2bfce895a7ba9138c470e5983d05ada404cb7c4cabc0d3c7f52a2d08b80af",
+          "version": "4.8.9340.0 built by: NET481REL1LAST_25H2_B",
+          "identity": "System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+        },
+        {
+          "sha256": "ad9336320a8237f4a11504a87e9f4fda27182456b22773d64f0fd544ea650aee",
+          "version": "4.8.9340.0 built by: NET481REL1LAST_25H2_B",
+          "identity": "System.Runtime.Serialization, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
+        }
+      ],
+      "clr": "4.0.30319.42000",
+      "compilerPath": "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
+    },
+    "companion": {
+      "sdk": "10.0.401",
+      "runtime": "10.0.12",
+      "runtimeIdentifier": "win-x64",
+      "projectSourceSha256": "bc8608908ae38e3c0fe3b68a54ed2f3ce7dee0180702a045adef5f4dd85cc9f9"
+    }
+  }
+}

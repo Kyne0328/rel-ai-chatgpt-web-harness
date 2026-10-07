@@ -3,7 +3,7 @@ import { stableJson } from '../stableJson.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { writeJsonAtomic } from '../durableState.ts';
-import { runProcess } from '../process.js';
+import { runReadOnlyProcess } from '../process.js';
 import { getStateDir } from '../statePaths.js';
 import { workspaceGitStatus } from '../repo/gitOps.js';
 import { relaiCodeInspect } from './codeIntelligence.js';
@@ -159,7 +159,7 @@ async function createValidationFingerprint(workspace, config, options = {}) {
 
 async function readRepositoryHead(workspace, config, signal) {
   signal?.throwIfAborted?.();
-  const result = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], {
+  const result = await runReadOnlyProcess('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: workspace.path,
     timeout: 30_000,
     maxOutputBytes: 1024 * 1024,

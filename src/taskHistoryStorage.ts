@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import { Worker } from 'node:worker_threads';
 
@@ -19,6 +20,7 @@ const TASK_HISTORY_VERSION = 3;
 const HISTORY_FORMAT_MARKER = '.task-history-v3';
 const LEGACY_MIGRATION_KEY = 'task_history_legacy_migrated_v1';
 const migratedStateDirs = new Set<string>();
+const reportedRejectedHistory = new Set<string>();
 let writeWorker: Worker | null = null;
 let writeRequestSequence = 0;
 const pendingWriteRequests = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
@@ -340,27 +342,27 @@ function parseSessionRows(db: DatabaseSync, rows: TaskHistoryRow[], readonly = f
   const invalid: string[] = [];
   for (const row of rows) {
     const session = parseStoredSession(row.payload);
-    if (session) sessions.push({ ...session, historyUpdatedAtMs: Number(row.updated_at_ms || 0) });
+    if (session && session.id === row.id) sessions.push({ ...session, historyUpdatedAtMs: Number(row.updated_at_ms || 0) });
     else invalid.push(String(row.id));
   }
-  if (invalid.length && !readonly) {
-    const remove = db.prepare('DELETE FROM task_history WHERE id=?');
-    for (const id of invalid) remove.run(id);
-  }
+  // A read must never erase an unsupported or malformed canonical payload.
+  if (invalid.length && !readonly) reportRejectedHistory(invalid);
   if (readonly) invalidRows?.push(...invalid);
   return sessions;
 }
 
-function removeInvalidSessions(config: TaskHistoryConfig, ids: string[]): void {
-  if (!ids.length) return;
-  // Corrupt-row cleanup is exceptional. Do it after closing the reader, and
-  // fail fast if a writer is busy so valid dashboard reads remain available.
-  try {
-    withStateDatabase(config, (db: DatabaseSync) => {
-      const remove = db.prepare('DELETE FROM task_history WHERE id=?');
-      for (const id of ids) remove.run(id);
-    }, { transaction: true });
-  } catch {}
+function reportRejectedHistory(ids: string[]): void {
+  for (const id of ids) {
+    if (reportedRejectedHistory.has(id)) continue;
+    reportedRejectedHistory.add(id);
+    console.error('[rel-ai-mcp] Retained unreadable task history for recovery:', id);
+  }
+}
+
+function removeInvalidSessions(_config: TaskHistoryConfig, ids: string[]): void {
+  // Keep the original row in place. Explicit user-requested deletion is handled
+  // separately; automatic reads and retention cannot decide it is disposable.
+  reportRejectedHistory(ids);
 }
 
 function readSession(directory: string, id: unknown): StoredTaskSession | null {
@@ -371,7 +373,7 @@ function readSession(directory: string, id: unknown): StoredTaskSession | null {
     const row = db.prepare('SELECT payload FROM task_history WHERE id=?').get(String(id || '')) as Pick<TaskHistoryRow, 'payload'> | undefined;
     if (!row) return null;
     const session = parseStoredSession(row.payload);
-    if (session) return session;
+    if (session && session.id === String(id || '')) return session;
     invalid = true;
     return null;
   }, { readonly: true }) as StoredTaskSession | null;
@@ -462,13 +464,13 @@ function pruneSessions(directory: string, options: TaskHistoryRetentionOptions =
   withStateDatabase(config, (db: DatabaseSync) => {
     const prunedIds: string[] = [];
     const removeHistory = db.prepare('DELETE FROM task_history WHERE id=?');
-    const expired = db.prepare(`SELECT id FROM task_history_summaries
-      WHERE updated_at_ms < ? AND status IN ('completed','failed','cancelled','invalid')
-      ORDER BY updated_at_ms ASC,id DESC
-    `).all(cutoffMs) as unknown as Array<{ id: string }>;
+    const expired = db.prepare(`SELECT history.id,history.payload FROM task_history AS history JOIN task_history_summaries AS summary ON history.id=summary.id
+      WHERE summary.updated_at_ms < ? AND status IN ('completed','failed','cancelled','invalid')
+      ORDER BY summary.updated_at_ms ASC,history.id DESC
+    `).all(cutoffMs) as unknown as Array<{ id: string; payload: string }>;
     for (const row of expired) {
       const taskId = String(row.id || '');
-      if (!taskId) continue;
+      if (!taskId || parseStoredSession(row.payload)?.id !== taskId) continue;
       removeHistory.run(taskId);
       prunedIds.push(taskId);
     }
@@ -476,21 +478,21 @@ function pruneSessions(directory: string, options: TaskHistoryRetentionOptions =
     let retainedBytes = taskHistoryStorageBytes(db);
     if (retainedBytes > storageBudgetBytes) {
       const candidates = db.prepare(`
-        SELECT history.id,
+        SELECT history.id,history.payload,
           length(CAST(history.payload AS BLOB)) + COALESCE(SUM(length(CAST(events.payload AS BLOB))), 0) AS bytes
         FROM task_history AS history
         LEFT JOIN task_history_events AS events ON events.task_id=history.id
         WHERE CASE
           WHEN json_valid(history.payload) THEN lower(COALESCE(json_extract(history.payload, '$.status'), '')) IN ('completed','failed','cancelled')
-          ELSE 1
+          ELSE 0
         END
         GROUP BY history.id,history.updated_at_ms
         ORDER BY history.updated_at_ms ASC,history.id DESC
-      `).all() as unknown as Array<{ id: string; bytes?: number }>;
+      `).all() as unknown as Array<{ id: string; payload: string; bytes?: number }>;
       for (const candidate of candidates) {
         if (retainedBytes <= storageBudgetBytes) break;
         const taskId = String(candidate.id || '');
-        if (!taskId) continue;
+        if (!taskId || parseStoredSession(candidate.payload)?.id !== taskId) continue;
         removeHistory.run(taskId);
         prunedIds.push(taskId);
         retainedBytes = Math.max(0, retainedBytes - Math.max(0, Number(candidate.bytes || 0)));
@@ -572,15 +574,34 @@ function parseStoredSession(payload: unknown): StoredTaskSession | null {
   }
 }
 
-function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
-  let stateKey = '';
+function preserveRejectedHistorySource(config: TaskHistoryConfig, source: Buffer): string {
+  // Keep an additional raw-byte copy outside the legacy directory so an older
+  // client cannot destroy the only evidence when it retries a partial migration.
   try {
-    stateKey = path.resolve(getStateDir(config));
+    const digest = createHash('sha256').update(source).digest('hex');
+    const directory = path.join(getStateDir(config), 'rejected-task-history');
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    let file = path.join(directory, `${digest}.json`);
+    if (fs.existsSync(file)) {
+      if (fs.readFileSync(file).equals(source)) return path.relative(getStateDir(config), file);
+      file = path.join(directory, `${digest}-${randomUUID()}.json`);
+    }
+    const descriptor = fs.openSync(file, 'wx', 0o600);
+    try { fs.writeFileSync(descriptor, source); fs.fsyncSync(descriptor); }
+    finally { fs.closeSync(descriptor); }
+    if (!fs.readFileSync(file).equals(source)) return '';
+    return path.relative(getStateDir(config), file);
   } catch {
-    stateKey = '';
+    // Never retire the original when a recovery copy cannot be verified.
+    return '';
   }
-  if (stateKey && migratedStateDirs.has(stateKey)) return;
-  let migrated = false;
+}
+
+function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
+  const stateKey = path.resolve(getStateDir(config));
+  if (migratedStateDirs.has(stateKey)) return;
+  const imported: Array<{ file: string; sha256: string }> = [];
+  const rejected: Array<{ file: string; reason: string; recoveryCopy?: string }> = [];
   withStateDatabase(config, (db: DatabaseSync) => {
     if (stateMetaValue(db, LEGACY_MIGRATION_KEY, '') === '1') return;
     const directory = getTaskHistoryDir(config);
@@ -592,22 +613,43 @@ function migrateLegacyTaskHistory(config: TaskHistoryConfig = {}): void {
       if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
     }
     for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.endsWith('-policy.json')) continue;
       const file = path.join(directory, entry.name);
+      let source: Buffer | null = null;
       try {
-        const source = fs.readFileSync(file, 'utf8');
-        const session = normalizeStoredSession(JSON.parse(source) as unknown);
-        if (!session) continue;
-        let mtimeMs = Date.now();
-        try { mtimeMs = fs.statSync(file).mtimeMs; } catch {}
+        source = fs.readFileSync(file);
+        const parsed = JSON.parse(source.toString('utf8')) as Record<string, any>;
+        const session = normalizeStoredSession(parsed);
+        if (!session) {
+          rejected.push({ file: entry.name, reason: Number(parsed?.version) !== TASK_HISTORY_VERSION ? 'unsupported_version' : 'invalid_record', recoveryCopy: preserveRejectedHistorySource(config, source) });
+          continue;
+        }
+        const mtimeMs = fs.statSync(file).mtimeMs;
         upsertTaskHistorySession(db, session, mtimeMs);
-      } catch {}
+        imported.push({ file, sha256: createHash('sha256').update(source).digest('hex') });
+      } catch (error) {
+        rejected.push({ file: entry.name, reason: errorCode(error) || 'read_parse_or_import_failed', ...(source ? { recoveryCopy: preserveRejectedHistorySource(config, source) } : {}) });
+      }
     }
-    setStateMeta(db, LEGACY_MIGRATION_KEY, '1');
-    migrated = true;
+    // Retriable failures must not permanently mark the migration complete.
+    setStateMeta(db, LEGACY_MIGRATION_KEY, rejected.length ? 'partial' : '1');
+    setStateMeta(db, 'task_history_legacy_recovery_v1', JSON.stringify(rejected));
   }, { transaction: true });
-  if (stateKey) migratedStateDirs.add(stateKey);
-  if (migrated) removeLegacyHistoryFiles(config);
+  migratedStateDirs.add(stateKey);
+  // Archive only committed imports, never delete raw evidence. Hash checking
+  // avoids retiring changed files; a concurrent replacement remains in the
+  // archive even if it races the rename.
+  for (const entry of imported) {
+    try {
+      if (createHash('sha256').update(fs.readFileSync(entry.file)).digest('hex') !== entry.sha256) continue;
+      const archive = path.join(getStateDir(config), 'imported-task-history');
+      fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
+      fs.renameSync(entry.file, path.join(archive, `${entry.sha256}-${randomUUID()}.json`));
+    } catch {
+      // The original remains retryable if retirement fails.
+    }
+  }
+  reportRejectedHistory(rejected.map(entry => `legacy:${entry.file} (${entry.reason})`));
 }
 
 /**

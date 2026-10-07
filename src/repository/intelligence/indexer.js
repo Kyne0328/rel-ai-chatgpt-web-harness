@@ -42,9 +42,9 @@ async function ensureRepositoryIndex(workspace, config = {}, options = {}) {
   if (existing) return waitForBuild(existing, options.signal);
 
   const buildAbortController = new AbortController();
-  const buildSignal = options.signal
-    ? AbortSignal.any([options.signal, buildAbortController.signal])
-    : buildAbortController.signal;
+  // The build belongs to all waiters. A caller's signal only detaches that
+  // caller; waitForBuild cancels shared work when its final waiter leaves.
+  const buildSignal = buildAbortController.signal;
   const record = {
     promise: null,
     waiters: 0,
@@ -152,10 +152,17 @@ async function disposeRepositoryIndex(workspace, config = {}, options = {}) {
   if (client) await client.terminate(abortError('Repository Intelligence workspace detached.'));
   workerClients.delete(databaseFile);
   activeBuilds.delete(databaseFile);
+  let cacheRemoved = false;
+  let cacheRemovalError;
   if (options.removeCache === true) {
-    try { fs.rmSync(path.dirname(databaseFile), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); } catch {}
+    try {
+      fs.rmSync(path.dirname(databaseFile), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      cacheRemoved = true;
+    } catch (error) {
+      cacheRemovalError = { code: String(error?.code || 'CACHE_REMOVAL_FAILED').slice(0, 80), message: boundedErrorMessage(error).slice(0, 1000) };
+    }
   }
-  return { detached: true, cacheRemoved: options.removeCache === true };
+  return { detached: true, cacheRemoved, ...(cacheRemovalError ? { cacheRemovalError } : {}) };
 }
 
 function closeRepositoryWatcher(state) {

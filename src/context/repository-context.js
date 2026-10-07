@@ -10,6 +10,7 @@ function compactRepositoryContext(snapshot = {}) {
     truncated: snapshot.truncated === true ? true : undefined,
     hints: hints.length ? hints : undefined,
     git,
+    ...(snapshot.skillDiscovery?.truncated ? { skillDiscovery: snapshot.skillDiscovery } : {}),
     projectInstructions
   });
 }

@@ -45,7 +45,7 @@
 - **Reclaim model-context headroom without weakening runtime validation.** Discovery schemas compact repeated batch-target and task-progress shapes, stop repeating optional `work_id` in every action grammar, and preserve high-impact action semantics such as explicit validation completion and inspect audit argument shapes.
 
 ### Validation and heavy-execution concurrency
-- **Remove Rel.AI's application-level admission cap for one-shot heavy execution.** Heavy `relai_exec`, validation, and diagnostic subprocesses no longer wait behind a host-global Rel.AI concurrency queue or fail because that queue stayed full; the operating system and machine resources remain the practical capacity boundary.
+- **Make host memory measurements diagnostic-only while retaining bounded concurrency.** Heavy `relai_exec`, validation, and diagnostic subprocesses can still wait for a host-global execution slot; the default heavy limit is between one and four operations. Physical-memory, commit-headroom, reservation, and missing-counter measurements do not block admission. Concurrency slots are not OS-enforced memory quotas.
 - **Let every policy-safe validation or diagnostic in a parallel stage run together.** Validation/diagnostic stages are no longer capped at three concurrent checks, and explicit execution-plan concurrency is no longer clamped to eight. Source mutations still keep one active repository writer and commit/reset/branch-switch/restore operations remain repository-exclusive so one visible working tree cannot race itself.
 
 ### Resource diagnostics and memory efficiency

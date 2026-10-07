@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as crypto from "node:crypto";
 import { resolveSafePath } from "../safety.js";
 import { parseEnv } from "../envOperations.js";
-import { runProcess } from "../process.js";
+import { runReadOnlyProcess } from "../process.js";
 
 async function buildSensitiveReview(workspace, config, paths, ownership, staged) {
   const entries = [];
@@ -45,7 +45,7 @@ async function buildEnvReview(workspace, config, relativePath, statusEntry, stag
 }
 
 async function readGitVersion(workspace, config, relativePath, prefix) {
-  const result = await runProcess('git', ['show', `${prefix}${relativePath}`], { cwd: workspace.path, timeout: 30000 }, config);
+  const result = await runReadOnlyProcess('git', ['show', `${prefix}${relativePath}`], { cwd: workspace.path, timeout: 30000 }, config);
   return result.exitCode === 0 ? String(result.stdout || '') : '';
 }
 

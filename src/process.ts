@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { execa, type Options as ExecaOptions } from 'execa';
+import { prepareWindowsProcessJob, type WindowsProcessJob } from './windowsProcessJob.ts';
 import { resolveGitExecutable } from './gitExecutable.js';
 import { isTimeoutAbort } from './abortSignals.js';
 import { executionOutcome } from './executionOutcome.js';
@@ -12,7 +13,20 @@ import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
 import { acquireHostResource } from './hostResourceScheduler.js';
-import { clearCurrentMutationProcess, markCurrentMutationProcessUncertain, recordCurrentMutationProcess } from './mutationProcessOwnership.js';
+import { clearCurrentMutationProcess, markCurrentMutationProcessUncertain, prepareCurrentMutationProcess, recordCurrentMutationProcess, runWithoutMutationProcessOwnership } from './mutationProcessOwnership.js';
+
+const internalObservationOutcomes = new WeakSet<object>();
+const ownedReadOnlyProcessOptions = new WeakSet<object>();
+const unsettledReadOnlyProcessJobs = new WeakMap<object, { job: WindowsProcessJob; controllerClosed: () => boolean }>();
+
+function internalReadOnlyProcessOutcome<T extends object>(value: T): T {
+  internalObservationOutcomes.add(value);
+  return value;
+}
+
+function isInternalReadOnlyProcessOutcome(value: unknown): boolean {
+  return Boolean(value && typeof value === 'object' && internalObservationOutcomes.has(value));
+}
 
 const TASKKILL_EXE = String.raw`C:\Windows\System32\taskkill.exe`;
 const DEFAULT_TERMINATION_GRACE_MS = 1000;
@@ -92,6 +106,7 @@ interface RunProcessOptions {
 export interface RunProcessResult {
   readonly executed: boolean;
   readonly exitCode: number;
+  readonly observedExitCode?: number;
   readonly signal?: string;
   readonly stdout: string;
   readonly stderr: string;
@@ -447,6 +462,10 @@ async function runProcess(command: string, args: readonly string[] = [], options
   const resourceClass = String(options.resourceClass || '').trim();
   const queueStartedAt = Date.now();
   let resourceLease: ResourceLease | null = null;
+  let retainResourceLease = false;
+  let failureCleanup: (() => Promise<boolean>) | null = null;
+  let windowsJob: WindowsProcessJob | null = null;
+  let ownedControllerClosed = false;
   if (resourceClass) {
     reportPhase('host-queued');
     try {
@@ -546,6 +565,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       extendEnv: false,
       shell,
       windowsHide: true,
+      detached: process.platform !== 'win32',
       reject: false,
       buffer: false,
       stdin: 'pipe',
@@ -574,8 +594,35 @@ async function runProcess(command: string, args: readonly string[] = [], options
       });
     }
     const processStartedAt = Date.now();
-    const subprocess = execa(file, shell ? [] : processArgs, execaOptions);
+    const mutationProcessFile = prepareCurrentMutationProcess();
+    let subprocess;
+    try {
+      if (process.platform === 'win32' && (mutationProcessFile || ownedReadOnlyProcessOptions.has(options))) {
+        windowsJob = await prepareWindowsProcessJob(config, {
+          executable: shell ? (process.env.ComSpec || String.raw`C:\Windows\System32\cmd.exe`) : executable,
+          args: shell ? [] : processArgs, env: childEnvironment,
+          ...(options.cwd ? { cwd: options.cwd } : {}),
+          ...(shell ? { shellCommand: file } : {})
+        });
+      }
+      if (options.signal?.aborted || (Number.isFinite(deadlineAtMs) && deadlineAtMs > 0 && Date.now() >= deadlineAtMs)) {
+        if (mutationProcessFile) clearCurrentMutationProcess(0, mutationProcessFile);
+        if (windowsJob) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
+        windowsJob = null;
+        const expired = !options.signal?.aborted || isTimeoutAbort(options.signal);
+        return terminalQueueResult({ error: errorMessage(options.signal?.reason || 'Execution deadline expired before process start.'),
+          timedOut: expired, cancelled: !expired, queueWaitMs });
+      }
+      subprocess = execa(windowsJob?.executable || file, windowsJob?.args || (shell ? [] : processArgs),
+        windowsJob ? { ...execaOptions, shell: false, env: windowsJob.environment } : execaOptions);
+      windowsJob?.bind(subprocess.pid);
+    } catch (error) {
+      if (mutationProcessFile) clearCurrentMutationProcess(0, mutationProcessFile);
+      if (windowsJob) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
+      throw error;
+    }
     const subprocessClose = observeSubprocessClose(subprocess.nodeChildProcess);
+    void subprocessClose.then(() => { ownedControllerClosed = true; });
     executed = processPid(subprocess) > 0;
     if (executed) reportPhase('spawned');
     const windowsTermination = {
@@ -591,9 +638,28 @@ async function runProcess(command: string, args: readonly string[] = [], options
     const requestWindowsTermination = (kind: 'timeout' | 'cancel'): void => {
       if (!ownsWindowsTermination || windowsTermination.promise) return;
       windowsTermination.kind = kind;
-      windowsTermination.promise = terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
+      windowsTermination.promise = (windowsJob ? windowsJob.stop(kind, forceWaitMs)
+        : terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs }))
         .catch(error => ({ exited: false, forced: true, error: errorMessage(error) }));
       void windowsTermination.promise.then(notifyWindowsTermination);
+    };
+    failureCleanup = async () => {
+      if (windowsTimeoutTimer) clearTimeout(windowsTimeoutTimer);
+      if (windowsAbortListener) options.signal?.removeEventListener('abort', windowsAbortListener);
+      const outcome = !executed
+        ? { exited: true, forced: false }
+        : await (windowsJob ? windowsJob.stop('stop', forceWaitMs)
+          : terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs }))
+          .catch(error => ({ exited: false, forced: true, error: errorMessage(error) }));
+      await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
+      if (mutationProcessFile) {
+        if (outcome.exited) clearCurrentMutationProcess(subprocess.pid || 0, mutationProcessFile);
+        else {
+          try { markCurrentMutationProcessUncertain(subprocess.pid, 'Post-spawn setup failed and process-tree termination remains unknown.', mutationProcessFile); }
+          catch { /* The pre-spawn intent is already durable and remains blocked. */ }
+        }
+      }
+      return outcome.exited;
     };
     if (ownsWindowsTermination) {
       if (options.signal) {
@@ -603,7 +669,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       }
       if (timeoutMs > 0) windowsTimeoutTimer = setTimeout(() => requestWindowsTermination('timeout'), timeoutMs);
     }
-    const mutationProcessRecorded = Boolean(recordCurrentMutationProcess(subprocess.pid));
+    const mutationProcessRecorded = Boolean(recordCurrentMutationProcess(subprocess.pid, mutationProcessFile));
     const stdoutBackpressure = createOutputBackpressure(subprocess.stdout, stdoutSpill);
     const stderrBackpressure = createOutputBackpressure(subprocess.stderr, stderrSpill);
     subprocess.stdout?.on('data', (chunk: Buffer | string) => {
@@ -619,6 +685,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBackpressure.observe();
     });
 
+    let inheritedPipeDrain = false;
     const disposePostExitPipeDrain = armPostExitPipeDrain(subprocess, forceWaitMs, () => {
       rootExitConfirmed = true;
       reportPhase('exited');
@@ -629,7 +696,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       // data a short drain window, then detach only our read ends.
       stdoutBackpressure.release();
       stderrBackpressure.release();
-    });
+    }, () => { inheritedPipeDrain = true; });
     let result;
     let windowsTerminationOutcome: ProcessTreeTerminationResult | null = null;
     try {
@@ -674,28 +741,32 @@ async function runProcess(command: string, args: readonly string[] = [], options
       && (windowsTermination.kind === 'timeout' || result.isCanceled === true);
     const timedOut = windowsTermination.kind === 'timeout' || result.timedOut === true || signalTimedOut;
     const cancelled = !timedOut && (windowsTermination.kind === 'cancel' || result.isCanceled === true);
-    const terminationOutcome = windowsTerminationOutcome || ((timedOut || cancelled)
+    const nativeReceipt = windowsJob?.receipt();
+    const terminationOutcome = windowsTerminationOutcome || (windowsJob ? (executed ? windowsJob.outcome() : { exited: true, forced: false }) : null) || ((timedOut || cancelled)
       ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
-      : null);
+      : inheritedPipeDrain
+        ? { exited: false, forced: false, error: 'The root exited but inherited output handles remained open; descendant termination is unconfirmed.' }
+        : process.platform !== 'win32' && isProcessTreeAlive(subprocess)
+          ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
+          : null);
+    retainResourceLease = terminationOutcome?.exited === false;
     if (terminationOutcome) {
       // Release only our stdio/child handles. This does not assert that the
       // process tree stopped; unconfirmed mutations retain their durable owner.
       await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
     }
-    rootExitConfirmed ||= executed && !isProcessAlive(subprocess);
+    rootExitConfirmed = windowsJob ? nativeReceipt?.rootExited === true : rootExitConfirmed || (executed && !isProcessAlive(subprocess));
     let mutationOwnershipPersistenceError = '';
     if (mutationProcessRecorded && terminationOutcome?.exited === false) {
       try {
         markCurrentMutationProcessUncertain(subprocess.pid,
-          terminationOutcome.error || 'Process-tree termination was not confirmed after cancellation or timeout.');
+          terminationOutcome.error || 'Process-tree termination was not confirmed after cancellation or timeout.', mutationProcessFile);
       } catch (error) {
         // Return the unconfirmed termination result so the caller still takes
         // its normal quarantine path; do not throw past that safety decision.
         mutationOwnershipPersistenceError = errorMessage(error);
         stderrBuffer.append(`\n[rel-ai-mcp ${mutationOwnershipPersistenceError}]\n`);
       }
-    } else if (mutationProcessRecorded && (!timedOut && !cancelled || terminationOutcome?.exited === true)) {
-      clearCurrentMutationProcess(subprocess.pid);
     }
     if (timedOut) {
       stderrBuffer.append(signalTimedOut
@@ -720,25 +791,30 @@ async function runProcess(command: string, args: readonly string[] = [], options
       ...(terminationOutcome ? { terminationConfirmed: terminationOutcome.exited } : {}),
       ...(outputFinalizationTimedOut ? { outputFinalizationTimedOut: true } : {})
     });
-    const spawnError = result.failed
+    const callerNeverStarted = nativeReceipt?.final === true
+      && nativeReceipt.commandStarted === false && nativeReceipt.startupFailedBeforeCommand === true
+      && terminationOutcome?.exited === true;
+    const spawnError = !timedOut && !cancelled && (nativeReceipt?.startupFailedBeforeCommand === true || result.failed
       && !result.signal
-      && !timedOut
-      && !cancelled
-      && (result.exitCode == null || (process.platform === 'win32' && !shell && !windowsExecutableExists(executable, options.cwd, childEnvironment)));
+      && (result.exitCode == null || (process.platform === 'win32' && !shell && !windowsExecutableExists(executable, options.cwd, childEnvironment))));
     const error = timedOut
       ? (signalTimedOut ? errorMessage(options.signal?.reason) : `Timed out after ${timeoutMs}ms`)
       : cancelled
         ? errorMessage(options.signal?.reason || 'Operation cancelled.')
         : spawnError
-          ? String(result.originalMessage || result.shortMessage || result.message || 'Process failed to start.')
-          : undefined;
+          ? String(nativeReceipt?.error || result.originalMessage || result.shortMessage || result.message || 'Process failed to start.')
+          : nativeReceipt?.error;
 
-    return {
-      executed: !spawnError && processPid(subprocess) > 0,
+    if (mutationProcessFile && (!executed || terminationOutcome?.exited !== false)) {
+      clearCurrentMutationProcess(subprocess.pid || 0, mutationProcessFile);
+    }
+    failureCleanup = null;
+    const outcome: RunProcessResult = {
+      executed: !spawnError && !callerNeverStarted && processPid(subprocess) > 0,
       rootExitConfirmed,
       ...(mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError } : {}),
       ...(outputFinalizationTimedOut ? { outputFinalizationTimedOut: true, outputFinalizationError } : {}),
-      exitCode: typeof result.exitCode === 'number' ? result.exitCode : -1,
+      exitCode: typeof nativeReceipt?.rootExitCode === 'number' ? nativeReceipt.rootExitCode : typeof result.exitCode === 'number' ? result.exitCode : -1,
       ...(result.signal ? { signal: result.signal } : {}),
       stdout: processOutputText(stdoutBuffer, options.preserveOutputWhitespace),
       stderr: processOutputText(stderrBuffer, options.preserveOutputWhitespace),
@@ -746,7 +822,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       ...(cancelled ? { cancelled: true } : {}),
       timedOut,
       ...(spawnError ? { spawnError: true } : {}),
-      ...((timedOut || cancelled) ? {
+      ...(terminationOutcome ? {
         terminationConfirmed: terminationOutcome?.exited === true,
         forcedTermination: result.isForcefullyTerminated === true || terminationOutcome?.forced === true
       } : {}),
@@ -765,9 +841,70 @@ async function runProcess(command: string, args: readonly string[] = [], options
         stderrSpillTruncated: stderrSpillResult.spillTruncated === true
       } : {})
     };
+    if (ownedReadOnlyProcessOptions.has(options) && windowsJob && terminationOutcome?.exited === false) {
+      unsettledReadOnlyProcessJobs.set(outcome, { job: windowsJob, controllerClosed: () => ownedControllerClosed });
+    }
+    return outcome;
+  } catch (cause) {
+    if (failureCleanup) {
+      const terminationConfirmed = await failureCleanup().catch(() => false);
+      retainResourceLease = !terminationConfirmed;
+      const error = new Error('Process setup or finalization failed; process-tree cleanup was attempted.', { cause });
+      Object.assign(error, {
+        code: 'PROCESS_SETUP_FAILED', executed, terminationConfirmed,
+        terminationCertainty: terminationConfirmed ? 'confirmed' : 'unconfirmed'
+      });
+      if (ownedReadOnlyProcessOptions.has(options) && windowsJob && !terminationConfirmed) {
+        unsettledReadOnlyProcessJobs.set(error, { job: windowsJob, controllerClosed: () => ownedControllerClosed });
+      }
+      throw error;
+    }
+    throw cause;
   } finally {
-    resourceLease?.release();
+    if (!retainResourceLease) {
+      resourceLease?.release();
+      if (windowsJob && !executed) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
+      else windowsJob?.cleanup();
+    }
   }
+}
+
+// Internal, statically classified observations only. Never use this entry point
+// for a caller-supplied executable/command or expose an ownership opt-out flag.
+// Internal native ownership is independent of mutation authority. The private
+// options identity cannot be requested through serialized public tool arguments.
+function runOwnedReadOnlyProcess(command: string, args: readonly string[] = [], options: RunProcessOptions = {}, config: ProcessRuntimeConfig = {}): Promise<RunProcessResult> {
+  if (options.resourceClass !== undefined) {
+    return Promise.reject(new TypeError('Owned read-only probes require caller-managed resource admission.'));
+  }
+  const ownedOptions = { ...options };
+  ownedReadOnlyProcessOptions.add(ownedOptions);
+  return runWithoutMutationProcessOwnership(() => runProcess(command, args, ownedOptions, config))
+    .then((result: RunProcessResult) => internalReadOnlyProcessOutcome(result))
+    .catch((error: unknown) => {
+      if (error && typeof error === 'object') internalReadOnlyProcessOutcome(error);
+      throw error;
+    })
+    .finally(() => ownedReadOnlyProcessOptions.delete(ownedOptions));
+}
+
+function reconcileReadOnlyProcessTermination(value: object): boolean {
+  if (!isInternalReadOnlyProcessOutcome(value)) return false;
+  const pending = unsettledReadOnlyProcessJobs.get(value);
+  if (!pending?.controllerClosed() || !pending.job.outcome().exited) return false;
+  pending.job.cleanup();
+  unsettledReadOnlyProcessJobs.delete(value);
+  return true;
+}
+
+function runReadOnlyProcess(command: string, args: readonly string[] = [], options: RunProcessOptions = {}, config: ProcessRuntimeConfig = {}): Promise<RunProcessResult> {
+  return runWithoutMutationProcessOwnership(() => runProcess(command, args, options, config)).then((result: RunProcessResult) => {
+    internalObservationOutcomes.add(result);
+    return result;
+  }, (error: unknown) => {
+    if (error && typeof error === 'object') internalObservationOutcomes.add(error);
+    throw error;
+  });
 }
 
 function observeSubprocessClose(
@@ -827,13 +964,15 @@ function armPostExitPipeDrain(
     readonly stderr?: { readonly destroyed?: boolean; destroy?(): unknown } | null;
   },
   drainGraceMs: number,
-  onExit: () => void
+  onExit: () => void,
+  onUnsettledPipes: () => void = () => {}
 ): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   const processHandle = subprocess.nodeChildProcess;
   const closeLingeringPipe = (stream: { readonly destroyed?: boolean; destroy?(): unknown } | null | undefined): void => {
-    if (!stream || stream.destroyed || typeof stream.destroy !== 'function') return;
+    if (!stream || stream.destroyed || (stream as { readableEnded?: boolean }).readableEnded || typeof stream.destroy !== 'function') return;
+    onUnsettledPipes();
     try { stream.destroy(); } catch {}
   };
   const handleExit = (): void => {
@@ -1017,12 +1156,14 @@ function appendLimited(current: string, next: string, maxBytes: number): string 
 }
 
 function summarizeCommand(result: Partial<RunProcessResult> & Pick<RunProcessResult, 'exitCode'>): Record<string, unknown> {
-  return {
+  const summary = {
     ok: result.exitCode === 0 && result.timedOut !== true && result.cancelled !== true,
     ...executionOutcome(result),
     ...(result.stdout ? { stdout: result.stdout } : {}),
     ...(result.stderr ? { stderr: result.stderr } : {})
   };
+  if (isInternalReadOnlyProcessOutcome(result)) internalObservationOutcomes.add(summary);
+  return summary;
 }
 
 function windowsExecutableExists(executable: string, cwd: string | undefined, env: NodeJS.ProcessEnv): boolean {
@@ -1067,7 +1208,7 @@ function debugKill(label: string, error: unknown): void {
 }
 
 export {
-  appendLimited, isProcessTreeAlive, readProcessCreationIdentity, runProcess, summarizeCommand, terminateProcessTree
+  appendLimited, internalReadOnlyProcessOutcome, isInternalReadOnlyProcessOutcome, isProcessTreeAlive, readProcessCreationIdentity, runProcess, runReadOnlyProcess, runOwnedReadOnlyProcess, reconcileReadOnlyProcessTermination, summarizeCommand, terminateProcessTree
 };
 export type {
   ProcessTreeTerminationResult

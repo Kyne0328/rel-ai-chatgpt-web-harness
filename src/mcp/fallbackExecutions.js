@@ -1,4 +1,7 @@
 import * as crypto from 'node:crypto';
+import { resolveWorkspaceInput } from '../config.js';
+import { getTaskHistoryDir, readSession } from '../taskHistoryStorage.ts';
+import { withStateDatabase } from '../stateDatabase.ts';
 import { stableJson } from '../stableJson.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -22,7 +25,8 @@ const fallbackPrunes = new Map();
 const REPLAYABLE_FALLBACK_STATUSES = new Set([
   FALLBACK_EXECUTION_STATUS.COMPLETED,
   FALLBACK_EXECUTION_STATUS.FAILED,
-  FALLBACK_EXECUTION_STATUS.CANCELLED
+  FALLBACK_EXECUTION_STATUS.CANCELLED,
+  FALLBACK_EXECUTION_STATUS.INTERRUPTED
 ]);
 const executionsByOperationId = new Map();
 const pendingCompletionDeliveries = new Map();
@@ -40,11 +44,17 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
   if (typeof run !== 'function') throw new TypeError('Fallback execution requires a run function.');
   pruneFallbackExecutions(now);
 
-  recoverExecutionRecords(id, { config, now, noticeScope });
-  const existing = recordsForReference(id).findLast(record => record.signature === signature
+  const reusable = () => recordsForReference(id).findLast(record => record.signature === signature
     && (!noticeScope || record.noticeScope === noticeScope)
+    && (!workspace || canonicalizeFallbackWorkspace(record, config).workspace === workspace)
     && (record.status === FALLBACK_EXECUTION_STATUS.RUNNING
       || (record.deliveryAcknowledged !== true && REPLAYABLE_FALLBACK_STATUSES.has(record.status))));
+  // A disk failure must not make a still-live terminal result inaccessible.
+  let existing = reusable();
+  if (!existing && persist !== false) {
+    recoverExecutionRecords(id, { config, now, noticeScope, workspace, scopeOnly: !work });
+    existing = reusable();
+  }
   if (existing) {
     return { record: existing, reused: true };
   }
@@ -83,12 +93,24 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
     promise: null
   };
 
+  // Durable admission must precede even scheduling the handler microtask.
+  // A failed write must not return an accepted operation that disappears on restart.
+  persistFallbackRecord(config, record, { required: true });
+
   record.promise = Promise.resolve()
     .then(() => run(controller.signal, record.operationId))
     .then(async result => {
       const resultTimeline = result?.structuredContent?.timeline || { ...record.timeline, executed: result?.structuredContent?.executed };
       updateFallbackExecutionPhase(record.operationId, 'persisting', config, resultTimeline);
-      await retainFallbackOutput(config, record, result);
+      // Terminal facts must survive failures in post-handler retention.
+      record.result = result || null;
+      try { await retainFallbackOutput(config, record, result); }
+      catch (error) {
+        if (result?.structuredContent) {
+          result.structuredContent.outputFinalizationError = String(error?.message || error);
+          result.structuredContent.outputRetentionFailed = true;
+        }
+      }
       if (controller.signal.aborted) {
         // Cancellation stays terminal, but the handler may hold the only evidence
         // that a subprocess is still alive or its mutations are unknown.
@@ -122,7 +144,7 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
       record.isError = result?.isError === true;
       persistFallbackRecord(config, record);
       deliverFallbackCompletion(config, record);
-      return { ok: true, result };
+      return { ok: true, result: record.result };
     }, error => {
       record.timeline = error?.timeline || { ...record.timeline, executed: error?.executed };
       if (controller.signal.aborted) {
@@ -141,7 +163,6 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
     });
 
   executionsByOperationId.set(record.operationId, record);
-  persistFallbackRecord(config, record);
   pruneFallbackExecutions(now);
   return { record, reused: false };
 }
@@ -210,14 +231,16 @@ function enableFallbackCompletionNotice(config, record) {
   else enqueueFallbackCompletionNotice(config, record);
 }
 
-function acknowledgeFallbackDelivery(config, reference) {
+function acknowledgeFallbackDelivery(config, reference, delivery = {}) {
   const id = String(reference || '').trim();
   if (!id) return false;
   const record = recordsForReference(id).at(-1) || null;
   if (!record) return false;
   // Delivery of a running acknowledgement confirms acceptance, not receipt of
   // the eventual result. Keep the replay identity until a terminal result arrives.
-  if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) return true;
+  if (delivery.kind !== 'result' || delivery.operationId !== record.operationId
+    || delivery.status !== record.status || delivery.revision !== record.revision
+    || record.status === FALLBACK_EXECUTION_STATUS.RUNNING) return false;
   record.deliveryAcknowledged = true;
   record.phase = 'delivered';
   record.timeline = fallbackTimelinePhase(record.timeline, 'delivered', Date.now());
@@ -231,13 +254,76 @@ function recordsForReference(reference) {
   return [...executionsByOperationId.values()].filter(record => (record.executionKey || record.workId) === reference);
 }
 
+function scopeIndexFile(config, executionKey, noticeScope) {
+  const key = crypto.createHash('sha256').update(stableJson([executionKey, noticeScope])).digest('hex');
+  return path.join(getStateDir(config), 'fallback-scopes', `${key}.json`);
+}
+
+function readPersistedScope(config, reference, options = {}) {
+  const scope = String(options.noticeScope || '');
+  const matching = record => Boolean(record && !record.workId && record.executionKey === reference
+    && record.noticeScope === scope && (!options.workspace || canonicalizeFallbackWorkspace(record, config).workspace === options.workspace));
+  const fresh = record => record.status === FALLBACK_EXECUTION_STATUS.RUNNING
+    || timeValue(options.now || Date.now) - (Date.parse(record.completedAt || record.updatedAt || record.startedAt) || 0) <= FALLBACK_RECORD_TTL_MS;
+  let index;
+  try {
+    index = readJsonFile(scopeIndexFile(config, reference, scope));
+  } catch (cause) {
+    const error = new Error('The persisted replay index is unreadable. Recover the known operationId before retrying this operation.', { cause });
+    error.code = 'FALLBACK_RECOVERY_UNAVAILABLE';
+    throw error;
+  }
+  if (index) {
+    if (!fresh(index)) return [];
+    const record = readPersistedFallback(config, index.operationId);
+    if (!matching(record)) {
+      const error = new Error('The replay index has no matching retained operation. Recover the known operationId before retrying.');
+      error.code = 'FALLBACK_RECOVERY_UNAVAILABLE';
+      error.executed = false;
+      throw error;
+    }
+    return fresh(record) ? [record] : [];
+  }
+  // Compatibility for pre-index records. Bound synchronous recovery and fail
+  // closed if its scan budget is exhausted rather than risk duplicate execution.
+  const root = path.join(getStateDir(config), 'fallback-executions');
+  let directory;
+  try { directory = fs.opendirSync(root); }
+  catch (cause) {
+    if (cause?.code === 'ENOENT') return [];
+    const error = new Error('Retained operation storage is unavailable. Restore it before retrying this operation.', { cause });
+    error.code = 'FALLBACK_RECOVERY_UNAVAILABLE';
+    error.executed = false;
+    throw error;
+  }
+  const candidates = [];
+  let count = 0;
+  try {
+    let entry;
+    while ((entry = directory.readSync())) {
+      if (++count > 4096) {
+        const error = new Error('Legacy replay recovery exceeds its bounded scan. Retrieve the known operationId before retrying.');
+        error.code = 'FALLBACK_RECOVERY_UNAVAILABLE';
+        throw error;
+      }
+      if (!entry.isFile() || !/^fallback_[A-Za-z0-9_-]{20,160}\.json$/.test(entry.name)) continue;
+      let record;
+      try { record = readJsonFile(path.join(root, entry.name)); } catch { continue; }
+      if (matching(record) && fresh(record)) candidates.push(record);
+    }
+  } finally { directory.closeSync(); }
+  return candidates.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+}
+
 function recoverExecutionRecords(reference, options = {}) {
   if (!options.config) return;
   const persisted = reference.startsWith('fallback_')
     ? [readPersistedFallback(options.config, reference, options.workId)].filter(Boolean)
-    : readTaskBackgroundOperations(options.config, reference);
+    : options.scopeOnly ? readPersistedScope(options.config, reference, options)
+      : readTaskBackgroundOperations(options.config, reference);
   for (const record of persisted) {
     if (!record?.operationId) continue;
+    canonicalizeFallbackWorkspace(record, options.config);
     if (executionsByOperationId.has(record.operationId)) continue;
     if (options.noticeScope && record.noticeScope !== options.noticeScope) continue;
     if (options.workspace && record.workspace !== options.workspace) continue;
@@ -247,6 +333,22 @@ function recoverExecutionRecords(reference, options = {}) {
   }
 }
 
+function canonicalizeFallbackWorkspace(record, config) {
+  if (!config || !record) return record;
+  try {
+    if (!record.workspace && record.workId && record.noticeScope) {
+      const task = readSession(getTaskHistoryDir(config), record.workId);
+      if (task?.principalFingerprint === record.noticeScope) record.workspace = String(task.workspace || '');
+    }
+    if (!record.workspace) return record;
+    const resolution = resolveWorkspaceInput(config, record.workspace);
+    if (resolution.source === 'configured_path') record.workspace = resolution.alias;
+  } catch {
+    // Ambiguous or unavailable legacy paths remain invisible to alias lookup.
+  }
+  return record;
+}
+
 function fallbackExecutionsStatus(reference, options = {}) {
   const id = String(reference || '').trim();
   if (!id) return [];
@@ -254,6 +356,7 @@ function fallbackExecutionsStatus(reference, options = {}) {
   pruneFallbackExecutions(now);
   recoverExecutionRecords(id, options);
   return recordsForReference(id)
+    .map(record => canonicalizeFallbackWorkspace(record, options.config))
     .filter(record => !options.noticeScope || record.noticeScope === options.noticeScope)
     .filter(record => !options.workspace || record.workspace === options.workspace)
     .filter(record => !options.workId || record.workId === options.workId)
@@ -368,6 +471,9 @@ function publicFallbackRecord(record, now = Date.now) {
     tool: record.tool,
     workspace: record.workspace,
     status: record.status,
+    ...(record.durability ? { durability: record.durability } : {}),
+    ...(record.persistenceError ? { persistenceError: record.persistenceError } : {}),
+    ...(record.noticePersistenceError ? { noticePersistenceError: record.noticePersistenceError } : {}),
     ...(record.phase ? { phase: record.phase } : {}),
     ...(record.timeline ? { timeline: record.timeline } : {}),
     ...(record.resultRetention ? { resultRetention: record.resultRetention } : {}),
@@ -462,7 +568,15 @@ function registerFallbackCompletionDelivery(config, notices, options = {}) {
   prunePendingCompletionDeliveries();
   const operationIds = [...new Set(notices.map(notice => String(notice?.operationId || '').trim()).filter(Boolean))];
   if (!operationIds.length) return false;
-  pendingCompletionDeliveries.set(completionDeliveryKey(noticeScope, requestId), {
+  const key = completionDeliveryKey(noticeScope, requestId);
+  const previous = pendingCompletionDeliveries.get(key);
+  // JSON-RPC ids are scoped to a transport, not a principal. Without a unique
+  // delivery token, overlapping registrations must not consume either payload.
+  const ambiguous = Boolean(previous && (previous.ambiguous
+    || previous.config !== config || previous.workspace !== workspace
+    || stableJson(previous.operationIds) !== stableJson(operationIds)));
+  pendingCompletionDeliveries.set(key, {
+    ambiguous,
     config,
     noticeScope,
     workspace,
@@ -478,7 +592,7 @@ function acknowledgeFallbackCompletionDelivery(noticeScope, requestId) {
   prunePendingCompletionDeliveries();
   const key = completionDeliveryKey(scope, requestId);
   const pending = pendingCompletionDeliveries.get(key);
-  if (!pending) return false;
+  if (!pending || pending.ambiguous) return false;
   pendingCompletionDeliveries.delete(key);
   let acknowledged = false;
   for (const operationId of pending.operationIds) {
@@ -486,7 +600,6 @@ function acknowledgeFallbackCompletionDelivery(noticeScope, requestId) {
       noticeScope: pending.noticeScope,
       workspace: pending.workspace
     });
-    if (consumed) acknowledgeFallbackDelivery(pending.config, operationId);
     acknowledged = consumed || acknowledged;
   }
   return acknowledged;
@@ -533,7 +646,7 @@ function deliverFallbackCompletion(config, record) {
     if (record.noticeEnabled) enqueueFallbackCompletionNotice(config, record);
     return;
   }
-  void publishMcpEvent(config, {
+  void Promise.resolve().then(() => publishMcpEvent(config, {
     principalFingerprint: noticeScope,
     name,
     data: {
@@ -544,7 +657,7 @@ function deliverFallbackCompletion(config, record) {
       status,
       error: String(record.error || '').slice(0, 500)
     }
-  }).then(delivered => {
+  })).then(delivered => {
     if (!record.noticeEnabled) return;
     if (delivered) acknowledgeFallbackCompletionNotice(config, record.operationId, { noticeScope, workspace });
     else enqueueFallbackCompletionNotice(config, record);
@@ -561,7 +674,7 @@ function enqueueFallbackCompletionIntent(config, record) {
   const noticeScope = String(record.noticeScope || '').trim();
   const workspace = String(record.workspace || '').trim();
   if (!noticeScope || !workspace || !record.operationId) return;
-  upsertFallbackCompletionRecord(config, noticeScope, workspace, fallbackCompletionIntent(record));
+  persistFallbackNotice(config, record, noticeScope, workspace, fallbackCompletionIntent(record));
 }
 
 function enqueueFallbackCompletionNotice(config, record) {
@@ -569,7 +682,19 @@ function enqueueFallbackCompletionNotice(config, record) {
   const noticeScope = String(record.noticeScope || '').trim();
   const workspace = String(record.workspace || '').trim();
   if (!noticeScope || !workspace || !record.operationId) return;
-  upsertFallbackCompletionRecord(config, noticeScope, workspace, fallbackCompletionNotice(record));
+  persistFallbackNotice(config, record, noticeScope, workspace, fallbackCompletionNotice(record));
+}
+
+function persistFallbackNotice(config, record, noticeScope, workspace, notice) {
+  try {
+    upsertFallbackCompletionRecord(config, noticeScope, workspace, notice);
+    record.noticePersistenceError = '';
+  } catch (error) {
+    record.noticePersistenceError = String(error?.message || error);
+    // Notice storage is independent of the execution/result. Preserve the
+    // existing operation and never turn a notification failure into a rerun.
+    console.error('[rel-ai-mcp] Completion notice could not be persisted:', record.operationId);
+  }
 }
 
 function upsertFallbackCompletionRecord(config, noticeScope, workspace, notice) {
@@ -667,7 +792,13 @@ function recoverPersistedFallback(config, reference, now = Date.now, previous = 
     revision: Math.max(1, Number(persisted.revision || 1)) + 1,
     error: 'Background operation was interrupted because the Rel.AI runtime restarted.'
   };
-  persistFallbackSnapshot(config, interrupted);
+  try { persistFallbackSnapshot(config, interrupted); }
+  catch (error) {
+    // Recovery is a read of existing evidence. A write failure cannot erase or
+    // hide the interrupted result, including older retained identifier formats.
+    interrupted.durability = 'memory_only';
+    interrupted.persistenceError = String(error?.message || error);
+  }
   return interrupted;
 }
 
@@ -744,7 +875,7 @@ function readPersistedFallback(config, reference, workId = '') {
         });
       } catch {}
       const taskId = stored?.workId || workId;
-      return taskId ? readTaskBackgroundOperations(config, taskId).find(record => record.operationId === id) || null : stored;
+      return taskId ? readTaskBackgroundOperations(config, taskId).find(record => record.operationId === id) || (stored?.status ? stored : null) : stored;
     }
     return readTaskBackgroundOperation(config, id);
   } catch (error) {
@@ -753,12 +884,32 @@ function readPersistedFallback(config, reference, workId = '') {
   }
 }
 
-function persistFallbackRecord(config, record) {
+function persistFallbackRecord(config, record, options = {}) {
   if (!config || !record || record.persist === false) return;
-  const persisted = persistFallbackSnapshot(config, persistentFallbackRecord(record));
-  if (persisted) {
+  try {
+    const persisted = persistFallbackSnapshot(config, persistentFallbackRecord(record));
+    record.persistenceError = '';
+    record.durability = 'persisted';
     record.persistedResultCompacted = persisted.persistedResultCompacted === true;
     record.resultRetention = persisted.resultRetention || null;
+  } catch (cause) {
+    record.persistenceError = String(cause?.message || cause);
+    record.durability = 'memory_only';
+    if (options.required === true) {
+      const error = new Error('Background operation was not started because its acceptance record could not be persisted.', { cause });
+      error.code = 'FALLBACK_PERSISTENCE_FAILED';
+      error.executed = false;
+      throw error;
+    }
+    // Execution may already have happened. Preserve its result and replay key.
+    if (record.result?.structuredContent) {
+      record.result = { ...record.result, structuredContent: {
+        ...record.result.structuredContent,
+        operationPersistence: { durable: false, errorCode: 'FALLBACK_PERSISTENCE_FAILED',
+          nextAction: 'Keep this result. Do not repeat the operation to repair persistence; reconcile this operationId.' }
+      } };
+    }
+    console.error('[rel-ai-mcp] Background result retained only in memory:', record.operationId);
   }
 }
 
@@ -770,32 +921,42 @@ async function retainFallbackOutput(config, record, result) {
 }
 
 function persistFallbackSnapshot(config, record) {
-  try {
-    const projected = sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
-    const originalResult = JSON.stringify(record.result);
-    const retainedResult = JSON.stringify(projected.result);
-    if (originalResult !== retainedResult) {
-      projected.persistedResultCompacted = true;
-      projected.resultRetention = { complete: false, compacted: true, originalBytes: Buffer.byteLength(originalResult || '', 'utf8'), retainedBytes: Buffer.byteLength(retainedResult || '', 'utf8'), reason: 'Durable history retains a sanitized bounded projection. Omitted fields cannot be restored by increasing the response budget.' };
-    }
-    record = projected;
-    if (record.workId) {
-      recordTaskBackgroundOperation(config, record.workId, record);
-      // Work-bound records also need direct operationId lookup after restart.
-      if (!readTaskBackgroundOperation(config, record.workId)) return;
-    }
-    const file = tasklessFallbackFile(config, record.operationId);
-    // Task history is authoritative for work-bound operations; the file is an
-    // operationId lookup index, not a second copy of the execution state.
-    const sanitized = record.workId ? { operationId: record.operationId, workId: record.workId }
-      : record;
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    writeJsonAtomic(file, sanitized, { mode: 0o600 });
-    scheduleTasklessFallbackPrune(config);
-    return record;
-  } catch (error) {
-    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback operation persistence:', error);
+  const projected = sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
+  const originalResult = JSON.stringify(record.result);
+  const retainedResult = JSON.stringify(projected.result);
+  if (originalResult !== retainedResult) {
+    projected.persistedResultCompacted = true;
+    projected.resultRetention = { complete: false, compacted: true, originalBytes: Buffer.byteLength(originalResult || '', 'utf8'), retainedBytes: Buffer.byteLength(retainedResult || '', 'utf8'), reason: 'Durable history retains a sanitized bounded projection. Omitted fields cannot be restored by increasing the response budget.' };
   }
+  record = projected;
+  let taskAuthoritative = false;
+  if (record.workId) {
+    const stored = recordTaskBackgroundOperation(config, record.workId, record);
+    if (stored) {
+      // A pending worker write is not a durable commit. Verify the canonical
+      // row, bypassing the optimistic in-memory task-history projection.
+      const session = readSession(getTaskHistoryDir(config), record.workId);
+      const operations = session?.backgroundOperations || (session?.backgroundOperation ? [session.backgroundOperation] : []);
+      taskAuthoritative = operations.some(value => value.operationId === record.operationId
+        && value.revision === record.revision && value.status === record.status
+        && value.deliveryAcknowledged === record.deliveryAcknowledged);
+      if (!taskAuthoritative) throw new Error('Task background operation has not reached durable history.');
+    }
+  }
+  const file = tasklessFallbackFile(config, record.operationId);
+  // Existing tasks are authoritative. Records without a task (including
+  // internal one-shot clients) retain their own snapshot instead of a dead pointer.
+  const sanitized = taskAuthoritative ? { operationId: record.operationId, workId: record.workId } : record;
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  writeJsonAtomic(file, sanitized, { mode: 0o600 });
+  if (!record.workId) {
+    const index = scopeIndexFile(config, record.executionKey, record.noticeScope);
+    writeJsonAtomic(index, { operationId: record.operationId, executionKey: record.executionKey,
+      noticeScope: record.noticeScope, workspace: record.workspace, status: record.status,
+      completedAt: record.completedAt || '', updatedAt: record.updatedAt }, { mode: 0o600 });
+  }
+  scheduleTasklessFallbackPrune(config);
+  return record;
 }
 
 function tasklessFallbackFile(config, operationId) {
@@ -810,14 +971,40 @@ function scheduleTasklessFallbackPrune(config) {
   if (previous?.pending || Date.now() - Number(previous?.startedAt || 0) < FALLBACK_PRUNE_INTERVAL_MS) return;
   const state = { pending: true, startedAt: Date.now(), promise: null };
   fallbackPrunes.set(root, state);
-  state.promise = pruneTasklessFallbackFiles(root)
+  state.promise = Promise.all([pruneTasklessFallbackFiles(root, config), pruneFallbackScopeFiles(config)])
     .catch(error => {
       if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback cleanup:', error);
     })
     .finally(() => { state.pending = false; });
 }
 
-async function pruneTasklessFallbackFiles(root) {
+async function pruneFallbackScopeFiles(config) {
+  const root = path.join(getStateDir(config), 'fallback-scopes');
+  let entries;
+  try { entries = await fs.promises.readdir(root, { withFileTypes: true }); } catch { return; }
+  const removable = [];
+  const cutoff = Date.now() - FALLBACK_RECORD_TTL_MS;
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/.test(entry.name)) continue;
+    const file = path.join(root, entry.name);
+    try {
+      const source = await fs.promises.readFile(file, 'utf8');
+      const record = JSON.parse(source);
+      if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) continue;
+      const at = Date.parse(record.completedAt || record.updatedAt || '') || 0;
+      removable.push({ file, source, at });
+    } catch {}
+  }
+  removable.sort((a, b) => b.at - a.at);
+  for (const [index, entry] of removable.entries()) {
+    if (entry.at >= cutoff && index < MAX_FALLBACK_RECORDS) continue;
+    try {
+      if (await fs.promises.readFile(entry.file, 'utf8') === entry.source) await fs.promises.unlink(entry.file);
+    } catch {}
+  }
+}
+
+async function pruneTasklessFallbackFiles(root, config) {
   let entries;
   try { entries = await fs.promises.readdir(root, { withFileTypes: true }); } catch { return; }
   const cutoff = Date.now() - FALLBACK_RECORD_TTL_MS;
@@ -831,7 +1018,19 @@ async function pruneTasklessFallbackFiles(root) {
       // Work-bound files are lookup pointers. Reading their authoritative task
       // here repeatedly hydrates large histories and blocks all tunnel clients.
       const record = JSON.parse(await fs.promises.readFile(file, 'utf8'));
-      if (record?.operationId !== path.basename(file, '.json') || record.workId) continue;
+      if (record?.operationId !== path.basename(file, '.json')) continue;
+      if (record.workId && !record.status) {
+        if (stat.mtimeMs >= cutoff) continue;
+        // Read only the indexed payload's operation ids, never hydrate histories.
+        // Any database error preserves the pointer for a later pass.
+        const retained = withStateDatabase(config, db => db.prepare(`
+          SELECT 1 FROM task_history WHERE id=? AND (
+            CASE WHEN json_valid(payload) THEN
+              json_extract(payload, '$.backgroundOperation.operationId') = ?
+              OR EXISTS (SELECT 1 FROM json_each(payload, '$.backgroundOperations') WHERE json_extract(value, '$.operationId') = ?)
+            ELSE 1 END)`).get(record.workId, record.operationId, record.operationId), { readonly: true });
+        if (retained) continue;
+      }
       if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) continue;
       files.push({ file, mtimeMs: stat.mtimeMs, size: stat.size });
     } catch {}

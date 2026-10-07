@@ -60,14 +60,17 @@ function normalizeTidyMode(raw) {
 }
 
 function scanUntrackedSessionFiles(workspace, ownership, maxCandidates) {
+  const included = new Set();
   const candidates = [];
   const skipped = [];
-  for (const file of ownership.untrackedSession.slice(0, maxCandidates)) {
+  for (const file of [...new Set(ownership.untrackedSession)].slice(0, maxCandidates)) {
     try {
       const safe = resolveSafePath(workspace.path, file);
       if (!fs.existsSync(safe.absolutePath)) { skipped.push({ path: safe.relativePath, reason: "missing" }); continue; }
       const stat = fs.statSync(safe.absolutePath);
       if (!stat.isFile()) { skipped.push({ path: safe.relativePath, reason: "not a file" }); continue; }
+      if (included.has(safe.relativePath)) continue;
+      included.add(safe.relativePath);
       candidates.push({
         path: safe.relativePath, action: "tidy_untracked_file",
         status: "untracked", owner: "session",
@@ -220,6 +223,7 @@ async function relaiWorkspaceTidyRun(workspace, config, args = {}) {
 function preflightTidyCandidates(candidates, workspace, currentUntracked) {
   const preflight = [];
   const refused = [];
+  const included = new Set();
   for (const candidate of candidates) {
     const safe = resolveSafePath(workspace.path, candidate.path);
     if (!currentUntracked.has(safe.relativePath)) { refused.push({ path: safe.relativePath, reason: "path is no longer session-owned and untracked" }); continue; }
@@ -228,6 +232,10 @@ function preflightTidyCandidates(candidates, workspace, currentUntracked) {
     if (!stat.isFile()) { refused.push({ path: safe.relativePath, reason: "path is not a file" }); continue; }
     const currentSha256 = fileSha256(workspace.path, safe.relativePath);
     if (currentSha256 !== candidate.sha256) { refused.push({ path: safe.relativePath, reason: "sha256 mismatch", expectedSha256: candidate.sha256, currentSha256 }); continue; }
+    // Older plans can contain the same path from full and exact Git observations.
+    // Validate every occurrence first; apply each canonical path only once.
+    if (included.has(safe.relativePath)) continue;
+    included.add(safe.relativePath);
     preflight.push({ path: safe.relativePath, sha256: currentSha256, sizeBytes: stat.size });
   }
   return { preflight, refused };

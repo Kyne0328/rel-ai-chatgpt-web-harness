@@ -15,11 +15,15 @@
 // are abort-aware so a disconnected MCP request never remains queued until an
 // unrelated operation eventually releases its lock.
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const queueOwnerContext = new AsyncLocalStorage();
 const locks = new Map();
 const mutationBlocks = new Map();
+const workspaceIdentities = new Map();
+const mutationBlockListeners = new Set();
 const mutationBlockControllers = new Map();
 
 const READ = 'read';
@@ -169,16 +173,95 @@ async function withLock(key, mode, operation, signal, timeoutMs = 0, owner = nul
   }
 }
 
+function workspaceIdentity(workspace) {
+  return workspaceIdentities.get(String(workspace || '').trim()) || String(workspace || '').trim();
+}
+
+function canonicalPath(value) {
+  let resolved;
+  try { resolved = fs.realpathSync.native(path.resolve(value)); }
+  catch (error) {
+    if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error;
+    resolved = path.resolve(value);
+  }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function readSmallMetadata(file) {
+  const stat = fs.statSync(file);
+  if (!stat.isFile() || stat.size > 8192) throw new Error('Git identity metadata is not a bounded regular file.');
+  const descriptor = fs.openSync(file, 'r');
+  try {
+    const bytes = Buffer.alloc(8193);
+    const count = fs.readSync(descriptor, bytes, 0, bytes.length, 0);
+    if (count > 8192) throw new Error('Git identity metadata exceeded its byte limit.');
+    return bytes.subarray(0, count).toString('utf8').trim();
+  } finally { fs.closeSync(descriptor); }
+}
+
+function canonicalWorkspaceAuthority(directory) {
+  const physical = canonicalPath(directory);
+  let current = physical;
+  for (;;) {
+    const marker = path.join(current, '.git');
+    let stat;
+    try { stat = fs.statSync(marker); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error;
+    }
+    if (stat) {
+      let admin = marker;
+      if (stat.isFile()) {
+        const match = /^gitdir:\s+(.+)$/u.exec(readSmallMetadata(marker));
+        if (!match) throw new Error('Cannot establish Git worktree identity.');
+        admin = path.resolve(current, match[1]);
+      } else if (!stat.isDirectory()) throw new Error('Cannot establish Git directory identity.');
+      let common = admin;
+      try { common = path.resolve(admin, readSmallMetadata(path.join(admin, 'commondir'))); }
+      catch (error) { if (error?.code !== 'ENOENT') throw error; }
+      return 'repo:' + canonicalPath(common);
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return 'path:' + physical;
+    current = parent;
+  }
+}
+
+// Bind before admission. Aliases remain the public label, while queue and
+// quarantine authority use one physical repository identity (including worktrees).
+function bindWorkspaceOperationIdentity(workspaceAlias, directory) {
+  const alias = String(workspaceAlias || '').trim();
+  if (!alias || !directory) return;
+  const identity = canonicalWorkspaceAuthority(directory);
+  const previous = workspaceIdentity(alias);
+  if (previous === identity) return;
+  if ([...locks.keys()].some(key => key === 'workspace:' + previous || key.startsWith('workspace:' + previous + ':'))) {
+    throw Object.assign(new Error('Workspace identity changed while operations were active. Retry after they settle.'), { code: 'WORKSPACE_IDENTITY_BUSY', retryable: true });
+  }
+  const block = mutationBlocks.get(previous);
+  workspaceIdentities.set(alias, identity);
+  if (previous === alias && block && !mutationBlocks.has(identity)) mutationBlocks.set(identity, block);
+  for (const listener of mutationBlockListeners) {
+    try { listener({ alias, mutationBlock: workspaceMutationBlockSummary(alias) }); } catch {}
+  }
+}
+
+function workspaceOperationAliases(workspaceAlias) {
+  const alias = String(workspaceAlias || '').trim();
+  const identity = workspaceIdentity(alias);
+  return [...new Set([alias, ...[...workspaceIdentities].filter(([, value]) => value === identity).map(([key]) => key)])];
+}
+
 function workspaceKey(workspace) {
-  return `workspace:${workspace}`;
+  return `workspace:${workspaceIdentity(workspace)}`;
 }
 
 function taskKey(workspace, taskId) {
-  return `workspace:${workspace}:task:${taskId}`;
+  return `workspace:${workspaceIdentity(workspace)}:task:${taskId}`;
 }
 
 function mutationKey(workspace) {
-  return `workspace:${workspace}:mutation`;
+  return `workspace:${workspaceIdentity(workspace)}:mutation`;
 }
 
 function notifyWait(options, waitMs, details) {
@@ -241,11 +324,12 @@ function workspaceMutationBlockedError(workspace, block) {
 }
 
 function throwIfWorkspaceMutationBlocked(workspace) {
-  const block = mutationBlocks.get(workspace);
+  const block = mutationBlocks.get(workspaceIdentity(workspace));
   if (block) throw workspaceMutationBlockedError(workspace, block);
 }
 
 function mutationBlockControllerFor(workspace) {
+  workspace = workspaceIdentity(workspace);
   let controller = mutationBlockControllers.get(workspace);
   if (!controller) {
     controller = new AbortController();
@@ -272,16 +356,43 @@ function mutationQueueSignal(workspace, callerSignal) {
 function blockWorkspaceMutations(workspaceAlias, reason) {
   const workspace = String(workspaceAlias || '').trim();
   if (!workspace) return null;
-  const existing = mutationBlocks.get(workspace);
+  const existing = mutationBlocks.get(workspaceIdentity(workspace));
   if (existing) return { ...existing };
   const block = {
     reason: reason instanceof Error ? reason.message : String(reason || 'Previous mutation termination was not confirmed.'),
     blockedAt: new Date().toISOString()
   };
-  mutationBlocks.set(workspace, block);
+  mutationBlocks.set(workspaceIdentity(workspace), block);
+  for (const alias of workspaceOperationAliases(workspace)) {
+    for (const listener of mutationBlockListeners) {
+      try { listener({ alias, mutationBlock: workspaceMutationBlockSummary(alias) }); } catch { /* Projection cannot change enforcement. */ }
+    }
+  }
   const controller = mutationBlockControllerFor(workspace);
   if (!controller.signal.aborted) controller.abort(workspaceMutationBlockedError(workspace, block));
   return { ...block };
+}
+
+// Never expose raw termination errors, command lines, or another task's owner.
+// The queue remains the sole authority; reading this projection cannot clear it.
+function workspaceMutationBlockSummary(workspaceAlias, workspacePath = '') {
+  const alias = String(workspaceAlias || '').trim();
+  const identity = workspacePath ? canonicalWorkspaceAuthority(workspacePath) : workspaceIdentity(alias);
+  const block = mutationBlocks.get(identity)
+    || (workspacePath && !workspaceIdentities.has(alias) ? mutationBlocks.get(alias) : null);
+  return block ? {
+    blocked: true,
+    code: 'WORKSPACE_MUTATION_BLOCKED',
+    blockedAt: block.blockedAt,
+    terminationCertainty: 'unknown',
+    message: 'A previous mutating process may still be running. Project changes are blocked until its termination is confirmed and safe recovery is completed.'
+  } : null;
+}
+
+function onWorkspaceMutationBlockChange(listener) {
+  if (typeof listener !== 'function') return () => {};
+  mutationBlockListeners.add(listener);
+  return () => mutationBlockListeners.delete(listener);
 }
 
 function throwIfAborted(signal) {
@@ -406,4 +517,4 @@ function pendingWorkspaceOperations() {
   return locks.size;
 }
 
-export { blockWorkspaceMutations, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };
+export { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, workspaceOperationAliases, blockWorkspaceMutations, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };

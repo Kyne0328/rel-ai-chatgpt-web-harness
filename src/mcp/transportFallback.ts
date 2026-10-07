@@ -7,6 +7,7 @@ import {
 } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { combineAbortSignals } from '../abortSignals.js';
+import { withTaskHistoryPersistenceBarrier } from '../taskHistoryStore.ts';
 import {
   DEFAULT_FALLBACK_GRACE_MS,
   acknowledgeFallbackCompletionDelivery,
@@ -201,16 +202,29 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
       errorCode: timedOut ? 'TIMEOUT' : 'CANCELLED'
     }, true));
   }
+  // Injected executors own their synthetic scope. Production execution resolves
+  // and authorizes the same canonical identity used by callTool before indexing.
+  if (options.execute === executeToolResult) {
+    try {
+      const { resolveFallbackExecutionScope } = await import('../tools/callTool.js');
+      args = resolveFallbackExecutionScope(config, name, args, transportToolContext(options));
+    } catch (error) {
+      return successResponse(message.id, toolResult(serializeToolError(name, error), true));
+    }
+  }
   const signature = fallbackSignature(name, args);
   const scopeId = workId || `workspace:${principalIdentity(options.principal)}:${String(args.workspace || '')}:${signature}`;
   const explicitTimeoutMs = Number(args?.timeoutMs);
-  const deadlineAtMs = Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0
-    ? Date.now() + Math.floor(explicitTimeoutMs)
-    : 0;
+  const explicitDeadlineAtMs = Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0
+    ? Date.now() + Math.floor(explicitTimeoutMs) : 0;
+  const inheritedDeadlineAtMs = Number(options.deadlineAtMs);
+  const deadlineAtMs = Number.isFinite(inheritedDeadlineAtMs) && inheritedDeadlineAtMs > 0
+    ? (explicitDeadlineAtMs > 0 ? Math.min(explicitDeadlineAtMs, inheritedDeadlineAtMs) : inheritedDeadlineAtMs)
+    : explicitDeadlineAtMs;
   const graceMs = Math.max(0, Number(options.synchronousFallbackGraceMs ?? DEFAULT_FALLBACK_GRACE_MS));
   let started;
   try {
-    started = startFallbackExecution({
+    const admit = () => startFallbackExecution({
       config,
       workId,
       scopeId,
@@ -230,13 +244,21 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
         message
       })
     });
+    started = workId && options.persistFallback !== false
+      ? await withTaskHistoryPersistenceBarrier(config, workId, admit, { signal: options.signal, deadlineAtMs })
+      : admit();
   } catch (error: any) {
     return successResponse(message.id, toolResult({
       ok: false,
       ...(workId ? { work_id: workId } : {}),
       error: error instanceof Error ? error.message : String(error),
       errorCode: String(error?.code || 'TASK_OPERATION_IN_PROGRESS'),
-      nextAction: workId
+      ...(error?.executed === false ? { executed: false, accepted: false } : {}),
+      nextAction: error?.code === 'FALLBACK_PERSISTENCE_FAILED'
+        ? 'No handler was started. Restore durable state availability before submitting the operation again.'
+        : error?.code === 'FALLBACK_RECOVERY_UNAVAILABLE'
+          ? 'Retained replay state is unavailable. Restore state access and retrieve the known operationId before retrying; do not repeat work to recover its result.'
+        : workId
         ? `Call relai_work with action "status" and work_id "${workId}" before starting another long operation.`
         : 'Check the returned operationId with relai_work action "status" before retrying the same long operation.'
     }, false));
@@ -315,7 +337,15 @@ function fallbackPhaseMessage(name: string, operation: any = {}) {
 
 function deliveryCallback(config: any, record: any, options: any) {
   if (options.deliveryAware !== true || !record?.operationId) return undefined;
-  return () => { acknowledgeFallbackDelivery(config, record.operationId); };
+  // Capture what this response contains now, never inspect a later mutable
+  // status when the send completes. A receipt cannot acknowledge a future result.
+  const delivery = Object.freeze({
+    operationId: record.operationId,
+    status: record.status,
+    revision: record.revision,
+    kind: record.status === 'running' ? 'receipt' : 'result'
+  });
+  return () => { acknowledgeFallbackDelivery(config, delivery.operationId, delivery); };
 }
 
 function replayFallbackResult(requestId: any, workId: any, record: any, onDelivered: any = undefined) {

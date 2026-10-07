@@ -1,3 +1,4 @@
+import { writeJsonAtomic } from './durableState.ts';
 import { captureNativeMutationPaths } from './taskIntegrity.ts';
 import { readGitObservation } from './repo/gitObservation.js';
 import fs from 'node:fs';
@@ -22,7 +23,7 @@ import { relaiResetWorkspace, relaiRestorePaths } from "./bridge/restore.js";
 import { workspaceTidyPlan, workspaceTidyRun as relaiWorkspaceTidyRun } from "./bridge/tidy.js";
 import { relaiApplyPatch, normalizeOpenAIPatchFormat } from "./bridge/patch.js";
 import { readProjectInstructions } from "./projectInstructions.js";
-import { discoverSkills, readDiscoveredSkill } from './skillDiscovery.js';
+import { discoverSkillInventory, readDiscoveredSkillAsync } from './skillDiscovery.js';
 import { discoverRepositoryTopology } from "./workflow/topology.js";
 import { STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD, workspaceWriteGuidance, analyzeFileShape, fileWriteGuidance } from "./bridge/writeGuidance.js";
 import { outputSpillOwner, readOutputSpill } from './outputSpill.js';
@@ -58,7 +59,8 @@ const EXACT_REPLACE_TEXT_BYTE_LIMIT = 50000;
 const EXACT_REPLACE_MAX_OPERATIONS = 50;
 const READ_IO_CONCURRENCY = 12;
 
-async function repoSnapshot(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs = {}) {
+async function repoSnapshot(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs = {}, context: BridgeContext = {}) {
+  context.signal?.throwIfAborted?.();
   const policy = resolvePolicy(workspace, config || {});
   const configuredDefault = clampNumber(workspace.context?.snapshotMaxFiles, 1, 20000, DEFAULT_MAX_SNAPSHOT_FILES);
   const effectiveDefault = resolveBudget(configuredDefault, policy, config || {});
@@ -72,8 +74,9 @@ async function repoSnapshot(workspace: BridgeWorkspace, config: BridgeConfig, ar
   const topology = discoverRepositoryTopology(workspace.path);
   const discoveredCommands = discoverCommands(workspace.path, { topology });
   const projectInstructions = readProjectInstructions(workspace, { targetPath: args.instructionPath });
-  const skills = discoverSkills(workspace, { config });
+  const { skills, discovery: skillDiscovery } = discoverSkillInventory(workspace, { config, signal: context.signal, deadlineAt: context.deadlineAtMs });
   const git = await gitSummary;
+  context.signal?.throwIfAborted?.();
   return {
     ok: true,
     workspace: workspace.alias,
@@ -83,6 +86,7 @@ async function repoSnapshot(workspace: BridgeWorkspace, config: BridgeConfig, ar
     discoveredCommands,
     projectInstructions,
     skills,
+    skillDiscovery,
     fileCount: tree.files.length,
     effectiveMaxEntries: maxEntries,
     budgetMultiplied: effectiveDefault !== configuredDefault,
@@ -126,7 +130,7 @@ async function relaiReadAsync(workspace: BridgeWorkspace, config: BridgeConfig, 
     if ((Array.isArray(args.paths) && args.paths.length) || (Array.isArray(args.ranges) && args.ranges.length)) {
       throw new Error('relai_read skill cannot be combined with paths or ranges.');
     }
-    const item = readDiscoveredSkill(workspace, args.skill, { maxBytes: args.maxBytes, config });
+    const item = await readDiscoveredSkillAsync(workspace, args.skill, { maxBytes: args.maxBytes, config, signal: context.signal, deadlineAt: context.deadlineAtMs });
     return {
       ok: true,
       workspace: workspace.alias,
@@ -646,12 +650,7 @@ function handleWriteAppend(workspace: BridgeWorkspace, config: BridgeConfig, arg
   if (args.dryRun === true) throw new Error("Staged content append does not persist dry-run payloads.");
   if (typeof args.content !== "string") throw new Error("Staged content append requires writeId and a content chunk string.");
   const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path);
-  const payload = readStagedPayload(config, workspace, writeId);
-  appendStagedPayload(config, workspace, writeId, args.content);
-  payload.bytes += Buffer.byteLength(args.content, "utf8");
-  payload.chunkCount += 1;
-  payload.updatedAt = new Date().toISOString();
-  writeStagedMetadata(config, workspace, writeId, payload);
+  const payload = appendStagedPayload(config, workspace, writeId, args.content);
   return {
     ok: true, workspace: workspace.alias, path: payload.path,
     operation: "stagedFullFileWrite:append", writeId,
@@ -890,7 +889,7 @@ function performFullFileWrite(workspace: BridgeWorkspace, config: BridgeConfig, 
     throw new Error(`Full-file edit refused stale expectedSha256 for ${safe.relativePath}. Expected ${expectedSha256}, current ${oldSha256 || "missing"}. Re-read the file and retry with current content.`);
   }
   const newContent = content;
-  const changed = newContent !== oldContent;
+  const changed = !exists || newContent !== oldContent;
   const newSha256 = sha256Text(newContent);
 
   const result: BridgeRecord = {
@@ -1066,13 +1065,39 @@ function createStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, w
 function writeStagedMetadata(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, payload: BridgeRecord): void {
   const file = stagedMetadataPath(config, workspace, writeId);
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, `${JSON.stringify(payload)}\n`, { mode: 0o600 });
+  writeJsonAtomic(file, payload, { mode: 0o600 });
 }
 
-function appendStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, content: string): void {
+function appendStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, content: string): BridgeRecord {
+  const payload = readStagedPayload(config, workspace, writeId);
   const file = stagedPayloadPath(config, workspace, writeId);
-  if (!fs.existsSync(file)) throw new Error(`No staged edit payload found for writeId ${writeId}. Start again with relai_edit stage='start'.`);
-  fs.appendFileSync(file, content, { encoding: "utf8" });
+  const chunk = Buffer.from(content, 'utf8');
+  const handle = fs.openSync(file, 'r+');
+  try {
+    let offset = 0;
+    while (offset < chunk.length) {
+      const written = fs.writeSync(handle, chunk, offset, chunk.length - offset, payload.bytes + offset);
+      if (!written) throw new Error('Staged append made no progress.');
+      offset += written;
+    }
+    fs.fsyncSync(handle);
+    const next = { ...payload, bytes: payload.bytes + chunk.length, chunkCount: payload.chunkCount + 1, updatedAt: new Date().toISOString() };
+    writeStagedMetadata(config, workspace, writeId, next);
+    return next;
+  } catch (error) {
+    // Metadata is the committed length. A failed append must be retryable without
+    // duplicating bytes; reopen performs the same repair after process death.
+    try {
+      const committed = JSON.parse(fs.readFileSync(stagedMetadataPath(config, workspace, writeId), 'utf8'));
+      if (Number.isInteger(committed.bytes) && committed.bytes >= payload.bytes) {
+        fs.ftruncateSync(handle, committed.bytes);
+        fs.fsyncSync(handle);
+      }
+    } catch {}
+    throw error;
+  } finally {
+    fs.closeSync(handle);
+  }
 }
 
 function readStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string): BridgeRecord {
@@ -1083,6 +1108,12 @@ function readStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, wri
   if (payload.workspace !== workspace.alias || payload.root !== workspace.path) throw new Error("Staged edit payload belongs to a different workspace.");
   if (!Number.isInteger(payload.chunkCount) || payload.chunkCount < 1 || !Number.isInteger(payload.bytes) || payload.bytes < 0) {
     throw new Error(`Staged edit payload metadata is invalid for writeId ${writeId}. Abort it and start again.`);
+  }
+  const size = fs.statSync(payloadFile).size;
+  if (size < payload.bytes) throw new Error(`Staged edit payload size mismatch for writeId ${writeId}. Abort it and start again.`);
+  if (size > payload.bytes) {
+    const handle = fs.openSync(payloadFile, 'r+');
+    try { fs.ftruncateSync(handle, payload.bytes); fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
   }
   return payload;
 }
@@ -1210,4 +1241,4 @@ function sha256Text(text: string): string {
   return crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
 }
 
-export { repoSnapshot, relaiReadAsync, workspaceWrite, workspaceReplace, relaiApplyPatch, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr, normalizeOpenAIPatchFormat, classifyStatusOwnership, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD, createStagedPayload, appendStagedPayload, writeStagedMetadata, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, workspaceTidyPlan, relaiWorkspaceTidyRun as workspaceTidyRun };
+export { repoSnapshot, relaiReadAsync, workspaceWrite, workspaceReplace, relaiApplyPatch, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr, normalizeOpenAIPatchFormat, classifyStatusOwnership, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD, createStagedPayload, appendStagedPayload, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, workspaceTidyPlan, relaiWorkspaceTidyRun as workspaceTidyRun };

@@ -68,6 +68,7 @@ export function activeTaskList(activity = {}) {
 export function overviewWorkspaceStatus(workspace = {}, findings = []) {
   const alias = String(workspace.alias || '');
   if (alias && findings.some(finding => finding?.workspace === alias && finding?.severity === 'error')) return 'needs attention';
+  if (workspace.operational?.mutationBlock?.blocked) return 'needs attention';
   if (workspace.operational?.exists === false) return 'unavailable';
   if (workspace.operational?.currentActivity || workspace.sessionPolicy?.sessionActive) return 'active';
   return 'ready';

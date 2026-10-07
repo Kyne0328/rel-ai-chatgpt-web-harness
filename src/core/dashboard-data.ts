@@ -159,7 +159,7 @@ function buildDashboardTaskDelta(
   }
   return {
     taskActivity: liveTaskActivityDelta(latest),
-    taskUpdates: [...taskUpdates.values()].map(item => summarizeDashboardTask(item.task)),
+    taskUpdates: [...taskUpdates.values()].map(item => ({ ...summarizeDashboardTask(item.task), changeRevision: item.revision })),
     activityEntries: [...activityEntries.values()].sort((left, right) => eventTimestampMs(left) - eventTimestampMs(right))
   };
 }

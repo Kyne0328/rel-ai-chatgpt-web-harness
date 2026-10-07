@@ -6,13 +6,17 @@ import { execFileSync } from 'node:child_process';
 
 import { relaiGitCommit } from "../src/repo/gitOps.js";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-sensitive-auth-'));
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-sensitive-auth-'));
+const root = path.join(temp, 'repo');
+fs.mkdirSync(root);
 const git = (args) => execFileSync('git', args, { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
 const workspace = { alias: 'repo', path: root };
-const config = { stateDir: path.join(root, '.state') };
+// Runtime receipts belong outside the worktree under test; otherwise a later
+// addAll correctly refuses the newly created opaque state directory first.
+const config = { stateDir: path.join(temp, 'state') };
 const removeRoot = () => {
   try {
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   } catch (error) {
     if (process.platform !== 'win32' || !['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
   }
@@ -24,6 +28,14 @@ try {
   fs.writeFileSync(path.join(root, 'README.md'), 'base\n');
   git(['add', 'README.md']);
   git(['commit', '-m', 'base']);
+  const originalHead = git(['rev-parse', 'HEAD']);
+  const indexPath = path.join(root, '.git', 'index');
+  const originalIndex = fs.readFileSync(indexPath);
+  const assertRefusalPreservedRepository = () => {
+    assert.deepEqual(git(['rev-parse', 'HEAD']), originalHead);
+    assert.deepEqual(fs.readFileSync(indexPath), originalIndex);
+    assert.equal(fs.existsSync(indexPath + '.lock'), false);
+  };
 
   fs.writeFileSync(path.join(root, '.env'), 'TOKEN=secret\n');
   fs.writeFileSync(path.join(root, '.npmrc'), '//registry.example/:_authToken=secret\n');
@@ -31,6 +43,7 @@ try {
   const noScope = await relaiGitCommit(workspace, config, { message: 'blocked', addAll: true });
   assert.equal(noScope.ok, false);
   assert.deepEqual(noScope.unauthorizedSecretPaths.sort(), ['.env', '.npmrc']);
+  assertRefusalPreservedRepository();
 
   const partial = await relaiGitCommit(workspace, config, {
     message: 'partial',
@@ -40,6 +53,7 @@ try {
   assert.equal(partial.ok, false);
   assert.deepEqual(partial.unauthorizedSecretPaths, ['.npmrc']);
   assert.equal(partial.indexRestored, true);
+  assertRefusalPreservedRepository();
 
   const dryRun = await relaiGitCommit(workspace, config, {
     message: 'planned',
@@ -70,14 +84,14 @@ try {
     /(blocked sensitive path|explicit sensitive authorization|required sensitive authorization)/i
   );
 
-  assert.rejects(
+  await assert.rejects(
     () => relaiGitCommit(workspace, config, {
       message: 'bad operation',
       sensitiveAuthorization: { operation: 'write', paths: ['.env'], reason: 'wrong scope' }
     }),
     /operation must be 'commit'/
   );
-  assert.rejects(
+  await assert.rejects(
     () => relaiGitCommit(workspace, config, {
       message: 'ordinary path',
       sensitiveAuthorization: { operation: 'commit', paths: ['README.md'], reason: 'not sensitive' }

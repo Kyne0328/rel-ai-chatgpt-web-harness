@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { isInternalReadOnlyProcessOutcome } from '../process.ts';
 import { createOperationTimeline } from '../operationTimeline.js';
 import { principalFingerprint, principalForContext, principalKind } from '../mcp/principal.ts';
 import { PRINCIPAL_KIND } from '../mcp/contracts.ts';
@@ -11,9 +12,8 @@ import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/f
 import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
 import { claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths } from '../taskIntegrity.ts';
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
-import { blockWorkspaceMutations, runWorkspaceOperation } from '../workspaceOperationQueue.js';
-import { isProcessTreeAlive } from '../process.ts';
-import { listMutationProcessRecords, removeMutationProcessRecord, runWithMutationProcessOwnership } from '../mutationProcessOwnership.js';
+import { bindWorkspaceOperationIdentity, blockWorkspaceMutations, runWorkspaceOperation } from '../workspaceOperationQueue.js';
+import { listMutationProcessRecords, runWithMutationProcessOwnership } from '../mutationProcessOwnership.js';
 import { recoverStructuredPatchTransaction } from '../structuredPatchTransaction.js';
 import {
   measurePerformancePhase,
@@ -51,6 +51,14 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
         && fallbackExecutionsStatus(backgroundReference, { config, workId: taskId }).some(record => record.status === 'running'));
       const workspace = workspaceOverride || (effectiveArgs?.workspace ? resolveWorkspace(config, effectiveArgs.workspace) : null);
       const directFilesystem = workspace?.directFilesystem === true;
+      if (workspace && !directFilesystem) {
+        // Register every configured alias before the first lock is acquired so
+        // duplicate roots cannot temporarily create independent authority lanes.
+        for (const [alias, entry] of Object.entries(config.workspaces || {})) {
+          if (entry?.path) bindWorkspaceOperationIdentity(alias, entry.path);
+        }
+        bindWorkspaceOperationIdentity(workspace.alias, workspace.path);
+      }
       const branchChange = isExplicitBranchChange(executionName, effectiveArgs);
       const readOnlyExec = executionName === OP.EXEC && isClearlyReadOnlyExec(effectiveArgs);
       const queueMode = queueModeFor(executionName, definition, readOnlyExec);
@@ -160,7 +168,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           );
           try {
             if (workspace && !directFilesystem && isMutationScope(queueScope)) {
-              assertNoRecoveredMutationProcess(config, workspace.alias);
+              assertNoRecoveredMutationProcess(config, workspace.alias, workspace.path);
               recoverStructuredPatchTransaction(config, workspace);
             }
             if (taskId && workspace && !directFilesystem && taskBaselineRequired(executionName, queueScope)) {
@@ -184,7 +192,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
               () => maybeStartSession(config, executionName, effectiveArgs || {}, { taskId })
             );
             const handled = await (workspace && !directFilesystem && isMutationScope(queueScope)
-              ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal))
+              ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal), workspace.path)
               : invokeHandler(effectiveArgs, watchdog.signal));
             if (workspace && isMutationScope(queueScope) && hasUnconfirmedTermination(handled)) {
               blockWorkspaceMutations(workspace.alias, 'A mutating subprocess was cancelled or timed out, but Rel.AI could not confirm that its process tree exited.');
@@ -195,6 +203,11 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
               ...performanceTimingAttributes()
             });
             return handled;
+          } catch (error) {
+            if (workspace && isMutationScope(queueScope) && error?.terminationConfirmed === false && !isInternalReadOnlyProcessOutcome(error)) {
+              blockWorkspaceMutations(workspace.alias, 'A mutating subprocess failed and process-tree termination remains unconfirmed.');
+            }
+            throw error;
           } finally {
             watchdog.dispose();
           }
@@ -243,15 +256,31 @@ function isMutationScope(scope) {
   return scope === 'mutation' || scope === 'workspace';
 }
 
-function assertNoRecoveredMutationProcess(config, workspace) {
-  for (const record of listMutationProcessRecords(config, workspace)) {
+function assertNoRecoveredMutationProcess(config, workspace, workspacePath = '') {
+  for (const record of listMutationProcessRecords(config, workspace, workspacePath)) {
+    if (record.incomplete === true) {
+      const error = new Error('Mutation recovery inventory exceeded its bounded limit; ownership remains incomplete and mutations are blocked until the outstanding state is reviewed.');
+      error.code = 'WORKSPACE_MUTATION_RECOVERY_INCOMPLETE';
+      error.retryable = false;
+      error.executed = false;
+      error.terminationCertainty = 'unconfirmed';
+      throw error;
+    }
     if (record.invalid === true) {
       const error = new Error(`Workspace '${workspace}' has invalid recovered mutation ownership state. Remove the invalid state only after confirming no stale mutating process is running.`);
       error.code = 'WORKSPACE_MUTATION_RECOVERY_STATE_INVALID';
       error.retryable = false;
       throw error;
     }
-    if (record.terminationUncertain === true) {
+    if (record.legacyAuthorityUnknown === true) {
+      const error = new Error('Legacy mutation ownership lacks a verified physical workspace identity. Existing unbound recovery state must be reviewed before another workspace mutation.');
+      error.code = 'WORKSPACE_MUTATION_LEGACY_AUTHORITY_UNCERTAIN';
+      error.retryable = false;
+      error.executed = false;
+      error.terminationCertainty = 'unconfirmed';
+      throw error;
+    }
+    if (record) {
       const error = new Error(`Workspace '${workspace}' retains unconfirmed process-tree termination for PID ${record.pid}. Restart or root-PID disappearance cannot clear this uncertainty. An operator must verify that relevant descendants have stopped before using the existing recovery-record cleanup procedure.`);
       error.code = 'WORKSPACE_MUTATION_TERMINATION_UNCERTAIN';
       error.retryable = false;
@@ -260,14 +289,6 @@ function assertNoRecoveredMutationProcess(config, workspace) {
       error.terminationCertainty = 'unconfirmed';
       throw error;
     }
-    if (isProcessTreeAlive(record.pid)) {
-      const error = new Error(`Workspace '${workspace}' still has a mutating process from a previous or interrupted operation (PID ${record.pid}). Wait for it to exit or stop it before starting another mutation.`);
-      error.code = 'WORKSPACE_MUTATION_RECOVERY_PENDING';
-      error.retryable = true;
-      error.pid = record.pid;
-      throw error;
-    }
-    removeMutationProcessRecord(record);
   }
 }
 
@@ -328,8 +349,8 @@ function createMutationWatchdog(scope, executionName, args, callerSignal, worksp
 }
 
 function hasUnconfirmedTermination(value, depth = 0) {
-  if (!value || typeof value !== 'object' || depth > 5) return false;
-  if (value.terminationConfirmed === false && (value.cancelled === true || value.timedOut === true)) return true;
+  if (!value || typeof value !== 'object' || depth > 5 || isInternalReadOnlyProcessOutcome(value)) return false;
+  if (value.terminationConfirmed === false) return true;
   if (Array.isArray(value)) return value.slice(0, 100).some(item => hasUnconfirmedTermination(item, depth + 1));
   for (const item of Object.values(value)) {
     if (hasUnconfirmedTermination(item, depth + 1)) return true;

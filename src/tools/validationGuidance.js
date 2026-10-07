@@ -6,6 +6,7 @@ function toolArgumentError({ publicTool, action = '', fields = [], required = []
   const validationIssues = issues.slice(0, 8).map(issue => ({ field: issue.field || issuePath(issue.path) || sdkIssueField(issue.message, properties) || '<root>', action, message: String(issue.message || 'Invalid value.') }));
   const error = new Error(message || `Invalid arguments for ${publicTool}${action ? ` action ${action}` : ''}: ${validationIssues.map(issue => `${issue.field}: ${issue.message}`).join('; ')}`);
   error.code = 'INVALID_TOOL_ARGUMENTS';
+  error.publicTool = publicTool;
   error.retryable = true;
   error.validation = {
     action, issues: validationIssues, allowedFields: fields, requiredFields: required,

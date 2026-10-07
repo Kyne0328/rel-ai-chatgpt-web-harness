@@ -2,6 +2,7 @@
 // Keep renderer safety and composition regressions here rather than duplicating their source spelling.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import vm from 'node:vm';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -73,10 +74,83 @@ assert.doesNotMatch(statusJs, /currentStatus\.mcpUrl|approval token|ngrok|gatewa
 
 assert.match(preload, /return \(\) => ipcRenderer\.removeListener\(channel, listener\)/);
 assert.doesNotMatch(preload, /removeAllListeners/);
-assert.match(settingsReact, /saved key is encrypted on this computer\. Rel\.AI does not show it again/i);
-assert.match(settingsReact, /replacementKeyPresent: Boolean\(String\(value\?\.tunnelApiKey \|\| ''\)\.trim\(\)\)/, 'React dirty-state tracking may record only whether a replacement key is present');
-assert.doesNotMatch(settingsReact, /replacementKey:\s*String\(value\?\.tunnelApiKey/, 'React dirty-state snapshots must not serialize the runtime API key');
-assert.match(settingsReact, /same local Rel\.AI service and the same configured workspaces/);
+
+// Exercise the current renderer callbacks. Saved credentials are represented by
+// metadata; Show/Hide may reveal a replacement being typed, never a saved key.
+async function assertTunnelCredentialRendering() {
+  const states = [];
+  let stateIndex = 0;
+  const saves = [];
+  const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) });
+  const context = {
+    h, React: { Fragment: 'Fragment' }, SettingsField: 'SettingsField', StatusPill: 'StatusPill',
+    useState(initial) {
+      const index = stateIndex++;
+      if (!(index in states)) states[index] = initial;
+      return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }];
+    },
+    useRef: value => ({ current: value }), useEffect: () => {},
+    tunnelRuntimeView: () => ({ label: 'Connected', tone: 'success', status: 'available' }),
+    requestDashboardRefresh: () => {}, toast: () => {},
+    messageOf: error => error.message,
+    confirmAction: async () => false
+  };
+  const definition = (name, next) => {
+    const start = settingsReact.indexOf('function ' + name + '(');
+    const end = settingsReact.indexOf('\nfunction ' + next + '(', start);
+    assert.ok(start >= 0 && end > start, 'Missing renderer function boundary: ' + name);
+    return settingsReact.slice(start, end);
+  };
+  vm.runInNewContext([
+    definition('TunnelConnections', 'validateAdditionalTunnel'),
+    definition('validateAdditionalTunnel', 'tunnelConnectionStatusSummary'),
+    definition('tunnelConnectionStatusSummary', 'connectionSnapshot'),
+    definition('connectionSnapshot', 'tunnelCredentialError'),
+    'globalThis.renderConnections = TunnelConnections; globalThis.snapshot = connectionSnapshot;'
+  ].join('\n'), context);
+  const props = {
+    connections: [{ label: 'Fixture account', tunnelId: 'tunnel_fixture1234', apiKeyConfigured: true,
+      apiKey: 'synthetic-saved-key-must-not-display' }],
+    desktop: { saveTunnel: async args => { saves.push(args); return { ok: true }; } }
+  };
+  const render = () => { stateIndex = 0; return context.renderConnections(props); };
+  const allNodes = value => !value || typeof value !== 'object' ? []
+    : [value, ...(value.children || []).flatMap(allNodes)];
+  const button = (tree, label) => allNodes(tree).find(node => node.type === 'button' && node.children.includes(label));
+  const keyInput = tree => allNodes(tree).find(node => node.props.id === 'additionalTunnelApiKey');
+  let tree = render();
+  assert.match(JSON.stringify(tree), /All tunnels connect to this computer’s projects/, 'Multi-account copy must explain the shared local projects');
+  button(tree, 'Edit').props.onClick();
+  tree = render();
+  assert.equal(keyInput(tree).props.type, 'password');
+  assert.equal(keyInput(tree).props.value, '', 'Editing a configured connection must not hydrate the saved key');
+  assert.match(keyInput(tree).props.placeholder, /Saved securely.*replace/i);
+  const keyField = allNodes(tree).find(node => node.props.inputId === 'additionalTunnelApiKey');
+  assert.match(keyField.props.help, /runtime key.*encrypted on this computer/i);
+  button(tree, 'Show').props.onClick();
+  tree = render();
+  assert.equal(keyInput(tree).props.type, 'text');
+  assert.equal(keyInput(tree).props.value, '', 'Reveal must not recover a previously saved key');
+  keyInput(tree).props.onChange({ currentTarget: { value: 'synthetic-replacement-key' } });
+  tree = render();
+  assert.equal(keyInput(tree).props.value, 'synthetic-replacement-key', 'Show can display only the replacement being edited');
+  assert.doesNotMatch(JSON.stringify(tree), /synthetic-saved-key-must-not-display/);
+  const snapshot = context.snapshot({ port: 3333, tunnelApiKey: 'synthetic-replacement-key', apiKey: 'synthetic-saved-key-must-not-display', tunnelApiKeyConfigured: true });
+  assert.equal(snapshot, JSON.stringify({ port: 3333 }), 'Local-setting dirty state must contain only the non-secret port');
+  button(tree, 'Hide').props.onClick();
+  tree = render();
+  assert.equal(keyInput(tree).props.type, 'password');
+  button(tree, 'Add ChatGPT tunnel').props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].apiKey, 'synthetic-replacement-key');
+  assert.equal(saves[0].originalTunnelId, 'tunnel_fixture1234');
+  tree = render();
+  assert.equal(keyInput(tree), undefined, 'A successful save must close the credential editor');
+  assert.doesNotMatch(JSON.stringify(states), /synthetic-replacement-key|synthetic-saved-key-must-not-display/, 'Saved replacement text must be cleared from renderer state');
+}
+await assertTunnelCredentialRendering();
+
 assert.match(settingsReact, /'aria-invalid': validation\?\.field === 'tunnelId'/);
 assert.doesNotMatch(settingsReact, /if \(issue\) return toast\(/, 'connection validation must stay beside the owning field');
 

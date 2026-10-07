@@ -21,6 +21,10 @@ for (let index = 0; index < 5; index += 1) {
   assert.equal(observeRepeatCall({ connector: true, taskId: 'task-1', operationName: OP.WORK_CANCEL, args: { work_id: 'task-1', reason: 'cancel' } }), null, 'idempotent cancellation retries must never warn');
 }
 assert.equal(observeRepeatCall({ ...base, connector: false }), null, 'non-connector internal calls must not participate in the MCP repeat guard');
+for (let index = 0; index < 10; index++) {
+  assert.equal(observeRepeatCall({ ...base, operationName: OP.SNAPSHOT, progress: true }), null, 'resumable snapshot pages must not advise reusing an incomplete result');
+}
+assert.equal(observeRepeatCall({ ...base, operationName: OP.SNAPSHOT }), null, 'completed paging starts a fresh repeat streak');
 
 resetRepeatCallGuard();
 console.log('Exact repeat call advisory guard tests passed.');

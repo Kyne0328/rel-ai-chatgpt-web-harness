@@ -18,7 +18,8 @@ import {
 import {
   createMidsceneComputerAdapter,
   type ComputerAdapter,
-  type ComputerImage,
+  type ComputerAppImage,
+  type ComputerPixelProvenance,
   type ComputerPoint,
   type ScrollDirection
 } from './computer/midsceneAdapter.ts';
@@ -34,6 +35,8 @@ import {
   type SemanticPerception,
   type SemanticTarget
 } from './computer/windowsUiaAdapter.ts';
+import { appCaptureUnavailable, appInputTargetUnverified, validateAppImage, validateAppPixelProvenance } from './computer/appCapture.ts';
+import { isResolvedAppApproved, type ResolvedAppTarget } from './computer/appTarget.ts';
 import { principalFingerprint } from './mcp/principal.ts';
 
 const COMPUTER_ACTIONS = new Set([
@@ -75,6 +78,8 @@ type ComputerWorkspace = Readonly<{ alias: string }>;
 type ComputerArgs = Readonly<Record<string, unknown> & {
   action?: unknown;
   displayId?: unknown;
+  windowTitle?: unknown;
+  windowId?: unknown;
   app?: unknown;
   x?: unknown;
   y?: unknown;
@@ -106,6 +111,9 @@ type ComputerObservationRecord = Readonly<{
   displayId?: string;
   sourceSha256: string;
   sourceWidth: number;
+  originX: number;
+  originY: number;
+  capture: ComputerPixelProvenance;
   sourceHeight: number;
   imageWidth: number;
   imageHeight: number;
@@ -120,6 +128,7 @@ type SemanticObservationRecord = Readonly<{
   perception: SemanticPerception;
   fingerprint: string;
   targets: readonly SemanticTarget[];
+  appTarget?: ResolvedAppTarget;
   capturedAt: number;
 }>;
 type ComputerSessionLock = { holder: string; app: string | null; since: string; lastActive: number };
@@ -134,6 +143,48 @@ type ComputerContext = Readonly<{
   taskId?: unknown;
   principal?: unknown;
 }>;
+
+
+const appTargetBindings = new Map<string, ResolvedAppTarget>();
+
+async function authorizeResolvedApp(
+  semanticAdapter: ComputerSemanticAdapter, app: string, config: ComputerControlConfig | null | undefined,
+  args: ComputerArgs, sessionId: string, action: string, signal?: AbortSignal
+): Promise<ResolvedAppTarget | undefined> {
+  if (typeof semanticAdapter.resolveAppTarget !== 'function' || !semanticAdapter.supported()) {
+    assertComputerAppApproved(app, config, sessionId);
+    assertComputerTierAllowed(app, action);
+    return undefined;
+  }
+  const bindingKey = [sessionId, app, String(args.windowId || ''), String(args.windowTitle || '')].join('\u0000');
+  const observed = args.observationId ? requireComputerObservation(args.observationId, sessionId, app).capture.targetIdentity : undefined;
+  const semantic = args.semanticObservationId ? requireSemanticObservation(args.semanticObservationId, sessionId, app).appTarget : undefined;
+  const target = observed || semantic || await semanticAdapter.resolveAppTarget(app, {
+    ...(appTargetBindings.has(bindingKey) ? { binding: appTargetBindings.get(bindingKey)! } : {}),
+    ...(args.windowId ? { windowId: String(args.windowId) } : {}),
+    ...(args.windowTitle ? { windowTitle: String(args.windowTitle) } : {}),
+    ...(args.displayId ? { displayId: String(args.displayId) } : {}),
+    approvedApps: listComputerApprovedApps(config, sessionId)
+  }, signal);
+  signal?.throwIfAborted?.();
+  const approved = listComputerApprovedApps(config, sessionId);
+  if (target.approvalBasis === 'title') {
+    // Captions select an already approved identity; they never grant one.
+    if (!isResolvedAppApproved(target, approved)) assertComputerAppApproved(target.canonicalApp, config, sessionId);
+  } else if (!approved.includes(app) && !isResolvedAppApproved(target, approved)) {
+    assertComputerAppApproved(app, config, sessionId);
+  }
+  assertComputerTierAllowed(app, action);
+  for (const name of target.policyNames) assertComputerTierAllowed(name, action);
+  appTargetBindings.set(bindingKey, target);
+  if (appTargetBindings.size > MAX_OBSERVATIONS) appTargetBindings.delete(appTargetBindings.keys().next().value!);
+  return target;
+}
+
+function resolvedAppTier(app: string, target?: ResolvedAppTarget): ReturnType<typeof tierForComputerApp> {
+  const tiers = [app, ...(target?.policyNames || [])].map(tierForComputerApp);
+  return tiers.includes('read') ? 'read' : tiers.includes('click') ? 'click' : 'full';
+}
 
 async function readComputerStatus(
   config: ComputerControlConfig | null | undefined,
@@ -209,12 +260,14 @@ async function runComputerAction(
   }
   if (action === 'revoke_app') {
     const app = revokeComputerApp(args.app, sessionId);
+    for (const key of appTargetBindings.keys()) if (key.startsWith(`${sessionId}\u0000${app}\u0000`)) appTargetBindings.delete(key);
     return baseResult(workspace, action, { app, approved: false, approvedApps: listComputerApprovedApps(config, sessionId) });
   }
   if (action === 'stop') {
     const released = releaseComputerLock(sessionId);
     displaySizeCache.clear();
     clearSessionObservations(sessionId);
+    for (const key of appTargetBindings.keys()) if (key.startsWith(`${sessionId}\u0000`)) appTargetBindings.delete(key);
     return baseResult(workspace, action, { executed: true, released, controlling: false });
   }
   if (action === 'displays') {
@@ -227,26 +280,25 @@ async function runComputerAction(
   if (action === 'screenshot') {
     const displayId = optionalDisplayId(args.displayId);
     const app = requiredComputerApp(args.app);
-    assertComputerAppApproved(app, config, sessionId);
-    assertComputerTierAllowed(app, 'screenshot');
-    const observation = await captureComputerObservation(adapter, sessionId, app, displayId, args);
+    const appTarget = await authorizeResolvedApp(semanticAdapter, app, config, args, sessionId, 'screenshot', context.signal);
+    const observation = await captureComputerObservation(adapter, sessionId, app, displayId, args, appTarget, context.signal);
     return baseResult(workspace, action, {
       ...(displayId ? { displayId } : {}),
       app,
-      tier: tierForComputerApp(app),
+      tier: resolvedAppTier(app, appTarget),
       ...observation,
-      engine: adapter.engine || '@midscene/computer'
+      engine: String(observation.captureEngine || adapter.engine || '@midscene/computer')
     });
   }
   if (action === 'wait_for_change') {
     return queueInput(
-      () => executeWaitForChange(adapter, workspace, config, args, sessionId, context.signal),
+      () => executeWaitForChange(adapter, semanticAdapter, workspace, config, args, sessionId, context.signal),
       context.signal
     );
   }
   if (action === 'wait_for_stable') {
     return queueInput(
-      () => executeWaitForStable(adapter, workspace, config, args, sessionId, context.signal),
+      () => executeWaitForStable(adapter, semanticAdapter, workspace, config, args, sessionId, context.signal),
       context.signal
     );
   }
@@ -272,8 +324,7 @@ async function executeInputAction(
 ): Promise<ComputerControlResultDto> {
   const app = requiredComputerApp((args as Record<string, unknown>).app);
   const displayId = resolveInputDisplayId(sessionId, app, args.displayId, args.observationId);
-  assertComputerAppApproved(app, config, sessionId);
-  assertComputerTierAllowed(app, action);
+  const appTarget = await authorizeResolvedApp(semanticAdapter, app, config, args, sessionId, action, signal);
   acquireComputerLock(sessionId, app);
 
   if (action === 'activate') {
@@ -287,7 +338,7 @@ async function executeInputAction(
     let semanticMethod = '';
     let handled = false;
     if (typeof semanticAdapter.activate === 'function') {
-      const activation = await semanticAdapter.activate(app, original, stored.maxElements, stored.perception, signal);
+      const activation = await semanticAdapter.activate(app, original, stored.maxElements, stored.perception, signal, appTarget);
       if (!activation.available || !activation.target) {
         throw new Error(activation.reason || `Semantic target '${targetId}' is stale or unavailable; take a new relai_computer observe result and retry.`);
       }
@@ -295,7 +346,7 @@ async function executeInputAction(
       semanticMethod = activation.method || '';
       handled = activation.handled === true;
     } else {
-      const refreshed = await semanticAdapter.observe(app, stored.maxElements, stored.perception, signal);
+      const refreshed = await semanticAdapter.observe(app, stored.maxElements, stored.perception, signal, appTarget);
       if (!refreshed.available || !Array.isArray(refreshed.elements)) {
         throw new Error('Semantic target could not be revalidated; take a new relai_computer observe result and retry.');
       }
@@ -310,7 +361,7 @@ async function executeInputAction(
       return baseResult(workspace, action, {
         executed: true,
         app,
-        tier: tierForComputerApp(app),
+        tier: resolvedAppTier(app, appTarget),
         semanticObservationId,
         targetId,
         displayId: current.displayId,
@@ -333,7 +384,7 @@ async function executeInputAction(
     return baseResult(workspace, action, {
       executed: true,
       app,
-      tier: tierForComputerApp(app),
+      tier: resolvedAppTier(app, appTarget),
       semanticObservationId,
       targetId,
       displayId: current.displayId,
@@ -356,7 +407,7 @@ async function executeInputAction(
       throw new Error('Native semantic value setting is unavailable; use click/type for this application instead.');
     }
     signal?.throwIfAborted?.();
-    const result = await semanticAdapter.setValue(app, original, text, stored.maxElements, signal);
+    const result = await semanticAdapter.setValue(app, original, text, stored.maxElements, signal, appTarget);
     if (!result.available || !result.target) {
       throw new Error(result.reason || `Semantic target '${targetId}' is stale or unavailable; take a new relai_computer observe result and retry.`);
     }
@@ -368,7 +419,7 @@ async function executeInputAction(
     return baseResult(workspace, action, {
       executed: true,
       app,
-      tier: tierForComputerApp(app),
+      tier: resolvedAppTier(app, appTarget),
       semanticObservationId,
       targetId,
       displayId: result.target.displayId,
@@ -381,13 +432,14 @@ async function executeInputAction(
 
   const appFields = {
     app,
-    tier: tierForComputerApp(app),
+    tier: resolvedAppTier(app, appTarget),
     ...(optionalObservationId(args.observationId) ? { observationId: optionalObservationId(args.observationId) } : {}),
     ...(warningForComputerApp(app) ? { warning: warningForComputerApp(app) } : {})
   };
 
   if (action === 'move' || action === 'click' || action === 'double_click' || action === 'right_click') {
     const point = await resolveDisplayPoint(adapter, displayId, args.x, args.y, 'x/y', sessionId, args.observationId, app);
+    await assertObservationInputTarget(adapter, sessionId, app, displayId, args.observationId, [point], false, signal);
     if (action === 'move') await adapter.move(displayId, point);
     else if (action === 'click') await adapter.click(displayId, point);
     else if (action === 'double_click') await adapter.doubleClick(displayId, point);
@@ -399,6 +451,7 @@ async function executeInputAction(
   if (action === 'drag') {
     const from = await resolveDisplayPoint(adapter, displayId, args.x, args.y, 'x/y', sessionId, args.observationId, app);
     const to = await resolveDisplayPoint(adapter, displayId, args.toX, args.toY, 'toX/toY', sessionId, args.observationId, app);
+    await assertObservationInputTarget(adapter, sessionId, app, displayId, args.observationId, [from, to], false, signal);
     await adapter.drag(displayId, from, to);
     touchComputerLock();
     return baseResult(workspace, action, {
@@ -415,6 +468,7 @@ async function executeInputAction(
       if (args.x === undefined || args.y === undefined) throw new Error('scroll requires both x and y when either coordinate is provided.');
       point = await resolveDisplayPoint(adapter, displayId, args.x, args.y, 'x/y', sessionId, args.observationId, app);
     }
+    await assertObservationInputTarget(adapter, sessionId, app, displayId, args.observationId, point ? [point] : [], false, signal);
     await adapter.scroll(displayId, { direction, distance, ...(point ? { point } : {}) });
     touchComputerLock();
     return baseResult(workspace, action, {
@@ -431,6 +485,7 @@ async function executeInputAction(
     if (!text) throw new Error('type requires non-empty text.');
     const textBytes = Buffer.byteLength(text, 'utf8');
     if (textBytes > MAX_TYPE_TEXT_BYTES) throw new Error(`type text exceeds the ${MAX_TYPE_TEXT_BYTES}-byte limit.`);
+    await assertObservationInputTarget(adapter, sessionId, app, displayId, args.observationId, [], true, signal);
     await adapter.typeText(text);
     touchComputerLock();
     return baseResult(workspace, action, { executed: true, textLength: text.length, ...appFields });
@@ -438,6 +493,7 @@ async function executeInputAction(
 
   if (action === 'key') {
     const key = normalizeKey(args.key);
+    await assertObservationInputTarget(adapter, sessionId, app, displayId, args.observationId, [], true, signal);
     await adapter.pressKey(key);
     touchComputerLock();
     return baseResult(workspace, action, { executed: true, key, ...appFields });
@@ -445,6 +501,7 @@ async function executeInputAction(
 
   if (action === 'hotkey') {
     const chord = normalizeHotkey(args.keys);
+    await assertObservationInputTarget(adapter, sessionId, app, displayId, args.observationId, [], true, signal);
     await adapter.pressKey(chord.keyName);
     touchComputerLock();
     return baseResult(workspace, action, { executed: true, key: chord.key, keys: chord.keys, ...appFields });
@@ -464,8 +521,7 @@ async function executeBatchAction(
   signal?: AbortSignal
 ): Promise<ComputerControlResultDto> {
   const parentApp = requiredComputerApp((parentArgs as Record<string, unknown>).app);
-  assertComputerAppApproved(parentApp, config, sessionId);
-  assertComputerTierAllowed(parentApp, 'batch');
+  const parentTarget = await authorizeResolvedApp(semanticAdapter, parentApp, config, parentArgs, sessionId, 'batch', signal);
   acquireComputerLock(sessionId, parentApp);
   const results: ComputerControlResultDto[] = [];
   let failed = false;
@@ -479,6 +535,8 @@ async function executeBatchAction(
       const stepArgs = {
         ...step,
         ...(parentApp && !step.app ? { app: parentApp } : {}),
+        ...(parentArgs.windowTitle && !step.windowTitle ? { windowTitle: parentArgs.windowTitle } : {}),
+        ...(parentArgs.windowId && !step.windowId ? { windowId: parentArgs.windowId } : {}),
         ...(parentArgs.observationId && !step.observationId ? { observationId: parentArgs.observationId } : {}),
         ...(parentArgs.profile && !step.profile ? { profile: parentArgs.profile } : {}),
         ...(parentArgs.semanticObservationId && !step.semanticObservationId ? { semanticObservationId: parentArgs.semanticObservationId } : {}),
@@ -499,20 +557,19 @@ async function executeBatchAction(
           const displays = await adapter.listDisplays();
           results.push(baseResult(workspace, stepAction, { displays, count: displays.length, engine: adapter.engine || '@midscene/computer' }));
         } else if (stepAction === 'wait_for_change') {
-          results.push(await executeWaitForChange(adapter, workspace, config, stepArgs, sessionId, signal));
+          results.push(await executeWaitForChange(adapter, semanticAdapter, workspace, config, stepArgs, sessionId, signal));
         } else if (stepAction === 'wait_for_stable') {
-          results.push(await executeWaitForStable(adapter, workspace, config, stepArgs, sessionId, signal));
+          results.push(await executeWaitForStable(adapter, semanticAdapter, workspace, config, stepArgs, sessionId, signal));
         } else {
           const stepApp = requiredComputerApp((stepArgs as Record<string, unknown>).app);
-          assertComputerAppApproved(stepApp, config, sessionId);
-          assertComputerTierAllowed(stepApp, stepAction);
-          const observation = await captureComputerObservation(adapter, sessionId, stepApp, displayId, stepArgs);
+          const stepTarget = await authorizeResolvedApp(semanticAdapter, stepApp, config, stepArgs, sessionId, stepAction, signal);
+          const observation = await captureComputerObservation(adapter, sessionId, stepApp, displayId, stepArgs, stepTarget, signal);
           results.push(baseResult(workspace, stepAction, {
             ...(displayId ? { displayId } : {}),
             app: stepApp,
-            tier: tierForComputerApp(stepApp),
+            tier: resolvedAppTier(stepApp, stepTarget),
             ...observation,
-            engine: adapter.engine || '@midscene/computer'
+            engine: String(observation.captureEngine || adapter.engine || '@midscene/computer')
           }));
         }
         touchComputerLock();
@@ -537,7 +594,7 @@ async function executeBatchAction(
     failed,
     results,
     app: parentApp,
-    tier: tierForComputerApp(parentApp)
+    tier: resolvedAppTier(parentApp, parentTarget)
   });
 }
 
@@ -551,21 +608,24 @@ async function executeObserve(
   signal?: AbortSignal
 ): Promise<ComputerControlResultDto> {
   const app = requiredComputerApp(args.app);
-  assertComputerAppApproved(app, config, sessionId);
-  assertComputerTierAllowed(app, 'observe');
+  const appTarget = await authorizeResolvedApp(semanticAdapter, app, config, args, sessionId, 'observe', signal);
   const maxElements = boundedInteger(args.maxElements, 1, 300, DEFAULT_SEMANTIC_ELEMENTS, 'maxElements');
   const perception = normalizeSemanticPerception(args.perception);
   try {
-    const semantic = await semanticAdapter.observe(app, maxElements, perception, signal);
+    const semantic = await semanticAdapter.observe(app, maxElements, perception, signal, appTarget);
     signal?.throwIfAborted?.();
     if (semantic.available === true && Array.isArray(semantic.elements) && semantic.elements.length > 0) {
-      const remembered = rememberSemanticObservation(sessionId, app, maxElements, perception, semantic.elements);
+      const capture = semantic.elements.some(target => target.source === 'ocr')
+        ? validateAppPixelProvenance(semantic.pixelProvenance, app, semantic.window?.displayId)
+        : null;
+      const remembered = rememberSemanticObservation(sessionId, app, maxElements, perception, semantic.elements, appTarget);
       return baseResult(workspace, 'observe', {
         app,
-        tier: tierForComputerApp(app),
+        tier: resolvedAppTier(app, appTarget),
         perception: semantic.perception || perception,
         semanticAvailable: true,
         semanticObservationId: remembered.id,
+        ...(capture ? { capture } : {}),
         changed: remembered.changed,
         count: semantic.elements.length,
         ...(semantic.ocrAvailable !== undefined ? { ocrAvailable: semantic.ocrAvailable } : {}),
@@ -579,32 +639,33 @@ async function executeObserve(
       });
     }
     const displayId = optionalDisplayId(args.displayId);
-    const fallback = await captureComputerObservation(adapter, sessionId, app, displayId, args);
+    const fallback = await captureComputerObservation(adapter, sessionId, app, displayId, args, appTarget, signal);
     return baseResult(workspace, 'observe', {
       ...(displayId ? { displayId } : {}),
       app,
-      tier: tierForComputerApp(app),
+      tier: resolvedAppTier(app, appTarget),
       perception,
       semanticAvailable: false,
       semanticReason: semantic.reason || 'Structured desktop controls were unavailable; returned a visual observation instead.',
       ...(semantic.ocrAvailable !== undefined ? { ocrAvailable: semantic.ocrAvailable } : {}),
       ...(semantic.ocrReason ? { ocrReason: semantic.ocrReason } : {}),
       ...fallback,
-      engine: adapter.engine || '@midscene/computer'
+      engine: String(fallback.captureEngine || adapter.engine || '@midscene/computer')
     });
   } catch (error) {
     signal?.throwIfAborted?.();
+    if ((error as { code?: string })?.code === 'COMPUTER_APP_CAPTURE_UNAVAILABLE') throw error;
     const displayId = optionalDisplayId(args.displayId);
-    const fallback = await captureComputerObservation(adapter, sessionId, app, displayId, args);
+    const fallback = await captureComputerObservation(adapter, sessionId, app, displayId, args, appTarget, signal);
     return baseResult(workspace, 'observe', {
       ...(displayId ? { displayId } : {}),
       app,
-      tier: tierForComputerApp(app),
+      tier: resolvedAppTier(app, appTarget),
       perception,
       semanticAvailable: false,
       semanticReason: `Structured desktop observation failed; returned a visual observation instead: ${errorMessage(error)}`,
       ...fallback,
-      engine: adapter.engine || '@midscene/computer'
+      engine: String(fallback.captureEngine || adapter.engine || '@midscene/computer')
     });
   }
 }
@@ -660,14 +721,37 @@ async function captureComputerObservation(
   sessionId: string,
   app: string,
   displayId: string | undefined,
-  args: ComputerArgs
+  args: ComputerArgs,
+  appTarget?: ResolvedAppTarget,
+  signal?: AbortSignal
 ): Promise<Record<string, unknown>> {
-  const image = await adapter.screenshot(displayId);
+  const image = await captureAppImage(adapter, app, displayId, appTarget, args, signal);
   return prepareObservationResult(image, sessionId, app, displayId, args.profile, args.forceImage === true, args.previousObservationId);
 }
 
+async function captureAppImage(adapter: ComputerAdapter, app: string, displayId?: string, appTarget?: ResolvedAppTarget, args: ComputerArgs = {}, signal?: AbortSignal): Promise<ComputerAppImage> {
+  if (typeof adapter.screenshotApp !== 'function') throw appCaptureUnavailable();
+  const requestedAt = Date.now();
+  try {
+    return validateAppImage(await adapter.screenshotApp(app, displayId, { fresh: true, ...(signal ? { signal } : {}), ...(appTarget ? { target: appTarget } : {}), ...(args.windowTitle ? { windowTitle: String(args.windowTitle) } : {}), ...(args.windowId ? { windowId: String(args.windowId) } : {}) }), app, displayId, requestedAt);
+  } catch (error) {
+    signal?.throwIfAborted?.();
+    const code = String((error as { code?: string })?.code || '');
+    if (/^COMPUTER_(APP_CAPTURE|APP_TARGET|APPROVAL|TIER|HELPER)_/.test(code)) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    if (/APP_CAPTURE_DENIED|WGC_DENIED/.test(detail)) throw appCaptureUnavailable('Windows denied capture of this app. Use supported semantic controls or browser tools; another pixel provider will not bypass this restriction.');
+    if (/APP_TARGET_STALE/.test(detail)) throw appCaptureUnavailable('The selected app window changed during capture. Select its current windowTitle/windowId and retry.');
+    throw appCaptureUnavailable('This app could not provide verified window pixels. Use an executable or product name (for example, notepad or Visual Studio Code), optionally select windowTitle/windowId, and restore minimized windows yourself. If pixels remain unavailable, use supported semantic controls or browser tools.');
+  }
+}
+
+function appImageSha256(source: ComputerAppImage): string {
+  const p = source.provenance;
+  return principalFingerprint(JSON.stringify([computerImageSha256(source), p.windowId, p.processId, p.processStartedAt, p.displayId, p.originX, p.originY, source.width, source.height]));
+}
+
 async function prepareObservationResult(
-  source: ComputerImage,
+  source: ComputerAppImage,
   sessionId: string,
   app: string,
   displayId: string | undefined,
@@ -677,8 +761,9 @@ async function prepareObservationResult(
 ): Promise<Record<string, unknown>> {
   pruneObservations();
   const profile = normalizeScreenshotProfile(profileValue);
-  const sourceSha256 = computerImageSha256(source);
+  const sourceSha256 = appImageSha256(source);
   const scope = observationScopeKey(sessionId, app, displayId);
+  displayId = source.provenance.displayId;
   const explicitPreviousId = optionalObservationId(previousObservationIdValue);
   const previous = explicitPreviousId
     ? requireComputerObservation(explicitPreviousId, sessionId, app, displayId)
@@ -686,12 +771,15 @@ async function prepareObservationResult(
   const observationId = observationIdFor(sessionId, app, displayId, sourceSha256, profile);
 
   if (!forceImage && previous && previous.sourceSha256 === sourceSha256 && previous.profile === profile) {
-    const record: ComputerObservationRecord = { ...previous, id: observationId, capturedAt: Date.now() };
+    const record: ComputerObservationRecord = { ...previous, id: observationId, capture: source.provenance, capturedAt: Date.now() };
     rememberObservation(scope, record);
     return {
       observationId,
       previousObservationId: previous.id,
       changed: false,
+      displayId,
+      capture: source.provenance,
+      captureEngine: source.provenance.method,
       profile
     };
   }
@@ -704,6 +792,9 @@ async function prepareObservationResult(
     ...(displayId ? { displayId } : {}),
     sourceSha256,
     sourceWidth: prepared.image.sourceWidth,
+    originX: source.provenance.originX,
+    originY: source.provenance.originY,
+    capture: source.provenance,
     sourceHeight: prepared.image.sourceHeight,
     imageWidth: prepared.image.width,
     imageHeight: prepared.image.height,
@@ -716,6 +807,9 @@ async function prepareObservationResult(
     observationId,
     ...(previous ? { previousObservationId: previous.id } : {}),
     changed,
+    displayId,
+    capture: source.provenance,
+      captureEngine: source.provenance.method,
     profile,
     image: prepared.image
   };
@@ -723,6 +817,7 @@ async function prepareObservationResult(
 
 async function executeWaitForChange(
   adapter: ComputerAdapter,
+  semanticAdapter: ComputerSemanticAdapter,
   workspace: ComputerWorkspace,
   config: ComputerControlConfig | null | undefined,
   args: ComputerArgs,
@@ -731,8 +826,7 @@ async function executeWaitForChange(
 ): Promise<ComputerControlResultDto> {
   const app = requiredComputerApp(args.app);
   const displayId = optionalDisplayId(args.displayId);
-  assertComputerAppApproved(app, config, sessionId);
-  assertComputerTierAllowed(app, 'wait_for_change');
+  const appTarget = await authorizeResolvedApp(semanticAdapter, app, config, args, sessionId, 'wait_for_change', signal);
   acquireComputerLock(sessionId, app);
 
   const timeoutMs = boundedInteger(args.timeoutMs, 100, 30_000, DEFAULT_CHANGE_TIMEOUT_MS, 'timeoutMs');
@@ -744,8 +838,8 @@ async function executeWaitForChange(
     : observationById(lastObservationByScope.get(scope));
   let baselineSha256 = previous?.sourceSha256;
   if (!baselineSha256) {
-    const baseline = await adapter.screenshot(displayId, { fresh: true });
-    baselineSha256 = computerImageSha256(baseline);
+    const baseline = await captureAppImage(adapter, app, displayId, appTarget, args, signal);
+    baselineSha256 = appImageSha256(baseline);
   }
 
   const startedAt = performance.now();
@@ -753,8 +847,8 @@ async function executeWaitForChange(
     signal?.throwIfAborted?.();
     const remaining = timeoutMs - (performance.now() - startedAt);
     await delay(Math.max(1, Math.min(pollMs, remaining)), undefined, signal ? { signal } : undefined);
-    const source = await adapter.screenshot(displayId, { fresh: true });
-    if (computerImageSha256(source) === baselineSha256) continue;
+    const source = await captureAppImage(adapter, app, displayId, appTarget, args, signal);
+    if (appImageSha256(source) === baselineSha256) continue;
     const observation = await prepareObservationResult(
       source,
       sessionId,
@@ -768,10 +862,10 @@ async function executeWaitForChange(
     return baseResult(workspace, 'wait_for_change', {
       ...(displayId ? { displayId } : {}),
       app,
-      tier: tierForComputerApp(app),
+      tier: resolvedAppTier(app, appTarget),
       durationMs: Math.round(performance.now() - startedAt),
       ...observation,
-      engine: adapter.engine || '@midscene/computer'
+      engine: String(observation.captureEngine || adapter.engine || '@midscene/computer')
     });
   }
   throw new Error(`Computer display did not change within ${timeoutMs}ms.`);
@@ -779,6 +873,7 @@ async function executeWaitForChange(
 
 async function executeWaitForStable(
   adapter: ComputerAdapter,
+  semanticAdapter: ComputerSemanticAdapter,
   workspace: ComputerWorkspace,
   config: ComputerControlConfig | null | undefined,
   args: ComputerArgs,
@@ -787,8 +882,7 @@ async function executeWaitForStable(
 ): Promise<ComputerControlResultDto> {
   const app = requiredComputerApp(args.app);
   const displayId = optionalDisplayId(args.displayId);
-  assertComputerAppApproved(app, config, sessionId);
-  assertComputerTierAllowed(app, 'wait_for_stable');
+  const appTarget = await authorizeResolvedApp(semanticAdapter, app, config, args, sessionId, 'wait_for_stable', signal);
   acquireComputerLock(sessionId, app);
 
   const timeoutMs = boundedInteger(args.timeoutMs, 100, 30_000, DEFAULT_CHANGE_TIMEOUT_MS, 'timeoutMs');
@@ -803,8 +897,8 @@ async function executeWaitForStable(
     ? requireComputerObservation(explicitPreviousId, sessionId, app, displayId)
     : observationById(lastObservationByScope.get(scope));
 
-  let source = await adapter.screenshot(displayId, { fresh: true });
-  let lastSha256 = computerImageSha256(source);
+  let source = await captureAppImage(adapter, app, displayId, appTarget, args, signal);
+  let lastSha256 = appImageSha256(source);
   let stableSince = performance.now();
   const startedAt = stableSince;
   while (true) {
@@ -824,20 +918,20 @@ async function executeWaitForStable(
       return baseResult(workspace, 'wait_for_stable', {
         ...(displayId ? { displayId } : {}),
         app,
-        tier: tierForComputerApp(app),
+        tier: resolvedAppTier(app, appTarget),
         stable: true,
         stableMs,
         durationMs: Math.round(now - startedAt),
         ...observation,
-        engine: adapter.engine || '@midscene/computer'
+        engine: String(observation.captureEngine || adapter.engine || '@midscene/computer')
       });
     }
     if (now - startedAt >= timeoutMs) break;
     const remaining = timeoutMs - (now - startedAt);
     const untilStable = stableMs - (now - stableSince);
     await delay(Math.max(1, Math.min(pollMs, remaining, untilStable)), undefined, signal ? { signal } : undefined);
-    source = await adapter.screenshot(displayId, { fresh: true });
-    const sha256 = computerImageSha256(source);
+    source = await captureAppImage(adapter, app, displayId, appTarget, args, signal);
+    const sha256 = appImageSha256(source);
     if (sha256 !== lastSha256) {
       lastSha256 = sha256;
       stableSince = performance.now();
@@ -931,6 +1025,28 @@ function optionalObservationId(value: unknown): string | undefined {
   return id || undefined;
 }
 
+
+async function assertObservationInputTarget(
+  adapter: ComputerAdapter, sessionId: string, app: string, displayId: string | undefined,
+  observationIdValue: unknown, points: readonly ComputerPoint[], requiresFocus: boolean, signal?: AbortSignal
+): Promise<void> {
+  const id = optionalObservationId(observationIdValue);
+  if (!id) return;
+  const observation = requireComputerObservation(id, sessionId, app, displayId);
+  if ((!requiresFocus && points.length === 0) || typeof adapter.assertAppInputTarget !== 'function') throw appInputTargetUnverified();
+  signal?.throwIfAborted?.();
+  try {
+    await adapter.assertAppInputTarget(app, {
+      provenance: observation.capture, width: observation.sourceWidth, height: observation.sourceHeight,
+      points, requiresFocus
+    });
+  } catch {
+    signal?.throwIfAborted?.();
+    throw appInputTargetUnverified();
+  }
+  signal?.throwIfAborted?.();
+}
+
 async function resolveDisplayPoint(
   adapter: ComputerAdapter,
   displayId: string | undefined,
@@ -952,8 +1068,8 @@ async function resolveDisplayPoint(
       { width: observation.imageWidth, height: observation.imageHeight }
     );
     return {
-      x: Math.min(observation.sourceWidth - 1, Math.floor(observed.x * observation.sourceWidth / observation.imageWidth)),
-      y: Math.min(observation.sourceHeight - 1, Math.floor(observed.y * observation.sourceHeight / observation.imageHeight))
+      x: observation.originX + Math.min(observation.sourceWidth - 1, Math.floor(observed.x * observation.sourceWidth / observation.imageWidth)),
+      y: observation.originY + Math.min(observation.sourceHeight - 1, Math.floor(observed.y * observation.sourceHeight / observation.imageHeight))
     };
   }
   const size = await cachedDisplaySize(adapter, displayId);
@@ -1001,21 +1117,23 @@ function rememberSemanticObservation(
   app: string,
   maxElements: number,
   perception: SemanticPerception,
-  targets: readonly SemanticTarget[]
+  targets: readonly SemanticTarget[],
+  appTarget?: ResolvedAppTarget
 ): { id: string; changed: boolean } {
   pruneSemanticObservations();
   const scope = `${sessionId}\u0000${app}`;
-  const fingerprint = principalFingerprint(JSON.stringify(targets.map(target => [
+  const fingerprint = principalFingerprint(JSON.stringify([appTarget?.windowId, appTarget?.processStartedAt, appTarget?.content?.processStartedAt, targets.map(target => [
     target.source, target.role, target.name, target.automationId, target.className, target.enabled,
     target.displayId, target.x, target.y, target.width, target.height, target.centerX, target.centerY,
     target.patterns || []
-  ])));
+  ])]));
   const previousId = lastSemanticObservationByScope.get(scope);
   const previous = previousId ? semanticObservations.get(previousId) : undefined;
   if (previous && previous.fingerprint === fingerprint && previous.maxElements === maxElements && previous.perception === perception) {
     semanticObservations.set(previous.id, Object.freeze({
       ...previous,
       targets: Object.freeze([...targets]),
+      ...(appTarget ? { appTarget } : {}),
       capturedAt: Date.now()
     }));
     return { id: previous.id, changed: false };
@@ -1029,6 +1147,7 @@ function rememberSemanticObservation(
     perception,
     fingerprint,
     targets: Object.freeze([...targets]),
+    ...(appTarget ? { appTarget } : {}),
     capturedAt: Date.now()
   }));
   lastSemanticObservationByScope.set(scope, id);
@@ -1097,11 +1216,25 @@ function requiredIdentifier(value: unknown, message: string): string {
 }
 
 function resolveAdapter(context: ComputerContext): ComputerAdapter {
-  return context.computerAdapter || defaultComputerAdapter;
+  if (context.computerAdapter) return context.computerAdapter;
+  return {
+    ...defaultComputerAdapter,
+    screenshotApp: (app, displayId, options) => defaultSemanticAdapter.screenshotApp!(app, displayId, options),
+    assertAppInputTarget: (app, target) => defaultSemanticAdapter.assertAppInputTarget!(app, target)
+  };
 }
 
 function resolveSemanticAdapter(context: ComputerContext): ComputerSemanticAdapter {
-  return context.semanticAdapter || defaultSemanticAdapter;
+  if (context.semanticAdapter) return context.semanticAdapter;
+  if (context.computerAdapter) return {
+    engine: 'injected-adapter-semantic-unavailable', supported: () => false,
+    warmup: async () => ({ supported: false, available: false, ocrAvailable: false }),
+    observe: async () => ({ supported: false, available: false, reason: 'No semantic adapter was supplied with this custom computer adapter.' }),
+    activate: async () => ({ supported: false, available: false, handled: false }),
+    setValue: async () => ({ supported: false, available: false, handled: false }),
+    shutdown: async () => {}
+  };
+  return defaultSemanticAdapter;
 }
 
 function startSemanticWarmup(context: ComputerContext): void {

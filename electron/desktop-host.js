@@ -880,7 +880,14 @@ async function createDesktopHost(options = {}) {
     // exit, then let electron-updater quit + relaunch into the installer.
     if (process.platform === 'win32') await markUpdateInstallPhase(app, 'closing');
     isQuitting = true;
-    await shutdownCoordinator.prepare('update');
+    const shutdown = await shutdownCoordinator.prepare('update');
+    if (shutdown?.clean !== true) {
+      allowUpdaterQuit = false;
+      const error = new Error('Rel.AI could not confirm a clean final shutdown. The update was not installed; review shutdown diagnostics before retrying.');
+      error.code = 'UPDATE_SHUTDOWN_UNCLEAN';
+      error.shutdown = shutdown;
+      throw error;
+    }
     allowUpdaterQuit = true;
   }
 

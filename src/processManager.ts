@@ -9,6 +9,7 @@ import { readJsonFile, writeJsonAtomic, writeJsonAtomicAsync } from './durableSt
 import { normalizeExecutionInvocation, resolveCommandCwd, normalizeCommandEnv } from './executionInvocation.ts';
 import { redactCommandForAudit } from './commandDisplay.ts';
 import { isProcessTreeAlive, readProcessCreationIdentity, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
+import { prepareWindowsProcessJob, restoreWindowsProcessJob, type WindowsProcessJob } from './windowsProcessJob.ts';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
 import { createHttpPrincipal, principalFingerprint } from './mcp/principal.ts';
@@ -170,6 +171,11 @@ interface ManagedProcessRecord extends GenericRecord {
   stderrPath: string;
   environmentKeys: string[];
   child: ChildProcess | null;
+  windowsJob?: WindowsProcessJob | null;
+  windowsJobDirectory?: string;
+  windowsJobOwned?: boolean;
+  windowsRootPid?: number;
+  windowsRootCreationIdentity?: string;
   ptyProcess: PtyProcess | null;
   pty: boolean;
   columns: number;
@@ -527,13 +533,24 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       }
       record.hostResourceRelease = resourceLease.release;
       record.queueWaitMs = resourceLease.waitMs;
+      if (process.platform === 'win32') {
+        record.windowsJob = await prepareWindowsProcessJob(config, {
+          executable: invocation.processExecutable, args: invocation.processArgv,
+          cwd: cwd.absolutePath, env: childEnvironment
+        }, directory);
+        record.windowsJobDirectory = path.basename(record.windowsJob.directory);
+        record.windowsJobOwned = true;
+      }
+      if (startupSignal?.aborted) throw cancellationError('Managed process startup was cancelled before native launch.');
+      const processExecutable = record.windowsJob?.executable || invocation.processExecutable;
+      const processArgv = record.windowsJob?.args || invocation.processArgv;
       if (record.pty) {
         const ptyProcess = await measurePerformancePhase('process.spawn', async () => {
           const nodePty = await loadNodePty();
-          return nodePty.spawn(invocation.processExecutable, invocation.processArgv, {
+          return nodePty.spawn(processExecutable, processArgv, {
             name: String(process.env.TERM || 'xterm-256color'),
             cwd: cwd.absolutePath,
-            env: childEnvironment,
+            env: record.windowsJob?.environment || childEnvironment,
             cols: record.columns,
             rows: record.rows,
             ...(process.platform === 'win32' ? { useConpty: false } : {})
@@ -541,7 +558,8 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         });
         record.ptyProcess = ptyProcess;
         record.pid = ptyProcess.pid || null;
-        record.status = 'running';
+        record.windowsJob?.bind(record.pid);
+        record.status = record.windowsJob ? 'starting' : 'running';
         record.ptyExitPromise = new Promise<PtyExitEvent>(resolve => { record.resolvePtyExit = resolve; });
         ptyProcess.onData(data => {
           record.lastPtyOutputAtMs = Date.now();
@@ -556,12 +574,12 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
             signal: event.signal ? String(event.signal) : ''
           });
         });
-        initialState = Promise.resolve({ type: 'spawned' });
+        initialState = record.windowsJob ? observeWindowsJobStartup(record.windowsJob, startupSignal) : Promise.resolve({ type: 'spawned' });
         addSpanEvent('process.spawned', { 'process.pid': record.pid || 0, 'process.pty': true });
       } else {
-        child = measurePerformancePhaseSync('process.spawn', () => spawn(invocation.processExecutable, invocation.processArgv, {
+        child = measurePerformancePhaseSync('process.spawn', () => spawn(processExecutable, processArgv, {
           cwd: cwd.absolutePath,
-          env: childEnvironment,
+          env: record.windowsJob?.environment || childEnvironment,
           detached: process.platform !== 'win32',
           windowsHide: true,
           shell: false,
@@ -571,11 +589,12 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         record.logSources.stdout = child.stdout || null;
         record.logSources.stderr = child.stderr || null;
         record.pid = child.pid || null;
-        initialState = observeInitialProcessState(child, startupSignal);
+        record.windowsJob?.bind(record.pid);
+        initialState = record.windowsJob ? observeWindowsJobStartup(record.windowsJob, startupSignal) : observeInitialProcessState(child, startupSignal);
         child.stdout?.on('data', chunk => appendLog(config, record, 'stdout', chunk));
         child.stderr?.on('data', chunk => appendLog(config, record, 'stderr', chunk));
         child.once('spawn', () => {
-          if (record.status !== 'starting') return;
+          if (record.status !== 'starting' || record.windowsJob) return;
           record.status = 'running';
           safePersistMetadata(config, record);
           notifyProcessState(record);
@@ -645,6 +664,14 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       await cleanupFailedStartup(config, record);
       throw new Error(`Managed process exited during startup with code ${initial.code ?? -1}.`);
     }
+    if (record.windowsJob && record.status === 'starting') {
+      record.status = 'running';
+      safePersistMetadata(config, record);
+      notifyProcessState(record);
+    }
+    const nativeRoot = record.windowsJob?.receipt();
+    if (Number.isSafeInteger(nativeRoot?.rootPid) && Number(nativeRoot?.rootPid) > 0) record.windowsRootPid = Number(nativeRoot?.rootPid);
+    if (/^win32:\d{1,20}$/.test(String(nativeRoot?.rootCreationIdentity || ''))) record.windowsRootCreationIdentity = String(nativeRoot?.rootCreationIdentity);
     if (record.pid) {
       record.processCreationIdentity = await readProcessCreationIdentity(record.pid);
       if (record.processCreationIdentity) {
@@ -698,6 +725,17 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     clearTimeout(coordinationTimer);
     startupReservation.release?.();
     releaseReuseReservation?.();
+  }
+}
+
+async function observeWindowsJobStartup(job: WindowsProcessJob, signal?: AbortSignal): Promise<InitialProcessState> {
+  try {
+    const receipt = await job.waitStarted(signal);
+    return receipt.commandStarted === true
+      ? { type: 'spawned' }
+      : { type: 'error', error: new Error(receipt.error || 'Native job setup refused the managed target before execution.') };
+  } catch (error) {
+    return signal?.aborted ? { type: 'aborted' } : { type: 'error', error: error instanceof Error ? error : new Error(String(error)) };
   }
 }
 
@@ -1023,7 +1061,7 @@ async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedPro
   const record = requireProcess(config, args.processId);
   assertProcessAccess(config, record, args, context, { requireSession: false });
   const duplicate = TERMINAL_STATUSES.has(record.status)
-    && (record.lifecycle !== 'task' || record.terminationConfirmed === true);
+    && ((record.lifecycle !== 'task' && !record.windowsJobOwned) || record.terminationConfirmed === true);
   if (!duplicate && (record.runtimeId !== RUNTIME_ID || record.rootExitConfirmed || (!record.child && !record.ptyProcess))) {
     const identity = await verifyRestoredProcessIdentity(config, record);
     if (identity === 'mismatch' || identity === 'unverified') throw restoredProcessIdentityError(record, identity);
@@ -1164,8 +1202,9 @@ async function sampleManagedProcessMemory(
   const selected = authorized.slice(0, clampNumber(args.limit, 1, ROOT_MEMORY_MAX_ROOTS, ROOT_MEMORY_MAX_ROOTS));
   const targets = selected.map(record => ({
     processId: record.processId,
-    pid: Number.isSafeInteger(record.pid) && Number(record.pid) > 0 ? Number(record.pid) : null,
-    identity: String(record.processCreationIdentity || '')
+    pid: record.windowsJobOwned ? (record.windowsRootPid || null)
+      : Number.isSafeInteger(record.pid) && Number(record.pid) > 0 ? Number(record.pid) : null,
+    identity: String(record.windowsJobOwned ? (record.windowsRootCreationIdentity || '') : (record.processCreationIdentity || ''))
   }));
   const authorityKey = context.internal === true ? 'trusted-local-dashboard' : principalKeyForContext(context);
   const key = crypto.createHash('sha256').update(JSON.stringify([
@@ -1206,7 +1245,9 @@ async function sampleManagedProcessMemory(
     const record = processes.get(target.processId);
     if (!record || !canAccessProcess(config, record, args, context, { requireSession: false })) return [];
     let observation = entry?.observations.get(target.processId) || unknownRootMemory(fallbackReason);
-    if (record.pid !== target.pid || record.processCreationIdentity !== target.identity || TERMINAL_STATUSES.has(record.status)) {
+    const currentRootPid = record.windowsJobOwned ? (record.windowsRootPid || null) : record.pid;
+    const currentRootIdentity = record.windowsJobOwned ? (record.windowsRootCreationIdentity || '') : record.processCreationIdentity;
+    if (currentRootPid !== target.pid || currentRootIdentity !== target.identity || TERMINAL_STATUSES.has(record.status)) {
       observation = unknownRootMemory('record_changed_during_sample');
     }
     return [{
@@ -1548,10 +1589,17 @@ function normalizeWorkspaceReference(value: unknown): string {
 }
 
 function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotOptions = {}): ManagedProcessDto & GenericRecord {
+  const nativeReceipt = record.windowsJob?.receipt();
+  if (nativeReceipt) {
+    if (Number.isSafeInteger(nativeReceipt.rootPid) && Number(nativeReceipt.rootPid) > 0) record.windowsRootPid = Number(nativeReceipt.rootPid);
+    if (/^win32:\d{1,20}$/.test(String(nativeReceipt.rootCreationIdentity || ''))) record.windowsRootCreationIdentity = String(nativeReceipt.rootCreationIdentity);
+    record.rootExitConfirmed ||= nativeReceipt.rootExited === true;
+    if (nativeReceipt.rootExited === true && typeof nativeReceipt.rootExitCode === 'number') record.exitCode = nativeReceipt.rootExitCode;
+  }
   const result: ManagedProcessDto & GenericRecord = {
     ok: !['failed', 'orphaned'].includes(record.status),
     processId: record.processId,
-    pid: record.pid || null,
+    pid: record.windowsRootPid || record.pid || null,
     workspace: record.workspaceId,
     workspaceId: record.workspaceId,
     label: record.label,
@@ -1620,7 +1668,15 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
 
 function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord, fields: Partial<ManagedProcessRecord>): void {
   if (TERMINAL_STATUSES.has(record.status) && record.endedAt) return;
-  record.rootExitConfirmed = true;
+  if (record.windowsJobOwned) {
+    const receipt = record.windowsJob?.receipt();
+    if (Number.isSafeInteger(receipt?.rootPid) && Number(receipt?.rootPid) > 0) record.windowsRootPid = Number(receipt?.rootPid);
+    const confirmed = record.terminationConfirmed === true || record.windowsJob?.outcome().exited === true;
+    record.terminationConfirmed = confirmed;
+    record.rootExitConfirmed = receipt?.rootExited === true || record.rootExitConfirmed;
+    if (typeof receipt?.rootExitCode === 'number') fields = { ...fields, exitCode: receipt.rootExitCode };
+    if (!confirmed) record.terminationError = 'Native Windows job completion was not confirmed; managed ownership is retained.';
+  } else record.rootExitConfirmed = true;
   if ((record.stopPromise || record.terminationInProgress) && record.terminationConfirmed !== true) {
     // The close event can race the tree terminator. Save root evidence, but
     // let the terminator decide whether descendants and capacity are gone.
@@ -1628,7 +1684,7 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
     if (fields.signal !== undefined) record.signal = fields.signal;
     return;
   }
-  if (record.lifecycle === 'task' && record.terminationConfirmed !== true && record.pid) {
+  if ((record.lifecycle === 'task' || record.windowsJobOwned) && record.terminationConfirmed !== true && record.pid) {
     clearInteractivePtyRetirement(record);
     clearScheduledPersist(record);
     resumeLogSources(record);
@@ -1650,6 +1706,7 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
   clearScheduledPersist(record);
   resumeLogSources(record);
   releaseManagedProcessResource(record);
+  record.windowsJob?.cleanup();
   Object.assign(record, fields, { endedAt: new Date().toISOString() });
   record.child = null;
   if (record.ptyProcess) void disposeNodePtyResources(record.ptyProcess);
@@ -1814,6 +1871,10 @@ function metadataRecord(record: ManagedProcessRecord): GenericRecord {
     error: record.error || '',
     pid: record.pid || null,
     processCreationIdentity: record.processCreationIdentity || '',
+    windowsJobDirectory: record.windowsJobDirectory || '',
+    windowsJobOwned: record.windowsJobOwned === true,
+    windowsRootPid: record.windowsRootPid || null,
+    windowsRootCreationIdentity: record.windowsRootCreationIdentity || '',
     stdoutBytes: Number(record.stdoutBytes || 0),
     stderrBytes: Number(record.stderrBytes || 0),
     stdoutDroppedBytes: Number(record.stdoutDroppedBytes || 0),
@@ -1932,6 +1993,12 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       error: String(metadata.error || ''),
       pid: Number.isSafeInteger(Number(metadata.pid)) ? Number(metadata.pid) : null,
       processCreationIdentity: String(metadata.processCreationIdentity || ''),
+      windowsRootCreationIdentity: /^win32:\d{1,20}$/.test(String(metadata.windowsRootCreationIdentity || '')) ? String(metadata.windowsRootCreationIdentity) : '',
+      windowsRootPid: Number.isSafeInteger(metadata.windowsRootPid) && Number(metadata.windowsRootPid) > 0 ? Number(metadata.windowsRootPid) : 0,
+      windowsJobOwned: metadata.windowsJobOwned === true || Boolean(metadata.windowsJobDirectory),
+      windowsJobDirectory: /^job-[a-zA-Z0-9]+$/.test(String(metadata.windowsJobDirectory || '')) ? String(metadata.windowsJobDirectory) : '',
+      windowsJob: /^job-[a-zA-Z0-9]+$/.test(String(metadata.windowsJobDirectory || ''))
+        ? restoreWindowsProcessJob(path.join(directory, String(metadata.windowsJobDirectory)), Number(metadata.pid) || null) : null,
       restartIdentityVerified: String(metadata.runtimeId || '') === RUNTIME_ID,
       stdoutBytes,
       stderrBytes,
@@ -1992,7 +2059,7 @@ async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProc
   const live = [];
   for (const record of restored) {
     const identity = await verifyRestoredProcessIdentity(config, record);
-    if (identity === 'verified') {
+    if (identity === 'verified' || (record.windowsJobOwned && record.terminationConfirmed !== true)) {
       live.push(record);
       continue;
     }
@@ -2026,6 +2093,18 @@ async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProc
 function reconcileRestoredRecord(config: ManagedProcessConfig, record: ManagedProcessRecord): ManagedProcessRecord {
   if (record.runtimeId === RUNTIME_ID && processes.has(record.processId)) return record;
   if (!isActiveProcessStatus(record.status) && record.status !== 'orphaned') return record;
+  if (record.windowsJobOwned) {
+    record.terminationConfirmed = record.windowsJob?.outcome().exited === true;
+    record.rootExitConfirmed ||= record.windowsJob?.receipt()?.rootExited === true;
+    record.status = record.terminationConfirmed ? 'stopped' : 'orphaned';
+    record.endedAt = record.terminationConfirmed ? (record.endedAt || new Date().toISOString()) : '';
+    if (!record.terminationConfirmed) {
+      record.terminationError = 'Recovered Windows job completion remains unconfirmed.';
+      record.error = record.terminationError;
+    }
+    try { persistMetadata(config, record); } catch {}
+    return record;
+  }
   if (record.pid && isProcessTreeAlive(record.pid)) {
     record.status = 'orphaned';
     if (!record.restartIdentityVerified) {
@@ -2033,7 +2112,7 @@ function reconcileRestoredRecord(config: ManagedProcessConfig, record: ManagedPr
     }
   } else {
     record.rootExitConfirmed = true;
-    record.status = record.lifecycle === 'task' && record.terminationConfirmed !== true ? 'orphaned' : 'stopped';
+    record.status = (record.lifecycle === 'task' || record.windowsJobOwned) && record.terminationConfirmed !== true ? 'orphaned' : 'stopped';
     record.endedAt = record.status === 'orphaned' ? '' : record.endedAt || new Date().toISOString();
     record.signal = record.signal || 'unobserved_restart';
     if (record.status === 'orphaned') {
@@ -2058,7 +2137,7 @@ async function verifyRestoredProcessIdentity(
     if (process.platform !== 'win32' || record.terminationConfirmed === true) releaseManagedProcessResource(record);
     record.restartIdentityVerified = false;
     record.rootExitConfirmed = true;
-    record.status = record.lifecycle === 'task' && record.terminationConfirmed !== true ? 'orphaned' : 'stopped';
+    record.status = (record.lifecycle === 'task' || record.windowsJobOwned) && record.terminationConfirmed !== true ? 'orphaned' : 'stopped';
     record.endedAt = record.status === 'orphaned' ? '' : record.endedAt || new Date().toISOString();
     record.signal = record.signal || 'unobserved_restart';
     try { persistMetadata(config, record); } catch {}
@@ -2333,6 +2412,7 @@ async function cleanupFailedStartup(config: ManagedProcessConfig, record: Manage
 function processNeedsTermination(record: ManagedProcessRecord): boolean {
   if (ACTIVE_STATUSES.has(record.status)) return true;
   if (record.status === 'orphaned') {
+    if (record.windowsJobOwned && record.terminationConfirmed !== true) return true;
     if (record.runtimeId !== RUNTIME_ID && !record.restartIdentityVerified) return false;
     return isProcessTreeAlive(record.pid);
   }
@@ -2340,6 +2420,15 @@ function processNeedsTermination(record: ManagedProcessRecord): boolean {
 }
 
 async function terminateManagedRecord(record: ManagedProcessRecord, options: StopRecordOptions = {}): Promise<ProcessTreeTerminationResult> {
+  if (record.windowsJobOwned) {
+    if (!record.windowsJob) return { exited: false, forced: false, error: 'Native Windows job control identity is unavailable.' };
+    const outcome = await record.windowsJob.stop('stop', Number(options.forceWaitMs) || DEFAULT_FORCE_WAIT_MS);
+    if (outcome.exited && record.ptyProcess) {
+      await waitForPtyExit(record.ptyExitPromise, 1000);
+      await disposeNodePtyResources(record.ptyProcess);
+    }
+    return outcome;
+  }
   if (record.ptyProcess) {
     const ptyProcess = record.ptyProcess;
     const exitPromise = record.ptyExitPromise;

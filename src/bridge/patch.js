@@ -8,7 +8,7 @@ import { assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths } from "../repo
 import { clampNumber } from "./limits.js";
 import { relaiVerify, hasRequestedChecks } from "./validation.js";
 import { relaiDiff } from "./review.js";
-import { beginStructuredPatchTransaction, completeStructuredPatchTransaction } from '../structuredPatchTransaction.js';
+import { beginStructuredPatchTransaction, completeStructuredPatchTransaction, recoverStructuredPatchTransaction } from '../structuredPatchTransaction.js';
 
 const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 
@@ -145,9 +145,8 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, con
   if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, touchedPaths);
   await context.beforeNativeMutation?.(touchedPaths);
   beginStructuredPatchTransaction(config, workspace, changedSnapshots, changedStates);
-  const applied = applyStructuredPlan(workspace, plan);
+  const applied = applyStructuredPlan(workspace, config, plan, context.signal);
   if (!applied.ok) {
-    if (applied.rollback?.ok === true) completeStructuredPatchTransaction(config, workspace);
     appendOperation(config, workspace, { id: operationId, type: "apply_patch", ok: false, paths: [], results: [{ operation: "applyPatch", rollback: applied.rollback, error: applied.error }] });
     return {
       ok: false,
@@ -161,7 +160,7 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, con
       error: applied.error
     };
   }
-  completeStructuredPatchTransaction(config, workspace);
+  const transaction = applied.transaction;
   const changedFiles = plan.changedFiles;
   const verify = hasRequestedChecks(args) ? await relaiVerify(workspace, config, args, context) : null;
   const diff = args.returnDiff === false ? null : await relaiDiff(workspace, config, { maxBytes: args.maxDiffBytes || DEFAULT_MAX_DIFF_BYTES }, context);
@@ -174,6 +173,7 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, con
     operation: "applyPatch",
     sourceFormat: "openai-patch",
     converted: false,
+    transaction,
     patchBytes: Buffer.byteLength(rawPatch, "utf8"),
     changedFiles,
     touchedPaths,
@@ -200,6 +200,7 @@ function planStructuredPatch(workspace, document) {
       snapshots.set(safe.relativePath, snapshot);
       states.set(safe.relativePath, {
         ...snapshot,
+        lineEnding: exists && /\r\n/.test(snapshot.content.toString('utf8')) && !/(?<!\r)\n/.test(snapshot.content.toString('utf8')) ? '\r\n' : '\n',
         text: exists ? snapshot.content.toString('utf8').replaceAll("\r\n", "\n") : ''
       });
       touchedPaths.push(safe.relativePath);
@@ -223,41 +224,41 @@ function planStructuredPatch(workspace, document) {
     state.exists = false;
     state.text = '';
   }
+  for (const state of states.values()) {
+    if (state.lineEnding === '\r\n') state.text = state.text.replaceAll('\n', '\r\n');
+  }
   const changedFiles = [...states.values()]
-    .filter(state => state.exists !== snapshots.get(state.path).exists || (state.exists && state.text !== snapshots.get(state.path).content.toString('utf8').replaceAll("\r\n", "\n")))
+    .filter(state => state.exists !== snapshots.get(state.path).exists || (state.exists && state.text !== snapshots.get(state.path).content.toString('utf8')))
     .map(state => state.path);
   return { states: [...states.values()], snapshots: [...snapshots.values()], touchedPaths, changedFiles };
 }
 
-function applyStructuredPlan(workspace, plan) {
+function applyStructuredPlan(workspace, config, plan, signal) {
   try {
     for (const state of plan.states) {
+      signal?.throwIfAborted?.();
       if (!plan.changedFiles.includes(state.path)) continue;
+      const snapshot = plan.snapshots.find(item => item.path === state.path);
+      const exists = fs.existsSync(state.absolutePath);
+      if (exists !== snapshot.exists || (exists && !fs.readFileSync(state.absolutePath).equals(snapshot.content))) {
+        throw new Error(`Structured patch target changed before application: ${state.path}`);
+      }
       if (!state.exists) fs.rmSync(state.absolutePath, { force: true });
       else writeTextFileSafe(workspace.path, state.path, state.text);
     }
-    return { ok: true };
+    signal?.throwIfAborted?.();
+    const transaction = completeStructuredPatchTransaction(config, workspace);
+    return { ok: true, transaction };
   } catch (error) {
-    const rollback = rollbackStructuredPlan(plan.snapshots);
+    let rollback;
+    try {
+      const recovery = recoverStructuredPatchTransaction(config, workspace);
+      rollback = { ok: !recovery.committed, ...recovery };
+    } catch (recoveryError) {
+      rollback = { ok: false, recoveryPending: true, error: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) };
+    }
     return { ok: false, error: error instanceof Error ? error.message : String(error), rollback };
   }
-}
-
-function rollbackStructuredPlan(snapshots) {
-  const errors = [];
-  for (const snapshot of snapshots) {
-    try {
-      if (!snapshot.exists) fs.rmSync(snapshot.absolutePath, { force: true });
-      else {
-        fs.mkdirSync(path.dirname(snapshot.absolutePath), { recursive: true });
-        fs.writeFileSync(snapshot.absolutePath, snapshot.content);
-        if (snapshot.mode != null) fs.chmodSync(snapshot.absolutePath, snapshot.mode);
-      }
-    } catch (error) {
-      errors.push({ path: snapshot.path, error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  return { ok: errors.length === 0, restored: snapshots.map(item => item.path), errors };
 }
 
 function parseOpenAIPatchDocument(input) {

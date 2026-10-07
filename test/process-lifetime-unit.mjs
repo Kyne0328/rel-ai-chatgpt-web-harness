@@ -137,7 +137,7 @@ try {
   startupController.abort();
   const raceCleanup = await cleanupTaskManagedProcesses(config, 'app', startupContext.taskId, startupContext);
   assert.equal((await startOutcome).error?.code, 'TASK_CANCELLED');
-  assert.equal(raceCleanup.complete, true);
+  assert.equal(raceCleanup.complete, true, JSON.stringify(raceCleanup));
   const afterRace = readManagedProcess(config, { processId: starting.processId }, { internal: true });
   assert.equal(afterRace.terminationConfirmed, true, 'startup failure cleanup must preserve a concurrent confirmed stop');
   assert.equal(afterRace.status, 'stopped');
@@ -159,17 +159,54 @@ try {
     ...startArgs, lifecycle: 'task', purpose: 'Natural root exit evidence.',
     argv: ['-e', 'setTimeout(() => process.exit(0), 2000)']
   }, { ...ownerContext, taskId: naturalTask.work_id });
-  await new Promise(resolve => setTimeout(resolve, 2200));
-  const rootExit = readManagedProcess(config, { processId: natural.processId }, { internal: true });
-  assert.equal(rootExit.rootExitConfirmed, true);
-  assert.equal(rootExit.terminationConfirmed, false, 'natural root exit must not imply descendant cleanup');
-  assert.equal(rootExit.status, 'orphaned');
-  const rootCleanup = await cleanupTaskManagedProcesses(config, 'app', naturalTask.work_id, { ...ownerContext, taskId: naturalTask.work_id });
+  let nativeCompletion;
+  let completedNativeJob;
   if (process.platform === 'win32') {
-    assert.equal(rootCleanup.complete, false, 'Windows cannot prove descendants gone after the root disappears');
+    const nativeRecord = activeProcessesForWorkSession(config, 'app', naturalTask.work_id).find(item => item.processId === natural.processId);
+    const nativeJob = nativeRecord.windowsJob;
+    completedNativeJob = nativeJob;
+    const cleanup = nativeJob.cleanup;
+    nativeJob.cleanup = function(...args) {
+      nativeCompletion = { receipt: this.receipt(), outcome: this.outcome() };
+      return cleanup.apply(this, args);
+    };
+  }
+  let rootExit;
+  const naturalExitDeadline = Date.now() + 6000;
+  do {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    rootExit = readManagedProcess(config, { processId: natural.processId }, { internal: true });
+  } while ((!rootExit.rootExitConfirmed || (process.platform === 'win32' && !nativeCompletion)) && Date.now() < naturalExitDeadline);
+  assert.equal(rootExit.rootExitConfirmed, true);
+  if (process.platform === 'win32') {
+    assert.equal(nativeCompletion?.receipt?.final, true);
+    assert.equal(nativeCompletion.receipt.activeProcesses, 0);
+    assert.equal(nativeCompletion.receipt.cleanupConfirmed, true);
+    assert.equal(nativeCompletion.outcome.exited, true);
+    assert.equal(fs.existsSync(completedNativeJob.directory), false, 'the actual native receipt directory was cleaned up');
+    assert.equal(completedNativeJob.outcome().exited, true, 'real native-zero proof survives receipt cleanup');
+    assert.equal((await completedNativeJob.stop('stop', 1000)).exited, true, 'repeated stop retains real native completion proof');
+    assert.equal(rootExit.terminationConfirmed, true, 'native job-zero evidence confirms the entire owned lifetime');
+    assert.equal(rootExit.status, 'exited');
+    const nativeCleanup = await cleanupTaskManagedProcesses(config, 'app', naturalTask.work_id, { ...ownerContext, taskId: naturalTask.work_id });
+    assert.equal(nativeCleanup.complete, true);
+    // Keep the original conservative contract for legacy records with only
+    // root-death evidence. This dead PID belongs to the completed fixture.
+    const legacyNatural = synthetic('r', {
+      workSessionId: naturalTask.work_id, pid: natural.pid, processCreationIdentity: '',
+      windowsJobOwned: false, windowsJobDirectory: '', windowsRootPid: null, windowsRootCreationIdentity: ''
+    });
+    const legacyExit = readManagedProcess(config, { processId: legacyNatural }, { internal: true });
+    assert.equal(legacyExit.terminationConfirmed, false);
+    assert.equal(legacyExit.status, 'orphaned');
+    const rootCleanup = await cleanupTaskManagedProcesses(config, 'app', naturalTask.work_id, { ...ownerContext, taskId: naturalTask.work_id });
+    assert.equal(rootCleanup.complete, false, 'legacy root death cannot prove detached descendants are gone');
     assert.match(rootCleanup.leftovers[0].reason, /descendant/i);
   } else {
-    assert.equal(rootCleanup.complete, true, 'a absent owned POSIX process group permits confirmed cleanup');
+    assert.equal(rootExit.terminationConfirmed, false, 'natural root exit alone must not imply descendant cleanup');
+    assert.equal(rootExit.status, 'orphaned');
+    const rootCleanup = await cleanupTaskManagedProcesses(config, 'app', naturalTask.work_id, { ...ownerContext, taskId: naturalTask.work_id });
+    assert.equal(rootCleanup.complete, true, 'an absent owned POSIX process group permits confirmed cleanup');
   }
   console.log('Task process lifetimes, finish/cancel cleanup, persistent/cross-task preservation, PID identity checks, and root-exit evidence passed.');
 } finally {

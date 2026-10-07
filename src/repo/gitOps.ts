@@ -1,7 +1,8 @@
 import { readGitObservation } from './gitObservation.js';
+import { beginGitIndexTransaction } from './gitIndexTransaction.ts';
 import { readSessionPolicy } from "../policyResolver.js";
 import { taskOwnedChangedFiles, taskCommitOwnership, readTaskIntegrity } from "../taskIntegrity.ts";
-import { runProcess, summarizeCommand } from "../process.js";
+import { runProcess, runReadOnlyProcess, summarizeCommand } from "../process.js";
 import { resolveSafePath, isSecretPath } from "../safety.js";
 import { INTERNAL_STATUS_MAX_BYTES, parseGitStatus, formatGitStatus, gitStatusEntryPaths } from "./gitStatus.js";
 import type { GitStatusEntry, GitStatusOwner, ParsedGitStatus } from "./gitStatus.ts";
@@ -188,7 +189,7 @@ async function ensureGitRepo(workspace: RepoWorkspace, _config: RepoConfig): Pro
 }
 
 async function inspectPatchPaths(workspace: RepoWorkspace, config: RepoConfig, patch: string, timeoutMs = 120000) {
-  const check = await runProcess("git", ["apply", "--check", "--numstat", "-z", "--summary", "--recount", "-"], {
+  const check = await runReadOnlyProcess("git", ["apply", "--check", "--numstat", "-z", "--summary", "--recount", "-"], {
     cwd: workspace.path,
     input: patch,
     timeout: timeoutMs,
@@ -320,13 +321,13 @@ function assertSafeRemoteUrl(remote: string, url: unknown): void {
 
 async function resolvePublishRemote(workspace: RepoWorkspace, config: RepoConfig, requestedRemote: unknown): Promise<string> {
   const remote = safeRemoteName(requestedRemote || "origin");
-  const listed = await runProcess("git", ["remote"], { cwd: workspace.path, timeout: 30000 }, config);
+  const listed = await runReadOnlyProcess("git", ["remote"], { cwd: workspace.path, timeout: 30000 }, config);
   if (listed.exitCode !== 0) throw new Error(`Could not read configured Git remotes: ${listed.stderr || listed.stdout || listed.exitCode}`);
   const configured = configuredRemoteNames(listed.stdout);
   if (!configured.includes(remote)) {
     throw new Error(`Git remote '${remote}' is not configured in this repository. Available remotes: ${configured.join(", ") || "none"}.`);
   }
-  const urls = await runProcess("git", ["remote", "get-url", "--push", "--all", remote], { cwd: workspace.path, timeout: 30000 }, config);
+  const urls = await runReadOnlyProcess("git", ["remote", "get-url", "--push", "--all", remote], { cwd: workspace.path, timeout: 30000 }, config);
   if (urls.exitCode !== 0) throw new Error(`Could not read push URL for Git remote '${remote}': ${urls.stderr || urls.stdout || urls.exitCode}`);
   const pushUrls = configuredRemoteNames(urls.stdout);
   if (!pushUrls.length) throw new Error(`Git remote '${remote}' has no push URL configured.`);
@@ -335,17 +336,17 @@ async function resolvePublishRemote(workspace: RepoWorkspace, config: RepoConfig
 }
 
 async function gitRefExists(workspace: RepoWorkspace, config: RepoConfig, ref: string): Promise<boolean> {
-  const result = await runProcess("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: workspace.path, timeout: 30000 }, config);
+  const result = await runReadOnlyProcess("git", ["rev-parse", "--verify", "--quiet", ref], { cwd: workspace.path, timeout: 30000 }, config);
   return result.exitCode === 0;
 }
 
 async function detectDefaultBaseBranch(workspace: RepoWorkspace, config: RepoConfig): Promise<string> {
-  const remotes = await runProcess("git", ["remote"], { cwd: workspace.path, timeout: 30000 }, config);
+  const remotes = await runReadOnlyProcess("git", ["remote"], { cwd: workspace.path, timeout: 30000 }, config);
   if (remotes.exitCode === 0) {
     const names = configuredRemoteNames(remotes.stdout).filter((name) => /^[A-Za-z0-9._/-]{1,200}$/.test(name) && !name.startsWith("-") && !name.includes(".."));
     names.sort((left, right) => Number(right === "origin") - Number(left === "origin") || left.localeCompare(right));
     for (const remote of names) {
-      const symbolic = await runProcess("git", ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`], { cwd: workspace.path, timeout: 30000 }, config);
+      const symbolic = await runReadOnlyProcess("git", ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`], { cwd: workspace.path, timeout: 30000 }, config);
       const value = String(symbolic.stdout || "").trim();
       const prefix = `${remote}/`;
       if (symbolic.exitCode === 0 && value.startsWith(prefix) && value.length > prefix.length) return value.slice(prefix.length);
@@ -358,7 +359,7 @@ async function detectDefaultBaseBranch(workspace: RepoWorkspace, config: RepoCon
 }
 
 async function currentGitBranch(workspace: RepoWorkspace, config: RepoConfig): Promise<string> {
-  const branch = await runProcess("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspace.path, timeout: 30000 }, config);
+  const branch = await runReadOnlyProcess("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspace.path, timeout: 30000 }, config);
   if (branch.exitCode !== 0) return "";
   return String(branch.stdout || "").trim();
 }
@@ -387,7 +388,7 @@ async function workspaceGitStatus(workspace: RepoWorkspace, config: RepoConfig, 
   let parsed: ParsedGitStatus;
   let statusError = '';
   try {
-    parsed = await readGitStatus(workspace.path, { timeoutMs: 30_000, signal: args.signal });
+    parsed = await readGitStatus(workspace.path, { timeoutMs: 30_000, signal: args.signal }, config);
   } catch (error) {
     if (args.signal?.aborted) {
       if (args.signal.reason instanceof Error) throw args.signal.reason;
@@ -537,115 +538,109 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
       statusBefore
     };
   }
-  const indexTree = await runProcess("git", ["write-tree"], { cwd: workspace.path, timeout: 60000 }, config);
-  if (indexTree.exitCode !== 0) throw new Error(`Could not snapshot the Git index before staging: ${indexTree.stderr || indexTree.stdout || indexTree.exitCode}`);
-  const restoreIndex = async () => {
-    const tree = String(indexTree.stdout || "").trim();
-    if (!tree) return null;
-    return runProcess("git", ["read-tree", tree], { cwd: workspace.path, timeout: 60000 }, config);
+  const transaction = await beginGitIndexTransaction(workspace.path, config);
+  let retainTransaction = false;
+  const runIndexMutation = async (argv: string[], timeout = 60000) => {
+    const result = await runProcess('git', argv,
+      { cwd: workspace.path, timeout, env: transaction.env, signal: args.signal }, config);
+    if (result.terminationConfirmed === false) retainTransaction = true;
+    return result;
   };
-  if (paths.length > 0) {
-    const add = await runProcess("git", ["add", "--", ...paths.map(file => `:(literal)${file}`)], { cwd: workspace.path, timeout: 60000 }, config);
-    if (add.exitCode !== 0) {
-      const indexRestore = await restoreIndex();
-      return {
-        ok: false,
-        workspace: workspace.alias,
-        message,
-        addAll,
-        paths,
-        add: summarizeCommand(add),
-        indexRestored: indexRestore?.exitCode === 0
-      };
+  const refuse = (error: string, extra: Record<string, any> = {}) => ({
+    ok: false, workspace: workspace.alias, message, addAll, paths: resultPaths,
+    statusBefore, indexRestored: transaction.unchanged(), indexPreserved: transaction.unchanged(),
+    error, ...extra
+  });
+  try {
+    const add = await runIndexMutation(paths.length
+      ? ['add', '--', ...paths.map(file => `:(literal)${file}`)]
+      : ['add', '-A']);
+    if (!completeGitCommand(add)) {
+      return refuse('Git staging failed. The visible index was not replaced.', { add: summarizeCommand(add) });
     }
-    const commit = await runProcess("git", ["commit", "--only", "-m", message, "--", ...paths.map(file => `:(literal)${file}`)], {
-      cwd: workspace.path,
-      timeout: clampNumber(args.timeoutMs, 1000, 86400000, 120000)
-    }, config);
-    if (commit.exitCode !== 0) await restoreIndex();
-    if (commit.exitCode === 0) {
-      const normalizeIndex = await runProcess("git", ["reset", "--quiet", "HEAD", "--", ...paths.map(file => `:(literal)${file}`)], {
-        cwd: workspace.path,
-        timeout: 60000
-      }, config);
-      if (normalizeIndex.exitCode !== 0) {
-        throw new Error(`Commit succeeded but the visible Git index could not be reconciled for the committed paths: ${normalizeIndex.stderr || normalizeIndex.stdout || normalizeIndex.exitCode}`);
-      }
-      const stagedSelected = await runProcess("git", ["diff", "--cached", "--name-only", "--", ...paths.map(file => `:(literal)${file}`)], {
-        cwd: workspace.path,
-        timeout: 60000
-      }, config);
-      if (stagedSelected.exitCode !== 0 || String(stagedSelected.stdout || "").trim()) {
-        throw new Error('Commit succeeded but committed paths still differ in the visible Git index. Refusing to report a clean scoped commit.');
-      }
+
+    // This is mandatory publication evidence. Preserve exact NUL paths, and
+    // refuse every failed, cancelled, timed-out or truncated observation.
+    const staged = await runReadOnlyProcess('git',
+      ['diff', '--cached', '--name-only', '-z', ...(paths.length ? ['--', ...paths.map(file => `:(literal)${file}`)] : [])],
+      { cwd: workspace.path, timeout: 60000, env: transaction.env,
+        preserveOutputWhitespace: true, maxOutputBytes: INTERNAL_STATUS_MAX_BYTES, signal: args.signal }, config);
+    if (staged.terminationConfirmed === false) retainTransaction = true;
+    let stagedPaths: string[];
+    try { stagedPaths = completeStagedPaths(staged); }
+    catch (error) {
+      return refuse(error instanceof Error ? error.message : String(error), { stagedObservation: summarizeCommand(staged) });
     }
-    const head = commit.exitCode === 0 ? await resolveCommitHead(workspace, config) : '';
+    const secretStaged = stagedPaths.filter(file => isSecretPath(file));
+    const unauthorizedSecretPaths = secretStaged.filter(file => !authorization.authorizedPaths.has(file));
+    if (unauthorizedSecretPaths.length) {
+      return refuse(`Refusing to commit sensitive paths without matching commit authorization: ${unauthorizedSecretPaths.join(', ')}. The visible index was preserved.`,
+        { secretStagedFiles: secretStaged, unauthorizedSecretPaths });
+    }
+    if (!transaction.unchanged()) return refuse('The visible Git index changed outside this transaction; refusing to commit.');
+    const commit = await runIndexMutation(
+      ['commit', ...(paths.length ? ['--only'] : []), '-m', message,
+        ...(paths.length ? ['--', ...paths.map(file => `:(literal)${file}`)] : [])],
+      clampNumber(args.timeoutMs, 1000, 86400000, 120000));
+    if (!completeGitCommand(commit)) {
+      return refuse('Git commit did not complete successfully. The visible index was not replaced.', { commit: summarizeCommand(commit) });
+    }
+    const head = await resolveCommitHead(workspace, config);
+    let indexError = '';
+    try {
+      if (paths.length) {
+        const normalizeIndex = await runIndexMutation(['reset', '--quiet', 'HEAD', '--', ...paths.map(file => `:(literal)${file}`)]);
+        if (!completeGitCommand(normalizeIndex)) throw new Error('the private index could not be reconciled for committed paths.');
+        const selected = await runReadOnlyProcess('git',
+          ['diff', '--cached', '--name-only', '-z', '--', ...paths.map(file => `:(literal)${file}`)],
+          { cwd: workspace.path, timeout: 60000, env: transaction.env, preserveOutputWhitespace: true, maxOutputBytes: INTERNAL_STATUS_MAX_BYTES }, config);
+        if (selected.terminationConfirmed === false) retainTransaction = true;
+        if (completeStagedPaths(selected).length) throw new Error('committed paths still differ in the private index.');
+      }
+      transaction.publish();
+    }
+    catch (error) { indexError = error instanceof Error ? error.message : String(error); }
     const statusAfter = await workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes });
     return {
-      ok: commit.exitCode === 0,
-      workspace: workspace.alias,
-      message,
-      addAll,
-      paths,
+      ok: !indexError && Boolean(head), workspace: workspace.alias, message, addAll, paths: resultPaths,
       ...(authorization.metadata ? { sensitiveAuthorization: authorization.metadata } : {}),
-      commit: summarizeCommand(commit),
-      ...(head ? { head } : {}),
-      statusBefore,
-      statusAfter
+      commit: summarizeCommand(commit), committed: true, ...(head ? { head } : {}),
+      statusBefore, statusAfter,
+      ...(indexError ? { indexReconciled: false, error: 'Commit succeeded, but ' + indexError } : { indexReconciled: true }),
+      ...(!head ? { error: 'Commit succeeded, but the resulting HEAD could not be verified.' } : {})
     };
+  } catch (error) {
+    if ((error as { terminationConfirmed?: boolean }).terminationConfirmed === false) retainTransaction = true;
+    throw error;
+  } finally {
+    // An unconfirmed child may still be using its index. Retain both files and
+    // the normal Git lock rather than deleting state underneath that process.
+    if (!retainTransaction) transaction.dispose();
   }
-  if (addAll) {
-    const add = await runProcess("git", ["add", "-A"], { cwd: workspace.path, timeout: 60000 }, config);
-    if (add.exitCode !== 0) return { ok: false, workspace: workspace.alias, message, addAll, add: summarizeCommand(add) };
+}
+
+function completeGitCommand(result: Record<string, any>): boolean {
+  return result.executed === true && result.exitCode === 0 && !result.timedOut
+    && !result.cancelled && !result.spawnError && result.terminationConfirmed !== false
+    && !result.outputFinalizationTimedOut;
+}
+
+function completeStagedPaths(result: Record<string, any>): string[] {
+  const output = String(result.stdout || '');
+  if (!completeGitCommand(result) || result.stdoutTruncated || result.stdoutSpillTruncated
+    || (output && !output.endsWith('\0')) || output.includes('\uFFFD')) {
+    throw new Error('Mandatory staged-file observation failed or was incomplete. No commit was attempted; the visible index was preserved.');
   }
-  // `git add -A` stages anything not gitignored, including files the read/write
-  // tools refuse to touch (.env, keys, credentials). Every staged sensitive path
-  // must be named in a commit-scoped authorization object.
-  const staged = await runProcess("git", ["diff", "--cached", "--name-only"], { cwd: workspace.path, timeout: 60000 }, config);
-  const secretStaged = String(staged.stdout || "").split(/\r?\n/).map((line) => normalizeGitPath(line)).filter((file) => file && isSecretPath(file));
-  const unauthorizedSecretPaths = secretStaged.filter((file) => !authorization.authorizedPaths.has(file));
-  if (unauthorizedSecretPaths.length > 0) {
-    const indexRestore = await restoreIndex();
-    return {
-      ok: false,
-      workspace: workspace.alias,
-      message,
-      addAll,
-      paths,
-      secretStagedFiles: secretStaged,
-      unauthorizedSecretPaths,
-      ...(authorization.metadata ? { sensitiveAuthorization: authorization.metadata } : {}),
-      indexRestored: indexRestore?.exitCode === 0,
-      error: `Refusing to commit sensitive paths without matching commit authorization: ${unauthorizedSecretPaths.join(", ")}. The pre-operation index was restored.`
-    };
-  }
-  const commit = await runProcess("git", ["commit", "-m", message], { cwd: workspace.path, timeout: clampNumber(args.timeoutMs, 1000, 86400000, 120000) }, config);
-  let indexRestored;
-  if (commit.exitCode !== 0) indexRestored = (await restoreIndex())?.exitCode === 0;
-  const head = commit.exitCode === 0 ? await resolveCommitHead(workspace, config) : '';
-  const statusAfter = await workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes });
-  return {
-    ok: commit.exitCode === 0,
-    workspace: workspace.alias,
-    message,
-    addAll,
-    paths: resultPaths,
-    ...(authorization.metadata ? { sensitiveAuthorization: authorization.metadata } : {}),
-    commit: summarizeCommand(commit),
-    ...(head ? { head } : {}),
-    ...(indexRestored == null ? {} : { indexRestored }),
-    statusBefore,
-    statusAfter
-  };
+  return output ? output.slice(0, -1).split('\0') : [];
 }
 
 async function resolveCommitHead(workspace: RepoWorkspace, config: RepoConfig): Promise<string> {
-  const result = await runProcess('git', ['rev-parse', '--verify', 'HEAD'], {
+  const result = await runReadOnlyProcess('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: workspace.path,
     timeout: 60000,
     maxOutputBytes: 4096
   }, config).catch(() => null);
-  if (!result || result.exitCode !== 0 || result.stdoutTruncated) return '';
+  if (!result || !completeGitCommand(result) || result.stdoutTruncated) return '';
   const head = String(result.stdout || '').trim();
   return /^[a-f0-9]{40,64}$/i.test(head) ? head : '';
 }
@@ -661,7 +656,7 @@ async function workspaceDirtyPaths(
     .map(item => normalizeGitPath(item))
     .filter(Boolean))];
   if (!normalized.length) return [];
-  const workTree = await runProcess("git", ["rev-parse", "--is-inside-work-tree"], {
+  const workTree = await runReadOnlyProcess("git", ["rev-parse", "--is-inside-work-tree"], {
     cwd: workspace.path,
     timeout: 30000,
     maxOutputBytes: DEFAULT_MAX_GIT_OUTPUT_BYTES,
@@ -774,7 +769,7 @@ async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, arg
   const base = String(args.base || await detectDefaultBaseBranch(workspace, config)).trim();
   const title = String(args.title || "").trim();
   const body = String(args.body || "").trim();
-  const diff = await runProcess("git", ["diff", `${base}...${head}`], { cwd: workspace.path, timeout: 60000, maxOutputBytes: 2 * 1024 * 1024 }, config);
+  const diff = await runReadOnlyProcess("git", ["diff", `${base}...${head}`], { cwd: workspace.path, timeout: 60000, maxOutputBytes: 2 * 1024 * 1024 }, config);
   const diffText = diff.stdout || "";
   const changedFiles = [...new Set(String(diffText).split(/\r?\n/).filter((line) => line.startsWith("+++ b/")).map((line) => line.slice(6)))];
   const emptyDiff = diff.exitCode === 0 && changedFiles.length === 0 && !diffText.trim();
@@ -795,4 +790,5 @@ async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, arg
   };
 }
 
-export { workspaceGitStatus, workspaceDirtyPaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr, classifyStatusOwnership, assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths };
+export {
+  completeStagedPaths, workspaceGitStatus, workspaceDirtyPaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr, classifyStatusOwnership, assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths };

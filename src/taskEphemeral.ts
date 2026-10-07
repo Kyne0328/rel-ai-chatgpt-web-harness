@@ -50,7 +50,8 @@ function ensureTaskEphemeralDirectory(
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   pruneStaleEphemeralDirectories(namespaceRoot, directory);
   writeMetadata(directory, {
-    version: 1,
+    version: 2,
+    cleanupEligible: false,
     taskId: String(taskId || '').trim(),
     workspace: String(workspace?.alias || ''),
     createdAt: readMetadata(directory)?.createdAt || new Date().toISOString(),
@@ -88,6 +89,9 @@ function cleanupTaskEphemeralDirectory(
     removeEmptyParents(directory);
     return { removed: true, removedFiles: usage.files, removedBytes: usage.bytes };
   } catch (error) {
+    // Explicit task cleanup has established that scratch is no longer needed.
+    // Only this durable fact makes a later age-based retry safe.
+    try { writeMetadata(directory, { ...readMetadata(directory), cleanupEligible: true }); } catch {}
     return {
       removed: false,
       removedFiles: 0,
@@ -158,6 +162,9 @@ function pruneStaleEphemeralDirectories(namespaceRoot: string, currentDirectory:
     let timestamp = 0;
     try {
       const metadata = readMetadata(directory);
+      // Age is not evidence that a long-running child stopped using scratch.
+      // Legacy and active directories remain retained until explicit cleanup.
+      if (metadata?.cleanupEligible !== true) continue;
       timestamp = Date.parse(String(metadata?.updatedAt || ''));
       if (!Number.isFinite(timestamp)) timestamp = fs.statSync(directory).mtimeMs;
     } catch {

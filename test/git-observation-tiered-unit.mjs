@@ -3,17 +3,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
-import { syncBuiltinESMExports } from 'node:module';
+import { syncBuiltinESMExports, stripTypeScriptTypes } from 'node:module';
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
 import { readGitObservation } from '../src/repo/gitObservation.ts';
-import { gitStatusArgs, parseGitStatus, statusMapFromOutput } from '../src/repo/gitStatus.ts';
+import { internalReadOnlyProcessOutcome, isInternalReadOnlyProcessOutcome } from '../src/process.ts';
+import { gitStatusArgs, parseGitStatus, statusMapFromOutput, INTERNAL_STATUS_MAX_BYTES } from '../src/repo/gitStatus.ts';
 import { relaiExec } from '../src/bridge/exec.js';
 import { workspaceWrite, workspaceReplace } from '../src/localRepoBridge.ts';
 import { relaiGitCommit, workspaceGitStatus } from '../src/repo/gitOps.ts';
 import { recordTaskIntegrityEvent, readTaskIntegrity, taskCommitOwnership } from '../src/taskIntegrity.ts';
 import { ensureSessionStarted } from '../src/policyResolver.js';
 import { workspaceTidyPlan } from '../src/bridge/tidy.js';
-import { acquireHostResource } from '../src/hostResourceScheduler.js';
+import { acquireHostResource, createFairResourceScheduler } from '../src/hostResourceScheduler.js';
 import { relaiRestorePaths } from '../src/bridge/restore.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-tiered-git-'));
@@ -32,8 +33,15 @@ let maximum = 0;
 const byRepo = new Map();
 childProcess.spawn = function (command, args, options) {
   const child = originalSpawn.call(this, command, args, options);
-  if (args?.includes('status')) {
-    probes.push([...args]);
+  const requestFlag = process.platform === 'win32' ? args?.indexOf('-RequestPath') : -1;
+  const request = requestFlag >= 0 ? JSON.parse(fs.readFileSync(args[requestFlag + 1], 'utf8')) : null;
+  const probeArgs = request?.args || args;
+  if (probeArgs?.includes('status')) {
+    if (request) {
+      const relative = path.relative(temp, request.cwd);
+      assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'only fixture-owned native Git probes');
+    }
+    probes.push([...probeArgs]);
     active++;
     maximum = Math.max(maximum, active);
     const cwd = options.cwd;
@@ -137,6 +145,103 @@ try {
     const boundary = args.indexOf('--');
     assert.ok(boundary >= 0 && boundary < args.length - 1);
     assert.ok(args.slice(boundary + 1).every(file => file.startsWith(':(literal)') && !file.endsWith('/')));
+  }
+
+  // Execute the actual observation module with only its process dependency
+  // injected. No child is launched; isolated real scheduler instances prove
+  // result/error capacity invariants without resetting production leases.
+  {
+    const source = stripTypeScriptTypes(fs.readFileSync(new URL('../src/repo/gitObservation.ts', import.meta.url), 'utf8'), { mode: 'strip' })
+      .replace(/^import .+;\s*$/gm, '')
+      .replace(/\bexport\s+(?=(?:async\s+)?function\b)/g, '');
+    const factory = new Function('fs', 'path', 'runOwnedReadOnlyProcess', 'reconcileReadOnlyProcessTermination', 'createFairResourceScheduler',
+      'acquireHostResource', 'hostResourceStats', 'gitStatusArgs', 'INTERNAL_STATUS_MAX_BYTES', 'internalReadOnlyProcessOutcome',
+      source + '\nreturn { readGitObservation };');
+    const make = (run, reconcile = () => false) => {
+      const scheduler = createFairResourceScheduler({ gitObservation: 2 });
+      const module = factory(fs, path, run, reconcile, createFairResourceScheduler,
+        (resource, owner, options) => scheduler.acquire(resource, owner, options),
+        () => scheduler.stats(), gitStatusArgs, INTERNAL_STATUS_MAX_BYTES, internalReadOnlyProcessOutcome);
+      return { ...module, scheduler };
+    };
+    const successful = { executed: true, exitCode: 0, stdout: '', stderr: '', timedOut: false,
+      stdoutBytes: 0, stderrBytes: 0, stdoutTruncated: false, stderrTruncated: false, queueWaitMs: 0, durationMs: 0 };
+    for (const control of [
+      () => successful,
+      () => ({ ...successful, exitCode: 1, terminationConfirmed: true }),
+      () => { throw Object.assign(new Error('fixture pre-spawn failure'), { code: 'ENOENT', executed: false }); },
+      () => { throw Object.assign(new Error('fixture settled failure'), { code: 'PROCESS_SETUP_FAILED', executed: true, terminationConfirmed: true, rootExitConfirmed: true }); }
+    ]) {
+      const fixture = make(control);
+      await fixture.readGitObservation(repo, config);
+      assert.equal(fixture.scheduler.stats().gitObservation.active, 0, 'success/settled/pre-spawn failure releases capacity');
+    }
+    for (const incomplete of [
+      { timedOut: true }, { cancelled: true }, { terminationConfirmed: false },
+      { stdoutTruncated: true }, { stdoutSpillTruncated: true }, { outputFinalizationTimedOut: true }
+    ]) {
+      const fixture = make(() => ({ ...successful, ...incomplete }));
+      const result = await fixture.readGitObservation(repo, config);
+      assert.notEqual(result.exitCode, 0, 'incomplete observations cannot look successful to status consumers');
+      assert.equal(result.observedExitCode, 0);
+      assert.equal(result.errorCode, 'GIT_OBSERVATION_INCOMPLETE');
+    }
+    let calls = 0;
+    const aborted = new AbortController();
+    const thrown = make(() => {
+      calls++;
+      aborted.abort(new Error('fixture caller cancellation'));
+      throw Object.assign(new Error('fixture uncertain post-spawn failure'), {
+        code: 'PROCESS_SETUP_FAILED', executed: true, terminationConfirmed: false, rootExitConfirmed: true
+      });
+    });
+    const failure = await thrown.readGitObservation(repo, config, { signal: aborted.signal });
+    assert.equal(failure.executed, true);
+    assert.equal(failure.terminationConfirmed, false);
+    assert.equal(failure.rootExitConfirmed, true);
+    assert.equal(failure.errorCode, 'PROCESS_SETUP_FAILED');
+    assert.equal(isInternalReadOnlyProcessOutcome(failure), true, 'caught observation errors keep private read-only provenance');
+    assert.match(failure.error, /fixture uncertain post-spawn failure/);
+    assert.equal(thrown.scheduler.stats().gitObservation.active, 1, 'thrown uncertainty retains capacity');
+    const suspended = await thrown.readGitObservation(repo, config);
+    assert.equal(suspended.executed, false);
+    assert.match(suspended.error, /suspended/);
+    assert.equal(calls, 1, 'suspended repositories never launch another probe');
+    const returned = make(() => ({ ...successful, timedOut: true, terminationConfirmed: false }));
+    await returned.readGitObservation(repo, config);
+    assert.equal(returned.scheduler.stats().gitObservation.active, 1, 'returned uncertainty retains the same capacity');
+    // A late proof must belong to the exact retained result/error object.
+    // The injected predicate models the private native-owner lookup; merely
+    // copying public result metadata cannot settle a lease.
+    for (const thrownError of [false, true]) {
+      let admitted = 0;
+      let proofAvailable = false;
+      const evidence = thrownError
+        ? Object.assign(new Error('late owned cleanup'), { executed: true, terminationConfirmed: false })
+        : { ...successful, terminationConfirmed: false };
+      const late = make(() => {
+        admitted++;
+        if (admitted > 1) return successful;
+        if (thrownError) throw evidence;
+        return evidence;
+      }, candidate => candidate === evidence && proofAvailable);
+      await late.readGitObservation(repo, config);
+      assert.equal(late.scheduler.stats().gitObservation.active, 1);
+      const stillUnknown = await late.readGitObservation(repo, config);
+      assert.equal(stillUnknown.executed, false);
+      assert.equal(admitted, 1);
+      proofAvailable = true;
+      const reconciled = await late.readGitObservation(repo, config);
+      assert.equal(reconciled.exitCode, 0);
+      assert.equal(admitted, 2);
+      assert.equal(late.scheduler.stats().gitObservation.active, 0, 'exact late proof releases both lanes before re-admission');
+    }
+    const cancelled = new AbortController();
+    cancelled.abort(new Error('fixture pre-admission cancellation'));
+    const beforeStart = make(() => { throw new Error('must not execute'); });
+    await assert.rejects(beforeStart.readGitObservation(repo, config, { signal: cancelled.signal }),
+      error => error === cancelled.signal.reason);
+    assert.equal(beforeStart.scheduler.stats().gitObservation.active, 0);
   }
   console.log('Tiered Git accounting: opaque trees, command success, native ownership, scoped commit/tidy, coalescing and bounded probes passed.');
 } finally {

@@ -9,6 +9,7 @@ import { normalizeConfig } from '../src/config.js';
 
 import { initializeTelemetry, runSpan, sanitizeAttributes, setTelemetryDiagnosticsEnabled, shutdownTelemetry, summarizeCommandForTelemetry, telemetrySampleRatio, telemetryStatus } from '../src/telemetry.js';
 
+const packageVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-tool-task-'));
 try {
   const legacyDisabled = { stateDir: root, telemetry: { enabled: false, endpoint: 'http://127.0.0.1:4318/v1/traces', sampleRatio: 0.25 } };
@@ -102,7 +103,7 @@ try {
     assert.match(firstIdentityState.installationId, /^[0-9a-f-]{36}$/i, 'usage reporting must persist a pseudonymous installation ID');
     assert.match(firstIdentityState.ingestToken, /^[A-Za-z0-9_-]{40,128}$/, 'usage reporting must persist a random installation-scoped ingest credential');
     assert.match(firstIdentityState.lastReportedAt, /^\d{4}-\d{2}-\d{2}T/, 'successful usage reporting must persist the last report time');
-    assert.equal(firstIdentityState.lastReportedVersion, '1.1.4', 'successful usage reporting must persist the reported app version');
+    assert.equal(firstIdentityState.lastReportedVersion, packageVersion, 'successful usage reporting must persist the reported app version');
 
     const usageRequests = requests.filter(request => request.path === '/api/v1/installation/presence');
     assert.equal(usageRequests.length, 1, 'initialization must send one presence event');
@@ -112,7 +113,7 @@ try {
     assert.deepEqual(Object.keys(presence).sort(), ['arch', 'installationId', 'platform', 'schemaVersion', 'version']);
     assert.equal(presence.schemaVersion, 1);
     assert.equal(presence.installationId, firstIdentityState.installationId);
-    assert.equal(presence.version, '1.1.4');
+    assert.equal(presence.version, packageVersion);
     assert.equal(presence.platform, process.platform);
     assert.equal(presence.arch, process.arch);
 
@@ -146,7 +147,7 @@ try {
     const refreshedIdentityState = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
     fs.writeFileSync(identityPath, JSON.stringify({
       ...refreshedIdentityState,
-      lastReportedVersion: '1.1.3'
+      lastReportedVersion: `${packageVersion}-fixture-previous`
     }, null, 2));
     initializeTelemetry(usageOnlyConfig);
     await shutdownTelemetry();
@@ -156,7 +157,7 @@ try {
       'an app version change must report immediately even when the previous presence is recent'
     );
     const upgradedIdentityState = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
-    assert.equal(upgradedIdentityState.lastReportedVersion, '1.1.4');
+    assert.equal(upgradedIdentityState.lastReportedVersion, packageVersion);
 
     const secret = 'SECRET_EXCEPTION_MARKER';
     const privatePath = 'C:\\private\\project\\file.js';

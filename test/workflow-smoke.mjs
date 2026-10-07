@@ -187,9 +187,11 @@ try {
   taskCall(11, 'relai_changes', { action: 'tidy_plan', workspace: 'smoke' });
   const plan = structuredContentOf(await client.waitFor(11));
   if (!plan.candidates.some(item => item.path === 'session-artifact.txt')) throw new Error('Tidy plan missed session artifact.');
+  if (new Set(plan.candidates.map(item => item.path)).size !== plan.candidates.length) throw new Error('Tidy plan contains duplicate paths from full and exact status observations.');
   taskCall(12, 'relai_changes', { action: 'tidy_run', workspace: 'smoke', planId: plan.planId });
   const tidied = structuredContentOf(await client.waitFor(12));
   if (!tidied.changedFiles.includes('session-artifact.txt')) throw new Error('Tidy run failed.');
+  if (tidied.changedFiles.filter(file => file === 'session-artifact.txt').length !== 1 || fs.existsSync(path.join(workspace, 'session-artifact.txt'))) throw new Error('Tidy must delete and report each approved artifact exactly once.');
 
   const checks = await completedTaskCall(13, 'relai_validate', {
     action: 'checks',

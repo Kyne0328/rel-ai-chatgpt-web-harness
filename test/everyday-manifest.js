@@ -1,6 +1,15 @@
 // Explicit everyday regression executables.
 // Prefer adding behavior to an existing suite-*-unit.mjs file. Add a standalone file here only when process/global isolation or an independently maintained boundary is required.
 export const EVERYDAY_TEST_FILES = [
+  "test-output-tail-unit.mjs",
+  "windows-process-job-artifact-unit.mjs",
+  "taskless-replay-restart-unit.mjs",
+  "extension-download-cleanup-unit.mjs",
+  "extension-lifecycle-unit.mjs",
+  "process-git-defensive-regression-unit.mjs",
+  "desktop-smoke-readiness-unit.mjs",
+  "result-recovery-integrity-unit.mjs",
+  "edit-transaction-recovery-unit.mjs",
   "ui-operation-diagnostics-unit.mjs",
   "operation-contract-validation-unit.mjs",
   "operation-receipts-history-unit.mjs",
@@ -86,7 +95,6 @@ export const EVERYDAY_TEST_FILES = [
   "process-lifetime-unit.mjs",
   "process-root-memory-unit.mjs",
   "process-start-admission-diagnostics-unit.mjs",
-  "process-pty-unit.mjs",
   "prune-stale-tests-unit.mjs",
   "real-root-cache-unit.mjs",
   "repeat-call-guard-unit.mjs",

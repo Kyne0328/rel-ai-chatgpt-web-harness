@@ -145,7 +145,7 @@ Rel.AI restrictions must protect a concrete resource or failure mode. A `work_id
 - Require `work_id` only when the requested semantics actually refer to a logical task: finish/cancel, `scope:"task"` review/checkpoints, session-owned tidy, task-owned default commit scope, and other explicitly task-relative operations.
 - Resource operations use the narrowest real identity: managed processes use authenticated principal + workspace + `processId`; local UI uses principal + workspace + `sessionId`; taskless large command output uses principal + workspace + `outputRef`; taskless fallback continuation uses `operationId`.
 - Fallback operation IDs are transport/execution identities. They must never be converted into fake logical `work_id` requirements.
-- Approval is reserved for the destructive/high-risk operation itself. Workspace reset and real Git push remain approval-gated. Do not add model-supplied magic confirmation strings as a second pseudo-consent layer when native approval already binds the exact request.
+- Approval is reserved for the destructive/high-risk operation itself. Workspace reset remains approval-gated. Git push requires git:publish in the client grant and does not request a second per-push approval. Do not add model-supplied magic confirmation strings as a second pseudo-consent layer when native approval already binds the exact request.
 - Validation is factual, risk-proportional evidence. A passed check becomes stale after relevant mutation, but stale/failed/not-run evidence is reported rather than converted into a generic prohibition on agent completion.
 - Recovery should use the narrowest real identity. Observation, interaction, output recovery, and cleanup should not force users to resurrect an unrelated or completed logical task when principal, workspace, and resource/session identity are sufficient.
 - Cross-workspace continuity is supplemental context, not authority. Require strong task-signature evidence before injecting portable task history: exact safe identifiers/paths or multiple meaningful intent signals may qualify, while one generic lexical overlap is insufficient. Same-workspace completed-task retrieval ranks compact summaries across the full retained history rather than truncating candidates by recency; exact path/error/test identifiers selectively promote matching full records so recall does not require loading every historical event timeline.
@@ -159,6 +159,56 @@ Factories remain only where a module owns mutable state, a framework object, an 
 `electron/ipc-handlers.js` owns sender-constrained setup, recovery, service lifecycle, dashboard-window management, notifications, and shared utilities. `electron/ipc-handlers-dashboard.js` owns the dashboard-only analytics, desktop-settings, updater, and diagnostics capabilities. There are no provider-switch, device-pairing, hosted-usage, or approval-token IPC channels.
 
 Connection status is projected through the existing server-status path and updates only the relevant dashboard regions. A tunnel reconnect does not remount the application or restart unrelated managed developer processes.
+
+## Skill discovery
+
+`src/skillScan.js` pages project, extension, and user discovery with at most 2,048
+credited scan events, 16 MiB of file-read credit, and a cooperative 250 ms elapsed
+budget per call. Directory enumeration, metadata reads, integrity hashes, and
+command readiness probes share those credits. Fixed, bounded root-identity and
+file-descriptor checks are additional work, so units are not a syscall count. The
+clock budget is checked between synchronous OS steps; it provides no hard elapsed
+ceiling for stalled OS I/O. A 128-candidate window preserves sorted selection
+without materializing an entire directory; collation ties use a binary tie-break.
+
+Discovery reports `consistency: 'sequential-observations'`, plus ISO timestamps
+`observationStartedAt` and `observationEndedAt`. The start is retained across pages
+of one scan; the end describes the current page's observation window. `complete`
+means required source prefixes were traversed and validation fingerprints matched
+when observed. It does not mean an atomic filesystem snapshot. Stable sources
+preserve the defined ordering and project/extension/user precedence. An edit after
+a source's last observation can appear on the next scan.
+
+At most eight resumable scans retain state, and idle scans expire after 60 seconds
+with their iterators closed. Sources are checked before publication and rechecked
+before final completion; an observed fingerprint change restarts discovery. Partial
+discovery is delivered as `skillDiscovery` through snapshots and task bootstrap,
+and repeated snapshot calls continue the same scan without the duplicate-request advisory.
+The 100-skill display limit remains distinct from asynchronous named reads, which
+search beyond that limit, yield between pages, and close their scan on cancellation
+or deadline. Metadata and extension-verification caches each retain at most 256
+entries. Active extension tickets or recovery markers defer extension publication;
+discovery does not reconcile or delete those records.
+
+## Windows process ownership
+
+Windows owned-process launches use the source-pinned NativeAOT x64 companion
+`src/windows-process-job-host.exe`. Each target still receives its own kill-on-close
+job, and completion still requires the root exit and zero active descendants. The
+controller atomically publishes nonce/PID-bound receipts by same-directory rename;
+target stdout/stderr never carry completion messages. Artifact selection verifies
+the owner source, controller source, AOT project configuration, and executable
+digest on every launch. Missing/stale artifacts or other host architectures use
+the source-pinned PowerShell/CLR fallback.
+
+Rebuild with `node scripts/generate-windows-process-job-native.mjs --write` on
+Windows using .NET SDK 10.0.401, the native C++ build tools, and the Framework
+compiler. The pinned AOT runtime is 10.0.12; no managed runtime is needed by the
+companion at launch. `--check` verifies the shipped artifacts without compiling.
+`node scripts/profile-windows-process-job.mjs` records diagnostic startup stages
+using an isolated no-op fixture. Performance acceptance remains the unchanged
+component-relative mutation-accounting benchmark, including separate fresh Git
+observations before and after mutating commands.
 
 ## Durable persistence
 

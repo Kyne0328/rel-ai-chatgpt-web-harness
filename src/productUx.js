@@ -1,3 +1,4 @@
+import { workspaceMutationSafetySummary } from './mutationProcessOwnership.js';
 import { getToolSchemas } from './tools.js';
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -66,9 +67,11 @@ function healthMonitor(config, _args = {}) {
   checkStaleFile(findings, "audit", config.auditLogPath, staleHours);
   const aliases = Object.keys(config.workspaces || {}).sort(compareText);
   const workspaces = aliases.map((alias) => {
+    const mutationBlock = workspaceMutationSafetySummary(config, alias, config.workspaces?.[alias]?.path || '');
+    if (mutationBlock) findings.push({ severity: 'error', code: 'workspace_mutation_blocked', workspace: alias, message: mutationBlock.message, mutationBlock });
     try {
       const workspace = resolveWorkspace(config, alias);
-      return { alias, ok: true, path: workspace.path, context: workspace.context || {} };
+      return { alias, ok: true, path: workspace.path, context: workspace.context || {}, mutationBlock };
     } catch (error) {
       findings.push({ severity: "error", code: "workspace_unavailable", workspace: alias, message: error instanceof Error ? error.message : String(error) });
       return { alias, ok: false, error: error instanceof Error ? error.message : String(error) };

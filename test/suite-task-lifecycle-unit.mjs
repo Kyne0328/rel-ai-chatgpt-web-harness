@@ -611,7 +611,9 @@ async function case_task_history_storage_unit() {
     assert.doesNotThrow(() => listRecentSessionEvents(directory, 10), 'recent-event reads must ignore malformed task-history rows');
     assert.doesNotThrow(() => listSessionSummaries(directory, 10), 'summary reads must preserve corrupt-record quarantine behavior');
     const corruptCount = withStateDatabase(config, db => db.prepare('SELECT COUNT(*) AS count FROM task_history WHERE id=?').get(corruptId).count);
-    assert.equal(Number(corruptCount), 0, 'invalid task-history rows must still be removed by summary reads');
+    assert.equal(Number(corruptCount), 1, 'summary reads must preserve rejected canonical history for recovery');
+    assert.equal(withStateDatabase(config, db => db.prepare('SELECT payload FROM task_history WHERE id=?').get(corruptId).payload), '{not-json',
+      'the exact rejected bytes must survive a nominal read');
   
     const singleEventId = 'single-event-summary';
     writeSession(directory, {
@@ -752,7 +754,8 @@ async function case_task_history_store_unit() {
       'cursor-paged activity history must not repeat the previous page'
     );
     assert.equal(sessions.some(session => session.id === 'legacy-task'), false, 'pre-current session records must not be interpreted');
-    assert.equal(fs.existsSync(path.join(historyDir, 'legacy.json')), false, 'pre-current session records must be removed on read');
+    assert.equal(fs.existsSync(path.join(historyDir, 'legacy.json')), true, 'unsupported originals must remain recoverable and must not be interpreted');
+    assert.equal(fs.readFileSync(path.join(historyDir, 'legacy.json'), 'utf8'), JSON.stringify({ id: 'legacy-task' }));
 
     for (let index = 0; index < 251; index += 1) {
       recordTaskHistoryEvent(config, currentEvent('long-task', {
@@ -1425,7 +1428,8 @@ async function case_task_observability_security_unit() {
     }));
     const historical = readTaskHistorySession(legacyConfig, historicalTaskId);
     assert.equal(historical, null, 'hard cutover must not load unsupported pre-v3 task-history records');
-    assert.equal(fs.existsSync(historicalFile), false, 'unsupported secret-bearing task history must be removed during hard cutover');
+    assert.equal(fs.existsSync(historicalFile), true, 'unsupported originals remain private recovery evidence and must not be returned as current history');
+    assert.equal(readTaskHistorySession(legacyConfig, historicalTaskId), null, 'retaining raw recovery evidence must not expose unsupported content through history reads');
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });
   }

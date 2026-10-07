@@ -55,13 +55,16 @@ export function orderedWorkspaces(workspaces, workspaceFilter = '') {
 
 export function workspaceCardView(workspace = {}, health = null) {
   const operational = workspace.operational || {};
+  const mutationBlock = operational.mutationBlock?.blocked ? operational.mutationBlock : null;
   const healthWarning = health?.ok === false ? health.error || 'Project unavailable' : '';
   const available = !healthWarning && operational.exists !== false;
   const active = Boolean(operational.currentActivity || workspace.sessionPolicy?.sessionActive);
   return {
     alias: workspace.alias || 'workspace',
     path: workspace.path || '',
-    statusLabel: healthWarning ? 'Needs attention' : active ? 'Active' : 'Ready',
+    statusLabel: mutationBlock ? 'Changes blocked' : healthWarning ? 'Needs attention' : active ? 'Active' : 'Ready',
+    mutationBlock,
+    ready: available && !mutationBlock,
     healthWarning,
     available,
     operational,
@@ -78,6 +81,9 @@ export function branchSummary(operational = {}) {
 }
 
 export function repositorySummary(operational = {}) {
+  if (operational.mutationBlock?.blocked) {
+    return { kindLabel: 'Safety', label: 'Changes blocked', description: 'Read-only inspection remains available. Changes require confirmed safe recovery.', tone: 'bad' };
+  }
   if (operational.exists === false) {
     return { kindLabel: 'Folder', label: 'Folder missing', description: 'Rel.AI cannot find this local folder.', tone: 'bad' };
   }

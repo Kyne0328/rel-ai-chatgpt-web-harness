@@ -166,6 +166,49 @@ async function case_desktop_lifecycle_unit() {
   assert.equal(portable.setLaunchAtLogin(true).errorCode, 'startup_setting_not_supported');
   
   fs.rmSync(stateDir, { recursive: true, force: true });
+
+  // Only injected state writes: no live Electron recovery file is used.
+  let durable = {};
+  let failWrite = false;
+  let holdWrite = null;
+  let writesInFlight = 0;
+  let maxWritesInFlight = 0;
+  const isolated = createDesktopLifecycleManager({
+    app, platform: 'win32', env: {}, now, connectorRevision: 'fixture',
+    readStateFile: async () => durable,
+    writeStateFile: async (_path, value) => {
+      writesInFlight += 1;
+      maxWritesInFlight = Math.max(maxWritesInFlight, writesInFlight);
+      try {
+        if (holdWrite) await holdWrite;
+        if (failWrite) { failWrite = false; throw new Error('fixture write failure'); }
+        durable = structuredClone(value);
+      } finally { writesInFlight -= 1; }
+    }
+  });
+  await isolated.start();
+  const originalLaunchId = durable.launchId;
+  failWrite = true;
+  await assert.rejects(() => isolated.markCleanShutdown(), /clean shutdown state could not be saved/);
+  assert.equal(durable.running, true, 'failed clean marker must preserve durable recovery evidence');
+  assert.equal(durable.launchId, originalLaunchId);
+  assert.equal(isolated.getStatus().lastCleanExitAt, '');
+  let releaseWrite;
+  holdWrite = new Promise(resolve => { releaseWrite = resolve; });
+  const firstPreference = isolated.setPreferences({ themePreference: 'dark' });
+  const secondPreference = isolated.setPreferences({ pulseEnabled: false });
+  const cleanShutdown = isolated.markCleanShutdown();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writesInFlight, 1, 'async lifecycle changes must not race whole-state writes');
+  holdWrite = null;
+  releaseWrite();
+  await Promise.all([firstPreference, secondPreference, cleanShutdown]);
+  assert.equal(maxWritesInFlight, 1);
+  assert.equal(durable.themePreference, 'dark');
+  assert.equal(durable.pulseEnabled, false);
+  assert.equal(durable.running, false, 'queued preferences must not restore an unclean marker after shutdown');
+  assert.ok(isolated.getStatus().lastCleanExitAt);
+
   console.log('Desktop lifecycle unit tests passed.');
 }
 await case_desktop_lifecycle_unit();
@@ -1103,12 +1146,16 @@ async function case_windows_uia_adapter_unit() {
     targetId: 'e1', source: 'uia', role: 'Button', name: 'Save', automationId: 'save', className: 'Button', enabled: true,
     displayId: '\\\\.\\DISPLAY1', x: 100, y: 200, width: 80, height: 30, centerX: 140, centerY: 215, patterns: ['invoke']
   };
+  const provenance = app => ({ scope: 'app-window', method: 'win32-print-window', app, windowId: '1001', processId: 123, processStartedAt: '100000', displayId: target.displayId, capturedAt: Date.now(), coordinateSpace: 'window-local-pixels', originX: 100, originY: 200 });
   let requests = [];
   const adapter = createWindowsUiaAdapter({
     platform: 'win32',
     request: async payload => {
       requests.push(payload);
       if (payload.action === 'warmup') return { supported: true, available: true, ocrAvailable: true };
+      if (payload.action === 'app_targets') return { candidates: [{ windowId: '1001', processId: 123, processStartedAt: '100000', executablePath: 'C:\\Fixture\\notes.exe', processName: 'notes', title: 'Notes', displayId: target.displayId }], truncated: false };
+      if (payload.action === 'verify_input_target') return { verified: true, windowId: payload.target.provenance.windowId, processId: payload.target.provenance.processId };
+      if (payload.action === 'screenshot_app') return { mimeType: 'image/png', data: Buffer.from('synthetic-window').toString('base64'), bytes: 16, width: 80, height: 30, provenance: provenance(payload.app) };
       if (payload.action === 'activate') {
         return { supported: true, available: true, handled: true, method: 'uia-invoke', target };
       }
@@ -1119,6 +1166,7 @@ async function case_windows_uia_adapter_unit() {
         supported: true,
         available: true,
         perception: payload.perception,
+        pixelProvenance: provenance(payload.app),
         ocrAvailable: true,
         window: {
           title: 'Notes',
@@ -1196,9 +1244,110 @@ async function case_windows_uia_adapter_unit() {
   
   await assert.rejects(() => adapter.observe('Notes', 50, 'invalid'), /auto, semantic, or hybrid/i);
   
+  const appImage = await adapter.screenshotApp('Notes', target.displayId);
+  assert.equal(appImage.provenance.originX, 100);
+  assert.equal(requests.at(-1).action, 'screenshot_app');
+  await adapter.assertAppInputTarget('Notes', { provenance: appImage.provenance, width: 80, height: 30, points: [{ x: 110, y: 210 }] });
+  assert.equal(requests.at(-1).action, 'verify_input_target');
+  await assert.rejects(() => unavailable.assertAppInputTarget('Notes', { provenance: appImage.provenance, width: 80, height: 30, points: [] }), error => error.code === 'COMPUTER_INPUT_TARGET_UNVERIFIED');
+  await assert.rejects(() => unavailable.screenshotApp('Notes'), error => error.code === 'COMPUTER_APP_CAPTURE_UNAVAILABLE');
+  const unprovenOcr = createWindowsUiaAdapter({ platform: 'win32', request: async payload => payload.action === 'warmup'
+    ? { supported: true, available: true, ocrAvailable: true }
+    : { supported: true, available: true, elements: [{ ...target, source: 'ocr' }], window: { processName: 'notes', processId: 123, displayId: target.displayId } } });
+  await assert.rejects(() => unprovenOcr.observe('Notes', 50, 'hybrid'), error => error.code === 'COMPUTER_APP_CAPTURE_UNAVAILABLE');
+  const fs = await import('node:fs');
+  const helper = fs.readFileSync(new URL('../src/computer/windows-uia-helper.ps1', import.meta.url), 'utf8');
+  const native = fs.readFileSync(new URL('../src/computer/windows-app-capture.ps1', import.meta.url), 'utf8');
+  assert.doesNotMatch(helper + native, /CopyFromScreen|GetDesktopWindow|GetDC\s*\(/, 'application pixels must never be derived from the visible desktop');
+  assert.match(native, /PrintWindow\(\$hwnd, \$hdc, 0\)/);
+  assert.match(native, /GetWindowThreadProcessId/);
+  assert.match(native, /StartTime/);
+  assert.match(native, /IsIconic/);
   console.log('Windows UI Automation adapter warms once, normalizes hybrid targets, and exposes native semantic actions.');
 }
 await case_windows_uia_adapter_unit();
+
+// Owned-helper containment and bounded same-target retry; no real processes/input.
+async function case_computer_helper_containment() {
+  const assert = (await import('node:assert/strict')).default;
+  const { EventEmitter } = await import('node:events');
+  const { PassThrough, Writable } = await import('node:stream');
+  const { createWindowsUiaAdapter } = await import('../src/computer/windowsUiaAdapter.ts');
+  const { selectAppTarget } = await import('../src/computer/appTarget.ts');
+  const candidate = { windowId: '3001', processId: 300, processStartedAt: '300000', executablePath: 'C:\\Fixture\\notes.exe', processName: 'notes', title: 'Fixture', displayId: 'main' };
+  const makeImage = target => ({ mimeType: 'image/png', data: 'eA==', bytes: 1, width: 2, height: 2, provenance: {
+    scope: 'app-window', method: 'win32-print-window', app: 'notes', windowId: target.windowId, processId: target.processId, processStartedAt: target.processStartedAt,
+    displayId: 'main', capturedAt: Date.now(), coordinateSpace: 'window-local-pixels', originX: 0, originY: 0, targetIdentity: target
+  } });
+  const initial = selectAppTarget('notes', [candidate]);
+  const replacement = { ...candidate, windowId: '3002', processId: 301, processStartedAt: '400000' };
+  const calls = [];
+  let first = true;
+  const retry = createWindowsUiaAdapter({ platform: 'win32', request: async payload => {
+    calls.push(payload.action);
+    if (payload.action === 'app_targets') return { candidates: [replacement], truncated: false };
+    if (first) { first = false; throw new Error('APP_TARGET_STALE: fixture closed'); }
+    return makeImage(payload.appTarget);
+  } });
+  const retried = await retry.screenshotApp('notes', 'main', { target: initial });
+  assert.equal(retried.provenance.windowId, '3002');
+  assert.deepEqual(calls, ['screenshot_app', 'app_targets', 'screenshot_app']);
+  for (const failure of ['APP_CAPTURE_DENIED', 'WGC_TIMEOUT']) {
+    let count = 0;
+    const denied = createWindowsUiaAdapter({ platform: 'win32', request: async () => { count += 1; throw new Error(failure); } });
+    await assert.rejects(() => denied.screenshotApp('notes', 'main', { target: initial }), new RegExp(failure));
+    assert.equal(count, 1, 'denial and timeout must not trigger another identity/provider request');
+  }
+
+  const children = [];
+  function spawnFake({ responds = false, confirms = true } = {}) {
+    const child = new EventEmitter();
+    Object.assign(child, { exitCode: null, signalCode: null, killed: false, kills: 0, stdout: new PassThrough(), stderr: new PassThrough() });
+    child.stdin = new Writable({ write(chunk, _encoding, callback) {
+      const request = JSON.parse(String(chunk));
+      child.lastRequest = request;
+      if (responds) setTimeout(() => child.stdout.write(JSON.stringify({ id: request.id, ok: true, result: { candidates: [candidate], truncated: false } }) + '\n'), 5);
+      callback();
+    } });
+    child.kill = () => {
+      child.killed = true; child.kills += 1;
+      if (confirms) setTimeout(() => { child.signalCode = 'SIGKILL'; child.emit('exit', null, 'SIGKILL'); }, 15);
+      return true;
+    };
+    children.push(child); return child;
+  }
+  const adapter = createWindowsUiaAdapter({ platform: 'win32', timeoutMs: 500, spawnProcess: () => spawnFake({ responds: children.length > 0 }) });
+  const before = Date.now();
+  await assert.rejects(() => adapter.resolveAppTarget('notes'), error => error.code === 'COMPUTER_HELPER_TIMEOUT' && error.terminationConfirmed === true);
+  assert.ok(Date.now() - before >= 500);
+  assert.equal(children[0].kills, 1);
+  const next = await adapter.resolveAppTarget('notes');
+  assert.equal(next.windowId, '3001');
+  children[0].emit('exit', null, 'late');
+  assert.equal((await adapter.resolveAppTarget('notes')).windowId, '3001', 'old exit callback must not kill successor');
+  await adapter.shutdown();
+  const abort = new AbortController();
+  const cancelled = createWindowsUiaAdapter({ platform: 'win32', timeoutMs: 500, spawnProcess: () => spawnFake() });
+  const pending = cancelled.resolveAppTarget('notes', {}, abort.signal);
+  setTimeout(() => abort.abort(new Error('fixture cancelled')), 10);
+  await assert.rejects(() => pending, error => /fixture cancelled/.test(error.message) && error.terminationConfirmed === true);
+  assert.equal(children.at(-1).signalCode, 'SIGKILL');
+  const warming = createWindowsUiaAdapter({ platform: 'win32', timeoutMs: 500, spawnProcess: () => spawnFake() });
+  const backgroundWarmup = warming.warmup().catch(error => error);
+  const warmAbort = new AbortController();
+  const observing = warming.observe('notes', 10, 'auto', warmAbort.signal);
+  setTimeout(() => warmAbort.abort(new Error('warmup cancelled')), 10);
+  await assert.rejects(() => observing, error => /warmup cancelled/.test(error.message) && error.terminationConfirmed === true);
+  assert.equal((await backgroundWarmup).terminationConfirmed, true, 'foreground cancellation must contain shared background warmup');
+  const stuck = createWindowsUiaAdapter({ platform: 'win32', timeoutMs: 500, spawnProcess: () => spawnFake({ confirms: false }) });
+  await assert.rejects(() => stuck.resolveAppTarget('notes'), error => error.terminationConfirmed === false);
+  const spawned = children.length;
+  await assert.rejects(() => stuck.resolveAppTarget('notes'), error => error.code === 'COMPUTER_HELPER_TERMINATION_UNCONFIRMED');
+  assert.equal(children.length, spawned, 'unreaped helper must prevent successor spawn');
+  console.log('Computer helper deadlines/cancellation await owned exit, quarantine uncertainty, fence late callbacks, and bound same-target retry.');
+}
+await case_computer_helper_containment();
+
 
 // Native multi-tunnel connection storage and runtime pooling.
 async function case_multi_tunnel_connection_unit() {

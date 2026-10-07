@@ -16,10 +16,14 @@ const POLLING_OPERATIONS = new Set([
 ]);
 const taskState = new LRUCache({ max: MAX_TRACKED_TASKS });
 
-function observeRepeatCall({ connector = false, taskId = '', operationName = '', args = {}, mutationGeneration = 0 } = {}) {
+function observeRepeatCall({ connector = false, taskId = '', operationName = '', args = {}, mutationGeneration = 0, progress = false } = {}) {
   const id = String(taskId || '').trim();
   const operation = String(operationName || '').trim();
   if (!connector || !id || !operation || POLLING_OPERATIONS.has(operation)) return null;
+  if (operation === OP.SNAPSHOT && progress) {
+    taskState.delete(id);
+    return null;
+  }
 
   const fingerprint = repeatFingerprint(operation, args);
   const generation = Number(mutationGeneration || 0);

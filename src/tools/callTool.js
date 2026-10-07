@@ -211,7 +211,7 @@ async function callToolObserved(name, args = {}, context = {}) {
     if (attributionHint && definition.annotations?.readOnlyHint !== true) {
       throw taskError('TASK_ATTRIBUTION_REQUIRED', attributionHint, { retryable: true, allowedAlternatives: [attributionHint] });
     }
-    const repeatCall = observeRepeatCall({
+    let repeatCall = observeRepeatCall({
       connector,
       taskId: requestedTaskId,
       operationName,
@@ -259,6 +259,8 @@ async function callToolObserved(name, args = {}, context = {}) {
       config, name, executionName: operationName, effectiveArgs, context, requestTaskContext, finishActivity, definition, started, workspaceOverride
     });
     const value = execution.value;
+    if (operationName === OP.SNAPSHOT && (value?.skillDiscovery?.resumable || value?.skillDiscovery?.resumed))
+      repeatCall = observeRepeatCall({ connector, taskId: requestedTaskId, operationName, progress: true });
     operationTimeline = execution.timeline;
     operationTimeline?.transition('persisting');
     if (value && typeof value === 'object') value.timeline = operationTimeline?.snapshot();
@@ -753,4 +755,29 @@ function ok(value) {
   return value && typeof value === 'object' && Object.hasOwn(value, 'ok') ? value : { ok: true, ...value };
 }
 
-export { callTool };
+
+// Resolve the execution identity before the transport registers replay/result
+// state. The actual call still performs its complete admission and ownership
+// checks; this preflight cannot grant authority or select an implicit task.
+function resolveFallbackExecutionScope(config, name, args = {}, context = {}) {
+  const resolved = resolveExecutableToolCall(name, args, config);
+  if (!resolved) throw new Error(`Unknown tool '${name}'.`);
+  const operationName = resolved.operationName;
+  const principal = principalForContext(context, Boolean(context.publicHttpOnly));
+  assertAuthorizedToolCall({ principal, operationName, workspace: '' });
+  let workspace = String(args.workspace || '').trim();
+  const taskId = normalizeTaskId(args.work_id);
+  if (taskId && args.independent === true) throw taskError('TASK_SCOPE_CONFLICT', 'work_id and independent cannot be combined.');
+  let knownTask = null;
+  if (taskId && operationName !== OP.WORK_BEGIN) {
+    knownTask = assertKnownTask(config, taskId, '', operationName, principal, args);
+    if (!workspace) workspace = String(knownTask?.workspace || '');
+  }
+  const resolution = resolveConfiguredWorkspaceArgument(config, workspace);
+  workspace = resolution?.alias || workspace;
+  if (workspace) assertAuthorizedToolCall({ principal, operationName, workspace });
+  if (knownTask) assertTaskWorkspaceOwnership(knownTask, workspace);
+  return { ...args, ...(workspace ? { workspace } : {}) };
+}
+
+export { callTool, resolveFallbackExecutionScope };

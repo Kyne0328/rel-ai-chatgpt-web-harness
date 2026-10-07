@@ -13,6 +13,7 @@ let operational = true;
 let localAlive = true;
 let controlPlaneDegraded = false;
 let deliveryDegraded = false;
+let acceptedDeliveries = 4;
 const statuses = [];
 const logs = [];
 
@@ -71,7 +72,7 @@ function fetchTunnel(url) {
         http_status: deliveryDegraded ? 502 : 200,
         attempts: 4,
         retries: deliveryDegraded ? 2 : 0,
-        accepted: deliveryDegraded ? 2 : 4,
+        accepted: deliveryDegraded ? 2 : acceptedDeliveries,
         completed: 4,
         terminal_failures: deliveryDegraded ? 1 : 0
       }
@@ -109,6 +110,12 @@ try {
   for (const phase of ['starting', 'locally_ready', 'authenticating', 'running']) {
     assert.ok(statuses.some(status => status.state === phase), `startup must publish ${phase}`);
   }
+
+  const initialConnectedAt = runtime.snapshot().lastConnectedAt;
+  acceptedDeliveries = 9;
+  await waitFor(() => runtime.snapshot().tunnelHealth.responseDelivery.details.accepted === 9);
+  assert.equal(runtime.snapshot().lastConnectedAt, initialConnectedAt, 'healthy counter refresh must not pretend a reconnect occurred');
+  assert.equal(spawned.child, primaryChild, 'healthy diagnostics must refresh without process restart');
 
   primaryChild.stdout.emit('data', '{"level":"WARN","msg":"command response deadline reached; dropping without posting a response","component":"dispatcher"}\n');
   primaryChild.stdout.emit('data', '{"level":"ERROR","msg":"dispatcher received MCP upstream error; posted error response to control plane","component":"dispatcher","status_code":502}\n');

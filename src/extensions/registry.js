@@ -14,7 +14,9 @@ import {
   managedExtensionCommandPath
 } from './paths.js';
 import { extractToolBundleZip } from './toolBundle.js';
+import { acquireExtensionOperation } from './operationLock.js';
 import { beginExtensionInstallTransaction, completeExtensionInstallTransaction, markExtensionInstallCommitted, recoverInterruptedExtensionInstalls } from './installTransaction.js';
+import { boundedInventory, fileSignature, scanError, scanFile, scanStat } from '../skillScan.js';
 
 const CATALOG_URL = 'https://raw.githubusercontent.com/Kyne0328/rel-ai-extensions/main/catalog.json';
 const OFFICIAL_EXTENSION_REPOSITORY_URL = 'https://github.com/Kyne0328/rel-ai-extensions';
@@ -330,7 +332,10 @@ function readInstalledExtension(directory, directoryName = path.basename(directo
     }
     if (manifest.id !== directoryName) throw new Error(`Manifest id '${manifest.id}' does not match extension directory '${directoryName}'.`);
     const files = verifyInstalledFiles(directory, manifest, cached?.files, options.metrics);
+    installedExtensionVerificationCache.delete(directory);
     installedExtensionVerificationCache.set(directory, { manifestSignature, manifest, files });
+    while (installedExtensionVerificationCache.size > 256)
+      installedExtensionVerificationCache.delete(installedExtensionVerificationCache.keys().next().value);
     const readiness = extensionReadiness(manifest, config);
     const metadata = readExtensionInstallMetadata(directory) || {};
     const sourceCatalogUrl = String(metadata.catalogUrl || '');
@@ -382,17 +387,118 @@ function extensionReadiness(manifest, config = {}) {
 
 function extensionSkillRecords(config = {}, options = {}) {
   const root = extensionsRoot(config);
-  return listInstalledExtensions(config, options).flatMap(extension => {
-    if (!extension.ready || !extension.entrypoints?.skill) return [];
-    const file = path.join(root, extension.id, extension.entrypoints.skill);
-    return [{
-      name: extension.id,
-      description: extension.description,
-      source: 'extension',
-      file,
-      displayPath: `extension:${extension.id}`
-    }];
+  const source = {
+    name: 'extension', root,
+    preflight(entry) {
+      if (/^\.install-transaction-[a-z0-9][a-z0-9.-]{0,79}\.json$/.test(entry.name)
+        || /^\.operation-\d+-[a-f0-9-]+\.lock$/.test(entry.name))
+        throw scanError('extension-recovery-unverified', 'Extension discovery waits for its active operation or recovery.');
+    },
+    accept: entry => EXTENSION_ID_PATTERN.test(entry.name) && !options.excludeNames?.has(entry.name),
+    inspect: (name, context) => extensionSkillObservation(root, name, config, context, true),
+    observe: function* (name, context) { return (yield* extensionSkillObservation(root, name, config, context, false)).signature; }
+  };
+  // The common scanner owns paging. Registry owns manifest/integrity/readiness
+  // observations, so snapshot and named lookup use identical extension rules.
+  if (options.scanSource) return source;
+  if (options.limit === 0) return [];
+  const result = boundedInventory('extension:' + root + ':' + JSON.stringify([...(options.excludeNames || [])]), [source], {
+    ...options, limit: Math.min(100, Math.max(1, Number(options.limit) || 100))
   });
+  if (options.metrics) options.metrics.skillDiscovery = result.discovery;
+  return result.records;
+}
+
+function* extensionSkillObservation(root, name, config, context, inspect) {
+  const directory = path.join(root, name), manifestPath = path.join(directory, MANIFEST_FILENAME);
+  const stat = yield* scanStat(manifestPath);
+  let signature = fileSignature(stat);
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.size > MAX_MANIFEST_BYTES) return { signature, record: null };
+  const manifestSignature = installedFileSignature(stat);
+  const cached = installedExtensionVerificationCache.get(directory);
+  let manifest;
+  try {
+    if (cached?.manifestSignature === manifestSignature) {
+      manifest = cached.manifest;
+      if (inspect) incrementExtensionMetric(context.metrics, 'extensionManifestCacheHits');
+    } else {
+      manifest = parseExtensionManifest(JSON.parse((yield* scanFile(manifestPath, stat, MAX_MANIFEST_BYTES)).toString('utf8')));
+      if (inspect) incrementExtensionMetric(context.metrics, 'extensionManifestReads');
+    }
+    if (manifest.id !== name) return { signature, record: null };
+  } catch (error) {
+    if (error.reason === 'source-changed') throw error;
+    return { signature, record: null };
+  }
+  const files = new Map();
+  let valid = true;
+  let skillStat;
+  for (const file of manifest.files) {
+    const target = safeJoin(directory, file.path), fileStat = yield* scanStat(target);
+    signature += ':' + file.path + ':' + fileSignature(fileStat);
+    if (file.path === manifest.entrypoints.skill) skillStat = fileStat;
+    if (!fileStat?.isFile() || fileStat.isSymbolicLink() || fileStat.size > MAX_EXTENSION_FILE_BYTES) { valid = false; continue; }
+    if (!inspect) continue;
+    const prior = cached?.files?.get(file.path), stamp = installedFileSignature(fileStat);
+    if (prior?.signature === stamp && prior.sha256 === file.sha256) {
+      incrementExtensionMetric(context.metrics, 'extensionFileVerificationCacheHits');
+      files.set(file.path, prior);
+    } else {
+      const digest = yield* scanFile(target, fileStat, MAX_EXTENSION_FILE_BYTES, true);
+      incrementExtensionMetric(context.metrics, 'extensionFileHashReads');
+      if (digest !== file.sha256) valid = false;
+      else files.set(file.path, { signature: stamp, sha256: digest });
+    }
+  }
+  if (inspect) {
+    installedExtensionVerificationCache.delete(directory);
+    installedExtensionVerificationCache.set(directory, { manifestSignature, manifest, files });
+    while (installedExtensionVerificationCache.size > 256)
+      installedExtensionVerificationCache.delete(installedExtensionVerificationCache.keys().next().value);
+  }
+  const version = String(getApplicationMetadata()?.version || '0.0.0');
+  let ready = semver.satisfies(version, manifest.compatibility.relai, { includePrerelease: true })
+    && (!manifest.requires.platforms.length || manifest.requires.platforms.includes(process.platform));
+  for (const command of manifest.requires.commands) ready = (yield* skillCommandAvailable(command, config)) && ready;
+  signature += ':' + ready;
+  return { signature, record: inspect && valid && ready && manifest.entrypoints.skill ? {
+    name: manifest.id, description: manifest.description, source: 'extension',
+    file: path.join(directory, manifest.entrypoints.skill), stat: skillStat, displayPath: `extension:${manifest.id}`
+  } : null };
+}
+
+function* skillCommandAvailable(command, config) {
+  const managedRoot = path.resolve(extensionBinRoot(config));
+  const entries = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === 'win32' ? String(process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean) : [''];
+  for (const directory of entries) {
+    if (path.resolve(directory) === managedRoot) continue;
+    for (const extension of extensions) {
+      const target = path.join(directory, process.platform === 'win32' && path.extname(command) ? command : command + extension);
+      yield { units: 1 };
+      try {
+        const stat = process.platform === 'win32' ? fs.lstatSync(target) : fs.statSync(target);
+        if (!stat.isFile() || stat.isSymbolicLink()) continue;
+        if (process.platform !== 'win32') { yield { units: 1 }; fs.accessSync(target, fs.constants.X_OK); }
+        return true;
+      } catch { /* Missing command candidate. */ }
+    }
+  }
+  const metadataPath = managedExtensionCommandMetadataPath(config, command), stat = yield* scanStat(metadataPath);
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) return false;
+  try {
+    const metadata = JSON.parse((yield* scanFile(metadataPath, stat, 16 * 1024)).toString('utf8'));
+    if (metadata?.schemaVersion !== 1 || metadata.command !== command || !EXTENSION_ID_PATTERN.test(String(metadata.extensionId || ''))) return false;
+    const target = metadata.installType === 'bundle'
+      ? managedExtensionBundleCommandPath(config, metadata.extensionId, metadata.relativePath) : managedExtensionCommandPath(config, command);
+    const targetStat = yield* scanStat(target);
+    if (!targetStat?.isFile() || targetStat.isSymbolicLink()) return false;
+    if (process.platform !== 'win32') { yield { units: 1 }; fs.accessSync(target, fs.constants.X_OK); }
+    return true;
+  } catch (error) {
+    if (error.reason === 'source-changed') throw error;
+    return false;
+  }
 }
 
 async function extensionDashboard(config = {}, options = {}) {
@@ -866,9 +972,20 @@ function finalizeManagedCommandInstall(install) {
 }
 
 async function installExtension(config, id, options = {}) {
-  const extensionId = normalizeExtensionId(id);
-  const recovery = recoverInterruptedExtensionInstalls(config);
+  const lease = acquireExtensionOperation(config);
+  try {
+    assertExtensionRecovery(config, lease);
+    return await installExtensionUnderLease(config, id, options);
+  } finally { lease.release(); }
+}
+
+function assertExtensionRecovery(config, lease) {
+  const recovery = recoverInterruptedExtensionInstalls(config, { lease });
   if (!recovery.ok) throw new Error(`Could not recover an interrupted extension installation: ${recovery.errors[0]?.error || 'unknown recovery error'}`);
+}
+
+async function installExtensionUnderLease(config, id, options) {
+  const extensionId = normalizeExtensionId(id);
   const { source, entry } = await resolveExtensionInstallSource(config, extensionId, options);
   const target = path.join(extensionsRoot(config), extensionId);
   if (fs.existsSync(target)) {
@@ -945,6 +1062,14 @@ async function resolveExtensionInstallSource(config, extensionId, options = {}) 
 }
 
 async function installLocalExtension(config, extensionDirectory) {
+  const lease = acquireExtensionOperation(config);
+  try {
+    assertExtensionRecovery(config, lease);
+    return await installLocalExtensionUnderLease(config, extensionDirectory);
+  } finally { lease.release(); }
+}
+
+async function installLocalExtensionUnderLease(config, extensionDirectory) {
   const source = path.resolve(String(extensionDirectory || ''));
   let sourceStat;
   try { sourceStat = fs.lstatSync(source); }
@@ -1015,6 +1140,13 @@ async function commitExtensionPackage(config, manifest, options) {
       installedAt: new Date().toISOString(),
       managedCommands: managedInstall?.entries.map(entry => entry.command) || []
     }, null, 2)}\n`, { mode: 0o600 });
+    // Preparation can await downloads. Check ownership again immediately
+    // before the synchronous package/command promotion.
+    for (const entry of managedInstall?.entries || []) {
+      if (!managedCommandDisposition(config, manifest.id, entry.command)) {
+        throw new Error(`Managed command '${entry.command}' changed during installation.`);
+      }
+    }
     beginExtensionInstallTransaction(config, {
       id: manifest.id,
       target,
@@ -1067,18 +1199,53 @@ function readLocalPackageFile(sourceRoot, file) {
 }
 
 function removeExtension(config, id) {
+  const lease = acquireExtensionOperation(config);
+  try {
+    assertExtensionRecovery(config, lease);
+    return removeExtensionUnderLease(config, id, lease);
+  } finally { lease.release(); }
+}
+
+function removeExtensionUnderLease(config, id, lease) {
   const extensionId = normalizeExtensionId(id);
-  const recovery = recoverInterruptedExtensionInstalls(config);
-  if (!recovery.ok) throw new Error(`Could not recover an interrupted extension installation: ${recovery.errors[0]?.error || 'unknown recovery error'}`);
   const root = extensionsRoot(config);
   const target = path.join(root, extensionId);
   let stat;
-  try { stat = fs.lstatSync(target); } catch { return { ok: true, id: extensionId, removed: false }; }
+  try { stat = fs.lstatSync(target); } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, id: extensionId, removed: false };
+    throw error;
+  }
   if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Refusing to remove an unsafe extension path.');
-  const removedCommands = removeManagedCommandsOwnedBy(config, extensionId);
-  fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  const nonce = crypto.randomUUID();
+  const entries = managedCommandRemovalEntries(config, extensionId, nonce);
+  const transaction = {
+    id: extensionId, operation: 'remove', target,
+    staging: path.join(root, `.remove-${extensionId}-${nonce}`),
+    backup: path.join(root, `.removed-${extensionId}-${nonce}`),
+    targetExisted: true, entries
+  };
+  beginExtensionInstallTransaction(config, transaction);
+  try {
+    // Move the package before touching commands. All moves are recoverable
+    // until the committed marker is durable.
+    fs.renameSync(target, transaction.backup);
+    for (const entry of entries) {
+      if (entry.targetExisted) fs.renameSync(entry.target, entry.backupTarget);
+      fs.renameSync(entry.metadataTarget, entry.backupMetadata);
+    }
+    markExtensionInstallCommitted(config, extensionId);
+  } catch (error) {
+    const recovery = recoverInterruptedExtensionInstalls(config, { lease });
+    if (!recovery.ok) error.recoveryError = recovery.errors[0]?.error;
+    throw error;
+  }
+  const cleanup = recoverInterruptedExtensionInstalls(config, { lease });
   installedExtensionVerificationCache.delete(target);
-  return { ok: true, id: extensionId, removed: true, removedCommands };
+  const removedCommands = [...new Set(entries.map(entry => entry.command))].sort((left, right) => left.localeCompare(right));
+  return {
+    ok: true, id: extensionId, removed: true, removedCommands,
+    ...(!cleanup.ok ? { cleanupPending: true, cleanupWarning: String(cleanup.errors[0]?.error || 'Removal cleanup will be retried.').slice(0, 1000) } : {})
+  };
 }
 
 function verifyInstalledFiles(directory, manifest, cachedFiles = new Map(), metrics) {
@@ -1324,48 +1491,62 @@ async function downloadVerifiedFile(url, maxBytes, label, destination, expectedS
   const timeoutMs = Math.min(30 * 60_000, Math.max(1_000, Number(options.timeoutMs) || 120_000));
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let fd = null;
+  let reader = null;
+  let created = false;
   let completed = false;
   try {
     const response = await fetch(url, { signal: controller.signal, redirect: 'follow', headers: { 'User-Agent': 'Rel.AI-MCP-Extensions/1' } });
+    if (response.body) reader = response.body.getReader();
     if (!response.ok) throw new Error(`Could not download ${label}: HTTP ${response.status}.`);
     if (!isHttpsUrl(response.url || url)) throw new Error(`The ${label} redirected to a non-HTTPS URL.`);
     const declaredLength = Number(response.headers.get('content-length') || 0);
     if (declaredLength > maxBytes) throw new Error(`The ${label} exceeds the allowed size.`);
-    if (!response.body) throw new Error(`The ${label} response did not contain a body.`);
+    if (!reader) throw new Error(`The ${label} response did not contain a body.`);
 
     fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
     fd = fs.openSync(destination, 'wx', 0o600);
+    created = true;
     const digest = crypto.createHash('sha256');
-    const reader = response.body.getReader();
     let totalBytes = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = Buffer.from(value);
-        totalBytes += chunk.length;
-        if (totalBytes > maxBytes) {
-          controller.abort();
-          throw new Error(`The ${label} exceeds the allowed size.`);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      totalBytes += chunk.length;
+      if (totalBytes > maxBytes) throw new Error(`The ${label} exceeds the allowed size.`);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const written = fs.writeSync(fd, chunk, offset, chunk.length - offset);
+        if (!Number.isInteger(written) || written <= 0 || written > chunk.length - offset) {
+          throw Object.assign(new Error(`Could not write ${label} to disk.`), { code: 'EIO' });
         }
-        digest.update(chunk);
-        fs.writeSync(fd, chunk);
+        offset += written;
       }
-    } finally {
-      reader.releaseLock();
+      digest.update(chunk);
     }
     const actualSha256 = digest.digest('hex');
     if (actualSha256 !== expectedSha256) throw new Error(`Checksum mismatch for ${label}.`);
+    fs.closeSync(fd);
+    fd = null;
     completed = true;
     return { bytes: totalBytes, sha256: actualSha256 };
   } catch (error) {
+    controller.abort();
     if (error?.name === 'AbortError') throw new Error(`Timed out downloading ${label}.`, { cause: error });
     throw error;
   } finally {
+    // Cleanup must not replace the original open/write/checksum failure.
+    if (!completed) {
+      controller.abort();
+      try { await reader?.cancel(); } catch {}
+    }
+    try { reader?.releaseLock(); } catch {}
     if (fd != null) {
       try { fs.closeSync(fd); } catch {}
     }
-    if (!completed) fs.rmSync(destination, { force: true });
+    if (!completed && created) {
+      try { fs.rmSync(destination, { force: true }); } catch {}
+    }
     clearTimeout(timeout);
   }
 }
@@ -1385,7 +1566,7 @@ function systemCommandAvailable(command, config = {}) {
     : [''];
   for (const directory of pathEntries) {
     for (const extension of extensions) {
-      const candidate = path.join(directory, process.platform === 'win32' && path.extname(name) ? name : `${name}${extension}`);
+        const candidate = path.join(directory, process.platform === 'win32' && path.extname(name) ? name : `${name}${extension}`);
       try {
         const stat = process.platform === 'win32' ? fs.lstatSync(candidate) : fs.statSync(candidate);
         if (!stat.isFile() || stat.isSymbolicLink()) continue;
@@ -1434,11 +1615,11 @@ function commandAvailable(command, config = {}) {
   }
 }
 
-function removeManagedCommandsOwnedBy(config, extensionId) {
+function managedCommandRemovalEntries(config, extensionId, nonce) {
   const root = path.resolve(extensionBinRoot(config));
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return []; }
-  const removed = [];
+  const removals = [];
   for (const entry of entries) {
     if (!entry.isFile() || entry.isSymbolicLink() || !entry.name.endsWith('.relai-owner.json')) continue;
     const metadataPath = path.join(root, entry.name);
@@ -1454,11 +1635,16 @@ function removeManagedCommandsOwnedBy(config, extensionId) {
     const commandPath = metadataPath.slice(0, -'.relai-owner.json'.length);
     const relativeCommand = path.relative(root, path.resolve(commandPath));
     if (!relativeCommand || relativeCommand.startsWith('..') || path.isAbsolute(relativeCommand) || relativeCommand.includes(path.sep)) continue;
-    fs.rmSync(commandPath, { force: true });
-    fs.rmSync(metadataPath, { force: true });
-    removed.push(String(metadata?.command || path.basename(commandPath)));
+    removals.push({
+      command: String(metadata?.command || path.basename(commandPath)),
+      target: commandPath, metadataTarget: metadataPath,
+      stagingTarget: '', stagingMetadata: `${metadataPath}.remove-stage-${nonce}`,
+      backupTarget: `${commandPath}.removed-${nonce}`,
+      backupMetadata: `${metadataPath}.removed-${nonce}`,
+      targetExisted: fs.existsSync(commandPath), metadataExisted: true
+    });
   }
-  return [...new Set(removed)].sort((left, right) => left.localeCompare(right));
+  return removals;
 }
 
 function errorMessage(error) {
@@ -1467,5 +1653,5 @@ function errorMessage(error) {
 }
 
 export {
-  MAX_EXTENSION_FILE_BYTES, MAX_EXTENSION_TOTAL_BYTES, PERMISSIONS, configuredExtensionSources, extensionCatalogSchema, extensionDashboard, extensionSkillRecords, extensionSourceId, extensionsRoot, installExtension, installLocalExtension, listInstalledExtensions, parseExtensionCatalog, parseExtensionManifest, removeExtension, validateExtensionSource
+  MAX_EXTENSION_FILE_BYTES, MAX_EXTENSION_TOTAL_BYTES, PERMISSIONS, configuredExtensionSources, downloadVerifiedFile, extensionCatalogSchema, extensionDashboard, extensionSkillRecords, extensionSourceId, extensionsRoot, installExtension, installLocalExtension, listInstalledExtensions, parseExtensionCatalog, parseExtensionManifest, removeExtension, validateExtensionSource
 };

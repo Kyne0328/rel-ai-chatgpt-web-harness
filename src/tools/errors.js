@@ -44,7 +44,9 @@ function patchErrorHint(toolName, raw, append, error) {
   return null;
 }
 
-function operationForTool(toolName) {
+function operationForTool(toolName, action = '') {
+  if (toolName === 'relai_changes' && ['diff', 'checkpoint', 'replay', 'tidy_plan'].includes(action)) return FAILURE_OPERATION.REVIEW;
+  if (toolName === 'relai_publish' && action === 'draft_pr') return FAILURE_OPERATION.REVIEW;
   if ([OP.READ, OP.SEARCH_TEXT, OP.SEARCH_SEMANTIC, OP.SNAPSHOT, OP.INSPECT, 'relai_read', 'relai_search', 'relai_snapshot', 'relai_inspect'].includes(toolName)) return FAILURE_OPERATION.READ;
   if ([OP.CHANGES_RESTORE, OP.CHANGES_RESET, 'relai_changes'].includes(toolName)) return FAILURE_OPERATION.RESTORE;
   if ([OP.PUBLISH_COMMIT, 'relai_publish'].includes(toolName)) return FAILURE_OPERATION.COMMIT;
@@ -73,7 +75,7 @@ function serializeToolError(toolName, error) {
     errorDetails: {
       code: String(error.code),
       source: String(error.source || 'rel-ai-mcp'),
-      operation: String(error.operation || operationForTool(toolName)),
+      operation: String(error.operation || operationForTool(toolName || error.publicTool, error.validation?.action)),
       ...(error.timeline ? { timeline: error.timeline } : {}),
       ...(typeof error.executed === 'boolean' ? { executed: error.executed } : {}),
       ...(error.deadlineKind ? { deadlineKind: error.deadlineKind } : {}),

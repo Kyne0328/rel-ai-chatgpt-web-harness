@@ -6,6 +6,17 @@ This document supplements the project [NOTICE](NOTICE). It does not replace lice
 
 ## Major bundled components
 
+### .NET NativeAOT runtime
+
+The Windows x64 process-ownership companion includes the .NET NativeAOT runtime
+10.0.12, compiled with .NET SDK 10.0.401 from the shared controller source.
+
+- Upstream: <https://github.com/dotnet/runtime>
+- License: MIT, Copyright (c) .NET Foundation and Contributors
+- License and upstream notices: `src/windows-process-job-licenses/`
+- Build configuration and provenance: `src/windows-process-job-host.csproj` and
+  `src/windows-process-job-host.manifest.json`
+
 ### OpenAI tunnel-client
 
 Rel.AI bundles a pinned build of `openai/tunnel-client` for the supported Secure MCP Tunnel connection.

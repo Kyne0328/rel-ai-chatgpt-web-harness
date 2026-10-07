@@ -1,12 +1,22 @@
 const { contextBridge } = require('electron');
 
-const content = [
+let revision = 1;
+let diffDelayMs = 75;
+let content = [
   'const answer = 42;',
   'function greet(name) {',
   '  return `hello ${name}`; // greeting',
   '}',
   'greet("Rel.AI");'
 ].join('\n');
+
+contextBridge.exposeInMainWorld('relaiCodeProbe', {
+  setRevision(value, delayMs = 75) {
+    revision = value;
+    diffDelayMs = delayMs;
+    content = content.replace(/const answer = [0-9]+;/, `const answer = ${41 + value};`);
+  }
+});
 
 contextBridge.exposeInMainWorld('relaiDesktop', {
   codeWorkspace: {
@@ -36,15 +46,17 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
       truncated: false
     }),
     diff: async (_taskId, requestedPath) => {
-      await new Promise(resolve => setTimeout(resolve, 75));
+      const requestedContent = content;
+      const requestedRevision = revision;
+      await new Promise(resolve => setTimeout(resolve, diffDelayMs));
       return {
       ok: true,
       work_id: 'probe-task',
       workspace: 'app',
       path: requestedPath,
-      content,
+      content: requestedContent,
       baseContent: 'const answer = 0;\n',
-      sha256: 'a'.repeat(64),
+      sha256: String(requestedRevision).padStart(64, '0'),
       language: 'javascript',
       writable: false,
       readOnly: true,

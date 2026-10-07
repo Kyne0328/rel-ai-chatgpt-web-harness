@@ -128,8 +128,15 @@ async function until(predicate, description) {
   }
 }
 async function stopStarted() {
-  for (const processId of [...new Set(started.splice(0))]) {
-    await stopManagedProcess(config, { processId, graceMs: 50 }, { internal: true });
+  for (const processId of [...new Set(started)]) {
+    const stopped = await stopManagedProcess(config, { processId, graceMs: 50 }, { internal: true });
+    assert.equal(stopped.terminationConfirmed, true, 'Fixture stop must prove termination before forgetting its process: ' + JSON.stringify({
+      processId, status: stopped.status, terminationConfirmed: stopped.terminationConfirmed,
+      terminationError: stopped.terminationError, persistent: hostResourceStats().persistent
+    }));
+    for (let index = started.length - 1; index >= 0; index--) {
+      if (started[index] === processId) started.splice(index, 1);
+    }
   }
 }
 function persistentArgs(purpose, counter) {

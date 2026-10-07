@@ -28,13 +28,11 @@ function ChangesRoute({ data = {} }) {
   if (!tasks.length) return h(EmptyChangesState);
   return h(ChangesDesktop, {
     bridge,
-    taskRevision: Number(data.live?.revisions?.task || 0),
-    taskSource: data.tasks,
     tasks
   });
 }
 
-function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
+function ChangesDesktop({ bridge, tasks }) {
   const { selectedTaskId, requestedFilePath, selectTask } = useRouteTaskId(tasks);
   const selectedTask = tasks.find(task => task.id === selectedTaskId) || null;
   const [workspace, setWorkspace] = useState(null);
@@ -78,6 +76,8 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
       return true;
     } catch (error) {
       if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId) return false;
+      if (currentRoutePath() !== 'code' || readRequestedTaskId() !== normalizedTaskId) return false;
+      if (readRequestedFilePath() && readRequestedFilePath() !== normalizedPath) return false;
       setDiffFile(null);
       setViewerMessage(messageFor(error));
       setViewerTone('error');
@@ -87,7 +87,7 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
     }
   }, [bridge]);
 
-  const refreshWorkspace = useCallback(async (taskId, { refreshCurrent = false } = {}) => {
+  const refreshWorkspace = useCallback(async (taskId, { refreshCurrent = true } = {}) => {
     const normalizedTaskId = String(taskId || '').trim();
     if (!normalizedTaskId) return;
     const request = ++workspaceRequestRef.current;
@@ -153,8 +153,10 @@ function ChangesDesktop({ bridge, taskRevision, taskSource, tasks }) {
   }, []);
 
   useEffect(() => {
-    void refreshWorkspace(selectedTaskId);
-  }, [refreshWorkspace, selectedTaskId, taskRevision, taskSource]);
+    // Refresh the selected diff when that task's authoritative snapshot changes.
+    // A global task revision also includes unrelated tasks and is not a file revision.
+    void refreshWorkspace(selectedTaskId, { refreshCurrent: true });
+  }, [refreshWorkspace, selectedTaskId, selectedTask?.changeRevision]);
 
   const canOpenIde = typeof bridge.editors === 'function' && typeof bridge.openIde === 'function';
 
@@ -411,9 +413,21 @@ function FallbackColumn({ label, content }) {
 }
 
 function applyDiffModels(monaco, editor, modelsRef, file) {
+  const fileKey = file ? [file.work_id || '', file.path || '', file.historyMode || '', file.commitHead || ''].join('\u0000') : '';
+  const language = file?.language || 'plaintext';
+  if (file && modelsRef.fileKey === fileKey && modelsRef.current.length === 2) {
+    const viewState = editor.saveViewState?.();
+    const contents = [file.baseContent || '', file.content || ''];
+    modelsRef.current.forEach((model, index) => {
+      if (model.getValue() !== contents[index]) model.setValue(contents[index]);
+      if (model.getLanguageId?.() !== language) monaco.editor.setModelLanguage?.(model, language);
+    });
+    if (viewState) editor.restoreViewState?.(viewState);
+    return;
+  }
   clearDiffModels(editor, modelsRef);
   if (!file) return;
-  const language = file.language || 'plaintext';
+  modelsRef.fileKey = fileKey;
   const original = monaco.editor.createModel(file.baseContent || '', language);
   const modified = monaco.editor.createModel(file.content || '', language);
   modelsRef.current = [original, modified];
@@ -426,6 +440,7 @@ function clearDiffModels(editor, modelsRef) {
     try { model?.dispose?.(); } catch {}
   }
   modelsRef.current = [];
+  modelsRef.fileKey = '';
 }
 
 function bindEditorResize(editor, host) {
@@ -497,7 +512,8 @@ function codeTasks(data = {}) {
       id: taskId(task),
       label: taskLabel(task),
       status: String(task.status || ''),
-      workspace: String(task.workspace || '')
+      workspace: String(task.workspace || ''),
+      changeRevision: String(task.changeRevision ?? JSON.stringify(task))
     }))
     .filter(task => task.id);
 }

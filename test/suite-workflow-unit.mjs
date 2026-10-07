@@ -510,6 +510,31 @@ async function case_workflow_task_review_unit() {
       () => relaiDiff(workspace, config, { _taskOwnedPaths: ['task.txt'], path: 'unrelated.txt' }),
       /task-owned review scope/i
     );
+  
+    // Preserve the index and discover an explicitly owned untracked file inside
+    // an opaque directory without expanding unrelated untracked directories.
+    fs.mkdirSync(path.join(root, 'nested'));
+    fs.writeFileSync(path.join(root, 'nested', 'new-task.txt'), 'new nested task\n');
+    fs.writeFileSync(path.join(root, 'outside.txt'), 'outside task\n');
+    execFileSync('git', ['add', '--', 'unrelated.txt'], { cwd: root });
+    const stagedBefore = execFileSync('git', ['diff', '--cached', '--name-only', '-z'], { cwd: root, encoding: 'utf8' });
+    assert.equal(stagedBefore, 'unrelated.txt\0');
+    const indexEntriesBefore = execFileSync('git', ['ls-files', '--stage', '-z'], { cwd: root, encoding: 'utf8' });
+    const nestedTask = await relaiDiff(workspace, config, { _taskOwnedPaths: ['nested/new-task.txt'] });
+    assert.deepEqual(nestedTask.reviewedFiles, ['nested/new-task.txt']);
+    assert.deepEqual(new Set(nestedTask.excludedWorkspaceFiles), new Set(['outside.txt', 'task.txt', 'unrelated.txt']));
+    assert.match(nestedTask.diff, /new nested task/);
+    assert.doesNotMatch(nestedTask.diff, /changed unrelated|outside task/);
+    const taskStaged = await relaiDiff(workspace, config, { staged: true, _taskOwnedPaths: ['task.txt'] });
+    assert.equal(taskStaged.diff, '');
+    assert.ok(taskStaged.excludedWorkspaceFiles.includes('unrelated.txt'));
+    const allStaged = await relaiDiff(workspace, config, { staged: true, _taskOwnedPaths: ['task.txt'], scope: 'workspace' });
+    assert.ok(allStaged.reviewedFiles.includes('unrelated.txt'));
+    assert.match(allStaged.diff, /changed unrelated/);
+    assert.equal(execFileSync('git', ['diff', '--cached', '--name-only', '-z'], { cwd: root, encoding: 'utf8' }), stagedBefore,
+      'task and workspace reviews must preserve unrelated staged changes');
+    assert.equal(execFileSync('git', ['ls-files', '--stage', '-z'], { cwd: root, encoding: 'utf8' }), indexEntriesBefore,
+      'reviews must preserve staged object identities and modes, not only path names');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

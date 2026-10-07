@@ -17,6 +17,8 @@ function createDesktopLifecycleManager(options = {}) {
     execPath = process.execPath,
     now = () => new Date().toISOString(),
     onLog = () => {},
+    readStateFile = readJsonFileAsync,
+    writeStateFile = writeJsonAtomicAsync,
     errorCodes = {},
     connectorRevision = readConnectorRevision(app)
   } = options;
@@ -31,6 +33,12 @@ function createDesktopLifecycleManager(options = {}) {
     state: errorCodes.LIFECYCLE_STATE_FAILED || 'lifecycle_state_failed'
   };
   let launchId = '';
+  let mutationQueue = Promise.resolve();
+  const serialize = operation => {
+    const pending = mutationQueue.then(operation, operation);
+    mutationQueue = pending.catch(() => {});
+    return pending;
+  };
   let status = baseStatus(app, startupSupport, currentConnectorRevision);
 
   async function start() {
@@ -76,7 +84,9 @@ function createDesktopLifecycleManager(options = {}) {
       reducedBackgroundWork: previous.reducedBackgroundWork === true,
       openedAtLogin: argv.includes('--background') || launchAtLogin.openedAtLogin === true
     };
-    await writeState(persistedState(true));
+    if (!await writeState(persistedState(true))) {
+      throw Object.assign(new Error('Desktop launch recovery state could not be saved.'), { code: codes.state });
+    }
     recordLaunch();
     return snapshot();
   }
@@ -84,7 +94,9 @@ function createDesktopLifecycleManager(options = {}) {
   async function markCleanShutdown() {
     if (!launchId) return snapshot();
     const cleanExitAt = now();
-    await writeState(persistedState(false, cleanExitAt));
+    if (!await writeState(persistedState(false, cleanExitAt))) {
+      throw Object.assign(new Error('Desktop clean shutdown state could not be saved; recovery state was preserved.'), { code: codes.state });
+    }
     status = { ...status, lastCleanExitAt: cleanExitAt };
     launchId = '';
     onLog('Desktop lifecycle recorded a clean shutdown.', { source: 'desktop-lifecycle' });
@@ -218,12 +230,12 @@ function createDesktopLifecycleManager(options = {}) {
   }
 
   function readState() {
-    return readJsonFileAsync(statePath, { backup: true, fallback: {} });
+    return readStateFile(statePath, { backup: true, fallback: {} });
   }
 
   async function writeState(value) {
     try {
-      await writeJsonAtomicAsync(statePath, value, { mode: 0o600, backup: true });
+      await writeStateFile(statePath, value, { mode: 0o600, backup: true });
       return true;
     } catch (error) {
       onLog(`Desktop lifecycle state could not be saved: ${cleanText(error?.message || error, 240)}`, {
@@ -274,7 +286,15 @@ function createDesktopLifecycleManager(options = {}) {
     return { ...status, launchAtLogin: { ...status.launchAtLogin } };
   }
 
-  return { start, markCleanShutdown, getStatus, acknowledgeConnectorRefresh, setLaunchAtLogin, setKeepAwake, setPreferences };
+  return {
+    start: () => serialize(start),
+    markCleanShutdown: () => serialize(markCleanShutdown),
+    getStatus,
+    acknowledgeConnectorRefresh: () => serialize(acknowledgeConnectorRefresh),
+    setLaunchAtLogin,
+    setKeepAwake: enabled => serialize(() => setKeepAwake(enabled)),
+    setPreferences: patch => serialize(() => setPreferences(patch))
+  };
 }
 
 function baseStatus(app, support, connectorRevision = '') {

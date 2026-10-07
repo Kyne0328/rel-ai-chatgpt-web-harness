@@ -532,7 +532,7 @@ async function repositoryStateForEvent(
     || Boolean(clean(event?.validationStatus));
   if (!needsChangedFiles) return { baseline: null, changedFiles: null };
   options.signal?.throwIfAborted?.();
-  const statusResult = await readGitObservation(workspace.path, config, { signal: options.signal, timeoutMs: 500 });
+  const statusResult = await readGitObservation(workspace.path, config, { signal: options.signal, timeoutMs: process.platform === 'win32' ? 2000 : 500 });
   options.signal?.throwIfAborted?.();
   const statusOutput = statusResult.exitCode === 0 && !statusResult.stdoutTruncated
     ? String(statusResult.stdout || '')

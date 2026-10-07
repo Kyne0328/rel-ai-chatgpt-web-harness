@@ -245,7 +245,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_computer', title: 'Control Computer',
-    description: 'User-authorized final fallback for local desktop input after structured local and browser capabilities. Windows uses UI Automation first, optional built-in OCR hybrid targeting for custom text UI, and Midscene pixels only when semantics cannot perform the action. activate revalidates targets and prefers native UIA actions; set_value uses UIA ValuePattern. wait_for_change, wait_for_stable, observe, and batch support bounded verified action bursts. Requires Computer control and per-app approval; browsers are view-only (relai_browser), terminals/IDEs click-only (relai_desktop for typing). One session drives input at a time.',
+    description: 'Local desktop fallback after structured tools and relai_browser. Requires Computer control and per-app approval. Windows uses UI Automation, then OCR or pixels when needed. Pixels/OCR require verified app-window capture and fail closed if unavailable. activate revalidates targets; set_value uses UIA ValuePattern. observe, waits and batch support bounded actions. Browsers are view-only; use relai_browser. Terminals/IDEs are click-only; use relai_desktop to type. One session drives input.',
     annotations: annotations(false, true, false, true), dashboard: { capabilities: ['execute'] }
   },
   {
@@ -262,7 +262,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_publish', title: 'Publish Repository Work',
-    description: 'Commits repository changes, pushes Git branches, or drafts PR text. Commit scope defaults to task-owned paths unless explicit paths or addAll are supplied. Commit, push, and draft-PR actions may use an authorized workspace directly. Real push remains approval-gated.',
+    description: 'Commits changes, pushes branches, or drafts PR text. Commit scope defaults to task-owned paths unless paths or addAll are supplied. Actions may use an authorized workspace directly. Push requires git:publish in the client grant, with no second per-push approval.',
     annotations: annotations(false, false, false, true), dashboard: { capabilities: ['git'] }, groups: ['git'], behavior: { taskScope: 'optional' }
   }
 ] satisfies readonly PublicToolValue[];

@@ -4,9 +4,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { EVERYDAY_TEST_FILES } from './everyday-manifest.js';
+import { runTestProcess } from './helpers/run-test-process.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(testDir, '..');
@@ -105,16 +105,24 @@ const jobCount = Math.min(parallelEntries.length, Number.isFinite(requestedJobs)
 const suiteStarted = Date.now();
 const results = new Array(files.length);
 let nextIndex = 0;
+let cleanupUncertain = false;
 
 await Promise.all(Array.from({ length: jobCount }, async () => {
-  while (true) {
+  while (!cleanupUncertain) {
     const queueIndex = nextIndex;
     nextIndex += 1;
     if (queueIndex >= parallelEntries.length) return;
     await runEntry(parallelEntries[queueIndex]);
   }
 }));
-for (const entry of serialEntries) await runEntry(entry);
+for (const entry of serialEntries) {
+  if (cleanupUncertain) break;
+  await runEntry(entry);
+}
+for (const [index, name] of files.entries()) {
+  if (!results[index]) results[index] = { name, durationMs: 0, exitCode: null,
+    error: new Error('Not run because a previous test has unconfirmed process-tree cleanup.') };
+}
 
 async function runEntry({ name, index }) {
   const started = Date.now();
@@ -122,12 +130,14 @@ async function runEntry({ name, index }) {
   const result = await runTest(name);
   const durationMs = Date.now() - started;
   results[index] = { name, durationMs, ...result };
+  if (result.terminationUncertain) cleanupUncertain = true;
   const seconds = (durationMs / 1000).toFixed(1);
   if (result.exitCode === 0) {
     console.log(`PASS ${name} (${seconds}s)`);
   } else {
     console.error(`FAIL ${name} (${seconds}s)`);
     if (result.error) console.error(result.error.message);
+    if (result.stdoutTruncated || result.stderrTruncated) console.error('Test output exceeded the retained 1 MiB per-stream tail; earlier output was omitted.');
     if (result.stdout) console.error(result.stdout.trim());
     if (result.stderr) console.error(result.stderr.trim());
   }
@@ -136,35 +146,7 @@ async function runEntry({ name, index }) {
 const failures = results.filter(result => result.exitCode !== 0);
 
 function runTest(name) {
-  return new Promise(resolve => {
-    let child;
-    try {
-      child = spawn(process.execPath, [path.join(testDir, name)], {
-        cwd: root,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 5 * 60 * 1000
-      });
-    } catch (error) {
-      resolve({ exitCode: null, stdout: '', stderr: '', error });
-      return;
-    }
-    let stdout = '';
-    let stderr = '';
-    let error = null;
-    let settled = false;
-    const finish = exitCode => {
-      if (settled) return;
-      settled = true;
-      resolve({ exitCode, stdout, stderr, error });
-    };
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.once('error', value => { error = value; });
-    child.once('close', finish);
-  });
+  return runTestProcess(process.execPath, [path.join(testDir, name)], { cwd: root });
 }
 
 const suiteSeconds = ((Date.now() - suiteStarted) / 1000).toFixed(1);

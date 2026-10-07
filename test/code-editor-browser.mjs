@@ -73,6 +73,10 @@ try {
     assert.ok(badge.fontSize >= 12 && badge.width >= 24 && badge.height >= 20, `changed-file markers must be readable badges: ${JSON.stringify(result.statusBadges)}`);
   }
   assert.equal(result.sameEditorAfterLiveUpdate, true, 'live task updates must not recreate the active editor');
+  assert.equal(result.sameModelAfterLiveUpdate, true, 'same-path live updates must preserve Monaco model identity');
+  assert.match(result.freshModelAfterLiveUpdate, /const answer = 43;/, 'same-path task revisions must update visible content');
+  assert.match(result.modelAfterOutOfOrderRefresh, /const answer = 45;/, 'older in-flight responses must not overwrite a newer revision');
+  assert.match(result.modelAfterManualRefresh, /const answer = 46;/, 'manual Refresh must update the selected same-path model');
   assert.deepEqual(result.positionAfterLiveUpdate, result.positionBeforeLiveUpdate, 'live task updates must not move the active cursor');
   assert.equal(result.editorCountAfterUnmount, 0, 'leaving the React Changes route must dispose Monaco editors');
   assert.equal(result.modelCountAfterUnmount, 0, 'leaving the React Changes route must dispose Monaco models');

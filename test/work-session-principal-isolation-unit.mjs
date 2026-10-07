@@ -107,7 +107,11 @@ try {
   }, projectlessCancelOwner);
   assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, projectlessCancel.work_id)?.workspace || '', '', 'cancel must not bind a projectless goal merely because a workspace argument was supplied');
 
-  const { runWorkspaceOperation } = await import('../src/workspaceOperationQueue.js');
+  const { bindWorkspaceOperationIdentity, runWorkspaceOperation } = await import('../src/workspaceOperationQueue.js');
+  // Match real public admission: bind the physical workspace before taking a
+  // direct internal queue lock. An alias-only lock cannot establish root identity.
+  bindWorkspaceOperationIdentity('repo', workspacePath);
+  bindWorkspaceOperationIdentity('other', otherWorkspacePath);
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
   const busyWorkspace = runWorkspaceOperation('repo', async () => {

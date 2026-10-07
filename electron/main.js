@@ -24,6 +24,7 @@ import {
   utilityProcess
 } from 'electron';
 import { configureApplicationIdentity } from './app-identity.js';
+import { recordDesktopSmokeReadiness } from './desktop-smoke-readiness.js';
 import { clearUpdateInstallMarkerSync, markUpdateInstallPhase, updateInstallLaunchGuard } from './update-install-marker.js';
 import { launchUpdateStatusHelper } from './update-status-helper.js';
 import { normalizeWizardConfig, saveLauncherConfig } from './launcher-config.js';
@@ -114,7 +115,8 @@ if (shouldStartDesktop) {
 
     // Electron waits for ESM evaluation before emitting ready. Do not await a
     // startup promise that itself waits for app.whenReady() at module scope.
-    void desktop.start().then(result => {
+    void desktop.start().then(async result => {
+      if (result?.ok) await recordDesktopSmokeReadiness({ app, BrowserWindow });
       if (result?.ok && updateLaunchGuard.reason === 'updated_launch') {
         void desktop.completeApplicationUpdate(updateLaunchGuard.marker).catch(error => {
           console.error('[rel-ai-mcp] Update completion recording failed:', error);

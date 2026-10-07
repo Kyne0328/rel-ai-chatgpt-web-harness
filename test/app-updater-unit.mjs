@@ -53,7 +53,7 @@ async function waitFor(condition, message, timeoutMs = 2000) {
   }
 }
 
-function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, platform = 'win32', manualMacUpdater = null, activeCalls = 0, activeTaskCount = 0, taskState = 'idle', tasks = [], checkFailures = [], downloadFailures = [], currentCompatibility = null, lastCheckAt = 0, fetchImpl = globalThis.fetch, now = () => Date.parse('2026-07-25T00:00:00.000Z'), autoDownloadUpdates = false, updateChannel = 'stable', beforeInstallError = null } = {}) {
+function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, platform = 'win32', manualMacUpdater = null, activeCalls = 0, activeTaskCount = 0, taskState = 'idle', tasks = [], checkFailures = [], downloadFailures = [], currentCompatibility = null, lastCheckAt = 0, fetchImpl = globalThis.fetch, now = () => Date.parse('2026-07-25T00:00:00.000Z'), autoDownloadUpdates = false, updateChannel = 'stable', beforeInstallError = null, commitCallback = null } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-updater-'));
   roots.push(temp);
   if (lastCheckAt > 0) fs.writeFileSync(path.join(temp, 'update-state.json'), `${JSON.stringify({ lastCheckAt })}\n`);
@@ -90,7 +90,7 @@ function createHarness({ currentVersion = '0.20.7', packaged = true, env = {}, p
       beforeInstall += 1;
       if (beforeInstallError) throw beforeInstallError;
     },
-    onInstallCommit: () => { installCommit += 1; },
+    onInstallCommit: async () => { installCommit += 1; if (commitCallback) await commitCallback(); },
     onInstallerLaunch: () => { installerLaunch += 1; },
     onInstallFailed: () => { installRecovery += 1; },
     shouldAutoDownload: () => autoDownloadUpdates,
@@ -438,6 +438,36 @@ assert.equal(preparationFailure.installCommit(), 0);
 assert.equal(preparationFailure.installerLaunch(), 0);
 assert.equal(preparationFailure.installRecovery(), 1);
 assert.deepEqual(preparationFailure.fake.installCalls, [], 'NSIS must not launch after failed in-app preparation');
+
+
+const desktopSource = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
+const commitSource = desktopSource.slice(desktopSource.indexOf('  async function commitApplicationUpdate()'), desktopSource.indexOf('  async function recoverApplicationUpdate()'));
+const { runInNewContext } = await import('node:vm');
+for (const shutdown of [{ ok: false, clean: false, errors: [{ step: 'marker', message: 'fixture failure' }] }, undefined, { ok: true, clean: true }]) {
+  const context = {
+    process: { platform: 'win32' }, app: {}, updateInstallPrepared: true,
+    markUpdateInstallPhase: async () => {}, isQuitting: false, allowUpdaterQuit: false,
+    shutdownCoordinator: { prepare: async () => shutdown }
+  };
+  runInNewContext(commitSource + '\n globalThis.commit = commitApplicationUpdate;', context);
+  const composed = createHarness({ commitCallback: context.commit });
+  composed.updater.start();
+  composed.fake.emit('update-available', { version: '0.21.0' });
+  await composed.updater.downloadUpdate();
+  composed.fake.emit('update-downloaded', { version: '0.21.0' });
+  const result = await composed.updater.installUpdate();
+  const clean = shutdown?.clean === true;
+  assert.equal(context.allowUpdaterQuit, clean, 'desktop commit requires an explicit clean shutdown result');
+  assert.equal(result.ok, clean);
+  assert.equal(composed.installerLaunch(), clean ? 1 : 0);
+  assert.equal(composed.fake.installCalls.length, clean ? 1 : 0);
+  assert.equal(composed.installRecovery(), clean ? 0 : 1);
+  if (!clean) {
+    assert.equal(composed.updater.getStatus().state, 'downloaded');
+    assert.match(composed.updater.getStatus().error, /current version was not replaced/i);
+    assert.ok(composed.logs.some(entry => /clean final shutdown/.test(entry.message)), 'shutdown failure details must remain in update diagnostics');
+  }
+}
 
 for (const candidate of ['bad-version', 'v0.21.0', '0.21.0-beta.1', '0.20.7', '0.19.9']) {
   const harness = createHarness();

@@ -20,6 +20,10 @@ app.whenReady().then(async () => {
     await win.loadURL(targetUrl);
     await waitFor(win, `document.querySelector('#__activity-filter-bar .filter-search-input') && document.querySelectorAll('.activity-message-copy').length > 0`);
 
+    const recoveryBefore = await probePersistedRecovery(win);
+    await win.webContents.executeJavaScript(`location.hash = '#activity'`);
+    await waitFor(win, `document.querySelector('#__activity-filter-bar .filter-search-input')`);
+
     const shared = await win.webContents.executeJavaScript(`(async () => {
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       const setRadio = (root, label, value) => {
@@ -77,6 +81,10 @@ app.whenReady().then(async () => {
         freezeIconOnly: Boolean(freeze?.querySelector('svg') && !freeze.textContent.trim())
       };
     })()`);
+    const recoveryAfter = await probePersistedRecovery(win);
+    const persistedRecovery = { before: recoveryBefore, after: recoveryAfter, activityRoute: activityApplied.route };
+    await win.webContents.executeJavaScript(`location.hash = ${JSON.stringify(activityApplied.route)}`);
+    await waitFor(win, `document.querySelector('#__activity-filter-bar [aria-label^="Remove Status filter"]')`);
     await win.webContents.executeJavaScript(`document.querySelector('#__activity-filter-bar [aria-label^="Remove Status filter"]')?.click()`);
     await waitFor(win, `!document.querySelector('#__activity-filter-bar [aria-label^="Remove Status filter"]') && !location.hash.includes('status=')`);
     await win.webContents.executeJavaScript(`location.hash = '#activity?task=acceptance-failed'`);
@@ -120,7 +128,7 @@ app.whenReady().then(async () => {
 
     win.setSize(1100, 820);
     await win.webContents.executeJavaScript(`location.hash = '#diagnostics'`);
-    await waitFor(win, `document.querySelector('#diagnosticFilterHost .filter-open-button') && document.querySelector('#diagnosticSummary')`);
+    await waitFor(win, `document.querySelector('#diagnosticFilterHost .filter-open-button') && /findings.*log entries shown/.test(document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent || '')`);
     const diagnostics = await win.webContents.executeJavaScript(`(async () => {
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       const setRadio = (root, label, value) => {
@@ -147,12 +155,27 @@ app.whenReady().then(async () => {
         liveTailPressed: document.querySelector('[data-live-tail]')?.getAttribute('aria-pressed'),
         reportActions: [...document.querySelectorAll('.diagnostic-page-actions button')].map(button => button.textContent.trim())
       };
-      document.querySelector('#diagnosticFilterHost .filter-open-button').click(); await delay(30);
+      const pendingFilterInput = document.querySelector('#diagnosticFilterHost .filter-search-input');
+      const pendingFilterSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      pendingFilterSetter?.call(pendingFilterInput, 'acceptance');
+      pendingFilterInput.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#diagnosticFilterHost [aria-label^="Remove Severity filter"]')?.click();
+      await delay(220);
+      const pendingFilterChips = [...document.querySelectorAll('#diagnosticFilterHost .filter-chip')].map(chip => chip.textContent.trim());
+      const pendingFilterRemovalPreserved = !document.querySelector('#diagnosticFilterHost [aria-label^="Remove Severity filter"]')
+        && document.querySelector('#diagnosticFilterHost .filter-search-input')?.value === 'acceptance';
+      pendingFilterSetter?.call(pendingFilterInput, 'drawer-pending-acceptance');
+      pendingFilterInput.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#diagnosticFilterHost .filter-open-button').click();
+      await delay(220);
       drawer = document.querySelector('.filter-drawer');
       setRadio(drawer, 'Scope', 'findings');
       const source = [...drawer.querySelectorAll('label')].find(item => item.textContent.includes('Source'))?.querySelector('select');
       const sourceDisabledForFindings = source?.disabled === true && source.value === 'all';
-      [...drawer.querySelectorAll('button')].find(button => button.textContent.trim() === 'Cancel')?.click();
+      [...drawer.querySelectorAll('button')].find(button => /Apply filters/.test(button.textContent))?.click();
+      await delay(30);
+      const pendingDrawerSearchValue = document.querySelector('#diagnosticFilterHost .filter-search-input')?.value || '';
+      const pendingDrawerSearchPreserved = pendingDrawerSearchValue === 'drawer-pending-acceptance';
       document.querySelector('#diagnosticFilterHost .filter-clear-button')?.click();
       const initialLiveTailLabel = document.querySelector('[data-live-tail]')?.getAttribute('aria-label') || '';
       document.querySelector('[data-live-tail]')?.click(); await delay(80);
@@ -163,13 +186,21 @@ app.whenReady().then(async () => {
       const search = document.querySelector('#diagnosticFilterHost .filter-search-input');
       const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       inputValueSetter?.call(search, 'no-diagnostic-match-acceptance'); search.dispatchEvent(new Event('input', { bubbles: true })); await delay(220);
-      const searchEmpty = /0 of .* findings.*0 of .* log entries shown/.test(document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent || '');
+      const searchSummary = document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent || '';
+      const searchValue = document.querySelector('#diagnosticFilterHost .filter-search-input')?.value || '';
+      const searchEmpty = /0 of .* findings.*0 of .* log entries shown/.test(searchSummary);
+      inputValueSetter?.call(search, 'pending-clear-acceptance');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('#diagnosticFilterHost .filter-clear-button')?.click();
+      await delay(220);
+      const clearSearchValue = document.querySelector('#diagnosticFilterHost .filter-search-input')?.value || '';
+      const clearSearchSummary = document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent || '';
+      const pendingSearchCleared = clearSearchValue === '' && document.querySelector('#diagnosticFilterHost .filter-clear-button')?.hidden === true;
       const technicalFindingCodesGated = ![...document.querySelectorAll('[data-diagnostic-region="findings"] code')]
         .some(code => !code.closest('details[data-diagnostic-detail]'));
       const findingSeveritiesReadable = [...document.querySelectorAll('.diagnostic-severity')]
         .every(element => ['Blocking', 'Warning', 'Recommendation'].includes(element.textContent.trim()));
-      return { cancelPreserved, fixedChoicesVisible, sourceDisabledForFindings, initialLiveTailLabel, liveTailActiveLabel, liveTailStarted, liveTailStopped, searchEmpty, technicalFindingCodesGated, findingSeveritiesReadable, applied };
+      return { cancelPreserved, fixedChoicesVisible, sourceDisabledForFindings, initialLiveTailLabel, liveTailActiveLabel, liveTailStarted, liveTailStopped, searchEmpty, searchSummary, searchValue, pendingSearchCleared, pendingFilterRemovalPreserved, pendingDrawerSearchPreserved, pendingDrawerSearchValue, pendingFilterChips, clearSearchValue, clearSearchSummary, technicalFindingCodesGated, findingSeveritiesReadable, applied };
     })()`);
 
     await win.webContents.executeJavaScript(`location.hash = '#tools'`);
@@ -509,7 +540,7 @@ app.whenReady().then(async () => {
       debuggerAttached = false;
     }
 
-    fs.writeFileSync(outputPath, JSON.stringify({ shared, activityApplied, taskChip, escapeFocus, mobileDrawer, diagnostics, tools, settings, workspaces, connection, usage, browserTabs, responsive, zoom200At420, forcedColors, failures }, null, 2));
+    fs.writeFileSync(outputPath, JSON.stringify({ persistedRecovery, shared, activityApplied, taskChip, escapeFocus, mobileDrawer, diagnostics, tools, settings, workspaces, connection, usage, browserTabs, responsive, zoom200At420, forcedColors, failures }, null, 2));
   } catch (error) {
     fs.writeFileSync(outputPath, JSON.stringify({ error: error?.stack || String(error), failures }, null, 2));
     process.exitCode = 1;
@@ -517,6 +548,23 @@ app.whenReady().then(async () => {
     win.destroy(); app.quit();
   }
 }).catch(error => { fs.writeFileSync(outputPath, JSON.stringify({ error: error?.stack || String(error) }, null, 2)); app.exit(1); });
+
+async function probePersistedRecovery(win) {
+  await win.webContents.executeJavaScript(`location.hash = '#workspaces'`);
+  await waitFor(win, `document.querySelector('[data-workspace-card="app"]')`);
+  const project = await win.webContents.executeJavaScript(`(() => {
+    const card = document.querySelector('[data-workspace-card="app"]');
+    const header = card?.querySelector('.workspace-card-head')?.textContent || '';
+    return { projectBlocked: Boolean(card?.querySelector('[data-workspace-mutation-block="app"]') && /Changes blocked/.test(header)), readyAbsent: !/Ready/.test(header) };
+  })()`);
+  await win.webContents.executeJavaScript(`location.hash = '#home'`);
+  await waitFor(win, `document.querySelector('.compact-workspace')`);
+  const overviewAttention = await win.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('.compact-workspace')].find(item => item.querySelector('strong')?.textContent.trim() === 'app');
+    return /needs attention/i.test(row?.textContent || '');
+  })()`);
+  return { ...project, overviewAttention };
+}
 
 async function waitFor(win, expression, timeoutMs = 10000) {
   const started = Date.now();

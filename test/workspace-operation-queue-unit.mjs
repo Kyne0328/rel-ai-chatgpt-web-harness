@@ -417,4 +417,115 @@ async function nextTurn() {
   assert.equal(pendingWorkspaceOperations(), 0);
 }
 
+
+{
+  const { workspaceMutationBlockSummary } = await import('../src/workspaceOperationQueue.js');
+  const { buildWorkspaceStates, onWorkspaceStateChange } = await import('../src/workspaceState.js');
+  const { workspaceCardView } = await import('../src/ui/features/workspaces/model.js');
+  const { overviewWorkspaceStatus } = await import('../src/ui/features/home/index.js');
+  const { filterActivityEntries } = await import('../src/ui/features/activity/model.js');
+  const alias = 'old-taskless-block-fixture';
+  const changes = [];
+  const off = onWorkspaceStateChange(event => changes.push(event));
+  const RealDate = globalThis.Date;
+  const oldTimestamp = RealDate.now() - 2 * 3600000;
+  try {
+    globalThis.Date = class extends RealDate {
+      constructor(...args) { super(...(args.length ? args : [oldTimestamp])); }
+      static now() { return oldTimestamp; }
+    };
+    blockWorkspaceMutations(alias, 'private command --token SECRET not for projection');
+  } finally { globalThis.Date = RealDate; off(); }
+  const projection = workspaceMutationBlockSummary(alias);
+  assert.equal(projection.blocked, true);
+  assert.equal(projection.terminationCertainty, 'unknown');
+  assert.doesNotMatch(JSON.stringify(projection), /SECRET|private command/);
+  projection.blocked = false;
+  assert.equal(workspaceMutationBlockSummary(alias).blocked, true, 'projection mutation cannot clear the authority');
+  const config = { workspaces: { [alias]: { path: '/nonexistent-projection-fixture' } } };
+  const operational = buildWorkspaceStates(config, [{ workspace: alias, status: 'completed', validation: 'passed', updatedAt: new Date().toISOString() }])[alias];
+  const view = workspaceCardView({ alias, operational: { ...operational, exists: true } });
+  assert.equal(view.statusLabel, 'Changes blocked');
+  assert.equal(view.ready, false);
+  assert.equal(overviewWorkspaceStatus({ alias, operational }), 'needs attention');
+  assert.equal(changes.at(-1).state.mutationBlock.blocked, true, 'current-state live delta must originate from the block authority');
+  assert.equal(filterActivityEntries([{ ts: new Date(oldTimestamp).toISOString(), status: 'blocked', workspace: alias }], { timeRange: '1h' }, Date.now()).length, 0);
+  assert.equal(workspaceCardView({ alias, operational: { exists: true, mutationBlock: workspaceMutationBlockSummary(alias) } }).statusLabel, 'Changes blocked');
+  assert.equal(await runWorkspaceOperation(alias, async () => 'new successful read', { mode: 'read' }), 'new successful read');
+  await assert.rejects(() => runWorkspaceOperation(alias, async () => {}, { mode: 'write' }), error => error.code === 'WORKSPACE_MUTATION_BLOCKED');
+  assert.equal(workspaceMutationBlockSummary('unblocked-fixture'), null);
+}
+
+
+{
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { bindWorkspaceOperationIdentity, workspaceOperationAliases, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange } = await import('../src/workspaceOperationQueue.js');
+  const { executeToolCall } = await import('../src/tools/execution.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-queue-identity-'));
+  const shared = path.join(root, 'shared');
+  const separate = path.join(root, 'separate');
+  fs.mkdirSync(shared);
+  fs.mkdirSync(separate);
+  const config = { stateDir: path.join(root, 'state'), workspaces: { 'identity-first': { path: shared }, 'identity-second': { path: shared } } };
+  const run = (alias, handler) => executeToolCall({ config, name: OP.EDIT, executionName: OP.EDIT,
+    effectiveArgs: { workspace: alias, returnDiff: false }, context: {},
+    definition: { behavior: { concurrencyScope: 'mutation' }, handler }, started: Date.now() });
+  try {
+    const entered = deferred(), finish = deferred();
+    let firstActive = false, overlap = false, secondEntered = false;
+    const first = run('identity-first', async () => {
+      firstActive = true;
+      entered.resolve();
+      await finish.promise;
+      fs.writeFileSync(path.join(shared, 'first.txt'), 'fixture');
+      firstActive = false;
+      return { ok: true };
+    });
+    await entered.promise;
+    assert.throws(() => bindWorkspaceOperationIdentity('identity-first', separate),
+      error => error.code === 'WORKSPACE_IDENTITY_BUSY', 'active authority cannot be rebound');
+    const second = run('identity-second', async () => {
+      secondEntered = true;
+      overlap = firstActive;
+      fs.writeFileSync(path.join(shared, 'second.txt'), 'fixture');
+      return { ok: true };
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(secondEntered, false, 'dual-alias full-wrapper mutation waits on physical authority');
+    finish.resolve();
+    await Promise.all([first, second]);
+    assert.equal(overlap, false);
+    assert.equal(pendingWorkspaceOperations(), 0);
+    const events = [];
+    const off = onWorkspaceMutationBlockChange(event => events.push(event.alias));
+    blockWorkspaceMutations('identity-first', 'fixture uncertainty');
+    assert.equal(workspaceMutationBlockSummary('identity-second').blocked, true);
+    assert.ok(events.includes('identity-first') && events.includes('identity-second'), 'projection preserves each display alias');
+    bindWorkspaceOperationIdentity('identity-second', separate);
+    assert.equal(workspaceMutationBlockSummary('identity-second'), null, 'old-root quarantine cannot contaminate an unrelated same-alias root');
+    events.length = 0;
+    blockWorkspaceMutations('identity-second', 'separate fixture uncertainty');
+    assert.deepEqual(events, ['identity-second']);
+    off();
+
+    const gitRoot = path.join(root, 'git-root');
+    const nested = path.join(gitRoot, 'nested');
+    const linked = path.join(root, 'linked');
+    const admin = path.join(gitRoot, '.git', 'worktrees', 'linked');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.mkdirSync(admin, { recursive: true });
+    fs.mkdirSync(linked);
+    fs.writeFileSync(path.join(linked, '.git'), 'gitdir: ' + admin + '\n');
+    fs.writeFileSync(path.join(admin, 'commondir'), '../..\n');
+    bindWorkspaceOperationIdentity('identity-git-root', gitRoot);
+    bindWorkspaceOperationIdentity('identity-git-nested', nested);
+    bindWorkspaceOperationIdentity('identity-git-linked', linked);
+    assert.deepEqual(new Set(workspaceOperationAliases('identity-git-root')),
+      new Set(['identity-git-root', 'identity-git-nested', 'identity-git-linked']),
+      'nested repository paths and linked worktrees share common Git authority');
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
+
 console.log('Workspace operation queue tests passed.');

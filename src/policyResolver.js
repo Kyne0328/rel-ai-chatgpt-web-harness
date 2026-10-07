@@ -153,7 +153,7 @@ async function captureBaselineState(workspaceRoot) {
   try {
     // Keep the branch record first so process-output normalization cannot strip
     // the leading status column from records such as " M file.js".
-    const result = await readGitObservation(workspaceRoot, {}, { timeoutMs: 500 });
+    const result = await readGitObservation(workspaceRoot, {}, { timeoutMs: process.platform === 'win32' ? 2000 : 500 });
     if (result.exitCode !== 0 || result.stdoutTruncated) {
       return { ok: false, files: [], error: String(result.error || result.stderr || result.stdout || `git status exited ${result.exitCode}`).trim() };
     }
