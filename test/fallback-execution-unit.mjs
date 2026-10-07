@@ -174,7 +174,13 @@ async function testConnectorInlineGrace() {
   });
   await delay(20);
   controller.abort(new Error('transport disconnected'));
-  await assert.rejects(waiting, /transport disconnected/);
+  const interrupted = await waiting;
+  assert.equal(interrupted.body.result.structuredContent.status, 'running');
+  assert.equal(interrupted.body.result.structuredContent.requestInterrupted, true);
+  assert.equal(interrupted.body.result.structuredContent.recovery.operationId, operationId);
+  assert.equal(interrupted.body.result.structuredContent.recovery.retryOriginalOperation, false);
+  assert.equal(interrupted.body.result.structuredContent.recovery.respectUserStop, true);
+  assert.equal(interrupted.body.result.structuredContent.cancelled, undefined);
   assert.equal(backgroundSignal.aborted, false, 'request disconnection stops inline waiting without cancelling detached work');
   complete(); await delay(20);
   const replay = await handleTransportFallbackRequest(config, disconnectedRead, {
@@ -187,6 +193,87 @@ async function testConnectorInlineGrace() {
   resetFallbackExecutions();
   fs.rmSync(config.stateDir, { recursive: true, force: true });
 }
+
+async function testTransportInterruptionResults() {
+  const config = { stateDir: fs.mkdtempSync(path.join(os.tmpdir(), 'relai-interrupted-result-')) };
+  try {
+    const controller = new AbortController();
+    const returned = toolResult({ ok: true, commandSucceeded: true, executed: true, exitCode: 0, marker: 'known-success' }, false);
+    const result = await handleTransportFallbackRequest(config, message('known-success-race', '', 'node done.js', 1000), {
+      principal: 'interrupt-owner', transportType: 'streamable-http', signal: controller.signal,
+      executeToolResult: async () => {
+        controller.abort(Object.assign(new Error('private HTTP detail'), { code: 'HTTP_MCP_REQUEST_INTERRUPTED' }));
+        return returned;
+      }
+    });
+    assert.equal(result.body.result.structuredContent.marker, 'known-success');
+    assert.equal(result.body.result.structuredContent.commandSucceeded, true);
+    assert.equal(result.body.result.isError, false);
+    assert.equal(result.body.result.structuredContent.cancelled, undefined);
+
+    for (const mode of ['http_rejected', 'http_pending', 'explicit_cancel']) {
+      const abort = new AbortController();
+      const interrupted = await handleTransportFallbackRequest(config, message(mode, '', 'node boundary.js', 1000), {
+        principal: 'interrupt-owner', transportType: 'streamable-http', signal: abort.signal,
+        executeToolResult: async () => {
+          abort.abort(Object.assign(new Error('fixture signal'), {
+            code: mode === 'explicit_cancel' ? 'MCP_REQUEST_CANCELLED' : 'HTTP_MCP_REQUEST_INTERRUPTED'
+          }));
+          if (mode === 'http_rejected') throw new Error('handler failed while stopping');
+          if (mode === 'http_pending') return new Promise(() => {});
+          return returned;
+        }
+      });
+      const facts = interrupted.body.result.structuredContent;
+      assert.equal(interrupted.body.result.isError, true);
+      if (mode === 'explicit_cancel') {
+        assert.equal(facts.commandSucceeded, false);
+        assert.equal(facts.errorCode, 'EXECUTION_ABORTED');
+        assert.equal(facts.cancelled, true, 'explicit MCP cancellation cannot take the HTTP result-preservation branch');
+      } else {
+        assert.equal(facts.errorCode, 'TRANSPORT_INTERRUPTED');
+        assert.equal(facts.commandSucceeded, undefined, 'unknown execution outcome is not a failed command');
+        assert.equal(facts.timedOut, undefined, 'transport interruption does not establish a command timeout');
+        assert.equal(facts.status, 'interrupted');
+        assert.equal(facts.cancelled, undefined, 'transport state cannot invent operation cancellation facts');
+        assert.equal(facts.terminationConfirmed, false);
+        assert.equal(facts.mutationUnknown, true);
+        assert.equal(facts.recovery.retryOriginalOperation, false);
+        assert.equal(facts.recovery.respectUserStop, true);
+        assert.equal(facts.cleanupPending, mode === 'http_pending');
+      }
+    }
+
+    const preAborted = await handleTransportFallbackRequest(config, message('http-before-admission', '', 'node never.js', 60000), {
+      principal: 'interrupt-owner', transportType: 'streamable-http',
+      signal: AbortSignal.abort(Object.assign(new Error('HTTP request interrupted'), { code: 'HTTP_MCP_REQUEST_INTERRUPTED' })),
+      executeToolResult: async () => { throw new Error('pre-aborted admission must not execute'); }
+    });
+    assert.equal(preAborted.body.result.structuredContent.errorCode, 'TRANSPORT_INTERRUPTED');
+    assert.equal(preAborted.body.result.structuredContent.executed, false);
+    assert.equal(preAborted.body.result.structuredContent.cancelled, undefined);
+    const existingId = 'fallback_00000000-0000-4000-8000-000000000001';
+    const request = workStatusMessage('direct-result', { action: 'result', operationId: existingId });
+    const delivery = new AbortController();
+    delivery.abort(new Error('private delivery detail'));
+    let calls = 0;
+    const retrieved = await handleTransportFallbackRequest(config, request, {
+      principal: 'interrupt-owner', transportType: 'streamable-http', deliverySignal: delivery.signal,
+      executeToolResult: async (_config, _name, args, options) => {
+        calls++;
+        assert.equal(args.operationId, existingId);
+        assert.equal(options.resultWaitSignal, delivery.signal);
+        assert.equal(options.backgroundFallbackExecution, undefined);
+        assert.equal(options.fallbackOperationId, undefined);
+        return toolResult({ ok: true, operationId: args.operationId, marker: 'retrieved' }, false);
+      }
+    });
+    assert.equal(calls, 1);
+    assert.equal(retrieved.body.result.structuredContent.marker, 'retrieved');
+    assert.equal(fs.existsSync(path.join(config.stateDir, 'fallback-executions')), false, 'retrieval creates no fallback execution');
+  } finally { resetFallbackExecutions(); fs.rmSync(config.stateDir, { recursive: true, force: true }); }
+}
+await testTransportInterruptionResults();
 
 function seedTask(config, taskId) {
   recordTaskHistoryEvent(config, {
@@ -1400,7 +1487,8 @@ try {
   const interrupted = fallbackExecutionStatus(interruptedWorkId, { config, now: () => Date.parse('2026-08-27T00:01:00.000Z') });
   assert.equal(interrupted.status, 'interrupted');
   assert.equal(interrupted.revision, interruptedInitialRevision + 1, 'restart interruption records exactly one new terminal transition');
-  assert.match(interrupted.error, /runtime restarted/i);
+  assert.match(interrupted.error, /final outcome is unknown/i);
+  assert.doesNotMatch(interrupted.error, /because the .*runtime restarted/i);
   const interruptedSession = readTaskHistorySessionRecord(config, interruptedWorkId);
   assert.equal(interruptedSession.backgroundOperation.status, 'interrupted');
   assert.equal(Object.hasOwn(interruptedSession.backgroundOperation.result, 'stdout'), false);

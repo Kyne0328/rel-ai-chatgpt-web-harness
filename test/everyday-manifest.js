@@ -9,6 +9,7 @@ export const EVERYDAY_TEST_FILES = [
   "process-git-defensive-regression-unit.mjs",
   "desktop-smoke-readiness-unit.mjs",
   "result-recovery-integrity-unit.mjs",
+  "fallback-terminal-journal-unit.mjs",
   "edit-transaction-recovery-unit.mjs",
   "ui-operation-diagnostics-unit.mjs",
   "operation-contract-validation-unit.mjs",

@@ -69,6 +69,18 @@ async function handleTransportFallbackRequest(config: any, message: any, options
   if (!validated.ok) return toolArgumentErrorResponse(message.id, validated.error);
 
   const definition = transportToolDefinition(name, validated.value);
+  // Result retrieval is a direct read of an existing receipt, never a new
+  // fallback execution. Its delivery wait may end without cancelling that work.
+  if (options.transportType === 'streamable-http' && definition?.operationName === 'work.result') {
+    const execute = typeof options.executeToolResult === 'function' ? options.executeToolResult : executeToolResult;
+    return successResponse(message.id, await execute(config, name, validated.value, {
+      ...options,
+      resultWaitSignal: options.deliverySignal || options.signal,
+      capabilities: clientCapabilities(message),
+      requestId: options.requestId ?? message.id,
+      message
+    }));
+  }
   const resilientFallback = options.transportType === 'streamable-http'
     && shouldUseResilientFallback(definition, validated.value);
   if (!resilientFallback && !shouldInterceptTool(definition, validated.value)) return null;
@@ -155,7 +167,7 @@ function isTransportFallbackRequestCandidate(_config: any, message: any, options
   try {
     const definition = transportToolDefinition(name, message?.params?.arguments || {});
     return (options.transportType === 'streamable-http'
-      && shouldUseResilientFallback(definition, message?.params?.arguments))
+      && (definition?.operationName === 'work.result' || shouldUseResilientFallback(definition, message?.params?.arguments)))
       || shouldInterceptTool(definition, message?.params?.arguments);
   } catch {
     return TRANSPORT_INTERCEPTABLE_TOOL_NAMES.has(name);
@@ -187,19 +199,21 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
   const workId = options.scopeOnly === true ? '' : String(args.work_id || '').trim();
   if (options.signal?.aborted) {
     const timedOut = options.signal.reason?.name === 'TimeoutError';
+    const transportInterrupted = options.signal.reason?.code === 'HTTP_MCP_REQUEST_INTERRUPTED';
     return successResponse(message.id, toolResult({
       ok: false,
       ...(workId ? { work_id: workId } : {}),
       executed: false,
       commandSucceeded: false,
       timedOut,
-      cancelled: !timedOut,
+      ...(transportInterrupted ? { requestInterrupted: true, status: 'interrupted', retryable: false,
+        recovery: { action: 'none', retryOriginalOperation: false, respectUserStop: true } } : { cancelled: !timedOut }),
       terminationConfirmed: true,
       mutationUnknown: false,
       error: options.signal.reason instanceof Error
         ? options.signal.reason.message
         : String(options.signal.reason || (timedOut ? 'Request timed out before execution.' : 'Request cancelled before execution.')),
-      errorCode: timedOut ? 'TIMEOUT' : 'CANCELLED'
+      errorCode: timedOut ? 'TIMEOUT' : transportInterrupted ? 'TRANSPORT_INTERRUPTED' : 'CANCELLED'
     }, true));
   }
   // Injected executors own their synthetic scope. Production execution resolves
@@ -272,8 +286,10 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
     return replayFallbackResult(message.id, workId, started.record, deliveryCallback(config, started.record, options));
   }
 
+  let deliveryInterrupted = false;
   if (!started.reused && graceMs > 0) {
     const settled = await waitForFallbackGrace(started.record.promise, graceMs, options.deliverySignal || options.signal);
+    deliveryInterrupted = settled.kind === 'interrupted';
     if (settled.kind === 'settled') {
       if (settled.value.ok || (settled.value.cancelled && settled.value.result)) return successResponse(message.id, settled.value.result, deliveryCallback(config, started.record, options));
       return successResponse(message.id, toolResult({
@@ -316,8 +332,14 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
     ...(operation.elapsedMs != null ? { elapsedMs: operation.elapsedMs } : {}),
     ...(operation.deadlineAt ? { deadlineAt: operation.deadlineAt } : {}),
     ...(operation.remainingMs != null ? { remainingMs: operation.remainingMs } : {}),
+    ...(deliveryInterrupted ? {
+      requestInterrupted: true,
+      recovery: { action: 'result', operationId: operation.operationId, retryOriginalOperation: false, respectUserStop: true }
+    } : {}),
     message: fallbackPhaseMessage(name, operation),
-    nextAction: 'Continue independent work. A later Rel.AI call in this workspace can surface completion under completedOperations. Retrieve this operation explicitly only when its result is required to proceed.'
+    nextAction: deliveryInterrupted
+      ? 'The response wait was interrupted; this does not establish cancellation of the operation or user intent. Respect any explicit user stop. If still authorized, retrieve this operationId with relai_work action "result"; do not rerun the original operation.'
+      : 'Continue independent work. A later Rel.AI call in this workspace can surface completion under completedOperations. Retrieve this operation explicitly only when its result is required to proceed.'
   }, false), deliveryCallback(config, started.record, options));
 }
 
@@ -366,15 +388,15 @@ async function waitForFallbackGrace(execution: any, graceMs: any, signal?: Abort
   let timer;
   let onAbort: (() => void) | undefined;
   try {
-    signal?.throwIfAborted();
+    if (signal?.aborted) return { kind: 'interrupted' };
     return await Promise.race([
       execution.then((value: any) => ({ kind: 'settled', value })),
       new Promise((resolve: any) => {
         timer = setTimeout(() => resolve({ kind: 'pending' }), graceMs);
         timer.unref?.();
       }),
-      ...(signal ? [new Promise((_, reject) => {
-        onAbort = () => reject(signal.reason);
+      ...(signal ? [new Promise((resolve) => {
+        onAbort = () => resolve({ kind: 'interrupted' });
         signal.addEventListener('abort', onAbort, { once: true });
         if (signal.aborted) onAbort();
       })] : [])
@@ -451,7 +473,11 @@ async function runBoundedExecution(executor: any, options: any = {}) {
   if (settled.kind === 'aborted') {
     timeoutController.abort(options.signal?.reason);
     const cleanup = await awaitCleanup(execution);
-    return { ok: false, error: abortedExecutionError(), cleanup };
+    const transportInterrupted = options.signal?.reason?.code === 'HTTP_MCP_REQUEST_INTERRUPTED';
+    // A known handler result is stronger evidence than a lost response race.
+    // Explicit MCP cancellation and operation-stop handling remain unchanged.
+    if (transportInterrupted && cleanup?.kind === 'value') return { ok: true, value: cleanup.value };
+    return { ok: false, error: abortedExecutionError(transportInterrupted), cleanup };
   }
   if (settled.kind === 'error') throw settled.error;
   return { ok: true, value: settled.value };
@@ -493,6 +519,7 @@ function transportToolContext(options: any) {
     requestHeaders: options.requestHeaders || {},
     principal: options.principal || principalIdentity(options.principal),
     signal: options.signal,
+    resultWaitSignal: options.resultWaitSignal,
     ...(Number(options.deadlineAtMs) > 0 ? { deadlineAtMs: Math.floor(Number(options.deadlineAtMs)) } : {}),
     backgroundFallbackExecution: options.backgroundFallbackExecution === true,
     fallbackOperationId: String(options.fallbackOperationId || ''),
@@ -539,17 +566,19 @@ function executionLimitError(reason: any, message: any, bounds: any) {
   return error;
 }
 
-function abortedExecutionError() {
-  const error = new Error('Bounded synchronous execution was cancelled because the request or connection closed.') as Error & {
+function abortedExecutionError(transportInterrupted = false) {
+  const error = new Error(transportInterrupted
+    ? 'The HTTP request was interrupted. The operation outcome is not established by the transport interruption.'
+    : 'Bounded synchronous execution was interrupted by its cancellation signal.') as Error & {
     code: number;
     reason: string;
     retryable: boolean;
     data: Record<string, unknown>;
   };
   error.code = EXECUTION_ABORTED_CODE;
-  error.reason = 'execution_aborted';
-  error.retryable = true;
-  error.data = { reason: 'execution_aborted' };
+  error.reason = transportInterrupted ? 'transport_interrupted' : 'execution_aborted';
+  error.retryable = false;
+  error.data = { reason: error.reason, retryOriginalOperation: false, respectUserStop: true };
   return error;
 }
 
@@ -569,10 +598,19 @@ function toolExecutionErrorResponse(id: any, error: any, cleanup: any = null) {
     ...(diagnostics.errorCode ? { handlerErrorCode: diagnostics.errorCode } : {}),
     ...(cleanup?.kind === 'error' ? { handlerError: String(cleanup.error?.message || cleanup.error) } : {}),
     ok: false,
-    commandSucceeded: false,
-    status: error?.reason === 'execution_aborted' ? 'cancelled' : 'failed',
-    timedOut: error?.reason === 'synchronous_timeout' || diagnostics.timedOut === true,
-    cancelled: error?.reason === 'execution_aborted' || diagnostics.cancelled === true,
+    ...(error?.reason !== 'transport_interrupted' ? { commandSucceeded: false } : {}),
+    status: error?.reason === 'execution_aborted' ? 'cancelled'
+      : error?.reason === 'transport_interrupted' ? 'interrupted' : 'failed',
+    ...(error?.reason === 'transport_interrupted' ? {
+      requestInterrupted: true,
+      retryable: false,
+      recovery: { action: 'inspect_status', retryOriginalOperation: false, respectUserStop: true },
+      nextAction: 'Respect any explicit user stop. If still authorized, inspect the existing operation or work status before deciding what to do; do not automatically rerun the original operation.'
+    } : {}),
+    ...(error?.reason !== 'transport_interrupted'
+      ? { timedOut: error?.reason === 'synchronous_timeout' || diagnostics.timedOut === true } : {}),
+    ...(error?.reason !== 'transport_interrupted' || typeof diagnostics.cancelled === 'boolean'
+      ? { cancelled: error?.reason === 'execution_aborted' || diagnostics.cancelled === true } : {}),
     // Absence of termination fields on a settled handler result is not evidence
     // of a live process. Preserve explicit facts, and flag uncertainty when no
     // result arrived before the cleanup boundary (or cleanup itself rejected).
@@ -603,6 +641,7 @@ function executionErrorCode(error: any) {
   switch (String(error?.reason || '')) {
     case 'synchronous_timeout': return 'SYNCHRONOUS_EXECUTION_TIMEOUT';
     case 'execution_aborted': return 'EXECUTION_ABORTED';
+    case 'transport_interrupted': return 'TRANSPORT_INTERRUPTED';
     default: return String(error?.code || 'TOOL_EXECUTION_FAILED');
   }
 }

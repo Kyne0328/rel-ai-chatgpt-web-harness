@@ -58,7 +58,7 @@ const { child, base, getStderr } = await startHttpTestServer({
   configPath,
   token,
   stateDir,
-  env: { REL_AI_MCP_MAX_BODY_BYTES: String(12 * 1024 * 1024) }
+  env: { REL_AI_MCP_MAX_BODY_BYTES: String(12 * 1024 * 1024), REL_AI_MCP_TRANSPORT_TIMING: '1' }
 });
 
 let client = null;
@@ -552,6 +552,20 @@ try {
   const getMcp = await fetch(`${base}/mcp`, { headers: { authorization: `Bearer ${token}` } });
   assert.equal(getMcp.status, 405);
   assert.equal(getMcp.headers.get('allow'), 'POST');
+
+  const timingRows = getStderr().split('\n')
+    .filter(line => line.startsWith('[rel-ai-mcp:transport-timing] '))
+    .map(line => JSON.parse(line.slice(line.indexOf('{'))));
+  assert.ok(timingRows.length > 0, 'opt-in timing must reach local stderr through the real HTTP listener');
+  const timingGroups = Map.groupBy(timingRows, row => row.transportId);
+  const completePhases = ['http_entry', 'body_complete', 'runtime_dispatch', 'call_tool_entry', 'call_tool_return', 'response_finished'];
+  assert.ok([...timingGroups.values()].some(rows => {
+    const phases = rows.map(row => row.phase);
+    return completePhases.every(phase => phases.includes(phase))
+      && completePhases.every((phase, index) => index === 0 || phases.indexOf(phase) > phases.indexOf(completePhases[index - 1]));
+  }), 'a real tools/call must retain one correlation ID through every timing boundary');
+  assert.ok(timingRows.every(row => Object.keys(row).sort().join(',') === 'at,elapsedMs,phase,transportId'));
+  assert.doesNotMatch(JSON.stringify(timingRows), /http-smoke-token|whsec_|authorization|arguments|command/);
 } catch (error) {
   console.error('HTTP smoke primary failure:', error);
   throw error;

@@ -60,7 +60,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
         metric('Pages read in / second', rate(pressure.pagesInputPerSecond)),
         metric('Page disk reads / second', rate(pressure.pageReadsPerSecond))
       ),
-      h('p', { className: 'resource-diagnostics-note' }, pressure.pagingMeaning || 'Paging rates are unavailable. A sampled rate alone does not establish sustained memory thrashing.'),
+      pressure.pagingMeaning ? h('p', { className: 'resource-diagnostics-note' }, pressure.pagingMeaning) : null,
       h('details', { className: 'resource-diagnostics-details' },
         h('summary', null, 'Current Node process memory'),
         h('p', { className: 'resource-diagnostics-note' }, `PID ${count(node.pid)} · ${sampleAge(node.ageMs)}${node.available === true ? '' : ' · Measurement unavailable'}`),
@@ -71,7 +71,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
           metric('V8 heap limit', bytes(current.heapLimitBytes)),
           metric('External memory', bytes(current.externalBytes)),
           metric('ArrayBuffers (included in external)', bytes(current.arrayBuffersBytes))),
-        h('p', { className: 'resource-diagnostics-note' }, node.interpretation || 'These metrics cover the current Node process, not Windows private commit or the complete Rel.AI process family. Memory values overlap and must not be added together.'),
+        node.interpretation ? h('p', { className: 'resource-diagnostics-note' }, node.interpretation) : null,
         h('h4', null, 'File-read cache budget'),
         h('dl', { className: 'resource-diagnostics-metrics' },
           metric('Retained text / byte budget', `${bytes(fileReadCache.retainedBytes)} / ${bytes(fileReadCache.maxRetainedBytes)}`),
@@ -110,7 +110,7 @@ function ManagedRootMemory({ snapshot = {} }) {
     h('summary', null, 'Managed process roots'),
     h('p', { className: 'resource-diagnostics-note' },
       `${roots.length} shown of ${count(value.totalRootCount)} authorized managed roots · ${sampleAge(value.cacheAgeMs)}${stale ? ' · Stale sample; refresh to verify identity again.' : ''}`),
-    h('p', { className: 'resource-diagnostics-note' }, 'Ranked by measured root private bytes, with unknown values last. This is a bounded list of Rel.AI-managed roots, not all OS processes or a complete process-family total. Detached descendants remain unknown.'),
+    roots.length ? h('p', { className: 'resource-diagnostics-note' }, 'Ranked by measured root private bytes, with unknown values last. This is a bounded list of Rel.AI-managed roots, not all OS processes or a complete process-family total. Detached descendants remain unknown.') : null,
     roots.length ? h('div', { className: 'resource-diagnostics-lanes' }, roots.map(root => h('section', {
       className: 'resource-diagnostics-lane resource-diagnostics-root', key: root.processId || root.pid, 'data-managed-root-id': root.processId || ''
     },
@@ -124,7 +124,7 @@ function ManagedRootMemory({ snapshot = {} }) {
         metric('Workspace', root.workspace || 'Unknown'),
         metric('Work session', root.workSessionId || 'None')),
       h('p', { className: 'resource-diagnostics-note' }, `Measured: ${root.sampledAt || 'Unknown'} · ${measured(root) ? 'Identity verified at sample time' : root.reason || 'Memory attribution unavailable'}`)
-    ))) : h('p', { className: 'resource-diagnostics-note' }, value.scope === 'managed_roots_only' ? (value.totalRootCount === 0 ? 'No managed roots are active in this authorized scope.' : 'Managed-root detail is unavailable for this snapshot.') : 'Managed-root memory was not requested in this context.'),
+    ))) : (value.scope === 'managed_roots_only' ? h('p', { className: 'resource-diagnostics-note' }, value.totalRootCount === 0 ? 'No managed roots are active.' : 'Managed-root detail is unavailable.') : null),
     value.omittedRootCount > 0 ? h('p', { className: 'resource-diagnostics-note' }, `${count(value.omittedRootCount)} additional roots omitted from this bounded snapshot.`) : null,
     value.error || value.reason ? h('p', { className: 'resource-diagnostics-note' }, value.error || value.reason) : null
   );

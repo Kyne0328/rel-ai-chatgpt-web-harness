@@ -128,9 +128,9 @@
 .resource-diagnostics-metrics > div { min-width: 0; }
 .resource-diagnostics-metrics dt { @apply text-[11px]; color: var(--ui-text-secondary); }
 .resource-diagnostics-metrics dd { @apply text-[13px] font-semibold; margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.resource-diagnostics-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; }
-.resource-diagnostics-lane { @apply flex flex-col gap-3 rounded-lg border p-3; border-color: var(--ui-border-subtle); }
-.resource-diagnostics-lane h4, .resource-diagnostics-details h4 { @apply text-[13px] font-semibold; overflow-wrap: anywhere; }
+.resource-diagnostics-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 8px; }
+.resource-diagnostics-lane { @apply flex flex-col gap-2 rounded-lg border p-2.5; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+.resource-diagnostics-lane h4, .resource-diagnostics-details h4 { @apply text-[12px] font-semibold; overflow-wrap: anywhere; }
 .resource-diagnostics-details { @apply border-t; border-color: var(--ui-border-subtle); min-width: 0; }
 .resource-diagnostics-details > summary { @apply min-h-11 cursor-pointer py-3 text-[12px] font-semibold; }
 .resource-diagnostics-details > p, .resource-diagnostics-details > dl, .resource-diagnostics-details > h4 { @apply mb-3; }
@@ -150,7 +150,7 @@
 .diagnostic-copy { @apply min-w-0; }
 .diagnostic-code { @apply mb-1 text-[11px] font-semibold; color: var(--ui-text-tertiary); }
 .diagnostic-copy h3 { @apply text-[13px]; }
-.diagnostic-copy p { @apply mt-2 text-[11px] leading-5; color: var(--ui-text-secondary); }
+.diagnostic-copy p { @apply mt-1.5 text-[12px] leading-relaxed; color: var(--ui-text-secondary); }
 .diagnostic-copy details { @apply mt-3; }
 .diagnostic-copy summary { @apply flex min-h-11 cursor-pointer items-center text-[11px] font-semibold; }
 .diagnostic-copy pre { @apply mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg p-3 text-[11px]; background: var(--ui-canvas); border: 1px solid var(--ui-border-subtle); }

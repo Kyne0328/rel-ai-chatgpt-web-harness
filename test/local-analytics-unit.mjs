@@ -127,7 +127,7 @@ try {
       schemaVersion: 5,
       month: '2026-08',
       totals: { requests: 512, ...aggregate },
-      transport: { request_started: 0, request_reached_runtime: 0, request_cancelled: 0, connection_closed: 0, upstream_5xx: 0, response_delivered: 0 },
+      transport: { request_started: 0, request_reached_runtime: 0, request_cancelled: 0, request_interrupted: 0, connection_closed: 0, upstream_5xx: 0, response_delivered: 0 },
       tools: Array.from({ length: 512 }, (_, index) => ({ tool: `tool-${index}-${'x'.repeat(120)}`, ...aggregate })),
       workspaces: [], workspaceTools: [], activityMatrix: [], workspaceActivityMatrix: [], taskIntents: [], workspaceTaskIntents: [],
       failureCategories: [], workspaceFailureCategories: [], performancePhases: {}, hours: []

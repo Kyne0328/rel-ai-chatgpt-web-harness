@@ -64,6 +64,7 @@ type TransportEventName =
   | 'request_started'
   | 'request_reached_runtime'
   | 'request_cancelled'
+  | 'request_interrupted'
   | 'connection_closed'
   | 'upstream_5xx'
   | 'response_delivered';
@@ -72,6 +73,7 @@ interface TransportAggregate {
   request_started: number;
   request_reached_runtime: number;
   request_cancelled: number;
+  request_interrupted: number;
   connection_closed: number;
   upstream_5xx: number;
   response_delivered: number;
@@ -1001,6 +1003,7 @@ function emptyTransportAggregate(): TransportAggregate {
     request_started: 0,
     request_reached_runtime: 0,
     request_cancelled: 0,
+    request_interrupted: 0,
     connection_closed: 0,
     upstream_5xx: 0,
     response_delivered: 0
@@ -1020,6 +1023,7 @@ function transportDto(value: TransportAggregate | null | undefined): TransportAg
     request_started: number(source.request_started),
     request_reached_runtime: number(source.request_reached_runtime),
     request_cancelled: number(source.request_cancelled),
+    request_interrupted: number(source.request_interrupted),
     connection_closed: number(source.connection_closed),
     upstream_5xx: number(source.upstream_5xx),
     response_delivered: number(source.response_delivered)

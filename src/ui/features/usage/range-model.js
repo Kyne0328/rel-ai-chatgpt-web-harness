@@ -23,7 +23,7 @@ export const ANALYTICS_RANGES = Object.freeze([
 
 const HOUR_MS = 60 * 60 * 1000;
 const RELIABILITY_KEYS = Object.freeze(['reliabilityCalls', 'reliableCalls', 'infrastructureFailures', 'operationFailures', 'recoverableFailures', 'cancellations']);
-const TRANSPORT_KEYS = Object.freeze(['request_started', 'request_reached_runtime', 'request_cancelled', 'connection_closed', 'upstream_5xx', 'response_delivered']);
+const TRANSPORT_KEYS = Object.freeze(['request_started', 'request_reached_runtime', 'request_cancelled', 'request_interrupted', 'connection_closed', 'upstream_5xx', 'response_delivered']);
 const TOTAL_KEYS = Object.freeze(['requests', 'toolCalls', 'successes', 'failures', 'executionMs', ...RELIABILITY_KEYS]);
 const GROUP_KEYS = Object.freeze(['toolCalls', 'successes', 'failures', 'executionMs', ...RELIABILITY_KEYS]);
 

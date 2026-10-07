@@ -2,6 +2,64 @@
 // Pure and self-contained checks share one process; tests requiring process/global isolation remain standalone.
 // Add related regression checks here instead of creating another one-off test file.
 
+async function case_transport_timing_privacy_unit() {
+  const assert = (await import('node:assert/strict')).default;
+  const { EventEmitter } = await import('node:events');
+  const { withHttpTransportTiming, recordTransportTiming } = await import('../src/transportTiming.ts');
+  const originalFlag = process.env.REL_AI_MCP_TRANSPORT_TIMING;
+  const originalError = console.error;
+  const lines = [];
+  console.error = (...args) => { lines.push(args.join(' ')); };
+  const request = () => Object.assign(new EventEmitter(), {
+    method: 'POST', url: '/mcp?token=DO_NOT_LOG', headers: { authorization: 'DO_NOT_LOG', 'mcp-name': 'DO_NOT_LOG' }
+  });
+  const response = () => Object.assign(new EventEmitter(), { writableFinished: false });
+  try {
+    delete process.env.REL_AI_MCP_TRANSPORT_TIMING;
+    withHttpTransportTiming(request(), response(), () => recordTransportTiming('call_tool_entry'));
+    assert.equal(lines.length, 0, 'timing must default off');
+    process.env.REL_AI_MCP_TRANSPORT_TIMING = '1';
+    const first = response();
+    const second = response();
+    await Promise.all([first, second].map(async (res, index) => withHttpTransportTiming(request(), res, async () => {
+      await new Promise(resolve => setTimeout(resolve, index));
+      recordTransportTiming('body_complete');
+      recordTransportTiming('runtime_dispatch');
+      recordTransportTiming('call_tool_entry');
+      recordTransportTiming('DO_NOT_LOG');
+      recordTransportTiming('call_tool_return');
+      res.writableFinished = true;
+      res.emit('finish');
+      res.emit('close');
+    })));
+    const rows = lines.map(line => JSON.parse(line.slice(line.indexOf('{'))));
+    assert.equal(new Set(rows.map(row => row.transportId)).size, 2, 'parallel requests retain independent correlation');
+    for (const id of new Set(rows.map(row => row.transportId))) {
+      const group = rows.filter(row => row.transportId === id);
+      assert.deepEqual(group.map(row => row.phase), ['http_entry', 'body_complete', 'runtime_dispatch', 'call_tool_entry', 'call_tool_return', 'response_finished']);
+      assert.ok(group.every(row => Number.isFinite(Date.parse(row.at)) && row.elapsedMs >= 0));
+      assert.ok(group.every(row => Object.keys(row).sort().join(',') === 'at,elapsedMs,phase,transportId'));
+    }
+    assert.doesNotMatch(lines.join('\n'), /DO_NOT_LOG/);
+    lines.length = 0;
+    const req = request();
+    const res = response();
+    withHttpTransportTiming(req, res, () => {
+      req.emit('aborted');
+      res.emit('close');
+    });
+    assert.deepEqual(lines.map(line => JSON.parse(line.slice(line.indexOf('{'))).phase), ['http_entry', 'request_interrupted', 'delivery_interrupted']);
+    console.error = () => { throw new Error('logging unavailable'); };
+    assert.equal(withHttpTransportTiming(request(), response(), () => 42), 42, 'diagnostics failures must not break requests');
+  } finally {
+    console.error = originalError;
+    if (originalFlag === undefined) delete process.env.REL_AI_MCP_TRANSPORT_TIMING;
+    else process.env.REL_AI_MCP_TRANSPORT_TIMING = originalFlag;
+  }
+  console.log('Opt-in correlated transport timing privacy tests passed.');
+}
+await case_transport_timing_privacy_unit();
+
 // Formerly active-controller-guard-unit.mjs
 async function case_active_controller_guard_unit() {
   const __m0 = await import("node:assert/strict");
@@ -123,7 +181,7 @@ async function case_analytics_reliability_unit() {
     recordLocalToolOutcome(config, { tool: 'relai_edit', operationName: 'relai_edit', workspace: 'repo', ok: false, errorCode: 'EDIT_CONTEXT_MISMATCH', errorMessage: 'found 2 matches', durationMs: 20, at });
     recordLocalToolOutcome(config, { tool: 'relai_exec', operationName: 'relai_exec', workspace: 'repo', ok: false, errorMessage: 'spawn EINVAL', durationMs: 30, at });
     recordLocalToolOutcome(config, { tool: 'relai_exec', operationName: 'relai_exec', workspace: 'repo', ok: false, errorMessage: 'Operation cancelled.', durationMs: 40, at });
-    for (const event of ['request_started', 'request_reached_runtime', 'connection_closed', 'upstream_5xx', 'response_delivered']) {
+    for (const event of ['request_started', 'request_reached_runtime', 'request_interrupted', 'connection_closed', 'upstream_5xx', 'response_delivered']) {
       assert.equal(recordLocalTransportEvent(config, { event, at }), true);
     }
   
@@ -139,6 +197,7 @@ async function case_analytics_reliability_unit() {
       request_started: 1,
       request_reached_runtime: 1,
       request_cancelled: 0,
+      request_interrupted: 1,
       connection_closed: 1,
       upstream_5xx: 1,
       response_delivered: 1

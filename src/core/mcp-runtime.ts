@@ -25,6 +25,7 @@ import {
 import { runSpan, setSpanAttributes } from '../telemetry.ts';
 
 export { LEGACY_LIFECYCLE_METHODS, MCP_PROTOCOL_VERSION, SERVER_INSTANCE_ID };
+export { recordTransportTiming } from '../transportTiming.ts';
 
 export interface McpAuthorization {
   authMode: McpAuthMode;

@@ -23,6 +23,7 @@ import {
   noteMcpAuthenticationFailure,
   observeMcpRequestManifest,
   recordMcpTransportEvent,
+  recordTransportTiming,
   runMcpRequestSpan,
   validateMcpRequestEnvelope,
   withMcpPerformanceBreakdown,
@@ -135,6 +136,7 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
   try {
     message = await measureMcpPhase('mcp.receive', async () => {
       const raw = await readRawBody(ctx.req, ctx.options.maxBodyBytes);
+      recordTransportTiming('body_complete');
       return raw.trim() ? JSON.parse(raw) as JsonRpcRequest : null;
     });
   } catch (error) {
@@ -229,6 +231,7 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
       () => observeMcpRequestManifest(requestContext, String(message?.method || ''))
     );
 
+    recordTransportTiming('runtime_dispatch');
     recordMcpTransportEvent('request_reached_runtime', transportEventDetails(transportDetails));
     await runMcpRequestSpan(requestContext, {
       protocolVersion: MCP_PROTOCOL_VERSION,
@@ -397,7 +400,10 @@ function createHttpRequestAbortScope(
   const controller = new AbortController();
   const deliveryController = new AbortController();
   const onRequestAborted = (): void => {
-    if (!controller.signal.aborted) controller.abort(new Error('HTTP MCP request was aborted by the client.'));
+    if (!controller.signal.aborted) controller.abort(Object.assign(
+      new Error('HTTP MCP request was interrupted; this does not establish user cancellation.'),
+      { code: 'HTTP_MCP_REQUEST_INTERRUPTED' }
+    ));
   };
   const onResponseClosed = (): void => {
     if (!res.writableFinished && !deliveryController.signal.aborted) {
@@ -423,12 +429,12 @@ function createHttpTransportLifecycle(
   res: ServerResponse<IncomingMessage>,
   details: HttpTransportDetails
 ): void {
-  let cancelled = false;
+  let interrupted = false;
   let closed = false;
   const onRequestAborted = (): void => {
-    if (cancelled) return;
-    cancelled = true;
-    recordMcpTransportEvent('request_cancelled', {
+    if (interrupted) return;
+    interrupted = true;
+    recordMcpTransportEvent('request_interrupted', {
       ...transportEventDetails(details),
       reasonCode: 'request_aborted'
     });

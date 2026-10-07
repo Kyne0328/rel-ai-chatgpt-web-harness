@@ -1204,7 +1204,9 @@ async function case_http_transport_io_unit() {
   const httpAbort = createHttpRequestAbortScope(req, res);
   req.emit('aborted');
   assert.equal(httpAbort.signal.aborted, true);
-  assert.match(String(httpAbort.signal.reason?.message || ''), /aborted by the client/i);
+  assert.equal(httpAbort.signal.reason?.code, 'HTTP_MCP_REQUEST_INTERRUPTED');
+  assert.match(String(httpAbort.signal.reason?.message || ''), /interrupted.*does not establish user cancellation/i);
+  assert.equal(httpAbort.deliverySignal.aborted, true, 'request interruption must also stop result delivery waiting');
   httpAbort.dispose();
   assert.equal(req.listenerCount('aborted'), 0);
   assert.equal(res.listenerCount('close'), 0);

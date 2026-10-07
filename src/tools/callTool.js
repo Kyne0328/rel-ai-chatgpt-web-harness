@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { recordTransportTiming } from '../transportTiming.ts';
 
 import { safeLogAudit } from '../audit.js';
 import { createValidationFingerprint } from '../bridge/validationPlan.js';
@@ -39,7 +40,15 @@ import {
 bindTaskHistoryActivityPersistence(onToolActivity, readConfig);
 
 async function callTool(name, args = {}, context = {}) {
-  return withPerformanceBreakdownIfAbsent(() => callToolObserved(name, args, context));
+  recordTransportTiming('call_tool_entry');
+  try {
+    const result = await withPerformanceBreakdownIfAbsent(() => callToolObserved(name, args, context));
+    recordTransportTiming('call_tool_return');
+    return result;
+  } catch (error) {
+    recordTransportTiming('call_tool_error');
+    throw error;
+  }
 }
 
 async function callToolObserved(name, args = {}, context = {}) {

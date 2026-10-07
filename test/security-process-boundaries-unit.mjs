@@ -56,6 +56,14 @@ assert.equal(serviceEnvironment.REL_AI_UI_CHROMIUM_PATH, '/safe/chromium');
 assert.equal(serviceEnvironment.SSH_AUTH_SOCK, undefined);
 assert.equal(serviceEnvironment.OPENAI_API_KEY, undefined);
 
+// Local timing is opt-in in the app launcher and must reach its service.
+// It does not belong in arbitrary workspace commands or the tunnel client.
+const diagnosticSource = { ...source, REL_AI_MCP_TRANSPORT_TIMING: '1' };
+assert.equal(makeServiceProcessEnvironment({}, { source: diagnosticSource }).REL_AI_MCP_TRANSPORT_TIMING, '1');
+assert.equal(makeServiceProcessEnvironment({}, { source }).REL_AI_MCP_TRANSPORT_TIMING, undefined);
+assert.equal(makeProcessEnvironment({}, { source: diagnosticSource }).REL_AI_MCP_TRANSPORT_TIMING, undefined);
+assert.equal(makeTunnelProcessEnvironment({}, { source: diagnosticSource }).REL_AI_MCP_TRANSPORT_TIMING, undefined);
+
 const serviceWithExplicitPassThrough = makeServiceProcessEnvironment({}, { source, allow: ['OPENAI_API_KEY'] });
 assert.equal(serviceWithExplicitPassThrough.OPENAI_API_KEY, inheritedSecret);
 

@@ -222,11 +222,11 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
       loadError ? h(DiagnosticUnavailable, { error: loadError, onRetry: () => void load() }) : null,
       report ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' },
         h(DiagnosticMetrics, { findings: view.findings }),
-        h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
-        h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }),
+        h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),
         report.tunnelHealth ? h(TunnelHealthSummary, { health: report.tunnelHealth }) : null,
         tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null,
-        h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),
+        h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
+        runtime?.buildIdentity?.buildId && runtime.buildIdentity.buildId !== 'Unknown' ? h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }) : null,
         h(DiagnosticLogs, { report, view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } })
       ) : null
     )
@@ -422,7 +422,7 @@ function TunnelDoctorResult({ result = {} }) {
         return h('article', { className: `diagnostic-doctor-check ${checkView.tone}`.trim(), key: check?.id || index },
           h('div', { className: 'diagnostic-doctor-check-head' }, h('code', null, checkView.label || `check-${index + 1}`), h('strong', null, checkView.statusLabel)),
           checkView.tone !== 'pass' && checkView.summary ? h('p', null, checkView.summary) : null,
-          checkView.tone !== 'pass' && checkView.why ? h('p', null, h('strong', null, 'Why: '), checkView.why) : null,
+          checkView.tone === 'fail' && checkView.why ? h('p', null, h('strong', null, 'Why: '), checkView.why) : null,
           next.length
             ? checkView.optionalSetup
               ? h('details', { className: 'diagnostic-doctor-optional-setup' },

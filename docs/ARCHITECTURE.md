@@ -27,6 +27,16 @@ The Rel.AI harness has three executable composition roots plus one external tran
 
 Composition roots construct resource owners. Pure validation, mapping, formatting, catalog, and projection functions are imported directly.
 
+## Operation receipt durability
+
+`src/mcp/fallbackExecutions.js` requires durable admission before scheduling an operation. A task-bound terminal result whose canonical SQLite write fails is retained as a sanitized, bounded, atomically written operation journal. Its receipt reports `durability: journaled` and pending canonical reconciliation; it does not claim that task history already contains the terminal result. Exact operation recovery can use that journal even while a fresh process cannot read the canonical database.
+
+Reconciliation uses bounded asynchronous backoff for transient database contention and rebuilds each write from the current record, including delivery acknowledgement. Recovered journals receive an initial reconciliation attempt. Reset and record eviction cancel owned retry timers. A terminal record with no durable copy remains available in memory beyond ordinary retention limits; protected/live capacity rejects new admission while exact result reuse remains available.
+
+Recovery checks ownership and revision before combining canonical and journal records. Conflicting equal-revision terminal facts fail closed; acknowledgement cannot be undone by a delayed journal. Pending journal files survive ordinary age/count pruning. A canonical winner schedules pointer-only retirement of its stale journal; this requires a verified physical database row and a fresh journal comparison, not an uncommitted working-session projection. An unreadable or malformed journal is not treated as an absent result. A persisted running record without a live owner has an unknown final outcome; that alone does not prove a runtime restart, user cancellation, or successful execution.
+
+Result-delivery interruption remains separate from operation cancellation. See [transport diagnostics](TRANSPORT-DIAGNOSTICS.md) for scoped retrieval and timing semantics.
+
 ## Dashboard frontend ownership
 
 The routine dashboard is a React application backed by server-owned projections. The current path is:

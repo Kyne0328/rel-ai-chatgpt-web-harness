@@ -30,6 +30,8 @@ const REPLAYABLE_FALLBACK_STATUSES = new Set([
 ]);
 const executionsByOperationId = new Map();
 const pendingCompletionDeliveries = new Map();
+const fallbackPersistenceRetries = new Map();
+const FALLBACK_PERSISTENCE_RETRY_DELAYS_MS = [25, 100, 500, 2000, 5000];
 
 function activeFallbackWorkIds() {
   return [...new Set([...executionsByOperationId.values()]
@@ -57,6 +59,13 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
   }
   if (existing) {
     return { record: existing, reused: true };
+  }
+
+  const protectedCount = [...executionsByOperationId.values()].filter(record =>
+    record.status === FALLBACK_EXECUTION_STATUS.RUNNING || record.durability === 'memory_only').length;
+  if (protectedCount >= MAX_FALLBACK_RECORDS) {
+    throw Object.assign(new Error('Background receipt capacity is occupied by live or unpersisted operations. Retrieve existing results before starting more work.'),
+      { code: 'FALLBACK_RECOVERY_CAPACITY', executed: false, retryable: true });
   }
 
   const startedAtMs = timeValue(now);
@@ -317,19 +326,32 @@ function readPersistedScope(config, reference, options = {}) {
 
 function recoverExecutionRecords(reference, options = {}) {
   if (!options.config) return;
+  const exactLive = executionsByOperationId.get(reference);
+  if (exactLive) { reconcileLiveFallback(options.config, exactLive); return; }
   const persisted = reference.startsWith('fallback_')
     ? [readPersistedFallback(options.config, reference, options.workId)].filter(Boolean)
     : options.scopeOnly ? readPersistedScope(options.config, reference, options)
       : readTaskBackgroundOperations(options.config, reference);
-  for (const record of persisted) {
+  for (let record of persisted) {
     if (!record?.operationId) continue;
+    if (executionsByOperationId.has(record.operationId)) {
+      reconcileLiveFallback(options.config, executionsByOperationId.get(record.operationId));
+      continue;
+    }
+    if (!reference.startsWith('fallback_') && !options.scopeOnly) {
+      record = selectPersistedFallback(options.config, record, readFallbackFile(options.config, record.operationId));
+    }
     canonicalizeFallbackWorkspace(record, options.config);
-    if (executionsByOperationId.has(record.operationId)) continue;
     if (options.noticeScope && record.noticeScope !== options.noticeScope) continue;
     if (options.workspace && record.workspace !== options.workspace) continue;
     if (options.workId && record.workId !== options.workId) continue;
     const recovered = recoverPersistedFallback(options.config, record.operationId, options.now || Date.now, record);
-    if (recovered) executionsByOperationId.set(recovered.operationId, hydratePersistedRecord(recovered));
+    if (recovered) {
+      const hydrated = hydratePersistedRecord(recovered);
+      executionsByOperationId.set(recovered.operationId, hydrated);
+      if (hydrated.pointerRepairPending) repairFallbackPointer(options.config, hydrated);
+      else if (hydrated.durability === 'journaled' || hydrated.durability === 'memory_only') scheduleFallbackPersistenceRetry(options.config, hydrated);
+    }
   }
 }
 
@@ -424,36 +446,46 @@ function fallbackExecutionStatus(reference, options = {}) {
 }
 
 async function waitForFallbackExecution(reference, options = {}) {
-  options.signal?.throwIfAborted();
+  // Resolve and authorize the existing record before handling a cancelled wait.
+  // Cancellation of result delivery never changes the operation's durable state.
   const operation = fallbackExecutionStatus(reference, options);
-  const record = operation && executionsByOperationId.get(operation.operationId);
+  if (!operation) return null;
+  if (options.signal?.aborted) return interruptedResultWait(operation);
+  const record = executionsByOperationId.get(operation.operationId);
   const requestedWaitMs = Number(options.waitMs ?? MAX_FALLBACK_RESULT_WAIT_MS);
   const deadlineWaitMs = Number(options.deadlineAtMs) > 0
     ? Math.max(0, Number(options.deadlineAtMs) - Date.now()) : MAX_FALLBACK_RESULT_WAIT_MS;
   const waitMs = Math.min(MAX_FALLBACK_RESULT_WAIT_MS, deadlineWaitMs, Math.max(0, requestedWaitMs || 0));
   const waiterCount = [...fallbackResultWaiters.values()].reduce((count, listeners) => count + listeners.size, 0);
-  // Wait only on this process's existing execution, after the same scope checks
-  // as an immediate lookup. Never start/recover work to satisfy a result wait.
   if (!record?.promise || operation.status !== FALLBACK_EXECUTION_STATUS.RUNNING
     || waitMs <= 0 || waiterCount >= MAX_CONCURRENT_RESULT_WAITS) return operation;
-  await new Promise((resolve, reject) => {
+  await new Promise(resolve => {
     const listeners = fallbackResultWaiters.get(record.operationId) || new Set();
     fallbackResultWaiters.set(record.operationId, listeners);
     const cleanup = () => {
       clearTimeout(timer);
-      options.signal?.removeEventListener('abort', onAbort);
+      options.signal?.removeEventListener('abort', onSettled);
       listeners.delete(onSettled);
       if (!listeners.size) fallbackResultWaiters.delete(record.operationId);
     };
     const onSettled = () => { cleanup(); resolve(); };
-    const onAbort = () => { cleanup(); reject(options.signal.reason); };
     const timer = setTimeout(onSettled, waitMs);
     listeners.add(onSettled);
-    options.signal?.addEventListener('abort', onAbort, { once: true });
-    if (options.signal?.aborted) onAbort();
+    options.signal?.addEventListener('abort', onSettled, { once: true });
+    if (options.signal?.aborted) onSettled();
   });
-  options.signal?.throwIfAborted();
-  return fallbackExecutionStatus(reference, options);
+  const latest = fallbackExecutionStatus(reference, options);
+  return options.signal?.aborted ? interruptedResultWait(latest) : latest;
+}
+
+function interruptedResultWait(operation) {
+  if (!operation) return null;
+  return {
+    ...operation,
+    retrievalInterrupted: true,
+    recovery: { action: 'result', operationId: operation.operationId, retryOriginalOperation: false, respectUserStop: true },
+    nextAction: 'Result waiting was interrupted; the operation status and retained result above remain authoritative. Respect any explicit user stop. If still authorized and the result is needed, retrieve this same operationId; do not rerun the original operation.'
+  };
 }
 
 function publicFallbackRecord(record, now = Date.now) {
@@ -790,7 +822,7 @@ function recoverPersistedFallback(config, reference, now = Date.now, previous = 
     updatedAt: new Date(timestamp).toISOString(),
     completedAt: new Date(timestamp).toISOString(),
     revision: Math.max(1, Number(persisted.revision || 1)) + 1,
-    error: 'Background operation was interrupted because the Rel.AI runtime restarted.'
+    error: 'No live execution record is available for the last persisted running operation. Its final outcome is unknown. Inspect retained evidence before retrying.'
   };
   try { persistFallbackSnapshot(config, interrupted); }
   catch (error) {
@@ -830,13 +862,17 @@ function hydratePersistedRecord(record) {
     cancellationRequestedAt: String(record.cancellationRequestedAt || ''),
     cancellationReason: String(record.cancellationReason || ''),
     deliveryAcknowledged: record.deliveryAcknowledged === true,
+    durability: record.pointerRepairPending === true ? 'memory_only' : record.durability || (record.journalPending === true ? 'journaled' : 'persisted'),
+    persistenceError: String(record.persistenceError || ''),
+    journalPending: record.journalPending === true,
+    pointerRepairPending: record.pointerRepairPending === true,
     controller: null,
     promise: null
   };
 }
 
 function persistentFallbackRecord(record) {
-  const structured = record.result?.structuredContent || record.persistedResult || null;
+  const structured = withoutFallbackPersistenceWarning(record.result?.structuredContent || record.persistedResult || null);
   return {
     operationId: record.operationId,
     executionKey: record.executionKey || record.workId || record.operationId,
@@ -864,35 +900,201 @@ function persistentFallbackRecord(record) {
   };
 }
 
+function readFallbackFile(config, operationId) {
+  if (!/^fallback_[A-Za-z0-9_-]{20,160}$/.test(String(operationId || ''))) return null;
+  try {
+    return readJsonFile(tasklessFallbackFile(config, operationId), {
+      validate: value => Boolean(value && typeof value === 'object' && value.operationId === operationId)
+    });
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') return null;
+    throw Object.assign(new Error('Retained operation storage could not be read safely. Inspect this operation before retrying.', { cause }),
+      { code: 'FALLBACK_RECOVERY_UNAVAILABLE', executed: false });
+  }
+}
+
+function selectPersistedFallback(config, canonical, stored, options = {}) {
+  if (!canonical) return stored?.status ? stored : null;
+  if (!stored?.status || stored.journalPending !== true) return canonical;
+  const left = canonicalizeFallbackWorkspace({ ...canonical }, config);
+  const right = canonicalizeFallbackWorkspace({ ...stored }, config);
+  const owner = value => [value.operationId, value.workId || '', value.executionKey || value.workId || value.operationId,
+    value.noticeScope || '', value.workspace || '', value.signature || ''];
+  if (stableJson(owner(left)) !== stableJson(owner(right))) {
+    throw Object.assign(new Error('Retained operation journal conflicts with its canonical ownership. Inspect this operation before retrying.'),
+      { code: 'FALLBACK_RECOVERY_UNAVAILABLE', executed: false });
+  }
+  const leftRevision = Number(left.revision || 1), rightRevision = Number(right.revision || 1);
+  if (leftRevision !== rightRevision) return rightRevision > leftRevision ? right : { ...left, pointerRepairPending: true };
+  if (left.status !== right.status) {
+    throw Object.assign(new Error('Retained operation records disagree at the same revision. Inspect this operation before retrying.'),
+      { code: 'FALLBACK_RECOVERY_UNAVAILABLE', executed: false });
+  }
+  // Delivery metadata can change independently, but immutable terminal facts
+  // cannot disagree at one revision. Fail before acknowledgement precedence.
+  if (left.status !== FALLBACK_EXECUTION_STATUS.RUNNING) {
+    const terminalFacts = value => [value.tool || '', value.startedAt || '', value.completedAt || '',
+      value.error || '', value.isError === true, value.cancellationRequestedAt || '', value.cancellationReason || '',
+      withoutFallbackPersistenceWarning(value.result || null)];
+    if (stableJson(terminalFacts(left)) !== stableJson(terminalFacts(right))) {
+      throw Object.assign(new Error('Retained operation terminal facts disagree at the same revision. Inspect this operation before retrying.'),
+        { code: 'FALLBACK_RECOVERY_UNAVAILABLE', executed: false });
+    }
+  }
+  // A delayed journal must never resurrect an already acknowledged replay.
+  if ((left.deliveryAcknowledged === true) !== (right.deliveryAcknowledged === true)) {
+    return left.deliveryAcknowledged === true ? { ...left, pointerRepairPending: true } : right;
+  }
+  return options.preferCanonicalOnEqual ? { ...left, pointerRepairPending: true } : right;
+}
+
 function readPersistedFallback(config, reference, workId = '') {
   const id = String(reference || '').trim();
   try {
     if (id.startsWith('fallback_')) {
-      let stored = null;
-      try {
-        stored = readJsonFile(tasklessFallbackFile(config, id), {
-          validate: value => Boolean(value && typeof value === 'object' && value.operationId === id)
-        });
-      } catch {}
+      const stored = readFallbackFile(config, id);
       const taskId = stored?.workId || workId;
-      return taskId ? readTaskBackgroundOperations(config, taskId).find(record => record.operationId === id) || (stored?.status ? stored : null) : stored;
+      if (!taskId) return stored;
+      let canonical;
+      try { canonical = readTaskBackgroundOperations(config, taskId).find(record => record.operationId === id); }
+      catch (cause) {
+        // A fresh process may encounter a migration/read lock before SQLite can
+        // return its row. The independently durable exact journal still stands.
+        if (stored?.journalPending === true && stored.status && stored.status !== FALLBACK_EXECUTION_STATUS.RUNNING) return stored;
+        throw cause;
+      }
+      return selectPersistedFallback(config, canonical, stored);
     }
     return readTaskBackgroundOperation(config, id);
   } catch (error) {
+    if (error?.code === 'FALLBACK_RECOVERY_UNAVAILABLE') throw error;
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] fallback operation read:', error);
     return null;
   }
 }
 
+function withoutFallbackPersistenceWarning(value) {
+  if (!value || typeof value !== 'object') return value;
+  const warning = value.operationPersistence;
+  if (warning?.errorCode !== 'FALLBACK_PERSISTENCE_FAILED' && warning?.storage !== 'operation-journal') return value;
+  const result = { ...value };
+  delete result.operationPersistence;
+  return result;
+}
+
+function clearFallbackPersistenceRetry(operationId) {
+  const pending = fallbackPersistenceRetries.get(operationId);
+  if (pending?.timer) clearTimeout(pending.timer);
+  fallbackPersistenceRetries.delete(operationId);
+}
+
+function reconcileLiveFallback(config, record) {
+  if (!record || (!record.pointerRepairPending && !record.persistenceError && record.durability !== 'memory_only' && record.durability !== 'journaled')) return;
+  const now = Date.now();
+  if (now - Number(record.lastPersistenceReconcileAtMs || 0) < 1000) return;
+  record.lastPersistenceReconcileAtMs = now;
+  if (record.pointerRepairPending) repairFallbackPointer(config, record);
+  else persistFallbackRecord(config, record);
+}
+
+function repairFallbackPointer(config, record) {
+  if (!record?.pointerRepairPending || !record.workId) return;
+  try {
+    const stored = readFallbackFile(config, record.operationId);
+    if (stored && stored.workId !== record.workId) {
+      throw new Error('Retained operation pointer ownership changed; preserve it for inspection.');
+    }
+    // The working-session projection can include uncommitted worker writes.
+    // Only the physical row proves it is safe to discard the terminal journal.
+    const session = readSession(getTaskHistoryDir(config), record.workId);
+    const operations = session?.backgroundOperations || (session?.backgroundOperation ? [session.backgroundOperation] : []);
+    const canonical = operations.find(value => value.operationId === record.operationId);
+    if (!canonical || canonical.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
+      throw new Error('Task background operation has not reached durable history for pointer repair.');
+    }
+    const liveProjection = sanitizeTaskRecord({ status: 'planning', backgroundOperation: persistentFallbackRecord(record) })?.backgroundOperation;
+    for (const candidate of [...(stored?.journalPending ? [stored] : []), { ...liveProjection, journalPending: true }]) {
+      const selected = selectPersistedFallback(config, canonical, candidate, { preferCanonicalOnEqual: true });
+      if (selected?.journalPending === true) {
+        throw new Error('Task background operation has not reached durable history for pointer repair.');
+      }
+    }
+    if (Number(canonical.revision || 1) > Number(record.revision || 1)) {
+      Object.assign(record, hydratePersistedRecord(canonical));
+    } else if (canonical.deliveryAcknowledged === true) record.deliveryAcknowledged = true;
+    record.pointerRepairPending = true;
+    record.durability = 'persisted';
+    if (stableJson(readFallbackFile(config, record.operationId)) !== stableJson(stored)) {
+      throw new Error('Retained operation journal changed before pointer repair; preserve it for later reconciliation.');
+    }
+    writeJsonAtomic(tasklessFallbackFile(config, record.operationId),
+      { operationId: record.operationId, workId: record.workId }, { mode: 0o600 });
+    record.pointerRepairPending = false;
+    record.persistenceError = '';
+    clearFallbackPersistenceRetry(record.operationId);
+  } catch (error) {
+    record.persistenceError = String(error?.message || error);
+    scheduleFallbackPersistenceRetry(config, record);
+  }
+}
+
+function scheduleFallbackPersistenceRetry(config, record) {
+  if (!config || record.persist === false || executionsByOperationId.get(record.operationId) !== record) return;
+  // Recovered journals do not persist transient SQLite error text. Give them
+  // one initial reconciliation attempt, then classify the actual failure.
+  const recoveredPending = (record.journalPending === true || record.pointerRepairPending === true) && !record.persistenceError;
+  if (!recoveredPending && !/database is (?:locked|busy)|SQLITE_(?:BUSY|LOCKED)|has not reached durable history/i.test(record.persistenceError || '')) {
+    clearFallbackPersistenceRetry(record.operationId);
+    return;
+  }
+  let pending = fallbackPersistenceRetries.get(record.operationId);
+  if (pending && pending.record !== record) { clearFallbackPersistenceRetry(record.operationId); pending = null; }
+  if (!pending) {
+    if (fallbackPersistenceRetries.size >= MAX_FALLBACK_RECORDS) return;
+    pending = { config, record, attempt: 0, timer: null };
+    fallbackPersistenceRetries.set(record.operationId, pending);
+  }
+  if (pending.timer) return;
+  const owned = pending;
+  owned.timer = setTimeout(() => {
+    owned.timer = null;
+    if (fallbackPersistenceRetries.get(record.operationId) !== owned
+      || executionsByOperationId.get(record.operationId) !== record) return;
+    owned.attempt = Math.min(owned.attempt + 1, FALLBACK_PERSISTENCE_RETRY_DELAYS_MS.length - 1);
+    // Rebuild from current state, including delivery acknowledgement. Never
+    // retry a captured pre-ack snapshot or a record removed by reset/pruning.
+    if (record.pointerRepairPending) repairFallbackPointer(owned.config, record);
+    else persistFallbackRecord(owned.config, record);
+  }, FALLBACK_PERSISTENCE_RETRY_DELAYS_MS[owned.attempt]);
+  owned.timer.unref?.();
+}
+
 function persistFallbackRecord(config, record, options = {}) {
   if (!config || !record || record.persist === false) return;
+  // A normal write may contain newer acknowledgement/state that must be saved.
+  record.pointerRepairPending = false;
   try {
-    const persisted = persistFallbackSnapshot(config, persistentFallbackRecord(record));
-    record.persistenceError = '';
-    record.durability = 'persisted';
+    const persisted = persistFallbackSnapshot(config, persistentFallbackRecord(record), {
+      allowJournalFallback: options.required !== true && record.status !== FALLBACK_EXECUTION_STATUS.RUNNING,
+      required: options.required === true
+    });
+    record.persistenceError = persisted.persistenceError || '';
+    record.durability = persisted.journalPending === true ? 'journaled' : 'persisted';
+    record.journalPending = persisted.journalPending === true;
+    record.pointerRepairPending = persisted.pointerRepairPending === true;
     record.persistedResultCompacted = persisted.persistedResultCompacted === true;
     record.resultRetention = persisted.resultRetention || null;
+    if (record.result?.structuredContent) {
+      const structured = withoutFallbackPersistenceWarning(record.result.structuredContent);
+      record.result = { ...record.result, structuredContent: record.journalPending
+        ? { ...structured, operationPersistence: { durable: true, canonicalPending: true, storage: 'operation-journal',
+          nextAction: 'Retrieve this operationId. Task history reconciliation is pending.' } } : structured };
+    }
+    record.persistedResult = withoutFallbackPersistenceWarning(record.persistedResult);
+    if (record.persistenceError || record.journalPending || record.pointerRepairPending) scheduleFallbackPersistenceRetry(config, record);
+    else clearFallbackPersistenceRetry(record.operationId);
   } catch (cause) {
+    const previousError = record.persistenceError;
     record.persistenceError = String(cause?.message || cause);
     record.durability = 'memory_only';
     if (options.required === true) {
@@ -901,7 +1103,6 @@ function persistFallbackRecord(config, record, options = {}) {
       error.executed = false;
       throw error;
     }
-    // Execution may already have happened. Preserve its result and replay key.
     if (record.result?.structuredContent) {
       record.result = { ...record.result, structuredContent: {
         ...record.result.structuredContent,
@@ -909,7 +1110,9 @@ function persistFallbackRecord(config, record, options = {}) {
           nextAction: 'Keep this result. Do not repeat the operation to repair persistence; reconcile this operationId.' }
       } };
     }
-    console.error('[rel-ai-mcp] Background result retained only in memory:', record.operationId);
+    scheduleFallbackPersistenceRetry(config, record);
+    if (previousError !== record.persistenceError) console.error('[rel-ai-mcp] Background result retained only in memory:',
+      record.operationId, record.persistenceError.slice(0, 240));
   }
 }
 
@@ -920,7 +1123,7 @@ async function retainFallbackOutput(config, record, result) {
   await retainOutputStreams(config, owner, result?.structuredContent);
 }
 
-function persistFallbackSnapshot(config, record) {
+function persistFallbackSnapshot(config, record, options = {}) {
   const projected = sanitizeTaskRecord({ status: 'planning', backgroundOperation: record })?.backgroundOperation || {};
   const originalResult = JSON.stringify(record.result);
   const retainedResult = JSON.stringify(projected.result);
@@ -930,25 +1133,41 @@ function persistFallbackSnapshot(config, record) {
   }
   record = projected;
   let taskAuthoritative = false;
+  let canonicalError = null;
   if (record.workId) {
-    const stored = recordTaskBackgroundOperation(config, record.workId, record);
-    if (stored) {
-      // A pending worker write is not a durable commit. Verify the canonical
-      // row, bypassing the optimistic in-memory task-history projection.
-      const session = readSession(getTaskHistoryDir(config), record.workId);
-      const operations = session?.backgroundOperations || (session?.backgroundOperation ? [session.backgroundOperation] : []);
-      taskAuthoritative = operations.some(value => value.operationId === record.operationId
-        && value.revision === record.revision && value.status === record.status
-        && value.deliveryAcknowledged === record.deliveryAcknowledged);
-      if (!taskAuthoritative) throw new Error('Task background operation has not reached durable history.');
-    }
+    try {
+      const stored = recordTaskBackgroundOperation(config, record.workId, record);
+      if (stored) {
+        const session = readSession(getTaskHistoryDir(config), record.workId);
+        const operations = session?.backgroundOperations || (session?.backgroundOperation ? [session.backgroundOperation] : []);
+        taskAuthoritative = operations.some(value => value.operationId === record.operationId
+          && value.revision === record.revision && value.status === record.status
+          && value.deliveryAcknowledged === record.deliveryAcknowledged);
+        if (!taskAuthoritative) throw new Error('Task background operation has not reached durable history.');
+      }
+    } catch (error) { canonicalError = error; }
   }
   const file = tasklessFallbackFile(config, record.operationId);
-  // Existing tasks are authoritative. Records without a task (including
-  // internal one-shot clients) retain their own snapshot instead of a dead pointer.
+  if (canonicalError) {
+    if (!options.allowJournalFallback) throw canonicalError;
+    // A terminal result must survive process loss while SQLite is locked.
+    // This is the same bounded projection and fsynced atomic file primitive
+    // already used for taskless receipts; required admission is unchanged.
+    const journal = { ...record, journalPending: true };
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeJsonAtomic(file, journal, { mode: 0o600 });
+    return { ...journal, persistenceError: String(canonicalError?.message || canonicalError) };
+  }
   const sanitized = taskAuthoritative ? { operationId: record.operationId, workId: record.workId } : record;
-  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  writeJsonAtomic(file, sanitized, { mode: 0o600 });
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeJsonAtomic(file, sanitized, { mode: 0o600 });
+  } catch (error) {
+    // An existing canonical terminal commit remains durable if only its
+    // pointer refresh fails. Initial admission still requires both writes.
+    if (!taskAuthoritative || options.required) throw error;
+    return { ...record, pointerRepairPending: true, persistenceError: String(error?.message || error) };
+  }
   if (!record.workId) {
     const index = scopeIndexFile(config, record.executionKey, record.noticeScope);
     writeJsonAtomic(index, { operationId: record.operationId, executionKey: record.executionKey,
@@ -1019,6 +1238,7 @@ async function pruneTasklessFallbackFiles(root, config) {
       // here repeatedly hydrates large histories and blocks all tunnel clients.
       const record = JSON.parse(await fs.promises.readFile(file, 'utf8'));
       if (record?.operationId !== path.basename(file, '.json')) continue;
+      if (record.workId && record.journalPending === true) continue;
       if (record.workId && !record.status) {
         if (stat.mtimeMs >= cutoff) continue;
         // Read only the indexed payload's operation ids, never hydrate histories.
@@ -1079,13 +1299,13 @@ function settleCancelledRecord(record, now = Date.now, reason = null) {
 function pruneFallbackExecutions(now = Date.now) {
   const current = timeValue(now);
   for (const record of executionsByOperationId.values()) {
-    if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) continue;
+    if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING || record.durability === 'memory_only') continue;
     const completed = Number(record.completedAtMs || record.startedAtMs || current);
     if (current - completed > FALLBACK_RECORD_TTL_MS) removeFallbackExecutionRecord(record);
   }
   if (executionsByOperationId.size <= MAX_FALLBACK_RECORDS) return;
   const removable = [...executionsByOperationId.values()]
-    .filter(record => record.status !== FALLBACK_EXECUTION_STATUS.RUNNING)
+    .filter(record => record.status !== FALLBACK_EXECUTION_STATUS.RUNNING && record.durability !== 'memory_only')
     .sort((left, right) => Number(left.completedAtMs || left.startedAtMs) - Number(right.completedAtMs || right.startedAtMs));
   while (executionsByOperationId.size > MAX_FALLBACK_RECORDS && removable.length) {
     removeFallbackExecutionRecord(removable.shift());
@@ -1094,7 +1314,10 @@ function pruneFallbackExecutions(now = Date.now) {
 
 function removeFallbackExecutionRecord(record) {
   if (!record) return;
-  if (record.operationId) executionsByOperationId.delete(record.operationId);
+  if (record.operationId) {
+    clearFallbackPersistenceRetry(record.operationId);
+    executionsByOperationId.delete(record.operationId);
+  }
 }
 
 function timeValue(now = Date.now) {
@@ -1108,6 +1331,7 @@ function fallbackSignature(tool, args = {}) {
 }
 
 function resetFallbackExecutions() {
+  for (const operationId of fallbackPersistenceRetries.keys()) clearFallbackPersistenceRetry(operationId);
   for (const listeners of fallbackResultWaiters.values()) {
     for (const notify of [...listeners]) notify();
   }

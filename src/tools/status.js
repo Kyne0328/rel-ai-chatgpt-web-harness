@@ -43,7 +43,7 @@ async function relaiStatus(config, args = {}, context = {}) {
   let detailedOperation = context.connector && foundOperation && !workspaceAliases.includes(foundOperation.workspace) ? null : foundOperation;
   if (context.resultWaitMs > 0 && detailedOperation?.status === 'running') {
     detailedOperation = await waitForFallbackExecution(args.operationId, {
-      ...operationOptions, waitMs: context.resultWaitMs, signal: context.signal, deadlineAtMs: context.deadlineAtMs
+      ...operationOptions, waitMs: context.resultWaitMs, signal: context.resultWaitSignal || context.signal, deadlineAtMs: context.deadlineAtMs
     });
   }
   const backgroundOperation = args.operationId && args.includeResult !== false ? { ...fallbackOperationReceipt(detailedOperation), ...detailedOperation } : fallbackOperationReceipt(detailedOperation);

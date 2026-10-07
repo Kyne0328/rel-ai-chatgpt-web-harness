@@ -12,6 +12,7 @@ import { buildToolManifest } from './mcp/toolManifest.js';
 import { resolveConnectionGenerations } from './mcp/connectionGenerations.js';
 import { mcpConnectionManager } from './mcp/connectionManager.js';
 import { SERVER_INSTANCE_ID } from './mcp/context.js';
+import { withHttpTransportTiming } from './transportTiming.ts';
 
 const DEFAULT_HTTP_REQUEST_TIMEOUT_MS = 300_000;
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
@@ -108,7 +109,7 @@ function startHttpServer(options: HttpServerOptions = {}): RelaiHttpServer {
     overrideGlobalObjects: false,
     autoCleanupIncoming: false
   });
-  const server = http.createServer(requestListener) as RelaiHttpServer;
+  const server = http.createServer((req, res) => withHttpTransportTiming(req, res, () => requestListener(req, res))) as RelaiHttpServer;
   server.startupTimings = {
     configurationMs,
     coreRuntimeMs,
