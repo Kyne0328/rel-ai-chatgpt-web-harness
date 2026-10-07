@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports, stripTypeScriptTypes } from 'node:module';
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
 import { readGitObservation } from '../src/repo/gitObservation.ts';
@@ -26,47 +27,82 @@ const git = (...args) => childProcess.execFileSync(GIT_EXECUTABLE, args, { cwd: 
 const event = (taskId, tool, result = {}) => recordTaskIntegrityEvent(config, {
   taskId, workspace: 'fixture', taskIdentityVersion: 2, tool, ok: true, ...result
 });
-async function beginObservedTask(prefix) {
-  // Baseline capture is deliberately best-effort (500 ms on POSIX). A loaded
-  // runner may capture an incomplete baseline even after a successful summary.
-  // Retry fixture setup with fresh identities before this task makes mutations;
-  // never replace an incomplete baseline with a later view of the workspace.
-  const baselines = [];
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const taskId = `${prefix}-${attempt}`;
-    await event(taskId, 'work.begin');
-    const baseline = readTaskIntegrity(config, taskId, 'fixture').baseline;
-    baselines.push(baseline);
-    if (!baseline.observationComplete) continue;
-    await ensureSessionStarted(config, 'fixture', repo, { taskId });
-    return taskId;
-  }
-  assert.fail(`Fixture could not capture a complete ${prefix} baseline: ${JSON.stringify(baselines)}`);
+async function beginObservedTask(taskId) {
+  await event(taskId, 'work.begin');
+  const baseline = readTaskIntegrity(config, taskId, 'fixture').baseline;
+  assert.equal(baseline.observationComplete, true, `Fixture baseline: ${JSON.stringify(baseline)}`);
+  await ensureSessionStarted(config, 'fixture', repo, { taskId });
+  return taskId;
+}
+
+function createProbeTracker() {
+  const byRepo = new Map();
+  let active = 0;
+  let maximum = 0;
+  return {
+    get active() { return active; },
+    get maximum() { return maximum; },
+    spawn(cwd, createChild) {
+      // Assert before launching, so a failed fixture assertion cannot orphan a
+      // child or poison the counter before its cleanup listeners are attached.
+      assert.equal(byRepo.get(cwd) || 0, 0, 'one native Git status process per repository');
+      const child = createChild();
+      byRepo.set(cwd, 1);
+      maximum = Math.max(maximum, ++active);
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        active--;
+        byRepo.delete(cwd);
+      };
+      // Execa can settle after root exit and stream completion but before the
+      // raw ChildProcess close event. Count live roots, not lingering handles.
+      child.once('exit', settle);
+      child.once('close', settle); // Also releases a child that failed to spawn.
+      return child;
+    }
+  };
+}
+
+// Exercise the native hook's exact tracker with deterministic lifecycle order.
+{
+  const tracker = createProbeTracker();
+  const first = new EventEmitter();
+  const second = new EventEmitter();
+  const failedSpawn = new EventEmitter();
+  tracker.spawn('fixture', () => first);
+  let overlappingSpawn = false;
+  assert.throws(() => tracker.spawn('fixture', () => { overlappingSpawn = true; }), /one native Git status process/);
+  assert.equal(overlappingSpawn, false, 'a genuinely overlapping child is rejected before launch');
+  first.emit('exit', 0);
+  tracker.spawn('fixture', () => second);
+  first.emit('close', 0);
+  assert.equal(tracker.active, 1, 'a late close cannot release a newer child');
+  assert.throws(() => tracker.spawn('fixture', () => new EventEmitter()), /one native Git status process/);
+  second.emit('exit', 0);
+  second.emit('close', 0);
+  tracker.spawn('fixture', () => failedSpawn);
+  failedSpawn.emit('close', -1);
+  assert.equal(tracker.active, 0, 'failed-spawn close and duplicate lifecycle events release exactly once');
+  assert.equal(tracker.maximum, 1);
 }
 const originalSpawn = childProcess.spawn;
 const probes = [];
-let active = 0;
-let maximum = 0;
-const byRepo = new Map();
+const probeTracker = createProbeTracker();
 childProcess.spawn = function (command, args, options) {
-  const child = originalSpawn.call(this, command, args, options);
   const requestFlag = process.platform === 'win32' ? args?.indexOf('-RequestPath') : -1;
   const request = requestFlag >= 0 ? JSON.parse(fs.readFileSync(args[requestFlag + 1], 'utf8')) : null;
   const probeArgs = request?.args || args;
-  if (probeArgs?.includes('status')) {
-    if (request) {
-      const relative = path.relative(temp, request.cwd);
-      assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'only fixture-owned native Git probes');
-    }
+  if (!probeArgs?.includes('status')) return originalSpawn.call(this, command, args, options);
+  const cwd = request?.cwd || options.cwd;
+  const relative = path.relative(temp, cwd);
+  assert.ok(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'only fixture-owned native Git probes');
+  return probeTracker.spawn(cwd, () => {
+    const child = originalSpawn.call(this, command, args, options);
     probes.push([...probeArgs]);
-    active++;
-    maximum = Math.max(maximum, active);
-    const cwd = options.cwd;
-    byRepo.set(cwd, (byRepo.get(cwd) || 0) + 1);
-    assert.equal(byRepo.get(cwd), 1, 'one native Git status process per repository');
-    child.once('close', () => { active--; byRepo.set(cwd, byRepo.get(cwd) - 1); });
-  }
-  return child;
+    return child;
+  });
 };
 syncBuiltinESMExports();
 try {
@@ -134,6 +170,7 @@ try {
   await event(nativeTask, 'validate.checks', { validationStatus: 'passed' });
   assert.deepEqual(taskCommitOwnership(config, nativeTask, 'fixture').ownedFiles, ['firmware-extract/native.txt']);
   const status = await workspaceGitStatus(workspace, config, { work_id: nativeTask });
+  assert.equal(status.ok, true, `Task status: ${JSON.stringify(status)}`);
   assert.ok(status.sessionChangedFiles.includes('firmware-extract/native.txt'));
   assert.equal(status.sessionChangedFiles.includes('firmware-extract/'), false);
   const tidy = await workspaceTidyPlan(workspace, config, { work_id: nativeTask });
@@ -169,7 +206,8 @@ try {
   const peers = [path.join(temp, 'peer-one'), path.join(temp, 'peer-two')];
   for (const [i, peer] of peers.entries()) git('worktree', 'add', '-qb', `peer-${i}`, peer);
   await Promise.all([repo, ...peers].flatMap(directory => Array.from({ length: 3 }, () => readGitObservation(directory, config))));
-  assert.ok(maximum <= 2);
+  assert.ok(probeTracker.maximum <= 2);
+  assert.equal(probeTracker.active, 0);
   for (const args of probes) {
     if (!args.includes('--untracked-files=all')) continue;
     const boundary = args.indexOf('--');
