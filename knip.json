@@ -41,7 +41,6 @@
         "**/*.{js,cjs,ts,tsx}"
       ],
       "ignoreDependencies": [
-        "electron-builder",
         "node-pty"
       ]
     }

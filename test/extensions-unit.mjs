@@ -27,7 +27,7 @@ import {
   managedExtensionCommandMetadataPath,
   managedExtensionCommandPath
 } from '../src/extensions/paths.js';
-import { extractToolBundleZip } from '../src/extensions/toolBundle.js';
+import { extractToolBundleZip, prepareBundledSevenZipExecutable } from '../src/extensions/toolBundle.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-extensions-'));
 const config = { stateDir: root };
@@ -350,27 +350,61 @@ await assert.rejects(
 assert.equal(fs.existsSync(unsafeTarDestination), false);
 fs.rmSync(unsafeTarArchive, { force: true });
 
-const extraFormatSource = path.join(root, 'extra-format-source');
-fs.mkdirSync(path.join(extraFormatSource, 'bin'), { recursive: true });
-fs.writeFileSync(path.join(extraFormatSource, 'bin', 'tool'), 'extra format fixture\n');
-const sevenZipArchive = path.join(root, 'tool-bundle.7z');
-const sevenZipCreate = spawnSync(sevenZip.path7za, ['a', '-t7z', sevenZipArchive, '.'], {
-  cwd: extraFormatSource,
-  encoding: 'utf8'
-});
-assert.equal(sevenZipCreate.status, 0, sevenZipCreate.stderr || sevenZipCreate.stdout);
-const sevenZipDestination = path.join(root, 'tool-bundle-7z');
-await extractToolBundleZip(sevenZipArchive, sevenZipDestination);
-assert.equal(fs.readFileSync(path.join(sevenZipDestination, 'bin', 'tool'), 'utf8'), 'extra format fixture\n');
+const originalSevenZipPath = sevenZip.path7za;
+const testPosixPreparation = process.platform !== 'win32' && path.isAbsolute(originalSevenZipPath);
+try {
+  if (testPosixPreparation) {
+    // Use a private copy so this regression cannot repair or damage the shared
+    // dependency used by concurrent tests. The published package has mode 0644.
+    const fixtureExecutable = path.join(root, 'fixture-7za');
+    fs.copyFileSync(originalSevenZipPath, fixtureExecutable);
+    fs.chmodSync(fixtureExecutable, 0o640);
+    sevenZip.path7za = fixtureExecutable;
+    assert.equal(prepareBundledSevenZipExecutable(), fixtureExecutable);
+    assert.equal(fs.statSync(fixtureExecutable).mode & 0o777, 0o740, 'Only owner execute permission is added.');
+    fs.chmodSync(fixtureExecutable, 0o544);
+    prepareBundledSevenZipExecutable();
+    assert.equal(fs.statSync(fixtureExecutable).mode & 0o777, 0o544, 'Already executable files keep their permissions.');
 
-const plainTarArchive = path.join(root, 'tool-bundle.tar');
-fs.writeFileSync(plainTarArchive, makeTar([{ name: 'bin/tool', data: Buffer.from('tar xz fixture\n'), mode: 0o755 }]));
-const tarXzArchive = path.join(root, 'tool-bundle.tar.xz');
-const xzCreate = spawnSync(sevenZip.path7za, ['a', '-txz', tarXzArchive, plainTarArchive], { encoding: 'utf8' });
-assert.equal(xzCreate.status, 0, xzCreate.stderr || xzCreate.stdout);
-const tarXzDestination = path.join(root, 'tool-bundle-tar-xz');
-await extractToolBundleZip(tarXzArchive, tarXzDestination);
-assert.equal(fs.readFileSync(path.join(tarXzDestination, 'bin', 'tool'), 'utf8'), 'tar xz fixture\n');
+    sevenZip.path7za = path.join(root, 'missing-7za');
+    assert.throws(prepareBundledSevenZipExecutable, error =>
+      error.cause?.code === 'ENOENT' && /Could not prepare bundled 7-Zip executable/.test(error.message));
+    sevenZip.path7za = '7za';
+    assert.equal(prepareBundledSevenZipExecutable(), '7za', 'A system command is left to PATH resolution.');
+    sevenZip.path7za = fixtureExecutable;
+    fs.chmodSync(fixtureExecutable, 0o644);
+  }
+
+  const extraFormatSource = path.join(root, 'extra-format-source');
+  fs.mkdirSync(path.join(extraFormatSource, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(extraFormatSource, 'bin', 'tool'), 'extra format fixture\n');
+  const sevenZipArchive = path.join(root, 'tool-bundle.7z');
+  const sevenZipCreate = spawnSync(prepareBundledSevenZipExecutable(), ['a', '-t7z', sevenZipArchive, '.'], {
+    cwd: extraFormatSource,
+    encoding: 'utf8'
+  });
+  assert.ifError(sevenZipCreate.error);
+  assert.equal(sevenZipCreate.status, 0, sevenZipCreate.stderr || sevenZipCreate.stdout || '7-Zip fixture creation failed without output.');
+  const sevenZipDestination = path.join(root, 'tool-bundle-7z');
+  if (testPosixPreparation) fs.chmodSync(sevenZip.path7za, 0o644);
+  await extractToolBundleZip(sevenZipArchive, sevenZipDestination);
+  assert.equal(fs.readFileSync(path.join(sevenZipDestination, 'bin', 'tool'), 'utf8'), 'extra format fixture\n');
+  if (testPosixPreparation) assert.equal(fs.statSync(sevenZip.path7za).mode & 0o777, 0o744);
+
+  const plainTarArchive = path.join(root, 'tool-bundle.tar');
+  fs.writeFileSync(plainTarArchive, makeTar([{ name: 'bin/tool', data: Buffer.from('tar xz fixture\n'), mode: 0o755 }]));
+  const tarXzArchive = path.join(root, 'tool-bundle.tar.xz');
+  const xzCreate = spawnSync(prepareBundledSevenZipExecutable(), ['a', '-txz', tarXzArchive, plainTarArchive], { encoding: 'utf8' });
+  assert.ifError(xzCreate.error);
+  assert.equal(xzCreate.status, 0, xzCreate.stderr || xzCreate.stdout || 'XZ fixture creation failed without output.');
+  const tarXzDestination = path.join(root, 'tool-bundle-tar-xz');
+  if (testPosixPreparation) fs.chmodSync(sevenZip.path7za, 0o644);
+  await extractToolBundleZip(tarXzArchive, tarXzDestination);
+  assert.equal(fs.readFileSync(path.join(tarXzDestination, 'bin', 'tool'), 'utf8'), 'tar xz fixture\n');
+  if (testPosixPreparation) assert.equal(fs.statSync(sevenZip.path7za).mode & 0o777, 0o744);
+} finally {
+  sevenZip.path7za = originalSevenZipPath;
+}
 
 const originalFetch = globalThis.fetch;
 const extraResponses = new Map();

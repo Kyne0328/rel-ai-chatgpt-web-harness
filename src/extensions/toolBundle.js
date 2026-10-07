@@ -11,6 +11,30 @@ const MAX_SEVEN_ZIP_OUTPUT_BYTES = 16 * 1024 * 1024;
 const MAX_ZIP_SYMLINK_TARGET_BYTES = 4096;
 const SEVEN_ZIP_TIMEOUT_MS = 5 * 60_000;
 
+function prepareBundledSevenZipExecutable() {
+  const executable = sevenZip.path7za;
+  // 7zip-bin ships POSIX binaries without execute permission. Do not change a
+  // system command selected through USE_SYSTEM_7ZA, or Windows permissions.
+  if (process.platform !== 'win32' && path.isAbsolute(executable)) {
+    try {
+      const stat = fs.lstatSync(executable);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error('Bundled 7-Zip executable must be a regular file.');
+      }
+      try {
+        fs.accessSync(executable, fs.constants.X_OK);
+      } catch (error) {
+        if (error.code !== 'EACCES') throw error;
+        fs.chmodSync(executable, (stat.mode & 0o7777) | 0o100);
+        fs.accessSync(executable, fs.constants.X_OK);
+      }
+    } catch (error) {
+      throw new Error(`Could not prepare bundled 7-Zip executable '${executable}': ${error.message}`, { cause: error });
+    }
+  }
+  return executable;
+}
+
 async function extractToolBundleZip(archivePath, destination, options = {}) {
   const format = detectToolBundleArchiveFormat(archivePath);
   if (format === 'tar.gz') {
@@ -338,7 +362,7 @@ function validateExtractedTree(root, limits) {
 
 async function decompressXzToTar(archivePath, tarPath, maxBytes) {
   fs.mkdirSync(path.dirname(tarPath), { recursive: true, mode: 0o700 });
-  const child = spawn(sevenZip.path7za, ['e', '-so', archivePath], {
+  const child = spawn(prepareBundledSevenZipExecutable(), ['e', '-so', archivePath], {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -389,7 +413,7 @@ async function decompressXzToTar(archivePath, tarPath, maxBytes) {
 
 function runSevenZip(args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(sevenZip.path7za, args, {
+    const child = spawn(prepareBundledSevenZipExecutable(), args, {
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
@@ -569,4 +593,4 @@ function positiveLimit(value, fallback) {
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
 }
 
-export { extractToolBundleZip };
+export { extractToolBundleZip, prepareBundledSevenZipExecutable };

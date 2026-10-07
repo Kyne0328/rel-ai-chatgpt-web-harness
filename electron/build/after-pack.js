@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import * as path from 'node:path';
 import { flipFuses, FuseVersion, FuseV1Options } from '@electron/fuses';
 import { normalizeBuildProvenance } from '../../src/buildProvenance.js';
+import { Arch } from 'electron-builder';
+import { preparePackagedSevenZipExecutable } from '../../scripts/packaged-seven-zip.mjs';
 
 export default async function hardenElectronBinary(context) {
   const executable = resolveExecutable(context);
@@ -18,6 +20,7 @@ export default async function hardenElectronBinary(context) {
     [FuseV1Options.LoadBrowserProcessSpecificV8Snapshot]: false,
     [FuseV1Options.GrantFileProtocolExtraPrivileges]: false
   });
+  preparePackagedSevenZipExecutable(resolveResourcesDirectory(context), context.electronPlatformName, Arch[context.arch]);
   writeBuildProvenance(context);
 };
 

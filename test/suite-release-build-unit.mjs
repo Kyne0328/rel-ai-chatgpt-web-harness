@@ -697,6 +697,79 @@ async function case_package_size_policy_unit() {
 }
 await case_package_size_policy_unit();
 
+// Bundled POSIX archive tools must work after a root-owned/read-only install.
+async function case_packaged_seven_zip_permissions_unit() {
+  const { default: assert } = await import('node:assert/strict');
+  const { default: fs } = await import('node:fs');
+  const { default: os } = await import('node:os');
+  const { default: path } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const { default: sevenZip } = await import('7zip-bin');
+  const { preparePackagedSevenZipExecutable, assertPackagedSevenZipExecutable } = await import('../scripts/packaged-seven-zip.mjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-packaged-seven-zip-'));
+  try {
+    const absentWindowsRoot = path.join(root, 'windows-not-created');
+    preparePackagedSevenZipExecutable(absentWindowsRoot, 'win32', 'x64');
+    assertPackagedSevenZipExecutable(absentWindowsRoot, 'win32', 'x64');
+    assert.equal(fs.existsSync(absentWindowsRoot), false, 'Windows packaging does not change executable permissions.');
+    assert.throws(() => preparePackagedSevenZipExecutable(root, 'other', 'x64'), /Unsupported Electron target platform/);
+    assert.throws(() => preparePackagedSevenZipExecutable(root, 'linux', '../x64'), /Unsupported Electron target architecture/);
+    assert.throws(() => preparePackagedSevenZipExecutable(root, 'linux'), /Unsupported Electron target architecture/);
+    assert.throws(() => preparePackagedSevenZipExecutable(root, 'linux', 'x64'), { code: 'ENOENT' });
+
+    if (process.platform !== 'win32') {
+      for (const platform of ['linux', 'darwin']) {
+        for (const arch of ['x64', 'arm64']) {
+          const resources = path.join(root, `${platform}-${arch}`, 'resources');
+          const executable = path.join(resources, 'node_modules', '7zip-bin', platform === 'darwin' ? 'mac' : 'linux', arch, '7za');
+          fs.mkdirSync(path.dirname(executable), { recursive: true });
+          fs.writeFileSync(executable, 'staged binary fixture\n');
+          fs.chmodSync(executable, 0o644);
+          const untouched = path.join(path.dirname(executable), 'unrelated-file');
+          fs.writeFileSync(untouched, 'unchanged\n');
+          fs.chmodSync(untouched, 0o640);
+          const original = fs.statSync(executable);
+          assert.throws(() => assertPackagedSevenZipExecutable(resources, platform, arch), /owner, group, and other/);
+          fs.chmodSync(executable, 0o744);
+          assert.throws(() => assertPackagedSevenZipExecutable(resources, platform, arch), /owner, group, and other/,
+            'Owner-only execution cannot support root-owned system installs.');
+          fs.chmodSync(executable, 0o644);
+          preparePackagedSevenZipExecutable(resources, platform, arch);
+          assert.equal(fs.statSync(executable).mode & 0o777, 0o755);
+          assert.equal(fs.statSync(executable).uid, original.uid, 'Packaging keeps file ownership.');
+          assert.equal(fs.statSync(executable).gid, original.gid, 'Packaging keeps file group ownership.');
+          assert.equal(fs.readFileSync(executable, 'utf8'), 'staged binary fixture\n');
+          assert.equal(fs.statSync(untouched).mode & 0o777, 0o640, 'Only the selected binary is changed.');
+          assertPackagedSevenZipExecutable(resources, platform, arch);
+
+          if (platform === process.platform && arch === process.arch && path.isAbsolute(sevenZip.path7za)) {
+            fs.copyFileSync(sevenZip.path7za, executable);
+            fs.chmodSync(executable, 0o644);
+            preparePackagedSevenZipExecutable(resources, platform, arch);
+            const result = spawnSync(executable, ['-h'], { encoding: 'utf8', timeout: 15_000 });
+            assert.ifError(result.error);
+            assert.equal(result.status, 0, result.stderr || result.stdout || 'Staged 7-Zip must execute before runtime repair.');
+          }
+
+          fs.rmSync(executable);
+          fs.symlinkSync(untouched, executable);
+          assert.throws(() => preparePackagedSevenZipExecutable(resources, platform, arch), /must be a regular file/);
+          assert.throws(() => assertPackagedSevenZipExecutable(resources, platform, arch), /must be a regular file/);
+          assert.equal(fs.statSync(untouched).mode & 0o777, 0o640, 'A link target must not be chmodded.');
+          fs.rmSync(executable);
+          fs.mkdirSync(executable);
+          assert.throws(() => preparePackagedSevenZipExecutable(resources, platform, arch), /must be a regular file/);
+          assert.throws(() => assertPackagedSevenZipExecutable(resources, platform, arch), /must be a regular file/);
+        }
+      }
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  console.log('Packaged 7-Zip permissions support POSIX system installs without changing Windows or unrelated files.');
+}
+await case_packaged_seven_zip_permissions_unit();
+
 // Formerly packaged-runtime-dependencies-unit.mjs
 async function case_packaged_runtime_dependencies_unit() {
   const __m0 = await import("node:fs");

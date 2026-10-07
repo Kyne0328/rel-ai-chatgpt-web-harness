@@ -9,6 +9,7 @@ import { electronPlatformSpec, normalizeElectronArch, normalizeElectronPlatform 
 import { resolvePackagedDirectory } from './packaged-directory.mjs';
 import { assertPackagedRuntimeParity } from './packaged-runtime-parity.mjs';
 import { buildIdFromFingerprint, normalizeBuildProvenance } from '../src/buildProvenance.js';
+import { assertPackagedSevenZipExecutable } from './packaged-seven-zip.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -109,6 +110,7 @@ for (const relativePath of requiredFiles) {
 assertExecutable(path.join(packageDirectory, tunnelClientRelativePath), platform);
 assertExecutable(path.join(packageDirectory, zoektSearchRelativePath), platform);
 assertExecutable(path.join(packageDirectory, zoektIndexRelativePath), platform);
+assertPackagedSevenZipExecutable(resourcesRoot, platform, targetArch);
 
 const asarPath = path.join(resourcesRoot, 'app.asar');
 const asarEntries = new Set(listPackage(asarPath).map(entry => entry.replaceAll('\\', '/').replace(/^\//, '')));
