@@ -11,7 +11,7 @@ import { handleTransportFallbackRequest } from '../src/mcp/transportFallback.ts'
 import { CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY } from '@modelcontextprotocol/server';
 import { MCP_PROTOCOL_VERSION } from '../src/mcp/protocol.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
-import { flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
+import { flushTaskHistoryPersistence, withTaskHistoryPersistenceBarrier } from '../src/taskHistoryStore.ts';
 import { resetTaskHistoryCaches } from '../src/taskHistoryStorage.ts';
 import { callTool as rawCallTool } from '../src/tools.js';
 import { getToolActivity, resetToolActivity } from '../src/toolActivity.js';
@@ -62,9 +62,11 @@ try {
     title: 'Stop detached fallback'
   });
 
+  const fallbackConfig = { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') };
+  // Production waits for queued task history before each new admission.
   let fallbackAbortObserved = false;
-  const fallback = startFallbackExecution({
-    config: { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') },
+  const fallback = await withTaskHistoryPersistenceBarrier(fallbackConfig, task.work_id, () => startFallbackExecution({
+    config: fallbackConfig,
     workId: task.work_id,
     noticeScope: principalFingerprint(context.principal),
     tool: 'relai_validate',
@@ -78,11 +80,11 @@ try {
       if (signal.aborted) finish();
       else signal.addEventListener('abort', finish, { once: true });
     })
-  });
+  }));
 
   let siblingAbortObserved = false;
-  const sibling = startFallbackExecution({
-    config: { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') },
+  const sibling = await withTaskHistoryPersistenceBarrier(fallbackConfig, task.work_id, () => startFallbackExecution({
+    config: fallbackConfig,
     workId: task.work_id,
     noticeScope: principalFingerprint(context.principal), tool: 'relai_exec', workspace: 'app', signature: 'work-stop-sibling',
     run: signal => new Promise(resolve => {
@@ -93,7 +95,7 @@ try {
       if (signal.aborted) finish();
       else signal.addEventListener('abort', finish, { once: true });
     })
-  });
+  }));
   const status = await callTool('relai_work', { action: 'status', work_id: task.work_id });
   assert.equal(fallbackExecutionStatus(fallback.record.operationId, { noticeScope: principalFingerprint('other-principal') }), null, 'receipt lookup must remain strict to its recorded principal');
   assert.deepEqual(new Set(status.backgroundOperations.map(operation => operation.operationId)), new Set([fallback.record.operationId, sibling.record.operationId]));

@@ -12,8 +12,6 @@ using System.Runtime.CompilerServices;
 
 public static class RelAiJobController {
     [DllImport("kernel32.dll")] static extern uint GetCurrentProcessId();
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-    static extern bool MoveFileExW(string existing, string destination, uint flags);
     const int JsonLimit = 1048576;
     static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
     static Dictionary<string, object> receipt;
@@ -82,8 +80,7 @@ public static class RelAiJobController {
         File.WriteAllBytes(temporary, ReceiptJson());
         // Same-directory atomic rename, including replacement. ReplaceFile's
         // destination metadata/stream merging is unnecessary for private receipts.
-        if (!MoveFileExW(temporary, receiptPath, 1))
-            throw new IOException("Atomic receipt publication failed: " + Marshal.GetLastWin32Error());
+        RelAiOwnedJob.PublishReceipt(temporary, receiptPath);
     }
     static void UpdateFacts() {
         receipt["commandStarted"] = owner.CommandStarted;

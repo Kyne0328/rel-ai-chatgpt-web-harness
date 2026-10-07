@@ -5,7 +5,7 @@ import { flushAuditWrites, getAuditPath, readAudit } from "../src/audit.js";
 import { flushLocalAnalytics, readLocalUsageSnapshot } from "../src/localAnalytics.js";
 import { repositoryIntelligence } from "../src/repository/intelligence/service.js";
 import { resetTaskHistoryCaches } from "../src/taskHistoryStorage.ts";
-import { flushTaskHistoryPersistence, readTaskHistorySessionRecord } from "../src/taskHistoryStore.ts";
+import { flushTaskHistoryPersistence, readTaskHistorySessionRecord, withTaskHistoryPersistenceBarrier } from "../src/taskHistoryStore.ts";
 import { startFallbackExecution, resetFallbackExecutions } from "../src/mcp/fallbackExecutions.js";
 import { principalFingerprint } from "../src/mcp/principal.ts";
 import { toolResult } from "../src/mcp/results.js";
@@ -119,11 +119,13 @@ try {
 
   // Reading a retained result must not reopen or revise a terminal task.
   let retainedRuns = 0;
-  const retained = startFallbackExecution({
+  // Completion activity can still be queued for the history worker. Admit in
+  // the same turn that the production barrier observes no outstanding write.
+  const retained = await withTaskHistoryPersistenceBarrier(readConfig(), unvalidatedTask, () => startFallbackExecution({
     config: readConfig(), workId: unvalidatedTask, noticeScope: principalFingerprint('local:trusted'),
     workspace: 'app', tool: 'relai_read', signature: 'terminal-observation-fixture',
     run: async () => { retainedRuns += 1; return toolResult({ ok: true, summary: 'Retained read fixture.' }, false); }
-  });
+  }));
   await retained.record.promise;
   await flushAuditWrites();
   assert.equal((await flushTaskHistoryPersistence()).ok, true);

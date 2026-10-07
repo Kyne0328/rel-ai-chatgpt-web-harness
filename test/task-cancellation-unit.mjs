@@ -8,7 +8,7 @@ import { flushLocalAnalytics } from '../src/localAnalytics.js';
 import { isProcessTreeAlive } from '../src/process.ts';
 import { stopAllManagedProcesses } from '../src/processManager.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
-import { flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
+import { flushTaskHistoryPersistence, withTaskHistoryPersistenceBarrier } from '../src/taskHistoryStore.ts';
 import { resetTaskHistoryCaches } from '../src/taskHistoryStorage.ts';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { isTerminalTaskReference } from '../src/tools/task.js';
@@ -120,8 +120,11 @@ try {
   assert.equal(managed.status, 'running');
   let fallbackAbortObserved = false;
   let releaseFallback = null;
-  const fallback = startFallbackExecution({
-    config: { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') },
+  const fallbackConfig = { stateDir, auditLogPath: path.join(stateDir, 'audit.jsonl') };
+  // Match production admission even when the managed process call left a
+  // task-history worker write in flight.
+  const fallback = await withTaskHistoryPersistenceBarrier(fallbackConfig, started.work_id, () => startFallbackExecution({
+    config: fallbackConfig,
     workId: started.work_id,
     tool: 'relai_validate',
     workspace: 'app',
@@ -132,7 +135,7 @@ try {
       if (signal.aborted) observeAbort();
       else signal.addEventListener('abort', observeAbort, { once: true });
     })
-  });
+  }));
   const result = await callTool('relai_work', { action: 'cancel',
     workspace: 'app',
     work_id: started.work_id,

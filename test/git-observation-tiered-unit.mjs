@@ -26,6 +26,23 @@ const git = (...args) => childProcess.execFileSync(GIT_EXECUTABLE, args, { cwd: 
 const event = (taskId, tool, result = {}) => recordTaskIntegrityEvent(config, {
   taskId, workspace: 'fixture', taskIdentityVersion: 2, tool, ok: true, ...result
 });
+async function beginObservedTask(prefix) {
+  // Baseline capture is deliberately best-effort (500 ms on POSIX). A loaded
+  // runner may capture an incomplete baseline even after a successful summary.
+  // Retry fixture setup with fresh identities before this task makes mutations;
+  // never replace an incomplete baseline with a later view of the workspace.
+  const baselines = [];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const taskId = `${prefix}-${attempt}`;
+    await event(taskId, 'work.begin');
+    const baseline = readTaskIntegrity(config, taskId, 'fixture').baseline;
+    baselines.push(baseline);
+    if (!baseline.observationComplete) continue;
+    await ensureSessionStarted(config, 'fixture', repo, { taskId });
+    return taskId;
+  }
+  assert.fail(`Fixture could not capture a complete ${prefix} baseline: ${JSON.stringify(baselines)}`);
+}
 const originalSpawn = childProcess.spawn;
 const probes = [];
 let active = 0;
@@ -71,9 +88,17 @@ try {
   await assert.rejects(readGitObservation(repo, config, { paths: ['.'] }), /relative file paths/);
   await assert.rejects(relaiRestorePaths(workspace, config, { paths: ['firmware-extract'] }), /directory paths/);
 
-  await event('native', 'work.begin');
-  await ensureSessionStarted(config, 'fixture', repo, { taskId: 'native' });
-  assert.deepEqual(readTaskIntegrity(config, 'native', 'fixture').baseline.opaqueDirectories, ['firmware-extract/']);
+  const unavailable = [await acquireHostResource('gitObservation', 'baseline-busy-1'), await acquireHostResource('gitObservation', 'baseline-busy-2')];
+  try {
+    await event('unobserved', 'work.begin');
+  } finally { for (const lease of unavailable) lease.release(); }
+  await ensureSessionStarted(config, 'fixture', repo, { taskId: 'unobserved' });
+  const incompleteBaseline = readTaskIntegrity(config, 'unobserved', 'fixture').baseline;
+  assert.equal(incompleteBaseline.observationComplete, false, 'an unavailable observation cannot prove a clean baseline');
+  assert.deepEqual(incompleteBaseline.opaqueDirectories, [], 'unknown trees are not complete empty trees');
+
+  const nativeTask = await beginObservedTask('native');
+  assert.deepEqual(readTaskIntegrity(config, nativeTask, 'fixture').baseline.opaqueDirectories, ['firmware-extract/']);
   const opendir = fs.promises.opendir;
   fs.promises.opendir = async () => { throw new Error('Unexpected bookkeeping crawl'); };
   let command;
@@ -85,8 +110,8 @@ try {
   assert.equal(command.timedOut, false);
   assert.equal(command.mutationUnknown, true);
   assert.deepEqual(command.changedFiles, [], 'opaque directories are not retroactively claimed');
-  await event('native', 'exec', command);
-  assert.deepEqual(taskCommitOwnership(config, 'native', 'fixture').ownedFiles, []);
+  await event(nativeTask, 'exec', command);
+  assert.deepEqual(taskCommitOwnership(config, nativeTask, 'fixture').ownedFiles, []);
   const blockers = [await acquireHostResource('gitObservation', 'busy-1'), await acquireHostResource('gitObservation', 'busy-2')];
   try {
     const start = performance.now();
@@ -104,33 +129,38 @@ try {
     assert.equal(git('diff', '--cached', '--name-only').trim(), '');
   } finally { for (const blocker of blockers) blocker.release(); }
 
-  const added = workspaceWrite(workspace, config, { work_id: 'native', path: 'firmware-extract/native.txt', content: 'native output\n' });
-  await event('native', 'edit', added);
-  await event('native', 'validate.checks', { validationStatus: 'passed' });
-  assert.deepEqual(taskCommitOwnership(config, 'native', 'fixture').ownedFiles, ['firmware-extract/native.txt']);
-  const status = await workspaceGitStatus(workspace, config, { work_id: 'native' });
+  const added = workspaceWrite(workspace, config, { work_id: nativeTask, path: 'firmware-extract/native.txt', content: 'native output\n' });
+  await event(nativeTask, 'edit', added);
+  await event(nativeTask, 'validate.checks', { validationStatus: 'passed' });
+  assert.deepEqual(taskCommitOwnership(config, nativeTask, 'fixture').ownedFiles, ['firmware-extract/native.txt']);
+  const status = await workspaceGitStatus(workspace, config, { work_id: nativeTask });
   assert.ok(status.sessionChangedFiles.includes('firmware-extract/native.txt'));
   assert.equal(status.sessionChangedFiles.includes('firmware-extract/'), false);
-  const tidy = await workspaceTidyPlan(workspace, config, { work_id: 'native' });
+  const tidy = await workspaceTidyPlan(workspace, config, { work_id: nativeTask });
   assert.deepEqual(tidy.candidates.map(item => item.path), ['firmware-extract/native.txt']);
   const whole = await relaiGitCommit(workspace, config, { message: 'unsafe broad commit', addAll: true });
   assert.equal(whole.ok, false);
-  const commit = await relaiGitCommit(workspace, config, { work_id: 'native', message: 'native output', _taskOwnedPaths: ['firmware-extract/native.txt'] });
+  const commit = await relaiGitCommit(workspace, config, { work_id: nativeTask, message: 'native output', _taskOwnedPaths: ['firmware-extract/native.txt'] });
   assert.equal(commit.ok, true, JSON.stringify(commit));
   assert.equal(git('ls-files', 'firmware-extract').trim(), 'firmware-extract/native.txt', 'commit never stages the opaque directory');
-  await event('native', 'publish.commit', { committedFiles: commit.paths });
+  await event(nativeTask, 'publish.commit', { committedFiles: commit.paths });
   fs.appendFileSync(path.join(repo, 'firmware-extract/native.txt'), 'later user edit\n');
-  const later = workspaceReplace(workspace, config, { work_id: 'native', path: 'firmware-extract/native.txt', oldText: 'native output', newText: 'new native output' });
-  await event('native', 'edit', later);
-  assert.ok(taskCommitOwnership(config, 'native', 'fixture').conflictingFiles.includes('firmware-extract/native.txt'), 'later user changes to a previously committed native file remain protected');
+  const later = workspaceReplace(workspace, config, { work_id: nativeTask, path: 'firmware-extract/native.txt', oldText: 'native output', newText: 'new native output' });
+  await event(nativeTask, 'edit', later);
+  assert.ok(taskCommitOwnership(config, nativeTask, 'fixture').conflictingFiles.includes('firmware-extract/native.txt'), 'later user changes to a previously committed native file remain protected');
 
-  await event('other', 'work.begin');
-  await ensureSessionStarted(config, 'fixture', repo, { taskId: 'other' });
-  const replaced = workspaceReplace(workspace, config, { work_id: 'other', path: 'firmware-extract/file-1.txt', oldText: 'user file', newText: 'edited file' });
-  await event('other', 'edit', replaced);
-  assert.ok(taskCommitOwnership(config, 'other', 'fixture').conflictingFiles.includes('firmware-extract/file-1.txt'), 'existing user files remain protected');
-  const otherTidy = await workspaceTidyPlan(workspace, config, { work_id: 'other' });
+  const otherTask = await beginObservedTask('other');
+  const replaced = workspaceReplace(workspace, config, { work_id: otherTask, path: 'firmware-extract/file-1.txt', oldText: 'user file', newText: 'edited file' });
+  await event(otherTask, 'edit', replaced);
+  assert.ok(taskCommitOwnership(config, otherTask, 'fixture').conflictingFiles.includes('firmware-extract/file-1.txt'), 'existing user files remain protected');
+  const otherTidy = await workspaceTidyPlan(workspace, config, { work_id: otherTask });
   assert.equal(otherTidy.candidates.some(item => item.path === 'firmware-extract/file-1.txt'), false);
+
+  const unobservedEdit = workspaceReplace(workspace, config, { work_id: 'unobserved', path: 'firmware-extract/file-2.txt', oldText: 'user file', newText: 'edited file' });
+  await event('unobserved', 'edit', unobservedEdit);
+  assert.ok(taskCommitOwnership(config, 'unobserved', 'fixture').conflictingFiles.includes('firmware-extract/file-2.txt'), 'incomplete baselines still protect existing user files');
+  assert.deepEqual(readTaskIntegrity(config, 'unobserved', 'fixture').baseline.opaqueDirectories, incompleteBaseline.opaqueDirectories);
+  assert.equal(readTaskIntegrity(config, 'unobserved', 'fixture').baseline.observationComplete, false, 'later observations cannot replace a pre-mutation baseline');
 
   const count = probes.length;
   await Promise.all(Array.from({ length: 6 }, () => readGitObservation(repo, config, { coalesce: true })));

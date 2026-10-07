@@ -89,6 +89,7 @@ async function finish(fixture) {
   return { outcome, receipt, stdout: Buffer.concat(fixture.stdout), stderr: Buffer.concat(fixture.stderr) };
 }
 async function record(name, body) {
+  if (process.argv.includes('--receipt-only') && !name.startsWith('receipt-')) return;
   if (process.argv.includes('--pty-only') && !name.startsWith('pty-')) return;
   if (process.argv.includes('--companion') && (name.startsWith('verified-assembly-')
     || name === 'pre-start-cancel-with-compilation-fallback' || name === 'job-attribute-setup-fails-before-target-creation')) return;
@@ -97,6 +98,61 @@ async function record(name, body) {
   results.push({ name, status: 'passed', elapsedMs: Date.now() - started, ...evidence });
   console.log(JSON.stringify(results.at(-1)));
 }
+
+const receiptLockScript = path.join(root, 'hold-receipt.ps1');
+await fs.writeFile(receiptLockScript, [
+  'param([string]$Receipt, [string]$Ready, [string]$Release)',
+  '$ErrorActionPreference = "Stop"',
+  '$handle = [IO.File]::Open($Receipt, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)',
+  'try {',
+  '  [IO.File]::WriteAllText($Ready, "locked")',
+  '  $deadline = [DateTime]::UtcNow.AddSeconds(15)',
+  '  while (-not [IO.File]::Exists($Release)) {',
+  '    if ([DateTime]::UtcNow -gt $deadline) { throw "Receipt lock fixture expired" }',
+  '    Start-Sleep -Milliseconds 10',
+  '  }',
+  '} finally { $handle.Dispose() }'
+].join('\n'));
+async function lockReceipt(fixture) {
+  const ready = path.join(fixture.directory, 'lock-ready');
+  const release = path.join(fixture.directory, 'unlock-receipt');
+  const child = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', receiptLockScript,
+    '-Receipt', fixture.files.receipt, '-Ready', ready, '-Release', release],
+  { cwd: repository, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  ownedHelpers.add(child);
+  let errorText = '';
+  child.stderr.on('data', data => { errorText += data; });
+  let outcome;
+  const exited = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', code => { ownedHelpers.delete(child); outcome = { code }; resolve(outcome); });
+  });
+  await poll(async () => {
+    if (outcome) throw new Error('Receipt lock fixture exited: ' + errorText);
+    try { await fs.access(ready); return true; } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      return false;
+    }
+  }, 'receipt delete-sharing lock');
+  return async () => {
+    await fs.writeFile(release, 'release');
+    assert.equal((await exited).code, 0, errorText);
+  };
+}
+async function waitForBlockedReceipt(fixture, final) {
+  const staged = fixture.files.receipt + '.' + fixture.child.pid + '.tmp';
+  await poll(async () => {
+    const value = await readJson(staged);
+    return value && (final === undefined || value.final === final);
+  }, 'staged atomic receipt');
+  // Hold the already-acquired OS lock across publication, then release it well
+  // inside the bounded production budget. The old one-shot publisher exits here.
+  const remainedAlive = await Promise.race([
+    fixture.exited.then(() => false), sleep(80).then(() => true)
+  ]);
+  assert.equal(remainedAlive, true, 'a brief delete-sharing lock must not terminate the owned job');
+}
+
 const detachedScript = path.join(root, 'detached-root.cjs');
 const heartbeatScript = path.join(root, 'heartbeat.cjs');
 await fs.writeFile(heartbeatScript, "const fs=require('fs'); const file=process.argv[2]; const until=Date.now()+Number(process.argv[3]); const timer=setInterval(()=>{fs.appendFileSync(file,'x');if(Date.now()>until||fs.existsSync(file+'.release')){clearInterval(timer);process.exit(0)}},40);");
@@ -111,6 +167,65 @@ async function heartbeatSize(f) {
   try { return (await fs.stat(path.join(f.directory, 'heartbeat'))).size; } catch { return 0; }
 }
 try {
+
+  for (const companion of [false, true]) {
+    const mode = companion ? 'companion' : 'powershell';
+    await record('receipt-transient-startup-lock-' + mode, async () => {
+      const f = await prepare('receipt-startup-lock-' + mode, process.execPath,
+        ['-e', 'require("fs").appendFileSync("executions", "once")']);
+      const previous = { sentinel: 'previous complete receipt' };
+      await fs.writeFile(f.files.receipt, JSON.stringify(previous));
+      const unlock = await lockReceipt(f);
+      let launched;
+      try {
+        launched = await launch(f, { companion });
+        await waitForBlockedReceipt(launched);
+        assert.deepEqual(await readJson(f.files.receipt), previous, 'replacement stays atomic while locked');
+        await assert.rejects(fs.access(path.join(f.directory, 'executions')), { code: 'ENOENT' });
+      } finally { await unlock(); }
+      const done = await finish(launched);
+      assert.equal(done.outcome.code, 0, JSON.stringify(done.receipt));
+      assert.equal(done.receipt.error, null);
+      assert.equal(done.receipt.cleanupConfirmed, true);
+      assert.equal(await fs.readFile(path.join(f.directory, 'executions'), 'utf8'), 'once');
+      return { transientLockRecovered: true, targetStartedOnce: true };
+    });
+    await record('receipt-transient-final-lock-' + mode, async () => {
+      const f = await launch(await prepare('receipt-final-lock-' + mode, process.execPath,
+        ['-e', 'const fs=require("fs");setInterval(()=>{if(fs.existsSync("finish-target"))process.exit(0)},10)']), { companion });
+      await poll(async () => (await readJson(f.files.receipt))?.commandStarted, 'receipt before final-publication lock');
+      const unlock = await lockReceipt(f);
+      try {
+        await fs.writeFile(path.join(f.directory, 'finish-target'), 'finish');
+        await waitForBlockedReceipt(f, true);
+        assert.equal((await readJson(f.files.receipt)).final, false, 'old complete receipt survives blocked final publication');
+      } finally { await unlock(); }
+      const done = await finish(f);
+      assert.equal(done.outcome.code, 0, JSON.stringify(done.receipt));
+      assert.equal(done.receipt.error, null);
+      assert.equal(done.receipt.activeProcesses, 0);
+      assert.equal(done.receipt.cleanupConfirmed, true);
+      return { transientLockRecovered: true, nativeZero: true };
+    });
+    await record('receipt-persistent-startup-lock-' + mode, async () => {
+      const f = await prepare('receipt-permanent-lock-' + mode, process.execPath,
+        ['-e', 'require("fs").writeFileSync("must-not-run", "bad")']);
+      const previous = { sentinel: 'unchanged on permanent failure' };
+      await fs.writeFile(f.files.receipt, JSON.stringify(previous));
+      const unlock = await lockReceipt(f);
+      try {
+        const launched = await launch(f, { companion });
+        let outcome;
+        void launched.exited.then(value => { outcome = value; });
+        await poll(() => outcome, 'bounded persistent receipt-lock failure', 5000);
+        assert.equal(outcome.code, 125);
+        assert.deepEqual(await readJson(f.files.receipt), previous);
+        await assert.rejects(fs.access(path.join(f.directory, 'must-not-run')), { code: 'ENOENT' });
+      } finally { await unlock(); }
+      return { persistentFailureBounded: true, refusedBeforeTarget: true };
+    });
+  }
+
 
   for (const companion of [false, true]) {
     await record('opaque-json-strings-' + (companion ? 'companion' : 'powershell'), async () => {

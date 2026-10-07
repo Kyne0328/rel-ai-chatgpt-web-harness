@@ -12,6 +12,7 @@ import { getPublicToolSchemas } from '../src/tools/schema.js';
 import { invokeRelaiTool } from '../src/mcp/toolInvocation.js';
 import { readOutputSpill } from '../src/outputSpill.js';
 import { startFallbackExecution } from '../src/mcp/fallbackExecutions.js';
+import { withTaskHistoryPersistenceBarrier } from '../src/taskHistoryStore.ts';
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -352,10 +353,12 @@ try {
     });
     let response;
     if (size === 3 * 1024 * 1024) {
-      const pending = startFallbackExecution({
+      // Prior tool activity can still have a history worker write in flight.
+      // Use production's atomic admission barrier before the synchronous start.
+      const pending = await withTaskHistoryPersistenceBarrier(readConfig(), initialTask.work_id, () => startFallbackExecution({
         config: readConfig(), workId: initialTask.work_id, tool: 'relai_exec', workspace: 'app',
         signature: `retention-${size}`, run: () => invoke(true)
-      });
+      }));
       response = (await pending.record.promise).result;
     } else response = await invoke(false);
     assert.equal(response.isError, false);

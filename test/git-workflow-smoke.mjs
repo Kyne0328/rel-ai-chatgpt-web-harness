@@ -3,11 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { simpleGit } from 'simple-git';
 
 import { relaiApplyPatch, relaiDiff, relaiGitCommit, relaiGitDraftPr, relaiGitPush, relaiRestorePaths, workspaceWrite } from '../src/localRepoBridge.js';
 import { workspaceGitStatus } from "../src/repo/gitOps.js";
 import { writeSessionPolicy } from "../src/policyResolver.js";
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
+import { checkGitRepository } from '../src/repo/gitClient.ts';
 
 function git(args, options = {}) {
   return execFileSync(GIT_EXECUTABLE, args, options);
@@ -40,6 +42,50 @@ function makeRepo() {
 }
 
 const { root, workspacePath } = makeRepo();
+const nonRepositoryPath = path.join(root, 'not-a-repository');
+const nestedRepositoryPath = path.join(workspacePath, 'nested');
+fs.mkdirSync(nonRepositoryPath);
+fs.mkdirSync(nestedRepositoryPath);
+assert.equal(await checkGitRepository(workspacePath), true, 'repository detection accepts the configured worktree');
+assert.equal(await checkGitRepository(nestedRepositoryPath), true, 'repository detection accepts nested worktree paths');
+assert.equal(await checkGitRepository(nonRepositoryPath), false, 'repository detection rejects an unrelated directory');
+assert.equal(await checkGitRepository(path.join(root, 'remote.git')), false, 'bare repositories are not worktrees');
+
+// Repository detection must use its base directory rather than a caller's
+// ambient Git selectors. simple-git v4 filters guarded ambient variables.
+const guardedEnvironment = {
+  GIT_DIR: path.join(workspacePath, '.git'),
+  GIT_WORK_TREE: workspacePath,
+  VISUAL: path.join(root, 'untrusted-editor')
+};
+const previousEnvironment = Object.fromEntries(Object.keys(guardedEnvironment).map(key => [key, process.env[key]]));
+try {
+  Object.assign(process.env, guardedEnvironment);
+  assert.equal(await checkGitRepository(workspacePath), true, 'ambient guarded variables must not break valid repository detection');
+  assert.equal(await checkGitRepository(nonRepositoryPath), false, 'ambient GIT_DIR and GIT_WORK_TREE must not redirect repository detection');
+} finally {
+  for (const [key, value] of Object.entries(previousEnvironment)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
+
+// GHSA-v5rq-49vh-5v5c: permitting an environment name is insufficient to
+// authorize executable editor values. Use a harmless command so this test
+// cannot invoke an editor even if the dependency regresses.
+for (const editorName of ['EDITOR', 'VISUAL', 'visual', 'ViSuAl']) {
+  const guardedGit = simpleGit({
+    baseDir: workspacePath,
+    binary: GIT_EXECUTABLE,
+    allowEnvironment: [editorName],
+    unsafe: { allowUnsafeCustomBinary: true }
+  });
+  await assert.rejects(
+    guardedGit.env({ [editorName]: path.join(root, 'untrusted-editor') }).raw(['--version']),
+    /allowUnsafeEditor/,
+    `${editorName} must require explicit unsafe-editor authorization`
+  );
+}
 const workspace = {
   alias: 'smoke',
   path: workspacePath,
