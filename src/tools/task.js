@@ -1,5 +1,6 @@
 
 import * as crypto from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { getCurrentToolActivityContext, getToolActivity, taskError } from '../toolActivity.js';
 import { findTaskReuseCandidates, readTaskHistory, readTaskHistorySessionRecord } from '../taskHistoryStore.ts';
 import { principalFingerprint } from '../mcp/principal.ts';
@@ -125,12 +126,8 @@ function taskBootstrapFromSnapshot(snapshot, mode = 'compact') {
   return buildTaskBootstrap(snapshot, mode);
 }
 
-function assertKnownTask(config, taskId, workspace, toolName, principal, args = {}, options = {}) {
-  const activeTaskIds = new Set(getToolActivity().tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean));
-  const session = readTaskHistorySessionRecord(config, taskId, {
-    reconcileInactive: true,
-    activeTaskIds
-  });
+async function assertKnownTask(config, taskId, workspace, toolName, principal, args = {}, options = {}) {
+  const session = await readKnownTaskSession(config, taskId, options);
   if (!session) {
     throw taskError('TASK_NOT_FOUND', 'The supplied work_id is unknown or expired. Start a new work session with relai_work action "begin".');
   }
@@ -147,6 +144,57 @@ function assertKnownTask(config, taskId, workspace, toolName, principal, args = 
     throw taskError('INVALID_TASK_STATE', `This work session is already ${session.status}. Start a new work session instead of reusing its work_id.`);
   }
   return session;
+}
+
+// WAL cleanup/recovery can briefly block readers too. Admission must distinguish
+// an unavailable store from a missing task without blocking the service thread.
+async function readKnownTaskSession(config, taskId, options) {
+  const retryUntil = performance.now() + 500;
+  let lastError;
+  const assertNotInterrupted = () => {
+    options.signal?.throwIfAborted();
+    if (Number(options.deadlineAtMs) > 0 && Date.now() >= Number(options.deadlineAtMs)) {
+      throw new DOMException('Task lookup deadline expired before admission.', 'TimeoutError');
+    }
+  };
+  const unavailable = (error, retryable) => {
+    const failure = taskError('TASK_HISTORY_UNAVAILABLE',
+      'Durable task history could not be read. The operation was not admitted.', {
+        retryable,
+        allowedAlternatives: ['Recover durable task storage, then retry with the same work_id.']
+      });
+    failure.executed = false;
+    failure.cause = error;
+    return failure;
+  };
+  for (;;) {
+    assertNotInterrupted();
+    if (lastError && performance.now() >= retryUntil) throw unavailable(lastError, true);
+    try {
+      const activeTaskIds = new Set(getToolActivity().tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean));
+      const session = readTaskHistorySessionRecord(config, taskId, {
+        reconcileInactive: true, activeTaskIds, strict: true
+      });
+      assertNotInterrupted();
+      return session;
+    } catch (error) {
+      assertNotInterrupted();
+      const busy = (Number(error?.errcode) & 0xff) === 5 || error?.code === 'SQLITE_BUSY';
+      if (!busy) throw unavailable(error, false);
+      lastError = error;
+      const remaining = retryUntil - performance.now();
+      if (remaining <= 0) throw unavailable(error, true);
+      const deadlineRemaining = Number(options.deadlineAtMs) > 0
+        ? Number(options.deadlineAtMs) - Date.now() : remaining;
+      try {
+        await delay(Math.max(0, Math.min(25, remaining, deadlineRemaining)), undefined,
+          options.signal ? { signal: options.signal } : {});
+      } catch (delayError) {
+        options.signal?.throwIfAborted();
+        throw delayError;
+      }
+    }
+  }
 }
 
 function assertTaskWorkspaceOwnership(session, workspace) {

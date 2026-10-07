@@ -168,6 +168,143 @@ async function case_auto_session_unit() {
     fs.rmSync(root, { recursive: true, force: true });
   }
   
+  // A WAL writer must not make a committed ownership baseline disappear.
+  {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { stateDatabasePath } = await import('../src/stateDatabase.ts');
+    const { recordTaskIntegrityEvent } = await import('../src/taskIntegrity.ts');
+    const { workspaceWrite } = await import('../src/localRepoBridge.ts');
+    const { default: childProcess } = await import('node:child_process');
+    const { syncBuiltinESMExports } = await import('node:module');
+    const { root, workspacePath, stateDir } = makeRepo();
+    const config = { stateDir, workspaces: { ws: { path: workspacePath, commands: {} } } };
+    const workspace = { alias: 'ws', path: workspacePath };
+    const taskId = 'task-wal-reader';
+    const event = (tool, result = {}) => recordTaskIntegrityEvent(config, {
+      taskId, workspace: 'ws', taskIdentityVersion: 2, tool, ok: true, ...result
+    });
+    let writer;
+    try {
+      fs.writeFileSync(path.join(workspacePath, 'pre-existing.txt'), 'user baseline\n');
+      await event('work.begin');
+      assert.equal(await ensureSessionStarted(config, 'ws', workspacePath, { taskId }), true);
+      const before = readSessionPolicy(config, 'ws', taskId);
+      assert.equal(before.baselineCaptured, true, JSON.stringify(before));
+      const edit = workspaceWrite(workspace, config, { work_id: taskId, path: 'session-artifact.txt', content: 'owned\n' });
+      await event('edit', edit);
+      writer = new DatabaseSync(stateDatabasePath(config));
+      writer.exec('BEGIN IMMEDIATE');
+
+      const originalExec = DatabaseSync.prototype.exec;
+      let writeTransactions = 0;
+      DatabaseSync.prototype.exec = function (sql) {
+        if (/BEGIN IMMEDIATE/i.test(sql)) writeTransactions++;
+        return originalExec.call(this, sql);
+      };
+      try {
+        assert.deepEqual(readSessionPolicy(config, 'ws', taskId), before);
+        assert.deepEqual(readSessionPolicy(config, 'ws'), before);
+        const coldPolicy = await import('../src/policyResolver.js?wal-read-regression');
+        assert.deepEqual(coldPolicy.readSessionPolicy(config, 'ws', taskId), before,
+          'a completed persisted migration must not need a writer lock on first read');
+        assert.equal(writeTransactions, 0, 'valid policy reads must not start cleanup or write transactions');
+      } finally { DatabaseSync.prototype.exec = originalExec; }
+
+      assert.equal(await ensureSessionStarted(config, 'ws', workspacePath, { taskId }), false,
+        'contention must not recapture an existing baseline after mutation');
+      const plan = await workspaceTidyPlan(workspace, config, { work_id: taskId });
+      assert.equal(plan.ok, true, JSON.stringify(plan));
+      assert.deepEqual(plan.candidates.map(item => item.path), ['session-artifact.txt']);
+      assert.deepEqual(readSessionPolicy(config, 'ws', taskId), before);
+      writer.exec('ROLLBACK');
+      writer.close();
+      writer = null;
+
+      const expiredAt = Date.now() - SESSION_IDLE_TTL_MS - 1000;
+      const expired = { ...before, taskId: 'expired', updatedAt: new Date(expiredAt).toISOString() };
+      const incomplete = { ...before, workspace: 'incomplete', taskId: 'incomplete', baselineCaptured: false };
+      withStateDatabase(config, db => {
+        const insert = db.prepare('INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)');
+        insert.run('ws', 'expired', expiredAt, JSON.stringify(expired));
+        insert.run('ws', 'malformed', Date.now(), '{');
+        insert.run('incomplete', 'incomplete', Date.now(), JSON.stringify(incomplete));
+      }, { transaction: true });
+      writer = new DatabaseSync(stateDatabasePath(config));
+      writer.exec('BEGIN IMMEDIATE');
+      assert.deepEqual(readSessionPolicy(config, 'ws'), before,
+        'failed stale-row cleanup cannot hide the only valid policy');
+      assert.equal(readSessionPolicy(config, 'ws', 'expired'), null);
+      assert.equal(readSessionPolicy(config, 'ws', 'malformed'), null);
+      assert.equal(readSessionPolicy(config, 'ws', 'missing'), null);
+      const refused = await workspaceTidyPlan({ ...workspace, alias: 'incomplete' }, config, { work_id: 'incomplete' });
+      assert.equal(refused.reason, 'no_session_baseline', 'incomplete baselines remain fail-closed under contention');
+      assert.deepEqual(refused.candidates, []);
+      writer.exec('ROLLBACK');
+      writer.close();
+      writer = null;
+      assert.deepEqual(readSessionPolicy(config, 'ws'), before);
+      assert.equal(withStateDatabase(config, db => db.prepare("SELECT count(*) AS count FROM session_policies WHERE workspace='ws' AND task_id IN ('expired','malformed')").get(),
+        { readonly: true }).count, 0, 'stale rows are cleaned once the writer releases');
+
+      const staleRenewing = { ...expired, taskId: 'renewing' };
+      const renewed = { ...before, taskId: 'renewing', updatedAt: new Date().toISOString() };
+      withStateDatabase(config, db => db.prepare('INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)')
+        .run('ws', 'renewing', expiredAt, JSON.stringify(staleRenewing)), { transaction: true });
+      const beforePrune = DatabaseSync.prototype.exec;
+      let renewalPending = true;
+      DatabaseSync.prototype.exec = function (sql) {
+        if (renewalPending && /BEGIN IMMEDIATE/i.test(sql)) {
+          renewalPending = false;
+          const update = new DatabaseSync(stateDatabasePath(config));
+          try {
+            update.prepare('UPDATE session_policies SET updated_at_ms=?,payload=? WHERE workspace=? AND task_id=?')
+              .run(Date.now(), JSON.stringify(renewed), 'ws', 'renewing');
+          } finally { update.close(); }
+        }
+        return beforePrune.call(this, sql);
+      };
+      try {
+        assert.equal(readSessionPolicy(config, 'ws', 'renewing'), null, 'the read saw the expired snapshot');
+      } finally { DatabaseSync.prototype.exec = beforePrune; }
+      assert.equal(renewalPending, false, 'renewal is injected between read and cleanup');
+      assert.deepEqual(readSessionPolicy(config, 'ws', 'renewing'), renewed,
+        'payload-guarded cleanup must not delete a concurrently renewed policy');
+
+      const second = { ...before, taskId: 'second' };
+      withStateDatabase(config, db => db.prepare('INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)')
+        .run('ws', second.taskId, Date.now(), JSON.stringify(second)), { transaction: true });
+      writer = new DatabaseSync(stateDatabasePath(config));
+      writer.exec('BEGIN IMMEDIATE');
+      assert.equal(readSessionPolicy(config, 'ws'), null, 'multiple active policies stay ambiguous under contention');
+      writer.exec('ROLLBACK');
+      writer.close();
+      writer = null;
+
+      // A genuinely unreadable policy must never authorize a fresh Git capture.
+      writer = new DatabaseSync(stateDatabasePath(config));
+      writer.exec('PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE');
+      const originalSpawn = childProcess.spawn;
+      let spawned = 0;
+      childProcess.spawn = function (...args) { spawned++; return originalSpawn.apply(this, args); };
+      syncBuiltinESMExports();
+      try {
+        await assert.rejects(ensureSessionStarted(config, 'ws', workspacePath, { taskId }),
+          error => Number(error.errcode) === 5 || /locked|busy/i.test(error.message));
+        assert.equal(spawned, 0, 'an unreadable existing policy must not start Git baseline capture');
+      } finally {
+        childProcess.spawn = originalSpawn;
+        syncBuiltinESMExports();
+      }
+      writer.exec('ROLLBACK');
+      writer.close();
+      writer = null;
+      assert.deepEqual(readSessionPolicy(config, 'ws', taskId), before, 'failed lookup preserves the original policy');
+    } finally {
+      if (writer) { try { writer.exec('ROLLBACK'); } catch {} writer.close(); }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+
   // 7. Repeated reads during an active session must return cached text instead of
   //    misclassifying the cache hit as a binary file.
   {

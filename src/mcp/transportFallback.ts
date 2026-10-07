@@ -216,18 +216,6 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
       errorCode: timedOut ? 'TIMEOUT' : transportInterrupted ? 'TRANSPORT_INTERRUPTED' : 'CANCELLED'
     }, true));
   }
-  // Injected executors own their synthetic scope. Production execution resolves
-  // and authorizes the same canonical identity used by callTool before indexing.
-  if (options.execute === executeToolResult) {
-    try {
-      const { resolveFallbackExecutionScope } = await import('../tools/callTool.js');
-      args = resolveFallbackExecutionScope(config, name, args, transportToolContext(options));
-    } catch (error) {
-      return successResponse(message.id, toolResult(serializeToolError(name, error), true));
-    }
-  }
-  const signature = fallbackSignature(name, args);
-  const scopeId = workId || `workspace:${principalIdentity(options.principal)}:${String(args.workspace || '')}:${signature}`;
   const explicitTimeoutMs = Number(args?.timeoutMs);
   const explicitDeadlineAtMs = Number.isFinite(explicitTimeoutMs) && explicitTimeoutMs > 0
     ? Date.now() + Math.floor(explicitTimeoutMs) : 0;
@@ -235,6 +223,18 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
   const deadlineAtMs = Number.isFinite(inheritedDeadlineAtMs) && inheritedDeadlineAtMs > 0
     ? (explicitDeadlineAtMs > 0 ? Math.min(explicitDeadlineAtMs, inheritedDeadlineAtMs) : inheritedDeadlineAtMs)
     : explicitDeadlineAtMs;
+  // Injected executors own their synthetic scope. Production execution resolves
+  // and authorizes the same canonical identity used by callTool before indexing.
+  if (options.execute === executeToolResult) {
+    try {
+      const { resolveFallbackExecutionScope } = await import('../tools/callTool.js');
+      args = await resolveFallbackExecutionScope(config, name, args, transportToolContext({ ...options, deadlineAtMs }));
+    } catch (error) {
+      return successResponse(message.id, toolResult(serializeToolError(name, error), true));
+    }
+  }
+  const signature = fallbackSignature(name, args);
+  const scopeId = workId || `workspace:${principalIdentity(options.principal)}:${String(args.workspace || '')}:${signature}`;
   const graceMs = Math.max(0, Number(options.synchronousFallbackGraceMs ?? DEFAULT_FALLBACK_GRACE_MS));
   let started;
   try {

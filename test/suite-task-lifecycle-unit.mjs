@@ -966,7 +966,7 @@ async function case_task_history_store_unit() {
       activeCalls: 0,
       principalFingerprint: principalFingerprint('anonymous')
     });
-    const resumable = assertKnownTask(config, 'stale-task-access', 'repo', 'relai_read', 'anonymous');
+    const resumable = await assertKnownTask(config, 'stale-task-access', 'repo', 'relai_read', 'anonymous');
     assert.equal(resumable.status, 'inactive', 'authorized same-workspace task access must accept a resumable inactive work session');
     assert.equal(readTaskHistorySessionRecord(config, 'stale-task-access').status, 'inactive');
     const staleTerminal = sessions.find(session => session.id === 'terminal-with-stale-operation');

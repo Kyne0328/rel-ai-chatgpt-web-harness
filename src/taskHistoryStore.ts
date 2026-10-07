@@ -59,6 +59,7 @@ interface PersistenceOptions {
 }
 
 interface ReadSessionOptions {
+  strict?: boolean;
   activeTaskIds?: Set<string> | string[];
   reconcileInactive?: boolean;
 }
@@ -275,7 +276,7 @@ function readTaskHistorySessionRecord(config: TaskHistoryConfig, taskId: unknown
   try {
     ensureCurrentHistory(config);
     const directory = getTaskHistoryDir(config);
-    const session = readWorkingSession(directory, id);
+    const session = readWorkingSession(directory, id, options.strict === true);
     if (!session) return null;
     const activeIds = activeTaskIdSet(options.activeTaskIds);
     const reconciled = options.reconcileInactive === true
@@ -285,6 +286,7 @@ function readTaskHistorySessionRecord(config: TaskHistoryConfig, taskId: unknown
     return sanitizeTaskRecord(reconciled) as TaskRecord;
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history session read:', error);
+    if (options.strict === true) throw error;
     return null;
   }
 }
@@ -711,8 +713,8 @@ function readPendingSession(directory: string, id: string): TaskRecord | null {
   return pendingSessions.get(pendingSessionKey(directory, id))?.session || null;
 }
 
-function readWorkingSession(directory: string, id: string): TaskRecord | null {
-  return readPendingSession(directory, id) || (clearingDirectories.has(directory) ? null : readSession(directory, id) as TaskRecord | null);
+function readWorkingSession(directory: string, id: string, strict = false): TaskRecord | null {
+  return readPendingSession(directory, id) || (clearingDirectories.has(directory) ? null : readSession(directory, id, { strict }) as TaskRecord | null);
 }
 
 function pendingSessionEntriesForDirectory(directory: string): Array<[string, PendingSession]> {

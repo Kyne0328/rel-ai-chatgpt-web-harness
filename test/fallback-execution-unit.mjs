@@ -1302,29 +1302,58 @@ try {
   const deliveredDurableWorkId = 'work_delivered_durable_fallback_test';
   seedTask(config, deliveredDurableWorkId);
   let deliveredDurableExecutions = 0;
+  let releaseDeliveredDurable;
   const deliveredDurableExecute = async () => {
     deliveredDurableExecutions += 1;
+    await new Promise(resolve => { releaseDeliveredDurable = resolve; });
     return completedResult(deliveredDurableWorkId, `durable-delivered-${deliveredDurableExecutions}`);
   };
-  const deliveredDurable = await handleTransportFallbackRequest(config, message(12, deliveredDurableWorkId), {
+  const deliveredDurableOptions = {
     principal: 'principal-delivered-durable',
     transportType: 'streamable-http',
-    synchronousFallbackGraceMs: 50,
+    synchronousFallbackGraceMs: 0,
     executeToolResult: deliveredDurableExecute
-  });
+  };
+  const receiveDeliveredDurable = async requestId => {
+    const request = message(requestId, deliveredDurableWorkId);
+    // A grace interval cannot prove delivery of a terminal result: even an
+    // immediate handler still awaits asynchronous output retention.
+    const receipt = await handleTransportFallbackRequest(config, request, deliveredDurableOptions);
+    assert.equal(receipt.body.result.structuredContent.status, 'running');
+    const tracked = startFallbackExecution({
+      config, workId: deliveredDurableWorkId, workspace: 'app',
+      noticeScope: principalFingerprint(deliveredDurableOptions.principal),
+      tool: 'relai_exec', signature: fallbackSignature('relai_exec', request.params.arguments),
+      run: () => { throw new Error('Delivery fixture must not duplicate the accepted operation'); }
+    });
+    assert.equal(tracked.reused, true);
+    assert.equal(tracked.record.operationId, receipt.body.result.structuredContent.operationId);
+    receipt.onDelivered();
+    assert.equal(tracked.record.deliveryAcknowledged, false, 'acceptance delivery cannot acknowledge a future result');
+    releaseDeliveredDurable();
+    await tracked.record.promise;
+    assert.equal(tracked.record.status, 'completed');
+    receipt.onDelivered();
+    assert.equal(tracked.record.deliveryAcknowledged, false, 'a late receipt callback still cannot acknowledge the terminal result');
+    assert.notEqual(readTaskHistorySessionRecord(config, deliveredDurableWorkId).backgroundOperation.deliveryAcknowledged, true,
+      'receipt delivery must not persist a terminal acknowledgement that could break restart replay');
+    const executionsBeforeReplay = deliveredDurableExecutions;
+    const terminal = await handleTransportFallbackRequest(config, request, deliveredDurableOptions);
+    assert.equal(terminal.body.result.structuredContent.exitCode, 0);
+    assert.equal(deliveredDurableExecutions, executionsBeforeReplay, 'terminal retrieval must not repeat the handler');
+    return terminal;
+  };
+  const deliveredDurable = await receiveDeliveredDurable(12);
   assert.equal(deliveredDurableExecutions, 1);
+  assert.equal(deliveredDurable.body.result.structuredContent.stdout, 'durable-delivered-1');
   deliveredDurable.onDelivered();
   assert.equal(readTaskHistorySessionRecord(config, deliveredDurableWorkId).backgroundOperation.deliveryAcknowledged, true);
   resetFallbackExecutions();
-  const freshDurable = await handleTransportFallbackRequest(config, message(13, deliveredDurableWorkId), {
-    principal: 'principal-delivered-durable',
-    transportType: 'streamable-http',
-    synchronousFallbackGraceMs: 50,
-    executeToolResult: deliveredDurableExecute
-  });
+  const freshDurable = await receiveDeliveredDurable(13);
   assert.equal(deliveredDurableExecutions, 2, 'confirmed delivery must survive restart so a later work-bound rerun executes fresh');
   assert.equal(freshDurable.body.result.structuredContent.stdout, 'durable-delivered-2');
   freshDurable.onDelivered();
+  assert.equal(readTaskHistorySessionRecord(config, deliveredDurableWorkId).backgroundOperation.deliveryAcknowledged, true);
 
   const noticeWorkId = 'work_completion_notice_test';
   seedTask(config, noticeWorkId);

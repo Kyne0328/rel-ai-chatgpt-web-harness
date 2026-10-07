@@ -232,6 +232,197 @@ try {
   assert.match(privateRecord.principalFingerprint, /^[A-Za-z0-9_-]{43}$/);
   const publicRecord = readTaskHistorySession({ stateDir, auditLogPath }, started.work_id);
   assert.equal(Object.hasOwn(publicRecord, 'principalFingerprint'), false);
+
+  // Exercise physical WAL contention with no pending in-memory task snapshot.
+  // A separate state directory avoids the suite's live analytics connection.
+  await taskHistoryStore.flushTaskHistoryPersistence();
+  await localAnalyticsModule.flushLocalAnalytics();
+  const { DatabaseSync } = await import('node:sqlite');
+  const { getTaskHistoryDir, writeSession } = await import('../src/taskHistoryStorage.ts');
+  const { stateDatabasePath } = await import('../src/stateDatabase.ts');
+  const { assertKnownTask } = await import('../src/tools/task.js');
+  const { principalFingerprint } = await import('../src/mcp/principal.ts');
+  const { OPERATION_IDS: OP } = await import('../src/tools/operationIds.js');
+  const { handleTransportFallbackRequest } = await import('../src/mcp/transportFallback.ts');
+  const { fallbackExecutionsStatus } = await import('../src/mcp/fallbackExecutions.js');
+  const { CLIENT_CAPABILITIES_META_KEY, PROTOCOL_VERSION_META_KEY } = await import('@modelcontextprotocol/server');
+  const { MCP_PROTOCOL_VERSION } = await import('../src/mcp/protocol.js');
+  const previousLockState = process.env.REL_AI_MCP_STATE_DIR;
+  const lockStateDir = path.join(root, 'history-read-contention');
+  process.env.REL_AI_MCP_STATE_DIR = lockStateDir;
+  const lockConfig = { stateDir: lockStateDir, workspaces: { repo: { path: workspacePath, commands: {}, testCommands: {} } } };
+  const lockTaskId = 'history-read-lock-fixture';
+  const lockDatabase = stateDatabasePath(lockConfig);
+  const lookup = (principal = owner.principal, options = {}) =>
+    assertKnownTask(lockConfig, lockTaskId, 'repo', OP.READ, principal, {}, options);
+  const busy = error => (Number(error?.errcode) & 0xff) === 5;
+  const withReadLock = async run => {
+    const database = new DatabaseSync(lockDatabase);
+    let released = false;
+    const releaseLock = () => {
+      if (released) return;
+      database.exec('ROLLBACK');
+      database.close();
+      released = true;
+    };
+    try {
+      database.exec('PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE');
+      assert.throws(() => readTaskHistorySessionRecord(lockConfig, lockTaskId, { strict: true }), busy,
+        'the fixture must physically block a strict task-history read');
+      return await run(releaseLock);
+    } finally { releaseLock(); }
+  };
+  try {
+    writeSession(getTaskHistoryDir(lockConfig), {
+      id: lockTaskId, workspace: 'repo', status: 'planning',
+      principalFingerprint: principalFingerprint(owner.principal),
+      plan: { revision: 1, steps: [{ id: 'read', title: 'Read the fixture', status: 'in_progress' }] },
+      startedAt: new Date().toISOString(), events: []
+    });
+    assert.equal(readTaskHistorySessionRecord(lockConfig, lockTaskId, { strict: true }).id, lockTaskId);
+    await withReadLock(async releaseLock => {
+      let releasedByTimer = false;
+      const timer = setTimeout(() => { releasedByTimer = true; releaseLock(); }, 0);
+      try {
+        assert.equal((await lookup()).id, lockTaskId, 'a transient busy read must recover the same task');
+        assert.equal(releasedByTimer, true, 'lookup recovery must yield so the lock release timer can run');
+      } finally { clearTimeout(timer); }
+    });
+    await withReadLock(async () => {
+      const watchdog = new AbortController();
+      const timer = setTimeout(() => watchdog.abort(new Error('Task lookup exceeded its bounded retry window')), 2000);
+      try {
+        await assert.rejects(lookup(owner.principal, { signal: watchdog.signal }),
+          error => error.code === 'TASK_HISTORY_UNAVAILABLE' && error.retryable === true && busy(error.cause),
+          'persistent BUSY must preserve its cause and never masquerade as an unknown task');
+      } finally { clearTimeout(timer); }
+    });
+    await withReadLock(async () => {
+      const controller = new AbortController();
+      const reason = new Error('Owner cancelled locked task admission');
+      const timer = setTimeout(() => controller.abort(reason), 0);
+      try {
+        await assert.rejects(lookup(owner.principal, { signal: controller.signal }), error => error === reason,
+          'owner cancellation must interrupt history retry without changing its reason');
+      } finally { clearTimeout(timer); }
+    });
+    await withReadLock(async () => {
+      await assert.rejects(lookup(owner.principal, { deadlineAtMs: Date.now() + 10 }),
+        error => error.name === 'TimeoutError', 'a real admission deadline must interrupt a held lock');
+    });
+    await withReadLock(async releaseLock => {
+      const timer = setTimeout(releaseLock, 0);
+      try {
+        await assert.rejects(lookup(otherOwner.principal), error => error.code === 'TASK_NOT_FOUND',
+          'transient recovery must still enforce the original task principal');
+      } finally { clearTimeout(timer); }
+    });
+    await assert.rejects(assertKnownTask(lockConfig, 'genuinely-missing-task', 'repo', OP.READ, owner.principal),
+      error => error.code === 'TASK_NOT_FOUND', 'genuine absence must retain its distinct result');
+
+    const database = new DatabaseSync(lockDatabase);
+    const originalPayload = database.prepare('SELECT payload FROM task_history WHERE id=?').get(lockTaskId).payload;
+    const invalidPayloads = [
+      JSON.stringify({ ...JSON.parse(originalPayload), version: 999, recoveryMarker: 'preserve-original-bytes' }),
+      '{"recoveryMarker":"preserve-malformed-bytes",'
+    ];
+    try {
+      for (const invalidPayload of invalidPayloads) {
+        database.prepare('UPDATE task_history SET payload=? WHERE id=?').run(invalidPayload, lockTaskId);
+        await assert.rejects(lookup(),
+          error => error.code === 'TASK_HISTORY_UNAVAILABLE' && error.retryable === false && /invalid/.test(error.cause?.message || ''),
+          'an invalid stored record is unavailable rather than absent or retryable');
+        assert.equal(database.prepare('SELECT payload FROM task_history WHERE id=?').get(lockTaskId).payload, invalidPayload,
+          'failed admission must preserve unsupported and malformed history bytes for recovery');
+      }
+    } finally {
+      database.prepare('UPDATE task_history SET payload=? WHERE id=?').run(originalPayload, lockTaskId);
+      database.close();
+    }
+
+    const marker = path.join(workspacePath, 'locked-admission-must-not-run.txt');
+    for (const interruption of ['deadline', 'abort', 'transport', 'busy']) {
+      await withReadLock(async () => {
+        const controller = new AbortController();
+        const reason = new Error('Owner stopped transport admission');
+        if (interruption === 'transport') reason.code = 'HTTP_MCP_REQUEST_INTERRUPTED';
+        const timer = ['abort', 'transport'].includes(interruption)
+          ? setTimeout(() => controller.abort(reason), 0) : null;
+        try {
+          const response = await handleTransportFallbackRequest(lockConfig, {
+            jsonrpc: '2.0', id: `locked-${interruption}`, method: 'tools/call',
+            params: {
+              name: 'relai_exec',
+              arguments: {
+                workspace: 'repo', work_id: lockTaskId, executable: process.execPath,
+                argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'executed')`],
+                timeoutMs: 1000
+              },
+              _meta: { [PROTOCOL_VERSION_META_KEY]: MCP_PROTOCOL_VERSION, [CLIENT_CAPABILITIES_META_KEY]: {} }
+            }
+          }, { principal: owner.principal, transportType: 'streamable-http', signal: controller.signal,
+            ...(interruption === 'deadline' ? { deadlineAtMs: Date.now() + 10 } : {}),
+            synchronousFallback: false, synchronousFallbackGraceMs: 0 });
+          const rejected = response.body.result.structuredContent;
+          assert.equal(response.body.result.isError, true);
+          assert.equal(rejected.ok, false);
+          assert.equal(rejected.errorCode, { deadline: 'TIMEOUT', abort: 'CANCELLED', transport: 'TRANSPORT_INTERRUPTED', busy: 'TASK_HISTORY_UNAVAILABLE' }[interruption], JSON.stringify(rejected));
+          assert.equal(rejected.executed, false);
+          assert.equal(rejected.errorDetails.retryable, interruption === 'busy', 'only unavailable storage may invite a retry');
+          if (interruption === 'busy') assert.match(rejected.errorDetails.allowedAlternatives.join(' '), /same work_id/);
+          else assert.deepEqual(rejected.errorDetails.allowedAlternatives, [], 'interrupted admission must not suggest fresh work');
+          assert.equal(rejected.operationId, undefined, 'interruption before admission must not create a receipt');
+          assert.equal(fs.existsSync(marker), false, 'interruption while reading history must not execute the handler');
+          assert.deepEqual(fallbackExecutionsStatus(lockTaskId), [], 'no live fallback may be accepted while task ownership is unreadable');
+        } finally { if (timer) clearTimeout(timer); }
+      });
+    }
+    assert.deepEqual(readTaskHistorySessionRecord(lockConfig, lockTaskId, { strict: true }).backgroundOperations || [], [],
+      'deadline rejection must not leave a durable phantom receipt');
+    const journalDirectory = path.join(lockStateDir, 'fallback-executions');
+    assert.deepEqual(fs.existsSync(journalDirectory) ? fs.readdirSync(journalDirectory) : [], [],
+      'deadline rejection must not create an operation journal');
+  } finally {
+    if (previousLockState == null) delete process.env.REL_AI_MCP_STATE_DIR;
+    else process.env.REL_AI_MCP_STATE_DIR = previousLockState;
+  }
+
+  // Real callTool error bookkeeping must preserve unreadable evidence even
+  // when the rejected request names a genuine task with integrity state.
+  await taskHistoryStore.flushTaskHistoryPersistence();
+  await auditModule.flushAuditWrites();
+  const genuineMarker = path.join(workspacePath, 'unreadable-task-must-not-execute.txt');
+  const genuineDatabase = new DatabaseSync(stateDatabasePath({ stateDir, auditLogPath }));
+  const genuineOriginal = genuineDatabase.prepare('SELECT payload FROM task_history WHERE id=?').get(started.work_id).payload;
+  const rejectionAudits = () => fs.readFileSync(auditLogPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
+    .filter(entry => entry.taskId === started.work_id && entry.errorCode === 'TASK_HISTORY_UNAVAILABLE');
+  const genuineInvalid = [
+    JSON.stringify({ ...JSON.parse(genuineOriginal), version: 999, recoveryMarker: 'preserve-real-task-bytes' }),
+    '{"recoveryMarker":"preserve-real-malformed-task",'
+  ];
+  try {
+    for (const invalidPayload of genuineInvalid) {
+      const priorRejections = rejectionAudits().length;
+      genuineDatabase.prepare('UPDATE task_history SET payload=? WHERE id=?').run(invalidPayload, started.work_id);
+      await assert.rejects(callTool('relai_exec', {
+        work_id: started.work_id, executable: process.execPath,
+        argv: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(genuineMarker)}, 'executed')`]
+      }, sameOwner), error => error.code === 'TASK_HISTORY_UNAVAILABLE' && error.executed === false && error.retryable === false,
+      'an unreadable genuine task must fail before handler admission');
+      assert.equal(genuineDatabase.prepare('SELECT payload FROM task_history WHERE id=?').get(started.work_id).payload, invalidPayload,
+        'failed real-call admission must preserve exact invalid history bytes instead of auditing an empty replacement');
+      assert.equal(fs.existsSync(genuineMarker), false, 'unreadable task ownership must not admit a real command');
+      await auditModule.flushAuditWrites();
+      const rejectedAudits = rejectionAudits();
+      assert.equal(rejectedAudits.length, priorRejections + 1, 'the rejected request must remain visible in ordinary audit history');
+      assert.equal(rejectedAudits.at(-1).taskIdentityVersion, 0);
+      assert.equal(rejectedAudits.at(-1).taskIdExplicit, false);
+      assert.equal(rejectedAudits.at(-1).taskHistoryEligible, false, 'unadmitted rejection must not project into task history');
+    }
+  } finally {
+    genuineDatabase.prepare('UPDATE task_history SET payload=? WHERE id=?').run(genuineOriginal, started.work_id);
+    genuineDatabase.close();
+  }
 } finally {
   if (repositoryIntelligenceModule) await repositoryIntelligenceModule.repositoryIntelligence.shutdown();
   if (localAnalyticsModule) await localAnalyticsModule.flushLocalAnalytics();

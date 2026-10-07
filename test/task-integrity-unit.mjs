@@ -3,9 +3,10 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import * as taskIntegrity from '../src/taskIntegrity.ts';
-import { openStateDatabase } from '../src/stateDatabase.ts';
+import { openStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
 const { readTaskIntegrity, readWorkspaceIntegrity, recordTaskIntegrityEvent } = taskIntegrity;
 
 const taskIntegritySource = fs.readFileSync(new URL('../src/taskIntegrity.ts', import.meta.url), 'utf8');
@@ -98,6 +99,90 @@ try {
   assert.ok(deferred.baseline.changedFiles.includes('ambient.txt'), 'deferred baseline must still protect pre-existing dirty files');
   assert.equal(deferred.baseline.pending, undefined);
   assert.deepEqual(deferred.taskOwnedChangedFiles, []);
+
+  // A last-connection WAL cleanup/recovery takes an exclusive lock. Hold that
+  // lock after Git observation so the first baseline persistence open must fail.
+  for (const contention of ['release', 'hold', 'abort', 'deadline']) {
+    const baselineId = `baseline-open-contention-${contention}`;
+    await recordTaskIntegrityEvent(config, event(baselineId, 'work.begin', { deferBaseline: true }));
+    const controller = new AbortController();
+    const abortReason = new Error('Baseline capture cancelled during SQLite contention');
+    let database;
+    let timer;
+    let observations = 0;
+    const release = () => {
+      if (!database) return;
+      database.exec('ROLLBACK');
+      database.close();
+      database = undefined;
+    };
+    try {
+      const capture = taskIntegrity.ensureTaskBaseline(config, baselineId, 'app', {
+        signal: controller.signal,
+        onStatusOutput: () => {
+          observations += 1;
+          database = new DatabaseSync(stateDatabasePath(config));
+          database.exec('PRAGMA locking_mode=EXCLUSIVE; BEGIN IMMEDIATE');
+          if (contention === 'release') timer = setTimeout(release, 0);
+          if (contention === 'abort') timer = setTimeout(() => controller.abort(abortReason), 0);
+          if (contention === 'deadline') {
+            const deadline = AbortSignal.timeout(1);
+            deadline.addEventListener('abort', () => controller.abort(deadline.reason), { once: true });
+          }
+        }
+      });
+      if (contention === 'release') {
+        const baseline = await capture;
+        assert.equal(baseline.baseline.pending, undefined, 'transient initialization contention must yield and retry baseline persistence');
+        assert.ok(baseline.baseline.changedFiles.includes('ambient.txt'), 'retry must retain the observed ambient baseline');
+      } else {
+        await assert.rejects(capture, error => contention === 'abort'
+          ? error === abortReason
+          : contention === 'deadline'
+            ? error === controller.signal.reason && error.name === 'TimeoutError'
+            : error?.errcode === 5 && /openStateDatabase/.test(error.stack),
+        'persistent SQLite contention must remain visible, and cancellation must stop the retry');
+      }
+    } finally {
+      clearTimeout(timer);
+      release();
+    }
+    assert.equal(observations, 1, 'SQLite retries must not repeat the Git observation or external callbacks');
+    const authority = readTaskIntegrity(config, baselineId, 'app');
+    assert.equal(authority.baseline.pending, contention === 'release' ? undefined : true,
+      'failed or cancelled persistence must retain the pending baseline');
+    assert.equal(authority.mutationGeneration, 0, 'baseline retries must not invent a mutation');
+    assert.deepEqual(authority.taskOwnedChangedFiles, [], 'baseline retries must preserve ambient ownership');
+    if (contention === 'abort') {
+      const resumed = await taskIntegrity.ensureTaskBaseline(config, baselineId, 'app');
+      assert.equal(resumed.baseline.pending, undefined, 'cancelled capture must leave a later capture retryable');
+    }
+  }
+
+  const cancelledBeforeWriteId = 'baseline-cancelled-before-write';
+  await recordTaskIntegrityEvent(config, event(cancelledBeforeWriteId, 'work.begin', { deferBaseline: true }));
+  const cancelledBeforeWrite = new AbortController();
+  const cancelledBeforeWriteReason = new Error('Baseline capture cancelled after Git observation');
+  await assert.rejects(taskIntegrity.ensureTaskBaseline(config, cancelledBeforeWriteId, 'app', {
+    signal: cancelledBeforeWrite.signal,
+    onStatusOutput: () => cancelledBeforeWrite.abort(cancelledBeforeWriteReason)
+  }), error => error === cancelledBeforeWriteReason);
+  assert.equal(readTaskIntegrity(config, cancelledBeforeWriteId, 'app').baseline.pending, true,
+    'cancellation after observation must not commit a baseline');
+
+  const unsupportedSchemaId = 'baseline-unsupported-schema';
+  await recordTaskIntegrityEvent(config, event(unsupportedSchemaId, 'work.begin', { deferBaseline: true }));
+  const unsupportedSchema = openStateDatabase(config);
+  try {
+    await assert.rejects(taskIntegrity.ensureTaskBaseline(config, unsupportedSchemaId, 'app', {
+      onStatusOutput: () => unsupportedSchema.prepare("UPDATE state_meta SET value='99' WHERE key='schema_version'").run()
+    }), /newer than supported/, 'baseline retry must not mask durable-state compatibility failures');
+  } finally {
+    unsupportedSchema.prepare("UPDATE state_meta SET value='2' WHERE key='schema_version'").run();
+    unsupportedSchema.close();
+  }
+  assert.equal(readTaskIntegrity(config, unsupportedSchemaId, 'app').baseline.pending, true,
+    'a non-contention persistence failure must not commit a baseline');
 
   await recordTaskIntegrityEvent(config, event(cancellationIntegrityTask, 'work.begin'));
   await recordTaskIntegrityEvent(config, event(cancellationIntegrityTask, 'work.cancel', {

@@ -2,6 +2,7 @@ import { readGitObservation } from './repo/gitObservation.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { resolveWorkspace } from './config.js';
 import { runProcess } from './process.js';
@@ -203,7 +204,7 @@ async function captureTaskBaseline(
   const workspace = resolveWorkspace(config, workspaceAlias);
   const repository = await repositoryStateForEvent(workspace, config, { tool: OP.WORK_BEGIN }, options);
   if (repository.statusOutput !== undefined) options.onStatusOutput?.(repository.statusOutput);
-  return withIntegrityTransaction(config, db => {
+  return withIntegrityTransactionRetry(config, db => {
     const authority = readTaskRow(db, taskId);
     if (!authority?.baseline.pending || !repository.baseline) return authority;
     authority.baseline = repository.baseline;
@@ -216,7 +217,7 @@ async function captureTaskBaseline(
     writeTaskRow(db, taskId, authority);
     writeWorkspaceRow(db, workspaceAlias, state);
     return authority;
-  });
+  }, options.signal ? { signal: options.signal } : {});
 }
 
 function readTaskIntegrity(config: IntegrityConfig, taskId: unknown, workspaceAlias = ''): IntegrityAuthority | null {
@@ -756,15 +757,25 @@ function withIntegrityDatabase<TResult>(
   }) as TResult;
 }
 
-async function withIntegrityTransactionRetry<TResult>(config: IntegrityConfig, operation: (db: DatabaseSync) => TResult): Promise<TResult> {
+async function withIntegrityTransactionRetry<TResult>(
+  config: IntegrityConfig,
+  operation: (db: DatabaseSync) => TResult,
+  options: { signal?: AbortSignal } = {}
+): Promise<TResult> {
   let lastError: unknown;
   for (let attempt = 0; attempt < INTEGRITY_SQLITE_RETRY_ATTEMPTS; attempt += 1) {
+    options.signal?.throwIfAborted();
     try {
       return withIntegrityTransaction(config, operation);
     } catch (error) {
       lastError = error;
       if (!isSqliteBusyError(error) || attempt >= INTEGRITY_SQLITE_RETRY_ATTEMPTS - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, INTEGRITY_SQLITE_RETRY_DELAY_MS * (attempt + 1)));
+      try {
+        await delay(INTEGRITY_SQLITE_RETRY_DELAY_MS * (attempt + 1), undefined, { signal: options.signal });
+      } catch (delayError) {
+        options.signal?.throwIfAborted();
+        throw delayError;
+      }
     }
   }
   throw lastError;

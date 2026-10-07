@@ -365,7 +365,7 @@ function removeInvalidSessions(_config: TaskHistoryConfig, ids: string[]): void 
   reportRejectedHistory(ids);
 }
 
-function readSession(directory: string, id: unknown): StoredTaskSession | null {
+function readSession(directory: string, id: unknown, options: { strict?: boolean } = {}): StoredTaskSession | null {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   let invalid = false;
@@ -377,7 +377,10 @@ function readSession(directory: string, id: unknown): StoredTaskSession | null {
     invalid = true;
     return null;
   }, { readonly: true }) as StoredTaskSession | null;
-  if (invalid) removeInvalidSessions(config, [String(id || '')]);
+  if (invalid) {
+    removeInvalidSessions(config, [String(id || '')]);
+    if (options.strict === true) throw new Error('Durable task history record is invalid.');
+  }
   return session;
 }
 

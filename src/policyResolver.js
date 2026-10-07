@@ -54,31 +54,39 @@ function migrateLegacySessionPolicies(config = {}) {
   const databaseKey = stateDatabasePath(config);
   if (migratedSessionDatabases.has(databaseKey)) return;
   const directory = sessionsDir(config);
-  withStateDatabase(config, db => {
-    if (stateMetaValue(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '') === '1') return;
-    let names = [];
-    try {
-      names = fs.readdirSync(directory);
-    } catch (error) {
-      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
-    }
-    for (const name of names) {
-      if (!name.endsWith('-policy.json')) continue;
+  // A completed migration must remain readable while an unrelated WAL writer
+  // is active. Only an absent marker requires the legacy write transaction.
+  const migrated = withStateDatabase(config, db => {
+    const hasMeta = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='state_meta'").get();
+    return Boolean(hasMeta) && stateMetaValue(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '') === '1';
+  }, { readonly: true, missingValue: false });
+  if (!migrated) {
+    withStateDatabase(config, db => {
+      if (stateMetaValue(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '') === '1') return;
+      let names = [];
       try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
-        const workspace = String(parsed?.workspace || '').trim();
-        const taskId = String(parsed?.taskId || '').trim();
-        if (!workspace || !taskId || !validPolicy(parsed, workspace, taskId)) continue;
-        const updatedAtMs = sessionLastActivity(parsed) || Date.now();
-        db.prepare(`INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)
-          ON CONFLICT(workspace,task_id) DO UPDATE SET updated_at_ms=excluded.updated_at_ms,payload=excluded.payload`)
-          .run(workspace, taskId, updatedAtMs, JSON.stringify(parsed));
+        names = fs.readdirSync(directory);
       } catch (error) {
-        if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] legacy session policy migration:', error);
+        if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
       }
-    }
-    setStateMeta(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '1');
-  }, { transaction: true });
+      for (const name of names) {
+        if (!name.endsWith('-policy.json')) continue;
+        try {
+          const parsed = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
+          const workspace = String(parsed?.workspace || '').trim();
+          const taskId = String(parsed?.taskId || '').trim();
+          if (!workspace || !taskId || !validPolicy(parsed, workspace, taskId)) continue;
+          const updatedAtMs = sessionLastActivity(parsed) || Date.now();
+          db.prepare(`INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)
+            ON CONFLICT(workspace,task_id) DO UPDATE SET updated_at_ms=excluded.updated_at_ms,payload=excluded.payload`)
+            .run(workspace, taskId, updatedAtMs, JSON.stringify(parsed));
+        } catch (error) {
+          if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] legacy session policy migration:', error);
+        }
+      }
+      setStateMeta(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '1');
+    }, { transaction: true });
+  }
   try {
     for (const name of fs.readdirSync(directory)) {
       if (name.endsWith('-policy.json')) fs.rmSync(path.join(directory, name), { force: true });
@@ -101,27 +109,53 @@ function parseStoredPolicy(payload, alias, taskId = '') {
   }
 }
 
+function pruneSessionPolicies(config, alias, rows) {
+  if (!rows.length) return;
+  try {
+    withStateDatabase(config, db => {
+      const remove = db.prepare('DELETE FROM session_policies WHERE workspace=? AND task_id=? AND payload=?');
+      // A fresh touch or replacement after the read must survive cleanup.
+      for (const row of rows) remove.run(alias, row.task_id, row.payload);
+    }, { transaction: true });
+  } catch (error) {
+    // Expired/invalid policies are filtered immediately even if another writer
+    // delays physical cleanup. Cleanup never hides a valid captured baseline.
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] stale session policy cleanup:', error);
+  }
+}
+
 function readSessionPolicies(config, alias) {
   migrateLegacySessionPolicies(config);
   try {
-    return withStateDatabase(config, db => {
-      const rows = db.prepare('SELECT task_id,payload FROM session_policies WHERE workspace=? ORDER BY updated_at_ms DESC').all(alias);
-      const policies = [];
-      for (const row of rows) {
-        const taskId = String(row.task_id || '');
-        const parsed = parseStoredPolicy(row.payload, alias, taskId);
-        if (!parsed || isExpiredPolicy(parsed)) {
-          db.prepare('DELETE FROM session_policies WHERE workspace=? AND task_id=?').run(alias, taskId);
-          continue;
-        }
-        policies.push(parsed);
-      }
-      return policies;
-    }, { transaction: true });
+    const rows = withStateDatabase(config, db =>
+      db.prepare('SELECT task_id,payload FROM session_policies WHERE workspace=? ORDER BY updated_at_ms DESC').all(alias),
+    { readonly: true, missingValue: [] });
+    const policies = [];
+    const stale = [];
+    for (const row of rows) {
+      const parsed = parseStoredPolicy(row.payload, alias, String(row.task_id || ''));
+      if (!parsed || isExpiredPolicy(parsed)) stale.push(row);
+      else policies.push(parsed);
+    }
+    pruneSessionPolicies(config, alias, stale);
+    return policies;
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] session policy list:', error);
     return [];
   }
+}
+
+function readTaskSessionPolicy(config, alias, taskId) {
+  const row = withStateDatabase(config, db =>
+    db.prepare('SELECT task_id,payload FROM session_policies WHERE workspace=? AND task_id=?').get(alias, taskId),
+  { readonly: true, missingValue: null });
+  if (!row) return null;
+  const parsed = parseStoredPolicy(row.payload, alias, taskId);
+  if (!parsed || isExpiredPolicy(parsed)) {
+    pruneSessionPolicies(config, alias, [row]);
+    return null;
+  }
+  return parsed;
 }
 
 function readSessionPolicy(config, alias, taskId = '') {
@@ -132,16 +166,7 @@ function readSessionPolicy(config, alias, taskId = '') {
   }
   migrateLegacySessionPolicies(config);
   try {
-    return withStateDatabase(config, db => {
-      const row = db.prepare('SELECT payload FROM session_policies WHERE workspace=? AND task_id=?').get(alias, resolved);
-      if (!row) return null;
-      const parsed = parseStoredPolicy(row.payload, alias, resolved);
-      if (!parsed || isExpiredPolicy(parsed)) {
-        db.prepare('DELETE FROM session_policies WHERE workspace=? AND task_id=?').run(alias, resolved);
-        return null;
-      }
-      return parsed;
-    }, { transaction: true });
+    return readTaskSessionPolicy(config, alias, resolved);
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] session policy read:', error);
     return null;
@@ -223,7 +248,9 @@ async function ensureSessionStarted(config, alias, workspaceRoot, options = {}) 
   if (!alias) return false;
   const taskId = String(options.taskId || currentTaskId() || '').trim();
   if (!taskId) throw new Error('Session start requires a taskId.');
-  const existing = readSessionPolicy(config, alias, taskId);
+  migrateLegacySessionPolicies(config);
+  // A failed read is not proof of absence: never recapture after a read error.
+  const existing = readTaskSessionPolicy(config, alias, taskId);
   if (existing) {
     touchSessionPolicy(config, alias, taskId);
     return false;

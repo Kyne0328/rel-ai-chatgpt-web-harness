@@ -54,6 +54,14 @@ async function callTool(name, args = {}, context = {}) {
 async function callToolObserved(name, args = {}, context = {}) {
   const config = readConfig();
   const started = Date.now();
+  const inheritedDeadlineAtMs = Number(context?.deadlineAtMs);
+  const requestedTimeoutMs = Number(args?.timeoutMs);
+  const explicitDeadlineAtMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+    ? started + Math.floor(requestedTimeoutMs) : 0;
+  const requestDeadlineAtMs = Number.isFinite(inheritedDeadlineAtMs) && inheritedDeadlineAtMs > 0
+    ? (explicitDeadlineAtMs > 0 ? Math.min(explicitDeadlineAtMs, inheritedDeadlineAtMs) : inheritedDeadlineAtMs)
+    : explicitDeadlineAtMs;
+  if (requestDeadlineAtMs > 0) context = { ...context, deadlineAtMs: requestDeadlineAtMs };
   const connector = Boolean(context?.publicHttpOnly);
   const publicArgs = args || {};
   let requestedTaskId = '';
@@ -119,7 +127,9 @@ async function callToolObserved(name, args = {}, context = {}) {
       throw taskError('TASK_ID_REQUIRED', `${name} requires the work_id returned by relai_work action begin.`);
     }
     if (requestedTaskId && operationName !== OP.WORK_BEGIN) {
-      knownTask = assertKnownTask(config, requestedTaskId, '', operationName, effectivePrincipal, effectiveArgs, { trustedLocalTaskControl });
+      knownTask = await assertKnownTask(config, requestedTaskId, '', operationName, effectivePrincipal, effectiveArgs, {
+        trustedLocalTaskControl, signal: context.signal, deadlineAtMs: context.deadlineAtMs
+      }).catch(error => { throw taskAdmissionReadError(error, context); });
       if (knownTask && taskAware && !String(effectiveArgs?.workspace || '').trim()) effectiveArgs = { ...effectiveArgs, workspace: knownTask.workspace };
     }
     assertAuthorizedToolCall({
@@ -408,8 +418,9 @@ async function callToolObserved(name, args = {}, context = {}) {
         nextAction: 'The handler returned this result before task bookkeeping failed. Do not repeat the original operation to repair persistence. Reconcile the same work_id and operationId; a running operation may still be active.'
       });
     }
+    const unadmittedTaskRead = Boolean(requestedTaskId && !knownTask && enhanced.executed === false);
     const failedValue = { ok: false, errorCode: enhanced.code || '', commandSummary: effectiveArgs?.command || '' };
-    const failedDraft = failedWorkId ? buildWorkflowEvidenceReceipt({
+    const failedDraft = failedWorkId && !unadmittedTaskRead ? buildWorkflowEvidenceReceipt({
       tool: operationName,
       args: { ...(effectiveArgs || {}), action: resolvedAction || effectiveArgs?.action },
       result: failedValue,
@@ -421,6 +432,9 @@ async function callToolObserved(name, args = {}, context = {}) {
       const failedAuditEntry = await safeLogAudit(config, {
         ...activityResult.activity,
         ...taskAuditContext(context, finishActivity, requestedTaskId, operationName, false),
+        // Retain the rejection log without projecting an unverified identity
+        // onto task state that admission could not read safely.
+        ...(unadmittedTaskRead ? { taskIdentityVersion: 0, taskIdExplicit: false, taskHistoryEligible: false } : {}),
         tool: operationName,
         publicTool: name,
         internalOperation: operationName === name ? undefined : operationName,
@@ -765,10 +779,26 @@ function ok(value) {
 }
 
 
+function taskAdmissionReadError(error, context) {
+  const reason = context.signal?.aborted ? context.signal.reason : error;
+  const timedOut = reason?.name === 'TimeoutError';
+  if (!context.signal?.aborted && !timedOut) return error;
+  const transportInterrupted = reason?.code === 'HTTP_MCP_REQUEST_INTERRUPTED';
+  const failure = taskError(timedOut ? 'TIMEOUT' : transportInterrupted ? 'TRANSPORT_INTERRUPTED' : 'CANCELLED',
+    reason instanceof Error ? reason.message : String(reason || 'Task lookup cancelled before admission.'), {
+      retryable: false, allowedAlternatives: []
+    });
+  failure.executed = false;
+  failure.terminationCertainty = 'not-started';
+  if (timedOut) failure.deadlineKind = 'operation';
+  failure.cause = reason;
+  return failure;
+}
+
 // Resolve the execution identity before the transport registers replay/result
 // state. The actual call still performs its complete admission and ownership
 // checks; this preflight cannot grant authority or select an implicit task.
-function resolveFallbackExecutionScope(config, name, args = {}, context = {}) {
+async function resolveFallbackExecutionScope(config, name, args = {}, context = {}) {
   const resolved = resolveExecutableToolCall(name, args, config);
   if (!resolved) throw new Error(`Unknown tool '${name}'.`);
   const operationName = resolved.operationName;
@@ -779,7 +809,9 @@ function resolveFallbackExecutionScope(config, name, args = {}, context = {}) {
   if (taskId && args.independent === true) throw taskError('TASK_SCOPE_CONFLICT', 'work_id and independent cannot be combined.');
   let knownTask = null;
   if (taskId && operationName !== OP.WORK_BEGIN) {
-    knownTask = assertKnownTask(config, taskId, '', operationName, principal, args);
+    knownTask = await assertKnownTask(config, taskId, '', operationName, principal, args, {
+      signal: context.signal, deadlineAtMs: context.deadlineAtMs
+    }).catch(error => { throw taskAdmissionReadError(error, context); });
     if (!workspace) workspace = String(knownTask?.workspace || '');
   }
   const resolution = resolveConfiguredWorkspaceArgument(config, workspace);
