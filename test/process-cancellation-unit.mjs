@@ -94,7 +94,8 @@ try {
   assert.equal(signalTimeout.timedOut, true);
   assert.notEqual(signalTimeout.cancelled, true);
   assert.equal(signalTimeout.terminationConfirmed, true);
-  assert.match(signalTimeout.stdout, /READY/);
+  // A 200 ms timeout may fire before a cold child has emitted any output.
+  // The readiness-synchronized cancellation below verifies captured child output.
 
   const noSpawnMarker = path.join(root, 'must-not-spawn');
   for (const reason of [new DOMException('Deadline expired.', 'TimeoutError'), new Error('manual timeout message'), new DOMException('Manual cancellation.', 'AbortError')]) {
@@ -177,6 +178,7 @@ try {
   assert.equal(fs.existsSync(gracefulReady), true, 'graceful child must install its signal handler before cancellation');
   assert.equal(graceful.cancelled, true);
   assert.equal(graceful.terminationConfirmed, true);
+  assert.match(graceful.stdout, /READY/, 'readiness-synchronized cancellation must retain child output');
   if (process.platform !== 'win32') {
     assert.equal(graceful.forcedTermination, false);
     assert.match(graceful.stderr, /GRACEFUL/);

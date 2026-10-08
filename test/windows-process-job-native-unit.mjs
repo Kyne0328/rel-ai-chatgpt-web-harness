@@ -438,7 +438,9 @@ try {
   }
   await record('pre-existing-shared-fixture-remains-outside-job', async () => {
     const sharedHeartbeat = path.join(root, 'outside-job-heartbeat');
-    const shared = spawn(process.execPath, [heartbeatScript, sharedHeartbeat, '12000'], { stdio: 'ignore' });
+    // Cold Windows controller startup can outlast a short heartbeat lifetime.
+    // The fixture exits on its explicit release marker after the ownership check.
+    const shared = spawn(process.execPath, [heartbeatScript, sharedHeartbeat, '60000'], { stdio: 'ignore' });
     ownedHelpers.add(shared);
     const sharedExited = new Promise((resolve) => shared.once('exit', (code) => { ownedHelpers.delete(shared); resolve(code); }));
     await poll(async () => { try { return (await fs.stat(sharedHeartbeat)).size > 0; } catch { return false; } }, 'shared fixture heartbeat');
