@@ -1,12 +1,12 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import semver from 'semver';
 import { z } from 'zod';
 import { getApplicationMetadata } from '../appMetadata.js';
-import { makeProcessEnvironment } from '../processEnvironment.js';
+import { writeJsonAtomic } from '../durableState.ts';
+import { runProcess } from '../process.js';
 import {
   extensionBinRoot,
   managedExtensionBundleCommandPath,
@@ -662,14 +662,21 @@ async function prepareManagedCommandInstall(config, manifest, extensionStaging) 
 
   const binRoot = extensionBinRoot(config);
   fs.mkdirSync(binRoot, { recursive: true, mode: 0o700 });
-  const entry = createManagedCommandTransactionEntry(config, manifest, command, {
-    installType: 'binary',
-    url: artifact.url,
-    sha256: artifact.sha256
-  });
-  fs.writeFileSync(entry.stagingTarget, content, { mode: 0o700 });
-  if (process.platform !== 'win32') fs.chmodSync(entry.stagingTarget, 0o755);
-  return { entries: [entry], committed: false };
+  const install = prepareManagedCommandEntries(config, manifest, [{
+    command,
+    metadata: { installType: 'binary', url: artifact.url, sha256: artifact.sha256 }
+  }]);
+  const entry = install.entries[0];
+  let targetPrepared = false;
+  try {
+    writePreparedCommandFile(entry.stagingTarget, content, 0o700);
+    targetPrepared = true;
+    if (process.platform !== 'win32') fs.chmodSync(entry.stagingTarget, 0o755);
+    return install;
+  } catch (error) {
+    cleanupPreparedCommandFiles([entry.stagingMetadata, ...(targetPrepared ? [entry.stagingTarget] : [])], error);
+    throw error;
+  }
 }
 
 async function prepareManagedBundleInstall(config, manifest, artifact, extensionStaging) {
@@ -680,6 +687,7 @@ async function prepareManagedBundleInstall(config, manifest, artifact, extension
 
   const archivePath = path.join(extensionStaging, '.tool-bundle-download.zip');
   const toolRoot = path.join(extensionStaging, '.tool');
+  let preserveArchive = false;
   await downloadVerifiedFile(
     artifact.url,
     MAX_TOOL_BUNDLE_ARCHIVE_BYTES,
@@ -690,12 +698,16 @@ async function prepareManagedBundleInstall(config, manifest, artifact, extension
   );
   try {
     await extractToolBundleZip(archivePath, toolRoot, {
+      ownerConfig: config,
       maxEntries: MAX_TOOL_BUNDLE_ENTRIES,
       maxExtractedBytes: MAX_TOOL_BUNDLE_EXTRACTED_BYTES,
       maxFileBytes: MAX_TOOL_BUNDLE_FILE_BYTES
     });
+  } catch (error) {
+    preserveArchive = error?.cleanupPending === true;
+    throw error;
   } finally {
-    fs.rmSync(archivePath, { force: true });
+    if (!preserveArchive) fs.rmSync(archivePath, { force: true });
   }
 
   for (const item of artifact.commands) {
@@ -710,13 +722,10 @@ async function prepareManagedBundleInstall(config, manifest, artifact, extension
     if (process.platform !== 'win32') fs.chmodSync(commandPath, stat.mode | 0o111);
   }
 
-  const entries = managed.map(({ item }) => createManagedCommandTransactionEntry(config, manifest, item.command, {
-    installType: 'bundle',
-    relativePath: item.path,
-    url: artifact.url,
-    sha256: artifact.sha256
-  }));
-  return { entries, committed: false };
+  return prepareManagedCommandEntries(config, manifest, managed.map(({ item }) => ({
+    command: item.command,
+    metadata: { installType: 'bundle', relativePath: item.path, url: artifact.url, sha256: artifact.sha256 }
+  })));
 }
 
 async function prepareManagedCondaInstall(config, manifest, artifact, extensionStaging) {
@@ -791,7 +800,7 @@ async function prepareManagedCondaInstall(config, manifest, artifact, extensionS
     '--prefix', toolRoot,
     '--relocate-prefix', path.join(extensionsRoot(config), manifest.id, '.tool'),
     '--file', explicitPath
-  ], { cwd: extensionStaging });
+  ], { cwd: extensionStaging, config });
 
   for (const item of artifact.commands) {
     const commandPath = safeJoin(toolRoot, item.path);
@@ -810,64 +819,42 @@ async function prepareManagedCondaInstall(config, manifest, artifact, extensionS
   fs.rmSync(path.join(extensionStaging, '.conda-root'), { recursive: true, force: true });
   fs.rmSync(explicitPath, { force: true });
 
-  const entries = managed.map(({ item }) => createManagedCommandTransactionEntry(config, manifest, item.command, {
-    installType: 'bundle',
-    sourceType: 'conda',
-    relativePath: item.path,
-    lockUrl: artifact.lockUrl,
-    lockSha256: artifact.lockSha256,
-    subdir: artifact.subdir
-  }));
-  return { entries, committed: false };
+  return prepareManagedCommandEntries(config, manifest, managed.map(({ item }) => ({
+    command: item.command,
+    metadata: {
+      installType: 'bundle', sourceType: 'conda', relativePath: item.path,
+      lockUrl: artifact.lockUrl, lockSha256: artifact.lockSha256, subdir: artifact.subdir
+    }
+  })));
 }
 
-function runMicromamba(executable, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
-      cwd: options.cwd,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: makeProcessEnvironment({
-        MAMBA_NO_BANNER: '1',
-        MAMBA_ROOT_PREFIX: path.join(options.cwd || process.cwd(), '.conda-root')
-      })
-    });
-    let stdout = '';
-    let stderr = '';
-    let outputBytes = 0;
-    let settled = false;
-    const maxOutputBytes = 4 * 1024 * 1024;
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error('Managed Conda installation timed out.'));
-    }, CONDA_INSTALL_TIMEOUT_MS);
-    const finish = error => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) reject(error);
-      else resolve();
-    };
-    const append = (current, chunk) => {
-      outputBytes += chunk.length;
-      if (outputBytes > maxOutputBytes) {
-        child.kill();
-        finish(new Error('Managed Conda installation produced too much output.'));
-        return current;
-      }
-      return current + chunk.toString('utf8');
-    };
-    child.stdout.on('data', chunk => { stdout = append(stdout, chunk); });
-    child.stderr.on('data', chunk => { stderr = append(stderr, chunk); });
-    child.on('error', error => finish(new Error('Could not start the managed micromamba runtime.', { cause: error })));
-    child.on('close', code => {
-      if (code !== 0) {
-        finish(new Error(`Managed Conda installation failed with exit code ${code}: ${(stderr || stdout).trim()}`));
-        return;
-      }
-      finish();
-    });
-  });
+async function runMicromamba(executable, args, options = {}) {
+  const result = await runProcess(executable, args, {
+    cwd: options.cwd,
+    env: {
+      MAMBA_NO_BANNER: '1',
+      MAMBA_ROOT_PREFIX: path.join(options.cwd || process.cwd(), '.conda-root')
+    },
+    nativeOwnership: true,
+    timeout: CONDA_INSTALL_TIMEOUT_MS,
+    maxOutputBytes: 4 * 1024 * 1024,
+    forceWaitMs: 5000
+  }, options.config);
+  if (result.executed && (result.terminationConfirmed === false
+    || (process.platform === 'win32' && result.terminationConfirmed !== true)
+    || (process.platform !== 'win32' && result.rootExitConfirmed !== true))) {
+    throw Object.assign(new Error('Managed Conda helper termination is unconfirmed; install staging must remain intact.'),
+      { cleanupPending: true, terminationConfirmed: false, errorCode: 'INSTALLER_TERMINATION_UNKNOWN' });
+  }
+  if (result.timedOut) throw new Error('Managed Conda installation timed out after confirmed process cleanup.');
+  if (result.cancelled) throw new Error('Managed Conda installation was cancelled after confirmed process cleanup.');
+  if (!result.executed) throw new Error(`Could not start the managed micromamba runtime: ${result.error || 'unknown launch failure'}`);
+  if (result.stdoutBytes + result.stderrBytes > 4 * 1024 * 1024
+    || result.stdoutTruncated || result.stderrTruncated) {
+    throw new Error('Managed Conda installation produced too much output.');
+  }
+  if (result.exitCode !== 0) throw new Error(
+    `Managed Conda installation failed with exit code ${result.exitCode}: ${(result.stderr || result.stdout).trim()}`);
 }
 
 function managedCommandDisposition(config, extensionId, command) {
@@ -888,6 +875,45 @@ function managedCommandDisposition(config, extensionId, command) {
   return { command, target, metadataTarget };
 }
 
+function cleanupPreparedCommandFiles(files, error) {
+  const failures = [];
+  for (const file of files) {
+    try { fs.rmSync(file, { force: true }); }
+    catch (failure) { failures.push(`${path.basename(file)}: ${errorMessage(failure)}`); }
+  }
+  if (failures.length) error.message += ` Preparation cleanup remains pending: ${failures.join('; ')}`;
+}
+
+function writePreparedCommandFile(file, content, mode) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'wx', mode);
+    fs.writeFileSync(fd, content);
+    fs.closeSync(fd);
+    fd = undefined;
+  } catch (error) {
+    // A failed exclusive open does not authorize removing an existing file.
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch {}
+      cleanupPreparedCommandFiles([file], error);
+    }
+    throw error;
+  }
+}
+
+function prepareManagedCommandEntries(config, manifest, commands) {
+  const entries = [];
+  try {
+    for (const { command, metadata } of commands) {
+      entries.push(createManagedCommandTransactionEntry(config, manifest, command, metadata));
+    }
+    return { entries, committed: false };
+  } catch (error) {
+    cleanupPreparedCommandFiles(entries.map(entry => entry.stagingMetadata), error);
+    throw error;
+  }
+}
+
 function createManagedCommandTransactionEntry(config, manifest, command, metadata) {
   const { target, metadataTarget } = managedCommandDisposition(config, manifest.id, command);
   const binRoot = extensionBinRoot(config);
@@ -899,7 +925,7 @@ function createManagedCommandTransactionEntry(config, manifest, command, metadat
   const stagingMetadata = path.join(binRoot, `.install-${manifest.id}-${normalizeCommandName(command)}-${nonce}.json`);
   const backupTarget = `${target}.backup-${nonce}`;
   const backupMetadata = `${metadataTarget}.backup-${nonce}`;
-  fs.writeFileSync(stagingMetadata, `${JSON.stringify({
+  writePreparedCommandFile(stagingMetadata, `${JSON.stringify({
     schemaVersion: 1,
     extensionId: manifest.id,
     command,
@@ -907,7 +933,7 @@ function createManagedCommandTransactionEntry(config, manifest, command, metadat
     arch: process.arch,
     ...metadata,
     installedAt: new Date().toISOString()
-  }, null, 2)}\n`, { mode: 0o600 });
+  }, null, 2)}\n`, 0o600);
   return {
     command,
     target,
@@ -936,8 +962,10 @@ function commitManagedCommandInstall(install) {
         entry.targetPromoted = true;
         if (process.platform !== 'win32') fs.chmodSync(entry.target, 0o755);
       }
-      fs.renameSync(entry.stagingMetadata, entry.metadataTarget);
-      entry.metadataPromoted = true;
+      if (entry.retired !== true) {
+        fs.renameSync(entry.stagingMetadata, entry.metadataTarget);
+        entry.metadataPromoted = true;
+      }
     }
     install.committed = true;
   } catch (error) {
@@ -1134,15 +1162,34 @@ async function commitExtensionPackage(config, manifest, options) {
       fs.writeFileSync(destination, content, { mode: 0o600 });
     }
     fs.writeFileSync(path.join(staging, MANIFEST_FILENAME), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    const commandIdentity = command => {
+      const file = managedExtensionCommandPath(config, command);
+      return process.platform === 'win32' ? file.toLowerCase() : file;
+    };
+    const requiredCommands = new Set(manifest.requires.commands.map(commandIdentity));
+    const previous = fs.existsSync(target) ? readInstalledExtension(target, manifest.id, config) : null;
+    const previousCommands = new Set((previous?.requires?.commands || []).map(commandIdentity));
+    const ownedEntries = managedCommandRemovalEntries(config, manifest.id, crypto.randomUUID());
+    const retiredEntries = ownedEntries.filter(entry => previousCommands.has(commandIdentity(entry.command))
+      && !requiredCommands.has(commandIdentity(entry.command))).map(entry => ({ ...entry, retired: true }));
+    const preparedEntries = managedInstall?.entries || [];
+    // A still-required dependency remains owned when its install method or
+    // current-platform artifact changes. Missing preparation is not retirement.
+    const managedCommands = [...new Set([...preparedEntries.map(entry => entry.command),
+      ...ownedEntries.filter(entry => requiredCommands.has(commandIdentity(entry.command))).map(entry => entry.command)])];
+    if (retiredEntries.length) managedInstall = {
+      entries: [...preparedEntries, ...retiredEntries], committed: false
+    };
     fs.writeFileSync(path.join(staging, INSTALL_METADATA_FILENAME), `${JSON.stringify({
       schemaVersion: 1,
       ...(options.metadata || {}),
       installedAt: new Date().toISOString(),
-      managedCommands: managedInstall?.entries.map(entry => entry.command) || []
+      managedCommands
     }, null, 2)}\n`, { mode: 0o600 });
     // Preparation can await downloads. Check ownership again immediately
     // before the synchronous package/command promotion.
     for (const entry of managedInstall?.entries || []) {
+      if (entry.retired === true) continue;
       if (!managedCommandDisposition(config, manifest.id, entry.command)) {
         throw new Error(`Managed command '${entry.command}' changed during installation.`);
       }
@@ -1161,6 +1208,17 @@ async function commitExtensionPackage(config, manifest, options) {
     commitManagedCommandInstall(managedInstall);
     markExtensionInstallCommitted(config, manifest.id);
   } catch (error) {
+    if (error?.cleanupPending === true || error?.terminationConfirmed === false) {
+      // An unconfirmed native helper might still write below staging. Preserve
+      // all bytes and block later install/removal until ownership is resolved.
+      const marker = path.join(root, `.install-uncertain-${manifest.id}.json`);
+      writeJsonAtomic(marker, {
+        schemaVersion: 1, extensionId: manifest.id, staging, target,
+        reason: String(error?.message || error).slice(0, 500),
+        recordedAt: new Date().toISOString()
+      }, { mode: 0o600 });
+      throw error;
+    }
     fs.rmSync(staging, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     rollbackManagedCommandInstall(managedInstall);
     if (packageCommitted) fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -1631,17 +1689,30 @@ function managedCommandRemovalEntries(config, extensionId, nonce) {
     } catch {
       continue;
     }
-    if (String(metadata?.extensionId || '') !== extensionId) continue;
+    if (metadata?.schemaVersion !== 1 || metadata.extensionId !== extensionId
+      || typeof metadata.command !== 'string' || !/^[A-Za-z0-9._+-]{1,100}$/.test(metadata.command)) continue;
+    const expectedMetadata = path.resolve(managedExtensionCommandMetadataPath(config, metadata.command));
+    const metadataKey = process.platform === 'win32' ? metadataPath.toLowerCase() : metadataPath;
+    const expectedKey = process.platform === 'win32' ? expectedMetadata.toLowerCase() : expectedMetadata;
+    if (metadataKey !== expectedKey) continue;
     const commandPath = metadataPath.slice(0, -'.relai-owner.json'.length);
     const relativeCommand = path.relative(root, path.resolve(commandPath));
     if (!relativeCommand || relativeCommand.startsWith('..') || path.isAbsolute(relativeCommand) || relativeCommand.includes(path.sep)) continue;
+    let targetExisted = false;
+    try {
+      const targetStat = fs.lstatSync(commandPath);
+      if (!targetStat.isFile() || targetStat.isSymbolicLink()) continue;
+      targetExisted = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
     removals.push({
-      command: String(metadata?.command || path.basename(commandPath)),
+      command: metadata.command,
       target: commandPath, metadataTarget: metadataPath,
       stagingTarget: '', stagingMetadata: `${metadataPath}.remove-stage-${nonce}`,
       backupTarget: `${commandPath}.removed-${nonce}`,
       backupMetadata: `${metadataPath}.removed-${nonce}`,
-      targetExisted: fs.existsSync(commandPath), metadataExisted: true
+      targetExisted, metadataExisted: true
     });
   }
   return removals;

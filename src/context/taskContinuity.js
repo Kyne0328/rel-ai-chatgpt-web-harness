@@ -16,9 +16,13 @@ function buildTaskContinuity(config, options = {}) {
   const workspace = String(options.workspace || '').trim();
   const excludeTaskId = String(options.excludeTaskId || '').trim();
   const conversationId = String(options.conversationId || '').trim();
+  const authority = {
+    principalFingerprint: String(options.principalFingerprint || ''),
+    authorizedWorkspaces: Array.isArray(options.authorizedWorkspaces) ? options.authorizedWorkspaces : []
+  };
   return rankBootstrapGroups(query, {
-    conversationContinuity: conversationId ? safeList(() => readConversationContinuity(config, conversationId, { excludeTaskId, limit: 4 })) : [],
-    crossWorkspaceTasks: safeList(() => readCrossWorkspaceTaskEpisodes(config, workspace, query, { excludeTaskId, limit: 3 }))
+    conversationContinuity: conversationId ? safeList(() => readConversationContinuity(config, conversationId, { ...authority, excludeTaskId, limit: 4 })) : [],
+    crossWorkspaceTasks: safeList(() => readCrossWorkspaceTaskEpisodes(config, workspace, query, { ...authority, excludeTaskId, limit: 3 }))
   }, settings.maxBootstrapBytes);
 }
 

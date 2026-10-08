@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { collectOptionsFromWorkspace, collectTextFiles, isPathInside, looksBinary, realRootOf } from '../../safety.js';
+import { collectOptionsFromWorkspace, collectTextFiles, createCollectionContext, createCollectionPathObserver, looksBinary } from '../../safety.js';
 import {
   beginGeneration,
   checkIndexIntegrity,
@@ -43,6 +43,12 @@ async function executeRepositoryIndexJob(job, signal) {
   const kind = normalizeJobKind(job?.kind);
   const databaseFile = String(job?.databaseFile || '');
   if (!databaseFile) throw new Error('Repository Intelligence worker requires databaseFile.');
+  throwIfAborted(signal);
+  const workspace = normalizeWorkspace(job?.workspace);
+  // Verify one canonical policy snapshot before any automatic or explicit recovery
+  // can discard derived facts. Reuse it for every observation in this job.
+  const collectionContext = createCollectionContext(workspace.path, collectOptionsFromWorkspace(workspace));
+  job = { ...job, workspace, collectionContext };
   if (kind === 'zoekt') return refreshZoektFromManifest(job, signal);
   if (kind === 'recover') {
     discardRepositoryIndex(databaseFile);
@@ -81,15 +87,18 @@ async function refreshZoektFromManifest(job, signal) {
     try { db?.close(); } catch {}
   }
 
-  const root = realRootOf(workspace.path);
+  const observe = createCollectionPathObserver(workspace.path, {
+    ...collectOptionsFromWorkspace(workspace), collectionContext: job.collectionContext
+  });
   const candidates = manifest.map(item => {
-    const absolutePath = path.resolve(root, item.path);
-    if (!isPathInside(absolutePath, root)) {
-      const error = new Error(`Repository Intelligence manifest path escaped the workspace: ${item.path}`);
-      error.code = 'INDEX_MANIFEST_PATH_INVALID';
+    const observation = observe(item.path);
+    if (observation.status !== 'eligible' || !observation.stat.isFile()
+      || observation.stat.size > MAX_INDEXED_FILE_BYTES) {
+      const error = new Error('Repository Intelligence source needs collection reconciliation before Zoekt refresh.');
+      error.code = 'INDEX_SOURCE_CHANGED';
       throw error;
     }
-    return { path: item.path, absolutePath };
+    return { path: observation.path, absolutePath: observation.absolutePath };
   });
   const graphIndex = {
     generation: Number(generation.id || 0),
@@ -124,18 +133,11 @@ async function refreshRepositoryIndex(job, signal) {
     const requestedPaths = normalizeRequestedPaths(job?.paths);
     const incrementalCandidate = Boolean(previousGeneration && requestedPaths.length && normalizeJobKind(job?.kind) === 'refresh');
     const parserVersionChanged = parserVersionChangedForIndex(db);
-    const manifest = incrementalCandidate && !parserVersionChanged
+    let manifest = incrementalCandidate && !parserVersionChanged
       ? listManifest(db, requestedPaths)
       : listManifest(db);
-    const manifestByPath = new Map(manifest.map(item => [item.path, item]));
-    if (!incrementalCandidate || parserVersionChanged) {
-      const integrity = checkIndexIntegrity(db);
-      if (!integrity.ok) {
-        const error = new Error(`Repository Intelligence index integrity check failed: ${integrity.message}`);
-        error.code = 'INDEX_INTEGRITY_FAILED';
-        throw error;
-      }
-    }
+    let manifestByPath = new Map(manifest.map(item => [item.path, item]));
+    if (!incrementalCandidate || parserVersionChanged) assertIndexIntegrity(db);
     const runtimeProducerVersion = intelligenceRuntimeFingerprint();
     const producerVersionChanged = Boolean(previousGeneration && indexProducerVersion(db) !== runtimeProducerVersion);
     if (producerVersionChanged) {
@@ -143,21 +145,30 @@ async function refreshRepositoryIndex(job, signal) {
       error.code = 'INDEX_PRODUCER_CHANGED';
       throw error;
     }
-    let scan = previousGeneration && requestedPaths.length && !parserVersionChanged && !producerVersionChanged
-      ? scanSelectedPaths(workspace, requestedPaths)
-      : scanWorkspace(workspace, maxFiles);
-    if (scan.requiresFullScan) scan = scanWorkspace(workspace, maxFiles);
+    const collectionOptions = { ...collectOptionsFromWorkspace(workspace), collectionContext: job.collectionContext };
+    const observe = createCollectionPathObserver(workspace.path, collectionOptions);
+    let scan = incrementalCandidate && !parserVersionChanged && !producerVersionChanged
+      ? scanSelectedPaths(workspace, requestedPaths, job.collectionContext)
+      : scanWorkspace(workspace, maxFiles, job.collectionContext);
+    if (scan.requiresFullScan || (scan.mode === 'incremental' && hasIndexedDescendants(db, scan))) {
+      scan = scanWorkspace(workspace, maxFiles, job.collectionContext);
+      // The targeted manifest contains exact paths only, not old directory children.
+      // Reload it before all change, addition, deletion and relationship decisions.
+      manifest = listManifest(db);
+      manifestByPath = new Map(manifest.map(item => [item.path, item]));
+      assertIndexIntegrity(db);
+    }
     throwIfAborted(signal);
 
     const changed = job?.kind === 'rebuild' || producerVersionChanged
       ? scan.candidates
       : scan.candidates.filter(candidate => candidateChanged(candidate, manifestByPath.get(candidate.path)));
-    const deletionDeferred = scan.mode === 'full' && scan.truncated;
     const deleted = scan.mode === 'full'
-      ? deletionDeferred ? [] : manifest.filter(item => !scan.currentPaths.has(item.path)).map(item => item.path)
+      ? observedRetirements(scan, manifest, observe)
       : [...scan.missingPaths].filter(relativePath => manifestByPath.has(relativePath));
+    const deletionDeferred = scan.mode === 'full' && !scan.complete;
     if (!changed.length && !deleted.length && previousGeneration) {
-      const metadata = indexMetadata(db, previousGeneration, workspace, scan, checkedAt, true, 0, 0, 0, 0, deletionDeferred);
+      const metadata = indexMetadata(db, previousGeneration, workspace, scan, checkedAt, true, 0, 0, 0, scan.observationFailureCount, deletionDeferred);
       return attachZoektMetadata(metadata, job, workspace, databaseFile, scan, signal);
     }
 
@@ -172,9 +183,9 @@ async function refreshRepositoryIndex(job, signal) {
       ? relationshipImpactForPaths(db, relationshipPaths)
       : null;
     const relationshipNames = new Set(relationshipImpact?.relationshipNames || []);
-    let relationshipScopeSafe = canScopeRelationships;
+    let relationshipScopeSafe = canScopeRelationships && scan.observationFailureCount === 0;
 
-    let sourceReadFailureCount = 0;
+    let sourceReadFailureCount = scan.observationFailureCount;
     const generationKind = previousGeneration ? normalizeGenerationKind(job?.kind) : 'build';
     generationId = beginGeneration(db, generationKind);
     db.exec('BEGIN IMMEDIATE');
@@ -186,7 +197,7 @@ async function refreshRepositoryIndex(job, signal) {
       const failedPaths = [];
       const parsedResults = await mapWithConcurrency(batch, PARSE_CONCURRENCY, async candidate => {
         throwIfAborted(signal);
-        return { candidate, result: await parseCandidate(candidate) };
+        return { candidate, result: await parseCandidate(candidate, observe) };
       });
       for (const { candidate, result: parsedResult } of parsedResults) {
         if (parsedResult.parsed) {
@@ -207,6 +218,7 @@ async function refreshRepositoryIndex(job, signal) {
           relationshipScopeSafe = false;
           if (!manifestByPath.has(candidate.path)) failedPaths.push(candidate.path);
         } else {
+          if (parsedResult.skipped === 'too-large') scan.skippedLargeFiles += 1;
           failedPaths.push(candidate.path);
           relationshipScopeSafe = false;
         }
@@ -334,59 +346,101 @@ async function attachZoektMetadata(metadata, job, workspace, databaseFile, scan,
   }
 }
 
-function scanWorkspace(workspace, maxFiles = DEFAULT_MAX_INDEX_FILES) {
-  const realRoot = realRootOf(workspace.path);
-  const tree = collectTextFiles(workspace.path, collectOptionsFromWorkspace(workspace, { maxEntries: maxFiles }));
-  const candidates = [];
-  let skippedLargeFiles = 0;
-  for (const relativePath of tree.files) {
-    const candidate = candidateForPath(realRoot, relativePath);
-    if (!candidate) continue;
-    if (candidate.tooLarge) { skippedLargeFiles += 1; continue; }
-    candidates.push(candidate);
-  }
-  return {
-    mode: 'full', candidates, currentPaths: new Set(candidates.map(item => item.path)), missingPaths: new Set(),
-    discoveredFiles: tree.files.length, collectionSkippedCount: tree.skipped.length, skippedLargeFiles,
-    truncated: tree.truncated, requiresFullScan: false
+function scanWorkspace(workspace, maxFiles = DEFAULT_MAX_INDEX_FILES, collectionContext) {
+  const options = collectOptionsFromWorkspace(workspace, { maxEntries: maxFiles });
+  collectionContext ||= createCollectionContext(workspace.path, options);
+  const collectionOptions = { ...options, collectionContext };
+  const observe = createCollectionPathObserver(workspace.path, collectionOptions);
+  const tree = collectTextFiles(workspace.path, collectionOptions);
+  const scan = {
+    mode: 'full', candidates: [], currentPaths: new Set(), missingPaths: new Set(),
+    discoveredFiles: tree.files.length, collectionSkippedCount: tree.skipped.length, skippedLargeFiles: 0,
+    truncated: tree.truncated, complete: tree.complete, incompletePaths: [...tree.incompletePaths],
+    observationFailureCount: tree.skipped.filter(item => item.unavailable === true).length,
+    requiresFullScan: false
   };
+  for (const relativePath of tree.files) addObservedCandidate(scan, observe(relativePath));
+  return scan;
 }
 
-function scanSelectedPaths(workspace, requestedPaths) {
-  const realRoot = realRootOf(workspace.path);
-  const candidates = [];
-  const currentPaths = new Set();
-  const missingPaths = new Set();
-  let skippedLargeFiles = 0;
+function scanSelectedPaths(workspace, requestedPaths, collectionContext) {
+  const observe = createCollectionPathObserver(workspace.path, {
+    ...collectOptionsFromWorkspace(workspace), collectionContext
+  });
+  const scan = {
+    mode: 'incremental', candidates: [], currentPaths: new Set(), missingPaths: new Set(),
+    discoveredFiles: 0, collectionSkippedCount: 0, skippedLargeFiles: 0,
+    truncated: false, complete: true, incompletePaths: [], observationFailureCount: 0,
+    requiresFullScan: false
+  };
   for (const requested of requestedPaths) {
-    const normalized = normalizeRelativePath(requested);
-    if (!normalized) continue;
-    const absolutePath = path.resolve(realRoot, normalized);
-    if (!isPathInside(absolutePath, realRoot)) continue;
-    let stat;
-    try { stat = fs.statSync(absolutePath); } catch { missingPaths.add(normalized); continue; }
-    if (stat.isDirectory()) {
-      return { mode: 'incremental', candidates: [], currentPaths: new Set(), missingPaths: new Set(), discoveredFiles: 0, collectionSkippedCount: 0, skippedLargeFiles: 0, truncated: false, requiresFullScan: true };
-    }
-    if (!stat.isFile()) continue;
-    currentPaths.add(normalized);
-    if (stat.size > MAX_INDEXED_FILE_BYTES) { skippedLargeFiles += 1; missingPaths.add(normalized); continue; }
-    candidates.push(candidateFromStat(normalized, absolutePath, stat));
+    addObservedCandidate(scan, observe(requested));
+    if (scan.requiresFullScan) break;
   }
-  return { mode: 'incremental', candidates, currentPaths, missingPaths, discoveredFiles: candidates.length, collectionSkippedCount: 0, skippedLargeFiles, truncated: false, requiresFullScan: false };
+  scan.discoveredFiles = scan.candidates.length;
+  return scan;
 }
 
-function candidateForPath(realRoot, relativePath) {
-  try {
-    const normalized = normalizeRelativePath(relativePath);
-    if (!normalized) return null;
-    const absolutePath = path.resolve(realRoot, normalized);
-    if (!isPathInside(absolutePath, realRoot)) return null;
-    const stat = fs.statSync(absolutePath);
-    if (!stat.isFile()) return null;
-    if (stat.size > MAX_INDEXED_FILE_BYTES) return { tooLarge: true };
-    return candidateFromStat(normalized, absolutePath, stat);
-  } catch { return null; }
+function addObservedCandidate(scan, observation) {
+  if (observation.status === 'unavailable') {
+    scan.complete = false;
+    scan.incompletePaths.push(observation.path);
+    scan.observationFailureCount += 1;
+    return;
+  }
+  if (observation.status === 'missing' || observation.status === 'excluded') {
+    scan.missingPaths.add(observation.path);
+    scan.collectionSkippedCount += 1;
+    return;
+  }
+  if (observation.stat.isDirectory()) {
+    if (scan.mode === 'incremental') scan.requiresFullScan = true;
+    else scan.missingPaths.add(observation.path); // Verified non-file transition.
+    return;
+  }
+  if (observation.stat.size > MAX_INDEXED_FILE_BYTES) {
+    scan.skippedLargeFiles += 1;
+    scan.missingPaths.add(observation.path);
+    return;
+  }
+  scan.currentPaths.add(observation.path);
+  scan.candidates.push(candidateFromStat(observation.path, observation.absolutePath, observation.stat));
+}
+
+function hasIndexedDescendants(db, scan) {
+  const query = db.prepare('SELECT 1 FROM files WHERE path >= ? AND path < ? LIMIT 1');
+  // '/' followed by any suffix lies strictly below the next ASCII character '0'.
+  // This indexed range avoids LIKE wildcard/case ambiguity and a full manifest read.
+  return [...scan.currentPaths, ...scan.missingPaths].some(relativePath =>
+    Boolean(query.get(relativePath + '/', relativePath + '0')));
+}
+
+function observedRetirements(scan, manifest, observe) {
+  const retired = [];
+  for (const item of manifest) {
+    if (scan.currentPaths.has(item.path)) continue;
+    if (scan.incompletePaths.some(prefix => prefix === '.' || item.path === prefix || item.path.startsWith(prefix + '/'))) continue;
+    const observation = scan.missingPaths.has(item.path) ? null : observe(item.path);
+    if (!observation || observation.status === 'missing' || observation.status === 'excluded'
+      || (observation.status === 'eligible' && (!observation.stat.isFile() || observation.stat.size > MAX_INDEXED_FILE_BYTES))) {
+      retired.push(item.path);
+    } else {
+      // An omitted but currently eligible file is not proven absent either.
+      scan.complete = false;
+      scan.incompletePaths.push(item.path);
+      if (observation.status === 'unavailable') scan.observationFailureCount += 1;
+    }
+  }
+  return retired;
+}
+
+function assertIndexIntegrity(db) {
+  const integrity = checkIndexIntegrity(db);
+  if (!integrity.ok) {
+    const error = new Error(`Repository Intelligence index integrity check failed: ${integrity.message}`);
+    error.code = 'INDEX_INTEGRITY_FAILED';
+    throw error;
+  }
 }
 
 function candidateFromStat(relativePath, absolutePath, stat) {
@@ -409,19 +463,34 @@ function candidateChanged(candidate, previous) {
     || previous.parserVersion !== PARSER_VERSION;
 }
 
-async function parseCandidate(candidate) {
+async function parseCandidate(candidate, observe) {
+  const observation = observe(candidate.path);
+  if (observation.status === 'unavailable') {
+    return { parsed: null, transientError: observation.reason };
+  }
+  if (observation.status !== 'eligible' || !observation.stat.isFile()) {
+    return { parsed: null, skipped: 'ineligible' };
+  }
+  if (observation.stat.size > MAX_INDEXED_FILE_BYTES) return { parsed: null, skipped: 'too-large' };
+  Object.assign(candidate, candidateFromStat(observation.path, observation.absolutePath, observation.stat));
   let data;
   try {
+    // The canonical observation is not a lasting read capability. No atomic
+    // no-follow guarantee is claimed across the observation/read boundary.
     data = fs.readFileSync(candidate.absolutePath);
   } catch (error) {
     return { parsed: null, transientError: boundedErrorMessage(error) };
   }
+  if (data.length > MAX_INDEXED_FILE_BYTES) return { parsed: null, skipped: 'too-large' };
   if (looksBinary(data)) return { parsed: null, skipped: 'binary' };
   try {
     const source = data.toString('utf8');
     const parsed = shouldSkipStructuralParsing(candidate, data)
       ? generatedLexicalResult(candidate.path, candidate.language, source)
       : await parseSourceFile({ relativePath: candidate.path, source });
+    if (parsed.structuralStatus === 'failed' || parsed.structuralStatus === 'unavailable') {
+      return { parsed: null, transientError: parsed.structuralError || 'Structural parser is unavailable.' };
+    }
     candidate.contentHash ||= crypto.createHash('sha256').update(data).digest('hex');
     return { parsed };
   } catch (error) {
@@ -471,11 +540,11 @@ function indexMetadata(
   deletionDeferred = false
 ) {
   const stats = indexStats(db);
-  const needsReconcile = sourceReadFailureCount > 0 || scan.truncated;
+  const needsReconcile = sourceReadFailureCount > 0 || scan.complete === false || scan.truncated;
   const producerVersion = intelligenceRuntimeFingerprint();
   const workspaceProducerVersion = intelligenceWorkspaceFingerprint(workspace.path);
   const runtimeStale = Boolean(workspaceProducerVersion && workspaceProducerVersion !== producerVersion);
-  const freshness = runtimeStale ? 'runtime-stale' : sourceReadFailureCount > 0 ? 'stale' : scan.truncated ? 'partial' : 'current';
+  const freshness = runtimeStale ? 'runtime-stale' : sourceReadFailureCount > 0 || (scan.complete === false && !scan.truncated) ? 'stale' : scan.truncated ? 'partial' : 'current';
   return {
     mode: 'persistent-tree-sitter-sqlite', persistent: true, freshness, cacheHit, scanMode: scan.mode, workerIsolated: true,
     fingerprint: `generation:${Number(generation?.id || 0)}`, generation: Number(generation?.id || 0),
@@ -514,7 +583,7 @@ function discardRepositoryIndex(databaseFile) {
 }
 
 function isRecoverableIndexError(error) {
-  if (!error || error.code === 'INDEX_ABORTED' || error.code === 'INDEX_SCHEMA_FUTURE') return false;
+  if (!error || ['INDEX_ABORTED', 'INDEX_SCHEMA_FUTURE', 'COLLECTION_POLICY_UNAVAILABLE', 'INDEX_SOURCE_CHANGED'].includes(error.code)) return false;
   if (error.code === 'INDEX_PRODUCER_CHANGED') return true;
   if (error.code === 'INDEX_INTEGRITY_FAILED') return true;
   return /(?:database disk image is malformed|database is malformed|file is not a database|database corrupt|sqlite_corrupt|sqlite_notadb)/.test(boundedErrorMessage(error).toLowerCase());
@@ -541,9 +610,9 @@ function normalizeRequestedPaths(paths) {
 }
 
 function normalizeRelativePath(value) {
-  const normalized = String(value || '').replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '').trim();
-  if (!normalized || normalized === '.' || normalized.startsWith('../') || normalized.includes('/../')) return '';
-  return path.posix.normalize(normalized);
+  // Keep invalid absolute, traversal and whitespace spelling for canonical
+  // observation; never turn it into a different, deletion-authorizing path.
+  return String(value || '').replaceAll('\\', '/').replace(/^\.\//, '');
 }
 
 function normalizeJobKind(value) {

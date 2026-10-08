@@ -29,9 +29,11 @@ function buildCompletionNotification(task = {}) {
   const summary = truncateNotificationText(task.summary, NOTIFICATION_SUMMARY_LIMIT);
   const workspace = truncateNotificationText(task.workspace, 64);
   const validationLevel = truncateNotificationText(task.validationLevel, 24).toLowerCase();
-  const parts = [summary || 'The coding task completed successfully.'];
+  const parts = [summary || 'The coding task completed.'];
   if (workspace) parts.push(`Project: ${workspace}.`);
-  parts.push(validationLevel ? `Final ${validationLevel} checks passed.` : 'Final checks passed.');
+  if (task.validationStatus === 'passed') {
+    parts.push(validationLevel ? `Final ${validationLevel} checks passed.` : 'Final checks passed.');
+  }
   return {
     title: 'Task completed',
     body: truncateNotificationText(parts.join(' '), NOTIFICATION_BODY_LIMIT)

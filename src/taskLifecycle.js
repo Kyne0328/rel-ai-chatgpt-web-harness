@@ -88,16 +88,17 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
   const represented = Boolean(receipt) || lifecycleIndex >= 0;
   const timestamp = timestampMs(event.ts || event.timestamp) || eventTimestampMs(previousEvent || {}) || Date.now();
   const ended = timestamp + Math.max(0, Number(event.ms || event.durationMs || 0));
-  const completion = event.ok !== false && (event.completionKnown === true || event.tool === OP.WORK_FINISH);
+  const resultFactsEligible = event.taskResultFactsEligible !== false && event.metadata?.taskResultFactsEligible !== false;
+  const completion = resultFactsEligible && event.ok !== false && (event.completionKnown === true || event.tool === OP.WORK_FINISH);
   const cancellationStatus = String(event.taskCancellationStatus || '').trim().toLowerCase();
-  const cancellationPending = event.ok !== false && event.tool === OP.WORK_CANCEL && cancellationStatus === 'cancelling';
-  const cancellation = event.ok !== false && event.tool === OP.WORK_CANCEL && !cancellationPending;
+  const cancellationPending = resultFactsEligible && event.ok !== false && event.tool === OP.WORK_CANCEL && cancellationStatus === 'cancelling';
+  const cancellation = resultFactsEligible && event.ok !== false && event.tool === OP.WORK_CANCEL && !cancellationPending;
   const changedFiles = unique([
     ...(current.changedFiles || []),
-    ...(Array.isArray(event.taskOwnedChangedFiles) ? event.taskOwnedChangedFiles : []),
-    ...(Array.isArray(event.changedFiles) ? event.changedFiles : [])
+    ...(resultFactsEligible && Array.isArray(event.taskOwnedChangedFiles) ? event.taskOwnedChangedFiles : []),
+    ...(resultFactsEligible && Array.isArray(event.changedFiles) ? event.changedFiles : [])
   ].map(String).filter(Boolean));
-  const recoverableValidationFailure = event.tool === OP.VALIDATE_CHECKS && ['failed', 'not_run'].includes(String(event.validationStatus || ''));
+  const recoverableValidationFailure = resultFactsEligible && event.tool === OP.VALIDATE_CHECKS && ['failed', 'not_run'].includes(String(event.validationStatus || ''));
   const priorOutcome = receipt?.outcome || eventCounterOutcome(previousEvent);
   const incomingOutcome = eventCounterOutcome(event, true);
   const outcome = incomingOutcome === 'pending' && priorOutcome !== 'pending' ? priorOutcome : incomingOutcome;
@@ -111,7 +112,7 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
   const events = lifecycleIndex >= 0
     ? current.events.map((item, index) => index === lifecycleIndex ? { ...item, ...compact } : item)
     : [...current.events, compact];
-  const status = completion || current.completionKnown
+  const status = !resultFactsEligible ? current.status : completion || current.completionKnown
     ? 'completed'
     : cancellation
       ? 'cancelled'
@@ -124,16 +125,18 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
           : 'planning';
   const terminal = isTerminalTaskStatus(status);
   const startedAtMs = timestampMs(current.startedAt);
-  const startedAt = startedAtMs && startedAtMs <= timestamp
+  const startedAt = !resultFactsEligible ? current.startedAt : startedAtMs && startedAtMs <= timestamp
     ? current.startedAt
     : new Date(timestamp).toISOString();
   const updatedAt = new Date(Math.max(ended, timestampMs(current.updatedAt), timestampMs(current.endedAt))).toISOString();
-  const validation = event.validationStatus === 'not_required'
+  const validation = !resultFactsEligible ? current.validation || 'not_run' : event.validationStatus === 'not_required'
     ? 'not_required'
-    : event.tool === OP.VALIDATE_CHECKS
-      ? validationState(event)
-      : current.validation || 'not_run';
-  const eventCommitHead = String(event.commitHead || event.metadata?.commitHead || '').trim();
+    : completion && ['passed', 'failed', 'stale', 'not_run'].includes(String(event.validationStatus || ''))
+      ? String(event.validationStatus)
+      : event.tool === OP.VALIDATE_CHECKS
+        ? validationState(event)
+        : current.validation || 'not_run';
+  const eventCommitHead = resultFactsEligible ? String(event.commitHead || event.metadata?.commitHead || '').trim() : '';
   const commitHeads = unique([
     ...(Array.isArray(current.commitHeads) ? current.commitHeads : []),
     ...(eventCommitHead ? [eventCommitHead] : [])
@@ -156,10 +159,10 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
     startedAt,
     updatedAt,
     lastActivityAt: updatedAt,
-    endedAt: terminal ? updatedAt : null,
-    completedAt: status === 'completed' ? updatedAt : null,
-    cancelledAt: status === 'cancelled' ? updatedAt : null,
-    durationMs: Math.max(0, timestampMs(updatedAt) - timestampMs(startedAt)),
+    endedAt: !resultFactsEligible ? current.endedAt : terminal ? updatedAt : null,
+    completedAt: !resultFactsEligible ? current.completedAt : status === 'completed' ? updatedAt : null,
+    cancelledAt: !resultFactsEligible ? current.cancelledAt : status === 'cancelled' ? updatedAt : null,
+    durationMs: !resultFactsEligible ? current.durationMs : Math.max(0, timestampMs(updatedAt) - timestampMs(startedAt)),
     calls,
     toolCallCount: Math.max(Number(current.toolCallCount || 0), calls),
     successfulToolCallCount,
@@ -169,16 +172,16 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
     changedFiles,
     changedFileCount: changedFiles.length,
     validation,
-    committed: Boolean(current.committed || (event.tool === OP.PUBLISH_COMMIT && event.ok !== false)),
+    committed: Boolean(current.committed || (resultFactsEligible && event.tool === OP.PUBLISH_COMMIT && event.commitCreated === true)),
     commitHead: eventCommitHead || current.commitHead || '',
     commitHeads,
-    pushed: Boolean(current.pushed || (event.tool === OP.PUBLISH_PUSH && event.ok !== false)),
-    prDrafted: Boolean(current.prDrafted || (event.tool === OP.PUBLISH_DRAFT_PR && event.ok !== false)),
+    pushed: Boolean(current.pushed || (resultFactsEligible && event.tool === OP.PUBLISH_PUSH && event.pushPublished === true)),
+    prDrafted: Boolean(current.prDrafted || (resultFactsEligible && event.tool === OP.PUBLISH_DRAFT_PR && event.ok !== false)),
     lastTool: event.tool || current.lastTool || '',
     operation: event.operation || current.operation || operationForTool(event.tool),
     lastOutcome: event.ok === false ? 'failed' : 'succeeded',
-    activeCalls: 0,
-    currentOperations: [],
+    activeCalls: resultFactsEligible ? 0 : current.activeCalls,
+    currentOperations: resultFactsEligible ? [] : current.currentOperations,
     events: events.slice(-MAX_SESSION_EVENTS)
   }, { eventsAlreadySanitized: true });
 }
@@ -268,12 +271,13 @@ function compactLifecycleEvent(event) {
   const keep = [
     'id', 'eventId', 'auditId', 'eventIdentitySource', 'eventIdentityOccurrence', 'ts', 'timestamp', 'startedAt', 'completedAt', 'durationMs', 'pid', 'taskId',
     'operationId', 'requestId', 'serverInstanceId', 'transportType', 'clientName', 'clientVersion',
-    'taskIdentityVersion', 'taskIdExplicit', 'taskHistoryEligible', 'duplicateRequest', 'eventType',
+    'taskIdentityVersion', 'taskIdExplicit', 'taskHistoryEligible', 'taskResultFactsEligible', 'duplicateRequest', 'eventType',
     'category', 'action', 'status', 'title', 'summary', 'currentStage', 'currentActivity', 'tool',
     'operation', 'workspace', 'target', 'result', 'metadata', 'progress', 'ok', 'ms', 'changedFiles',
     'taskOwnedChangedFiles', 'externalChangedFiles', 'validationStatus', 'validationFingerprint',
     'taskMutationGeneration', 'taskValidatedMutationGeneration', 'taskWorkspaceGeneration',
-    'completionKnown', 'endReason', 'completionSource', 'taskSummary', 'commitHead', 'message', 'error', 'path'
+    'completionKnown', 'endReason', 'completionSource', 'taskSummary', 'commitHead', 'commitCreated', 'pushPublished',
+    'mutationEffect', 'mutationUnknown', 'possibleChangedFiles', 'message', 'error', 'path'
   ];
   const compact = Object.fromEntries(keep.filter(key => event[key] !== undefined).map(key => [key, event[key]]));
   for (const key of ['taskSummary', 'message', 'error']) {
@@ -287,7 +291,8 @@ function compactLifecycleEvent(event) {
 function eventCounterOutcome(event, audit = false) {
   if (!event) return 'pending';
   if (['running', 'queued', 'pending', 'accepted'].includes(event.status)) return 'pending';
-  if (event.tool === OP.VALIDATE_CHECKS && ['failed', 'not_run'].includes(String(event.validationStatus || ''))) return 'validation_failed';
+  if (event.taskResultFactsEligible !== false && event.metadata?.taskResultFactsEligible !== false
+    && event.tool === OP.VALIDATE_CHECKS && ['failed', 'not_run'].includes(String(event.validationStatus || ''))) return 'validation_failed';
   if (event.ok === false || event.status === 'failed') return 'failed';
   if (event.status === 'cancelled') return 'cancelled';
   return audit || event.ok === true || event.status === 'succeeded' ? 'succeeded' : 'pending';
@@ -360,6 +365,7 @@ function mergeCounterReceipts(left, right, events) {
 }
 
 function validationState(event) {
+  if (event.validationStatus === 'stale') return 'stale';
   if (event.ok === false || event.validationStatus === 'failed') return 'failed';
   if (event.validationStatus === 'not_required') return 'not_required';
   return event.validationStatus === 'passed' ? 'passed' : 'not_run';

@@ -180,7 +180,7 @@ try {
   const commit = await relaiGitCommit(workspace, config, { work_id: nativeTask, message: 'native output', _taskOwnedPaths: ['firmware-extract/native.txt'] });
   assert.equal(commit.ok, true, JSON.stringify(commit));
   assert.equal(git('ls-files', 'firmware-extract').trim(), 'firmware-extract/native.txt', 'commit never stages the opaque directory');
-  await event(nativeTask, 'publish.commit', { committedFiles: commit.paths });
+  await event(nativeTask, 'publish.commit', { commitCreated: commit.committed === true, committedFiles: commit.paths });
   fs.appendFileSync(path.join(repo, 'firmware-extract/native.txt'), 'later user edit\n');
   const later = workspaceReplace(workspace, config, { work_id: nativeTask, path: 'firmware-extract/native.txt', oldText: 'native output', newText: 'new native output' });
   await event(nativeTask, 'edit', later);

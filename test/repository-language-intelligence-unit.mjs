@@ -4,10 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { openIndexDatabase, repositoryIndexPath } from '../src/repository/intelligence/database.js';
-import { enhancedResolverLanguages, languageCapabilities, languageForPath, structuralLanguages } from '../src/repository/intelligence/languages.js';
+import { enhancedResolverLanguages, languageCapabilities, languageForPath } from '../src/repository/intelligence/languages.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
 
-assert.equal(structuralLanguages().length, 78);
+const expectedStructuralLanguageCount = Object.keys(JSON.parse(
+  fs.readFileSync(new URL('../vendor/tree-sitter/manifest.json', import.meta.url), 'utf8')
+).grammars).length;
 const EXPECTED_ENHANCED = ['c', 'cpp', 'csharp', 'go', 'java', 'javascript', 'kotlin', 'php', 'python', 'ruby', 'rust', 'tsx', 'typescript'];
 assert.deepEqual(enhancedResolverLanguages().sort(), EXPECTED_ENHANCED);
 assert.equal(languageForPath('src/app.ts'), 'typescript');
@@ -48,7 +50,7 @@ const config = { stateDir };
 
 try {
   const index = await repositoryIntelligence.ensure(workspace, config);
-  assert.equal(index.languageIntelligence.structuralLanguages, 78);
+  assert.equal(index.languageIntelligence.structuralLanguages, expectedStructuralLanguageCount);
   assert.deepEqual(index.languageIntelligence.enhancedLanguages.sort(), EXPECTED_ENHANCED);
   const db = openIndexDatabase(repositoryIndexPath(config, workspace), { readonly: true });
   try {

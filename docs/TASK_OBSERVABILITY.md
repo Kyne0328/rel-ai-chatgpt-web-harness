@@ -2,7 +2,7 @@
 
 ## Scope
 
-Rel.AI MCP uses one logical-task tracker, one canonical task-state vocabulary, one activity-event normalization path, one JSON session store, one snapshot-based Server-Sent Events transport, and one shared frontend clock. The observability implementation repairs those existing owners rather than introducing a second task model, event bus, persistence layer, polling loop, or realtime protocol.
+Rel.AI MCP uses one logical-task tracker, one canonical task-state vocabulary, one activity-event normalization path, one task-history store in the shared SQLite database, one typed Server-Sent Events transport, and one shared frontend clock. The observability implementation repairs those existing owners rather than introducing a second task model, event bus, persistence layer, polling loop, or realtime protocol.
 
 The system reports what Rel.AI can observe: tool acquisition, queueing, approval waits, tool execution, validation work, progress, terminal outcomes, and persisted history. It does not infer ChatGPT's private reasoning or claim that an overall chat request is complete without an accepted completion call.
 
@@ -17,10 +17,11 @@ MCP tools/call
 → src/taskObservability.js derives a sanitized structured outcome
 → the lifecycle event is updated by stable operation/event ID
 → src/taskHistoryStore.ts normalizes and upserts the canonical task snapshot
-→ src/taskHistoryStorage.ts sanitizes before disk write and after disk read
-→ src/http/dashboardData.js builds the canonical dashboard projection
-→ src/http/dashboard.js publishes an ordered snapshot over the existing SSE stream
-→ src/ui/snapshot-order.js rejects duplicate or stale snapshots
+→ src/taskHistoryStorage.ts sanitizes task-history records before SQLite persistence and after reading
+→ src/core/dashboard-data.ts builds the canonical dashboard projection
+→ src/core/dashboard-runtime.ts publishes typed domain events through src/http/dashboard.ts
+→ src/ui/events.js receives typed SSE events
+→ src/ui/store.js rejects mismatched streams and non-increasing domain revisions
 → Sessions, Activity, progress, and elapsed-time views render canonical state
 ```
 
@@ -36,10 +37,10 @@ MCP tools/call
 | Validation and diagnostic work-unit progress | `src/bridge/validation.js` and `src/bridge/diagnosticsRunner.js` |
 | Cooperative process cancellation | `src/abortSignals.js`, `src/process.js`, and process-backed bridges |
 | Queue-wait activity | `src/tools/execution.js` through the current activity context |
-| Persistence and historical read normalization | `src/taskHistoryStore.ts` and `src/taskHistoryStorage.ts` |
-| Dashboard projection and copy-safe activity | `src/http/dashboardData.js` |
-| Snapshot stream ID and sequence | `src/http/dashboard.js` |
-| Duplicate/stale snapshot rejection | `src/ui/snapshot-order.js` |
+| Persistence and historical read normalization | `src/taskHistoryStore.ts`, `src/taskHistoryStorage.ts`, and `src/stateDatabase.ts` |
+| Dashboard projection and copy-safe activity | `src/core/dashboard-data.ts` |
+| Typed SSE stream identity, sequence, and domain revisions | `src/core/dashboard-runtime.ts` through `src/http/dashboard.ts` |
+| Live-event stream and revision checks | `src/ui/store.js` |
 | Presentation-only current time | `src/ui/clock.js` |
 | Task progress rendering | `src/ui/components/task-progress.js` |
 | Repository/runtime compatibility | `src/runtimeCompatibility.js` and `release-manifest.json` |
@@ -192,15 +193,15 @@ The same rules are reused defensively when completion-related strings enter:
 - dashboard snapshots and SSE payloads;
 - the Activity copy/export projection.
 
-This is defense in depth, not a claim that arbitrary human text can be classified perfectly. Production-path tests use synthetic credential-like values and verify that the original values do not appear in the tracker, raw history JSON, dashboard payload, SSE-compatible snapshot, activity details, or copied safe JSON. Real credentials must never be used as test fixtures.
+This is defense in depth, not a claim that arbitrary human text can be classified perfectly. Production-path tests use synthetic credential-like values and verify that the original values do not appear in the tracker, persisted task-history records, dashboard payload, SSE-compatible snapshot, activity details, or copied safe JSON. Real credentials must never be used as test fixtures.
 
 ## Realtime and reconnect correctness
 
-The existing canonical-snapshot SSE design remains authoritative.
+Aggregate dashboard snapshots provide initial state and catch-up; typed SSE domain events provide live updates.
 
-Every snapshot includes a process-scoped stream ID, a strictly increasing sequence, a generation timestamp, and the task model version. A new connection receives the current canonical snapshot. The frontend rejects duplicate or lower sequences within the same stream, accepts a new ordering domain after restart, and restores persisted task state and progress after reconnect.
+Aggregate responses retain their own snapshot metadata and include live stream identity and per-domain revisions. A new SSE connection receives a `ready` event containing current live metadata, not a full dashboard snapshot. Domain events carry a process-scoped stream ID, sequence, domain revision, and generation timestamp. `src/ui/store.js` rejects a different nonempty live stream ID or a non-increasing domain revision; sequence is SSE event-ID metadata, not its acceptance guard. The browser coordinator in `public/dashboard.js` refreshes the aggregate read model when ready metadata indicates a changed stream or newer domain revisions. Aggregate refresh establishes the incoming live stream and revisions.
 
-Stable event IDs make event upserts idempotent. Persisted terminal state rejects older nonterminal updates. No separate event-replay infrastructure is added because the canonical snapshot already supplies reconnect recovery.
+Stable event IDs make task-event upserts idempotent. Persisted terminal state rejects older nonterminal updates. Aggregate catch-up restores the current task/history projection without adding a separate live-event replay owner.
 
 ## Runtime and repository compatibility
 

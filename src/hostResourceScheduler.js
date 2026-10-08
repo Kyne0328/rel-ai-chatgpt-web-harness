@@ -116,14 +116,20 @@ function createFairResourceScheduler(limits = {}, {
       let progress;
       do {
         progress = false;
-        // Inspect one FIFO head per owner per turn. A blocked heavy ticket
-        // never prevents an unrelated light lane or another owner progressing.
+        // Inspect the oldest eligible ticket per owner per turn. A blocked
+        // multi-lane ticket cannot hold up work needing only available lanes;
+        // same-primary tickets with identical resource sets retain FIFO admission.
         for (const lane of lanes.values()) {
           const owners = [...lane.order];
           for (const owner of owners) {
-            const ticket = lane.owners.get(owner)?.[0];
+            let ticket = null;
+            for (const candidate of [...(lane.owners.get(owner) || [])]) {
+              if (allowed(candidate)) { ticket = candidate; break; }
+              // Rejection removes a ticket even without admitting work. Count
+              // that progress so an expired head cannot strand its successor.
+              if (!candidate.queued) progress = true;
+            }
             if (!ticket) continue;
-            if (!allowed(ticket)) continue;
             // Move this owner to the end even if their FIFO empties on admit.
             lane.order = lane.order.filter(value => value !== owner);
             lane.order.push(owner);

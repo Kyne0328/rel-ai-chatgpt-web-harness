@@ -32,6 +32,13 @@ const executionsByOperationId = new Map();
 const pendingCompletionDeliveries = new Map();
 const fallbackPersistenceRetries = new Map();
 const FALLBACK_PERSISTENCE_RETRY_DELAYS_MS = [25, 100, 500, 2000, 5000];
+const legacyScopeRecoveries = new Map();
+const LEGACY_SYNC_ENTRIES = 256;
+const LEGACY_SYNC_BYTES = 512 * 1024;
+const LEGACY_SYNC_MS = 20;
+const LEGACY_RECOVERY_MAX_ENTRIES = 200_000;
+const LEGACY_RECOVERY_MAX_BYTES = 64 * 1024 * 1024;
+const LEGACY_RECOVERY_FILE_BYTES = 1024 * 1024;
 
 function activeFallbackWorkIds() {
   return [...new Set([...executionsByOperationId.values()]
@@ -97,6 +104,7 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
     cancellationRequestedAt: '',
     cancellationReason: '',
     persist: persist !== false,
+    stateRoot: config ? getStateDir(config) : '',
     deliveryAcknowledged: false,
     controller,
     promise: null
@@ -107,7 +115,12 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
   persistFallbackRecord(config, record, { required: true });
 
   record.promise = Promise.resolve()
-    .then(() => run(controller.signal, record.operationId))
+    .then(() => {
+      // Shutdown or cancellation can arrive after durable admission but
+      // before the handler microtask starts. Never start that handler then.
+      if (controller.signal.aborted && record.shutdownInterrupted === true) throw controller.signal.reason || new Error('Operation interrupted before execution.');
+      return run(controller.signal, record.operationId);
+    })
     .then(async result => {
       const resultTimeline = result?.structuredContent?.timeline || { ...record.timeline, executed: result?.structuredContent?.executed };
       updateFallbackExecutionPhase(record.operationId, 'persisting', config, resultTimeline);
@@ -121,6 +134,7 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
         }
       }
       if (controller.signal.aborted) {
+        const serviceShutdown = controller.signal.reason?.code === 'SERVICE_SHUTDOWN';
         // Cancellation stays terminal, but the handler may hold the only evidence
         // that a subprocess is still alive or its mutations are unknown.
         const structured = result?.structuredContent || result?.result || {};
@@ -134,8 +148,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
           structuredContent: {
             ...structured,
             ok: false,
-            status: 'cancelled',
-            cancelled: true,
+            status: serviceShutdown ? 'interrupted' : 'cancelled',
+            ...(serviceShutdown ? { shutdownInterrupted: true, retryable: false } : { cancelled: true }),
             ...(Object.hasOwn(structured, 'commandSucceeded') ? { commandSucceeded: false } : {}),
             ...(structured.error ? {} : { error: reason }),
             ...(structured.errorCode ? {} : { errorCode: 'CANCELLED' }),
@@ -146,7 +160,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
         settleCancelledRecord(record, now, controller.signal.reason);
         persistFallbackRecord(config, record);
         deliverFallbackCompletion(config, record);
-        return { ok: false, cancelled: true, error: controller.signal.reason, result: record.result };
+        return { ok: false, ...(serviceShutdown ? { interrupted: true } : { cancelled: true }),
+          error: controller.signal.reason, result: record.result };
       }
       settleRecord(record, result?.isError === true ? FALLBACK_EXECUTION_STATUS.FAILED : FALLBACK_EXECUTION_STATUS.COMPLETED, now);
       record.result = result || null;
@@ -160,7 +175,8 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
         settleCancelledRecord(record, now, controller.signal.reason || error);
         persistFallbackRecord(config, record);
         deliverFallbackCompletion(config, record);
-        return { ok: false, cancelled: true, error: controller.signal.reason || error };
+        return { ok: false, ...(controller.signal.reason?.code === 'SERVICE_SHUTDOWN'
+          ? { interrupted: true } : { cancelled: true }), error: controller.signal.reason || error };
       }
       settleRecord(record, FALLBACK_EXECUTION_STATUS.FAILED, now);
       record.error = error instanceof Error ? error.message : String(error);
@@ -268,6 +284,72 @@ function scopeIndexFile(config, executionKey, noticeScope) {
   return path.join(getStateDir(config), 'fallback-scopes', `${key}.json`);
 }
 
+function legacyRecoveryError(message, cause) {
+  return Object.assign(new Error(message, cause ? { cause } : undefined), {
+    code: 'FALLBACK_RECOVERY_UNAVAILABLE', executed: false, retryable: true
+  });
+}
+
+function legacyDirectoryStamp(root) {
+  try {
+    const stat = fs.statSync(root);
+    if (!stat.isDirectory()) throw new Error('Operation storage is not a directory.');
+    return `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') return null;
+    throw legacyRecoveryError('Retained operation storage is unavailable. Restore it before retrying.', cause);
+  }
+}
+
+// A missing pre-index scope is not evidence of absence. An overflowing
+// synchronous probe continues in small asynchronous slices; retries use its
+// progress instead of traversing the first entries again on every request.
+function beginLegacyScopeRecovery(root, stamp) {
+  const state = { stamp, status: 'running', candidates: [], error: null, generation: 0 };
+  legacyScopeRecoveries.set(root, state);
+  void (async () => {
+    let entries = 0;
+    let bytes = 0;
+    let sliceStart = Date.now();
+    try {
+      const directory = await fs.promises.opendir(root);
+      for await (const entry of directory) {
+        if (legacyScopeRecoveries.get(root) !== state) return;
+        if (++entries > LEGACY_RECOVERY_MAX_ENTRIES) {
+          throw legacyRecoveryError('Legacy replay recovery exceeded the physical entry limit.');
+        }
+        if (entry.isFile() && /^fallback_[A-Za-z0-9_-]{20,160}\.json$/.test(entry.name)) {
+          const file = path.join(root, entry.name);
+          const stat = await fs.promises.stat(file);
+          if (!stat.isFile() || stat.size > LEGACY_RECOVERY_FILE_BYTES
+            || bytes + stat.size > LEGACY_RECOVERY_MAX_BYTES) {
+            throw legacyRecoveryError('Legacy replay recovery exceeded the retained byte limit.');
+          }
+          bytes += stat.size;
+          const record = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+          if (!record || record.operationId !== entry.name.slice(0, -5)) {
+            throw legacyRecoveryError('A retained operation record has invalid ownership.');
+          }
+          if (!record.workId) state.candidates.push(record);
+        }
+        if (entries % 64 === 0 || Date.now() - sliceStart >= LEGACY_SYNC_MS) {
+          await new Promise(resolve => setImmediate(resolve));
+          sliceStart = Date.now();
+        }
+      }
+      if (legacyDirectoryStamp(root) !== stamp) {
+        throw legacyRecoveryError('Retained operation storage changed during replay recovery. Retry recovery.');
+      }
+      state.status = 'done';
+    } catch (cause) {
+      state.error = cause?.code === 'FALLBACK_RECOVERY_UNAVAILABLE' ? cause
+        : legacyRecoveryError('A retained operation record is unreadable. Inspect storage before retrying.', cause);
+      state.status = 'failed';
+    }
+  })();
+  return state;
+}
+
 function readPersistedScope(config, reference, options = {}) {
   const scope = String(options.noticeScope || '');
   const matching = record => Boolean(record && !record.workId && record.executionKey === reference
@@ -296,6 +378,27 @@ function readPersistedScope(config, reference, options = {}) {
   // Compatibility for pre-index records. Bound synchronous recovery and fail
   // closed if its scan budget is exhausted rather than risk duplicate execution.
   const root = path.join(getStateDir(config), 'fallback-executions');
+  const stamp = legacyDirectoryStamp(root);
+  if (stamp === null) return [];
+  let recovery = legacyScopeRecoveries.get(root);
+  if (recovery && recovery.stamp !== stamp) {
+    legacyScopeRecoveries.delete(root);
+    recovery = null;
+  }
+  if (recovery) {
+    if (recovery.status === 'failed') throw recovery.error;
+    if (recovery.status !== 'done') throw legacyRecoveryError('Legacy replay recovery is incomplete. Retry this admission; no operation has been started.');
+    return recovery.candidates
+      .filter(record => matching(record) && fresh(record))
+      .map(record => {
+        // The background scan is a discovery index, not proof that the file
+        // remains intact. Verify exact durable state before replaying.
+        const stored = readFallbackFile(config, record.operationId);
+        if (!stored) throw legacyRecoveryError('A recovered operation disappeared before replay.');
+        return stored;
+      })
+      .sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+  }
   let directory;
   try { directory = fs.opendirSync(root); }
   catch (cause) {
@@ -307,20 +410,39 @@ function readPersistedScope(config, reference, options = {}) {
   }
   const candidates = [];
   let count = 0;
+  let bytes = 0;
+  const startedAt = Date.now();
   try {
     let entry;
     while ((entry = directory.readSync())) {
-      if (++count > 4096) {
-        const error = new Error('Legacy replay recovery exceeds its bounded scan. Retrieve the known operationId before retrying.');
-        error.code = 'FALLBACK_RECOVERY_UNAVAILABLE';
-        throw error;
+      if (++count > LEGACY_SYNC_ENTRIES || bytes > LEGACY_SYNC_BYTES || Date.now() - startedAt > LEGACY_SYNC_MS) {
+        beginLegacyScopeRecovery(root, stamp);
+        throw legacyRecoveryError('Legacy replay recovery is continuing asynchronously. Retry admission without repeating the operation.');
       }
       if (!entry.isFile() || !/^fallback_[A-Za-z0-9_-]{20,160}\.json$/.test(entry.name)) continue;
       let record;
-      try { record = readJsonFile(path.join(root, entry.name)); } catch { continue; }
+      try {
+        const file = path.join(root, entry.name);
+        const stat = fs.statSync(file);
+        if (!stat.isFile() || stat.size > LEGACY_RECOVERY_FILE_BYTES
+          || (bytes += stat.size) > LEGACY_SYNC_BYTES) {
+          beginLegacyScopeRecovery(root, stamp);
+          throw legacyRecoveryError('Legacy replay recovery is continuing asynchronously. Retry admission.');
+        }
+        record = readJsonFile(file);
+      } catch (cause) {
+        if (cause?.code === 'FALLBACK_RECOVERY_UNAVAILABLE') throw cause;
+        throw legacyRecoveryError('A retained operation record is unreadable. Inspect storage before retrying.', cause);
+      }
+      if (!record || record.operationId !== entry.name.slice(0, -5)) {
+        throw legacyRecoveryError('A retained operation record has invalid ownership.');
+      }
       if (matching(record) && fresh(record)) candidates.push(record);
     }
   } finally { directory.closeSync(); }
+  if (legacyDirectoryStamp(root) !== stamp) {
+    throw legacyRecoveryError('Retained operation storage changed during replay recovery. Retry admission.');
+  }
   return candidates.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
 }
 
@@ -348,6 +470,7 @@ function recoverExecutionRecords(reference, options = {}) {
     const recovered = recoverPersistedFallback(options.config, record.operationId, options.now || Date.now, record);
     if (recovered) {
       const hydrated = hydratePersistedRecord(recovered);
+      hydrated.stateRoot = getStateDir(options.config);
       executionsByOperationId.set(recovered.operationId, hydrated);
       if (hydrated.pointerRepairPending) repairFallbackPointer(options.config, hydrated);
       else if (hydrated.durability === 'journaled' || hydrated.durability === 'memory_only') scheduleFallbackPersistenceRetry(options.config, hydrated);
@@ -1292,7 +1415,9 @@ function settleRecord(record, status, now = Date.now) {
 }
 
 function settleCancelledRecord(record, now = Date.now, reason = null) {
-  if (record.status !== FALLBACK_EXECUTION_STATUS.CANCELLED) settleRecord(record, FALLBACK_EXECUTION_STATUS.CANCELLED, now);
+  const status = reason?.code === 'SERVICE_SHUTDOWN'
+    ? FALLBACK_EXECUTION_STATUS.INTERRUPTED : FALLBACK_EXECUTION_STATUS.CANCELLED;
+  if (record.status !== status) settleRecord(record, status, now);
   record.error = reason instanceof Error ? reason.message : String(reason || record.error || 'Work session cancelled by request.');
 }
 
@@ -1330,12 +1455,88 @@ function fallbackSignature(tool, args = {}) {
   return crypto.createHash('sha256').update(stableJson([String(tool || ''), args])).digest('base64url');
 }
 
+// The HTTP listener has stopped accepting work before this shutdown boundary.
+// Stop only this state directory's live producers and wait a bounded interval
+// for their terminal records. Incomplete work remains explicitly unclean.
+async function stopFallbackExecutionsForShutdown(config, timeoutMs = 5000) {
+  const root = getStateDir(config);
+  const active = [...executionsByOperationId.values()].filter(record =>
+    record.stateRoot === root && record.status === FALLBACK_EXECUTION_STATUS.RUNNING);
+  const reason = Object.assign(new Error('Service shutdown interrupted the operation; inspect its retained result before retrying.'),
+    { code: 'SERVICE_SHUTDOWN' });
+  for (const record of active) {
+    if (!record.controller || record.controller.signal.aborted) continue;
+    record.shutdownInterrupted = true;
+    record.controller.abort(reason);
+    record.phase = 'stopping';
+    record.updatedAt = new Date().toISOString();
+    record.revision += 1;
+    persistFallbackRecord(config, record);
+  }
+  let timer;
+  let completed;
+  try {
+    completed = await Promise.race([
+      Promise.allSettled(active.map(record => record.promise || Promise.resolve())).then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), Math.max(1, Math.min(30_000, Number(timeoutMs) || 5000))); })
+    ]);
+  } finally { if (timer) clearTimeout(timer); }
+  return { attempted: active.length, settled: active.filter(record =>
+    record.status !== FALLBACK_EXECUTION_STATUS.RUNNING).length,
+    pending: active.filter(record => record.status === FALLBACK_EXECUTION_STATUS.RUNNING).length,
+    timedOut: !completed };
+}
+
+// Must run *after* task-history flush: a terminal sidecar may have become
+// canonical during that flush. Verify the exact physical receipt, not a live
+// memory projection or a clean-looking HTTP response.
+function verifyFallbackDurabilityForShutdown(config) {
+  const root = getStateDir(config);
+  const records = [...executionsByOperationId.values()].filter(record => record.stateRoot === root);
+  const incompleteOperationIds = [];
+  const interruptedOperationIds = [];
+  for (const record of records) {
+    if (record.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
+      incompleteOperationIds.push(record.operationId);
+      continue;
+    }
+    if (record.shutdownInterrupted === true) {
+      interruptedOperationIds.push(record.operationId);
+    }
+    if (record.persist === false) continue;
+    if (record.pointerRepairPending) repairFallbackPointer(config, record);
+    else if (record.durability === 'memory_only' || record.durability === 'journaled') {
+      persistFallbackRecord(config, record);
+    }
+    try {
+      const stored = readPersistedFallback(config, record.operationId, record.workId);
+      const valid = stored?.operationId === record.operationId
+        && stored.status === record.status
+        && Number(stored.revision || 0) >= Number(record.revision || 0)
+        && (stored.deliveryAcknowledged === true) === (record.deliveryAcknowledged === true);
+      const indexed = Boolean(record.workId) || readJsonFile(scopeIndexFile(config, record.executionKey, record.noticeScope))?.operationId === record.operationId;
+      if (!valid || !indexed || record.durability === 'memory_only') {
+        incompleteOperationIds.push(record.operationId);
+      }
+    } catch {
+      incompleteOperationIds.push(record.operationId);
+    }
+  }
+  return {
+    ok: incompleteOperationIds.length === 0 && interruptedOperationIds.length === 0,
+    checked: records.length,
+    incompleteOperationIds,
+    interruptedOperationIds
+  };
+}
+
 function resetFallbackExecutions() {
   for (const operationId of fallbackPersistenceRetries.keys()) clearFallbackPersistenceRetry(operationId);
   for (const listeners of fallbackResultWaiters.values()) {
     for (const notify of [...listeners]) notify();
   }
   executionsByOperationId.clear();
+  legacyScopeRecoveries.clear();
   pendingCompletionDeliveries.clear();
 }
 
@@ -1357,6 +1558,8 @@ export {
   updateFallbackExecutionPhase,
   assertFallbackCompletionAvailable,
   fallbackSignature,
+  stopFallbackExecutionsForShutdown,
+  verifyFallbackDurabilityForShutdown,
   resetFallbackExecutions,
   startFallbackExecution
 };

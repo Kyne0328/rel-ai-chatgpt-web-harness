@@ -913,19 +913,21 @@ async function case_notification_wording_unit() {
   const completion = buildCompletionNotification({
     workspace: 'rel-ai-mcp',
     summary: 'Improved desktop notifications and application identity.',
-    validationLevel: 'release'
+    validationLevel: 'release',
+    validationStatus: 'not_run'
   });
   assert.ok(String(completion.title || '').trim(), 'completion notification must have a title');
   assert.match(completion.body, /Improved desktop notifications and application identity\./);
   assert.match(completion.body, /rel-ai-mcp/);
-  assert.match(completion.body, /release/i);
+  assert.doesNotMatch(completion.body, /checks passed/i);
   assert.doesNotMatch(completion.body, /completion reported|ChatGPT explicitly/i);
   
   const longSummary = 'x'.repeat(1000);
   const longCompletion = buildCompletionNotification({
     workspace: 'workspace',
     summary: longSummary,
-    validationLevel: 'standard'
+    validationLevel: 'standard',
+    validationStatus: 'passed'
   });
   assert.ok(longCompletion.body.length < longSummary.length, 'notification truncation must reduce an oversized summary');
   assert.match(longCompletion.body, /Final standard checks passed\.$/, 'validation result must remain visible');

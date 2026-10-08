@@ -219,9 +219,7 @@ async function shutdownRepositoryQueryWorkers() {
 
 export {
   QUERY_WORKER_GLOBAL_COUNT,
-  QUERY_WORKER_IDLE_EVICT_MS,
   QUERY_WORKER_TIMEOUT_MS,
-  QUERY_WORKER_QUEUE_TIMEOUT_MS,
   disposeRepositoryQueryWorker,
   repositoryQueryWorkerStats,
   runRepositoryQuery,

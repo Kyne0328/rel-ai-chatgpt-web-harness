@@ -416,4 +416,4 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
   };
 }
 
-export { relaiExec, readFilesystemStatusMap, changedFilesystemFiles };
+export { relaiExec, readGitStatusMap, changedStatusFiles, readFilesystemStatusMap, changedFilesystemFiles };

@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 const LOCAL_SCHEME = 'relai-app';
 const LOCAL_HOST = 'renderer';
+const registeredProtocols = new WeakSet();
 const installedProtocols = new WeakSet();
 const CONTENT_TYPES = Object.freeze({
   '.css': 'text/css; charset=utf-8',
@@ -14,6 +15,7 @@ const CONTENT_TYPES = Object.freeze({
 });
 
 function registerLocalScheme(protocol) {
+  if (registeredProtocols.has(protocol)) return false;
   protocol.registerSchemesAsPrivileged([{
     scheme: LOCAL_SCHEME,
     privileges: {
@@ -24,6 +26,8 @@ function registerLocalScheme(protocol) {
       stream: true
     }
   }]);
+  registeredProtocols.add(protocol);
+  return true;
 }
 
 function installLocalProtocol(protocol, rendererRoot) {

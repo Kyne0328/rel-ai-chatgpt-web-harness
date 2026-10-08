@@ -20,6 +20,10 @@ function extensionOperationIsHeld(config, lease) {
 
 function acquireExtensionOperation(config) {
   const root = operationRoot(config);
+  if (fs.readdirSync(root).some(name => /^\.install-uncertain-[a-z0-9][a-z0-9.-]{0,79}\.json$/.test(name))) {
+    throw Object.assign(new Error('An extension installer has unconfirmed native cleanup. Inspect retained native ownership before another install or removal.'),
+      { code: 'EXTENSION_INSTALL_TERMINATION_UNCONFIRMED' });
+  }
   const key = operationKey(root);
   if (held.has(key)) throw busyError();
   // Publish a unique ticket before checking for competitors. On a local

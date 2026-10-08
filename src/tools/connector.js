@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { fallbackOperationReceipt } from '../mcp/fallbackExecutions.js';
 import { slimCompactPublicResult } from './compactResult.js';
 import { executionOutcome } from '../executionOutcome.js';
+import { utf8Head } from './responseBudget.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { withTaskIdentity } from './task.js';
 import {
@@ -153,10 +154,10 @@ function compactForConnector(name, value, args = {}) {
       });
     }
     case OP.CHANGES_DIFF:
-      return pruneEmpty({ ...compactRepositoryState(value), staged: value.staged, path: value.path, reviewScope: value.reviewScope || value.reviewedScope, reviewedScope: value.reviewedScope, reviewHash: value.reviewHash, reviewedFiles: value.reviewedFiles, excludedWorkspaceFiles: value.excludedWorkspaceFiles, diff: value.diff });
+      return compactReviewResult(value);
     case OP.CHANGES_CHECKPOINT:
     case OP.CHANGES_REPLAY:
-      return pruneEmpty({ ...compactRepositoryState(value), checkpointId: value.checkpointId, payloadSha256: value.payloadSha256, createdAt: value.createdAt, replayed: value.replayed, staged: value.staged, path: value.path, reviewScope: value.reviewScope || value.reviewedScope, reviewedScope: value.reviewedScope, reviewHash: value.reviewHash, reviewedFiles: value.reviewedFiles, excludedWorkspaceFiles: value.excludedWorkspaceFiles, diff: value.diff });
+      return pruneEmpty({ ...compactReviewResult(value), checkpointId: value.checkpointId, payloadSha256: value.payloadSha256, createdAt: value.createdAt, replayed: value.replayed });
     case OP.VALIDATE_CHECKS:
       return pruneEmpty({
         ok: value.ok,
@@ -207,6 +208,9 @@ function compactForConnector(name, value, args = {}) {
         path: value.path,
         changed: value.changed,
         changedFiles: value.changedFiles,
+        mutationEffect: value.mutationEffect,
+        possibleChangedFiles: value.possibleChangedFiles,
+        plannedChangedFiles: value.plannedChangedFiles,
         editCount: value.editCount,
         appliedCount: value.appliedCount,
         verified: value.verified,
@@ -275,6 +279,30 @@ function compactForConnector(name, value, args = {}) {
     default:
       return value;
   }
+}
+
+function compactReviewResult(value) {
+  const sensitiveUnavailable = value.errorCode === 'SENSITIVE_REVIEW_UNAVAILABLE';
+  return pruneEmpty({
+    ...compactRepositoryState(value),
+    staged: value.staged,
+    path: value.path,
+    reviewScope: value.reviewScope || value.reviewedScope,
+    reviewedScope: value.reviewedScope,
+    reviewHash: value.reviewHash,
+    reviewedFiles: value.reviewedFiles,
+    excludedWorkspaceFiles: value.excludedWorkspaceFiles,
+    excludedWorkspaceFilesComplete: value.excludedWorkspaceFilesComplete,
+    diff: value.diff,
+    // These producers expose only redacted key/status/availability metadata.
+    // A missing marker, including an older replay, is not proof of redaction.
+    sensitiveReview: value.sensitiveValuesReturned === false ? value.sensitiveReview : undefined,
+    sensitiveValuesReturned: value.sensitiveValuesReturned,
+    errorCode: sensitiveUnavailable ? value.errorCode : undefined,
+    error: sensitiveUnavailable
+      ? typeof value.error === 'string' ? utf8Head(value.error, 512) : 'Sensitive review evidence is unavailable or incomplete.'
+      : undefined
+  });
 }
 
 export { compactForConnector, policySentence, serializeConnectorResult };

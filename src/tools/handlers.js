@@ -4,6 +4,7 @@ import { setTimeout as setNodeTimeout } from 'node:timers';
 
 
 import { resolveWorkspace } from '../config.js';
+import { principalFingerprint } from '../mcp/principal.ts';
 import { repoSnapshot, relaiReadAsync, workspaceTidyPlan, workspaceTidyRun, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr } from '../localRepoBridge.js';
 import { planEdit } from '../executionPlanner.js';
 import { workspaceHistory } from './history.ts';
@@ -22,7 +23,7 @@ import { runComputerAction } from '../computerManager.js';
 import { relaiSemanticSearch } from '../bridge/semanticSearch.js';
 import { repositoryIntelligence } from '../repository/intelligence/service.js';
 import { relaiDiagnosticsRun } from '../bridge/diagnosticsRunner.js';
-import { releaseTaskChangedFiles, taskCommitOwnership, taskOwnedChangedFiles } from '../taskIntegrity.ts';
+import { readTaskIntegrity, releaseTaskChangedFiles, taskCommitOwnership, taskOwnedChangedFiles } from '../taskIntegrity.ts';
 import { readRecentWorkflowEvidence, readRelevantTaskEpisodes } from '../taskHistoryStore.ts';
 import { selectRelevantSkills } from '../skillDiscovery.js';
 import { buildTaskContinuity, rankBootstrapGroups } from '../context/taskContinuity.js';
@@ -31,7 +32,7 @@ import { discoverRepositoryTopology, packageForPath } from '../workflow/topology
 import { createReviewCheckpoint, replayReviewCheckpoint } from '../reviewCheckpoints.js';
 import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
-import { getToolActivity, getCurrentTaskAbortSignal } from '../toolActivity.js';
+import { getToolActivity, getCurrentTaskAbortSignal, taskError } from '../toolActivity.js';
 import { combineAbortSignals } from '../abortSignals.js';
 import { applyTaskProgressPatch } from './taskProgress.js';
 function resolveOptionalWorkspace(config, args = {}) {
@@ -93,8 +94,10 @@ const taskContextHandler = async (config, inputArgs = {}, context = {}) => {
     ? compactSessionSummary(recoveredSession)
     : null;
   const suggestedSkills = selectRelevantSkills(snapshot.skills, taskQuery, { limit: 3 });
-  const relatedTasks = readRelevantTaskEpisodes(config, workspace.alias, taskQuery, { excludeTaskId: task.work_id, limit: 3 });
+  const continuityAuthority = { principalFingerprint: principalFingerprint(context.principal), authorizedWorkspaces: context.authorizedWorkspaces || [] };
+  const relatedTasks = readRelevantTaskEpisodes(config, workspace.alias, taskQuery, { ...continuityAuthority, excludeTaskId: task.work_id, limit: 3 });
   const continuity = buildTaskContinuity(config, {
+    ...continuityAuthority,
     workspace: workspace.alias,
     query: taskQuery,
     excludeTaskId: task.work_id,
@@ -181,8 +184,8 @@ const HANDLERS = Object.freeze({
   computer: inWorkspace((workspace, config, args, context) => runComputerAction(workspace, config, args, context)),
   semanticSearch: inWorkspace((workspace, config, args, context) => relaiSemanticSearch(workspace, config, withWorkflowTaskContext(config, workspace, args, context), context)),
   diagnosticsRun: inWorkspace((workspace, config, args, context) => relaiDiagnosticsRun(workspace, config, args, context)),
-  tidyPlan: inWorkspace((workspace, config, args) => workspaceTidyPlan(workspace, config, args)),
-  tidyRun: inWorkspace((workspace, config, args) => workspaceTidyRun(workspace, config, args)),
+  tidyPlan: inWorkspace((workspace, config, args, context) => workspaceTidyPlan(workspace, config, args, context)),
+  tidyRun: inWorkspace((workspace, config, args, context) => workspaceTidyRun(workspace, config, args, context)),
   runChecks: inWorkspace((workspace, config, args, context) => relaiVerify(workspace, config, mapCheckArgs(args), context)),
   httpProbe: inWorkspace((workspace, config, args) => relaiHttpProbe(workspace, config, args)),
   diff: inWorkspace((workspace, config, args, context) => relaiDiff(workspace, config, withTaskOwnedReviewContext(config, workspace, args, context), context)),
@@ -197,8 +200,8 @@ const HANDLERS = Object.freeze({
     return createReviewCheckpoint(workspace, config, review);
   }),
   reviewReplay: inWorkspace((workspace, config, args) => replayReviewCheckpoint(workspace, config, args.checkpointId)),
-  restorePaths: inWorkspace((workspace, config, args) => relaiRestorePaths(workspace, config, args)),
-  resetWorkspace: inWorkspace((workspace, config, args) => relaiResetWorkspace(workspace, config, args)),
+  restorePaths: inWorkspace((workspace, config, args, context) => relaiRestorePaths(workspace, config, args, context)),
+  resetWorkspace: inWorkspace((workspace, config, args, context) => relaiResetWorkspace(workspace, config, args, context)),
   status: relaiStatus,
   operationResult: (config, args, context) => relaiStatus(config, { ...args, includeResult: true }, {
     ...context, resultWaitMs: args.waitMs ?? (context?.connector ? 5000 : 0)
@@ -206,13 +209,19 @@ const HANDLERS = Object.freeze({
   workspaceHistory,
   gitCommit: inWorkspace(async (workspace, config, args, context) => {
     const commitArgs = withTaskOwnedCommitContext(config, workspace, args, context);
-    const result = await relaiGitCommit(workspace, config, commitArgs);
-    if (result?.ok === true && commitArgs._taskId && Array.isArray(result.paths) && result.paths.length) {
-      releaseTaskChangedFiles(config, commitArgs._taskId, workspace.alias, result.paths);
+    const result = await relaiGitCommit(workspace, config, commitArgs, context);
+    if (args?.dryRun !== true && result?.committed === true && commitArgs._taskId && Array.isArray(result.paths) && result.paths.length) {
+      try {
+        releaseTaskChangedFiles(config, commitArgs._taskId, workspace.alias, result.paths);
+      } catch (error) {
+        // Git already returned a proven physical result. The wrapper itself
+        // has not completed; keep these facts without repeating publication.
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { handlerResult: result });
+      }
     }
     return result;
   }),
-  gitPush: inWorkspace((workspace, config, args) => relaiGitPush(workspace, config, args)),
+  gitPush: inWorkspace((workspace, config, args, context) => relaiGitPush(workspace, config, args, context)),
   gitDraftPr: inWorkspace((workspace, config, args) => relaiGitDraftPr(workspace, config, args)),
   edit: inWorkspace((workspace, config, args, context) => planEdit(workspace, config, args, context)),
   stopTaskOperations,
@@ -251,16 +260,15 @@ function withWorkflowTaskContext(config, workspace, args, context = {}) {
 
 function withTaskOwnedReviewContext(config, workspace, args, context = {}) {
   const taskId = String(context.taskId || args.work_id || '').trim();
-  if (!taskId) return args;
+  if (!taskId || args.scope === 'workspace') return args;
   const requestState = requestTaskState(context, taskId);
   if (Array.isArray(requestState?.integrity?.taskOwnedChangedFiles)) {
     return { ...args, _taskOwnedPaths: [...requestState.integrity.taskOwnedChangedFiles] };
   }
-  try {
-    return { ...args, _taskOwnedPaths: taskOwnedChangedFiles(config, taskId, workspace.alias) };
-  } catch {
-    return args;
+  if (!readTaskIntegrity(config, taskId, workspace.alias)) {
+    throw taskError('TASK_INTEGRITY_STATE_MISSING', 'Task-scoped review requires authoritative owned-path evidence. The requested review was not broadened to workspace scope.', { retryable: false });
   }
+  return { ...args, _taskOwnedPaths: taskOwnedChangedFiles(config, taskId, workspace.alias) };
 }
 
 function withTaskOwnedCommitContext(config, workspace, args, context = {}) {

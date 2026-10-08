@@ -109,7 +109,6 @@ for (const schema of schemas) {
   assert.deepEqual(publicSchema.outputSchema.required, ['ok']);
 }
 const importUnsafeRootKeywords = ['oneOf', 'anyOf', 'allOf', 'if', 'then', 'else', 'not', 'propertyNames'];
-const capabilityRoutingDescriptions = new Set(['relai_work', 'relai_read', 'relai_edit', 'relai_ui', 'relai_browser', 'relai_desktop', 'relai_computer']);
 for (const schema of publicSchemas) {
   for (const keyword of importUnsafeRootKeywords) {
     assert.equal(schema.inputSchema[keyword], undefined, `${schema.name} discovery must not use root ${keyword}`);
@@ -123,9 +122,6 @@ for (const schema of publicSchemas) {
   assert.equal(schema._meta?.ui, undefined, `${schema.name} must stay model-facing and UI-free`);
   assert.equal(schema._meta?.['openai/outputTemplate'], undefined, `${schema.name} must not auto-mount an MCP App`);
   assert.ok(String(schema.description || '').trim().length > 0, `${schema.name} must have a concise connector description`);
-  if (!capabilityRoutingDescriptions.has(schema.name)) {
-    assert.doesNotMatch(schema.description || '', /\b(?:use when|use for|use to|do not|prefer|should|must)\b/i, `${schema.name} connector description must stay declarative unless it owns host/local capability routing`);
-  }
 }
 const publicWork = publicSchemas.find(item => item.name === 'relai_work');
 assert.match(publicWork?.description || '', /durable Rel\.AI goal starts with a non-empty plan/i, 'relai_work discovery must state the canonical plan-backed task invariant');

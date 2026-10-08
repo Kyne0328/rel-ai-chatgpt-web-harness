@@ -63,6 +63,7 @@ function migrateLegacySessionPolicies(config = {}) {
   if (!migrated) {
     withStateDatabase(config, db => {
       if (stateMetaValue(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '') === '1') return;
+      const outcome = { version: 1, imported: 0, alreadyPresent: 0, rejected: 0, conflicting: 0, recoveryRequired: false, sourceFilesRetained: true };
       let names = [];
       try {
         names = fs.readdirSync(directory);
@@ -71,32 +72,41 @@ function migrateLegacySessionPolicies(config = {}) {
       }
       for (const name of names) {
         if (!name.endsWith('-policy.json')) continue;
+        let parsed;
         try {
-          const parsed = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
+          parsed = JSON.parse(fs.readFileSync(path.join(directory, name), 'utf8'));
           const workspace = String(parsed?.workspace || '').trim();
           const taskId = String(parsed?.taskId || '').trim();
-          if (!workspace || !taskId || !validPolicy(parsed, workspace, taskId)) continue;
-          const updatedAtMs = sessionLastActivity(parsed) || Date.now();
-          db.prepare(`INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)
-            ON CONFLICT(workspace,task_id) DO UPDATE SET updated_at_ms=excluded.updated_at_ms,payload=excluded.payload`)
-            .run(workspace, taskId, updatedAtMs, JSON.stringify(parsed));
+          if (!workspace || !taskId || !validPolicy(parsed, workspace, taskId)) {
+            throw new Error('Legacy session policy has no valid workspace/task identity.');
+          }
         } catch (error) {
+          outcome.rejected += 1;
           if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] legacy session policy migration:', error);
+          continue;
         }
+        const workspace = String(parsed.workspace).trim();
+        const taskId = String(parsed.taskId).trim();
+        const payload = JSON.stringify(parsed);
+        const existing = db.prepare('SELECT payload FROM session_policies WHERE workspace=? AND task_id=?').get(workspace, taskId);
+        if (existing) {
+          if (String(existing.payload) === payload) outcome.alreadyPresent += 1;
+          else outcome.conflicting += 1;
+          continue;
+        }
+        const updatedAtMs = sessionLastActivity(parsed) || Date.now();
+        // SQL failures abort this transaction and leave the marker absent.
+        db.prepare('INSERT INTO session_policies(workspace,task_id,updated_at_ms,payload) VALUES(?,?,?,?)')
+          .run(workspace, taskId, updatedAtMs, payload);
+        outcome.imported += 1;
       }
+      outcome.recoveryRequired = outcome.rejected > 0 || outcome.conflicting > 0;
       setStateMeta(db, LEGACY_SESSION_POLICY_MIGRATION_KEY, '1');
+      setStateMeta(db, `${LEGACY_SESSION_POLICY_MIGRATION_KEY}_outcome`, JSON.stringify(outcome));
     }, { transaction: true });
   }
-  try {
-    for (const name of fs.readdirSync(directory)) {
-      if (name.endsWith('-policy.json')) fs.rmSync(path.join(directory, name), { force: true });
-    }
-    try { fs.rmdirSync(directory); } catch (error) {
-      if (error?.code !== 'ENOTEMPTY' && error?.code !== 'ENOENT') throw error;
-    }
-  } catch (error) {
-    if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
-  }
+  // Keep every original for recovery. The marker prevents automatic replay;
+  // migration is not an exclusive owner that can safely retire legacy files.
   migratedSessionDatabases.add(databaseKey);
 }
 

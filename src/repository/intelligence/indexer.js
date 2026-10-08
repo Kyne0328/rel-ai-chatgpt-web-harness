@@ -87,8 +87,12 @@ function noteRepositoryMutation(workspace, config = {}, paths = []) {
   state.changeRevision += 1;
   state.dirty = true;
   const normalized = normalizePaths(paths);
-  if (!normalized.length) {
+  if (!normalized.length || normalized.some(isCollectionPolicyPath)) {
+    clearPendingRefreshPaths(state);
     state.fullScanRequired = true;
+    // Reacquire the existing watcher's canonical filter even if its policy event
+    // was missed or delayed. The next ensure installs a fresh watcher.
+    if (normalized.some(isCollectionPolicyPath)) void closeRepositoryWatcher(state);
     return;
   }
   for (const relativePath of normalized) state.pendingPaths.add(relativePath);
@@ -286,6 +290,7 @@ async function runCoalescedIndexing(workspace, config, databaseFile, state, opti
       }
       const changedDuringBuild = state.changeRevision !== revisionAtStart;
       const needsReconcile = metadata?.needsReconcile === true;
+      if (needsReconcile) state.fullScanRequired = true;
       state.dirty = changedDuringBuild || needsReconcile;
       if (!changedDuringBuild) break;
       mode = 'refresh';
@@ -300,6 +305,8 @@ async function runCoalescedIndexing(workspace, config, databaseFile, state, opti
   } catch (error) {
     recoverAbandonedIndexGenerations(databaseFile, error);
     state.dirty = true;
+    state.fullScanRequired = true;
+    if (state.metadata) state.metadata = { ...state.metadata, freshness: 'stale', needsReconcile: true };
     if (error?.code === 'INDEX_ABORTED' || error?.name === 'AbortError') {
       state.status = state.metadata ? 'ready' : 'idle';
     } else {
@@ -495,21 +502,35 @@ async function cancelAndDrain(databaseFile, reason) {
 
 function ensureWorkspaceWatcher(workspace, config, state) {
   if (state.watcher) return;
+  let root;
+  let stateRoot;
+  let shouldCollect;
   try {
-    const root = watchPathFor(realRootOf(workspace.path));
-    const stateRoot = watchedStateRoot(workspace.path, root, getStateDir(config));
-    let shouldCollect = createCollectionPathFilter(root, collectOptionsFromWorkspace(workspace));
-    state.watcher = fs.watch(root, { recursive: true, persistent: false }, (eventType, filename) => {
+    root = watchPathFor(realRootOf(workspace.path));
+    stateRoot = watchedStateRoot(workspace.path, root, getStateDir(config));
+    shouldCollect = createCollectionPathFilter(root, collectOptionsFromWorkspace(workspace));
+  } catch (error) {
+    invalidateCollectionPolicy(workspace, state, error);
+    throw error;
+  }
+  try {
+    const watcher = fs.watch(root, { recursive: true, persistent: false }, (eventType, filename) => {
+      if (state.watcher !== watcher) return;
       clearZoektReconcile(state);
       const normalized = normalizeWatchPath(filename);
-      if (normalized === '.relaiignore') {
-        shouldCollect = createCollectionPathFilter(root, collectOptionsFromWorkspace(workspace));
+      if (isCollectionPolicyPath(normalized)) {
+        try { shouldCollect = createCollectionPathFilter(root, collectOptionsFromWorkspace(workspace)); }
+        catch (error) {
+          invalidateCollectionPolicy(workspace, state, error);
+          void closeRepositoryWatcher(state);
+          return;
+        }
       } else if (normalized && shouldIgnoreWatchPath(root, stateRoot, normalized, shouldCollect)) {
         return;
       }
       state.changeRevision += 1;
       state.dirty = true;
-      if (!normalized || eventType === 'rename' || normalized === '.relaiignore') {
+      if (!normalized || eventType === 'rename' || isCollectionPolicyPath(normalized)) {
         clearPendingRefreshPaths(state);
         state.fullScanRequired = true;
         return;
@@ -521,19 +542,39 @@ function ensureWorkspaceWatcher(workspace, config, state) {
         state.fullScanRequired = true;
       }
     });
-    state.watcher.on('error', error => {
+    state.watcher = watcher;
+    watcher.on('error', error => {
+      if (state.watcher !== watcher) return;
+      state.changeRevision += 1;
       state.dirty = true;
       state.fullScanRequired = true;
       state.lastError = boundedErrorMessage(error);
       recordIntelligenceDiagnostic(workspace, 'index_watcher_failed', error);
-      try { state.watcher?.close(); } catch {}
-      state.watcher = null;
+      void closeRepositoryWatcher(state);
     });
   } catch (error) {
+    // Plain fs.watch unsupported/resource errors retain timed reconciliation;
+    // they are distinct from canonical policy/root construction uncertainty.
     state.watcher = null;
     state.lastError = boundedErrorMessage(error);
     recordIntelligenceDiagnostic(workspace, 'index_watcher_unavailable', error);
   }
+}
+
+function invalidateCollectionPolicy(workspace, state, error) {
+  clearZoektReconcile(state);
+  clearPendingRefreshPaths(state);
+  state.changeRevision += 1;
+  state.dirty = true;
+  state.fullScanRequired = true;
+  state.status = 'degraded';
+  state.lastError = boundedErrorMessage(error);
+  if (state.metadata) state.metadata = { ...state.metadata, freshness: 'stale', needsReconcile: true };
+  recordIntelligenceDiagnostic(workspace, 'index_collection_policy_unavailable', error);
+}
+
+function isCollectionPolicyPath(relativePath) {
+  return (process.platform === 'win32' ? String(relativePath).toLowerCase() : relativePath) === '.relaiignore';
 }
 
 function watchedStateRoot(configuredWorkspaceRoot, watchedRoot, configuredStateRoot) {
@@ -629,7 +670,7 @@ function normalizePaths(paths) {
 }
 
 function normalizeWatchPath(value) {
-  return String(value || '').replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '').trim();
+  return String(value || '').replaceAll('\\', '/').replace(/^\.\//, '');
 }
 
 function normalizeMode(value) {

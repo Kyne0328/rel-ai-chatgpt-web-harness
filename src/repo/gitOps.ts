@@ -1,4 +1,6 @@
 import { readGitObservation } from './gitObservation.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { beginGitIndexTransaction } from './gitIndexTransaction.ts';
 import { readSessionPolicy } from "../policyResolver.js";
 import { taskOwnedChangedFiles, taskCommitOwnership, readTaskIntegrity } from "../taskIntegrity.ts";
@@ -183,16 +185,30 @@ function classifyStatusOwnership(workspace: RepoWorkspace, config: RepoConfig, s
 
 // ---- Git operation private helpers -------------------------------------------
 
-async function ensureGitRepo(workspace: RepoWorkspace, _config: RepoConfig): Promise<void> {
-  const isRepository = await checkGitRepository(workspace.path, { timeoutMs: 30_000 });
+function gitOperationOptions(context: RepoArgs = {}, timeout = 60000) {
+  context.signal?.throwIfAborted?.();
+  const deadline = Number(context.deadlineAtMs);
+  const remaining = Number.isFinite(deadline) && deadline > 0 ? deadline - Date.now() : timeout;
+  if (remaining <= 0) throw new DOMException('Operation deadline expired before the next phase.', 'TimeoutError');
+  // Some internal clients floor numeric timeouts. A binding absolute deadline
+  // also needs a signal so that their floor cannot extend the operation.
+  const deadlineSignal = Number.isFinite(deadline) && deadline > 0
+    ? AbortSignal.timeout(Math.min(2147483647, Math.max(0, Math.floor(remaining)))) : null;
+  const signal = deadlineSignal && context.signal ? AbortSignal.any([context.signal, deadlineSignal]) : deadlineSignal || context.signal;
+  return { signal, timeout: Math.max(1, Math.min(timeout, remaining)) };
+}
+
+async function ensureGitRepo(workspace: RepoWorkspace, _config: RepoConfig, context: RepoArgs = {}): Promise<void> {
+  const options = gitOperationOptions(context, 30000);
+  const isRepository = await checkGitRepository(workspace.path, { timeoutMs: options.timeout, signal: options.signal });
   if (!isRepository) throw new Error(`Workspace '${workspace.alias}' is not a git work tree.`);
 }
 
-async function inspectPatchPaths(workspace: RepoWorkspace, config: RepoConfig, patch: string, timeoutMs = 120000) {
+async function inspectPatchPaths(workspace: RepoWorkspace, config: RepoConfig, patch: string, timeoutMs = 120000, context: RepoArgs = {}) {
   const check = await runReadOnlyProcess("git", ["apply", "--check", "--numstat", "-z", "--summary", "--recount", "-"], {
     cwd: workspace.path,
     input: patch,
-    timeout: timeoutMs,
+    ...gitOperationOptions(context, timeoutMs),
     maxOutputBytes: INTERNAL_STATUS_MAX_BYTES
   }, config);
   if (check.exitCode !== 0) return { check, touchedPaths: [] };
@@ -319,16 +335,16 @@ function assertSafeRemoteUrl(remote: string, url: unknown): void {
   }
 }
 
-async function resolvePublishRemote(workspace: RepoWorkspace, config: RepoConfig, requestedRemote: unknown): Promise<string> {
+async function resolvePublishRemote(workspace: RepoWorkspace, config: RepoConfig, requestedRemote: unknown, context: RepoArgs = {}): Promise<string> {
   const remote = safeRemoteName(requestedRemote || "origin");
-  const listed = await runReadOnlyProcess("git", ["remote"], { cwd: workspace.path, timeout: 30000 }, config);
-  if (listed.exitCode !== 0) throw new Error(`Could not read configured Git remotes: ${listed.stderr || listed.stdout || listed.exitCode}`);
+  const listed = await runReadOnlyProcess("git", ["remote"], { cwd: workspace.path, ...gitOperationOptions(context, 30000) }, config);
+  if (!completeGitCommand(listed) || listed.stdoutTruncated || listed.stdoutSpillTruncated) throw new Error(`Could not read configured Git remotes: ${listed.stderr || listed.stdout || listed.exitCode}`);
   const configured = configuredRemoteNames(listed.stdout);
   if (!configured.includes(remote)) {
     throw new Error(`Git remote '${remote}' is not configured in this repository. Available remotes: ${configured.join(", ") || "none"}.`);
   }
-  const urls = await runReadOnlyProcess("git", ["remote", "get-url", "--push", "--all", remote], { cwd: workspace.path, timeout: 30000 }, config);
-  if (urls.exitCode !== 0) throw new Error(`Could not read push URL for Git remote '${remote}': ${urls.stderr || urls.stdout || urls.exitCode}`);
+  const urls = await runReadOnlyProcess("git", ["remote", "get-url", "--push", "--all", remote], { cwd: workspace.path, ...gitOperationOptions(context, 30000) }, config);
+  if (!completeGitCommand(urls) || urls.stdoutTruncated || urls.stdoutSpillTruncated) throw new Error(`Could not read push URL for Git remote '${remote}': ${urls.stderr || urls.stdout || urls.exitCode}`);
   const pushUrls = configuredRemoteNames(urls.stdout);
   if (!pushUrls.length) throw new Error(`Git remote '${remote}' has no push URL configured.`);
   for (const url of pushUrls) assertSafeRemoteUrl(remote, url);
@@ -358,9 +374,9 @@ async function detectDefaultBaseBranch(workspace: RepoWorkspace, config: RepoCon
   return currentGitBranch(workspace, config);
 }
 
-async function currentGitBranch(workspace: RepoWorkspace, config: RepoConfig): Promise<string> {
-  const branch = await runReadOnlyProcess("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspace.path, timeout: 30000 }, config);
-  if (branch.exitCode !== 0) return "";
+async function currentGitBranch(workspace: RepoWorkspace, config: RepoConfig, context: RepoArgs = {}): Promise<string> {
+  const branch = await runReadOnlyProcess("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspace.path, ...gitOperationOptions(context, 30000) }, config);
+  if (!completeGitCommand(branch) || branch.stdoutTruncated || branch.stdoutSpillTruncated) return "";
   return String(branch.stdout || "").trim();
 }
 
@@ -388,7 +404,8 @@ async function workspaceGitStatus(workspace: RepoWorkspace, config: RepoConfig, 
   let parsed: ParsedGitStatus;
   let statusError = '';
   try {
-    parsed = await readGitStatus(workspace.path, { timeoutMs: 30_000, signal: args.signal }, config);
+    const budget = gitOperationOptions(args, 30000);
+    parsed = await readGitStatus(workspace.path, { timeoutMs: budget.timeout, signal: budget.signal }, config);
   } catch (error) {
     if (args.signal?.aborted) {
       if (args.signal.reason instanceof Error) throw args.signal.reason;
@@ -405,7 +422,8 @@ async function workspaceGitStatus(workspace: RepoWorkspace, config: RepoConfig, 
   if (missingPaths.length) {
     const entries = new Map(parsed.entries.map(entry => [entry.path, entry]));
     for (let offset = 0; offset < missingPaths.length; offset += 100) {
-      const exact = await readGitObservation(workspace.path, config, { paths: missingPaths.slice(offset, offset + 100), signal: args.signal });
+      const budget = gitOperationOptions(args, 1500);
+      const exact = await readGitObservation(workspace.path, config, { paths: missingPaths.slice(offset, offset + 100), signal: budget.signal, timeoutMs: budget.timeout });
       if (exact.exitCode !== 0 || exact.stdoutTruncated) { statusError = exact.error || exact.stderr || 'Exact Git observation failed.'; break; }
       for (const entry of parseGitStatus(exact.stdout).entries) entries.set(entry.path, entry);
     }
@@ -438,12 +456,14 @@ async function workspaceGitStatus(workspace: RepoWorkspace, config: RepoConfig, 
   };
 }
 
-async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}) {
+async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}, context: RepoArgs = {}) {
+  context = { ...args, ...context };
+  args = { ...args, signal: context.signal, deadlineAtMs: context.deadlineAtMs };
   // The work-tree probe and the status read are independent child processes, so start
   // the probe here and let it overlap argument validation and the status spawn instead
   // of paying for both spawns back to back. The no-op catch only marks the rejection as
   // handled in case validation below throws first; awaiting it still surfaces the error.
-  const repoProbe = ensureGitRepo(workspace, config);
+  const repoProbe = ensureGitRepo(workspace, config, context);
   repoProbe.catch(() => {});
   const message = String(args.message || "").trim();
   if (!message) throw new Error('relai_publish action "commit" requires a non-empty commit message.');
@@ -461,7 +481,7 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
     allowSensitive: authorization.authorizedPaths.has(normalizeGitPath(item))
   }).relativePath))];
   const addAll = workspaceAddAll;
-  const statusRead = workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes, _taskOwnedPaths: paths });
+  const statusRead = workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes, _taskOwnedPaths: paths, signal: context.signal, deadlineAtMs: context.deadlineAtMs });
   statusRead.catch(() => {});
   await repoProbe;
   const statusBefore = await statusRead;
@@ -526,8 +546,10 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
           : 'No commit paths were selected. Pass explicit paths or addAll:true.'
     };
   }
+  if (addAll) await assertWorkspaceRepositoryRoot(workspace, config, context);
   if (dryRun) {
     return {
+      mutationEffect: 'none',
       ok: true,
       workspace: workspace.alias,
       dryRun: true,
@@ -538,11 +560,17 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
       statusBefore
     };
   }
-  const transaction = await beginGitIndexTransaction(workspace.path, config);
+  const transaction = await beginGitIndexTransaction(workspace.path, config, gitOperationOptions(context, 30000));
   let retainTransaction = false;
+  let committedResult: Record<string, any> | null = null;
+  let indexReconciled = false;
+  let verifiedHead = '';
+  let commitAttempted = false;
   const runIndexMutation = async (argv: string[], timeout = 60000) => {
+    const options = gitOperationOptions(context, timeout);
+    if (argv[0] === 'commit') commitAttempted = true;
     const result = await runProcess('git', argv,
-      { cwd: workspace.path, timeout, env: transaction.env, signal: args.signal }, config);
+      { cwd: workspace.path, ...options, env: transaction.env }, config);
     if (result.terminationConfirmed === false) retainTransaction = true;
     return result;
   };
@@ -563,8 +591,8 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
     // refuse every failed, cancelled, timed-out or truncated observation.
     const staged = await runReadOnlyProcess('git',
       ['diff', '--cached', '--name-only', '-z', ...(paths.length ? ['--', ...paths.map(file => `:(literal)${file}`)] : [])],
-      { cwd: workspace.path, timeout: 60000, env: transaction.env,
-        preserveOutputWhitespace: true, maxOutputBytes: INTERNAL_STATUS_MAX_BYTES, signal: args.signal }, config);
+      { cwd: workspace.path, ...gitOperationOptions(context), env: transaction.env,
+        preserveOutputWhitespace: true, maxOutputBytes: INTERNAL_STATUS_MAX_BYTES }, config);
     if (staged.terminationConfirmed === false) retainTransaction = true;
     let stagedPaths: string[];
     try { stagedPaths = completeStagedPaths(staged); }
@@ -583,9 +611,11 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
         ...(paths.length ? ['--', ...paths.map(file => `:(literal)${file}`)] : [])],
       clampNumber(args.timeoutMs, 1000, 86400000, 120000));
     if (!completeGitCommand(commit)) {
-      return refuse('Git commit did not complete successfully. The visible index was not replaced.', { commit: summarizeCommand(commit) });
+      return refuse('Git commit did not complete successfully. The visible index was not replaced.', { mutationEffect: commit.executed === false ? 'none' : 'unknown', commit: summarizeCommand(commit) });
     }
-    const head = await resolveCommitHead(workspace, config);
+    committedResult = summarizeCommand(commit);
+    const head = await resolveCommitHead(workspace, config, context);
+    verifiedHead = head;
     let indexError = '';
     try {
       if (paths.length) {
@@ -593,29 +623,53 @@ async function relaiGitCommit(workspace: RepoWorkspace, config: RepoConfig, args
         if (!completeGitCommand(normalizeIndex)) throw new Error('the private index could not be reconciled for committed paths.');
         const selected = await runReadOnlyProcess('git',
           ['diff', '--cached', '--name-only', '-z', '--', ...paths.map(file => `:(literal)${file}`)],
-          { cwd: workspace.path, timeout: 60000, env: transaction.env, preserveOutputWhitespace: true, maxOutputBytes: INTERNAL_STATUS_MAX_BYTES }, config);
+          { cwd: workspace.path, ...gitOperationOptions(context), env: transaction.env, preserveOutputWhitespace: true, maxOutputBytes: INTERNAL_STATUS_MAX_BYTES }, config);
         if (selected.terminationConfirmed === false) retainTransaction = true;
         if (completeStagedPaths(selected).length) throw new Error('committed paths still differ in the private index.');
       }
+      context.signal?.throwIfAborted?.();
       transaction.publish();
+      indexReconciled = true;
     }
-    catch (error) { indexError = error instanceof Error ? error.message : String(error); }
-    const statusAfter = await workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes });
+    catch (error) {
+      if ((error as { terminationConfirmed?: boolean }).terminationConfirmed === false) retainTransaction = true;
+      indexError = error instanceof Error ? error.message : String(error);
+    }
+    const statusAfter = await workspaceGitStatus(workspace, config, { maxBytes: args.maxBytes, signal: context.signal, deadlineAtMs: context.deadlineAtMs });
     return {
       ok: !indexError && Boolean(head), workspace: workspace.alias, message, addAll, paths: resultPaths,
       ...(authorization.metadata ? { sensitiveAuthorization: authorization.metadata } : {}),
-      commit: summarizeCommand(commit), committed: true, ...(head ? { head } : {}),
+      commit: committedResult, committed: true, mutationEffect: 'applied', ...(head ? { head } : {}),
       statusBefore, statusAfter,
-      ...(indexError ? { indexReconciled: false, error: 'Commit succeeded, but ' + indexError } : { indexReconciled: true }),
+      indexReconciled,
+      ...(indexError ? { error: 'Commit succeeded, but ' + indexError } : {}),
       ...(!head ? { error: 'Commit succeeded, but the resulting HEAD could not be verified.' } : {})
     };
   } catch (error) {
     if ((error as { terminationConfirmed?: boolean }).terminationConfirmed === false) retainTransaction = true;
+    if (committedResult) {
+      return {
+        ok: false, workspace: workspace.alias, message, addAll, paths: resultPaths,
+        committed: true, mutationEffect: 'applied', commit: committedResult,
+        ...(verifiedHead ? { head: verifiedHead } : {}), statusBefore, indexReconciled,
+        error: 'Commit succeeded, but later bookkeeping did not complete: ' + (error instanceof Error ? error.message : String(error))
+      };
+    }
+    if (commitAttempted) {
+      retainTransaction = true;
+      return { ok: false, workspace: workspace.alias, message, addAll, paths: resultPaths, statusBefore, mutationEffect: 'unknown', error: 'Commit outcome could not be verified. Do not retry without reconciling HEAD and the retained index.' };
+    }
     throw error;
   } finally {
     // An unconfirmed child may still be using its index. Retain both files and
     // the normal Git lock rather than deleting state underneath that process.
-    if (!retainTransaction) transaction.dispose();
+    if (!retainTransaction) {
+      try { transaction.dispose(); }
+      catch (error) {
+        if (committedResult) Object.assign(error as object, { handlerResult: { ok: false, workspace: workspace.alias, committed: true, mutationEffect: 'applied', commit: committedResult, paths: resultPaths, indexReconciled, ...(verifiedHead ? { head: verifiedHead } : {}), error: 'Commit succeeded, but transaction cleanup failed.' } });
+        throw error;
+      }
+    }
   }
 }
 
@@ -634,13 +688,13 @@ function completeStagedPaths(result: Record<string, any>): string[] {
   return output ? output.slice(0, -1).split('\0') : [];
 }
 
-async function resolveCommitHead(workspace: RepoWorkspace, config: RepoConfig): Promise<string> {
+async function resolveCommitHead(workspace: RepoWorkspace, config: RepoConfig, context: RepoArgs = {}): Promise<string> {
   const result = await runReadOnlyProcess('git', ['rev-parse', '--verify', 'HEAD'], {
     cwd: workspace.path,
-    timeout: 60000,
+    ...gitOperationOptions(context),
     maxOutputBytes: 4096
   }, config).catch(() => null);
-  if (!result || !completeGitCommand(result) || result.stdoutTruncated) return '';
+  if (!result || !completeGitCommand(result) || result.stdoutTruncated || result.stdoutSpillTruncated) return '';
   const head = String(result.stdout || '').trim();
   return /^[a-f0-9]{40,64}$/i.test(head) ? head : '';
 }
@@ -731,15 +785,15 @@ function assertPlainBranchName(branch: string): void {
   }
 }
 
-async function resolveGitPushTarget(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}) {
-  await ensureGitRepo(workspace, config);
-  const remote = await resolvePublishRemote(workspace, config, args.remote || "origin");
-  const branch = String(args.branch || await currentGitBranch(workspace, config)).trim();
+async function resolveGitPushTarget(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}, context: RepoArgs = {}) {
+  await ensureGitRepo(workspace, config, context);
+  const remote = await resolvePublishRemote(workspace, config, args.remote || "origin", context);
+  const branch = String(args.branch || await currentGitBranch(workspace, config, context)).trim();
   if (!branch) throw new Error('relai_publish action "push" could not determine the branch to push.');
   // git push treats this argument as a refspec: ":main" deletes the remote branch and
   // "+HEAD:main" force-pushes over it. Accept a plain branch name only.
   assertPlainBranchName(branch);
-  const head = await resolveCommitHead(workspace, config);
+  const head = await resolveCommitHead(workspace, config, context);
   if (!head) throw new Error('relai_publish action "push" could not resolve the current HEAD commit.');
   return {
     workspace: workspace.alias,
@@ -750,17 +804,17 @@ async function resolveGitPushTarget(workspace: RepoWorkspace, config: RepoConfig
   };
 }
 
-async function relaiGitPush(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}) {
-  const target = await resolveGitPushTarget(workspace, config, args);
+async function relaiGitPush(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}, context: RepoArgs = {}) {
+  const target = await resolveGitPushTarget(workspace, config, args, context);
   const { remote, branch, setUpstream } = target;
   const dryRun = Boolean(args.dryRun);
   const pushArgs = ["push", ...(dryRun ? ["--dry-run"] : []), ...(setUpstream ? ["--set-upstream"] : []), remote, branch];
   const push = await runProcess("git", pushArgs, {
     cwd: workspace.path,
-    timeout: clampNumber(args.timeoutMs, 1000, 240000, 120000),
+    ...gitOperationOptions(context, clampNumber(args.timeoutMs, 1000, 240000, 120000)),
     inheritCredentials: true
   }, config);
-  return { ok: push.exitCode === 0, workspace: workspace.alias, remote, branch, dryRun, setUpstream, push: summarizeCommand(push) };
+  return { ok: completeGitCommand(push), workspace: workspace.alias, remote, branch, dryRun, setUpstream, push: summarizeCommand(push) };
 }
 
 async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, args: RepoArgs = {}) {
@@ -790,5 +844,17 @@ async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, arg
   };
 }
 
+async function assertWorkspaceRepositoryRoot(workspace: RepoWorkspace, config: RepoConfig, context: RepoArgs = {}) {
+  const result = await runReadOnlyProcess('git', ['rev-parse', '--show-toplevel'], {
+    cwd: workspace.path, ...gitOperationOptions(context, 30000), maxOutputBytes: 16384, preserveOutputWhitespace: true
+  }, config);
+  if (!completeGitCommand(result) || result.stdoutTruncated || result.stdoutSpillTruncated) throw new Error('Could not verify the full repository scope. No repository-wide mutation was started.');
+  const root = fs.realpathSync(String(result.stdout).replace(/\r?\n$/, ''));
+  const selected = fs.realpathSync(workspace.path);
+  if (path.relative(root, selected) !== '') {
+    throw new Error('Repository-wide mutation requires a workspace rooted at the Git worktree root. The selected nested workspace was preserved.');
+  }
+}
+
 export {
-  completeStagedPaths, workspaceGitStatus, workspaceDirtyPaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr, classifyStatusOwnership, assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths };
+  gitOperationOptions, assertWorkspaceRepositoryRoot, completeStagedPaths, workspaceGitStatus, workspaceDirtyPaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr, classifyStatusOwnership, assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths };

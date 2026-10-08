@@ -30,10 +30,11 @@ async function case_auto_session_unit() {
     const { ensureSessionStarted, touchSessionPolicy, readSessionPolicy, resolvePolicy, writeSessionPolicy, SESSION_IDLE_TTL_MS } = __m6;
   
     const __m7 = await import("../src/localRepoBridge.js");
-    const { relaiReadAsync, workspaceTidyPlan } = __m7;
+    const { relaiReadAsync, workspaceTidyPlan, workspaceWrite } = __m7;
   
     const __m8 = await import("../src/stateDatabase.ts");
     const { withStateDatabase } = __m8;
+    const { recordTaskIntegrityEvent } = await import("../src/taskIntegrity.ts");
   
   function makeRepo() {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-auto-session-'));
@@ -156,11 +157,15 @@ async function case_auto_session_unit() {
   //    the pre-existing baseline file.
   {
     const { root, workspacePath, stateDir } = makeRepo();
-    const config = { stateDir };
+    const config = { stateDir, workspaces: { ws: { path: workspacePath, commands: {} } } };
+    const workspace = { alias: 'ws', path: workspacePath };
+    const taskId = 'task-tidy';
     fs.writeFileSync(path.join(workspacePath, 'pre-existing.txt'), 'baseline\n');
-    await writeSessionPolicy(config, 'ws', { workspaceRoot: workspacePath, taskId: 'task-tidy' });
-    fs.writeFileSync(path.join(workspacePath, 'session-artifact.txt'), 'made during session\n');
-    const plan = await workspaceTidyPlan({ alias: 'ws', path: workspacePath }, config, { mode: 'session_untracked' });
+    await recordTaskIntegrityEvent(config, { taskId, workspace: workspace.alias, taskIdentityVersion: 2, tool: 'work.begin', ok: true });
+    await writeSessionPolicy(config, workspace.alias, { workspaceRoot: workspacePath, taskId });
+    const edit = workspaceWrite(workspace, config, { work_id: taskId, path: 'session-artifact.txt', content: 'made during session\n' });
+    await recordTaskIntegrityEvent(config, { ...edit, taskId, workspace: workspace.alias, taskIdentityVersion: 2, tool: 'edit' });
+    const plan = await workspaceTidyPlan(workspace, config, { mode: 'session_untracked', work_id: taskId });
     assert.equal(plan.ok, true);
     const paths = new Set(plan.candidates.map((c) => c.path));
     assert.ok(paths.has('session-artifact.txt'), 'session file must be a candidate');
@@ -1400,10 +1405,11 @@ async function case_workspace_tidy_unit() {
     const { execFileSync } = __m4;
   
     const __m5 = await import("../src/localRepoBridge.js");
-    const { workspaceTidyPlan, workspaceTidyRun } = __m5;
+    const { workspaceTidyPlan, workspaceTidyRun, workspaceWrite } = __m5;
   
     const __m6 = await import("../src/policyResolver.js");
     const { writeSessionPolicy } = __m6;
+    const { recordTaskIntegrityEvent } = await import("../src/taskIntegrity.ts");
   
     const __m7 = await import("./helpers/git-executable.mjs");
     const { GIT_EXECUTABLE } = __m7;
@@ -1428,12 +1434,14 @@ async function case_workspace_tidy_unit() {
     const dir = makeTempRepo();
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-tidy-state-'));
     const workspace = { alias: 'test', path: dir };
-    const config = { stateDir };
+    const config = { stateDir, workspaces: { test: { path: dir, commands: {} } } };
     const workId = 'task-tidy-1';
     try {
+      await recordTaskIntegrityEvent(config, { taskId: workId, workspace: workspace.alias, taskIdentityVersion: 2, tool: 'work.begin', ok: true });
       await writeSessionPolicy(config, workspace.alias, { workspaceRoot: dir, taskId: workId });
       const artifact = path.join(dir, 'generated.svg');
-      fs.writeFileSync(artifact, '<svg></svg>');
+      const edit = workspaceWrite(workspace, config, { work_id: workId, path: 'generated.svg', content: '<svg></svg>' });
+      await recordTaskIntegrityEvent(config, { ...edit, taskId: workId, workspace: workspace.alias, taskIdentityVersion: 2, tool: 'edit' });
   
       const plan = await workspaceTidyPlan(workspace, config, { work_id: workId });
       assert.equal(plan.ok, true);
@@ -1456,12 +1464,14 @@ async function case_workspace_tidy_unit() {
     const dir = makeTempRepo();
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-tidy-state-'));
     const workspace = { alias: 'test', path: dir };
-    const config = { stateDir };
+    const config = { stateDir, workspaces: { test: { path: dir, commands: {} } } };
     const workId = 'task-tidy-2';
     try {
+      await recordTaskIntegrityEvent(config, { taskId: workId, workspace: workspace.alias, taskIdentityVersion: 2, tool: 'work.begin', ok: true });
       await writeSessionPolicy(config, workspace.alias, { workspaceRoot: dir, taskId: workId });
       const artifact = path.join(dir, 'generated.svg');
-      fs.writeFileSync(artifact, '<svg>old</svg>');
+      const edit = workspaceWrite(workspace, config, { work_id: workId, path: 'generated.svg', content: '<svg>old</svg>' });
+      await recordTaskIntegrityEvent(config, { ...edit, taskId: workId, workspace: workspace.alias, taskIdentityVersion: 2, tool: 'edit' });
       const plan = await workspaceTidyPlan(workspace, config, { work_id: workId });
       fs.writeFileSync(artifact, '<svg>changed</svg>');
   
@@ -1481,12 +1491,16 @@ async function case_workspace_tidy_unit() {
     const dir = makeTempRepo();
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-tidy-state-'));
     const workspace = { alias: 'test', path: dir };
-    const config = { stateDir };
+    const config = { stateDir, workspaces: { test: { path: dir, commands: {} } } };
     try {
+      await recordTaskIntegrityEvent(config, { taskId: 'task-a', workspace: workspace.alias, taskIdentityVersion: 2, tool: 'work.begin', ok: true });
       await writeSessionPolicy(config, workspace.alias, { workspaceRoot: dir, taskId: 'task-a' });
-      fs.writeFileSync(path.join(dir, 'from-a.tmp'), 'a');
+      const editA = workspaceWrite(workspace, config, { work_id: 'task-a', path: 'from-a.tmp', content: 'a' });
+      await recordTaskIntegrityEvent(config, { ...editA, taskId: 'task-a', workspace: workspace.alias, taskIdentityVersion: 2, tool: 'edit' });
+      await recordTaskIntegrityEvent(config, { taskId: 'task-b', workspace: workspace.alias, taskIdentityVersion: 2, tool: 'work.begin', ok: true });
       await writeSessionPolicy(config, workspace.alias, { workspaceRoot: dir, taskId: 'task-b' });
-      fs.writeFileSync(path.join(dir, 'from-b.tmp'), 'b');
+      const editB = workspaceWrite(workspace, config, { work_id: 'task-b', path: 'from-b.tmp', content: 'b' });
+      await recordTaskIntegrityEvent(config, { ...editB, taskId: 'task-b', workspace: workspace.alias, taskIdentityVersion: 2, tool: 'edit' });
   
       const plan = await workspaceTidyPlan(workspace, config, { work_id: 'task-b' });
       assert.deepEqual(plan.candidates.map(item => item.path), ['from-b.tmp'], 'task B must not claim task A pre-existing untracked output');

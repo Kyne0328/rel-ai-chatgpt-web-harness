@@ -1,6 +1,7 @@
 import { runProcess, summarizeCommand } from "../process.js";
 import { resolveSafePath } from "../safety.js";
 import { literalObservationPaths } from '../repo/gitObservation.js';
+import { gitOperationOptions, assertWorkspaceRepositoryRoot } from '../repo/gitOps.js';
 
 // resolveSafePath validates these as filesystem paths, but git reads them as
 // pathspecs: "*" or "." after `--` matches the whole worktree, so a single-file
@@ -22,45 +23,63 @@ function normalizePaths(workspace, paths) {
   return literalObservationPaths(workspace.path, selected);
 }
 
-async function relaiRestorePaths(workspace, config, args = {}) {
+async function relaiRestorePaths(workspace, config, args = {}, context = {}) {
   const paths = normalizePaths(workspace, args.paths);
   // ":(literal)" stops git re-interpreting a legitimate filename that happens to
   // contain pathspec syntax.
   const restore = await runProcess("git", ["restore", "--", ...paths.map((item) => `:(literal)${item}`)], {
     cwd: workspace.path,
-    timeout: 60000
-  }, config);
+    ...gitOperationOptions(context)
+  }, config).catch(error => {
+    Object.assign(error, { handlerResult: { ok: false, workspace: workspace.alias, paths, mutationEffect: error?.executed === false ? 'none' : 'unknown', changedFiles: [], ...(error?.executed === false ? {} : { possibleChangedFiles: paths }), error: 'Restore outcome could not be verified. Reconcile the selected files before retrying.' } });
+    throw error;
+  });
   return {
     workspace: workspace.alias,
     mode: "paths",
     paths,
     ...summarizeCommand(restore),
-    ok: restore.exitCode === 0
+    ok: completeMutation(restore),
+    mutationEffect: restore.executed === false ? "none" : "unknown",
+    ...(restore.executed !== false ? { possibleChangedFiles: paths } : {})
   };
 }
 
-async function relaiResetWorkspace(workspace, config, args = {}) {
+async function relaiResetWorkspace(workspace, config, args = {}, context = {}) {
+  await assertWorkspaceRepositoryRoot(workspace, config, context);
   const removeUntracked = args.removeUntracked === true;
-
-  const reset = await runProcess("git", ["reset", "--hard", "HEAD"], {
-    cwd: workspace.path,
-    timeout: 60000
-  }, config);
+  let reset = null;
   let clean = null;
-  if (reset.exitCode === 0 && removeUntracked) {
-    clean = await runProcess("git", ["clean", "-fd"], {
-      cwd: workspace.path,
-      timeout: 60000
-    }, config);
+  let mutationStarted = false;
+  try {
+    const resetOptions = gitOperationOptions(context);
+    mutationStarted = true;
+    reset = await runProcess("git", ["reset", "--hard", "HEAD"], { cwd: workspace.path, ...resetOptions }, config);
+    if (completeMutation(reset) && removeUntracked) {
+      const cleanOptions = gitOperationOptions(context);
+      clean = await runProcess("git", ["clean", "-fd"], { cwd: workspace.path, ...cleanOptions }, config);
+    }
+    return {
+      ok: completeMutation(reset) && (!clean || completeMutation(clean)),
+      mutationEffect: reset.executed === false ? 'none' : 'unknown',
+      workspace: workspace.alias, mode: "workspace-reset", removeUntracked,
+      reset: summarizeCommand(reset), ...(clean ? { clean: summarizeCommand(clean) } : {})
+    };
+  } catch (error) {
+    const resetNeverExecuted = !mutationStarted || reset?.executed === false
+      || (reset === null && error?.executed === false);
+    return {
+      ok: false, workspace: workspace.alias, mode: "workspace-reset", removeUntracked,
+      mutationEffect: resetNeverExecuted ? 'none' : 'unknown',
+      ...(reset ? { reset: summarizeCommand(reset) } : {}),
+      error: error instanceof Error ? error.message : String(error)
+    };
   }
-  return {
-    ok: reset.exitCode === 0 && (!clean || clean.exitCode === 0),
-    workspace: workspace.alias,
-    mode: "workspace-reset",
-    removeUntracked,
-    reset: summarizeCommand(reset),
-    ...(clean ? { clean: summarizeCommand(clean) } : {})
-  };
+}
+
+function completeMutation(result) {
+  return result.executed === true && result.exitCode === 0 && !result.cancelled && !result.timedOut
+    && result.terminationConfirmed !== false && !result.outputFinalizationTimedOut;
 }
 
 export { relaiResetWorkspace, relaiRestorePaths };

@@ -513,6 +513,12 @@ async function createDesktopHost(options = {}) {
     desktopTray.setup();
     routeInitialWindow(lifecycleStatus);
     desktopPower.start();
+    if (process.platform === 'darwin') {
+      app.on('activate', () => {
+        if (isQuitting || allowUpdaterQuit || appUpdater?.getStatus()?.state === 'installing') return;
+        focusActiveWindow();
+      });
+    }
     setImmediate(() => {
       appUpdater.start();
       updateSupportPolicy.start();

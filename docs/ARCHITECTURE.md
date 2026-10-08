@@ -108,7 +108,7 @@ The transport cannot select a repository by absolute path, bypass tool authoriza
 
 `src/tools/actionDefinitions.ts` owns immutable tool definitions. `src/tools/actionCatalog.js` is the single owner of action mapping, authorization capability, approval policy, catalog construction, operation resolution, schemas, annotations, task scope, concurrency scope, execution class, dashboard metadata, and tool-surface version.
 
-The public tool count is derived from the canonical runtime manifest (`release-manifest.json` records 14 for the current release). `src/tools/runtimeRegistry.js` contains executable function references only and deliberately does not become a second schema or policy source.
+The public tool count is derived from the canonical runtime catalog and recorded as `toolCount` in `release-manifest.json`. `src/tools/runtimeRegistry.js` contains executable function references only and deliberately does not become a second schema or policy source.
 
 Connector result serialization remains operation-aware. It compacts safe fields, attaches `work_id` where required, and validates the selected action output schema before returning a result.
 
@@ -240,7 +240,7 @@ Compatibility code must remain isolated and tested. The `2025-11-25` shim is sta
 
 | Metric | Current contract |
 | --- | ---: |
-| Public tools | Derived from canonical manifest (15 in current release) |
+| Public tools | Derived from canonical catalog; recorded in `release-manifest.json` as `toolCount` |
 | Public actions | Derived from the canonical action catalog |
 | Active public tool-schema source | 1 canonical catalog |
 | MCP protocol | `2026-07-28` |

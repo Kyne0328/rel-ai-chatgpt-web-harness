@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './styles.css';
 import { fetchJson } from '../../api.js';
+import { copyText } from '../../clipboard.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { clipBrowserSurfaceBounds, releaseBrowserRouteControl } from './behavior.js';
@@ -316,7 +317,7 @@ function createBrowserRoute() {
                     void copyText(state.url).then(copied => {
                       if (copied) setCopyStatus('Page URL copied.');
                       else setError('Could not copy page URL.');
-                    });
+                    }).catch(() => setError('Could not copy page URL.'));
                   }
                 }, h(Icon, { name: 'connection', size: 14 }))
               : null,
@@ -488,35 +489,6 @@ function faviconLetter(label) {
   const value = String(label || '').trim();
   const char = value ? [...value][0] : '•';
   return (char || '•').toUpperCase();
-}
-
-async function copyText(value) {
-  const text = String(value || '');
-  if (!text) return false;
-  try {
-    if (globalThis.navigator?.clipboard?.writeText) {
-      await globalThis.navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch { /* fall through */ }
-  return fallbackCopy(text);
-}
-
-function fallbackCopy(text) {
-  const area = document.createElement('textarea');
-  try {
-    area.value = text;
-    area.setAttribute('readonly', '');
-    area.style.position = 'fixed';
-    area.style.opacity = '0';
-    document.body.appendChild(area);
-    area.select();
-    return document.execCommand('copy') === true;
-  } catch {
-    return false;
-  } finally {
-    area.remove();
-  }
 }
 
 function sessionLabel(session, index) {

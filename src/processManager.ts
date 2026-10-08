@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { combineAbortSignals } from './abortSignals.ts';
+import { combineAbortSignals, isTimeoutAbort } from './abortSignals.ts';
 import { createManagedProcessList, type ManagedProcessDto, type ProcessState } from './contracts/processes.ts';
 import { readJsonFile, writeJsonAtomic, writeJsonAtomicAsync } from './durableState.ts';
 import { normalizeExecutionInvocation, resolveCommandCwd, normalizeCommandEnv } from './executionInvocation.ts';
@@ -197,6 +197,14 @@ interface ManagedProcessRecord extends GenericRecord {
   queueWaitMs: number;
   lastPtyInputAtMs: number;
   lastPtyOutputAtMs: number;
+  lastPtyResizeAtMs: number;
+  readonly ptyLaunchCwd: string;
+  readonly ptyLaunchColumns: number;
+  ptyWrappedStartupEligible: boolean;
+  ptyStartupSettled: boolean;
+  ptyActivitySeq: number;
+  ptyLastInputSeq: number;
+  ptyLastOutputSeq: number;
   idleRetireTimer: NodeJS.Timeout | null;
 }
 
@@ -218,9 +226,15 @@ interface ProcessAccessOptions {
   readonly requireSession?: boolean;
 }
 
+interface InteractivePtyRetirementGuard {
+  readonly activitySeq: number;
+  readonly idleMs: number;
+}
+
 interface StopRecordOptions {
   readonly graceMs?: unknown;
   readonly forceWaitMs?: unknown;
+  readonly automaticPtyRetirement?: InteractivePtyRetirementGuard;
 }
 
 interface ManagedProcessEvent {
@@ -281,6 +295,7 @@ const LOG_PENDING_HIGH_WATER_BYTES = 1024 * 1024;
 const LOG_PENDING_LOW_WATER_BYTES = 256 * 1024;
 const DEFAULT_INTERACTIVE_PTY_IDLE_RETIRE_MS = 60_000;
 const CAPACITY_PRESSURE_PTY_IDLE_MS = 15_000;
+const MAX_WRAPPED_STARTUP_PROMPT_BYTES = 4096;
 const ACTIVE_STATUSES = Object.freeze({ has: isActiveProcessStatus });
 const TERMINAL_STATUSES = Object.freeze({ has: isTerminalProcessStatus });
 const processes = new Map<string, ManagedProcessRecord>();
@@ -468,6 +483,14 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
     queueWaitMs: 0,
     lastPtyInputAtMs: Date.now(),
     lastPtyOutputAtMs: Date.now(),
+    lastPtyResizeAtMs: 0,
+    ptyLaunchCwd: cwd.absolutePath,
+    ptyLaunchColumns: columns,
+    ptyWrappedStartupEligible: false,
+    ptyStartupSettled: false,
+    ptyActivitySeq: 0,
+    ptyLastInputSeq: 0,
+    ptyLastOutputSeq: 0,
     idleRetireTimer: null
   };
 
@@ -493,6 +516,8 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         pathAppend: extensionCommandPathEntries(config)
       });
       Object.assign(childEnvironment, traceContextEnvironment());
+      record.ptyWrappedStartupEligible = record.pty && !invocation.command
+        && permitsWrappedCmdStartup(invocation.processExecutable, invocation.processArgv, childEnvironment);
       const startupSignal = admissionSignal;
       return { childEnvironment, startupSignal };
     });
@@ -547,6 +572,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       if (record.pty) {
         const ptyProcess = await measurePerformancePhase('process.spawn', async () => {
           const nodePty = await loadNodePty();
+          if (startupSignal?.aborted) throw cancellationError('Managed process startup was cancelled before PTY launch.');
           return nodePty.spawn(processExecutable, processArgv, {
             name: String(process.env.TERM || 'xterm-256color'),
             cwd: cwd.absolutePath,
@@ -562,6 +588,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         record.status = record.windowsJob ? 'starting' : 'running';
         record.ptyExitPromise = new Promise<PtyExitEvent>(resolve => { record.resolvePtyExit = resolve; });
         ptyProcess.onData(data => {
+          record.ptyLastOutputSeq = ++record.ptyActivitySeq;
           record.lastPtyOutputAtMs = Date.now();
           appendLog(config, record, 'stdout', data);
           scheduleInteractivePtyRetirement(config, record);
@@ -653,8 +680,13 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
 
     const initial = await measurePerformancePhase('process.readiness', () => initialState);
     if (initial.type === 'aborted') {
-      await stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS });
-      throw cancellationError('Managed process startup was cancelled before readiness was established.');
+      await stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS }).catch(() => null);
+      throw Object.assign(taskError(isTimeoutAbort(startupSignal) ? 'TIMEOUT' : 'TASK_CANCELLED',
+        'Managed process startup was interrupted. Inspect the process before starting it again.'), {
+        processId, cancelled: !isTimeoutAbort(startupSignal), timedOut: isTimeoutAbort(startupSignal),
+        terminationConfirmed: record.terminationConfirmed === true,
+        cleanupPending: record.terminationConfirmed !== true, retryable: false
+      });
     }
     if (initial.type === 'error') {
       await cleanupFailedStartup(config, record);
@@ -686,10 +718,14 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
 
     if (invocation.input !== undefined) {
       try {
-        await writeInitialProcessInput(record, invocation.input);
+        notePtyInputAttempt(record);
+        await writeInitialProcessInput(record, invocation.input, startupSignal);
       } catch (error) {
-        await cleanupFailedStartup(config, record);
-        throw new Error(`Could not send initial managed process input: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+        const cleanup = await cleanupFailedStartup(config, record)
+          .catch(() => ({ exited: record.terminationConfirmed === true }));
+        throw Object.assign(error instanceof Error ? error : new Error('Could not send initial managed process input.', { cause: error }), {
+          processId, terminationConfirmed: cleanup.exited, cleanupPending: !cleanup.exited, retryable: false
+        });
       }
     }
 
@@ -699,14 +735,21 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       () => waitDuringStartup(record, startupWaitMs, startupSignal)
     );
     if (startupResult === 'aborted') {
-      await stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS });
-      throw cancellationError('Managed process startup was cancelled.');
+      await stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS }).catch(() => null);
+      throw Object.assign(taskError(isTimeoutAbort(startupSignal) ? 'TIMEOUT' : 'TASK_CANCELLED',
+        'Managed process startup was interrupted. Inspect the process before starting it again.'), {
+        processId, cancelled: !isTimeoutAbort(startupSignal), timedOut: isTimeoutAbort(startupSignal),
+        terminationConfirmed: record.terminationConfirmed === true,
+        cleanupPending: record.terminationConfirmed !== true, retryable: false
+      });
     }
     if (startupResult === 'closed') {
       await cleanupFailedStartup(config, record);
       throw new Error(`Managed process exited during startup with code ${record.exitCode ?? -1}.`);
     }
 
+    record.ptyStartupSettled = true;
+    scheduleInteractivePtyRetirement(config, record);
     return {
       ...processSnapshot(record, { includeTail: true, tailBytes: 8192 }),
       reused: false,
@@ -806,23 +849,71 @@ function waitDuringPtyStartup(record: ManagedProcessRecord, waitMs: number, sign
   });
 }
 
-function writeInitialProcessInput(record: ManagedProcessRecord, input: unknown): Promise<void> {
+function managedProcessInputError(record: ManagedProcessRecord, signal: AbortSignal | undefined, invoked: boolean, queuedBytes?: number, cause?: unknown): Error {
+  const timedOut = isTimeoutAbort(signal);
+  const cancelled = signal?.aborted === true && !timedOut;
+  const detail = invoked
+    ? 'Input delivery is unknown. Inspect the process before sending more input; do not automatically resend.'
+    : 'No input was submitted.';
+  return Object.assign(taskError(timedOut ? 'TIMEOUT' : cancelled ? 'TASK_CANCELLED' : 'PROCESS_INPUT_FAILED',
+    `Managed process input ${timedOut ? 'timed out' : cancelled ? 'was cancelled' : 'failed'}. ${detail}`), {
+    processId: record.processId,
+    ...(invoked ? {} : { acceptedBytes: 0 }),
+    ...(queuedBytes !== undefined ? { inputQueuedBytes: queuedBytes } : {}),
+    inputDeliveryUnknown: invoked,
+    ...(cancelled ? { cancelled: true } : {}),
+    ...(timedOut ? { timedOut: true } : {}),
+    terminationConfirmed: record.terminationConfirmed,
+    retryable: false,
+    ...(cause !== undefined ? { cause } : {})
+  });
+}
+
+function writeInitialProcessInput(record: ManagedProcessRecord, input: string, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw managedProcessInputError(record, signal, false);
   if (record.pty) {
     if (!record.ptyProcess || !['starting', 'running'].includes(record.status)) {
-      throw new Error(`Process ${record.processId} does not have writable PTY input.`);
+      throw managedProcessInputError(record, signal, false);
     }
-    record.ptyProcess.write(String(input));
+    try {
+      record.ptyProcess.write(input);
+    } catch (cause) {
+      // The PTY API may have accepted input before throwing.
+      throw managedProcessInputError(record, signal, true, undefined, cause);
+    }
     return Promise.resolve();
   }
   const stream = record.child?.stdin;
   if (!stream || stream.destroyed || !['starting', 'running'].includes(record.status)) {
-    throw new Error(`Process ${record.processId} does not have writable stdin.`);
+    throw managedProcessInputError(record, signal, false);
   }
   return new Promise<void>((resolve, reject) => {
-    stream.write(input, error => {
+    let settled = false;
+    let invoked = false;
+    let queuedBytes: number | undefined;
+    const finish = (error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
       if (error) reject(error);
       else resolve();
-    });
+    };
+    const onAbort = (): void => finish(managedProcessInputError(record, signal, invoked, queuedBytes));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
+    try {
+      invoked = true;
+      stream.write(input, error => {
+        if (settled) return;
+        finish(error ? managedProcessInputError(record, signal, true, queuedBytes, error) : undefined);
+      });
+      // A false write return still means queued, not consumed by the target.
+      queuedBytes = Buffer.byteLength(input, 'utf8');
+    } catch (cause) {
+      finish(managedProcessInputError(record, signal, invoked, queuedBytes, cause));
+    }
+    // Cancellation settles only this waiter. The shared process and stream
+    // remain owned by their existing lifecycle; a late callback is harmless.
   });
 }
 
@@ -907,8 +998,13 @@ function flushLogBuffer(config: ManagedProcessConfig, record: ManagedProcessReco
       handlePersistenceFailure(config, record, error);
     })
     .finally(() => {
-      record.logPendingBytes[stream] = Math.max(0, record.logPendingBytes[stream] - buffer.length);
+      const pendingBefore = record.logPendingBytes[stream];
+      record.logPendingBytes[stream] = Math.max(0, pendingBefore - buffer.length);
       resumeLogSourceIfReady(record, stream);
+      if (stream === 'stdout' && pendingBefore > 0 && record.logPendingBytes.stdout === 0
+        && record.logBufferBytes.stdout === 0 && record.logBuffers.stdout.length === 0) {
+        scheduleInteractivePtyRetirement(config, record);
+      }
     });
   return record.logWritePromises[stream];
 }
@@ -1016,36 +1112,36 @@ async function writeManagedProcess(config: ManagedProcessConfig, args: ManagedPr
   const hasInput = args.input !== undefined;
   const hasResize = args.columns !== undefined || args.rows !== undefined;
   if (!hasInput && !hasResize) throw new Error('relai_process action "write" requires input or PTY columns+rows.');
+  const input = hasInput ? String(args.input ?? '') : '';
+  const bytes = Buffer.byteLength(input, 'utf8');
+  if (bytes > 1024 * 1024) throw new Error('Process input exceeds 1 MiB.');
+  if (hasInput && record.pty) {
+    notePtyInputAttempt(record);
+    scheduleInteractivePtyRetirement(config, record);
+  }
+  const inputSignal = combineAbortSignals(context.signal, getCurrentTaskAbortSignal());
+  if (inputSignal?.aborted) throw managedProcessInputError(record, inputSignal, false);
   if (hasResize) {
     if (!record.pty || !record.ptyProcess) throw new Error('PTY resize requires a running pty:true process.');
     if (args.columns === undefined || args.rows === undefined) throw new Error('PTY resize requires both columns and rows.');
     const columns = clampNumber(args.columns, 1, 1000, record.columns || 80);
     const rows = clampNumber(args.rows, 1, 1000, record.rows || 24);
+    record.ptyWrappedStartupEligible = false;
+    record.ptyActivitySeq += 1;
+    record.lastPtyResizeAtMs = Date.now();
+    scheduleInteractivePtyRetirement(config, record);
     record.ptyProcess.resize(columns, rows);
     record.columns = columns;
     record.rows = rows;
     await queueMetadataPersist(config, record);
     notifyProcessState(record);
   }
-  let bytes = 0;
   if (hasInput) {
-    const input = String(args.input ?? '');
-    bytes = Buffer.byteLength(input, 'utf8');
-    if (bytes > 1024 * 1024) throw new Error('Process input exceeds 1 MiB.');
-    if (record.pty) {
-      if (!record.ptyProcess) throw new Error(`Process ${record.processId} does not have writable PTY input.`);
-      record.lastPtyInputAtMs = Date.now();
-      scheduleInteractivePtyRetirement(config, record);
-      record.ptyProcess.write(input);
-    } else {
-      const stream = record.child?.stdin;
-      if (!stream || stream.destroyed) throw new Error(`Process ${record.processId} does not have writable stdin.`);
-      await new Promise<void>((resolve, reject) => {
-        stream.write(input, error => {
-          if (error) reject(error);
-          else resolve();
-        });
-      });
+    try {
+      await writeInitialProcessInput(record, input, inputSignal);
+    } catch (error) {
+      if (hasResize && error instanceof Error) error.message += ' The PTY resize was already applied.';
+      throw error;
     }
   }
   return {
@@ -1079,6 +1175,14 @@ async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedPro
 
 function stopRecordInternal(config: ManagedProcessConfig, record: ManagedProcessRecord, options: StopRecordOptions = {}): Promise<ManagedProcessDto & GenericRecord> {
   if (record.stopPromise) return record.stopPromise;
+  if (options.automaticPtyRetirement) {
+    if (!canAutomaticallyRetirePty(record, options.automaticPtyRetirement)) {
+      return Promise.resolve(processSnapshot(record));
+    }
+    // Commit admission without yielding or callbacks before reserving the owner.
+    // An explicit stop must never coalesce with a rejected automatic no-op.
+    record.status = 'stopping';
+  }
   const pending = Promise.resolve().then(() => stopRecordWithEvidence(config, record, options));
   record.stopPromise = pending;
   void pending.finally(() => {
@@ -1729,6 +1833,29 @@ function interactivePtyIdleRetireMs(): number {
   return DEFAULT_INTERACTIVE_PTY_IDLE_RETIRE_MS;
 }
 
+function permitsWrappedCmdStartup(executable: string, argv: readonly string[], environment: Record<string, string>): boolean {
+  if (process.platform !== 'win32' || !path.win32.isAbsolute(executable)) return false;
+  const systemRoot = String(process.env.SystemRoot || process.env.WINDIR || '');
+  if (!path.win32.isAbsolute(systemRoot)) return false;
+  const systemCmd = path.win32.join(systemRoot, 'System32', 'cmd.exe');
+  if (path.win32.normalize(executable).toLowerCase() !== path.win32.normalize(systemCmd).toLowerCase()) return false;
+  const flags = argv.map(value => value.toUpperCase());
+  return flags.length >= 1 && flags.length <= 2 && new Set(flags).size === flags.length
+    && flags.includes('/D') && flags.every(value => value === '/D' || value === '/Q')
+    && !Object.keys(environment).some(key => key.toUpperCase() === 'PROMPT');
+}
+
+function notePtyInputAttempt(record: ManagedProcessRecord): void {
+  if (!record.pty) return;
+  record.ptyWrappedStartupEligible = false;
+  record.ptyLastInputSeq = ++record.ptyActivitySeq;
+  record.lastPtyInputAtMs = Date.now();
+}
+
+function interactivePtyLastActivityAtMs(record: ManagedProcessRecord): number {
+  return Math.max(record.lastPtyInputAtMs, record.lastPtyOutputAtMs, record.lastPtyResizeAtMs);
+}
+
 function clearInteractivePtyRetirement(record: ManagedProcessRecord): void {
   if (!record.idleRetireTimer) return;
   clearTimeout(record.idleRetireTimer);
@@ -1742,14 +1869,15 @@ function scheduleInteractivePtyRetirement(config: ManagedProcessConfig, record: 
   record.idleRetireTimer = setTimeout(() => {
     record.idleRetireTimer = null;
     if (!isRetirableInteractivePty(record)) return;
-    const lastActivityAtMs = Math.max(record.lastPtyInputAtMs, record.lastPtyOutputAtMs);
-    const remainingMs = timeoutMs - Math.max(0, Date.now() - lastActivityAtMs);
+    const remainingMs = timeoutMs - Math.max(0, Date.now() - interactivePtyLastActivityAtMs(record));
     if (remainingMs > 0) {
       scheduleInteractivePtyRetirement(config, record);
       return;
     }
-    if (record.lastPtyOutputAtMs < record.lastPtyInputAtMs || !interactiveShellIsAtPrompt(record)) return;
-    void stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS }).catch(() => {});
+    void stopRecordInternal(config, record, {
+      graceMs: DEFAULT_STOP_GRACE_MS,
+      automaticPtyRetirement: { activitySeq: record.ptyActivitySeq, idleMs: timeoutMs }
+    }).catch(() => {});
   }, timeoutMs);
   record.idleRetireTimer.unref?.();
 }
@@ -1759,41 +1887,70 @@ function isRetirableInteractivePty(record: ManagedProcessRecord): boolean {
     && record.lifecycle === 'task'
     && record.kind === 'interactive'
     && record.pty === true
+    && record.ptyStartupSettled
+    && !record.discarded && !record.persistenceFailureHandled
     && record.status === 'running'
     && Boolean(record.ptyProcess);
 }
 
-function interactiveShellIsAtPrompt(record: ManagedProcessRecord): boolean {
-  const command = String(record.commandSummary || record.command || record.label || '');
-  const isPowerShell = /(?:^|[\\/\s"'])(?:powershell|pwsh)(?:\.exe)?(?:[\s"']|$)/i.test(command);
-  const isCmd = /(?:^|[\\/\s"'])cmd(?:\.exe)?(?:[\s"']|$)/i.test(command);
-  if (!isPowerShell && !isCmd) return false;
-  const tail = stripTerminalControls(readLogTail(record, 'stdout', 4096)).trimEnd();
-  const line = tail.split('\n').at(-1)?.trimEnd() || '';
-  if (isPowerShell) return /^PS\s+[^\r\n>]{1,300}>$/.test(line);
-  return /^(?:[A-Za-z]:\\|\\\\)[^\r\n>]{0,300}>$/.test(line);
+function canAutomaticallyRetirePty(record: ManagedProcessRecord, guard: InteractivePtyRetirementGuard): boolean {
+  if (processes.get(record.processId) !== record || !isRetirableInteractivePty(record)
+    || record.ptyActivitySeq !== guard.activitySeq || record.ptyLastOutputSeq <= record.ptyLastInputSeq
+    || Date.now() - interactivePtyLastActivityAtMs(record) < guard.idleMs
+    || record.stdoutDroppedBytes !== 0 || record.logPendingBytes.stdout !== 0
+    || record.logBufferBytes.stdout !== 0 || record.logBuffers.stdout.length !== 0) return false;
+  const atPrompt = interactiveShellIsAtPrompt(record);
+  return atPrompt && record.ptyActivitySeq === guard.activitySeq
+    && processes.get(record.processId) === record && isRetirableInteractivePty(record);
 }
 
-function stripTerminalControls(value: unknown): string {
-  return String(value || '')
-    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/\r/g, '');
+function interactiveShellIsAtPrompt(record: ManagedProcessRecord): boolean {
+  // Only the exact, owned CMD startup transcript is proof of an idle prompt.
+  // A later command can print "C:\\path>" or "PS path>" without returning to
+  // the shell; prompt-shaped stdout must never authorize process termination.
+  if (!record.ptyWrappedStartupEligible) return false;
+  const range = readLogTailRange(record, 'stdout', MAX_WRAPPED_STARTUP_PROMPT_BYTES);
+  if (range.invalidUtf8 || range.truncated || range.nextOffset !== record.stdoutBytes
+    || range.totalBytes !== record.stdoutBytes) return false;
+  return wrappedCmdStartupIsAtPrompt(record, range);
+}
+
+function wrappedCmdStartupIsAtPrompt(record: ManagedProcessRecord, range: LogRange): boolean {
+  if (!record.ptyWrappedStartupEligible || record.ptyLastInputSeq !== 0
+    || record.columns !== record.ptyLaunchColumns || range.offset !== 0
+    || range.retainedFromOffset !== 0 || range.truncatedBefore
+    || range.totalBytes > MAX_WRAPPED_STARTUP_PROMPT_BYTES) return false;
+  const expected = record.ptyLaunchCwd + '>';
+  const columns = record.ptyLaunchColumns;
+  if (!Number.isInteger(columns) || columns < 1 || columns > 1000
+    || expected.length > MAX_WRAPPED_STARTUP_PROMPT_BYTES
+    || !/^(?:[A-Za-z]:\\|\\\\)/.test(expected) || !/^[\x20-\x7E]+$/.test(expected)) return false;
+  // Only a controlled /D CMD startup, before any input, can establish this
+  // exact prompt. Support both single-row and wrapped launch paths without
+  // treating later arbitrary command output as a shell-completion signal.
+  const withoutControls = range.text.replace(/\x1B\[(?:0m|0K|\?25[hl])/g, '');
+  if (/[\r\n]/.test(withoutControls.replace(/\r\n/g, ''))) return false;
+  const visible = withoutControls.replace(/\r\n/g, '\n');
+  if (!/^[\x20-\x7E\n]*$/.test(visible)) return false;
+  const rows = visible.split('\n');
+  const count = Math.ceil(expected.length / columns);
+  const first = rows.length - count;
+  if (first < 1) return false;
+  return rows.slice(first).every((row, index) => row === expected.slice(index * columns, (index + 1) * columns));
 }
 
 async function retireIdleInteractivePtysForCapacity(config: ManagedProcessConfig): Promise<number> {
   const stats = hostResourceStats().persistent;
   if (Number(stats?.active || 0) < Number(stats?.limit || HOST_PERSISTENT_PROCESS_LIMIT)) return 0;
-  const now = Date.now();
   const candidates = [...processes.values()]
-    .filter(record => isRetirableInteractivePty(record)
-      && record.lastPtyOutputAtMs >= record.lastPtyInputAtMs
-      && now - Math.max(record.lastPtyInputAtMs, record.lastPtyOutputAtMs) >= CAPACITY_PRESSURE_PTY_IDLE_MS
-      && interactiveShellIsAtPrompt(record))
-    .sort((left, right) => Math.max(left.lastPtyInputAtMs, left.lastPtyOutputAtMs) - Math.max(right.lastPtyInputAtMs, right.lastPtyOutputAtMs));
+    .map(record => ({ record, guard: { activitySeq: record.ptyActivitySeq, idleMs: CAPACITY_PRESSURE_PTY_IDLE_MS } }))
+    .filter(({ record, guard }) => canAutomaticallyRetirePty(record, guard))
+    .sort((left, right) => interactivePtyLastActivityAtMs(left.record) - interactivePtyLastActivityAtMs(right.record));
   let retired = 0;
-  for (const record of candidates) {
-    await stopRecordInternal(config, record, { graceMs: DEFAULT_STOP_GRACE_MS }).catch(() => null);
+  for (const { record, guard } of candidates) {
+    await stopRecordInternal(config, record, {
+      graceMs: DEFAULT_STOP_GRACE_MS, automaticPtyRetirement: guard
+    }).catch(() => null);
     if (TERMINAL_STATUSES.has(record.status)) retired += 1;
     const current = hostResourceStats().persistent;
     if (Number(current?.active || 0) < Number(current?.limit || HOST_PERSISTENT_PROCESS_LIMIT)) break;
@@ -2035,6 +2192,14 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       queueWaitMs: 0,
       lastPtyInputAtMs: 0,
       lastPtyOutputAtMs: 0,
+      lastPtyResizeAtMs: 0,
+      ptyLaunchCwd: '',
+      ptyLaunchColumns: 0,
+      ptyWrappedStartupEligible: false,
+      ptyStartupSettled: false,
+      ptyActivitySeq: 0,
+      ptyLastInputSeq: 0,
+      ptyLastOutputSeq: 0,
       idleRetireTimer: null
     };
   } catch {

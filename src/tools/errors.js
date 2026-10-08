@@ -55,8 +55,9 @@ function operationForTool(toolName, action = '') {
 }
 
 function serializeToolError(toolName, error) {
+  const processFacts = processErrorFacts(error);
   const message = error instanceof Error ? error.message : String(error);
-  const payload = { ok: false, error: message,
+  const payload = { ok: false, error: message, ...processFacts,
     ...(error?.timeline ? { timeline: error.timeline } : {}),
     ...(typeof error?.executed === 'boolean' ? { executed: error.executed } : {}),
     ...(error?.deadlineKind ? { deadlineKind: error.deadlineKind } : {}),
@@ -73,6 +74,7 @@ function serializeToolError(toolName, error) {
     ...(error.terminationCertainty ? { terminationCertainty: error.terminationCertainty } : {}),
     ...(['TASK_NOT_FOUND', 'TASK_ID_REQUIRED', 'INVALID_TASK_STATE', 'TASK_INTEGRITY_STATE_MISSING', 'TASK_SCOPE_CONFLICT', 'TASK_OWNERSHIP_MISMATCH'].includes(String(error.code)) ? { recovery: { action: 'inspect_history', nextAction: 'Use relai_work action history with the exact authorized workspace to inspect your own work. Retrieve a known operationId with action result. Verify the intended task before supplying work_id, or explicitly begin a new task; never adopt an unrelated task or resubmit a mutation merely to recover a result.' } } : {}),
     errorDetails: {
+      ...processFacts,
       code: String(error.code),
       source: String(error.source || 'rel-ai-mcp'),
       operation: String(error.operation || operationForTool(toolName || error.publicTool, error.validation?.action)),
@@ -106,6 +108,27 @@ function serializeToolError(toolName, error) {
         : []
     }
   };
+}
+
+function processErrorFacts(error) {
+  const facts = {};
+  const supplied = key => {
+    try { return Object.getOwnPropertyDescriptor(error, key)?.value; }
+    catch { return undefined; }
+  };
+  const processId = supplied('processId');
+  if (typeof processId === 'string' && processId.length <= 512 && processId.trim()) facts.processId = processId;
+  for (const key of ['acceptedBytes', 'inputQueuedBytes']) {
+    const value = supplied(key);
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) facts[key] = value;
+  }
+  for (const key of ['inputDeliveryUnknown', 'cancelled', 'timedOut', 'cleanupPending', 'retryable']) {
+    const value = supplied(key);
+    if (typeof value === 'boolean') facts[key] = value;
+  }
+  const terminationConfirmed = supplied('terminationConfirmed');
+  if (terminationConfirmed === null || typeof terminationConfirmed === 'boolean') facts.terminationConfirmed = terminationConfirmed;
+  return facts;
 }
 
 export { enhanceToolError, serializeToolError };

@@ -49,7 +49,7 @@ assert.equal(task.validation, 'passed', 'later validation replaces the recoverab
 assert.equal(task.status, 'planning');
 
 task = reduceTaskLifecycleAuditEvent(task, event('task-1', {
-  operationId: 'commit-1', ts: '2026-07-11T06:00:05.000Z', tool: 'publish.commit', changedFiles: ['src/a.js', 'test/a.test.js'], commitHead: '0123456789abcdef0123456789abcdef01234567'
+  operationId: 'commit-1', ts: '2026-07-11T06:00:05.000Z', tool: 'publish.commit', commitCreated: true, changedFiles: ['src/a.js', 'test/a.test.js'], commitHead: '0123456789abcdef0123456789abcdef01234567'
 }));
 assert.equal(task.committed, true);
 assert.equal(task.commitHead, '0123456789abcdef0123456789abcdef01234567');

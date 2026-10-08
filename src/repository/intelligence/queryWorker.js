@@ -2,11 +2,8 @@ import { cachedRepositoryContext, cachedRepositorySummary, cachedSearchGraphCont
 import { currentGeneration, indexProducerVersion, openIndexDatabase, repositoryIndexPath } from './database.js';
 import { executeCodeInspectQuery, executeSemanticSearchQuery } from './queryService.js';
 
-let sourceCacheIdentity = '';
 const SOURCE_CACHE_MAX_FILES = 128;
 const SOURCE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
-
-let sourceCache = createBoundedSourceCache();
 
 export default async function runJob(job = {}) {
   try {
@@ -82,15 +79,10 @@ async function executeIndexedQuery(job, options, execute) {
 
 function queryOptions(job, options) {
   const databaseFile = repositoryIndexPath(job.config, job.workspace);
-  const identity = `${databaseFile}:${String(job.index?.fingerprint || '')}`;
-  if (sourceCacheIdentity !== identity) {
-    sourceCacheIdentity = identity;
-    sourceCache = createBoundedSourceCache();
-  }
   return {
     ...options,
     database: openIndexDatabase(databaseFile, { readonly: true }),
-    sourceCache
+    sourceCache: createBoundedSourceCache()
   };
 }
 

@@ -65,14 +65,14 @@ function createAppUpdater(options = {}) {
   const installedCompatibility = currentCompatibility || runtimeMetadata();
   const store = createUpdateStateStore({ app, onLog });
   const macUpdater = platform === 'darwin' && support.supported
-    ? manualMacUpdater || createMacManualUpdater({ app, arch, fetchImpl, openPath: openUpdateFile, now, onLog: message => log(message) })
+    ? manualMacUpdater || createMacManualUpdater({ app, arch, fetchImpl, openPath: openUpdateFile, now, onLog: message => { if (acceptsUpdaterEvent()) log(message); } })
     : null;
   const handlers = [];
   let autoCheckTimer = null;
   let releaseDiscoveryTimer = null;
   let releaseDiscoveryPromise = null;
   let lastReleaseDiscoveryAt = 0;
-  let retryingOperation = '';
+  let retryingOperation = null;
   let installDeferred = false;
   let started = false;
   let lifecycleGeneration = 0;
@@ -88,6 +88,7 @@ function createAppUpdater(options = {}) {
     if (started) return snapshot();
     started = true;
     lifecycleGeneration += 1;
+    const generation = lifecycleGeneration;
     if (!support.supported) {
       emit({ state: 'unsupported' });
       return snapshot();
@@ -97,7 +98,9 @@ function createAppUpdater(options = {}) {
       autoUpdater.autoInstallOnAppQuit = false;
       autoUpdater.disableDifferentialDownload = false;
       configureUpdateChannel();
-      autoUpdater.logger = createLogger(onLog);
+      autoUpdater.logger = createLogger((message, options) => {
+        if (status.state === 'installing' || acceptsUpdaterEvent(generation)) onLog(message, options);
+      });
       bindUpdaterEvents({
         autoUpdater,
         handlers,
@@ -109,10 +112,12 @@ function createAppUpdater(options = {}) {
         now,
         log,
         currentCompatibility: installedCompatibility,
-        allowPrerelease
+        allowPrerelease,
+        isCurrent: () => acceptsUpdaterEvent(generation)
       });
     }
     void scheduleAutomaticCheck().then(fullCheckDelay => {
+      if (!isCurrentGeneration(generation)) return;
       const discoveryDelay = fullCheckDelay <= AUTO_CHECK_DELAY_MS
         ? RELEASE_DISCOVERY_INTERVAL_MS
         : AUTO_CHECK_DELAY_MS;
@@ -132,55 +137,99 @@ function createAppUpdater(options = {}) {
     lifecycleGeneration += 1;
   }
 
+  function isCurrentGeneration(generation) {
+    return started && lifecycleGeneration === generation;
+  }
+
+  function acceptsUpdaterEvent(generation = lifecycleGeneration) {
+    return isCurrentGeneration(generation)
+      && (!retryingOperation || retryingOperation.generation === generation);
+  }
+
+  function updateBusyMessage() {
+    return retryingOperation && retryingOperation.generation !== lifecycleGeneration
+      ? 'A previous update action is still settling. Wait for it to finish. If it does not finish, restart Rel.AI before trying again.'
+      : 'An update action is already in progress.';
+  }
+
   async function checkForUpdates() {
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
-    if (isBusy()) return failure(codes.busy, 'An update action is already in progress.', false);
-    emit({ state: 'checking', error: '', errorCode: '', integrityVerified: false, availableCompatibility: null, updateSynchronization: null });
-    log('Checking for application updates.');
+    const generation = lifecycleGeneration;
+    if (!isCurrentGeneration(generation)) return { ok: true, skipped: true, status: snapshot() };
+    if (isBusy()) return failure(codes.busy, updateBusyMessage(), false);
+    const operation = beginUpdateOperation(generation);
     let result;
     try {
-      configureUpdateChannel();
-      if (platform === 'darwin') {
-        const info = await runWithRetries('Update check', () => macUpdater.checkForUpdates({ channel: updateChannel() }));
-        applyMacCheckResult(info);
-      } else {
-        await runWithRetries('Update check', () => autoUpdater.checkForUpdates());
+      emit({ state: 'checking', error: '', errorCode: '', integrityVerified: false, availableCompatibility: null, updateSynchronization: null });
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+      log('Checking for application updates.');
+      try {
+        configureUpdateChannel();
+        if (platform === 'darwin') {
+          const info = await runWithRetries('Update check', () => macUpdater.checkForUpdates({ channel: updateChannel() }), generation);
+          if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+          applyMacCheckResult(info);
+        } else {
+          await runWithRetries('Update check', () => autoUpdater.checkForUpdates(), generation);
+        }
+        if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+        result = { ok: true, status: snapshot() };
+      } catch (error) {
+        if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+        result = handleError(error);
       }
-      result = { ok: true, status: snapshot() };
-    } catch (error) {
-      result = handleError(error);
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+      const checkedAt = now();
+      await store.writeLastCheck(checkedAt);
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+      lastReleaseDiscoveryAt = checkedAt;
+      void scheduleAutomaticCheck();
+      return result;
+    } finally {
+      finishUpdateOperation(operation);
+      if (result) result.status = snapshot();
     }
-    const checkedAt = now();
-    await store.writeLastCheck(checkedAt);
-    lastReleaseDiscoveryAt = checkedAt;
-    void scheduleAutomaticCheck();
-    return result;
   }
 
   async function downloadUpdate() {
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
+    const generation = lifecycleGeneration;
+    if (!isCurrentGeneration(generation)) return { ok: true, skipped: true, status: snapshot() };
+    if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);
     if (status.state === 'downloaded') return { ok: true, status: snapshot() };
     if (status.state !== 'available') return failure(codes.busy, 'No downloadable update is currently available.', false);
-    emit({ state: 'downloading', progress: progressPayload({ percent: 0 }), error: '', errorCode: '', integrityVerified: false });
-    log(`Downloading Rel.AI MCP ${status.availableVersion || 'update'}.`);
+    const operation = beginUpdateOperation(generation);
+    let result;
     try {
+      emit({ state: 'downloading', progress: progressPayload({ percent: 0 }), error: '', errorCode: '', integrityVerified: false });
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+      log(`Downloading Rel.AI MCP ${status.availableVersion || 'update'}.`);
       if (platform === 'darwin') {
         const info = await runWithRetries('Update download', () => macUpdater.downloadUpdate({
           version: status.availableVersion,
-          onProgress: progress => emit({ state: 'downloading', progress: progressPayload(progress) })
-        }));
+          onProgress: progress => {
+            if (isCurrentGeneration(generation)) emit({ state: 'downloading', progress: progressPayload(progress) });
+          }
+        }), generation);
+        if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
         applyMacDownloadResult(info);
       } else {
-        await runWithRetries('Update download', () => autoUpdater.downloadUpdate());
+        await runWithRetries('Update download', () => autoUpdater.downloadUpdate(), generation);
       }
-      return { ok: true, status: snapshot() };
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+      return result = { ok: true, status: snapshot() };
     } catch (error) {
-      return handleError(error);
+      if (!isCurrentGeneration(generation)) return result = { ok: true, skipped: true, status: snapshot() };
+      return result = handleError(error);
+    } finally {
+      finishUpdateOperation(operation);
+      if (result) result.status = snapshot();
     }
   }
 
   async function installUpdate(options = {}) {
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
+    if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);
     if (status.state !== 'downloaded' || status.integrityVerified !== true) {
       const guidance = platform === 'darwin'
         ? 'Download and verify the update before opening the macOS installer.'
@@ -296,6 +345,7 @@ function createAppUpdater(options = {}) {
         log(`Newly published release ${latestVersion} detected. Verifying update metadata.`);
         return await checkForUpdates();
       } catch (error) {
+        if (!isCurrentGeneration(discoveryGeneration)) return { ok: true, skipped: true, status: snapshot() };
         log(`Could not check for a newly published release: ${cleanText(error?.message || error, 400)}`, {
           level: 'warning',
           code: 'update_discovery_failed'
@@ -311,23 +361,29 @@ function createAppUpdater(options = {}) {
   function scheduleReleaseDiscovery(delay = RELEASE_DISCOVERY_INTERVAL_MS) {
     if (!support.supported || !started) return;
     if (releaseDiscoveryTimer) clearTimer(releaseDiscoveryTimer);
+    const generation = lifecycleGeneration;
     releaseDiscoveryTimer = setTimer(() => {
+      if (!isCurrentGeneration(generation)) return;
       releaseDiscoveryTimer = null;
-      void discoverUpdate().finally(() => scheduleReleaseDiscovery(RELEASE_DISCOVERY_INTERVAL_MS));
+      void discoverUpdate().finally(() => {
+        if (isCurrentGeneration(generation)) scheduleReleaseDiscovery(RELEASE_DISCOVERY_INTERVAL_MS);
+      });
     }, Math.max(AUTO_CHECK_DELAY_MS, delay));
     releaseDiscoveryTimer?.unref?.();
   }
 
   async function scheduleAutomaticCheck() {
     if (!support.supported || !started) return 0;
-    if (autoCheckTimer) clearTimer(autoCheckTimer);
+    const generation = lifecycleGeneration;
     const lastCheck = await store.readLastCheck();
-    if (!support.supported || !started) return 0;
+    if (!isCurrentGeneration(generation)) return 0;
+    if (autoCheckTimer) clearTimer(autoCheckTimer);
     const elapsed = lastCheck > 0 ? Math.max(0, now() - lastCheck) : 0;
     const delay = lastCheck > 0 && elapsed < AUTO_CHECK_INTERVAL_MS
       ? AUTO_CHECK_INTERVAL_MS - elapsed
       : AUTO_CHECK_DELAY_MS;
     autoCheckTimer = setTimer(() => {
+      if (!isCurrentGeneration(generation)) return;
       autoCheckTimer = null;
       void checkForUpdates();
     }, delay);
@@ -335,21 +391,32 @@ function createAppUpdater(options = {}) {
     return delay;
   }
 
-  async function runWithRetries(label, action) {
-    retryingOperation = label;
-    try {
-      for (let attempt = 0; attempt <= UPDATE_RETRY_DELAYS_MS.length; attempt += 1) {
-        try {
-          return await action();
-        } catch (error) {
-          if (!isTransientUpdateError(error) || attempt >= UPDATE_RETRY_DELAYS_MS.length) throw error;
-          const delay = UPDATE_RETRY_DELAYS_MS[attempt];
-          log(`${label} hit a transient network error. Retrying in ${delay} ms (${attempt + 2}/${UPDATE_RETRY_DELAYS_MS.length + 1}).`, { level: 'warning', code: 'update_retry' });
-          await retryDelay(delay);
-        }
+  function beginUpdateOperation(generation) {
+    let settle;
+    const settled = new Promise(resolve => { settle = resolve; });
+    retryingOperation = { generation, settled, settle };
+    return retryingOperation;
+  }
+
+  function finishUpdateOperation(operation) {
+    operation.settle();
+    if (retryingOperation !== operation) return;
+    retryingOperation = null;
+    if (started && lifecycleGeneration !== operation.generation) onStatusChange(snapshot());
+  }
+
+  async function runWithRetries(label, action, generation) {
+    for (let attempt = 0; attempt <= UPDATE_RETRY_DELAYS_MS.length; attempt += 1) {
+      if (!isCurrentGeneration(generation)) return;
+      try {
+        return await action();
+      } catch (error) {
+        if (!isCurrentGeneration(generation)) return;
+        if (!isTransientUpdateError(error) || attempt >= UPDATE_RETRY_DELAYS_MS.length) throw error;
+        const delay = UPDATE_RETRY_DELAYS_MS[attempt];
+        log(`${label} hit a transient network error. Retrying in ${delay} ms (${attempt + 2}/${UPDATE_RETRY_DELAYS_MS.length + 1}).`, { level: 'warning', code: 'update_retry' });
+        await retryDelay(delay);
       }
-    } finally {
-      retryingOperation = '';
     }
   }
 
@@ -378,7 +445,7 @@ function createAppUpdater(options = {}) {
   }
 
   function isBusy() {
-    return ['checking', 'downloading', 'installing'].includes(status.state);
+    return Boolean(retryingOperation) || ['checking', 'downloading', 'installing'].includes(status.state);
   }
 
   function failure(errorCode, error, retryable) {
@@ -386,6 +453,7 @@ function createAppUpdater(options = {}) {
   }
 
   function emit(patch) {
+    const generation = lifecycleGeneration;
     const previousState = status.state;
     const previousVersion = status.availableVersion;
     status = normalizeStatus({ ...status, ...patch });
@@ -393,20 +461,28 @@ function createAppUpdater(options = {}) {
     onStatusChange(snapshot());
     const newlyAvailable = status.state === 'available'
       && (previousState !== 'available' || previousVersion !== status.availableVersion);
-    if (newlyAvailable && shouldAutoDownload() === true) {
-      queueMicrotask(() => {
-        if (status.state === 'available') void downloadUpdate();
+    if (newlyAvailable && isCurrentGeneration(generation) && shouldAutoDownload() === true) {
+      const pending = retryingOperation?.settled;
+      queueMicrotask(async () => {
+        await pending;
+        if (isCurrentGeneration(generation) && status.state === 'available') void downloadUpdate();
       });
     }
   }
 
   function snapshot() {
-    const installBlockedReason = status.canInstall
+    const current = retryingOperation && retryingOperation.generation !== lifecycleGeneration && status.state !== 'installing'
+      ? {
+        ...status, state: 'error', errorCode: codes.busy, error: updateBusyMessage(),
+        progress: null, integrityVerified: false, canCheck: false, canDownload: false, canInstall: false
+      }
+      : status;
+    const installBlockedReason = current.canInstall
       ? taskActivityBlockReason(getTaskActivity(), 'installing the update')
       : '';
     return {
-      ...status,
-      progress: status.progress ? { ...status.progress } : null,
+      ...current,
+      progress: current.progress ? { ...current.progress } : null,
       updateChannel: updateChannel(),
       installDeferred,
       installBlockedReason,
@@ -428,6 +504,7 @@ function createAppUpdater(options = {}) {
 
   async function deferInstallUntilIdle() {
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
+    if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);
     if (status.state !== 'downloaded' || status.integrityVerified !== true) {
       return failure(codes.busy, 'Download and verify the update before scheduling installation.', false);
     }
@@ -443,6 +520,7 @@ function createAppUpdater(options = {}) {
     if (!installDeferred || status.state !== 'downloaded' || status.integrityVerified !== true) {
       return { ok: true, skipped: true, status: snapshot() };
     }
+    if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);
     if (taskActivityBlockReason(getTaskActivity(), 'installing the update')) {
       return { ok: true, deferred: true, status: snapshot() };
     }

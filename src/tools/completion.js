@@ -23,7 +23,10 @@ async function completeTask(config, args = {}, handlerContext = {}) {
   const context = requireMatchingTaskContext(requestedTaskId);
   const signal = handlerContext.signal || getCurrentTaskAbortSignal();
   signal?.throwIfAborted?.();
-  const previous = readTaskHistorySession(config, requestedTaskId);
+  const previous = readTaskHistorySession(config, requestedTaskId, {
+    reconcileInactive: true, persistReconciliation: false,
+    activeTaskIds: getToolActivity().tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean)
+  });
   const workspaceAlias = String(previous?.workspace || '').trim();
   const workspace = workspaceAlias ? resolveWorkspace(config, workspaceAlias) : null;
   if (previous?.completionKnown === true || previous?.status === 'completed') {
@@ -40,7 +43,7 @@ async function completeTask(config, args = {}, handlerContext = {}) {
   const summary = normalizeCompletionSummary(args.summary);
   assertFallbackCompletionAvailable(requestedTaskId, { config, excludeOperationId: handlerContext.fallbackOperationId });
   if (!workspace) return finalizeProjectlessTask(summary);
-  const authority = readTaskIntegrity(config, requestedTaskId, workspace.alias);
+  const authority = readCompletionIntegrity(config, requestedTaskId, workspace.alias);
   const validation = await factualValidationState(config, workspace, authority, { signal });
   return finalizeValidatedTask(config, workspace, {
     summary,
@@ -94,7 +97,9 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
   if (!taskId) {
     throw taskError('TASK_OWNERSHIP_MISMATCH', 'The active invocation has no valid logical task identity.');
   }
-  const authority = readTaskIntegrity(config, taskId, workspace.alias);
+  const authority = options.completionSource === VALIDATE_CHECKS_SOURCE
+    ? readTaskIntegrity(config, taskId, workspace.alias)
+    : readCompletionIntegrity(config, taskId, workspace.alias);
   const processCleanup = await cleanupTaskManagedProcesses(config, workspace.alias, taskId, {
     ...options.processContext, taskId, workspace: workspace.alias
   });
@@ -114,10 +119,10 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     : changedFilesForTask(config, workspace.alias, taskId);
   const completionSource = String(options.completionSource || WORK_FINISH_SOURCE);
   let validationStatus = String(options.validationStatus || 'not_run');
-  // Process shutdown can write final files. Never reuse validation freshness
-  // from before that cleanup boundary.
-  if (validationStatus === 'passed' && processCleanup.attempted > 0) {
-    validationStatus = (await factualValidationState(config, workspace, readTaskIntegrity(config, taskId, workspace.alias), { signal: options.signal })).status;
+  // Manual finish reports existing evidence after all cleanup. Atomic
+  // validate-close checks its own current result below, never the old audit.
+  if (validationStatus === 'passed' && completionSource !== VALIDATE_CHECKS_SOURCE) {
+    validationStatus = (await factualValidationState(config, workspace, readCompletionIntegrity(config, taskId, workspace.alias), { signal: options.signal })).status;
   }
   const residualChangedFiles = await workspaceDirtyPaths(workspace, config, changedFiles, { signal: options.signal });
   const residualState = residualChangedFiles.length ? 'preserved_uncommitted' : 'clean';
@@ -129,6 +134,26 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     workflowEvidence: persistedLearningSession.workflowEvidence || [],
     changedFiles
   };
+  if (completionSource === VALIDATE_CHECKS_SOURCE) {
+    const checked = options.currentValidationResult;
+    const fingerprint = String(checked?.validationFingerprint || '');
+    const scope = checked?.validationScope;
+    const current = fingerprint && Array.isArray(scope)
+      ? await createValidationFingerprint(workspace, config, { paths: scope, signal: options.signal })
+      : null;
+    if (checked?.ok !== true || checked?.validationStatus !== 'passed'
+      || !current || current.fingerprint !== fingerprint) {
+      return {
+        ok: false, workspace: workspace.alias, work_id: taskId,
+        completionKnown: false, summary, validationStatus: 'stale',
+        validationLevel: String(options.validationLevel || ''),
+        validationFingerprint: fingerprint, processCleanup,
+        residualChangedFiles, residualState,
+        nextAction: 'Validation is stale at the final completion boundary. The work session remains open; validate the current content before requesting atomic completion.'
+      };
+    }
+  }
+  options.signal?.throwIfAborted?.();
   const completion = requestCurrentTaskCompletion({
     summary,
     validationStatus,
@@ -174,6 +199,7 @@ async function finalizeValidationResult(config, workspace, validationResult, sum
     validationLevel: validationResult.validationLevel,
     validationAt: new Date().toISOString(),
     validationFingerprint: validationResult.validationFingerprint,
+    currentValidationResult: validationResult,
     completionSource: VALIDATE_CHECKS_SOURCE,
     processContext: executionContext,
     signal
@@ -226,6 +252,15 @@ async function finalizeDuplicateCompletion(config, workspace, context, previous,
       ? 'Duplicate task completion request accepted; the task was already completing.'
       : 'Task was already completed. The original completion result is returned idempotently.') + completionProcessNote(processCleanup)
   };
+}
+
+function readCompletionIntegrity(config, taskId, workspace) {
+  try { return readTaskIntegrity(config, taskId, workspace); }
+  catch (error) {
+    if (!/^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] completion integrity unavailable:', error);
+    return null;
+  }
 }
 
 async function factualValidationState(config, workspace, authority, options = {}) {

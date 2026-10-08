@@ -252,6 +252,7 @@ async function case_analytics_reliability_unit() {
           failureCategories: [{ category: 'runtime', failures: 1 }], workspaceFailureCategories: []
         }]
       }));
+      const originalMonthlyBytes = fs.readFileSync(path.join(analyticsDir, '2026-08.json'));
       const migrated = readLocalUsageSnapshot({ stateDir: legacyStateDir }, '2026-08');
       assert.equal(migrated.totals.successes, 9);
       assert.equal(migrated.totals.failures, 1);
@@ -265,7 +266,7 @@ async function case_analytics_reliability_unit() {
       assert.equal(afterNewCall.totals.reliabilityCalls, 1, 'reliability starts with the first newly classified call');
       assert.equal(afterNewCall.totals.reliableCalls, 1);
       await flushLocalAnalytics({ stateDir: legacyStateDir });
-      assert.equal(fs.existsSync(analyticsDir), false, 'legacy analytics JSON must be removed after SQLite migration');
+      assert.deepEqual(fs.readFileSync(path.join(analyticsDir, '2026-08.json')), originalMonthlyBytes, 'legacy analytics JSON bytes must be preserved after SQLite migration');
       const migratedDocument = withStateDatabase({ stateDir: legacyStateDir }, db => JSON.parse(db.prepare('SELECT payload FROM analytics_months WHERE month=?').get('2026-08').payload));
       assert.equal(migratedDocument.schemaVersion, 5);
       assert.equal(migratedDocument.totals.reliabilityCalls, 1);

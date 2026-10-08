@@ -39,13 +39,15 @@ function digest(bytes: Buffer | null): string {
 
 // Stage in an alternate index while holding Git's ordinary index lock. Refusal
 // and failed staging never restore a snapshot over a concurrent writer.
-export async function beginGitIndexTransaction(cwd: string, config: Record<string, any>) {
+export async function beginGitIndexTransaction(cwd: string, config: Record<string, any>, options: { signal?: AbortSignal; timeout?: number } = {}) {
+  options.signal?.throwIfAborted?.();
   const location = await runReadOnlyProcess('git', ['rev-parse', '--git-path', 'index'],
-    { cwd, timeout: 30000, maxOutputBytes: 16384, preserveOutputWhitespace: true }, config);
+    { cwd, timeout: options.timeout || 30000, ...(options.signal ? { signal: options.signal } : {}), maxOutputBytes: 16384, preserveOutputWhitespace: true }, config);
   if (!location.executed || location.exitCode !== 0 || location.timedOut || location.cancelled
     || location.stdoutTruncated || location.terminationConfirmed === false || location.outputFinalizationTimedOut) {
     throw new Error('Could not determine the complete Git index path.');
   }
+  options.signal?.throwIfAborted?.();
   const indexPath = path.resolve(cwd, location.stdout.replace(/\r?\n$/, ''));
   const lockPath = indexPath + '.lock';
   const temporaryPath = indexPath + '.relai-' + crypto.randomBytes(16).toString('hex');

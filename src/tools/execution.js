@@ -14,7 +14,8 @@ import { claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths }
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { bindWorkspaceOperationIdentity, blockWorkspaceMutations, runWorkspaceOperation } from '../workspaceOperationQueue.js';
 import { listMutationProcessRecords, runWithMutationProcessOwnership } from '../mutationProcessOwnership.js';
-import { recoverStructuredPatchTransaction } from '../structuredPatchTransaction.js';
+import { inspectStructuredPatchTransaction, recoverStructuredPatchTransaction } from '../structuredPatchTransaction.js';
+import { authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.ts';
 import {
   measurePerformancePhase,
   performanceTimingAttributes,
@@ -51,12 +52,12 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
         && fallbackExecutionsStatus(backgroundReference, { config, workId: taskId }).some(record => record.status === 'running'));
       const workspace = workspaceOverride || (effectiveArgs?.workspace ? resolveWorkspace(config, effectiveArgs.workspace) : null);
       const directFilesystem = workspace?.directFilesystem === true;
+      const noSourceMutation = effectiveArgs?.dryRun === true || (executionName === OP.EDIT
+        && (['list', 'compare'].includes(String(effectiveArgs?.envAction || ''))
+          || ['start', 'append', 'abort'].includes(String(effectiveArgs?.stage || '').toLowerCase())));
       if (workspace && !directFilesystem) {
-        // Register every configured alias before the first lock is acquired so
-        // duplicate roots cannot temporarily create independent authority lanes.
-        for (const [alias, entry] of Object.entries(config.workspaces || {})) {
-          if (entry?.path) bindWorkspaceOperationIdentity(alias, entry.path);
-        }
+        // The selected physical identity joins the existing alias/legacy-block
+        // owner. Unrelated configured roots are not an admission prerequisite.
         bindWorkspaceOperationIdentity(workspace.alias, workspace.path);
       }
       const branchChange = isExplicitBranchChange(executionName, effectiveArgs);
@@ -92,9 +93,6 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
 
       const invokeHandler = async (args, signal = requestSignal) => {
         if (typeof definition?.handler !== 'function') throw new Error(`Tool '${name}' has no executable handler.`);
-        if (executionName === OP.EDIT && workspace && taskId && args?.path && args?.dryRun !== true) {
-          await captureNativeMutationPaths(config, taskId, workspace.alias, [String(args.path)]);
-        }
         if (executionName !== OP.EXEC) timeline.transition('running', { executed: true });
         const handled = await measurePerformancePhase('tool.execution', () => definition.handler(config, args || {}, {
           connector: Boolean(context?.publicHttpOnly),
@@ -104,10 +102,12 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           conversationId: context?.conversationId,
           transportSessionId: context?.transportSessionId,
           signal,
+          resultWaitSignal: context?.resultWaitSignal,
           onOperationPhase: event => timeline.transition(event.phase, event),
           ...(deadlineAtMs > 0 ? { deadlineAtMs } : {}),
-          beforeNativeMutation: workspace && taskId ? paths => captureNativeMutationPaths(config, taskId, workspace.alias, paths) : undefined,
-          principal: context?.principal,
+          beforeNativeMutation: workspace && taskId ? (paths, options) => captureNativeMutationPaths(config, taskId, workspace.alias, paths, options) : undefined,
+          principal: queuePrincipal,
+          authorizedWorkspaces: authorizedWorkspaceAliases(queuePrincipal, Object.keys(config.workspaces || {})),
 
           transportType: context?.transportType,
           executionMode: context?.executionMode || '',
@@ -124,6 +124,9 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           && !directFilesystem
           && taskId
           && effectiveArgs?.dryRun !== true
+          && handled?.mutationEffect !== 'none'
+          && handled?.mutationEffect !== 'unknown'
+          && handled?.mutationUnknown !== true
           && (executionName === OP.EDIT || executionName === OP.EXEC)
           && Array.isArray(handled?.changedFiles)
           && handled.changedFiles.length) {
@@ -168,10 +171,21 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           );
           try {
             if (workspace && !directFilesystem && isMutationScope(queueScope)) {
-              assertNoRecoveredMutationProcess(config, workspace.alias, workspace.path);
-              recoverStructuredPatchTransaction(config, workspace);
+              if (noSourceMutation) {
+                if (inspectStructuredPatchTransaction(config, workspace).pending === true) {
+                  const error = new Error('This non-source operation cannot proceed while active edit recovery is pending. Inspect the retained recovery state before requesting a real mutation.');
+                  error.code = 'WORKSPACE_EDIT_RECOVERY_PENDING';
+                  error.executed = false;
+                  error.retryable = false;
+                  throw error;
+                }
+              } else {
+                assertNoRecoveredMutationProcess(config, workspace.alias, workspace.path);
+                recoverStructuredPatchTransaction(config, workspace);
+              }
             }
-            if (taskId && workspace && !directFilesystem && taskBaselineRequired(executionName, queueScope)) {
+            if (taskId && workspace && !directFilesystem && !noSourceMutation
+              && taskBaselineRequired(executionName, queueScope)) {
               try {
                 const integrity = await ensureTaskBaseline(config, taskId, workspace.alias, {
                   signal: watchdog.signal,
@@ -370,6 +384,7 @@ function queueModeFor(executionName, definition, readOnlyExec) {
 }
 
 function taskBaselineRequired(executionName, queueScope) {
+  if (executionName === OP.WORK_FINISH) return false;
   return isMutationScope(queueScope) || executionName === OP.VALIDATE_CHECKS;
 }
 

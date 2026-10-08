@@ -22,11 +22,14 @@ export async function copyText(text) {
   textarea.style.position = 'fixed';
   textarea.style.opacity = '0';
   textarea.style.pointerEvents = 'none';
-  document.body.appendChild(textarea);
-  textarea.select();
-  textarea.setSelectionRange(0, textarea.value.length);
-  const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
-  textarea.remove();
-  if (!copied) throw new Error('Clipboard access failed.');
-  return true;
+  try {
+    document.body.appendChild(textarea);
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+    const copied = typeof document.execCommand === 'function' && document.execCommand('copy');
+    if (!copied) throw new Error('Clipboard access failed.');
+    return true;
+  } finally {
+    textarea.remove();
+  }
 }

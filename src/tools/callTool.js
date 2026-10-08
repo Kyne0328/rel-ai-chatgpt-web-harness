@@ -1,5 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fromJsonSchema } from '@modelcontextprotocol/server';
+import { toolArgumentError } from './validationGuidance.js';
 import { recordTransportTiming } from '../transportTiming.ts';
 
 import { safeLogAudit } from '../audit.js';
@@ -19,7 +21,7 @@ import { executeToolCall } from './execution.js';
 import { repositoryIntelligence } from '../repository/intelligence/service.js';
 import { describeToolOperation } from './operation.js';
 import { resolveExecutableToolCall, validateExecutableOperationInput } from './runtimeRegistry.js';
-import { getToolNames, isToolCallable } from './schema.js';
+import { getToolNames, getToolSchemas, isToolCallable } from './schema.js';
 import { applyCautionAudit, buildExtraAudit, invalidateSessionCacheForCall } from './session.js';
 import { assertKnownTask, assertTaskWorkspaceOwnership, findReusableTask, taskAttributionHint, isTerminalTaskReference, taskAuditContext, withTaskIdentity } from './task.js';
 import { deterministicActionId } from '../workflow/contracts.js';
@@ -38,6 +40,12 @@ import {
 } from '../performanceObservability.js';
 
 bindTaskHistoryActivityPersistence(onToolActivity, readConfig);
+
+// Validate the complete executable public grammar after safe scope recovery.
+// Discovery remains an ergonomic projection, never an execution validator.
+const PUBLIC_INPUT_VALIDATORS = new Map(getToolSchemas().map(definition => [
+  definition.name, { schema: definition.inputSchema, validator: fromJsonSchema(definition.inputSchema)['~standard'] }
+]));
 
 async function callTool(name, args = {}, context = {}) {
   recordTransportTiming('call_tool_entry');
@@ -82,6 +90,9 @@ async function callToolObserved(name, args = {}, context = {}) {
   let handlerResult;
   let operationTimeline;
   let compactResponse = false;
+  let taskOwnerVerified = false;
+  let verifiedTaskSession = null;
+  let workspaceScopeVerified = false;
   try {
     if (!isToolCallable(name, config)) {
       throw new Error(`Unknown tool '${name}'. Available tools: ${getToolNames(config).join(', ')}. Removed direct operation names are not callable; restart or reconnect if discovery is stale.`);
@@ -93,6 +104,7 @@ async function callToolObserved(name, args = {}, context = {}) {
     operationName = resolved.operationName;
     resolvedAction = resolved.action || '';
     effectiveArgs = resolved.operationArgs;
+    const optionalIntegrity = taskBookkeepingOptionalFor(operationName, effectiveArgs, definition);
     if (effectiveArgs?.taskProgress !== undefined) {
       taskProgressPatch = effectiveArgs.taskProgress;
       effectiveArgs = { ...effectiveArgs };
@@ -128,8 +140,10 @@ async function callToolObserved(name, args = {}, context = {}) {
     }
     if (requestedTaskId && operationName !== OP.WORK_BEGIN) {
       knownTask = await assertKnownTask(config, requestedTaskId, '', operationName, effectivePrincipal, effectiveArgs, {
-        trustedLocalTaskControl, signal: context.signal, deadlineAtMs: context.deadlineAtMs
+        trustedLocalTaskControl, signal: context.signal, deadlineAtMs: context.deadlineAtMs,
+        onOwnerVerified: session => { taskOwnerVerified = true; verifiedTaskSession = session; }
       }).catch(error => { throw taskAdmissionReadError(error, context); });
+      taskOwnerVerified = Boolean(knownTask);
       if (knownTask && taskAware && !String(effectiveArgs?.workspace || '').trim()) effectiveArgs = { ...effectiveArgs, workspace: knownTask.workspace };
     }
     assertAuthorizedToolCall({
@@ -163,6 +177,12 @@ async function callToolObserved(name, args = {}, context = {}) {
       : effectiveArgs, {
       publicLabel: resolved.action ? `${name} action '${resolved.action}'` : name
     });
+    await validateCompletePublicInput(name, {
+      ...effectiveArgs,
+      ...(workspaceOverride ? { workspace: workspaceOverride.alias } : {}),
+      ...(resolved.action ? { action: resolved.action } : {}),
+      ...(publicArgs?.taskProgress !== undefined ? { taskProgress: publicArgs.taskProgress } : {})
+    });
     if (operationName === OP.WORK_BEGIN) {
       const reusableTask = findReusableTask(
         config,
@@ -174,6 +194,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       if (reusableTask) {
         requestedTaskId = normalizeTaskId(reusableTask.id || reusableTask.taskId);
         knownTask = reusableTask;
+        taskOwnerVerified = true;
       }
     }
     if (knownTask) {
@@ -181,22 +202,27 @@ async function callToolObserved(name, args = {}, context = {}) {
       // resolution cannot change that record, so validate ownership against the
       // resolved alias without re-reading task history a second time.
       assertTaskWorkspaceOwnership(knownTask, effectiveArgs?.workspace);
-      let integrity = readTaskIntegrity(config, requestedTaskId, effectiveArgs?.workspace);
+      workspaceScopeVerified = true;
+      let integrity = readOptionalTaskIntegrity(config, requestedTaskId, effectiveArgs?.workspace, optionalIntegrity);
       const requestedWorkspace = String(effectiveArgs?.workspace || '').trim();
       const projectlessTask = !String(knownTask?.workspace || '').trim();
       if (!integrity && projectlessTask && requestedWorkspace && taskOperationBindsProject(operationName)) {
-        await recordTaskIntegrityEvent(config, {
-          taskId: requestedTaskId,
-          taskIdentityVersion: 2,
-          taskIdExplicit: true,
-          taskHistoryEligible: false,
-          tool: OP.WORK_BEGIN,
-          workspace: requestedWorkspace,
-          deferBaseline: true
-        });
-        integrity = readTaskIntegrity(config, requestedTaskId, requestedWorkspace);
+        try {
+          await recordTaskIntegrityEvent(config, {
+            taskId: requestedTaskId,
+            taskIdentityVersion: 2,
+            taskIdExplicit: true,
+            taskHistoryEligible: false,
+            tool: OP.WORK_BEGIN,
+            workspace: requestedWorkspace,
+            deferBaseline: true
+          });
+          integrity = readOptionalTaskIntegrity(config, requestedTaskId, requestedWorkspace, optionalIntegrity);
+        } catch (error) {
+          if (!optionalIntegrity || !/^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
+        }
       }
-      const lifecycleWithoutIntegrity = taskLifecycleCanRunWithoutIntegrity(operationName) || Boolean(workspaceOverride);
+      const lifecycleWithoutIntegrity = optionalIntegrity || taskLifecycleCanRunWithoutIntegrity(operationName) || Boolean(workspaceOverride);
       if (!integrity && !lifecycleWithoutIntegrity && (taskScoped || taskAttributionRequiresIntegrity(operationName))) {
         throw taskError(
           'TASK_INTEGRITY_STATE_MISSING',
@@ -217,17 +243,18 @@ async function callToolObserved(name, args = {}, context = {}) {
         workspaceResolution = null;
       }
     }
+    // Capability and compatible task/workspace scope have now been verified.
+    if (!knownTask) workspaceScopeVerified = true;
     assertTaskPlanReady({
       taskId: requestedTaskId,
       knownTask,
       operationName,
-      workspace: authorizedWorkspace,
-      taskProgressPatch
+      optionalBookkeeping: optionalIntegrity
     });
     const attributionHint = taskScope === 'optional' && !requestedTaskId && effectiveArgs?.independent !== true
       ? taskAttributionHint(config, authorizedWorkspace, effectivePrincipal, context?.conversationId)
       : '';
-    if (attributionHint && definition.annotations?.readOnlyHint !== true) {
+    if (attributionHint && !optionalIntegrity) {
       throw taskError('TASK_ATTRIBUTION_REQUIRED', attributionHint, { retryable: true, allowedAlternatives: [attributionHint] });
     }
     let repeatCall = observeRepeatCall({
@@ -314,6 +341,8 @@ async function callToolObserved(name, args = {}, context = {}) {
     const auditPromise = safeLogAudit(config, {
       ...activityResult.activity,
       ...taskAuditContext(context, finishActivity, requestedTaskId, operationName, valueOk, value),
+      taskIntegrityEligible: workspaceScopeVerified,
+      taskResultFactsEligible: true,
       tool: operationName,
       publicTool: name,
       ...(operationName === OP.WORK_BEGIN ? { deferBaseline: true } : {}),
@@ -331,7 +360,7 @@ async function callToolObserved(name, args = {}, context = {}) {
       ms: Date.now() - started,
       ...extraAudit,
       ...(valueOk ? {} : { error: activityResult.error })
-    }, { strictIntegrity: Boolean(workId) });
+    }, { strictIntegrity: Boolean(workId) && (!optionalIntegrity || operationName === OP.WORK_BEGIN), optionalIntegrity });
     const auditEntry = workId ? await auditPromise : null;
     refreshRequestTaskIntegrity(requestTaskContext, auditEntry);
     if (workId && evidenceDraft && auditEntry) {
@@ -418,9 +447,20 @@ async function callToolObserved(name, args = {}, context = {}) {
         nextAction: 'The handler returned this result before task bookkeeping failed. Do not repeat the original operation to repair persistence. Reconcile the same work_id and operationId; a running operation may still be active.'
       });
     }
-    const unadmittedTaskRead = Boolean(requestedTaskId && !knownTask && enhanced.executed === false);
-    const failedValue = { ok: false, errorCode: enhanced.code || '', commandSummary: effectiveArgs?.command || '' };
-    const failedDraft = failedWorkId && !unadmittedTaskRead ? buildWorkflowEvidenceReceipt({
+    const verifiedTaskFailure = Boolean(taskOwnerVerified || (finishActivity?.taskId && operationName === OP.WORK_BEGIN));
+    const verifiedWorkspaceFailure = workspaceScopeVerified && (!requestedTaskId || verifiedTaskFailure);
+    const partialResult = knownResult && typeof knownResult === 'object' && !Array.isArray(knownResult)
+      ? knownResult
+      : ['applied', 'unknown'].includes(error?.mutationEffect)
+        ? { mutationEffect: error.mutationEffect, changedFiles: error.changedFiles, possibleChangedFiles: error.possibleChangedFiles }
+        : null;
+    const failedValue = { ...(partialResult || {}), ok: false, errorCode: enhanced.code || '', commandSummary: effectiveArgs?.command || '' };
+    const physicalEffectKnown = Boolean(partialResult && (partialResult.mutationEffect === 'applied'
+      || partialResult.mutationEffect === 'unknown' || partialResult.committed === true));
+    if (physicalEffectKnown) enhanced.retryable = false;
+    if (verifiedWorkspaceFailure && physicalEffectKnown) signalRepositoryIntelligenceMutation(config, operationName, effectiveArgs || {}, failedValue);
+    const resultFactsEligible = Boolean(handlerResultKnown || error?.handlerResultKnown === true || physicalEffectKnown);
+    const failedDraft = failedWorkId && verifiedWorkspaceFailure && resultFactsEligible ? buildWorkflowEvidenceReceipt({
       tool: operationName,
       args: { ...(effectiveArgs || {}), action: resolvedAction || effectiveArgs?.action },
       result: failedValue,
@@ -431,17 +471,20 @@ async function callToolObserved(name, args = {}, context = {}) {
     if (!/^TASK_INTEGRITY_/.test(String(enhanced.code || ''))) {
       const failedAuditEntry = await safeLogAudit(config, {
         ...activityResult.activity,
+        ...(verifiedWorkspaceFailure ? buildExtraAudit(operationName, failedValue, effectiveArgs || {}) : {}),
         ...taskAuditContext(context, finishActivity, requestedTaskId, operationName, false),
-        // Retain the rejection log without projecting an unverified identity
-        // onto task state that admission could not read safely.
-        ...(unadmittedTaskRead ? { taskIdentityVersion: 0, taskIdExplicit: false, taskHistoryEligible: false } : {}),
+        // Owner-verified failure activity is distinct from authority to observe
+        // or reconcile the caller-supplied workspace.
+        ...(!verifiedTaskFailure ? { taskIdentityVersion: 0, taskIdExplicit: false, taskHistoryEligible: false } : {}),
+        taskIntegrityEligible: verifiedWorkspaceFailure,
+        taskResultFactsEligible: resultFactsEligible,
         tool: operationName,
         publicTool: name,
         internalOperation: operationName === name ? undefined : operationName,
         action: resolvedAction || undefined,
         operation: activityResult.activity?.title || finishActivity?.operation,
         ok: false,
-        workspace: effectiveArgs?.workspace,
+        workspace: verifiedWorkspaceFailure ? effectiveArgs?.workspace : verifiedTaskSession?.workspace || knownTask?.workspace || '',
         workspaceInput: publicArgs?.workspace == null ? '' : String(publicArgs.workspace),
         workspaceInputSource: 'tool_argument',
         workspaceMatchStatus: enhanced.workspaceMatchStatus || undefined,
@@ -457,6 +500,17 @@ async function callToolObserved(name, args = {}, context = {}) {
       if (failedWorkId && failedDraft && failedAuditEntry) {
         await persistWorkflowEvidence(config, effectiveArgs, operationName, resolvedAction, failedValue, failedAuditEntry, failedWorkId, failedDraft, { persist: true });
       }
+    }
+    if (verifiedWorkspaceFailure && physicalEffectKnown) {
+      const response = compactResponse
+        ? serializeConnectorResult({ publicName: name, action: resolvedAction, operationName, value: failedValue, args: effectiveArgs || {}, workId: failedWorkId })
+        : withTaskIdentity(failedValue, failedWorkId);
+      return ok({
+        ...response, ok: false, retryable: false,
+        handlerCompleted: handlerResultKnown || error?.handlerResultKnown === true,
+        error: enhanced.message, errorCode: enhanced.code,
+        nextAction: 'A source mutation or commit may already have taken effect. Preserve the same operation identity and recovery evidence; do not repeat the mutation to repair bookkeeping.'
+      });
     }
     throw enhanced;
   } finally {
@@ -478,12 +532,44 @@ async function callToolObserved(name, args = {}, context = {}) {
   }
 }
 
+async function validateCompletePublicInput(name, input) {
+  const contract = PUBLIC_INPUT_VALIDATORS.get(name);
+  if (!contract) throw new Error(`Unknown public tool '${name}'.`);
+  const result = await contract.validator.validate(input);
+  if (!result.issues) return;
+  throw toolArgumentError({
+    publicTool: name, action: String(input.action || ''), schema: contract.schema,
+    issues: result.issues, message: `Input validation error for ${name}: ${result.issues.map(issue => issue.message).join('; ')}.`
+  });
+}
+
+function taskBookkeepingOptionalFor(operationName, args = {}, definition = {}) {
+  if (taskLifecycleCanRunWithoutIntegrity(operationName) || definition.annotations?.readOnlyHint === true) return true;
+  if ([OP.PROCESS_READ, OP.PROCESS_LIST, OP.PROCESS_STOP].includes(operationName)) return true;
+  if (args.dryRun === true) return true;
+  if (operationName === OP.EDIT && ['list', 'compare'].includes(String(args.envAction || ''))) return true;
+  const action = String(args.action || '').trim().toLowerCase();
+  if (operationName === OP.BROWSER) return ['status', 'tabs', 'snapshot', 'screenshot', 'stop'].includes(action);
+  if (operationName === OP.UI) return ['snapshot', 'screenshot', 'console', 'network', 'stop'].includes(action);
+  if (operationName === OP.COMPUTER) return ['status', 'displays', 'observe', 'screenshot', 'wait_for_change', 'wait_for_stable', 'stop'].includes(action);
+  return operationName === OP.DESKTOP && action === 'clipboard_read';
+}
+
+function readOptionalTaskIntegrity(config, taskId, workspace, optional) {
+  try { return readTaskIntegrity(config, taskId, workspace); }
+  catch (error) {
+    if (!optional || !/^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] optional task integrity:', error);
+    return null;
+  }
+}
+
 function taskPlanHasSteps(plan) {
   return Array.isArray(plan?.steps) && plan.steps.length > 0;
 }
 
-function assertTaskPlanReady({ taskId, knownTask, operationName }) {
-  if (!taskId || !knownTask || taskPlanGateExemptOperations.has(operationName)) return;
+function assertTaskPlanReady({ taskId, knownTask, operationName, optionalBookkeeping = false }) {
+  if (!taskId || !knownTask || optionalBookkeeping || taskPlanGateExemptOperations.has(operationName)) return;
   const liveTask = getToolActivity().tasks.find(task => String(task.id || task.taskId || '') === taskId);
   const task = liveTask || knownTask;
   if (taskPlanHasSteps(task.plan)) return;
@@ -501,7 +587,7 @@ function assertTaskPlanReady({ taskId, knownTask, operationName }) {
 }
 
 const taskPlanGateExemptOperations = new Set([
-  OP.WORK_BEGIN, OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL,
+  OP.WORK_BEGIN, OP.WORK_CONTEXT, OP.WORK_PLAN, OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH,
   OP.PROCESS_READ, OP.PROCESS_LIST, OP.PROCESS_STOP
 ]);
 
@@ -749,20 +835,25 @@ function restrictWorkspaceRecoveryErrorAliases(error, principal, connector) {
 
 function signalRepositoryIntelligenceMutation(config, operationName, args, value) {
   const alias = String(args?.workspace || value?.workspace || '').trim();
-  if (!alias || args?.dryRun === true) return;
+  if (!alias || args?.dryRun === true || value?.mutationEffect === 'none') return;
   const changedFiles = Array.isArray(value?.changedFiles)
     ? [...new Set(value.changedFiles.map(item => String(item || '').trim().replaceAll('\\', '/')).filter(Boolean))]
     : [];
-  const broadMutation = operationName === OP.CHANGES_RESET && value?.ok !== false;
+  const uncertainMutation = value?.mutationEffect === 'unknown' || value?.mutationUnknown === true;
+  const possibleChangedFiles = Array.isArray(value?.possibleChangedFiles)
+    ? [...new Set(value.possibleChangedFiles.map(item => String(item || '').trim().replaceAll('\\', '/')).filter(Boolean))]
+    : [];
+  const broadMutation = operationName === OP.CHANGES_RESET && (value?.ok !== false || uncertainMutation);
   const targetedMutation = changedFiles.length > 0
     && [OP.EDIT, OP.EXEC, OP.CHANGES_TIDY_RUN].includes(operationName);
   const restoreMutation = operationName === OP.CHANGES_RESTORE && value?.ok !== false
     ? [...new Set((Array.isArray(args?.paths) ? args.paths : []).map(item => String(item || '').trim().replaceAll('\\', '/')).filter(Boolean))]
     : [];
-  if (!broadMutation && !targetedMutation && !restoreMutation.length) return;
+  if (!broadMutation && !targetedMutation && !restoreMutation.length && !uncertainMutation) return;
   try {
     const workspace = resolveWorkspace(config, alias);
-    const mutationPaths = broadMutation ? [] : (changedFiles.length ? changedFiles : restoreMutation);
+    const mutationPaths = broadMutation || (uncertainMutation && !possibleChangedFiles.length && !changedFiles.length)
+      ? [] : [...new Set([...changedFiles, ...possibleChangedFiles, ...restoreMutation])];
     repositoryIntelligence.noteMutation(workspace, config, mutationPaths);
     invalidateRepositoryTopology(workspace.path, mutationPaths);
   } catch {}

@@ -20,7 +20,7 @@ const MAX_PENDING_AUDIT_ENTRIES = 1000;
 const auditWriteStates = new Map();
 const pendingAuditOperations = new Set();
 
-async function logAudit(config, event) {
+async function logAudit(config, event, options = {}) {
   const auditPath = getAuditPath(config);
   const redacted = redactEvent(event || {});
   const entry = ensureActivityEventIdentity({
@@ -29,8 +29,15 @@ async function logAudit(config, event) {
     ...redacted,
     auditId: redacted.auditId || crypto.randomUUID()
   });
-  const integrity = await recordTaskIntegrityEvent(config, entry);
-  if (integrity) Object.assign(entry, integrity);
+  try {
+    const integrity = await recordTaskIntegrityEvent(config, entry);
+    if (integrity) Object.assign(entry, integrity);
+  } catch (error) {
+    if (options.optionalIntegrity !== true || !/^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
+    // Safe observations/control retain their factual audit/history even when
+    // optional integrity enrichment is unavailable. Do not repair its bytes.
+    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] optional integrity enrichment:', error);
+  }
   enqueueAuditWrite(auditPath, entry);
   try {
     recordTaskHistoryEvent(config, entry);
@@ -43,7 +50,7 @@ async function logAudit(config, event) {
 function safeLogAudit(config, event, options = {}) {
   const operation = (async () => {
     try {
-      return await logAudit(config, event);
+      return await logAudit(config, event, options);
     } catch (error) {
       if (options.strictIntegrity === true && /^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
       if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] audit write:', error);
@@ -171,6 +178,14 @@ async function flushAuditWrites(auditPath = '') {
     await flushAuditState(target, state);
     await state.promise;
   }
+  const receipts = targets.filter(([, state]) => Boolean(state))
+    .map(([target, state]) => ({ path: target, ...auditPersistenceSnapshot(state) }));
+  return {
+    ok: receipts.every(receipt => receipt.healthy && receipt.pending === 0),
+    pending: receipts.reduce((sum, receipt) => sum + receipt.pending, 0),
+    droppedEntries: receipts.reduce((sum, receipt) => sum + receipt.droppedEntries, 0),
+    failedPaths: receipts.filter(receipt => !receipt.healthy || receipt.pending !== 0).map(receipt => receipt.path)
+  };
 }
 
 function readAuditFileEntries(file, auditPath, tail = false) {

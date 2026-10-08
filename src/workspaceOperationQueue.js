@@ -44,6 +44,12 @@ function lockStateFor(key) {
 function admitWaiting(state) {
   while (state.queue.length > 0) {
     const next = state.queue[0];
+    // Timers may be delayed; expiry must be checked before reserving ownership.
+    if (next.deadlineAtMs > 0 && Date.now() >= next.deadlineAtMs) {
+      state.queue.shift();
+      next.timeout();
+      continue;
+    }
     if (next.mode === READ) {
       if (state.activeWriter) return;
       state.queue.shift();
@@ -60,7 +66,7 @@ function admitWaiting(state) {
   }
 }
 
-function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs, onQueueState = null) {
+function acquire(state, mode, signal, deadlineAtMs = 0, owner = null, reportedTimeoutMs = 0, onQueueState = null) {
   throwIfAborted(signal);
   const queuedAt = Date.now();
   return new Promise((resolve, reject) => {
@@ -72,10 +78,17 @@ function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeo
     };
     const entry = {
       mode,
+      deadlineAtMs,
       owner: owner && typeof owner === 'object' ? { ...owner } : null,
       settled: false,
       onQueueState,
       lastQueueState: '',
+      timeout: () => {
+        if (entry.settled) return;
+        entry.settled = true;
+        cleanupWait();
+        reject(workspaceOperationQueueTimeoutError(reportedTimeoutMs, state, entry.owner));
+      },
       admit: () => {
         if (entry.settled) return;
         entry.settled = true;
@@ -97,21 +110,15 @@ function acquire(state, mode, signal, timeoutMs = 0, owner = null, reportedTimeo
       admitWaiting(state);
       notifyQueueStates(state);
     };
-    const boundedTimeoutMs = Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
-      ? Math.max(1, Math.floor(Number(timeoutMs)))
-      : 0;
-
     state.queue.push(entry);
     signal?.addEventListener?.('abort', onAbort, { once: true });
-    if (boundedTimeoutMs > 0) {
+    if (deadlineAtMs > 0) {
       timer = setTimeout(() => {
         if (entry.settled || !removeWaitingEntry()) return;
-        entry.settled = true;
-        cleanupWait();
-        reject(workspaceOperationQueueTimeoutError(reportedTimeoutMs, state, entry.owner));
+        entry.timeout();
         admitWaiting(state);
         notifyQueueStates(state);
-      }, boundedTimeoutMs);
+      }, Math.max(1, deadlineAtMs - Date.now()));
     }
     admitWaiting(state);
     notifyQueueStates(state);
@@ -154,11 +161,11 @@ function deleteIdleLock(key, state) {
   }
 }
 
-async function withLock(key, mode, operation, signal, timeoutMs = 0, owner = null, reportedTimeoutMs = timeoutMs, onQueueState = null) {
+async function withLock(key, mode, operation, signal, deadlineAtMs = 0, owner = null, reportedTimeoutMs = 0, onQueueState = null) {
   const state = lockStateFor(key);
   let waitMs;
   try {
-    waitMs = await acquire(state, mode, signal, timeoutMs, owner, reportedTimeoutMs, onQueueState);
+    waitMs = await acquire(state, mode, signal, deadlineAtMs, owner, reportedTimeoutMs, onQueueState);
   } catch (error) {
     deleteIdleLock(key, state);
     throw error;
@@ -167,6 +174,11 @@ async function withLock(key, mode, operation, signal, timeoutMs = 0, owner = nul
     // The signal can flip after admission resolves but before this continuation
     // resumes. In that race, release the acquired lock without invoking work.
     throwIfAborted(signal);
+    // Admission may resolve before a delayed continuation resumes. This guard
+    // applies only before work starts, never to an already-running operation.
+    if (deadlineAtMs > 0 && Date.now() >= deadlineAtMs) {
+      throw workspaceOperationQueueTimeoutError(reportedTimeoutMs);
+    }
     return await queueOwnerContext.run(owner, () => operation(waitMs, state));
   } finally {
     release(key, state, mode);
@@ -418,7 +430,6 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
     ? Math.floor(Number(options.queueTimeoutMs))
     : 0;
   const queueDeadline = queueTimeoutMs > 0 ? Date.now() + queueTimeoutMs : 0;
-  const remainingQueueMs = () => queueDeadline > 0 ? Math.max(1, queueDeadline - Date.now()) : 0;
   const mode = options.mode === READ ? READ : WRITE;
   const taskId = String(options.taskId || '').trim();
   const requestedScope = String(options.scope || '');
@@ -444,7 +455,7 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
         queued: state.queue.length
       });
       return operation();
-    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+    }, signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
   }
 
   if (scope === MUTATION_SCOPE) {
@@ -462,13 +473,13 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
           queued: workspaceState.queue.length + (taskState?.queue.length || 0) + mutationState.queue.length
         });
         return operation();
-      }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+      }, signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
 
       if (options.bypassTaskLane === true) return enterMutationLane();
       const laneKey = taskKey(workspace, taskId);
       return withLock(laneKey, mode, (taskWaitMs, taskState) => enterMutationLane(taskWaitMs, taskState),
-        signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
-    }, signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+        signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
+    }, signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
   }
 
   return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => {
@@ -483,8 +494,8 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
         queued: workspaceState.queue.length + taskState.queue.length
       });
       return operation();
-    }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
-  }, options.signal, remainingQueueMs(), options.owner, queueTimeoutMs, options.onQueueState);
+    }, options.signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
+  }, options.signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
 }
 
 function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
@@ -496,6 +507,7 @@ function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
   const queueTimeoutMs = Number.isFinite(Number(options.queueTimeoutMs)) && Number(options.queueTimeoutMs) > 0
     ? Math.floor(Number(options.queueTimeoutMs))
     : 0;
+  const queueDeadline = queueTimeoutMs > 0 ? Date.now() + queueTimeoutMs : 0;
   throwIfWorkspaceMutationBlocked(workspace);
   const signal = mutationQueueSignal(workspace, options.signal);
   // Validation may enter this narrower boundary from an already-owned task lane.
@@ -510,7 +522,7 @@ function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
       queued: state.queue.length
     });
     return operation();
-  }, signal, queueTimeoutMs, owner, queueTimeoutMs, options.onQueueState);
+  }, signal, queueDeadline, owner, queueTimeoutMs, options.onQueueState);
 }
 
 function pendingWorkspaceOperations() {

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { fetchJson } from '../../api.js';
 import { copyText } from '../../clipboard.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
@@ -6,7 +6,7 @@ import { Icon } from '../../components/icons.js';
 import { RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
-import { getWorkspaceFilter } from '../../router.js';
+import { getRouteSnapshot, subscribeRoute } from '../../router.js';
 
 import { timeAgo } from '../../utils.js';
 import { restartConnection } from './connection-recovery.js';
@@ -21,13 +21,16 @@ const RUNTIME_SLICES = Object.freeze(['runtime', 'runtimeCompatibility']);
 export function createDiagnosticsRoute(useDashboardSlices) {
   return function DiagnosticsRoute() {
     const data = useDashboardSlices(RUNTIME_SLICES);
-    return h(DiagnosticsView, { runtime: data.runtime, runtimeCompatibility: data.runtimeCompatibility });
+    const route = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
+    const workspace = new URLSearchParams(route.search).get('workspace') || '';
+    return h(DiagnosticsView, { runtime: data.runtime, runtimeCompatibility: data.runtimeCompatibility, workspace });
   };
 }
 
-function DiagnosticsView({ runtime, runtimeCompatibility }) {
-  const [report, setReport] = useState(null);
-  const [loadError, setLoadError] = useState('');
+function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
+  const [reportState, setReportState] = useState(() => ({ workspace, report: null, error: '' }));
+  const report = reportState.workspace === workspace ? reportState.report : null;
+  const loadError = reportState.workspace === workspace ? reportState.error : '';
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [live, setLive] = useState(false);
   const [busy, setBusy] = useState('');
@@ -36,11 +39,14 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
   const reportRef = useRef(report);
   const liveRef = useRef(live);
   const refreshTimerRef = useRef(0);
-  const loadingRef = useRef(false);
+  const requestRef = useRef(null);
+  const requestGenerationRef = useRef(0);
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
   const logRefs = useRef(new Map());
   const scrollStateRef = useRef(new Map());
 
-  useEffect(() => { reportRef.current = report; }, [report]);
+  reportRef.current = report;
   useEffect(() => { liveRef.current = live; }, [live]);
 
   const captureLogPositions = useCallback(() => {
@@ -53,31 +59,58 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
     }
   }, []);
 
-  const load = useCallback(async ({ silent = false } = {}) => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    try {
-      const workspace = getWorkspaceFilter();
-      const url = '/api/diagnostics' + (workspace ? `?workspace=${encodeURIComponent(workspace)}` : '');
-      const result = await fetchJson(url, { cache: 'no-store' });
-      if (!result?.ok) throw new Error(result?.error || 'Troubleshooting info could not be loaded.');
-      if (silent) captureLogPositions();
-      setReport(result);
-      setLoadError('');
-    } catch (error) {
-      if (silent) {
-        setLive(false);
-        toast(messageOf(error), { variant: 'error' });
-      } else {
-        setReport(null);
-        setLoadError(messageOf(error));
-      }
-    } finally {
-      loadingRef.current = false;
+  const load = useCallback(async function loadReport({ silent = false, fresh = false } = {}) {
+    if (workspaceRef.current !== workspace) return null;
+    const generation = requestGenerationRef.current;
+    const pending = requestRef.current;
+    if (pending) {
+      if (!fresh && pending.workspace === workspace && pending.generation === generation) return pending.promise;
+      await pending.promise;
+      if (workspaceRef.current !== workspace || requestGenerationRef.current !== generation) return null;
+      return loadReport({ silent });
     }
-  }, [captureLogPositions]);
 
-  useEffect(() => { void load(); }, [load]);
+    const request = { workspace, generation, promise: null };
+    const isCurrent = () => requestRef.current === request
+      && requestGenerationRef.current === generation && workspaceRef.current === workspace;
+    requestRef.current = request;
+    request.promise = (async () => {
+      try {
+        const url = '/api/diagnostics' + (workspace ? `?workspace=${encodeURIComponent(workspace)}` : '');
+        const result = await fetchJson(url, { cache: 'no-store' });
+        if (!result?.ok) throw new Error(result?.error || 'Troubleshooting info could not be loaded.');
+        if (!isCurrent()) return null;
+        if (silent) captureLogPositions();
+        reportRef.current = result;
+        setReportState({ workspace, report: result, error: '' });
+        return result;
+      } catch (error) {
+        if (!isCurrent()) return null;
+        const previous = silent ? reportRef.current : null;
+        reportRef.current = previous;
+        setReportState({ workspace, report: previous, error: messageOf(error) });
+        if (silent) setLive(false);
+        return null;
+      } finally {
+        if (requestRef.current === request) requestRef.current = null;
+      }
+    })();
+    return request.promise;
+  }, [captureLogPositions, workspace]);
+
+  useEffect(() => {
+    const generation = ++requestGenerationRef.current;
+    workspaceRef.current = workspace;
+    reportRef.current = null;
+    setReportState({ workspace, report: null, error: '' });
+    setTunnelDoctor(null);
+    void load();
+    return () => {
+      if (requestGenerationRef.current === generation) requestGenerationRef.current += 1;
+      window.clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = 0;
+    };
+  }, [load, workspace]);
 
   const scheduleRefresh = useCallback(() => {
     if (document.visibilityState === 'hidden' || refreshTimerRef.current) return;
@@ -101,7 +134,7 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
         const next = { ...current, logs: { ...current.logs, runtime: delta.runtime } };
         reportRef.current = next;
         captureLogPositions();
-        setReport(next);
+        setReportState(currentState => ({ workspace, report: next, error: currentState.workspace === workspace ? currentState.error : '' }));
         if (change.type === 'append' && ['warning', 'error'].includes(change.entry.level)) {
           setLiveAnnouncement(`New app log ${change.entry.level} from ${change.entry.source || 'Rel.AI'}.`);
         }
@@ -111,7 +144,7 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
     };
     window.addEventListener('relai:diagnostics-live', onLive);
     return () => window.removeEventListener('relai:diagnostics-live', onLive);
-  }, [captureLogPositions, live, scheduleRefresh]);
+  }, [captureLogPositions, live, scheduleRefresh, workspace]);
 
   useEffect(() => {
     if (!live) return undefined;
@@ -122,8 +155,6 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [live, load]);
-
-  useEffect(() => () => window.clearTimeout(refreshTimerRef.current), []);
 
   useEffect(() => {
     for (const [key, element] of logRefs.current.entries()) {
@@ -147,7 +178,9 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
     if (!report?.reportText) return;
     setBusy('copy');
     try {
-      await copyText(report.reportText);
+      const current = await load({ silent: true, fresh: true });
+      if (!current?.reportText || workspaceRef.current !== workspace) throw new Error('The current troubleshooting report is unavailable.');
+      await copyText(current.reportText);
       toast('Diagnostic report copied.', { variant: 'success' });
     } catch {
       toast('Could not copy the report.', { variant: 'error' });
@@ -157,9 +190,11 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
     if (!report) return;
     setBusy('export');
     try {
+      const current = await load({ silent: true, fresh: true });
+      if (!current || workspaceRef.current !== workspace) throw new Error('The current troubleshooting report is unavailable.');
       const result = typeof window.relaiDesktop?.exportDiagnosticState === 'function'
-        ? await window.relaiDesktop.exportDiagnosticState(report)
-        : downloadDiagnosticState(report);
+        ? await window.relaiDesktop.exportDiagnosticState(current)
+        : downloadDiagnosticState(current);
       if (result?.ok === false) throw new Error(result.error || 'Could not export diagnostic state.');
     } catch (error) { toast(messageOf(error), { variant: 'error' }); }
     finally { setBusy(''); }
@@ -219,9 +254,10 @@ function DiagnosticsView({ runtime, runtimeCompatibility }) {
       ),
       h('div', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, liveAnnouncement),
       !report && !loadError ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' }, h('div', { className: 'empty', role: 'status' }, 'Loading troubleshooting info…')) : null,
-      loadError ? h(DiagnosticUnavailable, { error: loadError, onRetry: () => void load() }) : null,
+      loadError ? h(DiagnosticUnavailable, { error: loadError, hasReport: Boolean(report), onRetry: () => void load() }) : null,
       report ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' },
-        h(DiagnosticMetrics, { findings: view.findings }),
+        h('p', { className: 'settings-help' }, 'Report snapshot: ', h('time', { dateTime: report.generatedAt || '' }, localLogTime(report.generatedAt))),
+        h(DiagnosticMetrics, { findings: report.findings || [] }),
         h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),
         report.tunnelHealth ? h(TunnelHealthSummary, { health: report.tunnelHealth }) : null,
         tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null,
@@ -580,9 +616,9 @@ function LogRow({ entry }) {
 function localLogTime(value) { const timestamp = Date.parse(String(value || '')); return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString(undefined, { hour12: false }) : 'Unknown time'; }
 function levelLabel(level) { return level === 'error' ? 'Error' : level === 'warning' ? 'Warning' : level === 'debug' ? 'Debug' : 'Info'; }
 
-function DiagnosticUnavailable({ error, onRetry }) {
-  return h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' }, h('div', { className: 'diagnostic-clear diagnostic-unavailable' },
-    h('strong', null, 'Troubleshooting info unavailable'), h('span', null, error), h('small', null, 'Refresh the dashboard or restart the Rel.AI connection.'),
+function DiagnosticUnavailable({ error, hasReport = false, onRetry }) {
+  return h('div', { id: hasReport ? 'diagnosticRefreshError' : 'diagnosticSummary', className: 'diagnostic-summary', role: 'alert' }, h('div', { className: 'diagnostic-clear diagnostic-unavailable' },
+    h('strong', null, hasReport ? 'Troubleshooting refresh failed' : 'Troubleshooting info unavailable'), h('span', null, error), h('small', null, hasReport ? 'Showing an earlier snapshot. Retry to check current conditions.' : 'Refresh the dashboard or restart the Rel.AI connection.'),
     h('div', { className: 'connection-actions' }, h('button', { className: 'secondary', type: 'button', onClick: onRetry }, 'Retry'), h('a', { className: 'buttonlike secondary', href: '#settings/connection' }, 'Connection'))
   ));
 }

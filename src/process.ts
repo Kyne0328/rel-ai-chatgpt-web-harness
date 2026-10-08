@@ -81,6 +81,9 @@ interface ProcessPhaseEvent {
 }
 
 interface RunProcessOptions {
+  // Internal native subprocesses whose ownership must predate execution even
+  // outside an ambient mutation context (for example extension installers).
+  readonly nativeOwnership?: boolean;
   readonly resourceClass?: unknown;
   readonly resourceOwner?: unknown;
   readonly cwd?: string;
@@ -447,6 +450,11 @@ function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolea
 async function runProcess(command: string, args: readonly string[] = [], options: RunProcessOptions = {}, config: ProcessRuntimeConfig = {}): Promise<RunProcessResult> {
   let executed = false;
   let rootExitConfirmed = false;
+  let mutationOwnershipPersistenceError = '';
+  const retireMutationProcess = (pid: number, file: string): void => {
+    mutationOwnershipPersistenceError = clearCurrentMutationProcess(pid, file) ? ''
+      : 'Process ownership cleanup is pending because its recovery marker could not be removed. Known command and termination facts are unchanged. Inspect recovery state before another mutation; do not rerun the command to clear this marker.';
+  };
   const reportPhase = (phase: ProcessPhaseEvent['phase'], details: Partial<ProcessPhaseEvent> = {}): void => {
     // Observability must never prevent process cleanup or change execution.
     try { options.onPhase?.({ phase, atMs: Date.now(), executed, rootExitConfirmed, ...details }); } catch {}
@@ -597,7 +605,8 @@ async function runProcess(command: string, args: readonly string[] = [], options
     const mutationProcessFile = prepareCurrentMutationProcess();
     let subprocess;
     try {
-      if (process.platform === 'win32' && (mutationProcessFile || ownedReadOnlyProcessOptions.has(options))) {
+      if (process.platform === 'win32' && (mutationProcessFile || ownedReadOnlyProcessOptions.has(options)
+        || options.nativeOwnership === true)) {
         windowsJob = await prepareWindowsProcessJob(config, {
           executable: shell ? (process.env.ComSpec || String.raw`C:\Windows\System32\cmd.exe`) : executable,
           args: shell ? [] : processArgs, env: childEnvironment,
@@ -606,18 +615,21 @@ async function runProcess(command: string, args: readonly string[] = [], options
         });
       }
       if (options.signal?.aborted || (Number.isFinite(deadlineAtMs) && deadlineAtMs > 0 && Date.now() >= deadlineAtMs)) {
-        if (mutationProcessFile) clearCurrentMutationProcess(0, mutationProcessFile);
+        if (mutationProcessFile) retireMutationProcess(0, mutationProcessFile);
         if (windowsJob) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
         windowsJob = null;
         const expired = !options.signal?.aborted || isTimeoutAbort(options.signal);
-        return terminalQueueResult({ error: errorMessage(options.signal?.reason || 'Execution deadline expired before process start.'),
-          timedOut: expired, cancelled: !expired, queueWaitMs });
+        return {
+          ...terminalQueueResult({ error: errorMessage(options.signal?.reason || 'Execution deadline expired before process start.'),
+            timedOut: expired, cancelled: !expired, queueWaitMs }),
+          ...(mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError } : {})
+        };
       }
       subprocess = execa(windowsJob?.executable || file, windowsJob?.args || (shell ? [] : processArgs),
         windowsJob ? { ...execaOptions, shell: false, env: windowsJob.environment } : execaOptions);
       windowsJob?.bind(subprocess.pid);
     } catch (error) {
-      if (mutationProcessFile) clearCurrentMutationProcess(0, mutationProcessFile);
+      if (mutationProcessFile) retireMutationProcess(0, mutationProcessFile);
       if (windowsJob) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
       throw error;
     }
@@ -653,7 +665,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
           .catch(error => ({ exited: false, forced: true, error: errorMessage(error) }));
       await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
       if (mutationProcessFile) {
-        if (outcome.exited) clearCurrentMutationProcess(subprocess.pid || 0, mutationProcessFile);
+        if (outcome.exited) retireMutationProcess(subprocess.pid || 0, mutationProcessFile);
         else {
           try { markCurrentMutationProcessUncertain(subprocess.pid, 'Post-spawn setup failed and process-tree termination remains unknown.', mutationProcessFile); }
           catch { /* The pre-spawn intent is already durable and remains blocked. */ }
@@ -756,7 +768,6 @@ async function runProcess(command: string, args: readonly string[] = [], options
       await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
     }
     rootExitConfirmed = windowsJob ? nativeReceipt?.rootExited === true : rootExitConfirmed || (executed && !isProcessAlive(subprocess));
-    let mutationOwnershipPersistenceError = '';
     if (mutationProcessRecorded && terminationOutcome?.exited === false) {
       try {
         markCurrentMutationProcessUncertain(subprocess.pid,
@@ -806,7 +817,8 @@ async function runProcess(command: string, args: readonly string[] = [], options
           : nativeReceipt?.error;
 
     if (mutationProcessFile && (!executed || terminationOutcome?.exited !== false)) {
-      clearCurrentMutationProcess(subprocess.pid || 0, mutationProcessFile);
+      retireMutationProcess(subprocess.pid || 0, mutationProcessFile);
+      if (mutationOwnershipPersistenceError) stderrBuffer.append(`\n[rel-ai-mcp ${mutationOwnershipPersistenceError}]\n`);
     }
     failureCleanup = null;
     const outcome: RunProcessResult = {
@@ -849,15 +861,22 @@ async function runProcess(command: string, args: readonly string[] = [], options
     if (failureCleanup) {
       const terminationConfirmed = await failureCleanup().catch(() => false);
       retainResourceLease = !terminationConfirmed;
-      const error = new Error('Process setup or finalization failed; process-tree cleanup was attempted.', { cause });
+      const error = new Error(`Process setup or finalization failed; process-tree cleanup was attempted.${mutationOwnershipPersistenceError ? ` ${mutationOwnershipPersistenceError}` : ''}`, { cause });
       Object.assign(error, {
         code: 'PROCESS_SETUP_FAILED', executed, terminationConfirmed,
-        terminationCertainty: terminationConfirmed ? 'confirmed' : 'unconfirmed'
+        terminationCertainty: terminationConfirmed ? 'confirmed' : 'unconfirmed',
+        ...(mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError, cleanupPending: true, retryable: false } : {})
       });
       if (ownedReadOnlyProcessOptions.has(options) && windowsJob && !terminationConfirmed) {
         unsettledReadOnlyProcessJobs.set(error, { job: windowsJob, controllerClosed: () => ownedControllerClosed });
       }
       throw error;
+    }
+    if (mutationOwnershipPersistenceError) {
+      throw Object.assign(new Error(`${errorMessage(cause)} ${mutationOwnershipPersistenceError}`, { cause }), {
+        code: errorCode(cause) || 'PROCESS_SETUP_FAILED',
+        mutationOwnershipPersistenceError, cleanupPending: true, retryable: false
+      });
     }
     throw cause;
   } finally {

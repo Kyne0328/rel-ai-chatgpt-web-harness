@@ -512,20 +512,51 @@ function taskActivityRevision(activity: JsonRecord | null = null): string {
 
 function desktopStatusRevision(status: JsonRecord | null = null): string {
   if (!status) return '0';
-  const connectionState = asJsonRecord(status.connectionState);
+  const peers = (Array.isArray(status.additionalTunnelStatuses) ? status.additionalTunnelStatuses : [])
+    .map(value => {
+      const peer = asJsonRecord(value);
+      return [
+        peer.tunnelId || '', peer.label || '', peer.enabled !== false,
+        peer.state || '', peer.healthUrl || '', peer.recoveryMode || '',
+        peer.errorCode || '', peer.error || '', peer.retry || null,
+        tunnelHealthRevision(peer.tunnelHealth)
+      ];
+    })
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0])) || String(left[1]).localeCompare(String(right[1])));
   return JSON.stringify([
     status.serverRunning === true,
     status.starting === true,
     status.tunnelStatus || '',
     status.tunnelId || '',
     status.tunnelHealthUrl || '',
+    status.tunnelRecoveryMode || '',
+    status.tunnelRetryAttempt || 0,
+    status.tunnelNextRetryAt || null,
     status.localMcpUrl || '',
     status.localUrl || '',
     status.mcpUrl || '',
     status.errorCode || '',
     status.error || '',
-    connectionState.overall || connectionState.status || ''
+    asJsonRecord(status.connectionState),
+    tunnelHealthRevision(status.tunnelHealth),
+    peers
   ]);
+}
+
+function tunnelHealthRevision(value: unknown): unknown[] {
+  const health = asJsonRecord(value);
+  // Observation timestamps and increasing poll age are snapshot detail, not
+  // connection changes. Retry schedules, health transitions and counters are.
+  return ['controlPlane', 'responseDelivery'].map(key => {
+    const component = asJsonRecord(health[key]);
+    const details = asJsonRecord(component.details);
+    return [
+      component.status || '', component.state || '', component.reasonCode || '', component.limited === true,
+      ...['failureCategory', 'httpStatus', 'consecutiveFailures', 'configuredWaitSeconds',
+        'effectiveWaitSeconds', 'deadlineSeconds', 'nextRetry', 'inProgress', 'disposition',
+        'attempts', 'retries', 'accepted', 'completed', 'terminalFailures'].map(field => details[field] ?? null)
+    ];
+  });
 }
 
 function dashboardLiveMetadata(

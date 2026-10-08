@@ -4,7 +4,7 @@ import { cleanupTaskManagedProcesses } from '../processManager.js';
 import { safeLogAudit } from '../audit.js';
 import { cancelFallbackExecution } from '../mcp/fallbackExecutions.js';
 import { clearSessionPolicy } from '../policyResolver.js';
-import { getCurrentToolActivityContext, onToolActivity, releaseTaskCancellationHold, requestCurrentTaskCancellation, requestCurrentTaskOperationStop, taskError } from '../toolActivity.js';
+import { getCurrentToolActivityContext, getToolActivity, onToolActivity, releaseTaskCancellationHold, requestCurrentTaskCancellation, requestCurrentTaskOperationStop, taskError } from '../toolActivity.js';
 import { readTaskHistorySession } from '../taskHistoryStore.ts';
 import { sanitizeDisplayText } from '../taskObservability.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
@@ -15,26 +15,12 @@ async function stopTaskOperations(config, args = {}) {
 
   const operationId = String(args.operationId || '').trim();
   const reason = sanitizeDisplayText(args.reason || 'Running operation stopped by request.', 500);
-  if (operationId.startsWith('fallback_')) {
-    const fallback = cancelFallbackExecution(operationId, { config, reason, expectedWorkId: taskId });
-    const session = readTaskHistorySession(config, taskId);
-    const stopRequested = fallback.cancelled === true || fallback.stopping === true;
-    const stoppedOperationCount = stopRequested ? 1 : 0;
-    return {
-      ok: true,
-      work_id: taskId,
-      status: String(session?.status || 'running'),
-      duplicate: fallback.duplicate || !stopRequested,
-      operationId,
-      stoppedOperationIds: stoppedOperationCount ? [operationId] : [],
-      stoppedOperationCount,
-      message: stoppedOperationCount
-        ? 'Stop requested for 1 running operation.'
-        : 'No matching running task operation needed to be stopped.'
-    };
-  }
-
-  const fallback = !operationId ? cancelFallbackExecution(taskId, { config, reason }) : null;
+  // A resilient receipt may be taskless while this exact operation is tracked
+  // by the verified task. Each owner checks its own association; a receipt
+  // mismatch must not bypass the task operation controller.
+  const fallback = operationId.startsWith('fallback_')
+    ? cancelFallbackExecution(operationId, { config, reason, expectedWorkId: taskId })
+    : !operationId ? cancelFallbackExecution(taskId, { config, reason }) : null;
   const stopped = requestCurrentTaskOperationStop({
     operationId,
     reason,
@@ -66,7 +52,10 @@ async function stopTaskOperations(config, args = {}) {
 async function cancelTask(config, args = {}, handlerContext = {}) {
   const taskId = String(args.work_id || '').trim();
   if (!taskId) throw taskError('TASK_ID_REQUIRED', 'work_id is required to cancel a work session.');
-  const session = readTaskHistorySession(config, taskId);
+  const session = readTaskHistorySession(config, taskId, {
+    reconcileInactive: true, persistReconciliation: false,
+    activeTaskIds: getToolActivity().tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean)
+  });
   const workspace = String(session?.workspace || '').trim();
   if (session?.status === 'cancelled') {
     // callTool already verified the persisted task/principal. Terminal retries

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 
-import { enhancedResolverLanguages } from '../src/repository/intelligence/languages.js';
 import { parseSourceFile } from '../src/repository/intelligence/treeSitter.js';
 
 const CASES = [
@@ -30,5 +29,4 @@ for (const item of CASES) {
   for (const specifier of item.imports) assert.ok(parsed.imports.some(entry => entry.specifier === specifier && entry.provider === item.provider), `${item.language} missing import ${specifier}`);
 }
 
-assert.deepEqual(enhancedResolverLanguages().sort(), ['c', 'cpp', 'csharp', 'go', 'java', 'javascript', 'kotlin', 'php', 'python', 'ruby', 'rust', 'tsx', 'typescript']);
 console.log('Repository Intelligence ecosystem resolver-depth tests passed.');

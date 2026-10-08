@@ -126,7 +126,7 @@ class TaskIntegrityError extends Error {
 async function recordTaskIntegrityEvent(config: IntegrityConfig, event: IntegrityEvent = {}): Promise<IntegrityProjection | null> {
   const taskId = clean(event.taskId);
   const workspaceAlias = clean(event.workspace);
-  if (!workspaceAlias) return null;
+  if (!workspaceAlias || event.taskIntegrityEligible === false || event.taskResultFactsEligible === false) return null;
   if (taskId && Number(event.taskIdentityVersion || 0) < 2) return null;
 
   try {
@@ -262,14 +262,19 @@ function claimTaskChangedFiles(config: IntegrityConfig, taskId: unknown, workspa
 }
 
 // Capture only known native-edit paths beneath an opaque baseline directory.
-function captureNativeMutationPaths(config: IntegrityConfig, taskId: string, workspaceAlias: string, paths: readonly string[]): void {
+function captureNativeMutationPaths(config: IntegrityConfig, taskId: string, workspaceAlias: string, paths: readonly string[], options: { operation?: string; proposedContent?: string } = {}): void {
   const authority = readTaskIntegrity(config, taskId, workspaceAlias);
   if (!authority) return;
   const roots = authority.baseline.opaqueDirectories || [];
-  const dirty = exactPaths(paths).map(file => resolveSafePath(authority.workspacePath, file, { operation: 'write', allowSensitive: true }).relativePath).filter(file => {
+  const dirty = exactPaths(paths).map(file => resolveSafePath(authority.workspacePath, file, {
+    operation: options.operation || 'write', ...(options.proposedContent !== undefined ? { proposedContent: options.proposedContent } : {})
+  }).relativePath).filter(file => {
     if (!fs.existsSync(path.resolve(authority.workspacePath, file))) return false;
     const previous = authority.nativeFileStates?.[file];
-    if (previous) return previous !== nativeFileState(authority.workspacePath, file);
+    if (previous) {
+      const current = nativeFileState(authority.workspacePath, file, options);
+      return previous === 'unavailable' || current === 'unavailable' || previous !== current;
+    }
     return authority.baseline.observationComplete === false || roots.some(root => file.startsWith(root));
   });
   if (!dirty.length) return;
@@ -277,18 +282,18 @@ function captureNativeMutationPaths(config: IntegrityConfig, taskId: string, wor
     const current = readTaskRow(db, taskId);
     if (!current) return;
     const state = normalizeWorkspaceState(readWorkspaceRow(db, workspaceAlias) || createWorkspaceState(workspaceAlias));
-    for (const file of dirty) {
-      if (!state.uncommittedOwners[file]?.length) addWorkspaceOwner(state, file, AMBIENT_OWNER);
-    }
+    for (const file of dirty) addWorkspaceOwner(state, file, AMBIENT_OWNER);
     current.baseline.changedFiles = unique([...current.baseline.changedFiles, ...dirty]);
     writeTaskRow(db, taskId, current);
     writeWorkspaceRow(db, workspaceAlias, state);
   });
 }
 
-function nativeFileState(root: string, file: string): string {
+function nativeFileState(root: string, file: string, options: { operation?: string; proposedContent?: string } = {}): string {
   try {
-    const stat = fs.lstatSync(resolveSafePath(root, file, { allowSensitive: true }).absolutePath, { bigint: true });
+    const stat = fs.lstatSync(resolveSafePath(root, file, {
+      operation: options.operation || 'read', ...(options.proposedContent !== undefined ? { proposedContent: options.proposedContent } : {})
+    }).absolutePath, { bigint: true });
     return [stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs, stat.ino].join(':');
   } catch { return 'unavailable'; }
 }
@@ -327,7 +332,10 @@ function applyIntegrityEvent(
   const timestamp = clean(event.ts) || new Date().toISOString();
   const changedFiles = exactChangedFiles(event);
   const ephemeralChangedFiles = exactEphemeralChangedFiles(event).filter(file => changedFiles.includes(file));
-  const mutation = eventMutatedCode(event) && (event.ok !== false || changedFiles.length > 0);
+  const mutation = eventMutatedCode(event);
+  const uncertain = event.mutationEffect === 'unknown' || event.mutationUnknown === true;
+  const ownershipFiles = uncertain ? [] : changedFiles;
+  const possibleChangedFiles = uncertain ? unique([...changedFiles, ...exactPaths(event.possibleChangedFiles)]) : [];
   normalizeWorkspaceState(workspaceState);
   if (Array.isArray(repositoryChanged)) reconcileWorkspaceOwners(workspaceState, repositoryChanged, opaqueDirectories);
   if (tool === OP.WORK_BEGIN && Array.isArray(repositoryChanged)) {
@@ -342,12 +350,16 @@ function applyIntegrityEvent(
 
   if (mutation) {
     authority.mutationGeneration += 1;
-    authority.taskOwnedChangedFiles = unique([...authority.taskOwnedChangedFiles, ...changedFiles]);
-    updateEphemeralWorkspaceFiles(authority, workspace, changedFiles, ephemeralChangedFiles, timestamp);
-    for (const file of changedFiles) addWorkspaceOwner(workspaceState, file, authority.taskId);
-    if (tool === OP.EDIT) {
+    authority.taskOwnedChangedFiles = unique([...authority.taskOwnedChangedFiles, ...ownershipFiles]);
+    updateEphemeralWorkspaceFiles(authority, workspace, ownershipFiles, ephemeralChangedFiles, timestamp);
+    for (const file of ownershipFiles) addWorkspaceOwner(workspaceState, file, authority.taskId);
+    // Unknown final bytes are protected ambient work, never an exclusive claim.
+    for (const file of possibleChangedFiles) addWorkspaceOwner(workspaceState, file, AMBIENT_OWNER);
+    authority.possibleChangedFiles = unique([...(authority.possibleChangedFiles || []), ...possibleChangedFiles]);
+    authority.lastMutationUnknown = uncertain;
+    if (tool === OP.EDIT && !uncertain) {
       authority.nativeFileStates ||= {};
-      for (const file of changedFiles.slice(0, 200)) authority.nativeFileStates[file] = nativeFileState(authority.workspacePath, file);
+      for (const file of ownershipFiles.slice(0, 200)) authority.nativeFileStates[file] = nativeFileState(authority.workspacePath, file);
     }
     authority.lastMutationAt = timestamp;
     authority.lastMutationTool = tool;
@@ -359,6 +371,7 @@ function applyIntegrityEvent(
       taskId: authority.taskId,
       generation: workspaceState.generation,
       changedFiles,
+      ...(uncertain ? { mutationUnknown: true, possibleChangedFiles } : {}),
       tool,
       at: timestamp
     };
@@ -375,7 +388,7 @@ function applyIntegrityEvent(
   if (tool === OP.WORK_CANCEL && event.ok !== false && clean(event.taskCancellationStatus).toLowerCase() !== 'cancelling') {
     authority.cancelledAt = timestamp;
   }
-  if (tool === OP.PUBLISH_COMMIT && event.ok !== false) {
+  if (tool === OP.PUBLISH_COMMIT && event.commitCreated === true) {
     const committedFiles = exactCommittedFiles(event);
     for (const file of committedFiles) removeWorkspaceOwner(workspaceState, file, authority.taskId);
     if (committedFiles.length && Array.isArray(authority.ephemeralWorkspaceFiles)) {
@@ -399,11 +412,11 @@ function applyWorkspaceIntegrityEvent(workspaceState: WorkspaceIntegrityState, e
   const tool = clean(event.tool);
   const timestamp = clean(event.ts) || new Date().toISOString();
   const changedFiles = exactChangedFiles(event);
-  const mutation = eventMutatedCode(event) && (event.ok !== false || changedFiles.length > 0);
+  const mutation = eventMutatedCode(event);
   normalizeWorkspaceState(workspaceState);
   if (Array.isArray(repositoryChanged)) reconcileWorkspaceOwners(workspaceState, repositoryChanged, opaqueDirectories);
   if (!mutation) return;
-  for (const file of changedFiles) addWorkspaceOwner(workspaceState, file, AMBIENT_OWNER);
+  for (const file of unique([...changedFiles, ...exactPaths(event.possibleChangedFiles)])) addWorkspaceOwner(workspaceState, file, AMBIENT_OWNER);
   workspaceState.generation += 1;
   workspaceState.updatedAt = timestamp;
   workspaceState.lastMutation = {
@@ -417,8 +430,7 @@ function applyWorkspaceIntegrityEvent(workspaceState: WorkspaceIntegrityState, e
 
 function integrityEventRequiresPersistence(event: IntegrityEvent): boolean {
   const tool = clean(event?.tool);
-  const changedFiles = exactChangedFiles(event);
-  const mutation = eventMutatedCode(event) && (event?.ok !== false || changedFiles.length > 0);
+  const mutation = eventMutatedCode(event);
   return tool === OP.WORK_BEGIN
     || mutation
     || Boolean(clean(event?.validationStatus))
@@ -573,11 +585,12 @@ async function repositoryStateForEvent(
 
 function eventMutatedCode(event: IntegrityEvent): boolean {
   const tool = clean(event.tool);
-  if (tool === OP.EXEC) {
-    if (event.executed === false) return false;
-    return exactChangedFiles(event).length > 0 || event.mutationUnknown === true;
-  }
-  return CODE_MUTATING_TOOLS.has(tool);
+  if (tool !== OP.EXEC && !CODE_MUTATING_TOOLS.has(tool)) return false;
+  if (event.executed === false || event.mutationEffect === 'none') return false;
+  if (event.mutationEffect === 'applied' || event.mutationEffect === 'unknown') return true;
+  if (tool === OP.EXEC) return exactChangedFiles(event).length > 0 || event.mutationUnknown === true;
+  return CODE_MUTATING_TOOLS.has(tool)
+    && (event.ok !== false || exactChangedFiles(event).length > 0 || event.mutationUnknown === true);
 }
 
 function exactChangedFiles(event: IntegrityEvent): string[] {

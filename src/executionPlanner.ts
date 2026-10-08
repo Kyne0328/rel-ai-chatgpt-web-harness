@@ -14,6 +14,8 @@ import { repositoryIntelligence } from './repository/intelligence/service.js';
 import { resolveSymbolEdit } from './semanticEdit.js';
 import { discoverRepositoryTopology, packageForPath } from "./workflow/topology.js";
 import { importNativeArtifact } from './artifactIntake.js';
+import { readGitStatusMap, changedStatusFiles } from './bridge/exec.js';
+import { readTaskIntegrity, taskCommitOwnership, taskOwnedChangedFiles } from './taskIntegrity.ts';
 
 type PlannerRecord = Record<string, any>;
 type PlannerConfig = PlannerRecord;
@@ -54,8 +56,11 @@ async function runStagedWrite(workspace: PlannerWorkspace, config: PlannerConfig
   const chunks: string[] = [];
   let offset = 0;
   while (offset < content.length) {
-    chunks.push(content.slice(offset, offset + STAGED_CHUNK_BYTES));
-    offset += STAGED_CHUNK_BYTES;
+    let end = Math.min(offset + STAGED_CHUNK_BYTES, content.length);
+    // Each chunk is encoded separately. Keep a surrogate pair in one chunk.
+    if (end < content.length && /[\uD800-\uDBFF]/.test(content.charAt(end - 1)) && /[\uDC00-\uDFFF]/.test(content.charAt(end))) end -= 1;
+    chunks.push(content.slice(offset, end));
+    offset = end;
   }
   const startResult = workspaceWrite(workspace, config, { stage: 'start', path, work_id, content: chunks[0], dryRun, suppressJournal, expectedSha256 });
   const { writeId } = startResult;
@@ -224,10 +229,30 @@ function postActionRecommendation(workspace: PlannerWorkspace, changedFiles: rea
 // change-verify-review loop costs one approval instead of three. When both are
 // requested, validation always finishes before diff capture so the returned diff
 // describes the final workspace even if a check creates or rewrites files.
-async function runPostActions(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, changedFiles: readonly unknown[] = [], signal?: AbortSignal): Promise<PlannerRecord> {
+async function runPostActions(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, changedFiles: readonly unknown[] = [], signal?: AbortSignal, editResult: PlannerRecord = {}): Promise<PlannerRecord> {
   const post: PlannerRecord = {};
   const wantsChecks = args.runChecks === true && !args.dryRun;
   const wantsDiff = args.returnDiff === true && !args.dryRun;
+  const currentEditPaths = [...new Set((changedFiles || []).map(value => String(value || '').trim()).filter(Boolean))];
+  const possibleEditPaths = Array.isArray(editResult.possibleChangedFiles) ? editResult.possibleChangedFiles : [];
+  const taskId = String(args.work_id || '').trim();
+  let ownedPaths: string[] = [];
+  let mixedOwnershipPaths: string[] = [];
+  let ownershipUncertain = false;
+  if (wantsDiff && taskId) {
+    try {
+      const integrity = readTaskIntegrity(config, taskId, workspace.alias);
+      if (!integrity) throw new Error('Task ownership evidence is missing.');
+      ownedPaths = taskOwnedChangedFiles(config, taskId, workspace.alias);
+      const conflicts = taskCommitOwnership(config, taskId, workspace.alias).conflictingFiles;
+      mixedOwnershipPaths = [...new Set([...conflicts, ...(integrity.baseline?.changedFiles || [])])];
+    } catch {
+      ownershipUncertain = true;
+    }
+  }
+  let generatedPaths: string[] = [];
+  let validationMutationUnknown = false;
+  let validationObservation: PlannerRecord | null = null;
   const validationArgs = {
     level: args.level,
     complete: false,
@@ -252,15 +277,41 @@ async function runPostActions(workspace: PlannerWorkspace, config: PlannerConfig
     }
   };
   const runDiff = async (): Promise<PlannerResult> => {
+    const paths = [...new Set([...currentEditPaths, ...possibleEditPaths, ...ownedPaths, ...generatedPaths])];
     try {
-      return await relaiDiff(workspace, config, { maxBytes: args.maxBytes }, { signal });
+      if (ownershipUncertain) {
+        return { ok: false, reviewScope: 'task', scopeUncertain: true,
+          error: 'Task ownership evidence is unavailable. Review was not widened to unrelated workspace files.' };
+      }
+      const review = await relaiDiff(workspace, config, { maxBytes: args.maxBytes,
+        _taskOwnedPaths: paths, _operationScoped: !taskId,
+        _mixedOwnershipPaths: mixedOwnershipPaths.filter(file => paths.includes(file)),
+        _scopeUncertain: validationMutationUnknown || editResult.mutationEffect === 'unknown',
+        ...(validationObservation ? { _validationObservation: validationObservation } : {})
+      }, { signal });
+      return review;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
   };
 
   if (wantsChecks && wantsDiff) {
+    let before: PlannerRecord | null = null;
+    try { before = await readGitStatusMap(workspace, config, signal); }
+    catch { validationMutationUnknown = true; }
     post.checks = await runChecks();
+    let after: PlannerRecord | null = null;
+    try { after = await readGitStatusMap(workspace, config); }
+    catch { validationMutationUnknown = true; }
+    if (before?.state === 'ok' && after?.state === 'ok' && before.snapshot && after.snapshot) {
+      const changed = changedStatusFiles(before.snapshot, after.snapshot);
+      generatedPaths = changed.files;
+      validationMutationUnknown ||= changed.truncated;
+    } else validationMutationUnknown = true;
+    validationMutationUnknown ||= post.checks?.cancelled === true || post.checks?.timedOut === true
+      || post.checks?.results?.some((result: PlannerRecord) => result.terminationConfirmed === false) === true;
+    validationObservation = { before: before?.state || 'unavailable', after: after?.state || 'unavailable',
+      generatedFiles: generatedPaths, complete: !validationMutationUnknown };
     post.diff = await runDiff();
     post.execution = {
       mode: 'serial',
@@ -295,6 +346,9 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
   const stage = String(args.stage || '').trim().toLowerCase();
   const hasPatchChunk = typeof args.updateText === 'string';
   const hasContentChunk = typeof args.content === 'string';
+  if (args.dryRun && ['start', 'append', 'abort'].includes(stage)) {
+    throw new Error('Staged payload start, append, and abort do not support dryRun. No payload was changed.');
+  }
 
   if (stage === 'start') {
     if (hasPatchChunk === hasContentChunk) {
@@ -335,7 +389,7 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
     if (payload.kind !== 'patch') {
       const result = workspaceWrite(workspace, config, { ...args, writeId });
       const out = { ...result, plannerPath: 'write:staged', plannerReason: `staged full-file write ${stage}` };
-      return stage === 'commit' ? attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal)) : out;
+      return stage === 'commit' ? attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal, out)) : out;
     }
     if (stage === 'abort') {
       const existed = clearStagedPayload(config, workspace, writeId);
@@ -346,9 +400,14 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
       throw new Error(`Staged patch payload size mismatch for writeId ${writeId}. Abort it and start again.`);
     }
     const result = await relaiApplyPatch(workspace, config, { ...args, patch, returnDiff: false }, { signal });
-    if (!args.dryRun) clearStagedPayload(config, workspace, writeId);
     const out = { ...result, operation: 'stagedPatch:commit', writeId, plannerPath: 'apply-update:staged' };
-    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
+    if (!args.dryRun) {
+      try { clearStagedPayload(config, workspace, writeId); }
+      catch (error) {
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), { handlerResult: { ...out, ok: false, error: 'Patch processing returned, but the staged payload could not be retired. Reconcile the recorded effects before retrying.' } });
+      }
+    }
+    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal, out));
   }
 
   throw new Error("relai_edit stage must be one of: start, append, commit, abort.");
@@ -370,6 +429,8 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
       plannerReason: preflightPlannerReason(preflight),
       editCount: preflight.results.length,
       appliedCount: 0,
+      changedFiles: [],
+      mutationEffect: 'none',
       preflightAtomic: true,
       rollbackAtomic: true,
       batchInputBytes: metrics.inputBytes,
@@ -379,7 +440,7 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
       ...(failure || {}),
       results: formatBatchResults(preflight.results, compactResults)
     };
-    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
+    return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal, out));
   }
 
   const snapshotCapture = captureEditSnapshots(workspace, args.edits);
@@ -417,27 +478,33 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
   const changedFiles = allOk
     ? [...new Set(results.flatMap(item => Array.isArray(item.changedFiles) ? item.changedFiles : []))]
     : [];
-  appendOperation(config, workspace, {
+  const mutationEffect = allOk ? (changedFiles.length ? 'applied' : 'none') : rollback?.ok === true ? 'none' : 'unknown';
+  const possibleChangedFiles = mutationEffect === 'unknown' ? snapshots.map(snapshot => snapshot.path) : [];
+  try { appendOperation(config, workspace, {
     id: makeOperationId(),
     type: 'batch_edit',
     ok: allOk,
     paths: changedFiles,
     results: results.map(item => ({ path: item.path, ok: item.ok !== false, changedFiles: item.changedFiles || [] })),
     ...(rollback ? { rollback } : {})
-  });
+  }); } catch (error) {
+    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { handlerResult: { ok: false, workspace: workspace.alias, mutationEffect, changedFiles, ...(possibleChangedFiles.length ? { possibleChangedFiles } : {}), error: 'Batch effects settled, but the journal could not be saved.' } });
+  }
   const out: PlannerResult = {
     ok: allOk,
     workspace: workspace.alias,
     plannerPath: 'batch',
     plannerReason: `preflight passed; applied ${results.filter((item) => item.ok !== false).length} edit(s)`,
     editCount: args.edits.length,
-    appliedCount: allOk ? results.filter((item) => item.ok !== false).length : 0,
+    appliedCount: allOk || mutationEffect === 'unknown' ? results.filter((item) => item.ok !== false).length : 0,
     preflightAtomic: true,
     rollbackAtomic: rollback ? rollback.ok : true,
     batchInputBytes: metrics.inputBytes,
     replacementCount: metrics.replacementCount,
     snapshotBytes: snapshotCapture.bytes,
     changedFiles,
+    mutationEffect,
+    ...(possibleChangedFiles.length ? { possibleChangedFiles } : {}),
     ...(transaction ? { transaction } : {}),
     ...(compactResults ? { resultDetailsCompacted: true } : {}),
     ...(rollback ? { rollback } : {}),
@@ -448,7 +515,7 @@ async function _handleBatchEdits(workspace: PlannerWorkspace, config: PlannerCon
     preflight: formatBatchResults(preflight.results, compactResults),
     results: formatBatchResults(results, compactResults)
   };
-  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
+  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal, out));
 }
 
 function batchFailureDetails(results: PlannerResult[], { phase, unchanged }: BatchFailureOptions): PlannerRecord {
@@ -525,13 +592,14 @@ function singlePlannerReason(hasReplacement: boolean, plannerPath: unknown): str
 async function _handleUpdateTextEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
   const result = await relaiApplyPatch(workspace, config, { ...args, patch: args.updateText, returnDiff: false }, { signal });
   const out = { ...result, plannerPath: 'apply-update', plannerReason: 'updateText provided — routing to patch-shaped apply-update' };
-  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal));
+  return attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal, out));
 }
 
 async function _handleSymbolEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
   const semantic = await resolveSymbolEdit(workspace, config, args.symbolEdit, { expectedSha256: args.expectedSha256 });
   const result = workspaceReplace(workspace, config, {
     path: semantic.path,
+    work_id: args.work_id,
     oldText: semantic.oldText,
     newText: semantic.newText,
     occurrence: semantic.occurrence,
@@ -545,7 +613,7 @@ async function _handleSymbolEdit(workspace: PlannerWorkspace, config: PlannerCon
     plannerReason: `${semantic.target.action} resolved structurally to ${semantic.target.qualifiedName || semantic.target.name} in ${semantic.path}`,
     semanticTarget: semantic.target
   };
-  return attachPost(out, await runPostActions(workspace, config, args, result.changedFiles, signal));
+  return attachPost(out, await runPostActions(workspace, config, args, result.changedFiles, signal, out));
 }
 
 async function _handleSingleEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, signal?: AbortSignal): Promise<PlannerResult> {
@@ -570,16 +638,16 @@ async function _handleSingleEdit(workspace: PlannerWorkspace, config: PlannerCon
     replacements: args.replacements,
     content: args.content,
     expectedSha256: args.expectedSha256
-  }, args.dryRun);
+  }, args.dryRun, { work_id: args.work_id });
   single.plannerReason = singlePlannerReason(hasReplacement, single.plannerPath);
-  return attachPost(single, await runPostActions(workspace, config, args, single.changedFiles, signal));
+  return attachPost(single, await runPostActions(workspace, config, args, single.changedFiles, signal, single));
 }
 
-async function planEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, context: PlannerContext = {}): Promise<PlannerResult> {
+async function planEditResult(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, context: PlannerContext = {}): Promise<PlannerResult> {
   assertSupportedEditForm(args);
   if (args.file && typeof args.file === 'object' && !Array.isArray(args.file)) {
     const result = await importNativeArtifact(workspace, config, args, { signal: context.signal });
-    return attachPost(result, await runPostActions(workspace, config, args, result.changedFiles, context.signal));
+    return attachPost(result, await runPostActions(workspace, config, args, result.changedFiles, context.signal, result));
   }
   if (args.semantic && typeof args.semantic === 'object') {
     const proposal = await repositoryIntelligence.semanticRename(workspace, args.semantic, { signal: context.signal });
@@ -700,6 +768,14 @@ function assertSupportedEditForm(args: PlannerArgs = {}): void {
   if (hasOldText && (typeof args.oldText !== 'string' || args.oldText.length === 0)) {
     throw new Error('relai_edit oldText must be a non-empty string. Use content for a complete file replacement.');
   }
+}
+
+async function planEdit(workspace: PlannerWorkspace, config: PlannerConfig, args: PlannerArgs, context: PlannerContext = {}): Promise<PlannerResult> {
+  const result = await planEditResult(workspace, config, args, context);
+  return {
+    ...result,
+    mutationEffect: result.mutationEffect || (args.dryRun || !result.changedFiles?.length ? 'none' : 'applied')
+  };
 }
 
 export { planEdit, postActionRecommendation };

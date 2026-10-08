@@ -38,21 +38,30 @@ export function connectionStateFor(data = {}, dashboardStatus = '') {
   const source = data.connectionState || desktopState || DEFAULT_STATE;
   const mcpConnection = data.mcpConnection && typeof data.mcpConnection === 'object' ? { ...data.mcpConnection, status: normalizeActivity(data.mcpConnection.activityStatus || data.mcpConnection.status) } : source.mcpClient;
   const normalized = normalizeConnectionState({ ...source, mcpClient: mcpConnection });
-  const additionalTunnelStatuses = Array.isArray(data.desktopStatus?.additionalTunnelStatuses)
-    ? data.desktopStatus.additionalTunnelStatuses
-    : [];
-  const primaryConfigured = Boolean(data.desktopStatus?.tunnelId || data.connection?.tunnelId || normalized.publicEndpoint.status !== 'disabled');
   normalized.mode = 'secure_tunnel';
-  // Desktop status owns the raw primary endpoint. A projected aggregate must
-  // never be counted as a primary tunnel on the next event or shell render.
+  // Backend connection state already aggregates all enabled tunnels. Raw runtime
+  // states supply presentation counts only; they never replace that authority.
   if (desktopState?.publicEndpoint) {
-    const primary = normalizeLayer('publicEndpoint', desktopState.publicEndpoint, DEFAULT_STATE.publicEndpoint.status);
     normalized.localService = normalizeLayer('localService', desktopState.localService, DEFAULT_STATE.localService.status);
-    normalized.publicEndpoint = aggregateTunnelEndpoint(primary, additionalTunnelStatuses, Boolean(data.desktopStatus?.tunnelId || primary.status !== 'disabled'));
-  } else if (!Object.hasOwn(normalized.publicEndpoint, 'connectionCount')) {
-    normalized.publicEndpoint = aggregateTunnelEndpoint(normalized.publicEndpoint, additionalTunnelStatuses, primaryConfigured);
+    normalized.publicEndpoint = normalizeLayer('publicEndpoint', desktopState.publicEndpoint, DEFAULT_STATE.publicEndpoint.status);
+    normalized.error = normalizeError(desktopState.error);
   }
-  normalized.chatgptReadiness = { status: normalized.localService.status === 'running' && normalized.publicEndpoint.status === 'available' ? 'ready' : 'unavailable' };
+  const readiness = desktopState?.chatgptReadiness || source.chatgptReadiness;
+  normalized.chatgptReadiness = readiness
+    ? normalizeLayer('chatgptReadiness', readiness, DEFAULT_STATE.chatgptReadiness.status)
+    : { status: normalized.localService.status === 'running' && normalized.publicEndpoint.status === 'available' ? 'ready' : 'unavailable' };
+  if (data.desktopStatus) {
+    const endpoint = { ...normalized.publicEndpoint };
+    for (const key of ['connectionCount', 'availableCount', 'reconnectingCount', 'connectingCount', 'unavailableCount', 'stoppedCount', 'issueCount']) delete endpoint[key];
+    normalized.publicEndpoint = endpoint;
+    const rawPrimary = String(data.desktopStatus.tunnelStatus || '').trim();
+    if (rawPrimary) {
+      const primary = tunnelRuntimeView({ state: rawPrimary });
+      const primaryConfigured = Boolean(data.desktopStatus.tunnelId || primary.status !== 'disabled');
+      const peers = Array.isArray(data.desktopStatus.additionalTunnelStatuses) ? data.desktopStatus.additionalTunnelStatuses : [];
+      normalized.publicEndpoint = { ...endpoint, ...tunnelEndpointCounts(primary.status, peers, primaryConfigured) };
+    }
+  }
   if (dashboardStatus) normalized.dashboardUpdates = { status: ALLOWED.dashboardUpdates.has(dashboardStatus) ? dashboardStatus : 'offline' };
   return normalized;
 }
@@ -106,31 +115,19 @@ export function tunnelRuntimeView(status = {}) {
   if (['starting', 'locally_ready', 'authenticating', 'connecting'].includes(state)) return { status: 'connecting', label: 'Connecting', tone: 'working' };
   return { status: 'disabled', label: 'Stopped', tone: 'neutral' };
 }
-function aggregateTunnelEndpoint(primary, additionalStatuses, primaryConfigured) {
+function tunnelEndpointCounts(primaryStatus, additionalStatuses, primaryConfigured) {
   const states = [];
-  if (primaryConfigured || primary.status !== 'disabled') states.push(primary.status);
+  if (primaryConfigured) states.push(primaryStatus);
   for (const status of additionalStatuses) {
-    if (!status || typeof status !== 'object') continue;
+    if (!status || typeof status !== 'object' || status.enabled === false) continue;
     states.push(tunnelRuntimeView(status).status);
   }
-  if (!states.length) return { ...primary, connectionCount: 0, availableCount: 0, reconnectingCount: 0, connectingCount: 0, unavailableCount: 0, stoppedCount: 0, issueCount: 0 };
   const availableCount = states.filter(status => status === 'available').length;
   const reconnectingCount = states.filter(status => status === 'degraded').length;
   const connectingCount = states.filter(status => status === 'connecting').length;
   const unavailableCount = states.filter(status => status === 'unavailable').length;
   const stoppedCount = states.filter(status => status === 'disabled').length;
-  const status = availableCount > 0
-    ? 'available'
-    : reconnectingCount > 0
-      ? 'degraded'
-      : connectingCount > 0
-        ? 'connecting'
-        : unavailableCount > 0
-          ? 'unavailable'
-          : 'disabled';
   return {
-    ...primary,
-    status,
     connectionCount: states.length,
     availableCount,
     reconnectingCount,

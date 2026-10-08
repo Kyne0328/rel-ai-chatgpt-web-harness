@@ -78,6 +78,7 @@ function createDesktopServiceRuntime(deps) {
     if (!prepared.ok) {
       setStatus(desktopStatusFailure(errorCodes.CONFIGURATION_INVALID, prepared.error, {
         serverRunning: false,
+        starting: false,
         tunnelStatus: 'failed',
         tunnelId: '',
         mcpUrl: ''
@@ -142,6 +143,7 @@ function createDesktopServiceRuntime(deps) {
       recordDesktopTiming(runtimeLogs, 'connection_start', timing.snapshot(), false);
       setStatus(desktopStatusFailure(code, failure, {
         serverRunning: false,
+        starting: false,
         tunnelStatus: 'failed',
         tunnelId: guiConfig.tunnelId,
         mcpUrl: ''
@@ -190,6 +192,7 @@ function createDesktopServiceRuntime(deps) {
     if (!prepared.ok) {
       setStatus(desktopStatusFailure(errorCodes.CONFIGURATION_INVALID, prepared.error, {
         serverRunning: true,
+        starting: false,
         tunnelStatus: 'failed',
         tunnelId: '',
         localMcpUrl: `http://127.0.0.1:${activePort}/mcp`
@@ -202,6 +205,7 @@ function createDesktopServiceRuntime(deps) {
       const error = new Error('Rel.AI local authentication is unavailable. Restart the full connection.');
       setStatus(desktopStatusFailure(errorCodes.CONFIGURATION_INVALID, error, {
         serverRunning: true,
+        starting: false,
         tunnelStatus: 'failed',
         tunnelId: guiConfig.tunnelId
       }));

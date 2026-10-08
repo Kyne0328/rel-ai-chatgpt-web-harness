@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { runProcess, summarizeCommand } from "../process.js";
 import { resolveSafePath, writeTextFileSafe, fileSha256 } from "../safety.js";
 import { appendOperation, makeOperationId } from "../journal.js";
-import { assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths } from "../repo/gitOps.js";
+import { assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths, gitOperationOptions } from "../repo/gitOps.js";
 import { clampNumber } from "./limits.js";
 import { relaiVerify, hasRequestedChecks } from "./validation.js";
 import { relaiDiff } from "./review.js";
@@ -13,6 +13,17 @@ import { beginStructuredPatchTransaction, completeStructuredPatchTransaction, re
 const DEFAULT_MAX_DIFF_BYTES = 1024 * 1024;
 
 async function relaiApplyPatch(workspace, config, args = {}, context = {}) {
+  const mutationFacts = { mutationEffect: 'none', changedFiles: [] };
+  try { return await applyPatchResult(workspace, config, args, { ...context, mutationFacts }); }
+  catch (error) {
+    if (mutationFacts.mutationEffect !== 'none') {
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { handlerResult: { ok: false, workspace: workspace.alias, ...mutationFacts, error: 'Patch processing failed after mutation began. Reconcile the recorded effects before retrying.' } });
+    }
+    throw error;
+  }
+}
+
+async function applyPatchResult(workspace, config, args = {}, context = {}) {
   const rawPatch = String(args.patch || args.diff || args.updateText || "");
   assertPatchUpdateSafe(workspace, config, args, rawPatch);
   if (/^\*\*\* Begin Patch\b/m.test(rawPatch)) {
@@ -20,9 +31,9 @@ async function relaiApplyPatch(workspace, config, args = {}, context = {}) {
   }
   const patch = normalizeUnifiedDiffText(rawPatch);
   const patchBytes = Buffer.byteLength(patch, "utf8");
-  await ensureGitRepo(workspace, config);
+  await ensureGitRepo(workspace, config, context);
   const timeoutMs = clampNumber(args.timeoutMs, 1000, 86400000, 120000);
-  const inspection = await inspectPatchPaths(workspace, config, patch, timeoutMs);
+  const inspection = await inspectPatchPaths(workspace, config, patch, timeoutMs, context);
   const touchedPaths = inspection.touchedPaths;
   const check = inspection.check;
   const operationId = makeOperationId();
@@ -56,17 +67,37 @@ async function relaiApplyPatch(workspace, config, args = {}, context = {}) {
   // must report changedFiles:[].
   const hashOf = (rel) => (fs.existsSync(path.join(workspace.path, rel)) ? fileSha256(workspace.path, rel) : null);
   const beforeHashes = new Map(touchedPaths.map((rel) => [rel, hashOf(rel)]));
-  if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, touchedPaths);
-  await context.beforeNativeMutation?.(touchedPaths);
-  const apply = await runProcess("git", ["apply", "-"], { cwd: workspace.path, input: patch, timeout: timeoutMs, signal: context.signal }, config);
-  const changedFiles = apply.exitCode === 0
-    ? touchedPaths.filter((rel) => hashOf(rel) !== beforeHashes.get(rel))
-    : [];
+  // A supplied hook owns capture; standalone callers use the same helper directly.
+  if (context.beforeNativeMutation) await context.beforeNativeMutation(touchedPaths);
+  else if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, touchedPaths);
+  const applyOptions = gitOperationOptions(context, timeoutMs);
+  Object.assign(context.mutationFacts, { mutationEffect: 'unknown', possibleChangedFiles: touchedPaths });
+  const apply = await runProcess("git", ["apply", "-"], { cwd: workspace.path, input: patch, ...applyOptions }, config).catch(error => {
+    if (error?.executed === false) {
+      Object.assign(context.mutationFacts, { mutationEffect: 'none', changedFiles: [], possibleChangedFiles: [] });
+      Object.assign(error, { handlerResult: { ok: false, workspace: workspace.alias, mutationEffect: 'none', changedFiles: [], error: 'Patch execution was not started.' } });
+    }
+    throw error;
+  });
+  const changedFiles = [];
+  const possibleChangedFiles = [];
+  if (apply.executed !== false) {
+    for (const rel of touchedPaths) {
+      if (apply.terminationConfirmed === false) { possibleChangedFiles.push(rel); continue; }
+      try { if (hashOf(rel) !== beforeHashes.get(rel)) changedFiles.push(rel); }
+      catch { possibleChangedFiles.push(rel); }
+    }
+  }
+  const mutationEffect = possibleChangedFiles.length ? 'unknown' : changedFiles.length ? 'applied' : 'none';
+  Object.assign(context.mutationFacts, { mutationEffect, changedFiles, possibleChangedFiles });
+  if (apply.terminationConfirmed === false || apply.cancelled || apply.timedOut) {
+    return { ok: false, workspace: workspace.alias, operationId, operation: 'applyPatch', ...context.mutationFacts, touchedPaths, apply: summarizeCommand(apply), error: 'Patch execution did not settle successfully. Follow-on checks were not started.' };
+  }
   const verify = hasRequestedChecks(args) ? await relaiVerify(workspace, config, args, context) : null;
   const diff = args.returnDiff === false ? null : await relaiDiff(workspace, config, { maxBytes: args.maxDiffBytes || DEFAULT_MAX_DIFF_BYTES }, context);
   const ok = apply.exitCode === 0 && (!verify || verify.ok);
   appendOperation(config, workspace, { id: operationId, type: "apply_patch", ok, paths: changedFiles, results: [{ operation: "applyPatch", bytes: patchBytes, touchedPaths, changedFiles, verified: verify ? verify.ok : null }] });
-  return { ok, workspace: workspace.alias, operationId, operation: "applyPatch", changedFiles, touchedPaths, patchBytes, apply: summarizeCommand(apply), sourceFormat: "unified-diff", ...(verify ? { verify } : {}), ...(diff ? { diff } : {}) };
+  return { ok, workspace: workspace.alias, operationId, operation: "applyPatch", changedFiles, mutationEffect, ...(possibleChangedFiles.length ? { possibleChangedFiles } : {}), touchedPaths, patchBytes, apply: summarizeCommand(apply), sourceFormat: "unified-diff", ...(verify ? { verify } : {}), ...(diff ? { diff } : {}) };
 }
 
 function normalizeOpenAIPatchFormat(input) {
@@ -136,16 +167,27 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, con
       sourceFormat: "openai-patch",
       converted: false,
       patchBytes: Buffer.byteLength(rawPatch, "utf8"),
-      changedFiles: plan.changedFiles,
+      changedFiles: [],
+      plannedChangedFiles: plan.changedFiles,
+      mutationEffect: 'none',
       touchedPaths
     };
   }
   const changedSnapshots = plan.snapshots.filter(snapshot => plan.changedFiles.includes(snapshot.path));
   const changedStates = plan.states.filter(state => plan.changedFiles.includes(state.path));
-  if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, touchedPaths);
-  await context.beforeNativeMutation?.(touchedPaths);
+  for (const state of changedStates) {
+    const options = state.exists ? { operation: 'write', proposedContent: state.text } : { operation: 'delete' };
+    if (context.beforeNativeMutation) await context.beforeNativeMutation([state.path], options);
+    else if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, [state.path], options);
+  }
   beginStructuredPatchTransaction(config, workspace, changedSnapshots, changedStates);
+  Object.assign(context.mutationFacts, { mutationEffect: 'unknown', possibleChangedFiles: plan.changedFiles });
   const applied = applyStructuredPlan(workspace, config, plan, context.signal);
+  Object.assign(context.mutationFacts, {
+    mutationEffect: applied.ok ? (plan.changedFiles.length ? 'applied' : 'none') : applied.rollback?.ok === true ? 'none' : 'unknown',
+    changedFiles: applied.ok ? plan.changedFiles : [],
+    possibleChangedFiles: !applied.ok && applied.rollback?.ok !== true ? plan.changedFiles : []
+  });
   if (!applied.ok) {
     appendOperation(config, workspace, { id: operationId, type: "apply_patch", ok: false, paths: [], results: [{ operation: "applyPatch", rollback: applied.rollback, error: applied.error }] });
     return {
@@ -155,6 +197,8 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, con
       operation: "applyPatch",
       sourceFormat: "openai-patch",
       changedFiles: [],
+      mutationEffect: applied.rollback?.ok === true ? 'none' : 'unknown',
+      ...(applied.rollback?.ok === true ? {} : { possibleChangedFiles: plan.changedFiles }),
       touchedPaths,
       rollback: applied.rollback,
       error: applied.error
@@ -176,6 +220,7 @@ async function applyStructuredOpenAIPatch(workspace, config, args, rawPatch, con
     transaction,
     patchBytes: Buffer.byteLength(rawPatch, "utf8"),
     changedFiles,
+    mutationEffect: changedFiles.length ? 'applied' : 'none',
     touchedPaths,
     ...(verify ? { verify } : {}),
     ...(diff ? { diff } : {})

@@ -388,8 +388,18 @@ try {
       freshControls.push(file);
     }
     try {
-      const trigger = start({ config: cfg, scopeId: 'disk-prune-trigger', signature: 'disk-prune-trigger',
-        run: async () => result({ marker: 'prune-trigger' }) });
+      let trigger;
+      const recoveryDeadline = Date.now() + 5000;
+      for (;;) {
+        try {
+          trigger = start({ config: cfg, scopeId: 'disk-prune-trigger', signature: 'disk-prune-trigger',
+            run: async () => result({ marker: 'prune-trigger' }) });
+          break;
+        } catch (error) {
+          if (error?.code !== 'FALLBACK_RECOVERY_UNAVAILABLE' || Date.now() >= recoveryDeadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      }
       await trigger.record.promise;
       await waitUntil(() => !fs.existsSync(expiredFile)
         && freshControls.some(file => !fs.existsSync(file)), 2500,

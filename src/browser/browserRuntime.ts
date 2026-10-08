@@ -277,9 +277,16 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       if (record.profileDirectory && result.url && !record.driver.recordsPersistentSites) await recordPersistentBrowserSite(record.profileDirectory, result.url);
       return sessionResult(record, 'open_tab', { tabId: tab.tabId, ...result });
     } catch (error) {
+      try {
+        await tab.page.close();
+      } catch {
+        const retained = record.tabs.has(tab.tabId);
+        const failure = error instanceof Error ? error : new Error(String(error));
+        failure.message += `\n\nBrowser tab ${tab.tabId} cleanup also failed. ${retained ? 'The tab remains available for cleanup.' : 'Inspect the existing session before retrying.'}`;
+        throw failure;
+      }
       record.tabs.delete(tab.tabId);
       if (record.activeTabId === tab.tabId) record.activeTabId = firstTabId(record);
-      await tab.page.close().catch(() => {});
       throw error;
     }
   }
@@ -292,9 +299,9 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     const record = requireSession(workspace, args, context);
     assertAiControl(record, 'close a tab');
     const tab = requireTab(record, args.tabId);
+    await tab.page.close();
     record.tabs.delete(tab.tabId);
     if (record.activeTabId === tab.tabId) record.activeTabId = firstTabId(record);
-    await tab.page.close().catch(() => {});
     return sessionResult(record, 'close_tab', { tabId: tab.tabId, status: 'closed', activeTabId: record.activeTabId });
   }
 

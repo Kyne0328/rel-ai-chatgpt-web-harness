@@ -88,10 +88,21 @@ try {
   syncBuiltinESMExports();
   try {
     const start = performance.now();
-    const executions = ['a', 'b'].map(scope => startFallbackExecution({
-      config: cleanupConfig, scopeId: `workspace:${scope}`, tool: 'relai_exec',
-      signature: scope, run: async () => ({ content: [], structuredContent: { ok: true } })
-    }));
+    const startWithRecovery = async scope => {
+      const deadline = Date.now() + 15000;
+      for (;;) {
+        try {
+          return startFallbackExecution({
+            config: cleanupConfig, scopeId: `workspace:${scope}`, tool: 'relai_exec',
+            signature: scope, run: async () => ({ content: [], structuredContent: { ok: true } })
+          });
+        } catch (error) {
+          if (error?.code !== 'FALLBACK_RECOVERY_UNAVAILABLE' || Date.now() >= deadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      }
+    };
+    const executions = await Promise.all(['a', 'b'].map(startWithRecovery));
     let yielded = false;
     await new Promise(resolve => setImmediate(() => { yielded = true; resolve(); }));
     assert.ok(yielded, 'cleanup must yield to the service event loop');

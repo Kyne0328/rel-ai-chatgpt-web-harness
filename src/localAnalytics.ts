@@ -169,13 +169,11 @@ function recordLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOu
     const outcome = classifyAnalyticsOutcome(event);
     const performancePhases = sanitizePerformancePhases(event.timings?.phaseMs || event.performancePhases);
     const reliability = reliabilityCountersForOutcome(outcome);
-    let migratedLegacy = false;
     withAnalyticsWriteDatabase(config, (db: StateDatabase) => {
-      migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
+      migrateLegacyLocalAnalyticsInDatabase(db, config);
       ensureNormalizedAnalyticsSchema(db, config);
       recordNormalizedToolOutcome(db, month, hour, tool, workspace, intent, useCase, success, failure, durationMs, category, reliability, performancePhases);
     });
-    if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
     return true;
   } catch {
@@ -231,13 +229,11 @@ function recordLocalTransportEvent(
     const month = monthKey(at);
     const hour = hourKey(at);
     const count = boundedTransportCount(event.count);
-    let migratedLegacy = false;
     withAnalyticsWriteDatabase(config, (db: StateDatabase) => {
-      migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
+      migrateLegacyLocalAnalyticsInDatabase(db, config);
       ensureNormalizedAnalyticsSchema(db, config);
       recordNormalizedTransportEvent(db, month, hour, eventName, count);
     });
-    if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
     return true;
   } catch {
@@ -252,13 +248,11 @@ function recordLocalTaskCompletion(config: AnalyticsConfig = {}, event: { worksp
     const hour = hourKey(at);
     const workspace = boundedLabel(event.workspace, 160);
     const intent = normalizeAnalyticsTaskIntent(event.taskIntent, 'auto');
-    let migratedLegacy = false;
     withStateDatabase(config, (db: StateDatabase) => {
-      migratedLegacy = migrateLegacyLocalAnalyticsInDatabase(db, config);
+      migrateLegacyLocalAnalyticsInDatabase(db, config);
       ensureNormalizedAnalyticsSchema(db, config);
       recordNormalizedTaskCompletion(db, month, hour, workspace, intent);
     }, { transaction: true, timeoutMs: 0 });
-    if (migratedLegacy) removeLegacyAnalyticsDirectory(config);
     scheduleRetentionPrune(config);
     return true;
   } catch {
@@ -524,22 +518,22 @@ function upsertDocument(db: StateDatabase, document: AnalyticsDocument, updatedA
     .run(document.month, Math.max(0, Math.floor(Number(updatedAtMs) || Date.now())), JSON.stringify(document));
 }
 
-function parseDocument(text: string, month: string): AnalyticsDocument {
+function parseDocument(text: string, month: string, options: { requireSupported?: boolean } = {}): AnalyticsDocument {
   const parsed = asRecord(JSON.parse(text) as unknown);
   const schemaVersion = Number(parsed.schemaVersion);
   const supportedSchema = [SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION, RELIABILITY_SCHEMA_VERSION, PRE_RELIABILITY_SCHEMA_VERSION, LEGACY_SCHEMA_VERSION].includes(schemaVersion);
-  return supportedSchema && parsed.month === month
-    ? sanitizeDocument(parsed, month, { resetReliability: schemaVersion < RELIABILITY_SCHEMA_VERSION })
-    : emptyDocument(month);
+  if (!supportedSchema || parsed.month !== month) {
+    if (options.requireSupported === true) throw new Error('Legacy analytics schema or month is unsupported.');
+    return emptyDocument(month);
+  }
+  return sanitizeDocument(parsed, month, { resetReliability: schemaVersion < RELIABILITY_SCHEMA_VERSION });
 }
 
 function migrateLegacyLocalAnalytics(config: AnalyticsConfig = {}): void {
   if (legacyLocalAnalyticsMigrationComplete(config)) return;
-  let migrated = false;
   withStateDatabase(config, (db: StateDatabase) => {
-    migrated = migrateLegacyLocalAnalyticsInDatabase(db, config);
+    migrateLegacyLocalAnalyticsInDatabase(db, config);
   }, { transaction: true });
-  if (migrated) removeLegacyAnalyticsDirectory(config);
 }
 
 function legacyLocalAnalyticsMigrationComplete(config: AnalyticsConfig): boolean {
@@ -554,9 +548,10 @@ function legacyLocalAnalyticsMigrationComplete(config: AnalyticsConfig): boolean
   }
 }
 
-function migrateLegacyLocalAnalyticsInDatabase(db: StateDatabase, config: AnalyticsConfig = {}): boolean {
-  if (stateMetaValue(db, LEGACY_MIGRATION_KEY, '') === '1') return false;
+function migrateLegacyLocalAnalyticsInDatabase(db: StateDatabase, config: AnalyticsConfig = {}): void {
+  if (stateMetaValue(db, LEGACY_MIGRATION_KEY, '') === '1') return;
   const directory = statePath(config, 'analytics', 'local');
+  const outcome = { version: 1, imported: 0, alreadyPresent: 0, rejected: 0, conflicting: 0, recoveryRequired: false, sourceFilesRetained: true };
   let entries: fs.Dirent[] = [];
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -568,14 +563,36 @@ function migrateLegacyLocalAnalyticsInDatabase(db: StateDatabase, config: Analyt
     if (!entry.isFile() || !/^\d{4}-\d{2}\.json$/.test(entry.name)) continue;
     const month = entry.name.slice(0, 7);
     const file = path.join(directory, entry.name);
+    let document: AnalyticsDocument;
+    let updatedAtMs: number;
     try {
       const stat = fs.statSync(file);
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
-      upsertDocument(db, parseDocument(fs.readFileSync(file, 'utf8'), month), stat.mtimeMs);
-    } catch {}
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) {
+        outcome.rejected += 1;
+        continue;
+      }
+      document = parseDocument(fs.readFileSync(file, 'utf8'), month, { requireSupported: true });
+      updatedAtMs = stat.mtimeMs;
+    } catch {
+      outcome.rejected += 1;
+      continue;
+    }
+    const payload = JSON.stringify(document);
+    const existing = db.prepare('SELECT payload FROM analytics_months WHERE month=?').get(month) as { payload?: unknown } | undefined;
+    if (existing) {
+      if (String(existing.payload) === payload) outcome.alreadyPresent += 1;
+      else outcome.conflicting += 1;
+      continue;
+    }
+    // SQL failures abort the caller's outer transaction, including its marker.
+    upsertDocument(db, document, updatedAtMs);
+    outcome.imported += 1;
   }
+  outcome.recoveryRequired = outcome.rejected > 0 || outcome.conflicting > 0;
   setStateMeta(db, LEGACY_MIGRATION_KEY, '1');
-  return true;
+  setStateMeta(db, `${LEGACY_MIGRATION_KEY}_outcome`, JSON.stringify(outcome));
+  // Retain all originals. Only the separately requested explicit clear removes
+  // the legacy directory; a completed marker never authorizes migration cleanup.
 }
 
 async function flushLocalAnalytics(config?: AnalyticsConfig): Promise<{ ok: true; failed: 0; pending: 0 }> {

@@ -42,10 +42,16 @@ function buildExtraAudit(name, value, args) {
 function enrichCommonAudit(extra, name, value, args) {
   const dryRun = args?.dryRun === true;
   const mutationCapable = CODE_MUTATING_TOOLS.has(name) || name === OP.EXEC;
-  const changedFiles = !dryRun && mutationCapable && Array.isArray(value?.changedFiles) ? value.changedFiles : [];
+  const bookkeepingOnly = name === OP.EDIT && (['start', 'append', 'abort'].includes(String(args?.stage || '').toLowerCase())
+    || ['list', 'compare'].includes(String(args?.envAction || '')));
+  const effect = dryRun || bookkeepingOnly ? 'none' : ['none', 'applied', 'unknown'].includes(value?.mutationEffect) ? value.mutationEffect : '';
+  if (effect && !dryRun) extra.mutationEffect = effect;
+  if (effect === 'unknown') extra.mutationUnknown = true;
+  const changedFiles = !dryRun && effect !== 'none' && mutationCapable && Array.isArray(value?.changedFiles) ? value.changedFiles : [];
   if (changedFiles.length) extra.changedFiles = changedFiles.slice(0, 200);
+  if (!dryRun && effect === 'unknown' && Array.isArray(value?.possibleChangedFiles)) extra.possibleChangedFiles = value.possibleChangedFiles.slice(0, 200);
   assignTruthy(extra, "validationStatus", value?.validationStatus);
-  if (!dryRun && name === OP.PUBLISH_COMMIT && value?.ok !== false) {
+  if (!dryRun && name === OP.PUBLISH_COMMIT && value?.committed === true) {
     extra.commitCreated = true;
     assignTruthy(extra, 'commitHead', value?.head);
     if (Array.isArray(value?.paths) && value.paths.length) extra.committedFiles = value.paths.slice(0, 200);

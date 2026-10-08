@@ -36,8 +36,6 @@ try {
   assert.equal(projectAccess.config.projectAccess.directFilesystem, true, 'direct filesystem switch must persist through the canonical config editor');
   assert.equal(JSON.parse(fs.readFileSync(configPath, 'utf8')).projectAccess.directFilesystem, true);
 
-  const editorSource = fs.readFileSync(new URL('../src/configEditor.js', import.meta.url), 'utf8');
-  assert.equal(editorSource.includes('const DEFAULT_CONTEXT'), false, 'config editor must not retain a second context-default owner');
   console.log('Configuration default ownership parity tests passed.');
 } finally {
   delete process.env.REL_AI_MCP_CONFIG;

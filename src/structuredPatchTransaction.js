@@ -65,6 +65,12 @@ function completeStructuredPatchTransaction(config, workspace) {
   return { committed: true, ...cleanupTransaction(config, workspace) };
 }
 
+function inspectStructuredPatchTransaction(config, workspace) {
+  const record = readTransaction(config, workspace);
+  const status = record ? (record.status || 'active') : 'absent';
+  return { pending: Boolean(record && !['committed', 'rolled_back'].includes(status)), status };
+}
+
 function recoverStructuredPatchTransaction(config, workspace) {
   const record = readTransaction(config, workspace);
   if (!record) return { recovered: false, restored: [] };
@@ -171,5 +177,6 @@ export {
   beginStructuredPatchTransaction,
   prepareStructuredPatchEntry,
   completeStructuredPatchTransaction,
-  recoverStructuredPatchTransaction
+  recoverStructuredPatchTransaction,
+  inspectStructuredPatchTransaction
 };

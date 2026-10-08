@@ -38,7 +38,7 @@ function prepareBundledSevenZipExecutable() {
 async function extractToolBundleZip(archivePath, destination, options = {}) {
   const format = detectToolBundleArchiveFormat(archivePath);
   if (format === 'tar.gz') {
-    return await extractToolBundleTarGz(archivePath, destination, options);
+    return await extractToolBundleTarArchive(archivePath, destination, options);
   }
   if (format === 'tar.xz') {
     return await extractToolBundleTarXz(archivePath, destination, options);
@@ -172,20 +172,21 @@ async function extractToolBundleZipArchive(archivePath, destination, options = {
   });
 }
 
-async function extractToolBundleTarGz(archivePath, destination, options = {}) {
-  return await extractToolBundleTarArchive(archivePath, destination, options);
-}
-
 async function extractToolBundleTarXz(archivePath, destination, options = {}) {
   const maxEntries = positiveLimit(options.maxEntries, 20_000);
   const maxExtractedBytes = positiveLimit(options.maxExtractedBytes, 2 * 1024 * 1024 * 1024);
   const tarPath = `${archivePath}.relai-${process.pid}-${Date.now()}.tar`;
   const maxTarBytes = maxExtractedBytes + Math.max(16 * 1024 * 1024, maxEntries * 1024);
+  let preserveIntermediate = false;
   try {
-    await decompressXzToTar(archivePath, tarPath, maxTarBytes);
+    await decompressXzToTar(archivePath, tarPath, maxTarBytes, options);
     return await extractToolBundleTarArchive(tarPath, destination, options);
+  } catch (error) {
+    preserveIntermediate = error?.cleanupPending === true;
+    throw error;
   } finally {
-    fs.rmSync(tarPath, { force: true });
+    // An unconfirmed decompressor may still own the intermediate TAR.
+    if (!preserveIntermediate) fs.rmSync(tarPath, { force: true });
   }
 }
 
@@ -280,12 +281,12 @@ async function extractToolBundle7z(archivePath, destination, options = {}) {
   const limits = archiveLimits(options);
   fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
   try {
-    const listing = await runSevenZip(['l', '-slt', '-sccUTF-8', archivePath]);
+    const listing = await runSevenZip(['l', '-slt', '-sccUTF-8', archivePath], options);
     validateSevenZipListing(listing.stdout, limits);
-    await runSevenZip(['x', '-y', '-bd', '-bb0', '-sccUTF-8', `-o${destination}`, archivePath]);
+    await runSevenZip(['x', '-y', '-bd', '-bb0', '-sccUTF-8', `-o${destination}`, archivePath], options);
     return validateExtractedTree(destination, limits);
   } catch (error) {
-    fs.rmSync(destination, { recursive: true, force: true });
+    if (error?.cleanupPending !== true) fs.rmSync(destination, { recursive: true, force: true });
     throw error;
   }
 }
@@ -360,12 +361,29 @@ function validateExtractedTree(root, limits) {
   return { entryCount, extractedBytes };
 }
 
-async function decompressXzToTar(archivePath, tarPath, maxBytes) {
+async function decompressXzToTar(archivePath, tarPath, maxBytes, options = {}) {
   fs.mkdirSync(path.dirname(tarPath), { recursive: true, mode: 0o700 });
-  const child = spawn(prepareBundledSevenZipExecutable(), ['e', '-so', archivePath], {
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  const executable = prepareBundledSevenZipExecutable();
+  const argv = ['e', '-so', archivePath];
+  const job = options.ownerConfig && process.platform === 'win32'
+    ? await (async () => {
+      const { prepareWindowsProcessJob } = await import('../windowsProcessJob.ts');
+      const { makeProcessEnvironment } = await import('../processEnvironment.js');
+      return prepareWindowsProcessJob(options.ownerConfig, {
+      executable, args: argv, env: makeProcessEnvironment({})
+      });
+    })() : null;
+  let child;
+  try {
+    child = spawn(job?.executable || executable, job?.args || argv, {
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+      ...(job ? { env: job.environment } : {})
+    });
+    job?.bind(child.pid);
+  } catch (error) {
+    if (job) fs.rmSync(job.directory, { recursive: true, force: true });
+    throw error;
+  }
   const output = fs.createWriteStream(tarPath, { flags: 'wx', mode: 0o600 });
   let bytes = 0;
   let stderr = '';
@@ -395,6 +413,7 @@ async function decompressXzToTar(archivePath, tarPath, maxBytes) {
   }), output);
   try {
     await Promise.all([writing, childFinished]);
+    if (job) await settleNativeExtractor(job);
   } catch (error) {
     const stopRequested = child.kill('SIGKILL');
     child.stdout.destroy();
@@ -402,6 +421,14 @@ async function decompressXzToTar(archivePath, tarPath, maxBytes) {
     // Node owns the TAR file handle. Wait for its pipeline to close, but never
     // wait indefinitely for a decompressor that did not acknowledge termination.
     await writing.catch(() => {});
+    if (job) {
+      const native = await job.stop(timedOut ? 'timeout' : 'stop', 5000);
+      if (!native.exited) {
+        throw Object.assign(new Error(`${error instanceof Error ? error.message : String(error)} Native decompressor termination remains unconfirmed; intermediate output was preserved.`, { cause: error }),
+          { cleanupPending: true, terminationConfirmed: false });
+      }
+      job.cleanup();
+    }
     if (!stopRequested && child.exitCode == null && child.signalCode == null) {
       throw new Error(`${error instanceof Error ? error.message : String(error)} Could not confirm termination of the 7-Zip decompressor (PID ${child.pid || 'unavailable'}).`, { cause: error });
     }
@@ -411,7 +438,48 @@ async function decompressXzToTar(archivePath, tarPath, maxBytes) {
   }
 }
 
-function runSevenZip(args) {
+async function settleNativeExtractor(job) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (job.outcome().exited) {
+      job.cleanup();
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  const result = await job.stop('stop', 5000);
+  if (result.exited) job.cleanup();
+  throw Object.assign(new Error(result.exited
+    ? 'The decompressor helper exited before its descendants; native cleanup stopped remaining processes.'
+    : 'Native decompressor completion could not be confirmed; retained artifacts must not be deleted.'),
+  { cleanupPending: !result.exited, terminationConfirmed: result.exited });
+}
+
+async function runSevenZip(args, options = {}) {
+  if (options.ownerConfig) {
+    const { runProcess } = await import('../process.js');
+    const result = await runProcess(prepareBundledSevenZipExecutable(), args, {
+      nativeOwnership: true,
+      timeout: SEVEN_ZIP_TIMEOUT_MS,
+      forceWaitMs: 5000,
+      maxOutputBytes: MAX_SEVEN_ZIP_OUTPUT_BYTES
+    }, options.ownerConfig);
+    if (result.executed && (result.terminationConfirmed === false
+      || (process.platform === 'win32' && result.terminationConfirmed !== true)
+      || (process.platform !== 'win32' && result.rootExitConfirmed !== true))) {
+      throw Object.assign(new Error('Bundled 7-Zip termination remains unconfirmed; extracted content must be preserved.'),
+        { cleanupPending: true, terminationConfirmed: false });
+    }
+    if (result.timedOut) throw new Error('Bundled 7-Zip operation timed out after confirmed cleanup.');
+    if (result.cancelled) throw new Error('Bundled 7-Zip operation was cancelled after confirmed cleanup.');
+    if (!result.executed) throw new Error(`Could not start bundled 7-Zip: ${result.error || 'unknown launch failure'}`);
+    if (result.stdoutBytes + result.stderrBytes > MAX_SEVEN_ZIP_OUTPUT_BYTES
+      || result.stdoutTruncated || result.stderrTruncated) {
+      throw new Error('Bundled 7-Zip produced too much diagnostic output.');
+    }
+    if (result.exitCode !== 0) throw new Error(
+      `Bundled 7-Zip failed with exit code ${result.exitCode}: ${result.stderr.trim() || result.stdout.trim()}`);
+    return { stdout: result.stdout, stderr: result.stderr };
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(prepareBundledSevenZipExecutable(), args, {
       windowsHide: true,

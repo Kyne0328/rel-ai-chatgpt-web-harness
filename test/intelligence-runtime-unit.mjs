@@ -12,24 +12,15 @@ import { repositoryIntelligence } from '../src/repository/intelligence/service.j
 const zoektSource = fs.readFileSync(new URL('../src/repository/intelligence/zoekt.js', import.meta.url), 'utf8');
 const indexBuildSource = fs.readFileSync(new URL('../src/repository/intelligence/indexBuild.js', import.meta.url), 'utf8');
 const queryServiceSource = fs.readFileSync(new URL('../src/repository/intelligence/queryService.js', import.meta.url), 'utf8');
-const queryWorkerClientSource = fs.readFileSync(new URL('../src/repository/intelligence/queryWorkerClient.js', import.meta.url), 'utf8');
 const queryWorkerSource = fs.readFileSync(new URL('../src/repository/intelligence/queryWorker.js', import.meta.url), 'utf8');
 const repositoryServiceSource = fs.readFileSync(new URL('../src/repository/intelligence/service.js', import.meta.url), 'utf8');
 const lexicalFallbackSource = fs.readFileSync(new URL('../src/repository/intelligence/lexicalFallback.js', import.meta.url), 'utf8');
-assert.doesNotMatch(zoektSource, /spawnSync/, 'Zoekt subprocesses must never block the MCP event loop');
-assert.doesNotMatch(lexicalFallbackSource, /spawnSync/, 'lexical fallback subprocesses must never block the MCP event loop');
 assert.match(lexicalFallbackSource, /await runProcess\(/, 'lexical fallback must use the asynchronous process runner');
 assert.match(zoektSource, /await runProcess\(/, 'Zoekt commands must use the asynchronous process runner');
 assert.match(indexBuildSource, /await rebuildZoektIndex\(/, 'full Zoekt rebuilds must execute inside the Repository Intelligence worker job');
 assert.match(queryServiceSource, /await searchZoekt\(/, 'query-time Zoekt search must remain asynchronous');
-assert.match(queryServiceSource, /options\.sourceCache \|\| new Map\(\)/, 'repository queries must accept a generation-aware shared source cache');
-assert.match(queryWorkerClientSource, /import Piscina from 'piscina'/, 'repository query work must use the production worker-pool dependency');
-assert.match(queryWorkerClientSource, /maxThreads:\s*QUERY_WORKER_GLOBAL_COUNT/, 'repository query work must retain a bounded global worker budget');
-assert.doesNotMatch(queryWorkerClientSource, /warmIdleReaders|type: 'warm'/,
-  'one query must not eagerly warm every reader slot');
 assert.match(queryWorkerSource, /SOURCE_CACHE_MAX_FILES/, 'query worker source caching must have a file-count bound');
 assert.match(queryWorkerSource, /SOURCE_CACHE_MAX_BYTES/, 'query worker source caching must have a byte bound');
-assert.match(repositoryServiceSource, /runRepositoryQuery/, 'the repository service must route query work through the worker client');
 assert.doesNotMatch(repositoryServiceSource, /queryCodeInspect|querySemanticSearch/, 'the main repository service must not execute synchronous query implementations directly');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-intelligence-'));

@@ -340,14 +340,26 @@ async function case_connection_state_unit() {
   assert.equal(connectionSummary(unavailable).title, 'ChatGPT connection unavailable');
   assert.doesNotMatch(connectionSummary(unavailable).message, /Tunnel ID|API key|MCP/i);
 
+  const degradedAggregate = {
+    localService: { status: 'running' },
+    publicEndpoint: { status: 'degraded' },
+    chatgptReadiness: { status: 'unavailable' },
+    error: null
+  };
+  const availableAggregate = {
+    ...degradedAggregate,
+    publicEndpoint: { status: 'available', retryAttempt: 0, nextRetryAt: null },
+    chatgptReadiness: { status: 'ready' }
+  };
   const partiallyConnected = connectionStateFor({
-    connectionState: {
-      localService: { status: 'running' },
-      publicEndpoint: { status: 'degraded', retryAttempt: 2, nextRetryAt: '2026-10-04T02:00:00.000Z' },
-      dashboardUpdates: { status: 'live' }
-    },
+    connectionState: { ...availableAggregate, dashboardUpdates: { status: 'live' } },
     desktopStatus: {
+      serverRunning: true,
+      connectionState: availableAggregate,
       tunnelId: 'tunnel_primary123',
+      tunnelStatus: 'degraded',
+      tunnelRetryAttempt: 2,
+      tunnelNextRetryAt: '2026-10-04T02:00:00.000Z',
       additionalTunnelStatuses: [
         { tunnelId: 'tunnel_secondary123', label: 'Account 2', state: 'running' }
       ]
@@ -369,13 +381,9 @@ async function case_connection_state_unit() {
   
   // Bootstrap projection, successive desktop status events, and the shell's
   // reduced store must not count an aggregate endpoint as a healthy primary.
-  const rawPrimary = {
-    localService: { status: 'running' },
-    publicEndpoint: { status: 'degraded' }
-  };
   const desktopProjection = connectionStateFor({
     ...base,
-    desktopStatus: { connectionState: rawPrimary, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'running' }] }
+    desktopStatus: { connectionState: availableAggregate, tunnelId: 'primary', tunnelStatus: 'degraded', additionalTunnelStatuses: [{ state: 'running' }] }
   }, 'live');
   assert.equal(desktopProjection.publicEndpoint.availableCount, 1, 'fresh desktop primary state must override a stale HTTP endpoint');
   assert.equal(desktopProjection.publicEndpoint.reconnectingCount, 1);
@@ -385,14 +393,14 @@ async function case_connection_state_unit() {
   assert.match(connectionSummary(shellProjection).message, /1 of 2 configured tunnels/);
   const allUnhealthy = connectionStateFor({
     connectionState: desktopProjection,
-    desktopStatus: { connectionState: rawPrimary, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'degraded' }] }
+    desktopStatus: { connectionState: degradedAggregate, tunnelId: 'primary', tunnelStatus: 'degraded', additionalTunnelStatuses: [{ state: 'degraded' }] }
   }, 'live');
   assert.equal(allUnhealthy.publicEndpoint.status, 'degraded', 'the last healthy tunnel failing must clear aggregate availability');
   assert.equal(allUnhealthy.publicEndpoint.availableCount, 0);
   assert.equal(allUnhealthy.chatgptReadiness.status, 'unavailable');
   const primaryRecovered = connectionStateFor({
     connectionState: allUnhealthy,
-    desktopStatus: { connectionState: { ...rawPrimary, publicEndpoint: { status: 'available' } }, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'failed' }] }
+    desktopStatus: { connectionState: availableAggregate, tunnelId: 'primary', tunnelStatus: 'running', additionalTunnelStatuses: [{ state: 'failed' }] }
   }, 'live');
   assert.equal(primaryRecovered.publicEndpoint.availableCount, 1);
   assert.equal(primaryRecovered.publicEndpoint.unavailableCount, 1);
@@ -411,10 +419,10 @@ async function case_connection_state_unit() {
     updateShell: () => {}
   };
   (await import('node:vm')).default.runInNewContext(desktopUpdateSource + '\n;globalThis.applyDesktopStatus = applyDesktopStatus;', desktopUpdateContext);
-  desktopUpdateContext.applyDesktopStatus({ connectionState: rawPrimary, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'degraded' }] });
+  desktopUpdateContext.applyDesktopStatus({ connectionState: degradedAggregate, tunnelId: 'primary', tunnelStatus: 'degraded', additionalTunnelStatuses: [{ state: 'degraded' }] });
   assert.equal(projectedStore.connectionState.publicEndpoint.status, 'degraded', 'the actual desktop store update must clear a formerly healthy aggregate');
   assert.equal(projectedStore.connectionState.publicEndpoint.availableCount, 0);
-  desktopUpdateContext.applyDesktopStatus({ connectionState: { ...rawPrimary, publicEndpoint: { status: 'available' } }, tunnelId: 'primary', additionalTunnelStatuses: [{ state: 'failed' }] });
+  desktopUpdateContext.applyDesktopStatus({ connectionState: availableAggregate, tunnelId: 'primary', tunnelStatus: 'running', additionalTunnelStatuses: [{ state: 'failed' }] });
   assert.equal(projectedStore.connectionState.publicEndpoint.availableCount, 1, 'the actual desktop update must also recover without counting stale aggregate state');
 
   assert.deepEqual(connectionLayerViews(recent).map(layer => layer.title), [

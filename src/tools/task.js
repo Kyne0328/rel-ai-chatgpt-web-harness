@@ -32,7 +32,7 @@ function findReusableTask(config, workspace, args = {}, principal, conversationI
   if (live) return live;
   const activeTaskIds = new Set(activity.tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean));
   const narrowed = (workspaceAlias ? findTaskReuseCandidates(config, workspaceAlias, conversation, 24) : [])
-    .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: true, activeTaskIds }))
+    .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: true, persistReconciliation: false, activeTaskIds }))
     .filter(Boolean)
     .filter(session => !isTerminalTaskStatus(session?.status))
     .filter(session => String(session?.workspace || '') === workspaceAlias)
@@ -44,14 +44,17 @@ function findReusableTask(config, workspace, args = {}, principal, conversationI
   if (narrowed.length) return reuseResult(narrowed);
   // Fallback for short conversation ids (<4 chars, skipped by the SQL needle
   // search) or search quirks: bounded recent scan instead of the full 500.
-  const persisted = readTaskHistory(config, activity, { limit: 50, summary: true })
+  const persisted = readTaskHistory(config, activity, {
+    limit: 50, summary: true, maintain: false,
+    principalFingerprint: expectedPrincipal, authorizedWorkspaces: [workspaceAlias]
+  })
     .filter(session => !isTerminalTaskStatus(session?.status))
     .filter(session => String(session?.workspace || '') === workspaceAlias)
     .filter(session => String(session?.correlation?.conversationId || '') === conversation)
     .filter(session => objective
       ? normalizeTaskGoal(session?.objective) === objective
       : normalizeTaskGoal(session?.title) === title)
-    .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: false }))
+    .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: true, persistReconciliation: false, activeTaskIds }))
     .filter(matches);
   return reuseResult(persisted);
 }
@@ -85,11 +88,19 @@ function taskAttributionHint(config, workspace, principal, conversationId) {
   if (!conversation || !workspace) return '';
   const fingerprint = principalFingerprint(principal || 'anonymous');
   const activity = getToolActivity();
-  const persisted = findTaskReuseCandidates(config, workspace, conversation, 24);
+  const persisted = findTaskReuseCandidates(config, workspace, conversation, 24)
+    .map(session => readTaskHistorySessionRecord(config, session.id, {
+      reconcileInactive: true, persistReconciliation: false,
+      activeTaskIds: activity.tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean)
+    })).filter(Boolean);
   const candidates = [...activity.tasks, ...persisted,
-    ...(conversation.length < 4 ? readTaskHistory(config, activity, { limit: 50, summary: true })
+    ...(conversation.length < 4 ? readTaskHistory(config, activity, {
+      limit: 50, summary: true, maintain: false,
+      principalFingerprint: fingerprint, authorizedWorkspaces: [workspace]
+    })
       .filter(session => session.workspace === workspace && session.correlation?.conversationId === conversation)
-      .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: false })).filter(Boolean) : [])];
+      .map(session => readTaskHistorySessionRecord(config, session.id, { reconcileInactive: true, persistReconciliation: false,
+        activeTaskIds: activity.tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean) })).filter(Boolean) : [])];
   const ids = [...new Set(candidates.filter(session =>
     !isTerminalTaskStatus(session.status)
     && String(session.workspace || '') === workspace
@@ -136,6 +147,9 @@ async function assertKnownTask(config, taskId, workspace, toolName, principal, a
   if (!expectedPrincipal || (options.trustedLocalTaskControl !== true && !safeEqual(expectedPrincipal, actualPrincipal))) {
     throw taskError('TASK_NOT_FOUND', 'The supplied work_id is unknown or expired. Start a new work session with relai_work action "begin".');
   }
+  // Verification may support a safe failure activity fact even if a later
+  // state/workspace/capability check rejects admission. It grants no scope.
+  options.onOwnerVerified?.(session);
   assertTaskWorkspaceOwnership(session, workspace);
   if (session.status === 'cancelled' && toolName === OP.WORK_CANCEL) return session;
   if (session.status === 'completed' && toolName === OP.WORK_FINISH) return session;
@@ -173,7 +187,7 @@ async function readKnownTaskSession(config, taskId, options) {
     try {
       const activeTaskIds = new Set(getToolActivity().tasks.map(task => String(task.id || task.taskId || '')).filter(Boolean));
       const session = readTaskHistorySessionRecord(config, taskId, {
-        reconcileInactive: true, activeTaskIds, strict: true
+        reconcileInactive: true, persistReconciliation: true, activeTaskIds, strict: true
       });
       assertNotInterrupted();
       return session;

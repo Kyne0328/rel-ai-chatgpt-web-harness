@@ -78,12 +78,17 @@ async function relaiStatus(config, args = {}, context = {}) {
   }
   const { getToolNames, getToolGroups, getToolSurfaceManifest } = toolSchema;
   const taskActivity = typeof context.getTaskActivity === 'function' ? context.getTaskActivity() : getToolActivity();
-  const taskSession = args.work_id ? readTaskHistorySessionRecord(config, args.work_id, { reconcileInactive: false }) : null;
+  const taskSession = args.work_id ? readTaskHistorySessionRecord(config, args.work_id, {
+    reconcileInactive: true, persistReconciliation: false,
+    activeTaskIds: (taskActivity.tasks || []).map(task => String(task.id || task.taskId || '')).filter(Boolean)
+  }) : null;
   const activeRelatedWork = compactActiveRelatedWork(taskActivity, taskSession || {});
   const taskQuery = taskSession ? [taskSession.objective, taskSession.title].filter(Boolean).join(' ') : '';
   const taskContinuity = !compactConnectorStatus && taskSession && taskQuery
     ? buildTaskContinuity(config, {
         workspace: taskSession.workspace,
+        principalFingerprint: principalFingerprint(context.principal),
+        authorizedWorkspaces: workspaceAliases,
         query: taskQuery,
         excludeTaskId: args.work_id,
         conversationId: taskSession.correlation?.conversationId

@@ -321,23 +321,25 @@ function looksBinary(buffer) {
 }
 
 function collectTextFiles(root, options = {}) {
+  const observation = collectionContextFor(root, options);
   const context = {
-    maxEntries: options.maxEntries || Infinity,
-    files: [],
-    skipped: [],
-    realRoot: realRootOf(root),
-    policy: null
+    maxEntries: options.maxEntries || Infinity, files: [], skipped: [],
+    realRoot: observation.realRoot, policy: observation.policy
   };
-  context.policy = buildCollectionPolicy(context.realRoot, options);
   walkTextFiles(context, context.realRoot, "");
-  return { files: context.files, skipped: context.skipped, truncated: context.files.length >= context.maxEntries };
+  const truncated = context.files.length >= context.maxEntries;
+  const incompletePaths = [...new Set([
+    ...context.skipped.filter(item => item.unavailable === true).map(item => item.path),
+    ...(truncated ? ['.'] : [])
+  ])];
+  return { files: context.files, skipped: context.skipped, truncated, complete: !incompletePaths.length, incompletePaths };
 }
 
 function readDirectoryEntries(dir, prefix, skipped) {
   try {
     return fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
   } catch (error) {
-    skipped.push({ path: prefix || ".", reason: error.message });
+    skipped.push({ path: prefix || ".", reason: error.message, unavailable: true });
     return [];
   }
 }
@@ -391,7 +393,7 @@ function inspectTextFile(context, abs, rel) {
     }
     context.files.push(rel);
   } catch (error) {
-    context.skipped.push({ path: rel, reason: error.message });
+    context.skipped.push({ path: rel, reason: error.message, unavailable: true });
   }
 }
 
@@ -416,7 +418,7 @@ function buildCollectionPolicy(root, options = {}) {
   return {
     includeRoots,
     excludePaths: normalizePathList(excludePaths),
-    excludeNames: new Set([...DEFAULT_EXCLUDED_NAMES, ...normalizePathList(options.excludeNames || [])])
+    excludeNames: [...new Set([...DEFAULT_EXCLUDED_NAMES, ...normalizePathList(options.excludeNames || [])])]
   };
 }
 
@@ -430,7 +432,7 @@ function collectOptionsFromWorkspace(workspace, overrides = {}) {
 }
 
 function createCollectionPathFilter(root, options = {}) {
-  const policy = buildCollectionPolicy(root, options);
+  const { policy } = collectionContextFor(root, options);
   return relativePath => {
     let normalized = String(relativePath || "").replaceAll(WINDOWS_SEPARATOR, "/");
     if (normalized.startsWith("./")) normalized = normalized.slice(2);
@@ -444,18 +446,114 @@ function createCollectionPathFilter(root, options = {}) {
   };
 }
 
-function readRelaiIgnore(root) {
+function collectionPolicyUnavailable() {
+  return Object.assign(new Error('Collection policy is unavailable; existing collection facts must be preserved.'), { code: 'COLLECTION_POLICY_UNAVAILABLE' });
+}
+
+// Internal per-refresh snapshot. Plain arrays keep it safe to structured-clone
+// into a collector worker; this is not a public path-policy override.
+function createCollectionContext(root, options = {}) {
   try {
-    const file = path.join(root, ".relaiignore");
-    if (!fs.existsSync(file)) return [];
-    return fs.readFileSync(file, "utf8")
-      .split(/\r?\n/)
-      .map((line) => line.split("#")[0].trim())
-      .filter(Boolean);
+    const realRoot = fs.realpathSync(root);
+    const stat = fs.lstatSync(realRoot);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw collectionPolicyUnavailable();
+    return { realRoot, policy: buildCollectionPolicy(realRoot, options) };
   } catch (error) {
-    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] .relaiignore:', error);
-    return [];
+    if (error?.code === 'COLLECTION_POLICY_UNAVAILABLE') throw error;
+    throw collectionPolicyUnavailable();
   }
+}
+
+function collectionContextFor(root, options) {
+  const context = options.collectionContext;
+  if (context == null) return createCollectionContext(root, options);
+  const policy = context?.policy;
+  if (typeof context?.realRoot !== 'string' || !policy
+    || !['includeRoots', 'excludePaths', 'excludeNames'].every(key => Array.isArray(policy[key]) && policy[key].every(value => typeof value === 'string'))) {
+    throw collectionPolicyUnavailable();
+  }
+  try {
+    if (fs.realpathSync(root) !== context.realRoot) throw collectionPolicyUnavailable();
+    const stat = fs.lstatSync(context.realRoot);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw collectionPolicyUnavailable();
+  } catch { throw collectionPolicyUnavailable(); }
+  return context;
+}
+
+function createCollectionPathObserver(root, options = {}) {
+  const context = collectionContextFor(root, options);
+  return relativePath => {
+    let clean;
+    try {
+      const raw = String(relativePath || '').replaceAll(WINDOWS_SEPARATOR, '/');
+      const normalized = raw.startsWith('./') ? raw.slice(2) : raw;
+      clean = validateRelativePath(normalized, 'Collection path', { skipSensitivePolicy: true });
+      if (clean !== normalized) throw new Error('Non-canonical collection path.');
+      if (clean !== '.' && clean.split('/').includes('.')) throw new Error('Non-canonical collection path.');
+      // Recheck root identity for reused snapshots. No atomic no-follow claim is
+      // made: consumers must still treat later read failures as unavailable.
+      collectionContextFor(root, { collectionContext: context });
+      if (clean === '.') return { status: 'eligible', path: clean, absolutePath: context.realRoot, stat: fs.lstatSync(context.realRoot) };
+      const segments = clean.split('/');
+      let absolutePath = context.realRoot;
+      for (let index = 0; index < segments.length; index += 1) {
+        const name = segments[index];
+        const prefix = segments.slice(0, index + 1).join('/');
+        const policyReason = skipReasonForEntry(prefix, { name, isSymbolicLink: () => false }, context.policy);
+        if (policyReason) return { status: 'excluded', path: clean, reason: policyReason };
+        absolutePath = path.join(absolutePath, name);
+        if (!isPathInside(absolutePath, context.realRoot)) throw new Error('Collection path escapes workspace.');
+        let stat;
+        try { stat = fs.lstatSync(absolutePath); }
+        catch (error) {
+          if (error?.code === 'ENOENT') return { status: 'missing', path: clean, reason: 'verified absent path' };
+          throw error;
+        }
+        const reason = skipReasonForEntry(prefix, { name, isSymbolicLink: () => stat.isSymbolicLink() }, context.policy);
+        if (reason) return { status: 'excluded', path: clean, reason };
+        if (index < segments.length - 1) {
+          if (!stat.isDirectory()) return { status: 'excluded', path: clean, reason: 'ancestor is not a directory' };
+          continue;
+        }
+        if (!stat.isDirectory() && !stat.isFile()) return { status: 'excluded', path: clean, reason: 'not a regular file or directory' };
+        if (stat.isFile() && !KNOWN_TEXT_EXTENSIONS.has(path.extname(clean).toLowerCase()) && fileLooksBinary(absolutePath)) {
+          return { status: 'excluded', path: clean, reason: 'binary-looking file' };
+        }
+        return { status: 'eligible', path: clean, absolutePath, stat };
+      }
+    } catch {
+      return { status: 'unavailable', path: String(relativePath || ''), reason: 'path observation unavailable' };
+    }
+  };
+}
+
+function readRelaiIgnore(root) {
+  const file = path.join(root, ".relaiignore");
+  let stat;
+  try { stat = fs.lstatSync(file); }
+  catch (error) {
+    if (error?.code === 'ENOENT') {
+      // A missing root or a failed policy read is not evidence of policy absence.
+      try {
+        const parent = fs.lstatSync(root);
+        if (parent.isDirectory() && !parent.isSymbolicLink()) return [];
+      } catch {}
+    }
+    throw collectionPolicyUnavailable();
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) throw collectionPolicyUnavailable();
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    const opened = fs.fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) throw collectionPolicyUnavailable();
+    const text = fs.readFileSync(descriptor, 'utf8');
+    const final = fs.lstatSync(file);
+    if (!final.isFile() || final.isSymbolicLink() || final.dev !== opened.dev || final.ino !== opened.ino
+      || final.size !== opened.size || final.mtimeMs !== opened.mtimeMs) throw collectionPolicyUnavailable();
+    return text.split(/\r?\n/).map(line => line.split('#')[0].trim()).filter(Boolean);
+  } catch { throw collectionPolicyUnavailable(); }
+  finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
 
 function normalizePathList(value) {
@@ -478,7 +576,7 @@ function shouldExcludeRelativePath(rel, name, policy) {
   if (policy.includeRoots.length && !policy.includeRoots.some((root) => isInsideIncludedRoot(normalized, root))) {
     return "outside context include roots";
   }
-  if (!explicitlyIncluded && (policy.excludeNames.has(name) || policy.excludeNames.has(normalized))) return "excluded generated/cache folder";
+  if (!explicitlyIncluded && (policy.excludeNames.includes(name) || policy.excludeNames.includes(normalized))) return "excluded generated/cache folder";
   for (const pattern of policy.excludePaths) {
     if (matchesIgnorePattern(normalized, pattern)) return "excluded by context policy";
   }
@@ -575,7 +673,7 @@ function safeReadJson(file, fallback = null) {
   }
 }
 
-export { SECRET_PATH_PATTERNS,  clearRealRootCache, realRootOf, validateRelativePath, resolveSafePath, assertPathOperationAllowed, isPathInside, isSecretPath, classifySensitivePath, evaluateSensitiveContent, looksBinary, collectTextFiles, collectOptionsFromWorkspace, createCollectionPathFilter, writeTextFileSafe, fileSha256, safeReadJson };
+export { SECRET_PATH_PATTERNS,  clearRealRootCache, realRootOf, validateRelativePath, resolveSafePath, assertPathOperationAllowed, isPathInside, isSecretPath, classifySensitivePath, evaluateSensitiveContent, looksBinary, collectTextFiles, collectOptionsFromWorkspace, createCollectionPathFilter, createCollectionContext, createCollectionPathObserver, writeTextFileSafe, fileSha256, safeReadJson };
 
 function guardAgainstCollapsedFullFileWrite(absolutePath, relativePath, newText) {
   if (!fs.existsSync(absolutePath)) return;

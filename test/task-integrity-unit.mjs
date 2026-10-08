@@ -273,6 +273,7 @@ try {
   }));
   assert.deepEqual(taskIntegrity.taskOwnedChangedFiles(config, ephemeralTask, 'app'), [], 'an explicit later scratch declaration may capture the new hash');
   await recordTaskIntegrityEvent(config, event(ephemeralTask, 'publish.commit', {
+    commitCreated: true,
     committedFiles: [scratchFile]
   }));
   ephemeralAuthority = readTaskIntegrity(config, ephemeralTask, 'app');

@@ -1,4 +1,4 @@
-import { taskOwnedChangedFiles } from '../taskIntegrity.ts';
+import { taskOwnedChangedFiles, taskCommitOwnership, readTaskIntegrity } from '../taskIntegrity.ts';
 import { readGitObservation } from '../repo/gitObservation.js';
 import { randomBytes } from 'node:crypto';
 import * as fs from "node:fs";
@@ -7,31 +7,40 @@ import { writeJsonAtomic } from "../durableState.ts";
 import { resolveSafePath, fileSha256 } from "../safety.js";
 import { getStateDir } from '../statePaths.js';
 import { appendOperation, makeOperationId } from "../journal.js";
-import { classifyStatusOwnership } from "../repo/gitOps.js";
+import { classifyStatusOwnership, gitOperationOptions } from "../repo/gitOps.js";
 import { clampNumber } from "./limits.js";
 
 const TIDY_PLAN_TTL_MS = 15 * 60 * 1000;
 const TIDY_PLAN_ID_PATTERN = /^tidy_[a-z0-9]+_[a-f0-9]{12}$/;
 const TIDY_MODES = new Set(["session_untracked"]);
 
-function clearTidyFiles(workspace, config, paths) {
+function clearTidyFiles(workspace, config, candidates, context = {}) {
   const operationId = makeOperationId();
   const cleared = [];
-  for (const rawPath of paths) {
-    const safe = resolveSafePath(workspace.path, rawPath, { operation: "delete" });
-    if (!fs.existsSync(safe.absolutePath)) throw new Error(`Tidy target does not exist: ${safe.relativePath}`);
-    if (!fs.statSync(safe.absolutePath).isFile()) throw new Error(`Tidy refuses non-file path: ${safe.relativePath}`);
-    fs.rmSync(safe.absolutePath, { force: true });
-    cleared.push(safe.relativePath);
+  let attemptedPath = '';
+  try {
+    for (const candidate of candidates) {
+      context.signal?.throwIfAborted?.();
+      const safe = resolveSafePath(workspace.path, candidate.path, { operation: "delete" });
+      if (!fs.existsSync(safe.absolutePath)) throw new Error(`Tidy target does not exist: ${safe.relativePath}`);
+      if (!fs.statSync(safe.absolutePath).isFile()) throw new Error(`Tidy refuses non-file path: ${safe.relativePath}`);
+      if (fileSha256(workspace.path, safe.relativePath) !== candidate.sha256) throw new Error(`Tidy target changed: ${safe.relativePath}`);
+      gitOperationOptions(context, 1500);
+      attemptedPath = safe.relativePath;
+      fs.rmSync(safe.absolutePath);
+      cleared.push(safe.relativePath);
+      attemptedPath = '';
+    }
+    appendOperation(config, workspace, { id: operationId, type: "workspace_tidy_clear", ok: true, paths: cleared, results: [] });
+    return { ok: true, changedFiles: cleared, mutationEffect: cleared.length ? 'applied' : 'none' };
+  } catch (error) {
+    return {
+      ok: false, changedFiles: cleared,
+      mutationEffect: attemptedPath ? 'unknown' : cleared.length ? 'applied' : 'none',
+      ...(attemptedPath ? { possibleChangedFiles: [attemptedPath] } : {}),
+      error: error instanceof Error ? error.message : String(error)
+    };
   }
-  appendOperation(config, workspace, {
-    id: operationId,
-    type: "workspace_tidy_clear",
-    ok: true,
-    paths: cleared,
-    results: []
-  });
-  return { ok: true, changedFiles: cleared };
 }
 
 function tidyPlanDir(config, workspace) {
@@ -85,30 +94,38 @@ function scanUntrackedSessionFiles(workspace, ownership, maxCandidates) {
   return { candidates, skipped };
 }
 
-async function readTidyOwnership(workspace, config, taskId = '') {
-  const status = await readGitObservation(workspace.path, config);
+async function readTidyOwnership(workspace, config, taskId = '', context = {}) {
+  const budget = gitOperationOptions(context, 1500);
+  const status = await readGitObservation(workspace.path, config, { signal: budget.signal, timeoutMs: budget.timeout });
   if (status.exitCode !== 0 || status.stdoutTruncated) {
     throw new Error(`git status failed for ${workspace.alias}: ${status.stderr || (status.stdoutTruncated ? "output exceeded internal limit" : status.exitCode)}`);
   }
   const known = taskId ? taskOwnedChangedFiles(config, taskId, workspace.alias) : [];
   let output = status.stdout || '';
   for (let offset = 0; offset < known.length; offset += 100) {
-    const exact = await readGitObservation(workspace.path, config, { paths: known.slice(offset, offset + 100) });
+    const exactBudget = gitOperationOptions(context, 1500);
+    const exact = await readGitObservation(workspace.path, config, { paths: known.slice(offset, offset + 100), signal: exactBudget.signal, timeoutMs: exactBudget.timeout });
     if (exact.exitCode !== 0 || exact.stdoutTruncated) throw new Error('Could not verify exact tidy file ownership.');
     output += exact.stdout;
   }
-  return classifyStatusOwnership(workspace, config, output, taskId);
+  const ownership = classifyStatusOwnership(workspace, config, output, taskId);
+  const integrity = taskId ? readTaskIntegrity(config, taskId, workspace.alias) : null;
+  const claims = integrity ? taskCommitOwnership(config, taskId, workspace.alias) : { ownedFiles: [], conflictingFiles: [] };
+  const exclusive = new Set(claims.ownedFiles.filter(file => !claims.conflictingFiles.includes(file)));
+  return {
+    ...ownership,
+    hasTaskIntegrity: Boolean(integrity),
+    untrackedSession: ownership.untrackedSession.filter(file => exclusive.has(file))
+  };
 }
 
-async function workspaceTidyPlan(workspace, config, args = {}) {
+async function workspaceTidyPlan(workspace, config, args = {}, context = {}) {
   const mode = normalizeTidyMode(args.mode);
   const maxCandidates = clampNumber(args.maxCandidates, 1, 100, 50);
   const taskId = String(args.work_id || '').trim();
-  const ownership = await readTidyOwnership(workspace, config, taskId);
-  // Without a captured session baseline we cannot distinguish this agent's
-  // untracked artifacts from pre-existing user files. Refuse rather than risk
-  // planning a delete of files the user created before any session started.
-  if (mode === "session_untracked" && !ownership.hasSession) {
+  const ownership = await readTidyOwnership(workspace, config, taskId, context);
+  // Only affirmative exclusive task claims authorize tidy candidates.
+  if (mode === "session_untracked" && !ownership.hasTaskIntegrity) {
     return {
       ok: false,
       workspace: workspace.alias,
@@ -118,7 +135,7 @@ async function workspaceTidyPlan(workspace, config, args = {}) {
       candidates: [],
       skipped: [],
       reason: "no_session_baseline",
-      message: "No active session baseline for this workspace, so untracked files cannot be attributed to this session. Make an edit first so Rel.AI can capture a session baseline before tidying session-owned untracked files."
+      message: "Task integrity is unavailable, so exclusive ownership of untracked files could not be verified."
     };
   }
   const { candidates, skipped } = scanUntrackedSessionFiles(workspace, ownership, maxCandidates);
@@ -171,14 +188,14 @@ function readTidyPlan(config, workspace, planId) {
   return { file, plan };
 }
 
-async function relaiWorkspaceTidyRun(workspace, config, args = {}) {
+async function relaiWorkspaceTidyRun(workspace, config, args = {}, context = {}) {
   const planId = validateTidyPlanId(args.planId);
   const taskId = String(args.work_id || '').trim();
   const { file, plan } = readTidyPlan(config, workspace, planId);
   if (!taskId || taskId !== String(plan.taskId || '').trim()) {
     throw new Error(`Workspace tidy plan ${planId} belongs to a different work session.`);
   }
-  const ownership = await readTidyOwnership(workspace, config, taskId);
+  const ownership = await readTidyOwnership(workspace, config, taskId, context);
   const currentUntracked = new Set(ownership.untrackedSession || []);
   const candidates = Array.isArray(plan.candidates) ? plan.candidates : [];
   const { preflight, refused } = preflightTidyCandidates(candidates, workspace, currentUntracked);
@@ -196,17 +213,22 @@ async function relaiWorkspaceTidyRun(workspace, config, args = {}) {
     };
   }
   const clearResult = preflight.length > 0
-    ? clearTidyFiles(workspace, config, preflight.map((item) => item.path))
-    : { ok: true, changedFiles: [] };
-  try { fs.rmSync(file, { force: true }); } catch { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] tidy plan cleanup'); }
-  const applied = preflight.map((item) => ({ path: item.path, action: "tidied_untracked_file", sha256: item.sha256, sizeBytes: item.sizeBytes }));
-  appendOperation(config, workspace, {
+    ? clearTidyFiles(workspace, config, preflight, context)
+    : { ok: true, changedFiles: [], mutationEffect: 'none' };
+  if (clearResult.ok) {
+    try { fs.rmSync(file, { force: true }); } catch { if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] tidy plan cleanup'); }
+  }
+  const applied = preflight.filter(item => clearResult.changedFiles.includes(item.path)).map((item) => ({ path: item.path, action: "tidied_untracked_file", sha256: item.sha256, sizeBytes: item.sizeBytes }));
+  try { appendOperation(config, workspace, {
     id: planId,
     type: "workspace_tidy_apply",
     ok: clearResult.ok === true,
     paths: clearResult.changedFiles || [],
     results: [{ operation: "workspaceTidyApply", appliedCount: applied.length }]
-  });
+  }); } catch (error) {
+    Object.assign(error, { handlerResult: { ...clearResult, ok: false, workspace: workspace.alias, error: 'Tidy effects occurred, but the journal could not be saved.' } });
+    throw error;
+  }
   return {
     ok: clearResult.ok === true,
     workspace: workspace.alias,
@@ -214,6 +236,9 @@ async function relaiWorkspaceTidyRun(workspace, config, args = {}) {
     planId,
     changed: applied.length > 0,
     changedFiles: clearResult.changedFiles || [],
+    mutationEffect: clearResult.mutationEffect,
+    ...(clearResult.possibleChangedFiles ? { possibleChangedFiles: clearResult.possibleChangedFiles } : {}),
+    ...(clearResult.error ? { error: clearResult.error } : {}),
     appliedCount: applied.length,
     applied,
     message: applied.length ? `Applied workspace tidy plan to ${applied.length} file(s).` : "Workspace tidy plan had no candidates."

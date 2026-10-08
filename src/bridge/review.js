@@ -19,6 +19,7 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
     ? normalizePaths(args._taskOwnedPaths)
     : null;
   const reviewedScope = taskOwnedPaths && args.scope !== 'workspace' ? 'task' : 'workspace';
+  const scopeLabel = reviewedScope === 'task' && args._operationScoped === true ? 'operation' : reviewedScope;
   if (reviewedScope === 'task' && filterPath && !taskOwnedPaths.includes(filterPath)) {
     throw new Error(`Path '${filterPath}' is outside the task-owned review scope. Pass scope:'workspace' to explicitly widen this review.`);
   }
@@ -37,13 +38,16 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
   // Exact task observations intentionally omit unrelated paths. Obtain a bounded
   // metadata-only inventory for the excluded-files receipt, without widening the
   // diff allowlist or recursively enumerating unrelated untracked directories.
-  const inventory = reviewedScope === 'task' && exactPaths?.length
-    ? await readGitObservation(workspace.path, config, { signal: context.signal })
-    : stat;
-  if (inventory.exitCode !== 0 || inventory.stdoutTruncated) {
-    throw new Error(`Git review inventory failed: ${inventory.error || inventory.stderr || 'output budget exhausted'}`);
+  let inventory = stat;
+  if (reviewedScope === 'task' && exactPaths?.length) {
+    try { inventory = await readGitObservation(workspace.path, config, { signal: context.signal }); }
+    catch { inventory = null; }
+    context.signal?.throwIfAborted?.();
   }
-  const inventoryOwnership = inventory === stat ? ownership : classifyStatusOwnership(workspace, config, inventory.stdout || '');
+  const excludedWorkspaceFilesComplete = Boolean(inventory && inventory.exitCode === 0 && !inventory.stdoutTruncated
+    && !inventory.cancelled && !inventory.timedOut && inventory.terminationConfirmed !== false);
+  const inventoryOwnership = inventory === stat ? ownership
+    : classifyStatusOwnership(workspace, config, excludedWorkspaceFilesComplete ? inventory.stdout || '' : '');
   const inventoryPaths = normalizePaths(inventoryOwnership.entries.filter(entry => !entry.opaqueDirectory).map(entry => entry.path));
   const workspaceChangedPaths = normalizePaths(ownership.entries.filter(entry => !entry.opaqueDirectory).map(entry => entry.path));
   const scopedPaths = reviewedScope === 'task'
@@ -69,21 +73,31 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
     diffText += buildUntrackedDiff(workspace, changedPaths.filter(file => untracked.has(file)), Math.max(0, maxBytes - Buffer.byteLength(diffText)));
   }
   const sensitiveReview = redactSensitive
-    ? await buildSensitiveReview(workspace, config, sensitivePaths, ownership, staged)
+    ? await buildSensitiveReview(workspace, config, sensitivePaths, ownership, staged, context)
     : [];
   const reviewedFiles = normalizePaths(changedPaths);
+  const mixedOwnershipPaths = normalizePaths(args._mixedOwnershipPaths || []).filter(file => reviewedFiles.includes(file));
   const scopedOwnership = scopeOwnership(ownership, new Set(reviewedFiles));
   const reviewHash = crypto.createHash("sha256").update(diffText).update(JSON.stringify(sensitiveReview)).digest("hex");
   return {
-    ok: stat.exitCode === 0 && diff.exitCode === 0,
+    ok: stat.exitCode === 0 && diff.exitCode === 0 && sensitiveReview.every(entry => entry.availability !== 'unavailable'),
     workspace: workspace.alias,
     staged,
     redactSensitive,
-    reviewScope: reviewedScope,
-    reviewedScope,
+    reviewScope: scopeLabel,
+    reviewedScope: scopeLabel,
+    ...(reviewedScope === 'task' ? {
+      scopeGranularity: 'path',
+      mixedOwnershipPaths,
+      ...(mixedOwnershipPaths.length ? { mixedOwnershipWarning: 'Paths with mixed ownership include all their hunks. Path filtering cannot separate task changes from unrelated changes within one file.' } : {}),
+      ...(args._scopeUncertain === true ? { scopeUncertain: true,
+        scopeWarning: 'Validation or edit mutation evidence is incomplete; other changes may exist. Do not assume this scoped review proves no other files changed.' } : {}),
+      ...(args._validationObservation ? { validationMutationEvidence: args._validationObservation } : {})
+    } : {}),
     reviewHash,
     reviewedFiles,
-    excludedWorkspaceFiles,
+    excludedWorkspaceFilesComplete,
+    ...(excludedWorkspaceFilesComplete ? { excludedWorkspaceFiles } : {}),
     ...(filterPath ? { path: filterPath } : {}),
     status: formatGitStatus(scopedOwnership),
     branch: ownership.branch,
@@ -96,6 +110,7 @@ async function relaiDiff(workspace, config, args = {}, context = {}) {
     ...(ownership.baselineSource ? { baselineSource: ownership.baselineSource } : {}),
     diff: truncateDiff(diffText, maxBytes),
     sensitiveReview,
+    ...(sensitiveReview.some(entry => entry.availability === 'unavailable') ? { error: 'Sensitive review evidence is unavailable or incomplete; no key changes were inferred for unavailable versions.', errorCode: 'SENSITIVE_REVIEW_UNAVAILABLE' } : {}),
     sensitiveValuesReturned: false,
     exitCode: diff.exitCode,
     ...(diff.stderr ? { stderr: diff.stderr } : {})

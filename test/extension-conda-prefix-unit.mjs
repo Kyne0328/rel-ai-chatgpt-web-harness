@@ -1,13 +1,26 @@
 import assert from 'node:assert/strict';
-import childProcess from 'node:child_process';
 import crypto from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import { PassThrough } from 'node:stream';
-import { installLocalExtension, listInstalledExtensions } from '../src/extensions/registry.js';
+import { makeProcessEnvironment } from '../src/processEnvironment.js';
+
+// Retain the real native process implementation in production. This existing
+// installer-stage fixture substitutes only its external process result; native
+// process ownership has separate bounded real-process probes.
+const processFacade = new URL('../src/process.js', import.meta.url).href;
+const processImplementation = new URL('../src/process.ts', import.meta.url).href;
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url !== processFacade) return nextLoad(url, context);
+    return {
+      format: 'module', shortCircuit: true,
+      source: `export * from ${JSON.stringify(processImplementation)}; export const runProcess = (...args) => globalThis.__relaiCondaFixtureRun(...args);`
+    };
+  }
+});
+const { installLocalExtension, listInstalledExtensions } = await import('../src/extensions/registry.js');
 
 // Network and the external manager are fixtures. The registry's package hashing,
 // on-disk staging, promotion, rollback, metadata, and readiness are real.
@@ -23,7 +36,7 @@ const packageBytes = Buffer.from('mocked conda package; never executed');
 const registrySource = fs.readFileSync(new URL('../src/extensions/registry.js', import.meta.url), 'utf8');
 const managerPin = registrySource.match(new RegExp(`'${process.platform}/${process.arch}': \\{ url: '[^']+', sha256: '([a-f0-9]{64})'`))?.[1];
 assert.ok(managerPin, 'fixture host must have a pinned manager target');
-const original = { fetch: globalThis.fetch, spawn: childProcess.spawn, createHash: crypto.createHash };
+const original = { fetch: globalThis.fetch, createHash: crypto.createHash };
 const savedEnvironment = Object.fromEntries(['PATH', 'REL_AI_MCP_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'REL_AI_REQUEST_STATE_KEY', 'TEMP', 'TMP'].map(key => [key, process.env[key]]));
 const lockUrl = 'https://fixture.test/conda/lock.json';
 const packageUrl = 'https://fixture.test/conda/tool-1.0-0.conda';
@@ -72,18 +85,21 @@ crypto.createHash = function(...args) {
   };
   return hash;
 };
-childProcess.spawn = function(executable, args, options) {
+globalThis.__relaiCondaFixtureRun = async function(executable, args, options) {
   managerCalls += 1;
   assert.match(executable, /micromamba(?:\.exe)?$/);
+  assert.equal(options.nativeOwnership, true, 'Conda execution must keep native ownership.');
+  assert.ok(options.timeout > 0, 'Conda execution must remain bounded.');
+  const filteredEnv = makeProcessEnvironment(options.env);
   if (!prefixOnly) {
-    assert.equal(options.env.REL_AI_MCP_TOKEN, undefined);
-    assert.equal(options.env.AWS_SECRET_ACCESS_KEY, undefined);
-    assert.equal(options.env.REL_AI_REQUEST_STATE_KEY, undefined);
-    assert.equal(options.env.TEMP, root);
-    assert.equal(options.env.TMP, root);
-    assert.ok(options.env.PATH.split(path.delimiter).includes(path.join(root, 'safe-bin')));
+    assert.equal(filteredEnv.REL_AI_MCP_TOKEN, undefined);
+    assert.equal(filteredEnv.AWS_SECRET_ACCESS_KEY, undefined);
+    assert.equal(filteredEnv.REL_AI_REQUEST_STATE_KEY, undefined);
+    assert.equal(filteredEnv.TEMP, root);
+    assert.equal(filteredEnv.TMP, root);
+    assert.ok(filteredEnv.PATH.split(path.delimiter).includes(path.join(root, 'safe-bin')));
     for (const key of ['SystemRoot', 'ComSpec', 'PATHEXT', 'HOME', 'USERPROFILE']) {
-      if (process.env[key] != null) assert.equal(options.env[key], process.env[key]);
+      if (process.env[key] != null) assert.equal(filteredEnv[key], process.env[key]);
     }
   }
   assert.equal(options.env.MAMBA_NO_BANNER, '1');
@@ -96,16 +112,12 @@ childProcess.spawn = function(executable, args, options) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, JSON.stringify({ embeddedPrefix: relocation }));
   fs.writeFileSync(path.join(prefix, 'runtime-data.txt'), 'prefix data');
-  const child = new EventEmitter();
-  child.stdout = new PassThrough();
-  child.stderr = new PassThrough();
-  child.kill = () => true;
-  setImmediate(() => {
-    child.stdout.end();
-    child.stderr.end();
-    child.emit('close', failManager ? 1 : 0);
-  });
-  return child;
+  return {
+    executed: true, rootExitConfirmed: true, terminationConfirmed: true,
+    timedOut: false, cancelled: false, exitCode: failManager ? 1 : 0,
+    stdout: '', stderr: '', stdoutBytes: 0, stderrBytes: 0,
+    stdoutTruncated: false, stderrTruncated: false
+  };
 };
 syncBuiltinESMExports();
 try {
@@ -139,7 +151,7 @@ try {
   console.log('Conda staging preserves final prefixes, filtered installer environment, and failed-upgrade rollback.');
 } finally {
   globalThis.fetch = original.fetch;
-  childProcess.spawn = original.spawn;
+  delete globalThis.__relaiCondaFixtureRun;
   crypto.createHash = original.createHash;
   syncBuiltinESMExports();
   for (const [key, value] of Object.entries(savedEnvironment)) {

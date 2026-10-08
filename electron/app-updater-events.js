@@ -3,10 +3,11 @@
 import { assessUpdateSynchronization, cleanText, isoNow, progressPayload, updateCompatibilityMetadata } from './app-updater-status.js';
 import { compareUpdateVersions, isUpdateVersion } from "./update-version.js";
 
-function bindUpdaterEvents({ autoUpdater, handlers, status, emit, handleError, handleEventError = handleError, store, now, log, currentCompatibility = {}, allowPrerelease = () => false }) {
+function bindUpdaterEvents({ autoUpdater, handlers, status, emit, handleError, handleEventError = handleError, store, now, log, currentCompatibility = {}, allowPrerelease = () => false, isCurrent = () => true }) {
   const bind = (eventName, handler) => {
-    autoUpdater.on(eventName, handler);
-    handlers.push([eventName, handler]);
+    const currentHandler = (...args) => { if (isCurrent()) return handler(...args); };
+    autoUpdater.on(eventName, currentHandler);
+    handlers.push([eventName, currentHandler]);
   };
 
   bind('checking-for-update', () => emit({ state: 'checking', error: '', errorCode: '', integrityVerified: false }));

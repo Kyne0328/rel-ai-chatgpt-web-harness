@@ -62,9 +62,15 @@ interface ReadSessionOptions {
   strict?: boolean;
   activeTaskIds?: Set<string> | string[];
   reconcileInactive?: boolean;
+  persistReconciliation?: boolean;
 }
 
-interface ReadHistoryOptions {
+interface ContinuityAuthorityOptions {
+  principalFingerprint?: string;
+  authorizedWorkspaces?: readonly string[];
+}
+
+interface ReadHistoryOptions extends ContinuityAuthorityOptions {
   limit?: number;
   summary?: boolean;
   maintain?: boolean;
@@ -84,12 +90,12 @@ interface ActivityHistoryPageOptions {
   taskId?: unknown;
 }
 
-interface EpisodeOptions {
+interface EpisodeOptions extends ContinuityAuthorityOptions {
   excludeTaskId?: unknown;
   limit?: number;
 }
 
-interface ContinuityOptions {
+interface ContinuityOptions extends ContinuityAuthorityOptions {
   excludeTaskId?: unknown;
   limit?: number;
 }
@@ -282,7 +288,7 @@ function readTaskHistorySessionRecord(config: TaskHistoryConfig, taskId: unknown
     const reconciled = options.reconcileInactive === true
       ? reconcileInactiveStoredSession(session, activeIds)
       : session;
-    if (reconciled !== session) persistSession(directory, reconciled, { defer: true });
+    if (reconciled !== session && options.persistReconciliation !== false) persistSession(directory, reconciled, { defer: true });
     return sanitizeTaskRecord(reconciled) as TaskRecord;
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history session read:', error);
@@ -339,6 +345,7 @@ function readTaskHistory(config: TaskHistoryConfig, activity: TaskActivitySnapsh
     byId.set(task.id, existing ? mergeTaskLifecycleSnapshots(existing, task, { eventsAlreadySanitized: true }) as TaskRecord : task);
   }
   return [...byId.values()]
+    .filter(session => continuitySessionVisible(session, options))
     .sort((left, right) => eventTime(right) - eventTime(left))
     .slice(0, limit)
     .map(publicSession);
@@ -416,7 +423,7 @@ function readRelevantTaskEpisodes(config: TaskHistoryConfig, workspace: unknown,
   if (!workspaceAlias || !String(query || '').trim()) return [];
   const excludeTaskId = cleanTaskId(options.excludeTaskId);
   const limit = clamp(options.limit || 3, 1, 5);
-  return retrievalCandidateSessions(config, workspaceAlias, query)
+  return retrievalCandidateSessions(config, workspaceAlias, query, options)
     .filter((session: TaskRecord) => String(session.workspace || '') === workspaceAlias)
     .filter((session: TaskRecord) => !excludeTaskId || cleanTaskId(session.id) !== excludeTaskId)
     .filter((session: TaskRecord) => session.status === 'completed' && session.completionKnown === true)
@@ -432,7 +439,7 @@ function readCrossWorkspaceTaskEpisodes(config: TaskHistoryConfig, workspace: un
   if (!String(query || '').trim()) return [];
   const excludeTaskId = cleanTaskId(options.excludeTaskId);
   const limit = clamp(options.limit || 2, 1, 4);
-  return retrievalCandidateSessions(config, workspaceAlias, query, { portable: true })
+  return retrievalCandidateSessions(config, workspaceAlias, query, { ...options, portable: true })
     .filter((session: TaskRecord) => !workspaceAlias || String(session.workspace || '') !== workspaceAlias)
     .filter((session: TaskRecord) => !excludeTaskId || cleanTaskId(session.id) !== excludeTaskId)
     .filter((session: TaskRecord) => session.status === 'completed' && session.completionKnown === true)
@@ -463,13 +470,20 @@ function findTaskReuseCandidates(config: TaskHistoryConfig, workspaceAlias: unkn
   }
 }
 
-function retrievalCandidateSessions(config: TaskHistoryConfig, workspaceAlias: string, query: unknown, options: { portable?: boolean } = {}): TaskRecord[] {
-  if (clearingDirectories.has(getTaskHistoryDir(config))) return readTaskHistory(config, {}, { limit: MAX_HISTORY_QUERY_SESSIONS, summary: true });
+function continuitySessionVisible(session: TaskRecord, options: ContinuityAuthorityOptions): boolean {
+  if (options.principalFingerprint !== undefined
+    && (!options.principalFingerprint || String(session.principalFingerprint || '') !== options.principalFingerprint)) return false;
+  const workspace = String(session.workspace || '').trim();
+  return options.authorizedWorkspaces === undefined || !workspace || options.authorizedWorkspaces.includes(workspace);
+}
+
+function retrievalCandidateSessions(config: TaskHistoryConfig, workspaceAlias: string, query: unknown, options: ContinuityAuthorityOptions & { portable?: boolean } = {}): TaskRecord[] {
+  if (clearingDirectories.has(getTaskHistoryDir(config))) return readTaskHistory(config, {}, { ...options, maintain: false, limit: MAX_HISTORY_QUERY_SESSIONS, summary: true });
   const signature = queryTaskSignature(query);
   const exactNeedles = uniqueStrings([...signature.identifiers, ...signature.paths, ...signature.pathScopes])
     .filter(value => value.length >= 4)
     .slice(0, 12);
-  if (!exactNeedles.length) return readTaskHistory(config, {}, { limit: MAX_HISTORY_QUERY_SESSIONS, summary: true });
+  if (!exactNeedles.length) return readTaskHistory(config, {}, { ...options, maintain: false, limit: MAX_HISTORY_QUERY_SESSIONS, summary: true });
   const exactLimit = Math.min(MAX_HISTORY_QUERY_SESSIONS, Math.max(24, exactNeedles.length * 8));
   let exact: StoredTaskSession[] = [];
   try {
@@ -483,11 +497,11 @@ function retrievalCandidateSessions(config: TaskHistoryConfig, workspaceAlias: s
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task episode candidate search:', error);
     exact = [];
   }
-  const recent = readTaskHistory(config, {}, { limit: 100, summary: true });
+  const recent = readTaskHistory(config, {}, { ...options, maintain: false, limit: 100, summary: true });
   const byId = new Map(recent.map(session => [session.id, session]));
   for (const session of exact) {
     const record = session as TaskRecord;
-    if (record?.id) byId.set(record.id, publicSession(record));
+    if (record?.id && continuitySessionVisible(record, options)) byId.set(record.id, publicSession(record));
   }
   return [...byId.values()];
 }
@@ -502,6 +516,7 @@ function readConversationContinuity(config: TaskHistoryConfig, conversationId: u
     try {
       const exact = findSessionsContaining(getTaskHistoryDir(config), [id], { limit: 20 });
       candidates = (Array.isArray(exact) ? exact : [])
+        .filter(session => continuitySessionVisible(session as TaskRecord, options))
         .map(session => publicSession(session as TaskRecord))
         .filter(session => Boolean(session?.id));
     } catch (error) {
@@ -511,7 +526,7 @@ function readConversationContinuity(config: TaskHistoryConfig, conversationId: u
   }
   if (!candidates) {
     try {
-      candidates = readTaskHistory(config, {}, { limit: 100, summary: true });
+      candidates = readTaskHistory(config, {}, { ...options, maintain: false, limit: 100, summary: true });
     } catch {
       return [];
     }

@@ -605,6 +605,7 @@ const WRITE_STAGE_HANDLERS: Record<string, (workspace: BridgeWorkspace, config: 
 
 function workspaceWrite(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs = {}) {
   const stage = String(args.stage || "direct").trim().toLowerCase();
+  if (args.dryRun && ["start", "append", "abort"].includes(stage)) throw new Error("Staged payload start, append, and abort do not support dryRun.");
   const handler = WRITE_STAGE_HANDLERS[stage];
   if (!handler) throw new Error("relai_edit staged write must use one of: direct, start, append, commit, abort.");
   return handler(workspace, config, args);
@@ -674,7 +675,13 @@ function handleWriteCommit(workspace: BridgeWorkspace, config: BridgeConfig, arg
     suppressJournal: args.suppressJournal === true,
     expectedSha256: payload.expectedSha256 || ""
   });
-  if (!args.dryRun) clearStagedPayload(config, workspace, writeId);
+  if (!args.dryRun) {
+    try { clearStagedPayload(config, workspace, writeId); }
+    catch (error) {
+      Object.assign(error as object, { handlerResult: { ...result, ok: false, error: 'File operation completed, but its staged payload could not be retired.' } });
+      throw error;
+    }
+  }
   return { ...result, operation: "stagedFullFileWrite:commit", writeId, staged: true, chunks: payload.chunkCount, bytes: payload.bytes };
 }
 
@@ -831,6 +838,7 @@ function workspaceReplace(workspace: BridgeWorkspace, config: BridgeConfig, args
     path: safe.relativePath,
     changed,
     changedFiles: changed && !dryRun ? [safe.relativePath] : [],
+    mutationEffect: changed && !dryRun ? "applied" : "none",
     oldSha256,
     newSha256,
     ...(shaMismatch ? { shaMismatch: { expectedSha256, currentSha256: oldSha256 } } : {}),
@@ -838,24 +846,36 @@ function workspaceReplace(workspace: BridgeWorkspace, config: BridgeConfig, args
   };
 
   if (changed && !dryRun) {
-    if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, [safe.relativePath]);
-    const write = writeTextFileSafe(workspace.path, safe.relativePath, nextContent);
-    const verifiedSha256 = fileSha256(workspace.path, safe.relativePath);
+    if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, [safe.relativePath], { operation: "replace", proposedContent: nextContent });
+    let write;
+    let verifiedSha256;
+    try {
+      write = writeTextFileSafe(workspace.path, safe.relativePath, nextContent);
+      verifiedSha256 = fileSha256(workspace.path, safe.relativePath);
+    } catch (error) {
+      Object.assign(error as object, { handlerResult: { ok: false, workspace: workspace.alias, mutationEffect: 'unknown', changedFiles: [], possibleChangedFiles: [safe.relativePath], error: error instanceof Error ? error.message : String(error) } });
+      throw error;
+    }
     if (verifiedSha256 !== write.sha256 || verifiedSha256 !== newSha256) {
-      throw new Error(`Fresh read verification failed for ${safe.relativePath}. Expected ${newSha256}, got ${verifiedSha256 || "missing"}.`);
+      throw Object.assign(new Error(`Fresh read verification failed for ${safe.relativePath}. Expected ${newSha256}, got ${verifiedSha256 || "missing"}.`), {
+        handlerResult: { ok: false, workspace: workspace.alias, mutationEffect: 'unknown', changedFiles: [], possibleChangedFiles: [safe.relativePath], error: 'Write completed, but final bytes could not be verified.' }
+      });
     }
     result.verified = true;
     result.bytes = write.bytes;
   }
 
   if (!dryRun && args.suppressJournal !== true) {
-    appendOperation(config, workspace, {
+    try { appendOperation(config, workspace, {
       id: operationId,
       type: "replace",
       ok: true,
       paths: result.changedFiles,
       results: [{ path: safe.relativePath, operation: "exactReplace", changed, oldSha256, newSha256, verified: !changed || result.verified === true }]
-    });
+    }); } catch (error) {
+      Object.assign(error as object, { handlerResult: { ...result, ok: false, error: 'File operation completed, but its journal could not be saved.' } });
+      throw error;
+    }
   }
 
   return result;
@@ -903,11 +923,20 @@ function performFullFileWrite(workspace: BridgeWorkspace, config: BridgeConfig, 
   };
 
   if (changed && !dryRun) {
-    if (options.work_id) captureNativeMutationPaths(config, String(options.work_id), workspace.alias, [safe.relativePath]);
-    const write = writeTextFileSafe(workspace.path, safe.relativePath, newContent);
-    const verifiedSha256 = fileSha256(workspace.path, safe.relativePath);
+    if (options.work_id) captureNativeMutationPaths(config, String(options.work_id), workspace.alias, [safe.relativePath], { operation: "write", proposedContent: newContent });
+    let write;
+    let verifiedSha256;
+    try {
+      write = writeTextFileSafe(workspace.path, safe.relativePath, newContent);
+      verifiedSha256 = fileSha256(workspace.path, safe.relativePath);
+    } catch (error) {
+      Object.assign(error as object, { handlerResult: { ok: false, workspace: workspace.alias, mutationEffect: 'unknown', changedFiles: [], possibleChangedFiles: [safe.relativePath], error: error instanceof Error ? error.message : String(error) } });
+      throw error;
+    }
     if (verifiedSha256 !== write.sha256) {
-      throw new Error(`Fresh read verification failed for ${safe.relativePath}. Expected ${write.sha256}, got ${verifiedSha256 || "missing"}.`);
+      throw Object.assign(new Error(`Fresh read verification failed for ${safe.relativePath}. Expected ${write.sha256}, got ${verifiedSha256 || "missing"}.`), {
+        handlerResult: { ok: false, workspace: workspace.alias, mutationEffect: 'unknown', changedFiles: [], possibleChangedFiles: [safe.relativePath], error: 'Write completed, but final bytes could not be verified.' }
+      });
     }
     result.newSha256 = write.sha256;
     result.verified = write.verified === true;
@@ -920,11 +949,12 @@ function performFullFileWrite(workspace: BridgeWorkspace, config: BridgeConfig, 
     workspace: workspace.alias,
     operationId,
     changedFiles: changed && !dryRun ? [safe.relativePath] : [],
+    mutationEffect: changed && !dryRun ? "applied" : "none",
     result
   };
 
   if (!dryRun && options.suppressJournal !== true) {
-    appendOperation(config, workspace, {
+    try { appendOperation(config, workspace, {
       id: operationId,
       type: "write",
       ok: true,
@@ -937,7 +967,10 @@ function performFullFileWrite(workspace: BridgeWorkspace, config: BridgeConfig, 
         newSha256: result.newSha256,
         verified: result.verified === true || !changed
       }]
-    });
+    }); } catch (error) {
+      Object.assign(error as object, { handlerResult: { ...summary, ok: false, error: 'File operation completed, but its journal could not be saved.' } });
+      throw error;
+    }
   }
 
   return summary;
@@ -982,17 +1015,20 @@ const STAGED_PRUNE_TTL_MS = 24 * 60 * 60 * 1000;
 //   4. Otherwise refuse and list the candidates so the caller passes id/path.
 function resolveStagedWriteId(config: BridgeConfig, workspace: BridgeWorkspace, rawWriteId: unknown, targetPath: unknown): string {
   const text = String(rawWriteId || "").trim();
+  // An explicit path is a constraint, never a hint to discard during recovery.
+  const wantPath = stagedRelativePath(workspace, targetPath);
   if (text && /^op_[a-z0-9]+_[a-f0-9]{12}$/.test(text) && fs.existsSync(stagedMetadataPath(config, workspace, text))) {
+    const exact = readStagedPayload(config, workspace, text);
+    if (wantPath && exact.path !== wantPath) throw new Error('Staged edit path does not match the supplied writeId. No payload was changed.');
     return text;
   }
   const fresh = listStagedPayloads(config, workspace)
     .filter((item) => item.ageMs == null || item.ageMs <= STAGED_FALLBACK_TTL_MS);
 
-  const wantPath = stagedRelativePath(workspace, targetPath);
   if (wantPath) {
     const byPath = fresh.filter((item) => item.path === wantPath);
     if (byPath.length === 1) return byPath[0]!.id;
-    if (byPath.length > 1) throw stagedAmbiguityError(byPath, text);
+    throw stagedAmbiguityError(byPath, text);
   }
 
   if (fresh.length === 1) return fresh[0]!.id;
@@ -1000,13 +1036,11 @@ function resolveStagedWriteId(config: BridgeConfig, workspace: BridgeWorkspace, 
 }
 
 function stagedRelativePath(workspace: BridgeWorkspace, targetPath: unknown): string | null {
-  const raw = String(targetPath || "").trim();
-  if (!raw) return null;
-  try {
-    return resolveSafePath(workspace.path, raw).relativePath;
-  } catch {
-    return null;
+  if (targetPath === undefined) return null;
+  if (typeof targetPath !== "string" || !targetPath.trim()) {
+    throw new Error("Explicit staged target path must be a non-empty string.");
   }
+  return resolveSafePath(workspace.path, targetPath.trim()).relativePath;
 }
 
 function stagedAmbiguityError(candidates: BridgeRecord[], suppliedId: unknown): Error {

@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { resolveSafePath } from "./safety.js";
+import { captureNativeMutationPaths } from "./taskIntegrity.ts";
 import { appendOperation, makeOperationId } from "./journal.js";
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -59,7 +60,15 @@ function runEnvOperation(workspace, config, args = {}) {
   }
 
   const dryRun = Boolean(args.dryRun);
-  if (changed && !dryRun) atomicWrite(safe.absolutePath, next);
+  if (changed && !dryRun) {
+    if (args.work_id) captureNativeMutationPaths(config, String(args.work_id), workspace.alias, [safe.relativePath], { operation });
+    try { atomicWrite(safe.absolutePath, next); }
+    catch {
+      const failure = new Error('Environment write outcome could not be verified. Reconcile the file before retrying.');
+      Object.assign(failure, { handlerResult: { ok: false, workspace: workspace.alias, path: safe.relativePath, mutationEffect: 'unknown', changedFiles: [], possibleChangedFiles: [safe.relativePath], valuesReturned: false, error: failure.message } });
+      throw failure;
+    }
+  }
   const result = {
     ...baseResult(workspace, safe.relativePath, action, parseEnv(next), changed, dryRun),
     key,
@@ -67,13 +76,15 @@ function runEnvOperation(workspace, config, args = {}) {
     presentAfter: action === 'set' ? true : false
   };
   if (!dryRun) {
-    appendOperation(config, workspace, {
+    try { appendOperation(config, workspace, {
       id: makeOperationId(),
       type: 'env_edit',
       ok: true,
       paths: changed ? [safe.relativePath] : [],
       results: [{ path: safe.relativePath, operation, changed, key }]
-    });
+    }); } catch {
+      throw Object.assign(new Error('Environment operation completed, but its journal could not be saved.'), { handlerResult: { ...result, ok: false, error: 'Environment operation completed, but its journal could not be saved.' } });
+    }
   }
   return result;
 }
@@ -91,6 +102,7 @@ function baseResult(workspace, relativePath, action, parsed, changed, dryRun) {
     malformedLines: parsed.malformedLines,
     sha256: parsed.sha256 || undefined,
     valuesReturned: false,
+    mutationEffect: changed && !dryRun ? 'applied' : 'none',
     changedFiles: changed && !dryRun ? [relativePath] : []
   };
 }

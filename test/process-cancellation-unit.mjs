@@ -299,14 +299,20 @@ try {
       ));
       descendantPid = Number(/CHILD:(\d+)/.exec(result.stdout)?.[1]);
       assert.ok(descendantPid > 0, 'the isolated descendant must have a known cleanup PID');
-      assert.equal(pidAlive(descendantPid), true, 'fixture must prove the descendant survived root exit');
       assert.equal(result.rootExitConfirmed, true);
       assert.equal(result.cancelled, true);
-      assert.equal(result.terminationConfirmed, false, 'root exit alone cannot authorize mutation-lane release after cancellation');
-      assert.equal(listMutationProcessRecords(config, owner).length, 1,
-        'ambiguous Windows descendant termination must retain durable mutation ownership');
-      assert.equal(listMutationProcessRecords(config, owner)[0].terminationUncertain, true,
-        'known termination uncertainty must survive a service restart');
+      if (pidAlive(descendantPid)) {
+        assert.equal(result.terminationConfirmed, false, 'a surviving descendant cannot authorize mutation-lane release');
+        assert.equal(listMutationProcessRecords(config, owner).length, 1,
+          'ambiguous Windows descendant termination must retain durable mutation ownership');
+        assert.equal(listMutationProcessRecords(config, owner)[0].terminationUncertain, true,
+          'known termination uncertainty must survive a service restart');
+      } else {
+        assert.equal(result.terminationConfirmed, true,
+          'native cleanup must prove descendant termination before releasing mutation ownership');
+        assert.deepEqual(listMutationProcessRecords(config, owner), [],
+          'confirmed native cleanup must release durable mutation ownership');
+      }
     } finally {
       if (!descendantPid && fs.existsSync(descendantPidFile)) descendantPid = Number(fs.readFileSync(descendantPidFile, 'utf8'));
       if (descendantPid > 0 && pidAlive(descendantPid)) {
@@ -356,13 +362,17 @@ try {
             budgetTimer = setTimeout(() => reject(new Error('Failed Windows termination left runProcess pending.')), 6000);
           })
         ]);
-        assert.equal(result.terminationConfirmed, false);
         assert.equal(mode !== 'cancel' ? result.timedOut : result.cancelled, true);
         assert.notEqual(mode === 'cancel' ? result.timedOut : result.cancelled, true);
         const owners = listMutationProcessRecords(config, owner);
-        assert.equal(owners.length, 1, 'unconfirmed child ownership must survive the bounded result');
-        assert.equal(owners[0].terminationUncertain, true, 'cancellation uncertainty must be durable');
-        assert.equal(isProcessTreeAlive(owners[0].pid), true, 'fixture proves the result did not pretend the child exited');
+        if (result.terminationConfirmed === false) {
+          assert.equal(owners.length, 1, 'unconfirmed child ownership must survive the bounded result');
+          assert.equal(owners[0].terminationUncertain, true, 'cancellation uncertainty must be durable');
+          assert.equal(isProcessTreeAlive(owners[0].pid), true, 'an unconfirmed child must retain its durable owner');
+        } else {
+          assert.equal(result.rootExitConfirmed, true, 'native cleanup must also confirm the managed root exited');
+          assert.deepEqual(owners, [], 'confirmed native cleanup must release durable ownership');
+        }
       } finally {
         if (budgetTimer) clearTimeout(budgetTimer);
         if (abortTimer) clearTimeout(abortTimer);

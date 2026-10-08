@@ -4,6 +4,7 @@ import { readConfig } from '../config.js';
 import { initializeKnowledgeDatabase, maintainKnowledgeDatabase } from '../knowledgeStore.js';
 import { initializeStateDatabase, maintainStateDatabase } from '../stateDatabase.ts';
 import { initializeTelemetry } from '../telemetry.js';
+import { stopFallbackExecutionsForShutdown, verifyFallbackDurabilityForShutdown } from '../mcp/fallbackExecutions.js';
 
 export interface RelaiCoreRuntimeOptions {
   config?: Record<string, unknown>;
@@ -13,6 +14,7 @@ export interface RelaiCoreRuntimeOptions {
 
 export interface CoreShutdownResult {
   clean: boolean;
+  fallbackResults?: Record<string, unknown>;
   managedProcesses: Record<string, unknown>;
   repositoryIntelligence: Record<string, unknown>;
   errors: Array<{ step: string; error: string }>;
@@ -102,25 +104,20 @@ async function shutdownCoreRuntime(
       : Promise.resolve({ attempted: 0, stopped: 0, orphaned: 0, skipped: true });
     const repositoryIntelligencePromise = repositoryIntelligenceModule.repositoryIntelligence.shutdown()
       .then(() => ({ closed: true }));
-    const labels = [
-      'audit',
-      'taskHistory',
-      'analytics',
-      'managedProcesses',
-      'browserSessions',
-      'uiSessions',
-      'telemetry',
-      'repositoryIntelligence'
-    ] as const;
-    const settled = await Promise.allSettled([
-      auditModule.flushAuditWrites(),
-      taskHistoryModule.flushTaskHistoryPersistence(),
-      analyticsModule.flushLocalAnalytics(),
+    // Stop producers first: process/browser shutdown may enqueue final audit and
+    // task-history writes. A concurrent flush cannot certify those later writes.
+    const producers = await Promise.allSettled([
+      stopFallbackExecutionsForShutdown(config),
       managedProcessesPromise,
       browserRuntimeModule.stopAllBrowserSessions(),
       webAutomationModule.stopAllUiSessions(),
-      telemetryModule.shutdownTelemetry(),
       repositoryIntelligencePromise
+    ]);
+    const drains = await Promise.allSettled([
+      auditModule.flushAuditWrites(),
+      taskHistoryModule.flushTaskHistoryPersistence(),
+      analyticsModule.flushLocalAnalytics(),
+      telemetryModule.shutdownTelemetry()
     ]);
 
     const maintenance = await Promise.allSettled([
@@ -128,21 +125,51 @@ async function shutdownCoreRuntime(
       Promise.resolve().then(() => maintainKnowledgeDatabase(config))
     ]);
     const managedProcesses = settledRecord(
-      settled[3],
-      { attempted: 0, stopped: 0, orphaned: 1, error: settledError(settled[3]) }
+      producers[1],
+      { attempted: 0, stopped: 0, orphaned: 1, error: settledError(producers[1]) }
     );
     const repositoryIntelligence = settledRecord(
-      settled[7],
-      { closed: false, error: settledError(settled[7]) }
+      producers[4],
+      { closed: false, error: settledError(producers[4]) }
     );
-    const errors: Array<{ step: string; error: string }> = settled.flatMap((result, index) => result.status === 'rejected'
-      ? [{ step: labels[index] ?? `step-${index}`, error: errorMessage(result.reason) }]
+    const producerLabels = ['fallbackResults', 'managedProcesses', 'browserSessions', 'uiSessions', 'repositoryIntelligence'];
+    const drainLabels = ['audit', 'taskHistory', 'analytics', 'telemetry'];
+    const errors: Array<{ step: string; error: string }> = producers.flatMap((result, index) => result.status === 'rejected'
+      ? [{ step: producerLabels[index] ?? `producer-${index}`, error: errorMessage(result.reason) }]
       : []);
+    errors.push(...drains.flatMap((result, index) => result.status === 'rejected'
+      ? [{ step: drainLabels[index] ?? `drain-${index}`, error: errorMessage(result.reason) }]
+      : []));
+    const taskHistoryFlush = settledRecord(drains[1], {});
+    if (drains[1]?.status === 'fulfilled' && (taskHistoryFlush.ok === false
+      || Number(taskHistoryFlush.failed || 0) > 0 || Number(taskHistoryFlush.pending || 0) > 0)) {
+      errors.push({
+        step: 'taskHistory',
+        error: `Task history persistence reported an incomplete flush: ${Number(taskHistoryFlush.failed || 0)} failed, ${Number(taskHistoryFlush.pending || 0)} pending.`
+      });
+    }
+    const auditFlush = settledRecord(drains[0], {});
+    if (drains[0]?.status === 'fulfilled' && auditFlush.ok === false) {
+      errors.push({ step: 'audit',
+        error: `Audit persistence remains incomplete: ${Number(auditFlush.pending || 0)} pending, ${Number(auditFlush.droppedEntries || 0)} dropped.` });
+    }
+    let fallbackResults: Record<string, unknown>;
+    try {
+      fallbackResults = verifyFallbackDurabilityForShutdown(config);
+    } catch (error) {
+      fallbackResults = { ok: false, error: errorMessage(error) };
+    }
+    if (fallbackResults.ok !== true || settledRecord(producers[0], {}).timedOut === true
+      || Number(settledRecord(producers[0], {}).pending || 0) > 0) {
+      errors.push({ step: 'fallbackResults',
+        error: 'An operation did not reach a confirmed durable terminal state. Preserve retained receipts and inspect recovery before retrying.' });
+    }
     if (maintenance[0]?.status === 'rejected') errors.push({ step: 'stateMaintenance', error: errorMessage(maintenance[0].reason) });
     if (maintenance[1]?.status === 'rejected') errors.push({ step: 'knowledgeMaintenance', error: errorMessage(maintenance[1].reason) });
 
     return {
       clean: errors.length === 0 && Number(managedProcesses.orphaned || 0) === 0 && repositoryIntelligence.closed !== false,
+      fallbackResults,
       managedProcesses,
       repositoryIntelligence,
       errors
