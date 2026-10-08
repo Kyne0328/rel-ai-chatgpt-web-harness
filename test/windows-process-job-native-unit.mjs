@@ -251,6 +251,11 @@ try {
         const launched = await launch(f, { companion });
         let outcome;
         void launched.exited.then(value => { outcome = value; }, error => { outcome = { error }; });
+        // The failure bound starts when the controller reaches atomic publication,
+        // not while Windows PowerShell is still initializing on a cold runner.
+        const staged = f.files.receipt + '.' + launched.child.pid + '.tmp';
+        await poll(async () => outcome || await readJson(staged),
+          'persistent receipt-lock publication attempt', companion ? 20000 : 90000);
         await poll(() => outcome, 'bounded persistent receipt-lock failure', 5000);
         assert.ifError(outcome.error);
         assert.equal(outcome.code, 125);
