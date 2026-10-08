@@ -310,7 +310,11 @@ try {
       if (kind === 'missing') source = source.replace(assemblyPattern, '$1$3');
       if (kind === 'malformed') source = source.replace(assemblyPattern, '$1%%%INVALID-BASE64%%%$3');
       if (kind === 'wrong-hash') source = source.replace(/\$nativeAssemblySha256 = '[a-f0-9]{64}'/, "$nativeAssemblySha256 = '" + '0'.repeat(64) + "'");
-      if (kind === 'stale-source') source = source.replace("$native = @'\n", "$native = @'\n// Fixture-owned source change must invalidate the embedded assembly.\n");
+      if (kind === 'stale-source') {
+        source = source.replace(/(\$native = @')(\r?\n)/,
+          '$1$2// Fixture-owned source change must invalidate the embedded assembly.$2');
+        assert.notEqual(source, helperSource, 'stale-source fixture must change the embedded native source');
+      }
       if (kind === 'crlf') source = source.replace(/\r?\n/g, '\r\n');
       const copiedHelper = path.join(root, 'assembly-' + kind + '.ps1');
       await fs.writeFile(copiedHelper, source);
