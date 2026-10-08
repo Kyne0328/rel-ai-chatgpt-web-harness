@@ -178,7 +178,7 @@ try {
         || !/^[\x20-\x7e]+$/.test(expectedCmdPrompt) || expectedCmdPrompt.length > 4096) return false;
       // This fixture oracle preserves rows and recognizes only the exact launch prompt.
       // eslint-disable-next-line no-control-regex -- Match literal ANSI escapes in this terminal fixture.
-      const rendered = output.text.replace(/\x1b\[(?:0m|0K|\?25l|\?25h)/g, '');
+      const rendered = output.text.replace(/\x1b\]0;[\x20-\x7e]*\x07|\x1b\[(?:0m|0K|1G|\?25l|\?25h)/g, '');
       const rows = rendered.split('\r\n');
       if (rows.some(row => /[\p{Cc}\p{Cf}\u2028\u2029\uFFFD]/u.test(row)) || rows.length < expectedCmdRows.length) return false;
       return rows.slice(-expectedCmdRows.length).every((row, index) => row === expectedCmdRows[index]);
