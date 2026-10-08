@@ -15,6 +15,7 @@ on:
       - vendor/zoekt/**
       - vendor/tunnel-client/**
       - src/repository/intelligence/**
+      - src/localAnalytics.ts
       - .github/workflows/release.yml
   workflow_dispatch:
 

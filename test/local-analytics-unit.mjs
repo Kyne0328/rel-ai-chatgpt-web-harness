@@ -163,7 +163,14 @@ try {
       assert.equal(recordLocalTransportEvent(contentionConfig, { event: 'request_started' }), false);
       assert.equal(recordLocalTaskCompletion(contentionConfig, { workspace: 'repo', taskIntent: 'bugfix' }), false);
       assert.ok(Date.now() - startedAt < 1000, 'analytics contention must fail fast instead of blocking the service thread');
+      scheduleLocalTaskCompletion(contentionConfig, { workspace: 'repo', taskIntent: 'bugfix' });
+      const queuedFlush = flushLocalAnalytics(contentionConfig);
+      await new Promise(resolve => setImmediate(resolve));
       lock.exec('ROLLBACK');
+      await queuedFlush;
+      const recovered = readLocalUsageSnapshot(contentionConfig, new Date().toISOString().slice(0, 7));
+      assert.equal(recovered.taskIntents.find(row => row.intent === 'bugfix')?.tasks, 1,
+        'a queued completion must survive a transient SQLite writer lock exactly once');
     } finally {
       if (lock.isTransaction) lock.exec('ROLLBACK');
       lock.close();

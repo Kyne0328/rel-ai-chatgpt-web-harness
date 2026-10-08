@@ -181,12 +181,12 @@ function recordLocalToolOutcome(config: AnalyticsConfig = {}, event: LocalToolOu
   }
 }
 
-function scheduleLocalAnalyticsWrite(write: () => void): void {
+function scheduleLocalAnalyticsWrite(write: () => void | Promise<void>): void {
   let resolvePending: (() => void) | undefined;
   const pending = new Promise<void>(resolve => { resolvePending = resolve; });
   pendingAnalyticsWrites.add(pending);
-  setImmediate(() => {
-    try { write(); }
+  setImmediate(async () => {
+    try { await write(); }
     finally {
       pendingAnalyticsWrites.delete(pending);
       resolvePending?.();
@@ -202,7 +202,13 @@ function scheduleLocalTaskCompletion(
   config: AnalyticsConfig = {},
   event: { workspace?: unknown; taskIntent?: unknown; at?: unknown } = {}
 ): void {
-  scheduleLocalAnalyticsWrite(() => { recordLocalTaskCompletion(config, event); });
+  scheduleLocalAnalyticsWrite(async () => {
+    const deadline = Date.now() + 2_000;
+    do {
+      if (recordLocalTaskCompletion(config, event)) return;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    } while (Date.now() < deadline);
+  });
 }
 
 function scheduleLocalTransportEvent(
