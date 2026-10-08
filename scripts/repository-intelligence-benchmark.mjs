@@ -9,6 +9,9 @@ const fileCount = integerArg('--files', 100000, 1, 500000);
 const mutationCount = Math.min(fileCount, integerArg('--mutations', 100, 1, 10000));
 const generatedBundleKb = integerArg('--generated-bundle-kb', 0, 0, 10240);
 const totalFileCount = fileCount + (generatedBundleKb > 0 ? 1 : 0);
+// Reaching maxEntries is conservatively marked truncated; allow one spare slot
+// so this fixture measures a complete scan before incremental refresh.
+const scanFileLimit = totalFileCount + 1;
 const maxFullMs = optionalPositiveNumberArg('--max-full-ms');
 const maxIncrementalMs = optionalPositiveNumberArg('--max-incremental-ms');
 const maxRestartReuseMs = optionalPositiveNumberArg('--max-restart-reuse-ms');
@@ -18,14 +21,14 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-repository-index-bench
 const workspaceRoot = path.join(root, 'workspace');
 const stateDir = path.join(root, 'state');
 const workspace = { alias: 'benchmark', path: workspaceRoot, context: {}, testCommands: {}, commands: {} };
-const config = { stateDir, repositoryIntelligence: { maxFiles: totalFileCount } };
+const config = { stateDir, repositoryIntelligence: { maxFiles: scanFileLimit } };
 
 try {
   createFixture(workspaceRoot, fileCount, generatedBundleKb);
   const before = process.memoryUsage().rss;
   const fullStarted = performance.now();
   const fullMeasurement = await measurePeakRss(() => repositoryIntelligence.ensure(
-    workspace, config, { force: true, watch: false, maxFiles: totalFileCount }
+    workspace, config, { force: true, watch: false, maxFiles: scanFileLimit }
   ));
   const full = fullMeasurement.value;
   const fullBuildMs = performance.now() - fullStarted;
@@ -35,7 +38,7 @@ try {
   repositoryIntelligence.noteMutation(workspace, config, changedPaths);
   const incrementalStarted = performance.now();
   const incrementalMeasurement = await measurePeakRss(() => repositoryIntelligence.ensure(
-    workspace, config, { watch: false, maxFiles: totalFileCount }
+    workspace, config, { watch: false, maxFiles: scanFileLimit }
   ));
   const incremental = incrementalMeasurement.value;
   const incrementalRefreshMs = performance.now() - incrementalStarted;
@@ -43,7 +46,7 @@ try {
 
   await repositoryIntelligence.shutdown();
   const restartStarted = performance.now();
-  const restarted = await repositoryIntelligence.ensure(workspace, config, { watch: false, maxFiles: totalFileCount });
+  const restarted = await repositoryIntelligence.ensure(workspace, config, { watch: false, maxFiles: scanFileLimit });
   const restartReuseMs = performance.now() - restartStarted;
 
   if (full.sourceFileCount !== totalFileCount) {
