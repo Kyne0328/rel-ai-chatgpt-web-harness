@@ -11,6 +11,7 @@ on:
       - electron/**
       - scripts/**
       - test/windows-process-job-native-unit.mjs
+      - test/process-pty-unit.mjs
       - vendor/zoekt/**
       - vendor/tunnel-client/**
       - src/repository/intelligence/**
