@@ -21,6 +21,7 @@ const config = {
 };
 const finiteScript = path.join(root, 'finite.cjs');
 const gracefulScript = path.join(root, 'graceful.cjs');
+const gracefulReady = path.join(root, 'graceful-ready');
 const stubbornScript = path.join(root, 'stubborn.cjs');
 const treeScript = path.join(root, 'tree-parent.cjs');
 const inheritedPipeChildScript = path.join(root, 'inherited-pipe-child.cjs');
@@ -33,6 +34,7 @@ process.on('SIGTERM', () => {
   process.stderr.write('GRACEFUL\\n');
   setTimeout(() => process.exit(0), 50);
 });
+require('node:fs').writeFileSync(process.argv[2], 'ready');
 setInterval(() => {}, 1000);
 `);
 fs.writeFileSync(stubbornScript, `
@@ -159,15 +161,20 @@ try {
   assert.equal(summarizeCommand({ exitCode: 0, cancelled: true }).ok, false);
 
   const gracefulController = new AbortController();
-  const gracefulPromise = runProcess(process.execPath, [gracefulScript], {
+  const gracefulPromise = runProcess(process.execPath, [gracefulScript, gracefulReady], {
     cwd: root,
     signal: gracefulController.signal,
     terminationGraceMs: 1000,
     forceWaitMs: 2000,
     maxOutputBytes: 65536
   }, config);
-  setTimeout(() => gracefulController.abort(new Error('operation cancelled')), 200);
+  // Do not signal before a cold macOS runner has initialized the SIGTERM handler.
+  for (let attempt = 0; attempt < 400 && !fs.existsSync(gracefulReady); attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  gracefulController.abort(new Error('operation cancelled'));
   const graceful = await gracefulPromise;
+  assert.equal(fs.existsSync(gracefulReady), true, 'graceful child must install its signal handler before cancellation');
   assert.equal(graceful.cancelled, true);
   assert.equal(graceful.terminationConfirmed, true);
   if (process.platform !== 'win32') {

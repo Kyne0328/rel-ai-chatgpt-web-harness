@@ -95,6 +95,9 @@ async function record(name, body) {
   if (process.argv.includes('--pty-only') && !name.startsWith('pty-')) return;
   if (process.argv.includes('--companion') && (name.startsWith('verified-assembly-')
     || name === 'pre-start-cancel-with-compilation-fallback' || name === 'job-attribute-setup-fails-before-target-creation')) return;
+  // The safety deadline protects a stalled case, not the total duration of
+  // multiple cold PowerShell starts on a hosted Windows runner.
+  safetyDeadline.refresh();
   const started = Date.now();
   const evidence = await body();
   results.push({ name, status: 'passed', elapsedMs: Date.now() - started, ...evidence });
@@ -152,7 +155,7 @@ async function withReceiptLock(fixture, body) {
   if (cleanupError) throw cleanupError;
   return value;
 }
-async function waitForBlockedReceipt(fixture, final, timeout = 20000) {
+async function waitForBlockedReceipt(fixture, final, timeout = fixture.child.spawnfile === powershell ? 90000 : 20000) {
   const staged = fixture.files.receipt + '.' + fixture.child.pid + '.tmp';
   let terminal;
   void fixture.exited.then(outcome => { terminal = { outcome }; }, error => { terminal = { error }; });
@@ -199,9 +202,7 @@ try {
       await fs.writeFile(f.files.request, JSON.stringify({ ...f.request, nonce: 'invalid' }));
       await assert.rejects(() => withReceiptLock(f, async () => {
         const launched = await launch(f, { companion });
-        // Fresh hosted Windows runners can take longer than the normal receipt
-        // polling budget to initialize the first Windows PowerShell process.
-        await waitForBlockedReceipt(launched, undefined, companion ? 20000 : 90000);
+        await waitForBlockedReceipt(launched);
       }), error => /Controller exited before staged receipt:/.test(error.message)
         && /"code":125/.test(error.message));
       await assert.rejects(fs.access(path.join(f.directory, 'must-not-run')), { code: 'ENOENT' });
