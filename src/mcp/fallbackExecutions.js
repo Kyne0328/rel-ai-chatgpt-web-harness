@@ -382,8 +382,9 @@ function readPersistedScope(config, reference, options = {}) {
   if (stamp === null) return [];
   let recovery = legacyScopeRecoveries.get(root);
   if (recovery && recovery.stamp !== stamp) {
-    legacyScopeRecoveries.delete(root);
-    recovery = null;
+    // Cleanup or another writer changed the directory while replay was running.
+    // Restart in the background instead of redoing a synchronous scan on each retry.
+    recovery = beginLegacyScopeRecovery(root, stamp);
   }
   if (recovery) {
     if (recovery.status === 'failed') throw recovery.error;
