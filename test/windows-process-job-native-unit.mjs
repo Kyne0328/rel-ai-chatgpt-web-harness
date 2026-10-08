@@ -230,7 +230,8 @@ try {
     await record('receipt-transient-final-lock-' + mode, async () => {
       const f = await launch(await prepare('receipt-final-lock-' + mode, process.execPath,
         ['-e', 'const fs=require("fs");setInterval(()=>{if(fs.existsSync("finish-target"))process.exit(0)},10)']), { companion });
-      await poll(async () => (await readJson(f.files.receipt))?.commandStarted, 'receipt before final-publication lock');
+      await poll(async () => (await readJson(f.files.receipt))?.commandStarted,
+        'receipt before final-publication lock', companion ? 20000 : 90000);
       await withReceiptLock(f, async () => {
         await fs.writeFile(path.join(f.directory, 'finish-target'), 'finish');
         await waitForBlockedReceipt(f, true);

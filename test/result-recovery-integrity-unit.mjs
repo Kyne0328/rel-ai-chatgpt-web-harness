@@ -109,8 +109,10 @@ try {
       'independent-task', () => 'independent'), 'independent', 'admission must not flush unrelated histories');
     barrierDb.exec('ROLLBACK');
     const [accepted, replayed] = await Promise.all([pending, duplicate]);
-    assert.equal(accepted.body.result.structuredContent.ok, true);
-    assert.equal(replayed.body.result.structuredContent.ok, true);
+    assert.equal(accepted.body.result.structuredContent.ok, true,
+      'First task-history admission after unlocking: ' + JSON.stringify(accepted.body.result.structuredContent));
+    assert.equal(replayed.body.result.structuredContent.ok, true,
+      'Duplicate task-history admission after unlocking: ' + JSON.stringify(replayed.body.result.structuredContent));
     const operationId = accepted.body.result.structuredContent.operationId;
     assert.equal(replayed.body.result.structuredContent.operationId, operationId);
     await tick();
