@@ -22,7 +22,9 @@ const safetyDeadline = setTimeout(() => {
 }, 120000);
 safetyDeadline.unref();
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function poll(fn, label, timeout = 20000) {
+// PowerShell controller startup can exceed 20 seconds on a cold hosted runner.
+// Explicit short assertion deadlines elsewhere remain unchanged.
+async function poll(fn, label, timeout = process.argv.includes('--companion') ? 20000 : 90000) {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
     const value = await fn();
@@ -401,12 +403,15 @@ try {
     return { equal: true, variableCount: actual.keys.length };
   });
   await record('detached-child-natural-completion', async () => {
-    const f = await detached('natural', 1200);
+    // The detached child must remain alive until its ownership has been observed;
+    // a fixed 1.2s lifetime could elapse before a cold controller published the receipt.
+    const f = await detached('natural', 60000);
     const pending = await poll(async () => {
       const r = await readJson(f.files.receipt);
       return r?.rootExited && r.activeProcesses > 0 && r;
     }, 'root exited while child alive');
     assert.equal(pending.jobComplete, false);
+    await fs.writeFile(path.join(f.directory, 'heartbeat.release'), '');
     const done = await finish(f);
     assert.equal(done.receipt.rootExitCode, 7);
     assert.equal(done.receipt.activeProcesses, 0);

@@ -10,7 +10,7 @@ function publishProcessLifecycleEvent(event: Record<string, unknown>): void {
 
   const principalFingerprint = String(event.principalFingerprint || '');
   if (!principalFingerprint) return;
-  void publishMcpEvent(readConfig(), {
+  publishLifecycleEvent({
     principalFingerprint,
     name: `process.${status}`,
     data: {
@@ -21,7 +21,7 @@ function publishProcessLifecycleEvent(event: Record<string, unknown>): void {
       status,
       exit_code: event.exitCode === undefined ? null : event.exitCode
     }
-  }).catch(debugEventDelivery);
+  });
 }
 
 function publishActivityLifecycleEvent(value: unknown): void {
@@ -44,7 +44,7 @@ function publishActivityLifecycleEvent(value: unknown): void {
     : terminalStatus === 'cancelled'
       ? 'work.cancelled'
       : 'work.failed';
-  void publishMcpEvent(readConfig(), {
+  publishLifecycleEvent({
     principalFingerprint,
     name,
     data: {
@@ -54,7 +54,17 @@ function publishActivityLifecycleEvent(value: unknown): void {
       operation: String(event.operation || activityEvent.title || ''),
       summary: String(activityEvent.summary || event.error || task.summary || '').slice(0, 500)
     }
-  }).catch(debugEventDelivery);
+  });
+}
+
+function publishLifecycleEvent(event: Parameters<typeof publishMcpEvent>[1]): void {
+  try {
+    void publishMcpEvent(readConfig(), event).catch(debugEventDelivery);
+  } catch (error) {
+    // Reporting is best effort; missing local configuration cannot crash a
+    // process after its terminal state has already been recorded.
+    debugEventDelivery(error);
+  }
 }
 
 function debugEventDelivery(error: unknown): void {
