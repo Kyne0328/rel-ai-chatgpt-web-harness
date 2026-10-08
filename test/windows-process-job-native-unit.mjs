@@ -563,9 +563,16 @@ try {
     ownedPtys.add(child);
     let output = '';
     child.onData((data) => { output += data; });
-    const exited = new Promise((resolve) => child.onExit((value) => { ownedHelpers.delete(child); resolve(value); }));
+    let exitOutcome;
+    const exited = new Promise((resolve) => child.onExit((value) => { ownedHelpers.delete(child); exitOutcome = value; resolve(value); }));
+    // Winpty can print its console banner before the cold PowerShell controller
+    // has started the actual target. Measure readiness only after physical start.
+    await poll(async () => {
+      if (exitOutcome) throw new Error('PTY controller exited before target startup: ' + JSON.stringify(exitOutcome));
+      return (await readJson(f.files.receipt))?.commandStarted;
+    }, 'PTY target startup');
     await poll(() => output.includes('PTY_READY'), 'PTY ready', 4000).catch(async (error) => {
-      throw new Error(error.message + ': ' + JSON.stringify({ output, receipt: await readJson(f.files.receipt) }));
+      throw new Error(error.message + ': ' + JSON.stringify({ output, receipt: await readJson(f.files.receipt), exitOutcome }));
     });
     child.resize(103, 33);
     await sleep(150);
