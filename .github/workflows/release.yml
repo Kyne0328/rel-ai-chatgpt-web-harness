@@ -10,6 +10,7 @@ on:
       - CHANGELOG.md
       - electron/**
       - scripts/**
+      - test/windows-process-job-native-unit.mjs
       - vendor/zoekt/**
       - vendor/tunnel-client/**
       - src/repository/intelligence/**
