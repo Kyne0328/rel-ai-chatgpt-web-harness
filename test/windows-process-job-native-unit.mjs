@@ -152,7 +152,7 @@ async function withReceiptLock(fixture, body) {
   if (cleanupError) throw cleanupError;
   return value;
 }
-async function waitForBlockedReceipt(fixture, final) {
+async function waitForBlockedReceipt(fixture, final, timeout = 20000) {
   const staged = fixture.files.receipt + '.' + fixture.child.pid + '.tmp';
   let terminal;
   void fixture.exited.then(outcome => { terminal = { outcome }; }, error => { terminal = { error }; });
@@ -164,7 +164,7 @@ async function waitForBlockedReceipt(fixture, final) {
     }));
     const value = await readJson(staged);
     return value && (final === undefined || value.final === final);
-  }, 'staged atomic receipt');
+  }, 'staged atomic receipt', timeout);
   // Hold the already-acquired OS lock across publication, then release it well
   // inside the bounded production budget. The old one-shot publisher exits here.
   const remainedAlive = await Promise.race([
@@ -199,7 +199,9 @@ try {
       await fs.writeFile(f.files.request, JSON.stringify({ ...f.request, nonce: 'invalid' }));
       await assert.rejects(() => withReceiptLock(f, async () => {
         const launched = await launch(f, { companion });
-        await waitForBlockedReceipt(launched);
+        // Fresh hosted Windows runners can take longer than the normal receipt
+        // polling budget to initialize the first Windows PowerShell process.
+        await waitForBlockedReceipt(launched, undefined, companion ? 20000 : 90000);
       }), error => /Controller exited before staged receipt:/.test(error.message)
         && /"code":125/.test(error.message));
       await assert.rejects(fs.access(path.join(f.directory, 'must-not-run')), { code: 'ENOENT' });

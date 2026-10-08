@@ -142,9 +142,13 @@ function findInstalledWindowsRoot(expectedVersion) {
 
 function findInstalledLinuxRoot(packageName) {
   const result = runChecked('dpkg-query', ['-L', packageName]);
-  const metadataPath = result.stdout.split(/\r?\n/).find(value => value.endsWith('/resources/package.json'));
-  assert.ok(metadataPath, `Installed Linux package ${packageName} does not contain resources/package.json.`);
-  return path.dirname(path.dirname(metadataPath));
+  const roots = result.stdout.split(/\r?\n/)
+    .filter(value => value.endsWith('/resources/package.json'))
+    .map(value => path.dirname(path.dirname(value)))
+    .filter(applicationRoot => readPackagedMetadata(applicationRoot)?.name === packageJson.name
+      && fs.existsSync(path.join(applicationRoot, electronPackage.build.linux.executableName)));
+  assert.equal(roots.length, 1, `Installed Linux package ${packageName} must contain exactly one application root.`);
+  return roots[0];
 }
 
 function readPackagedMetadata(applicationRoot) {
