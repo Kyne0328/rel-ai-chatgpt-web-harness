@@ -186,8 +186,11 @@ try {
       // not identical display spelling, after validating the terminal output.
       const prompt = rows.slice(-expectedCmdRows.length).join('');
       if (!prompt.endsWith('>')) return false;
-      try { return fs.realpathSync(prompt.slice(0, -1)).toLowerCase() === cmdLaunchCwd.toLowerCase(); }
-      catch { return false; }
+      try {
+        const displayed = fs.statSync(prompt.slice(0, -1));
+        const launched = fs.statSync(cmdLaunchCwd);
+        return displayed.isDirectory() && displayed.dev === launched.dev && displayed.ino === launched.ino;
+      } catch { return false; }
     };
     const previousIdleTimeout = process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS;
     process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS = '1000';
