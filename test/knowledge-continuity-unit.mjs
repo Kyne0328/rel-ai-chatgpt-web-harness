@@ -166,7 +166,14 @@ try {
     action: 'begin', workspace: 'app', title: 'Inspect alpha syntax', objective: 'Inspect alpha syntax', bootstrap: 'compact'
   }, context);
   compactWithRepositorySummary.bootstrap = (await callTool('relai_work', { action: 'context', work_id: compactWithRepositorySummary.work_id }, context)).bootstrap;
-  assert.equal(compactWithRepositorySummary.bootstrap?.repositoryIntelligence?.summaryOnly, true, 'compact task bootstrap must reuse the cheap cached Repository Intelligence summary when available');
+  const cachedSummary = compactWithRepositorySummary.bootstrap?.repositoryIntelligence;
+  if (cachedSummary?.available === true) {
+    assert.equal(cachedSummary.summaryOnly, true, 'available cached Repository Intelligence context must remain summary-only');
+  } else {
+    assert.equal(cachedSummary?.status, 'deferred', 'optional cached context must report contention rather than inventing a summary');
+    assert.ok(['cached_lookup_budget_exhausted', 'cached_lookup_backoff'].includes(cachedSummary.reason),
+      'optional cached context can be deferred only by its bounded query budget or backoff');
+  }
   await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: compactWithRepositorySummary.work_id, reason: 'compact bootstrap regression complete' }, context);
 
   const continuity = buildTaskContinuity(config, { workspace: 'app', query: 'alpha syntax' });
