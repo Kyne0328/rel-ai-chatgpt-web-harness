@@ -270,6 +270,10 @@ function verifyWorkflowContracts() {
   const ciWorkflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'ci.yml'), 'utf8');
   const workflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'release.yml'), 'utf8');
   const promotionWorkflow = fs.readFileSync(path.join(tmp, '.github', 'workflows', 'promote-release.yml'), 'utf8');
+  assert.match(ciWorkflow, /^on:\s*\n\s+push:\s*\n\s+branches:\s*\n\s+- main\s*\n\s+pull_request:/m,
+    'normal CI must avoid duplicate push and pull-request runs for the same feature branch');
+  assert.match(workflow, /^on:\s*\n\s+workflow_dispatch:/m,
+    'publishing candidates must be an explicit action rather than a side effect of routine pushes');
   const installedReleaseValidator = fs.readFileSync(path.join(tmp, 'scripts', 'validate-installed-release.mjs'), 'utf8');
   const prepareReleaseAssets = fs.readFileSync(path.join(tmp, 'scripts', 'prepare-release-assets.mjs'), 'utf8');
   assert.match(prepareReleaseAssets, /names\.macMetadata/, 'release preparation must publish latest-mac.yml');

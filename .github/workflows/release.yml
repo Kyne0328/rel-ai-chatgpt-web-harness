@@ -1,22 +1,6 @@
 name: Publish GitHub Release
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - package.json
-      - package-lock.json
-      - CHANGELOG.md
-      - electron/**
-      - scripts/**
-      - test/windows-process-job-native-unit.mjs
-      - test/process-pty-unit.mjs
-      - vendor/zoekt/**
-      - vendor/tunnel-client/**
-      - src/repository/intelligence/**
-      - src/localAnalytics.ts
-      - .github/workflows/release.yml
   workflow_dispatch:
 
 permissions:

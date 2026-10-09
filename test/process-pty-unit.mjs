@@ -162,34 +162,15 @@ try {
 
   if (process.platform === 'win32') {
     const systemCmd = fs.realpathSync(path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'cmd.exe'));
-    const cmdLaunchCwd = fs.realpathSync(repo);
-    const expectedCmdPrompt = cmdLaunchCwd + '>';
-    const cmdStartupReady = snapshot => {
-      const output = snapshot.stdout;
-      if (snapshot.pty !== true || snapshot.columns !== 80 || !output || typeof output.text !== 'string'
-        || output.encoding !== 'utf8' || output.invalidUtf8 === true
-        || !Number.isSafeInteger(output.totalBytes) || output.totalBytes > 4096 || output.totalBytes < 1
-        || output.requestedOffset !== 0 || output.offset !== 0 || output.retainedFromOffset !== 0
-        || output.nextOffset !== output.totalBytes || snapshot.stdoutBytes !== output.totalBytes
-        || snapshot.stdoutRetainedFromOffset !== 0 || Number(snapshot.stdoutDroppedBytes || 0) !== 0
-        || output.truncatedBefore === true || output.truncated === true
-        || Buffer.byteLength(output.text, 'utf8') !== output.totalBytes
-        || !/^[\x20-\x7e]+$/.test(expectedCmdPrompt) || expectedCmdPrompt.length > 4096) return false;
-      // This fixture oracle preserves rows and recognizes only the exact launch prompt.
-      // eslint-disable-next-line no-control-regex -- Match literal ANSI escapes in this terminal fixture.
-      const rendered = output.text.replace(/\x1b\]0;[\x20-\x7e]*\x07|\x1b\[(?:0m|0K|1G|\?25l|\?25h)/g, '');
-      const rows = rendered.split('\r\n');
-      if (rows.some(row => /[\p{Cc}\p{Cf}\u2028\u2029\uFFFD]/u.test(row))) return false;
-      // cmd.exe may render the 8.3 spelling of its working directory while
-      // realpathSync(repo) expands it. Require the same physical directory,
-      // not identical display spelling, after validating the terminal output.
-      const prompt = rows.at(-1) || '';
-      if (!prompt.endsWith('>')) return false;
-      try {
-        const displayed = fs.statSync(prompt.slice(0, -1));
-        const launched = fs.statSync(cmdLaunchCwd);
-        return displayed.isDirectory() && displayed.dev === launched.dev && displayed.ino === launched.ino;
-      } catch { return false; }
+    // Probe actual shell behavior. Windows may render startup banners, prompts,
+    // cursor controls and 8.3 paths differently without breaking the PTY.
+    const waitForCmdReady = async () => {
+      const token = `RELAI_CMD_READY_${processId}`;
+      const input = `echo ${token}\r`;
+      const written = await writeManagedProcess(config, { processId, input }, context);
+      assert.equal(written.acceptedBytes, Buffer.byteLength(input));
+      return waitFor(snapshot => snapshot.status === 'running' && snapshot.pty === true
+        && snapshot.columns === 80 && snapshot.stdout?.text?.includes(token));
     };
     const previousIdleTimeout = process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS;
     process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS = '1000';
@@ -205,7 +186,9 @@ try {
         startupWaitMs: 100
       }, { ...context, requestTaskContext: { taskId: context.taskId, session: { workspace: workspace.alias } } });
       processId = idleShell.processId;
-      await waitFor(cmdStartupReady, 5000);
+      // Do not send input to the idle-shell fixture: input changes its idle lifecycle.
+      await waitFor(snapshot => snapshot.status === 'running' && snapshot.pty === true
+        && snapshot.columns === 80 && snapshot.stdout?.text?.includes('>'));
       const retired = await waitFor(snapshot => snapshot.status === 'stopped', 6000);
       assert.equal(retired.status, 'stopped', 'a disposable task cmd prompt retires after the configured grace period');
       assert.equal(retired.terminationConfirmed, true);
@@ -220,7 +203,7 @@ try {
           ...(lifecycle ? { lifecycle } : {}), pty: true, columns: 80, startupWaitMs: 100
         }, context);
         processId = persistentShell.processId;
-        await waitFor(cmdStartupReady, 5000);
+        await waitForCmdReady();
         await writeManagedProcess(config, { processId, input: `set RELAI_PTY_STATE=${persistedValue}\r` }, context);
         await new Promise(resolve => setTimeout(resolve, 1300));
         const idle = readManagedProcess(config, { processId }, context);
