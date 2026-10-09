@@ -164,7 +164,6 @@ try {
     const systemCmd = fs.realpathSync(path.join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32', 'cmd.exe'));
     const cmdLaunchCwd = fs.realpathSync(repo);
     const expectedCmdPrompt = cmdLaunchCwd + '>';
-    const expectedCmdRows = expectedCmdPrompt.match(/.{1,80}/g) || [];
     const cmdStartupReady = snapshot => {
       const output = snapshot.stdout;
       if (snapshot.pty !== true || snapshot.columns !== 80 || !output || typeof output.text !== 'string'
@@ -180,11 +179,11 @@ try {
       // eslint-disable-next-line no-control-regex -- Match literal ANSI escapes in this terminal fixture.
       const rendered = output.text.replace(/\x1b\]0;[\x20-\x7e]*\x07|\x1b\[(?:0m|0K|1G|\?25l|\?25h)/g, '');
       const rows = rendered.split('\r\n');
-      if (rows.some(row => /[\p{Cc}\p{Cf}\u2028\u2029\uFFFD]/u.test(row)) || rows.length < expectedCmdRows.length) return false;
+      if (rows.some(row => /[\p{Cc}\p{Cf}\u2028\u2029\uFFFD]/u.test(row))) return false;
       // cmd.exe may render the 8.3 spelling of its working directory while
       // realpathSync(repo) expands it. Require the same physical directory,
       // not identical display spelling, after validating the terminal output.
-      const prompt = rows.slice(-expectedCmdRows.length).join('');
+      const prompt = rows.at(-1) || '';
       if (!prompt.endsWith('>')) return false;
       try {
         const displayed = fs.statSync(prompt.slice(0, -1));
