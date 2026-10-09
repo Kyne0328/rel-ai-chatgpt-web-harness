@@ -181,7 +181,13 @@ try {
       const rendered = output.text.replace(/\x1b\]0;[\x20-\x7e]*\x07|\x1b\[(?:0m|0K|1G|\?25l|\?25h)/g, '');
       const rows = rendered.split('\r\n');
       if (rows.some(row => /[\p{Cc}\p{Cf}\u2028\u2029\uFFFD]/u.test(row)) || rows.length < expectedCmdRows.length) return false;
-      return rows.slice(-expectedCmdRows.length).every((row, index) => row === expectedCmdRows[index]);
+      // cmd.exe may render the 8.3 spelling of its working directory while
+      // realpathSync(repo) expands it. Require the same physical directory,
+      // not identical display spelling, after validating the terminal output.
+      const prompt = rows.slice(-expectedCmdRows.length).join('');
+      if (!prompt.endsWith('>')) return false;
+      try { return fs.realpathSync(prompt.slice(0, -1)).toLowerCase() === cmdLaunchCwd.toLowerCase(); }
+      catch { return false; }
     };
     const previousIdleTimeout = process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS;
     process.env.REL_AI_MCP_INTERACTIVE_PTY_IDLE_RETIRE_MS = '1000';
