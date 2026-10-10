@@ -24,10 +24,6 @@ public class RelaiNoPrintFixture : Form {
   public int PrintRequests = 0;
   public bool Black = false;
   public bool Occluder = false;
-  protected override bool ShowWithoutActivation { get { return true; } }
-  protected override CreateParams CreateParams {
-    get { var value = base.CreateParams; value.ExStyle |= 0x08000000; return value; }
-  }
   protected override void WndProc(ref Message message) {
     if (message.Msg == 0x0317 || message.Msg == 0x0318) {
       PrintRequests++; message.Result = new IntPtr(1); return;
@@ -59,7 +55,6 @@ public static class RelaiWgcFixtureNative {
     $target.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $target.Location = [System.Drawing.Point]::new($area.Left + 70, $area.Top + 90)
     $target.ClientSize = [System.Drawing.Size]::new(340, 200)
-    $target.ShowInTaskbar = $false
     $target.TopMost = $true
     $target.Show()
     $target.Refresh()
@@ -114,7 +109,6 @@ public static class RelaiWgcFixtureNative {
     $occluder.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $occluder.Location = $target.Location
     $occluder.ClientSize = $target.ClientSize
-    $occluder.ShowInTaskbar = $false
     $occluder.TopMost = $true
     $occluder.Show()
     $occluder.Refresh()
