@@ -78,7 +78,7 @@ function resolveCommandCwd(workspace: WorkspacePath, value: unknown, operationNa
   if (!isPathInside(candidate, root)) throw new Error(`${operationName} cwd escapes the workspace: ${raw}`);
   let real: string;
   try {
-    real = fs.realpathSync(candidate);
+    real = fs.realpathSync.native(candidate);
   } catch (error) {
     if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
       throw new Error(`${operationName} cwd does not exist: ${raw}`, { cause: error });
