@@ -126,7 +126,7 @@ try {
   const initial = await waitFor(snapshot => snapshot.stdout.text.includes('TTY:true') && snapshot.stdout.text.includes('SIZE:90:30'));
   assert.match(initial.stdout.text, /TTY:true/);
   assert.deepEqual(JSON.parse(fs.readFileSync(observationFile, 'utf8')), {
-    args: literalArgs, cwd: repo, sentinel, stdinTty: true, stdoutTty: true
+    args: literalArgs, cwd: fs.realpathSync.native(repo), sentinel, stdinTty: true, stdoutTty: true
   }, 'the managed PTY target sees exact arguments, environment, cwd, and terminal handles');
 
   const resized = await writeManagedProcess(config, {
