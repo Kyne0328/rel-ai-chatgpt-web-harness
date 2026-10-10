@@ -62,6 +62,13 @@ const titleRange = {
   truncatedBefore: false, totalBytes: Buffer.byteLength(titleFixture)
 };
 assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, titleRange), true, 'exact elevated CMD startup prompt can retire');
+const prefixedTitleFixture = `\x1b[0m\x1b[0K${titleFixture.replace('\x1b[0m', '')}`;
+assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, {
+  ...titleRange, text: prefixedTitleFixture, totalBytes: Buffer.byteLength(prefixedTitleFixture)
+}), true, 'elevated CMD startup also accepts harmless controls before its OSC title');
+assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, {
+  ...titleRange, text: `\x1b[2J${prefixedTitleFixture}`, totalBytes: Buffer.byteLength(prefixedTitleFixture) + 4
+}), false, 'other terminal control sequences before the title remain invalid');
 assert.equal(wrappedCmdStartupIsAtPrompt({ ...titleRecord, ptyLastInputSeq: 1 }, titleRange), false, 'input invalidates startup-only proof');
 assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, { ...titleRange, text: titleFixture.replace('Administrator:  ', 'Administrator:\x1b[0m  ') }), false,
   'embedded terminal controls cannot be hidden inside the startup title');

@@ -1928,10 +1928,10 @@ export function wrappedCmdStartupIsAtPrompt(record: ManagedProcessRecord, range:
   // Only a controlled /D CMD startup, before any input, can establish this
   // exact prompt. Support both single-row and wrapped launch paths without
   // treating later arbitrary command output as a shell-completion signal.
-  // Elevated CMD can emit an OSC 0 window title before the startup banner.
-  // Only strip it at the beginning of this controlled startup transcript.
+  // Elevated CMD can emit harmless SGR/erase controls before its OSC 0 title.
+  // Only strip this ordered prefix at the start of the controlled transcript.
   const withoutControls = range.text
-    .replace(/^\x1B\]0;[\x20-\x7E]{0,256}\x07/, '')
+    .replace(/^(?:\x1B\[(?:0m|0K))*\x1B\]0;[\x20-\x7E]{0,256}\x07/, '')
     .replace(/\x1B\[(?:0m|0K|\?25[hl])/g, '');
   if (/[\r\n]/.test(withoutControls.replace(/\r\n/g, ''))) return false;
   const visible = withoutControls.replace(/\r\n/g, '\n');
