@@ -351,22 +351,32 @@ setInterval(()=>{if(fs.existsSync(dir+'/release-root'))process.exit(0);},20);set
   }, owner);
   let managedChildPid = 0;
   try {
-    const memory = await sampleManagedProcessMemory(config, {}, owner);
+    // Reproduce a bounded diagnostic timeout deterministically. Ownership and
+    // descendant cleanup must still work when memory measurement is unknown;
+    // process-root-memory-unit.mjs separately verifies the real native probe.
+    const originalExecFile = childProcess.execFile;
+    let memoryProbes = 0;
+    childProcess.execFile = function(executable, args, options, callback) {
+      if (!args?.some(value => String(value).includes('RelAiManagedRootMemoryV1'))) {
+        return originalExecFile.call(this, executable, args, options, callback);
+      }
+      memoryProbes += 1;
+      queueMicrotask(() => callback(Object.assign(new Error('Fixture memory probe timeout'), { code: 'ETIMEDOUT' }), '', ''));
+      return { kill() { return true; } };
+    };
+    syncBuiltinESMExports();
+    let memory;
+    try { memory = await sampleManagedProcessMemory(config, {}, owner); }
+    finally { childProcess.execFile = originalExecFile; syncBuiltinESMExports(); }
+    assert.equal(memoryProbes, 1);
     const measured = memory.roots.find(item => item.processId === managed.processId);
     assert.equal(measured.pid, managed.pid, 'memory sampling uses caller root rather than private controller PID');
-    if (measured.identityVerified) {
-      assert.equal(measured.measurementStatus, 'measured');
-      assert.ok(Number.isSafeInteger(measured.privateBytes));
-      assert.ok(Number.isSafeInteger(measured.workingSetBytes));
-    } else {
-      // This independent ownership fixture must not require the optional,
-      // two-second PowerShell memory probe to finish on a busy CI runner.
-      // The dedicated root-memory test verifies successful native measurements.
-      assert.equal(measured.reason, 'probe_failed_or_timed_out', JSON.stringify(measured));
-      assert.equal(measured.measurementStatus, 'unknown');
-      assert.equal(measured.privateBytes, null);
-      assert.equal(measured.workingSetBytes, null);
-    }
+    assert.equal(measured.identityVerified, false);
+    assert.equal(measured.reason, 'probe_failed_or_timed_out', JSON.stringify(measured));
+    assert.equal(measured.measurementStatus, 'unknown');
+    assert.equal(measured.privateBytes, null);
+    assert.equal(measured.workingSetBytes, null);
+    assert.equal(measured.sampledAt, null);
     await until(() => fs.existsSync(path.join(managedDir, 'child.json')));
     managedChildPid = JSON.parse(fs.readFileSync(path.join(managedDir, 'child.json'), 'utf8')).pid;
     fs.writeFileSync(path.join(managedDir, 'release-root'), '');
