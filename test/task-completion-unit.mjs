@@ -90,6 +90,20 @@ try {
   const plainEditTask = await callTool('relai_work', {
     action: 'begin', workspace: 'plain', bootstrap: 'none'
   }, { publicHttpOnly: true });
+  let durableBeginning;
+  const readDeadline = performance.now() + 500;
+  for (;;) {
+    try {
+      durableBeginning = withStateDatabase(readConfig(), db =>
+        db.prepare('SELECT payload FROM task_history WHERE id=?').get(plainEditTask.work_id),
+      { readonly: true });
+      break;
+    } catch (error) {
+      if ((Number(error?.errcode) & 0xff) !== 5 || performance.now() >= readDeadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+  }
+  assert.ok(durableBeginning, 'a successful begin must persist the work_id before another call can use it');
   await callTool('relai_edit', {
     workspace: 'plain', work_id: plainEditTask.work_id, path: 'src/index.js',
     content: 'console.log("plain updated");\n'

@@ -3,6 +3,7 @@ import { recordTaskIntegrityEvent } from './taskIntegrity.ts';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { getStateDir } from './statePaths.js';
 import { ensureActivityEventIdentity } from './taskEventIdentity.js';
 import { sanitizeDisplayText } from './taskObservability.js';
@@ -39,10 +40,24 @@ async function logAudit(config, event, options = {}) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] optional integrity enrichment:', error);
   }
   enqueueAuditWrite(auditPath, entry);
-  try {
-    recordTaskHistoryEvent(config, entry);
-  } catch (error) {
-    if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history audit projection:', error);
+  const project = () => recordTaskHistoryEvent(config, entry);
+  if (options.strictHistory === true) {
+    // A newly returned work_id must be recoverable on the very next call.
+    // A short WAL writer can transiently block its history projection.
+    const until = performance.now() + 500;
+    for (;;) {
+      try { project(); break; }
+      catch (error) {
+        const busy = (Number(error?.errcode) & 0xff) === 5 || error?.code === 'SQLITE_BUSY';
+        if (!busy || performance.now() >= until) throw error;
+        await delay(Math.min(25, Math.max(1, until - performance.now())));
+      }
+    }
+  } else {
+    try { project(); }
+    catch (error) {
+      if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history audit projection:', error);
+    }
   }
   return entry;
 }
@@ -52,7 +67,7 @@ function safeLogAudit(config, event, options = {}) {
     try {
       return await logAudit(config, event, options);
     } catch (error) {
-      if (options.strictIntegrity === true && /^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
+      if (options.strictHistory === true || options.strictIntegrity === true && /^TASK_INTEGRITY_/.test(String(error?.code || ''))) throw error;
       if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] audit write:', error);
       return null;
     }

@@ -457,7 +457,10 @@ function openStateDatabase(config: StateDatabaseConfig = {}, options: OpenStateD
     db.enableLoadExtension(false);
     db.exec('PRAGMA foreign_keys=ON');
     if (!readonly) {
-      db.exec('PRAGMA journal_mode=WAL');
+      // Reasserting WAL requires more locking than opening an existing WAL
+      // database. Only change its mode when migration actually needs it.
+      const mode = (db.prepare('PRAGMA journal_mode').get() as { journal_mode?: string } | undefined)?.journal_mode;
+      if (mode?.toLowerCase() !== 'wal') db.exec('PRAGMA journal_mode=WAL');
       db.exec('PRAGMA synchronous=NORMAL');
       ensureStateSchema(db, file);
       try { fs.chmodSync(file, 0o600); } catch {}

@@ -360,7 +360,8 @@ async function callToolObserved(name, args = {}, context = {}) {
       ms: Date.now() - started,
       ...extraAudit,
       ...(valueOk ? {} : { error: activityResult.error })
-    }, { strictIntegrity: Boolean(workId) && (!optionalIntegrity || operationName === OP.WORK_BEGIN), optionalIntegrity });
+    }, { strictIntegrity: Boolean(workId) && (!optionalIntegrity || operationName === OP.WORK_BEGIN),
+      strictHistory: operationName === OP.WORK_BEGIN, optionalIntegrity });
     const auditEntry = workId ? await auditPromise : null;
     refreshRequestTaskIntegrity(requestTaskContext, auditEntry);
     if (workId && evidenceDraft && auditEntry) {
