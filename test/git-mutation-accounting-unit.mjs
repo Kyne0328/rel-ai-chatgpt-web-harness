@@ -33,11 +33,12 @@ try {
   const budgets = buildGitBenchmarkLatencyBudgets(timings);
   assert.equal(budgets.every(item => item.passed), true);
   assert.equal(budgets.find(item => item.label === 'read-only wrapper').maximumMs, 180);
-  assert.equal(budgets.find(item => item.label === 'mutating wrapper').maximumMs, 280);
+  assert.equal(budgets.find(item => item.label === 'mutating wrapper').maximumMs, 304);
+  assert.equal(budgets.find(item => item.label === 'mutating wrapper').componentBaselineMs, timings.readOnlyMs + 2 * timings.dirtyV2Ms);
   assert.equal(buildGitBenchmarkLatencyBudgets({ ...timings, readOnlyMs: 180 })[2].passed, true);
   assert.equal(buildGitBenchmarkLatencyBudgets({ ...timings, readOnlyMs: 180.1 })[2].passed, false);
-  assert.equal(buildGitBenchmarkLatencyBudgets({ ...timings, mutatingMs: 280 })[3].passed, true);
-  assert.equal(buildGitBenchmarkLatencyBudgets({ ...timings, mutatingMs: 280.1 })[3].passed, false);
+  assert.equal(buildGitBenchmarkLatencyBudgets({ ...timings, mutatingMs: 304 })[3].passed, true);
+  assert.equal(buildGitBenchmarkLatencyBudgets({ ...timings, mutatingMs: 304.1 })[3].passed, false);
   for (const [field, index] of [['cleanV2Ms', 0], ['dirtyV2Ms', 1], ['readOnlyMs', 2], ['mutatingMs', 3]]) {
     const injected = buildGitBenchmarkLatencyBudgets({ ...timings, [field]: timings[field] + 200 });
     assert.equal(injected[index].passed, false, 'injected 200ms regression must fail the ' + field + ' gate without sleeping');

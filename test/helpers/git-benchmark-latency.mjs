@@ -21,8 +21,10 @@ function buildGitBenchmarkLatencyBudgets(metrics, wrapperOverheadMs = 150) {
       { rawStatusMs: metrics.dirtyRawMs, multiplier: 2, allowanceMs: 75 }),
     budget('read-only wrapper', metrics.readOnlyMs, metrics.rawSpawnMs, wrapperOverheadMs,
       { rawSpawnMs: metrics.rawSpawnMs, statusReads: 0 }),
-    budget('mutating wrapper', metrics.mutatingMs, metrics.rawSpawnMs + 2 * metrics.dirtyRawMs, wrapperOverheadMs,
-      { rawSpawnMs: metrics.rawSpawnMs, dirtyRawStatusMs: metrics.dirtyRawMs, statusReads: 2 })
+    // Read-only wrapper timing includes common dispatch. The mutation
+    // snapshots also parse status records, not just launch raw Git processes.
+    budget('mutating wrapper', metrics.mutatingMs, metrics.readOnlyMs + 2 * metrics.dirtyV2Ms, wrapperOverheadMs,
+      { readOnlyWrapperMs: metrics.readOnlyMs, dirtyParsedStatusMs: metrics.dirtyV2Ms, statusReads: 2 })
   ];
 }
 
