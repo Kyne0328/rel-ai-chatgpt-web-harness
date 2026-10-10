@@ -702,12 +702,9 @@ async function runProcess(command: string, args: readonly string[] = [], options
       rootExitConfirmed = true;
       reportPhase('exited');
       reportPhase('draining-output');
-      // Once the launched process exits, its own output is complete. A
-      // background descendant can still inherit these handles and keep Execa
-      // waiting for EOF forever. Resume any paused output first, give buffered
-      // data a short drain window, then detach only our read ends.
-      stdoutBackpressure.release();
-      stderrBackpressure.release();
+      // A process can exit while its stdout pipe still holds unread bytes.
+      // Keep backpressure active until those bytes drain; the bounded pipe
+      // grace period below still handles inherited open descriptors.
     }, () => { inheritedPipeDrain = true; });
     let result;
     let windowsTerminationOutcome: ProcessTreeTerminationResult | null = null;
@@ -1073,7 +1070,9 @@ function processOutputText(buffer: BoundedOutputBuffer, preserveWhitespace = fal
   return preserveWhitespace ? text : text.trim();
 }
 
-const OUTPUT_SPILL_HIGH_WATER_BYTES = 4 * 1024 * 1024;
+// Leave room below the writer's 4 MiB hard queue limit for a readable chunk
+// already in flight before pause() can take effect.
+const OUTPUT_SPILL_HIGH_WATER_BYTES = 2 * 1024 * 1024;
 const OUTPUT_SPILL_LOW_WATER_BYTES = 1024 * 1024;
 
 interface OutputBackpressureSource {

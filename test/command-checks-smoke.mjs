@@ -160,7 +160,14 @@ fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({
   // Output should be capped — well below 5 MB
   assert.ok(totalBytes < 2 * 1024 * 1024, `output should be truncated, got ${totalBytes} bytes`);
 
-  assert.equal(resultEntry.stdoutSpillTruncated, false, 'the actual producer must retain the complete oversized stream');
+  assert.equal(resultEntry.stdoutSpillTruncated, false,
+    `the actual producer must retain the complete oversized stream: ${JSON.stringify({
+      stdoutBytes: resultEntry.stdoutBytes,
+      stdoutOutputRef: resultEntry.stdoutOutputRef,
+      outputFinalizationTimedOut: resultEntry.outputFinalizationTimedOut,
+      outputFinalizationError: resultEntry.outputFinalizationError,
+      exitCode: resultEntry.exitCode
+    })}`);
   assert.ok(resultEntry.stdoutOutputRef, 'validation must return a real output recovery reference');
   const owner = outputSpillOwner({ workspace: workspace.alias });
   const retained = readOutputSpill(config, owner, resultEntry.stdoutOutputRef);
