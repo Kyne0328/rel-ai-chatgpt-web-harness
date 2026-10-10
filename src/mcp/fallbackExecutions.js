@@ -46,7 +46,7 @@ function activeFallbackWorkIds() {
     .map(record => record.workId))];
 }
 
-function startFallbackExecution({ config = null, workId = '', scopeId = '', noticeScope = '', tool, workspace = '', signature = '', deadlineAtMs = 0, run, persist = true, now = Date.now }) {
+function startFallbackExecution({ config = null, workId = '', scopeId = '', noticeScope = '', tool, workspace = '', signature = '', operationId = '', deadlineAtMs = 0, run, persist = true, now = Date.now }) {
   const work = String(workId || '').trim();
   const id = work || String(scopeId || '').trim();
   if (!id) throw new Error('Fallback execution requires a durable work_id or authorized workspace execution scope.');
@@ -79,7 +79,7 @@ function startFallbackExecution({ config = null, workId = '', scopeId = '', noti
   const startedAt = new Date(startedAtMs).toISOString();
   const controller = new AbortController();
   const record = {
-    operationId: `fallback_${crypto.randomUUID()}`,
+    operationId: operationId || `fallback_${crypto.randomUUID()}`,
     executionKey: id,
     workId: work,
     tool: String(tool || ''),

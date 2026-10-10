@@ -129,6 +129,53 @@ try {
     await flush;
   }
 
+  const busyAdmissionConfig = { ...config, stateDir: path.join(root, 'transient-busy-admission') };
+  const busyAdmissionId = 'transient-busy-task';
+  const busyAdmissionDirectory = history.getTaskHistoryDir(busyAdmissionConfig);
+  history.writeSession(busyAdmissionDirectory, { id: busyAdmissionId, status: 'planning',
+    workspace: 'app', principalFingerprint: scope, events: [] });
+  const originalBusyExec = DatabaseSync.prototype.exec;
+  let busyInjected = false;
+  let busyRuns = 0;
+  let releaseBusyHandler;
+  const heldBusyHandler = new Promise(resolve => { releaseBusyHandler = resolve; });
+  DatabaseSync.prototype.exec = function(sql, ...args) {
+    if (!busyInjected && sql === 'BEGIN IMMEDIATE') {
+      busyInjected = true;
+      const error = new Error('database is locked');
+      error.code = 'SQLITE_BUSY';
+      error.errcode = 5;
+      throw error;
+    }
+    return originalBusyExec.call(this, sql, ...args);
+  };
+  try {
+    const args = { workspace: 'app', work_id: busyAdmissionId, command: 'single admission after transient lock' };
+    const executeToolResult = async (_config, _name, _args, execution) => {
+      busyRuns++;
+      await heldBusyHandler;
+      return result({ work_id: busyAdmissionId, operationId: execution.fallbackOperationId });
+    };
+    const response = await handleTransportFallbackRequest(busyAdmissionConfig,
+      make('transient-busy-first', args, 'relai_exec'), { ...options, synchronousFallbackGraceMs: 0, executeToolResult });
+    const accepted = response.body.result.structuredContent;
+    assert.equal(busyInjected, true, 'the fixture must interrupt a real SQLite acceptance transaction');
+    assert.equal(accepted.status, 'running', JSON.stringify(accepted));
+    const retry = await handleTransportFallbackRequest(busyAdmissionConfig,
+      make('transient-busy-retry', args, 'relai_exec'), { ...options, synchronousFallbackGraceMs: 0, executeToolResult });
+    assert.equal(retry.body.result.structuredContent.operationId, accepted.operationId,
+      'retrying a transient write lock must not create a second operation');
+    releaseBusyHandler();
+    await tick();
+    assert.equal(busyRuns, 1, 'the handler must execute once, only after durable acceptance');
+    const stored = history.readSession(busyAdmissionDirectory, busyAdmissionId);
+    assert.equal(stored.backgroundOperations.filter(item => item.operationId === accepted.operationId).length, 1);
+    cases.push('transient SQLite busy during acceptance retries with one durable operation identity');
+  } finally {
+    releaseBusyHandler();
+    DatabaseSync.prototype.exec = originalBusyExec;
+  }
+
 
   const failedAdmissionConfig = { ...config, stateDir: path.join(root, 'failed-admission') };
   const failedId = 'failed-admission-task';

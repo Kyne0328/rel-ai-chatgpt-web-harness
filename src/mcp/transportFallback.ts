@@ -5,6 +5,8 @@ import {
   SERVER_INFO_META_KEY,
   fromJsonSchema
 } from '@modelcontextprotocol/server';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { combineAbortSignals } from '../abortSignals.js';
 import { withTaskHistoryPersistenceBarrier } from '../taskHistoryStore.ts';
@@ -238,10 +240,14 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
   const graceMs = Math.max(0, Number(options.synchronousFallbackGraceMs ?? DEFAULT_FALLBACK_GRACE_MS));
   let started;
   try {
+    // Retry transient WAL writer contention before execution, keeping the
+    // identity stable if the first attempt persisted a partial receipt.
+    const operationId = workId && options.persistFallback !== false ? `fallback_${randomUUID()}` : '';
     const admit = () => startFallbackExecution({
       config,
       workId,
       scopeId,
+      ...(operationId ? { operationId } : {}),
       noticeScope: principalFingerprint(options.principal),
       tool: name,
       workspace: String(args.workspace || ''),
@@ -258,9 +264,23 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
         message
       })
     });
-    started = workId && options.persistFallback !== false
-      ? await withTaskHistoryPersistenceBarrier(config, workId, admit, { signal: options.signal, deadlineAtMs })
-      : admit();
+    const retryUntil = performance.now() + 500;
+    for (;;) {
+      try {
+        started = workId && options.persistFallback !== false
+          ? await withTaskHistoryPersistenceBarrier(config, workId, admit, { signal: options.signal, deadlineAtMs })
+          : admit();
+        break;
+      } catch (error: any) {
+        const cause = error?.cause;
+        const busy = (Number(cause?.errcode) & 0xff) === 5 || cause?.code === 'SQLITE_BUSY';
+        if (error?.code !== 'FALLBACK_PERSISTENCE_FAILED' || error?.executed !== false || !busy
+          || performance.now() >= retryUntil || (deadlineAtMs > 0 && Date.now() >= deadlineAtMs)) throw error;
+        options.signal?.throwIfAborted();
+        await delay(Math.min(25, Math.max(1, retryUntil - performance.now())), undefined,
+          options.signal ? { signal: options.signal } : {});
+      }
+    }
   } catch (error: any) {
     return successResponse(message.id, toolResult({
       ok: false,
