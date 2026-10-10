@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
 import { WindowsProcessJob, prepareWindowsProcessJob, restoreWindowsProcessJob } from '../src/windowsProcessJob.ts';
-import { normalizeExecutionInvocation } from '../src/executionInvocation.ts';
+import { normalizeExecutionInvocation, resolveCommandCwd } from '../src/executionInvocation.ts';
 import { makeProcessEnvironment } from '../src/processEnvironment.js';
 import { runProcess, runOwnedReadOnlyProcess } from '../src/process.ts';
 import { hostResourceStats } from '../src/hostResourceScheduler.js';
@@ -25,6 +25,10 @@ assert.equal(process.platform, 'win32', 'This is a Windows-only acceptance execu
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-windows-bookkeeping-wrapper-'));
 const workspace = { alias: 'native-bookkeeping', path: path.join(root, 'repo') };
 fs.mkdirSync(workspace.path);
+// Git observations canonicalize cwd; Windows CI TEMP can use an 8.3 alias.
+const canonicalWorkspacePath = fs.realpathSync.native(workspace.path);
+assert.deepEqual(resolveCommandCwd(workspace, '.'), { absolutePath: canonicalWorkspacePath, relativePath: '.' });
+assert.throws(() => resolveCommandCwd(workspace, '..'), /cwd escapes the workspace/);
 childProcess.execFileSync(GIT_EXECUTABLE, ['init', '-q'], { cwd: workspace.path, stdio: 'ignore' });
 const config = { stateDir: path.join(root, 'state'), workspaces: { [workspace.alias]: { path: workspace.path, commands: {}, testCommands: {} } } };
 const run = handler => executeToolCall({
@@ -47,7 +51,7 @@ try {
       if (!intercepted && requestFlag >= 0) {
         const requestPath = args[requestFlag + 1];
         const request = JSON.parse(fs.readFileSync(requestPath, 'utf8'));
-        targetProbe = request.cwd === workspace.path && request.args.includes('status');
+        targetProbe = request.cwd === canonicalWorkspacePath && request.args.includes('status');
         if (targetProbe) {
           intercepted = true;
           if (phase === 'before-caller') fs.writeFileSync(path.join(path.dirname(requestPath), 'control.json'),
@@ -96,7 +100,7 @@ try {
     try {
       const request = JSON.parse(fs.readFileSync(path.join(this.directory, 'request.json'), 'utf8'));
       const receipt = JSON.parse(fs.readFileSync(path.join(this.directory, 'receipt.json'), 'utf8').replace(/^\uFEFF/, ''));
-      if (request.cwd === workspace.path && request.args.includes('status') && receipt.final && receipt.commandStarted) {
+      if (request.cwd === canonicalWorkspacePath && request.args.includes('status') && receipt.final && receipt.commandStarted) {
         uncertainProbeJob ||= this;
         if (this === uncertainProbeJob) return null;
       }

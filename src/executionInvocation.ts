@@ -85,9 +85,12 @@ function resolveCommandCwd(workspace: WorkspacePath, value: unknown, operationNa
     }
     throw error;
   }
-  if (!isPathInside(real, root)) throw new Error(`${operationName} cwd resolves outside the workspace: ${raw}`);
+  // The configured root can use a Windows 8.3 alias or junction while realpath
+  // resolves the candidate to its canonical spelling. Compare real paths.
+  const canonicalRoot = fs.realpathSync.native(root);
+  if (!isPathInside(real, canonicalRoot)) throw new Error(`${operationName} cwd resolves outside the workspace: ${raw}`);
   if (!fs.statSync(real).isDirectory()) throw new Error(`${operationName} cwd is not a directory: ${raw}`);
-  const relative = path.relative(root, real).replaceAll(path.sep, '/') || '.';
+  const relative = path.relative(canonicalRoot, real).replaceAll(path.sep, '/') || '.';
   return { absolutePath: real, relativePath: relative };
 }
 
