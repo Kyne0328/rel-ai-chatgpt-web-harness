@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readManagedProcess, startManagedProcess, stopManagedProcess, writeManagedProcess } from '../src/processManager.js';
+import { readManagedProcess, startManagedProcess, stopManagedProcess, wrappedCmdStartupIsAtPrompt, writeManagedProcess } from '../src/processManager.js';
 import { hostResourceStats } from '../src/hostResourceScheduler.js';
 import { WindowsProcessJob } from '../src/windowsProcessJob.ts';
 import { readWindowsProcessJobArtifacts } from '../src/windowsProcessJobArtifacts.js';
@@ -47,6 +47,26 @@ let processId = '';
 let selectedJob;
 const resourceBaseline = hostResourceStats().persistent.active;
 let verifiedCompanion;
+
+// Elevated Windows runners can prepend an OSC title to the exact CMD banner.
+const titleFixtureCwd = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\relai-process-pty-fixture\repo`;
+const titleFixture = '\x1b]0;Administrator:  \x07\x1b[0mMicrosoft Windows [Version 10.0.26100.33438]\x1b[0K\x1b[?25l\r\n'
+  + '(c) Microsoft Corporation. All rights reserved.\x1b[0K\r\n\x1b[0K\r\n'
+  + `${titleFixtureCwd}>\x1b[0K\x1b[?25h`;
+const titleRecord = {
+  ptyWrappedStartupEligible: true, ptyLastInputSeq: 0,
+  ptyLaunchCwd: titleFixtureCwd, ptyLaunchColumns: 80, columns: 80
+};
+const titleRange = {
+  text: titleFixture, offset: 0, retainedFromOffset: 0,
+  truncatedBefore: false, totalBytes: Buffer.byteLength(titleFixture)
+};
+assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, titleRange), true, 'exact elevated CMD startup prompt can retire');
+assert.equal(wrappedCmdStartupIsAtPrompt({ ...titleRecord, ptyLastInputSeq: 1 }, titleRange), false, 'input invalidates startup-only proof');
+assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, { ...titleRange, text: titleFixture.replace('Administrator:  ', 'Administrator:\x1b[0m  ') }), false,
+  'embedded terminal controls cannot be hidden inside the startup title');
+assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, { ...titleRange, text: `unexpected\r\n${titleFixture}` }), false,
+  'a later OSC title cannot disguise arbitrary preceding output as startup');
 
 async function startTarget(purpose) {
   const originalBind = WindowsProcessJob.prototype.bind;

@@ -1915,7 +1915,7 @@ function interactiveShellIsAtPrompt(record: ManagedProcessRecord): boolean {
   return wrappedCmdStartupIsAtPrompt(record, range);
 }
 
-function wrappedCmdStartupIsAtPrompt(record: ManagedProcessRecord, range: LogRange): boolean {
+export function wrappedCmdStartupIsAtPrompt(record: ManagedProcessRecord, range: LogRange): boolean {
   if (!record.ptyWrappedStartupEligible || record.ptyLastInputSeq !== 0
     || record.columns !== record.ptyLaunchColumns || range.offset !== 0
     || range.retainedFromOffset !== 0 || range.truncatedBefore
@@ -1928,7 +1928,11 @@ function wrappedCmdStartupIsAtPrompt(record: ManagedProcessRecord, range: LogRan
   // Only a controlled /D CMD startup, before any input, can establish this
   // exact prompt. Support both single-row and wrapped launch paths without
   // treating later arbitrary command output as a shell-completion signal.
-  const withoutControls = range.text.replace(/\x1B\[(?:0m|0K|\?25[hl])/g, '');
+  // Elevated CMD can emit an OSC 0 window title before the startup banner.
+  // Only strip it at the beginning of this controlled startup transcript.
+  const withoutControls = range.text
+    .replace(/^\x1B\]0;[\x20-\x7E]{0,256}\x07/, '')
+    .replace(/\x1B\[(?:0m|0K|\?25[hl])/g, '');
   if (/[\r\n]/.test(withoutControls.replace(/\r\n/g, ''))) return false;
   const visible = withoutControls.replace(/\r\n/g, '\n');
   if (!/^[\x20-\x7E\n]*$/.test(visible)) return false;
