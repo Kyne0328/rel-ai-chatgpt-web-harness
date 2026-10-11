@@ -220,7 +220,7 @@
     "globals": "^17.13.0",
     "knip": "^6.39.0",
     "p-retry": "^8.0.1",
-    "pixelmatch": "^7.2.0",
+    "pixelmatch": "^8.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "tailwindcss": "^4.3.3",
