@@ -31,7 +31,6 @@ const OPERATION_IDS = Object.freeze({
   CHANGES_CHECKPOINT: 'changes.checkpoint',
   CHANGES_REPLAY: 'changes.replay',
   CHANGES_RESTORE: 'changes.restore',
-  CHANGES_RESET: 'changes.reset',
   CHANGES_TIDY_PLAN: 'changes.tidy_plan',
   CHANGES_TIDY_RUN: 'changes.tidy_run',
   PUBLISH_COMMIT: 'publish.commit',

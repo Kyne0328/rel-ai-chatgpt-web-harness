@@ -25,11 +25,11 @@ import {
   validateJsonRpcRequestEnvelope,
   validJsonRpcId
 } from './protocol.js';
-import { createRelaiRequestStateCodec, openAiConversationId } from './context.js';
+import { openAiConversationId } from './context.js';
 import { serializeToolError } from '../tools/errors.js';
 import { toolArgumentError } from '../tools/validationGuidance.js';
 import { toolResult } from './results.js';
-import { catalogApprovalRequirement, getToolActionCatalog, resolveToolOperation, normalizePublicToolArguments, getCatalogAction } from '../tools/actionCatalog.js';
+import { getToolActionCatalog, resolveToolOperation, normalizePublicToolArguments, getCatalogAction } from '../tools/actionCatalog.js';
 import { getToolSchemas } from '../tools/schema.js';
 import { validateToolOutput } from '../tools/outputValidation.js';
 import { principalFingerprint, principalIdentity } from './principal.ts';
@@ -139,8 +139,7 @@ async function handleTransportFallbackRequest(config: any, message: any, options
 
 function shouldInterceptTool(definition: any, args: any = {}) {
   return definition?.behavior?.executionClass === 'background_fallback_eligible'
-    && definition?.behavior?.longRunning === true
-    && !catalogApprovalRequirement(definition.name, args || {});
+    && definition?.behavior?.longRunning === true;
 }
 
 function shouldUseResilientFallback(definition: any, args: any = {}) {
@@ -148,8 +147,7 @@ function shouldUseResilientFallback(definition: any, args: any = {}) {
   // compact status request into another background operation to be polled.
   if (definition?.operationName === 'work.status' && args?.detail !== 'full') return false;
   if (definition?.operationName === 'read' && args?.asResource === true) return false;
-  return TRANSPORT_RESILIENT_OPERATION_NAMES.has(String(definition?.operationName || ''))
-    && !catalogApprovalRequirement(definition.name, args || {});
+  return TRANSPORT_RESILIENT_OPERATION_NAMES.has(String(definition?.operationName || ''));
 }
 
 function transportToolDefinition(name: any, args: any = {}) {
@@ -434,8 +432,6 @@ async function executeToolResult(config: any, name: any, args: any, options: any
     name,
     args,
     context: transportToolContext(options),
-    approvalContext: options.approvalContext,
-    requestStateCodec: options.requestStateCodec || createRelaiRequestStateCodec(config, options.principal),
     validateOutput: (output: any) => validateToolOutput(config, name, args || {}, output)
   });
 }

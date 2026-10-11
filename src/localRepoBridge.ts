@@ -19,7 +19,7 @@ import { clampNumber } from "./bridge/limits.js";
 import { relaiVerify } from "./bridge/validation.js";
 import { relaiHttpProbe } from "./bridge/httpProbe.js";
 import { relaiDiff } from "./bridge/review.js";
-import { relaiResetWorkspace, relaiRestorePaths } from "./bridge/restore.js";
+import { relaiRestorePaths } from "./bridge/restore.js";
 import { workspaceTidyPlan, workspaceTidyRun as relaiWorkspaceTidyRun } from "./bridge/tidy.js";
 import { relaiApplyPatch, normalizeOpenAIPatchFormat } from "./bridge/patch.js";
 import { readProjectInstructions } from "./projectInstructions.js";
@@ -1275,4 +1275,4 @@ function sha256Text(text: string): string {
   return crypto.createHash("sha256").update(String(text), "utf8").digest("hex");
 }
 
-export { repoSnapshot, relaiReadAsync, workspaceWrite, workspaceReplace, relaiApplyPatch, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr, normalizeOpenAIPatchFormat, classifyStatusOwnership, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD, createStagedPayload, appendStagedPayload, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, workspaceTidyPlan, relaiWorkspaceTidyRun as workspaceTidyRun };
+export { repoSnapshot, relaiReadAsync, workspaceWrite, workspaceReplace, relaiApplyPatch, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr, normalizeOpenAIPatchFormat, classifyStatusOwnership, STAGED_WRITE_BYTE_THRESHOLD, STAGED_WRITE_LINE_THRESHOLD, createStagedPayload, appendStagedPayload, readStagedPayload, readStagedContent, clearStagedPayload, resolveStagedWriteId, workspaceTidyPlan, relaiWorkspaceTidyRun as workspaceTidyRun };

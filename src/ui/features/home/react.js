@@ -51,7 +51,7 @@ function ConnectionHero({ state }) {
       h('h2', { className: 'overview-title' }, state.title),
       state.description ? h('p', { className: 'overview-description' }, state.description) : null
     ),
-    h('a', { className: 'buttonlike secondary compact-button', href: routeMetadata('settings/connection').href }, 'View connection')
+    h('a', { className: 'buttonlike secondary compact-button', href: state.actionHref || routeMetadata('settings/connection').href }, state.actionLabel || 'View connection')
   );
 }
 

@@ -857,4 +857,4 @@ async function assertWorkspaceRepositoryRoot(workspace: RepoWorkspace, config: R
 }
 
 export {
-  gitOperationOptions, assertWorkspaceRepositoryRoot, completeStagedPaths, workspaceGitStatus, workspaceDirtyPaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr, classifyStatusOwnership, assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths };
+  gitOperationOptions, completeStagedPaths, workspaceGitStatus, workspaceDirtyPaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr, classifyStatusOwnership, assertPatchUpdateSafe, ensureGitRepo, inspectPatchPaths };

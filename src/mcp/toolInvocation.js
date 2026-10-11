@@ -1,5 +1,4 @@
 import { jsonBytes, responseByteLimit, utf8Head } from '../tools/responseBudget.js';
-import { requireApprovalIfNeeded } from './approval.ts';
 import { toolResult } from './results.js';
 import { outputSpillOwner, retainOutputStreams } from '../outputSpill.js';
 import { callTool } from '../tools.js';
@@ -9,7 +8,6 @@ import {
   registerFallbackCompletionDelivery
 } from './fallbackExecutions.js';
 import { principalFingerprint } from './principal.ts';
-import { browserHandoffOperationArgs, requestBrowserHandoff } from './browserHandoff.ts';
 
 async function invokeRelaiTool(options = {}) {
   const name = String(options.name || '');
@@ -27,33 +25,13 @@ async function invokeRelaiTool(options = {}) {
     }
   };
   try {
-    if (options.approvalContext && options.requestStateCodec) {
-      const approval = await requireApprovalIfNeeded(
-        name,
-        args,
-        options.context || {},
-        options.approvalContext,
-        options.requestStateCodec
-      );
-      if (approval) return approval;
-    }
-    if (name === 'relai_browser' && args.action === 'handoff' && options.approvalContext && options.requestStateCodec) {
-      return await requestBrowserHandoff({
-        args,
-        context: options.context || {},
-        rawContext: options.approvalContext,
-        codec: options.requestStateCodec,
-        execute: async action => {
-          const output = await callTool(name, browserHandoffOperationArgs(args, action), options.context || {});
-          await validateReturnedOutput(output);
-          return output;
-        }
-      });
-    }
     const output = await callTool(name, args, options.context || {});
     await validateReturnedOutput(output);
-    const identified = options.context?.fallbackOperationId && output && typeof output === 'object'
-      ? { ...output, operationId: options.context.fallbackOperationId } : output;
+    const browserOutput = name === 'relai_browser' && args.action === 'handoff' && output?.ok !== false
+      ? { ...output, userInputRequired: true, nextAction: 'Finish the sign-in or verification in the local Rel.AI Browser, then call relai_browser with action "resume" for this session.' }
+      : output;
+    const identified = options.context?.fallbackOperationId && browserOutput && typeof browserOutput === 'object'
+      ? { ...browserOutput, operationId: options.context.fallbackOperationId } : browserOutput;
     const enriched = enrichWithFallbackCompletions(options.config, name, args, identified, options.context || {});
     let result = toolResult(enriched, enriched?.ok === false, undefined, resultOptions);
     if (result.structuredContent?.truncated === true && result.structuredContent?.originalBytes > 0) {

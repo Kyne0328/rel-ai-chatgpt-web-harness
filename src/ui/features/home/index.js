@@ -1,5 +1,5 @@
 import { connectionStateFor, connectionSummary, hasObservedMcpConnection, hasObservedMcpToolCall } from '../../connection-state.js';
-import { getWorkspaceFilter } from '../../router.js';
+import { getWorkspaceFilter, routeHref } from '../../router.js';
 import { workSessionStateView } from '../../task-identity.js';
 
 export function overviewState(data = {}, workspaceFilter = getWorkspaceFilter()) {
@@ -18,20 +18,40 @@ export function overviewState(data = {}, workspaceFilter = getWorkspaceFilter())
     tasks,
     findings,
     effectiveEndpoint,
-    bridgeState: resolveBridgeState({ endpoint: effectiveEndpoint, workspaces, findings, connectionState: state })
+    bridgeState: resolveBridgeState({ endpoint: effectiveEndpoint, workspaces: allWorkspaces, findings, connectionState: state })
   };
 }
 
-export function resolveBridgeState({ findings = [], connectionState }) {
+export function resolveBridgeState({ findings = [], workspaces = [], connectionState }) {
   const connection = connectionSummary(connectionState);
-  if (connection.tone !== 'ok') {
+  const connectionReady = connectionState?.localService?.status === 'running'
+    && connectionState?.publicEndpoint?.status === 'available';
+  const connectionBanner = {
+    tone: connection.tone === 'bad' ? 'bad' : 'warn',
+    kicker: 'Connection status',
+    title: connection.title,
+    description: connection.message
+  };
+  if (connection.tone !== 'ok' && !connectionReady) return connectionBanner;
+  const unavailable = findings.filter(item => item?.severity === 'error' && item?.code === 'workspace_unavailable' && item.workspace);
+  if (unavailable.length) {
+    const finding = unavailable[0];
+    const folder = workspaces.find(item => item.alias === finding.workspace)?.path;
+    const missing = /path does not exist/i.test(String(finding.message || ''));
+    const detail = missing
+      ? `The configured folder${folder ? ` "${folder}"` : ''} no longer exists.`
+      : String(finding.message || 'The configured project folder cannot be opened.');
+    const others = unavailable.length > 1 ? ` ${unavailable.length - 1} other project${unavailable.length === 2 ? '' : 's'} also need attention.` : '';
     return {
-      tone: connection.tone === 'bad' ? 'bad' : 'warn',
-      kicker: 'Connection status',
-      title: connection.title,
-      description: connection.message
+      tone: 'bad',
+      kicker: 'Project needs attention',
+      title: `Project "${finding.workspace}" ${missing ? 'folder is missing' : 'is unavailable'}.`,
+      description: `${detail}${others} Fix the folder location or remove the project. The ChatGPT connection is still available.`,
+      actionLabel: 'Fix project',
+      actionHref: routeHref('workspaces', { workspace: finding.workspace, focus: 1 })
     };
   }
+  if (connection.tone !== 'ok') return connectionBanner;
   if (findings.some(item => item?.severity === 'error')) {
     return {
       tone: 'bad',

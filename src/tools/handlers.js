@@ -5,7 +5,7 @@ import { setTimeout as setNodeTimeout } from 'node:timers';
 
 import { resolveWorkspace } from '../config.js';
 import { principalFingerprint } from '../mcp/principal.ts';
-import { repoSnapshot, relaiReadAsync, workspaceTidyPlan, workspaceTidyRun, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiResetWorkspace, relaiGitCommit, relaiGitPush, relaiGitDraftPr } from '../localRepoBridge.js';
+import { repoSnapshot, relaiReadAsync, workspaceTidyPlan, workspaceTidyRun, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr } from '../localRepoBridge.js';
 import { planEdit } from '../executionPlanner.js';
 import { workspaceHistory } from './history.ts';
 import { relaiStatus } from './status.js';
@@ -201,7 +201,6 @@ const HANDLERS = Object.freeze({
   }),
   reviewReplay: inWorkspace((workspace, config, args) => replayReviewCheckpoint(workspace, config, args.checkpointId)),
   restorePaths: inWorkspace((workspace, config, args, context) => relaiRestorePaths(workspace, config, args, context)),
-  resetWorkspace: inWorkspace((workspace, config, args, context) => relaiResetWorkspace(workspace, config, args, context)),
   status: relaiStatus,
   operationResult: (config, args, context) => relaiStatus(config, { ...args, includeResult: true }, {
     ...context, resultWaitMs: args.waitMs ?? (context?.connector ? 5000 : 0)

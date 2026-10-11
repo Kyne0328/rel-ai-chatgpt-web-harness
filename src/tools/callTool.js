@@ -844,16 +844,15 @@ function signalRepositoryIntelligenceMutation(config, operationName, args, value
   const possibleChangedFiles = Array.isArray(value?.possibleChangedFiles)
     ? [...new Set(value.possibleChangedFiles.map(item => String(item || '').trim().replaceAll('\\', '/')).filter(Boolean))]
     : [];
-  const broadMutation = operationName === OP.CHANGES_RESET && (value?.ok !== false || uncertainMutation);
   const targetedMutation = changedFiles.length > 0
     && [OP.EDIT, OP.EXEC, OP.CHANGES_TIDY_RUN].includes(operationName);
   const restoreMutation = operationName === OP.CHANGES_RESTORE && value?.ok !== false
     ? [...new Set((Array.isArray(args?.paths) ? args.paths : []).map(item => String(item || '').trim().replaceAll('\\', '/')).filter(Boolean))]
     : [];
-  if (!broadMutation && !targetedMutation && !restoreMutation.length && !uncertainMutation) return;
+  if (!targetedMutation && !restoreMutation.length && !uncertainMutation) return;
   try {
     const workspace = resolveWorkspace(config, alias);
-    const mutationPaths = broadMutation || (uncertainMutation && !possibleChangedFiles.length && !changedFiles.length)
+    const mutationPaths = uncertainMutation && !possibleChangedFiles.length && !changedFiles.length
       ? [] : [...new Set([...changedFiles, ...possibleChangedFiles, ...restoreMutation])];
     repositoryIntelligence.noteMutation(workspace, config, mutationPaths);
     invalidateRepositoryTopology(workspace.path, mutationPaths);

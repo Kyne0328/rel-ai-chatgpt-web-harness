@@ -3,7 +3,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   BAGGAGE_META_KEY,
-  createRequestStateCodec,
   CLIENT_CAPABILITIES_META_KEY,
   CLIENT_INFO_META_KEY,
   PROTOCOL_VERSION_META_KEY,
@@ -66,14 +65,6 @@ function httpHeaders(request) {
   return result;
 }
 
-function createRelaiRequestStateCodec(config, principal) {
-  return createRequestStateCodec({
-    key: requestStateKey(config),
-    ttlSeconds: 10 * 60,
-    bind: context => `${context?.mcpReq?.method || ''}\0${principalIdentity(principal || context?.principal || context?.http?.authInfo)}`
-  });
-}
-
 function requestStateKey(config) {
   const explicit = String(process.env.REL_AI_REQUEST_STATE_KEY || '').trim();
   if (Buffer.byteLength(explicit, 'utf8') >= 32) return explicit;
@@ -92,4 +83,4 @@ function objectValue(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
 
-export { SERVER_INSTANCE_ID, createRelaiRequestStateCodec, openAiConversationId, requestStateKey, toolContext };
+export { SERVER_INSTANCE_ID, openAiConversationId, requestStateKey, toolContext };

@@ -73,6 +73,9 @@ A daily cron runs at 00:15 UTC and writes a small aggregate snapshot to `daily_m
 - `platform`
 - `architecture`
 - `ingest_token_hash`
+- `country` — an approximate two-letter country code from Cloudflare request metadata, or `ZZ` when unknown. It is never sent by the desktop.
+
+Country is derived by the Worker from Cloudflare's request geolocation, not from a client-supplied header or device location. It may reflect a VPN or proxy rather than where the person lives. Existing rows become `Unknown` after the migration and acquire a country only on a subsequent successful presence request; unknown later requests do not erase the last known country. IP addresses, cities, and coordinates are not stored in D1.
 
 Rows are removed after 400 days without presence. `daily_metrics` stores aggregate product trends and is retained for 730 days:
 
@@ -106,6 +109,8 @@ Run focused telemetry tests before the cutover:
 npm run telemetry:test
 ```
 
+For the country reporting update, apply migration `0004_installation_country.sql` **before** deploying the updated Worker; the new Worker expects the `country` column. The presence payload remains schema v1 and older reporting clients do not need to update solely to provide country metadata. Running clients that have never reported, including legacy builds without the reporter, still cannot be counted.
+
 Deploy only at the server-cutover stage:
 
 ```bash
@@ -134,7 +139,7 @@ The production username is `admin`. The password is independent from Axiom. New 
 
 Signing in sends the password only to `POST /api/v1/admin/login`. A successful login creates an expiring server-side session and sets an `HttpOnly` cookie, so the page does not turn the password into a reusable browser token or persist a Basic authorization value in JavaScript storage. Selecting **Keep me signed in for 7 days** gives the cookie a seven-day lifetime; otherwise it is a browser-session cookie with a server-side 12-hour ceiling. `POST /api/v1/admin/logout` revokes the current session.
 
-The admin page shows the retained installation registry, installations seen in rolling 1/7/30-day windows, rolling new-install counts, version adoption, platforms, and CPU architectures. These are service-presence measurements, not DAU/WAU/MAU product-engagement metrics. The daily chart contains rolling-window snapshots captured at 00:15 UTC. Diagnostic trace exploration stays in Axiom.
+The admin page shows the retained installation registry, installations seen in rolling 1/7/30-day windows, rolling new-install counts, version adoption, all three supported platforms (including zero-reporting platforms), CPU architectures, and approximate countries. These are service-presence measurements, not DAU/WAU/MAU product-engagement metrics. The daily chart contains rolling-window snapshots captured at 00:15 UTC. Diagnostic trace exploration stays in Axiom.
 
 ## Retention
 

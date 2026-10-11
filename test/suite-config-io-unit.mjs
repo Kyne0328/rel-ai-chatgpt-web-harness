@@ -692,7 +692,7 @@ async function case_restore_contract_unit() {
     const { execFileSync } = __m4;
   
     const __m5 = await import("../src/bridge/restore.js");
-    const { relaiResetWorkspace, relaiRestorePaths } = __m5;
+    const { relaiRestorePaths } = __m5;
   
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-restore-contract-'));
   const repo = path.join(temp, 'repo');
@@ -729,23 +729,13 @@ async function case_restore_contract_unit() {
     assert.equal(read('tracked.txt'), 'saved\n');
     assert.equal(fs.existsSync(path.join(repo, 'untracked.txt')), true, 'scoped restore must not remove untracked files');
   
-    write('tracked.txt', 'changed again\n');
-    const trackedReset = await relaiResetWorkspace(workspace, {}, {});
-    assert.equal(trackedReset.ok, true);
-    assert.equal(trackedReset.removeUntracked, false);
-    assert.equal(read('tracked.txt'), 'saved\n');
-    assert.equal(fs.existsSync(path.join(repo, 'untracked.txt')), true, 'tracked-only reset must leave untracked files intact');
-  
-    write('tracked.txt', 'changed for clean\n');
-    write('nested/generated.txt', 'remove\n');
-    const cleanReset = await relaiResetWorkspace(workspace, {}, { removeUntracked: true });
-    assert.equal(cleanReset.ok, true);
-    assert.equal(cleanReset.removeUntracked, true);
-    assert.equal(read('tracked.txt'), 'saved\n');
-    assert.equal(fs.existsSync(path.join(repo, 'untracked.txt')), false);
-    assert.equal(fs.existsSync(path.join(repo, 'nested')), false);
-  
-    console.log('Restore contract passed for scoped restore and approval-owned workspace reset semantics.');
+    await assert.rejects(
+      () => relaiRestorePaths(workspace, {}, { paths: ['*'] }),
+      /literal file paths/,
+      'scoped restore must never expand to the entire workspace'
+    );
+    assert.equal(fs.existsSync(path.join(repo, 'untracked.txt')), true);
+    console.log('Restore contract passed for scoped literal paths.');
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

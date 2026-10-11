@@ -35,6 +35,10 @@ Do not invoke specialists ceremonially. They return conclusions to this workflow
 
 `relai_edit` changes repository files. One-shot tests, builds, linters, source checks, and release gates use `relai_exec` or `relai_validate`; `relai_process` is only for persistent or interactive programs. Use `relai_ui` for local browser-rendered QA and `relai_changes` for scoped review/recovery. Exact action contracts live at `relai://server/tool-surface`; do not copy full schemas or hard-coded tool counts into skills.
 
+## User decisions in ChatGPT
+
+When a workflow genuinely needs several independent user decisions before proceeding, present a compact native ChatGPT form if the host supports one. Keep questions specific to the current blocker, make optional answers optional, and use submitted answers to continue the same `work_id`. For a single missing detail, ask one conversational question instead. Never request credentials or secrets through workflow questionnaires; use the existing browser handoff. Native ChatGPT forms are host-owned UI, not an MCP feature Rel.AI can force or render. Do not create a dashboard duplicate or invent an MCP input request solely to influence presentation.
+
 ## Approved plan execution
 
 Continue through ordinary task boundaries without asking for status confirmation. Mark steps complete only when their completion conditions are met. Stop only for a real blocker, material design change, required user input, or an external/manual-only step.

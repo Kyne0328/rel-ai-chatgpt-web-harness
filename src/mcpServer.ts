@@ -1,6 +1,6 @@
 import { McpServer, ResourceTemplate, fromJsonSchema } from '@modelcontextprotocol/server';
 import { readConfig } from './config.js';
-import { createRelaiRequestStateCodec, SERVER_INSTANCE_ID, toolContext } from './mcp/context.js';
+import { SERVER_INSTANCE_ID, toolContext } from './mcp/context.js';
 import {
   MCP_LEGACY_PROTOCOL_VERSIONS,
   MCP_PROTOCOL_VERSION
@@ -37,7 +37,6 @@ function createRelaiMcpServer(options: RelaiMcpServerOptions = {}): McpServer {
   const definitions = PUBLIC_TOOL_SCHEMAS;
   const surface = getToolSurfaceManifest(config);
   const legacyCompatibility = options.legacyCompatibility === true;
-  const requestStateCodec = createRelaiRequestStateCodec(config, options.principal);
   const capabilities = {
     tools: {},
     resources: {},
@@ -70,15 +69,9 @@ function createRelaiMcpServer(options: RelaiMcpServerOptions = {}): McpServer {
       'resources/list': { ttlMs: 15000, cacheScope: 'private' },
       'resources/read': { ttlMs: 5000, cacheScope: 'private' }
     },
-    inputRequired: {
-      maxRounds: 4,
-      roundTimeoutMs: 10 * 60 * 1000,
-      legacyShim: legacyCompatibility
-    },
-    requestState: { verify: requestStateCodec.verify }
   });
 
-  for (const definition of definitions) registerTool(server, config, definition, requestStateCodec, options);
+  for (const definition of definitions) registerTool(server, config, definition, options);
   for (const resource of listResources(config).resources) {
     server.registerResource(resource.name, resource.uri, {
       description: resource.description,
@@ -105,7 +98,6 @@ function registerTool(
   server: any,
   config: Record<string, unknown>,
   definition: (typeof PUBLIC_TOOL_SCHEMAS)[number],
-  requestStateCodec: any,
   options: RelaiMcpServerOptions
 ): void {
   server.registerTool(definition.name, TOOL_REGISTRATIONS.get(definition.name), async (args: Record<string, unknown> | undefined, context: any) => {
@@ -116,8 +108,6 @@ function registerTool(
       name: definition.name,
       args: input,
       context: toolContext(context, options),
-      approvalContext: context,
-      requestStateCodec,
       validateOutput: (output: unknown) => validateToolOutput(config, definition.name, input, output)
     });
   });

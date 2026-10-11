@@ -26,8 +26,7 @@ const pendingBaselineCaptures = new Map<string, Promise<IntegrityAuthority | nul
 const CODE_MUTATING_TOOLS = new Set<string>([
   OP.EDIT,
   OP.CHANGES_TIDY_RUN,
-  OP.CHANGES_RESTORE,
-  OP.CHANGES_RESET
+  OP.CHANGES_RESTORE
 ]);
 const REPOSITORY_RECONCILE_TOOLS = new Set<string>([
   OP.VALIDATE_CHECKS,

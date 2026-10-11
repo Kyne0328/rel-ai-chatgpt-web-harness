@@ -29,6 +29,28 @@ const errorState = resolveBridgeState({
 });
 assert.equal(errorState.tone, 'bad', 'error health findings must still block readiness');
 assert.equal(errorState.kicker, 'Needs attention');
+const missingProjectState = resolveBridgeState({
+  workspaces: [{ alias: 'deleted-project', path: 'C:/projects/deleted-project' }],
+  findings: [{ severity: 'error', code: 'workspace_unavailable', workspace: 'deleted-project', message: "Workspace 'deleted-project' path does not exist: C:/projects/deleted-project" }],
+  connectionState: readyConnectionState
+});
+assert.equal(missingProjectState.tone, 'bad');
+assert.match(missingProjectState.title, /deleted-project.*folder is missing/);
+assert.match(missingProjectState.description, /C:\/projects\/deleted-project/);
+assert.match(missingProjectState.description, /connection is still available/i);
+assert.equal(missingProjectState.actionLabel, 'Fix project');
+assert.equal(missingProjectState.actionHref, '#workspaces?workspace=deleted-project&focus=1');
+const activeConnectionProjectState = resolveBridgeState({
+  workspaces: [{ alias: 'deleted-project', path: 'C:/projects/deleted-project' }],
+  findings: [{ severity: 'error', code: 'workspace_unavailable', workspace: 'deleted-project', message: 'path does not exist' }],
+  connectionState: { ...readyConnectionState, mcpClient: { status: 'active' } }
+});
+assert.equal(activeConnectionProjectState.actionLabel, 'Fix project', 'active requests must not hide project folder failures');
+const unreachableConnectionState = resolveBridgeState({
+  findings: [{ severity: 'error', code: 'workspace_unavailable', workspace: 'deleted-project', message: 'path does not exist' }],
+  connectionState: { ...readyConnectionState, publicEndpoint: { status: 'unavailable' } }
+});
+assert.match(unreachableConnectionState.title, /connection unavailable/i, 'connection failure must not be hidden by a missing project');
 assert.equal(overviewWorkspaceStatus({ alias: 'app' }, [{ workspace: 'app', severity: 'warning' }]), 'ready');
 assert.equal(overviewWorkspaceStatus({ alias: 'app' }, [{ workspace: 'app', severity: 'error' }]), 'needs attention');
 

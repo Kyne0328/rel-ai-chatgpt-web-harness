@@ -1,5 +1,3 @@
-import type { ApprovalRequirement } from './authorization.ts';
-
 export interface ToolAction {
   readonly publicTool: string;
   readonly action: string;
@@ -17,6 +15,5 @@ export interface ToolAction {
   readonly dashboard: Readonly<Record<string, unknown>>;
   readonly groups: readonly string[];
   readonly capability: string;
-  readonly approval: ((args: Record<string, unknown>) => ApprovalRequirement) | null;
   readonly handlerName: string;
 }

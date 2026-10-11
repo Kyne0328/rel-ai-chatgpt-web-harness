@@ -18,7 +18,7 @@ function debugSwallow(context, error) {
 }
 
 /** @type {Readonly<Record<string, AuditEnricher>>} */
-const CODE_MUTATING_TOOLS = new Set([OP.EDIT, OP.CHANGES_TIDY_RUN, OP.CHANGES_RESTORE, OP.CHANGES_RESET]);
+const CODE_MUTATING_TOOLS = new Set([OP.EDIT, OP.CHANGES_TIDY_RUN, OP.CHANGES_RESTORE]);
 
 const AUDIT_ENRICHERS = Object.freeze({
   edit: enrichEditAudit,

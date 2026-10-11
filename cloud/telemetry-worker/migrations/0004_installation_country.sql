@@ -1,0 +1,1 @@
+ALTER TABLE installations ADD COLUMN country TEXT NOT NULL DEFAULT 'ZZ';

@@ -4,13 +4,13 @@
 
 Work only inside an authorized configured workspace. Use `work_id` only when behavior genuinely depends on durable task identity or when its ownership/recovery benefits are useful. Do not create or resurrect a task merely to edit, execute, validate, observe, transfer an artifact, or access a resource when the public contract supports workspace/resource scope. Inspect relevant files before editing. Treat pre-existing changes as user-owned unless the task explicitly includes them. Use bounded reads, outputs, patches, and process logs.
 
-## Approval-gated operations
+## Authorization
 
-Never bypass or simulate approval. Preserve the signed request state and retry only with the accepted response. Native approval remains required for workspace reset and real Git push. Local commits use their explicit path/addAll/sensitive-authorization contract and must not gain a second approval prompt without a demonstrated risk that the existing boundary does not cover.
+Never bypass or simulate user consent. Workspace-wide reset and clearing the saved browser profile are not exposed through MCP because ChatGPT Web cannot render their former native approval flow. Do not substitute a conversational confirmation for authorization. Git push requires the `git:publish` client grant; local commits use their explicit path/addAll/sensitive-authorization contract without a second approval prompt.
 
 ## Destructive changes
 
-Prefer focused edits or `relai_changes` action `restore` for listed tracked paths. Use reset only when the requested scope is the entire workspace. `removeUntracked:true` broadens reset to remove untracked files and directories; the native reset approval must bind that choice. Do not add or ask for model-supplied magic confirmation strings as duplicate consent. Review existing uncommitted changes first.
+Prefer focused edits or `relai_changes` action `restore` for listed tracked paths. Workspace-wide reset is no longer an MCP action; do not recreate it through a command as a shortcut around removed approval. Review existing uncommitted changes first.
 
 ## Command execution
 

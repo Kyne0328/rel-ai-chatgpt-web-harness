@@ -4,6 +4,7 @@ This Cloudflare Worker is the public telemetry edge for official Rel.AI builds.
 
 - `POST /api/v1/installation/presence` accepts the mandatory privacy-bounded installation presence event. Official clients authenticate with a random installation-scoped bearer credential; D1 stores only its one-way hash.
 - `POST /v1/traces` accepts authenticated optional OTLP diagnostic batches and proxies them to Axiom without exposing the Axiom credential to desktop clients.
+- The Worker records a coarse country code from Cloudflare request geolocation on presence (or `ZZ` for Unknown) without collecting client location or persisting IP addresses. Run D1 migration `0004_installation_country.sql` before deploying this Worker revision.
 - `GET /admin` is the private product-analytics surface. Sign in with username `admin`; the password hash and salt are Cloudflare Worker secrets and are independent from Axiom credentials.
 - `GET /health` reports whether D1 is reachable.
 - A daily cron prunes expired telemetry state and stores small rolling-window aggregate snapshots for trend history.

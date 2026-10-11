@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 
 import telemetryWorker, {
   adminHtml,
+  aggregateSummary,
   axiomTraceUrl,
   constantTimeEqual,
   hashAdminPassword,
@@ -33,6 +34,7 @@ assert.deepEqual(validatePresence(valid), {
   }
 });
 assert.equal(validatePresence({ ...valid, machineName: 'private-host' }).ok, false, 'presence schema must reject unexpected fields');
+assert.equal(validatePresence({ ...valid, country: 'US' }).ok, false, 'clients cannot submit or override their own country');
 assert.equal(validatePresence({ ...valid, installationId: 'not-a-uuid' }).ok, false);
 assert.equal(validatePresence({ ...valid, version: '../../private' }).ok, false);
 assert.equal(validatePresence({ ...valid, platform: 'unknown' }).ok, false);
@@ -134,15 +136,15 @@ const telemetryDb = {
     }
     if (sql.includes('UPDATE installations\n       SET last_seen_at')) {
       return {
-        bind(lastSeen, currentVersion, platform, architecture, ingestTokenHash, id) {
-          return { run: async () => { const current = installations.get(id) || {}; installations.set(id, { ...current, last_seen_at: lastSeen, current_version: currentVersion, platform, architecture, ingest_token_hash: ingestTokenHash }); return { success: true }; } };
+        bind(lastSeen, currentVersion, platform, architecture, country, ingestTokenHash, id) {
+          return { run: async () => { const current = installations.get(id) || {}; installations.set(id, { ...current, last_seen_at: lastSeen, current_version: currentVersion, platform, architecture, country, ingest_token_hash: ingestTokenHash }); return { success: true }; } };
         }
       };
     }
     if (sql.includes('INSERT INTO installations')) {
       return {
-        bind(id, firstSeen, lastSeen, firstVersion, currentVersion, platform, architecture, ingestTokenHash) {
-          return { run: async () => { installations.set(id, { last_seen_at: lastSeen, current_version: currentVersion, platform, architecture, ingest_token_hash: ingestTokenHash, first_seen_at: firstSeen, first_version: firstVersion }); return { success: true }; } };
+        bind(id, firstSeen, lastSeen, firstVersion, currentVersion, platform, architecture, country, ingestTokenHash) {
+          return { run: async () => { installations.set(id, { last_seen_at: lastSeen, current_version: currentVersion, platform, architecture, country, ingest_token_hash: ingestTokenHash, first_seen_at: firstSeen, first_version: firstVersion }); return { success: true }; } };
         }
       };
     }
@@ -184,6 +186,7 @@ assert.ok(oversizedPulls <= 5, 'the 4 KiB presence limit must prevent reading th
 const enrolled = await telemetryWorker.fetch(new Request(presenceUrl, { method: 'POST', headers: presenceAuth, body: JSON.stringify(valid) }), telemetryEnv);
 assert.equal(enrolled.status, 202);
 assert.equal(installations.get(valid.installationId).ingest_token_hash, await hashIngestToken(ingestToken));
+assert.equal(installations.get(valid.installationId).country, 'ZZ', 'missing edge geolocation must retain Unknown rather than trusting client location');
 const presenceBytes = new TextEncoder().encode(JSON.stringify(valid));
 let presenceOffset = 0;
 const fragmentedPresence = new ReadableStream({
@@ -196,6 +199,28 @@ const fragmentedPresence = new ReadableStream({
 assert.equal((await telemetryWorker.fetch(new Request(presenceUrl, {
   method: 'POST', headers: presenceAuth, body: fragmentedPresence, duplex: 'half'
 }), telemetryEnv)).status, 202, 'bounded streaming reads must retain fragmented valid request bodies');
+const geoRequest = (body, country, extraHeaders = {}) => {
+  const request = new Request(presenceUrl, {
+    method: 'POST', headers: { ...presenceAuth, ...extraHeaders }, body: JSON.stringify(body)
+  });
+  if (country) Object.defineProperty(request, 'cf', { value: { country } });
+  return request;
+};
+const enriched = await telemetryWorker.fetch(geoRequest(valid, 'PH'), telemetryEnv);
+assert.equal(enriched.status, 202);
+assert.equal((await enriched.json()).updated, true, 'new country metadata must enrich existing installations even within the normal presence window');
+assert.equal(installations.get(valid.installationId).country, 'PH');
+const spoofed = await telemetryWorker.fetch(geoRequest(valid, '', { 'cf-ipcountry': 'US' }), telemetryEnv);
+assert.equal(spoofed.status, 202);
+assert.equal(installations.get(valid.installationId).country, 'PH', 'client-supplied country headers must not override trusted edge geolocation');
+const mac = { ...valid, installationId: '550e8400-e29b-41d4-a716-446655440001', platform: 'darwin', arch: 'arm64' };
+const linux = { ...valid, installationId: '550e8400-e29b-41d4-a716-446655440002', platform: 'linux' };
+assert.equal((await telemetryWorker.fetch(geoRequest(mac, 'us'), telemetryEnv)).status, 202);
+assert.equal(installations.get(mac.installationId).country, 'US');
+assert.equal(installations.get(mac.installationId).platform, 'darwin');
+assert.equal((await telemetryWorker.fetch(geoRequest(linux, 'T1'), telemetryEnv)).status, 202);
+assert.equal(installations.get(linux.installationId).country, 'ZZ', 'Cloudflare non-country sentinel must remain Unknown');
+
 const rejectedPresence = await telemetryWorker.fetch(new Request(presenceUrl, {
   method: 'POST', headers: { ...presenceAuth, authorization: 'Bearer wrong-credential-that-is-long-enough-1234567890' }, body: JSON.stringify(valid)
 }), telemetryEnv);
@@ -255,6 +280,27 @@ try {
   globalThis.fetch = originalFetch;
 }
 
+const summary = await aggregateSummary({
+  prepare(sql) { return { sql }; },
+  async batch(statements) {
+    assert.equal(statements.length, 6, 'summary must retain history and add only one country aggregation');
+    assert.match(statements[4].sql, /GROUP BY country/);
+    return [
+      { results: [{ total: 3, active_1d: 2 }] },
+      { results: [{ name: '1.2.0', count: 3 }] },
+      { results: [{ name: 'win32', count: 2 }, { name: 'darwin', count: 1 }] },
+      { results: [{ name: 'x64', count: 2 }, { name: 'arm64', count: 1 }] },
+      { results: [{ name: 'PH', count: 2 }, { name: 'ZZ', count: 1 }] },
+      { results: [] }
+    ];
+  }
+});
+assert.deepEqual(summary.platforms, [
+  { name: 'win32', count: 2 }, { name: 'darwin', count: 1 }, { name: 'linux', count: 0 }
+], 'all supported platforms must appear even when zero installations have reported');
+assert.deepEqual(summary.countries, [{ name: 'PH', count: 2 }, { name: 'ZZ', count: 1 }]);
+assert.equal(summary.totals.installations, 3);
+
 const retentionStatements = [];
 await pruneRetainedTelemetry({
   batch: async statements => { retentionStatements.push(...statements); return []; },
@@ -275,6 +321,9 @@ assert.match(generatedAdminHtml, /autocomplete="current-password"/);
 assert.match(generatedAdminHtml, /\/api\/v1\/admin\/login/);
 assert.match(generatedAdminHtml, /New Installs · Last 24h/);
 assert.match(generatedAdminHtml, /Presence Recency Ratio/);
+assert.match(generatedAdminHtml, /id="list-countries"/);
+assert.match(generatedAdminHtml, /id="search-countries"/);
+assert.match(generatedAdminHtml, /Last known request country/);
 assert.doesNotMatch(generatedAdminHtml, /DAU \/ MAU/);
 assert.doesNotMatch(generatedAdminHtml, /sessionStorage/);
 assert.doesNotMatch(generatedAdminHtml, /headers:\s*\{\s*authorization:/);

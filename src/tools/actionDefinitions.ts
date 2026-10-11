@@ -1,4 +1,3 @@
-import type { ApprovalRequirement } from '../contracts/authorization.ts';
 import type { JsonSchema, ToolDefinitionMetadata, ToolGroup } from '../../types/boundaries.d.ts';
 import { publicEditInputSchema, publicExecInputSchema, publicProcessInputSchema } from './publicOperationSchemas.js';
 import { ACTION_REGISTRY as RAW_ACTION_REGISTRY, OPERATION_REGISTRY as RAW_OPERATION_REGISTRY } from './actionRegistry.js';
@@ -44,7 +43,6 @@ type ActionMapping = Readonly<{
   operationName: string;
   keepAction?: boolean;
   capability?: string;
-  approval?: ((args: Record<string, unknown>) => ApprovalRequirement) | null;
   behavior?: Partial<ToolBehavior> | null;
   publicContract?: PublicActionContractInput | null;
 }>;
@@ -95,10 +93,10 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.PROCESS_STOP, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
   OP.VALIDATE_DIAGNOSTICS, OP.CHANGES_TIDY_RUN, OP.VALIDATE_CHECKS, OP.CHANGES_RESTORE,
-  OP.CHANGES_RESET, OP.EDIT
+  OP.EDIT
 ]);
 const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
-  ...READ_ONLY_TOOLS, OP.PROCESS_STOP, OP.CHANGES_RESTORE, OP.CHANGES_RESET,
+  ...READ_ONLY_TOOLS, OP.PROCESS_STOP, OP.CHANGES_RESTORE,
   OP.WORK_PLAN, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
 ]);
 const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
@@ -235,7 +233,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_browser', title: 'Use Local Browser',
-    description: 'Local browser for localhost/LAN/intranet/VPN, machine-authenticated sessions, and workspace file transfer. Persistent profile reuses sign-ins. profile:ephemeral is private. handoff lets the user enter passwords, MFA, CAPTCHA, or private input. resume returns control. clear_profile removes saved site data for this client. Use semantic snapshots for content, layout for geometry/overflow, screenshots for pixels. Public web stays host-owned.',
+    description: 'Local browser for localhost/LAN/intranet/VPN, machine-authenticated sessions, and workspace file transfer. Persistent profile reuses sign-ins. profile:ephemeral is private. handoff lets the user enter passwords, MFA, CAPTCHA, or private input. resume returns control. Use semantic snapshots for content, layout for geometry/overflow, screenshots for pixels. Public web stays host-owned.',
     annotations: annotations(false, true, false, true), dashboard: { capabilities: ['execute'] }
   },
   {

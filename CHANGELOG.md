@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Remove unsupported MCP elicitation workflows from the public connector.** ChatGPT Web cannot render the native approval requests; workspace-wide reset and browser-profile clearing are no longer advertised or callable through the MCP tool surface rather than silently bypassing approval. Browser sign-in, MFA and CAPTCHA handoff now use the local-browser control and explicit `resume` path without MCP `input_required` or obsolete request-state plumbing. Host-native ChatGPT question forms remain available independently.
+
 ## [1.2.0] — 2026-10-06
 
 ### Multiple ChatGPT accounts

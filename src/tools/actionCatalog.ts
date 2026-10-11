@@ -1,5 +1,4 @@
 import { toolArgumentError } from './validationGuidance.js';
-import type { ApprovalRequirement } from '../contracts/authorization.ts';
 import {
   getCatalogToolDefinition,
   getCatalogToolDefinitions,
@@ -10,7 +9,7 @@ import {
 import type { ActionMapping, ActionRegistry, CatalogToolDefinition, PublicActionContract } from './actionDefinitions.ts';
 import { ACTION_REGISTRY as RAW_ACTION_REGISTRY } from './actionRegistry.js';
 
-const TOOL_SURFACE_VERSION = 91;
+const TOOL_SURFACE_VERSION = 92;
 const ACTION_REGISTRY = RAW_ACTION_REGISTRY as unknown as ActionRegistry;
 
 type ToolActionCatalogEntry = Readonly<{
@@ -29,7 +28,6 @@ type ToolActionCatalogEntry = Readonly<{
   dashboard: CatalogToolDefinition['dashboard'];
   groups: CatalogToolDefinition['groups'];
   capability: string;
-  approval: ((args: Record<string, unknown>) => ApprovalRequirement) | null;
   handlerName: string;
 }>;
 
@@ -86,7 +84,6 @@ function buildCatalog(): ToolActionCatalogEntry[] {
         dashboard: operationMetadata.dashboard,
         groups: operationMetadata.groups,
         capability,
-        approval: mapping.approval || null,
         handlerName: operationMetadata.handlerName
       }));
     }
@@ -141,7 +138,6 @@ function inferCatalogAction(publicTool: string, args: Record<string, unknown>, a
       if (Array.isArray(args.paths)) return 'restore';
       if (nonEmptyArg(args, 'planId')) return 'tidy_run';
       if (Object.hasOwn(args, 'maxCandidates') || Object.hasOwn(args, 'mode')) return 'tidy_plan';
-      if (Object.hasOwn(args, 'removeUntracked')) return 'reset';
       return 'diff';
     case 'relai_process':
       if (['kind', 'purpose', 'command', 'executable', 'argv', 'lifecycle', 'reuseExisting', 'pty', 'startupWaitMs', 'maxLogBytes']
@@ -225,16 +221,9 @@ function getOperationCapability(operationName: string): string {
   return entries[0]?.capability || '';
 }
 
-function catalogApprovalRequirement(publicTool: string, args: Record<string, unknown> = {}): ApprovalRequirement | null {
-  const resolution = resolveToolOperation(publicTool, args);
-  if (!resolution?.catalogEntry?.approval) return null;
-  return resolution.catalogEntry.approval(resolution.operationArgs);
-}
-
 export {
   ACTION_REGISTRY,
   TOOL_SURFACE_VERSION,
-  catalogApprovalRequirement,
   getCatalogAction,
   getCatalogToolDefinition,
   getCatalogToolDefinitions,

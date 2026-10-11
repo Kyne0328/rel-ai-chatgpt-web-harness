@@ -48,7 +48,7 @@ function operationForTool(toolName, action = '') {
   if (toolName === 'relai_changes' && ['diff', 'checkpoint', 'replay', 'tidy_plan'].includes(action)) return FAILURE_OPERATION.REVIEW;
   if (toolName === 'relai_publish' && action === 'draft_pr') return FAILURE_OPERATION.REVIEW;
   if ([OP.READ, OP.SEARCH_TEXT, OP.SEARCH_SEMANTIC, OP.SNAPSHOT, OP.INSPECT, 'relai_read', 'relai_search', 'relai_snapshot', 'relai_inspect'].includes(toolName)) return FAILURE_OPERATION.READ;
-  if ([OP.CHANGES_RESTORE, OP.CHANGES_RESET, 'relai_changes'].includes(toolName)) return FAILURE_OPERATION.RESTORE;
+  if ([OP.CHANGES_RESTORE, 'relai_changes'].includes(toolName)) return FAILURE_OPERATION.RESTORE;
   if ([OP.PUBLISH_COMMIT, 'relai_publish'].includes(toolName)) return FAILURE_OPERATION.COMMIT;
   if ([OP.CHANGES_DIFF, OP.PUBLISH_DRAFT_PR].includes(toolName)) return FAILURE_OPERATION.REVIEW;
   return FAILURE_OPERATION.WRITE;

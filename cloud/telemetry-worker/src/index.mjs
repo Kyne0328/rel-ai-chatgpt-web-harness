@@ -11,6 +11,7 @@ const ADMIN_REMEMBER_SESSION_SECONDS = 7 * 24 * 60 * 60;
 const ALLOWED_PLATFORMS = new Set(['win32', 'darwin', 'linux']);
 const ALLOWED_ARCHITECTURES = new Set(['x64', 'arm64', 'arm', 'ia32']);
 const PRESENCE_KEYS = new Set(['schemaVersion', 'installationId', 'version', 'platform', 'arch']);
+const UNKNOWN_COUNTRY = 'ZZ';
 
 function withSecurityHeaders(headers = {}) {
   return {
@@ -59,6 +60,11 @@ function validatePresence(input) {
   if (!ALLOWED_PLATFORMS.has(platform)) return { ok: false, error: 'Unsupported platform.' };
   if (!ALLOWED_ARCHITECTURES.has(arch)) return { ok: false, error: 'Unsupported architecture.' };
   return { ok: true, value: { installationId, version, platform, arch } };
+}
+
+function edgeCountry(request) {
+  const country = String(request.cf?.country || '').trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(country) && !['XX', 'EU', 'ZZ'].includes(country) ? country : UNKNOWN_COUNTRY;
 }
 
 function encodeBase64Url(bytes) {
@@ -247,7 +253,7 @@ async function handlePresence(request, env) {
   }
 
   const existing = await env.DB.prepare(
-    'SELECT last_seen_at, current_version, platform, architecture, ingest_token_hash FROM installations WHERE installation_id = ?'
+    'SELECT last_seen_at, current_version, platform, architecture, country, ingest_token_hash FROM installations WHERE installation_id = ?'
   ).bind(presence.installationId).first();
   const ingestTokenHash = await hashIngestToken(ingestToken);
 
@@ -260,11 +266,14 @@ async function handlePresence(request, env) {
 
   const now = new Date();
   const nowIso = now.toISOString();
+  const detectedCountry = edgeCountry(request);
+  const country = detectedCountry === UNKNOWN_COUNTRY ? existing?.country || UNKNOWN_COUNTRY : detectedCountry;
   if (existing) {
     const lastSeen = Date.parse(String(existing.last_seen_at || ''));
     const metadataChanged = existing.current_version !== presence.version
       || existing.platform !== presence.platform
-      || existing.architecture !== presence.arch;
+      || existing.architecture !== presence.arch
+      || existing.country !== country;
     if (!metadataChanged && Number.isFinite(lastSeen) && now.getTime() - lastSeen < PRESENCE_MIN_INTERVAL_MS) {
       if (!existing.ingest_token_hash) {
         await env.DB.prepare('UPDATE installations SET ingest_token_hash = ? WHERE installation_id = ?')
@@ -275,16 +284,16 @@ async function handlePresence(request, env) {
 
     await env.DB.prepare(
       `UPDATE installations
-       SET last_seen_at = ?, current_version = ?, platform = ?, architecture = ?, ingest_token_hash = ?
+       SET last_seen_at = ?, current_version = ?, platform = ?, architecture = ?, country = ?, ingest_token_hash = ?
        WHERE installation_id = ?`
-    ).bind(nowIso, presence.version, presence.platform, presence.arch, ingestTokenHash, presence.installationId).run();
+    ).bind(nowIso, presence.version, presence.platform, presence.arch, country, ingestTokenHash, presence.installationId).run();
     return json({ ok: true, updated: true }, 202);
   }
 
   await env.DB.prepare(
     `INSERT INTO installations
-      (installation_id, first_seen_at, last_seen_at, first_version, current_version, platform, architecture, ingest_token_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      (installation_id, first_seen_at, last_seen_at, first_version, current_version, platform, architecture, country, ingest_token_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     presence.installationId,
     nowIso,
@@ -293,6 +302,7 @@ async function handlePresence(request, env) {
     presence.version,
     presence.platform,
     presence.arch,
+    country,
     ingestTokenHash
   ).run();
   return json({ ok: true, updated: true }, 202);
@@ -357,6 +367,7 @@ async function aggregateSummary(db) {
     versions,
     platforms,
     architectures,
+    countries,
     history
   ] = await db.batch([
     db.prepare(`
@@ -373,6 +384,7 @@ async function aggregateSummary(db) {
     db.prepare('SELECT current_version AS name, COUNT(*) AS count FROM installations GROUP BY current_version ORDER BY count DESC, name ASC LIMIT 25'),
     db.prepare('SELECT platform AS name, COUNT(*) AS count FROM installations GROUP BY platform ORDER BY count DESC, name ASC'),
     db.prepare('SELECT architecture AS name, COUNT(*) AS count FROM installations GROUP BY architecture ORDER BY count DESC, name ASC'),
+    db.prepare('SELECT country AS name, COUNT(*) AS count FROM installations GROUP BY country ORDER BY count DESC, name ASC'),
     db.prepare('SELECT day, total_installations, active_1d, active_7d, active_30d, new_1d FROM daily_metrics ORDER BY day DESC LIMIT 90')
   ]);
 
@@ -389,8 +401,11 @@ async function aggregateSummary(db) {
       new30d: Number(totalRow.new_30d || 0)
     },
     versions: versions.results || [],
-    platforms: platforms.results || [],
+    platforms: ['win32', 'darwin', 'linux'].map(name => ({
+      name, count: Number((platforms.results || []).find(item => item.name === name)?.count || 0)
+    })).sort((left, right) => right.count - left.count || left.name.localeCompare(right.name)),
     architectures: architectures.results || [],
+    countries: countries.results || [],
     history: (history.results || []).reverse()
   };
 }
@@ -1165,10 +1180,10 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
-/* Distribution Bento Grid (3-column) */
+/* Distribution cards */
 .dist-grid {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 .panel-card {
@@ -1226,6 +1241,7 @@ a {
   pointer-events: none;
 }
 
+.panel-footnote { color: var(--text-tertiary); font-size: 11px; line-height: 1.5; }
 .dist-list {
   display: flex;
   flex-direction: column;
@@ -1682,7 +1698,7 @@ a {
     </div>
   </section>
 
-  <!-- Distribution Bento Grid (3-column) -->
+  <!-- Installation breakdowns -->
   <div class="dist-grid">
     <!-- Version Adoption -->
     <div class="panel-card">
@@ -1710,6 +1726,7 @@ a {
         </div>
       </div>
       <div class="dist-list" id="list-platforms"></div>
+      <p class="panel-footnote">Reporting installations only. Zero means no presence received, not zero downloads.</p>
     </div>
 
     <!-- CPU Architectures -->
@@ -1721,6 +1738,24 @@ a {
         </div>
       </div>
       <div class="dist-list" id="list-architectures"></div>
+    </div>
+
+    <!-- Approximate country from Cloudflare edge geolocation -->
+    <div class="panel-card">
+      <div class="panel-header">
+        <div class="panel-title-wrap">
+          <h2>Countries</h2>
+          <span class="panel-count" id="count-countries">0 countries</span>
+        </div>
+        <div class="search-wrapper">
+          <span class="search-icon" aria-hidden="true">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          </span>
+          <input type="search" class="panel-search" id="search-countries" placeholder="Filter..." aria-label="Filter countries">
+        </div>
+      </div>
+      <div class="dist-list" id="list-countries"></div>
+      <p class="panel-footnote">Last known request country, not device location. VPNs may affect accuracy. Older records are Unknown until they report.</p>
     </div>
   </div>
 
@@ -1750,7 +1785,7 @@ a {
       </div>
       <div class="insight-stat">
         <div class="insight-stat-num" style="color:var(--accent-relai); font-size:16px;">Verified</div>
-        <div class="insight-stat-label">Zero-PII</div>
+        <div class="insight-stat-label">No IP storage</div>
       </div>
     </div>
   </div>
@@ -1782,6 +1817,7 @@ a {
   let currentSummary = null;
   let chartRange = 30;
   let versionFilter = '';
+  let countryFilter = '';
   let toastTimer = null;
 
   function showToast(message) {
@@ -1797,6 +1833,12 @@ a {
     darwin: { label: 'macOS', icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.42c.62-.75 1.04-1.8 1.04-2.85 0-.15-.01-.3-.04-.44-1 .04-2.19.67-2.88 1.48-.56.65-.99 1.69-.99 2.76 0 .15.02.3.04.41 1.09.08 2.21-.61 2.83-1.36Z"/></svg>' },
     linux: { label: 'Linux', icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg>' }
   };
+
+  const countryNames = typeof Intl.DisplayNames === 'function' ? new Intl.DisplayNames(['en'], { type: 'region' }) : null;
+  function countryLabel(value) {
+    const code = String(value || '').toUpperCase();
+    return code === 'ZZ' || !code ? 'Unknown' : (countryNames?.of(code) || code) + ' (' + code + ')';
+  }
 
   const archMeta = {
     x64: 'x64 (Intel / AMD 64-bit)',
@@ -1816,7 +1858,7 @@ a {
       const isTop = idx === 0 && items.length > 1;
 
       let iconHtml = options.icon || '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></svg>';
-      let label = esc(item.name);
+      let label = String(item.name || '');
 
       if (options.type === 'platform') {
         const key = String(item.name || '').toLowerCase();
@@ -1827,13 +1869,16 @@ a {
       } else if (options.type === 'arch') {
         const key = String(item.name || '').toLowerCase();
         if (archMeta[key]) label = archMeta[key];
+      } else if (options.type === 'country') {
+        label = countryLabel(item.name);
+        iconHtml = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>';
       }
 
       return '<div class="dist-row">' +
         '<div class="dist-row-top">' +
           '<div class="dist-name-group">' +
             '<span class="dist-icon">' + iconHtml + '</span>' +
-            '<span class="dist-name" title="' + esc(label) + '">' + label + '</span>' +
+            '<span class="dist-name" title="' + esc(label) + '">' + esc(label) + '</span>' +
             (options.type === 'version' && isTop ? '<span class="dist-tag">Leading</span>' : '') +
           '</div>' +
           '<div class="dist-values">' +
@@ -1842,7 +1887,7 @@ a {
           '</div>' +
         '</div>' +
         '<div class="dist-bar-track">' +
-          '<div class="dist-bar-fill ' + (options.barClass || '') + '" style="width:' + Math.max(pct, 1) + '%"></div>' +
+          '<div class="dist-bar-fill ' + (options.barClass || '') + '" style="width:' + (count ? Math.max(pct, 1) : 0) + '%"></div>' +
         '</div>' +
       '</div>';
     }).join('');
@@ -1997,17 +2042,26 @@ a {
 
     filterAndRenderVersions();
 
-    q('count-platforms').textContent = (s.platforms || []).length + ' platforms';
+    q('count-platforms').textContent = (s.platforms || []).filter(item => Number(item.count || 0) > 0).length + ' of 3 reporting';
     q('list-platforms').innerHTML = renderDistList(s.platforms || [], total, { type: 'platform', barClass: 'platform-bar' });
 
     q('count-architectures').textContent = (s.architectures || []).length + ' architectures';
     q('list-architectures').innerHTML = renderDistList(s.architectures || [], total, { type: 'arch', barClass: 'arch-bar' });
 
+    filterAndRenderCountries();
     renderChart(s.history || [], chartRange);
 
     q('auth-view').style.display = 'none';
     q('dashboard-view').style.display = 'flex';
     q('header-authenticated-actions').style.display = 'flex';
+  }
+
+  function filterAndRenderCountries() {
+    if (!currentSummary) return;
+    const countries = currentSummary.countries || [];
+    const filtered = countries.filter(item => countryLabel(item.name).toLowerCase().includes(countryFilter.toLowerCase()));
+    q('count-countries').textContent = filtered.length + ' of ' + countries.length;
+    q('list-countries').innerHTML = renderDistList(filtered, Number(currentSummary.totals?.installations || 0), { type: 'country' });
   }
 
   function filterAndRenderVersions() {
@@ -2144,6 +2198,14 @@ a {
       md += '\\n';
     }
 
+    if (s.countries && s.countries.length) {
+      md += '#### Countries (approximate)\\n\\n| Country | Installations |\\n|:---|---:|\\n';
+      s.countries.forEach(c => {
+        md += '| ' + countryLabel(c.name) + ' | ' + Number(c.count || 0).toLocaleString() + ' |\\n';
+      });
+      md += '\\n';
+    }
+
     navigator.clipboard.writeText(md).then(() => {
       showToast('Markdown summary copied to clipboard');
     }).catch(() => {
@@ -2184,6 +2246,10 @@ a {
   q('search-versions').addEventListener('input', e => {
     versionFilter = e.target.value.trim();
     filterAndRenderVersions();
+  });
+  q('search-countries').addEventListener('input', e => {
+    countryFilter = e.target.value.trim();
+    filterAndRenderCountries();
   });
 
   document.querySelectorAll('.range-btn').forEach(btn => {

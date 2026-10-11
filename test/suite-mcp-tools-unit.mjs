@@ -2,188 +2,6 @@
 // Pure and self-contained checks share one process; tests requiring process/global isolation remain standalone.
 // Add related regression checks here instead of creating another one-off test file.
 
-// Formerly approval-broker-unit.mjs
-async function case_approval_broker_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("../src/mcp/approval.ts");
-    const { approvalRequirement } = __m1;
-  
-    const __m2 = await import("../src/mcp/approvalBroker.ts");
-    const { APPROVAL_TTL_MS,
-    approvalDigest,
-    requestApproval } = __m2;
-
-    const __mElicitation = await import("../src/mcp/elicitation.ts");
-    const { supportsFormElicitation } = __mElicitation;
-  
-  const principal = { clientId: 'chatgpt-session-a', authMode: 'local_session' };
-  const otherPrincipal = { clientId: 'chatgpt-session-b', authMode: 'local_session' };
-  const baseArgs = {
-    action: 'reset',
-    workspace: 'repo',
-    work_id: 'work-a',
-    removeUntracked: true
-  };
-  const requirement = approvalRequirement('relai_changes', baseArgs);
-  
-  assert.ok(requirement, 'destructive reset must still require approval');
-  assert.equal(approvalRequirement('relai_publish', {
-    action: 'push', workspace: 'repo', work_id: 'work-a', remote: 'origin', branch: 'main', dryRun: false
-  }), null, 'real push must rely on publish authorization instead of a second approval interaction');
-  assert.equal(approvalRequirement('relai_publish', {
-    action: 'push', workspace: 'repo', work_id: 'work-a', remote: 'origin', branch: 'main', dryRun: true
-  }), null, 'dry-run push must not require approval');
-  const browserClearApproval = approvalRequirement('relai_browser', { action: 'clear_profile', workspace: 'repo' });
-  assert.ok(browserClearApproval, 'clearing saved browser sign-ins must require explicit user approval');
-  assert.match(browserClearApproval.message, /saved browser sign-ins and site data/i);
-  assert.equal(supportsFormElicitation({}), false);
-  assert.equal(supportsFormElicitation({ elicitation: {} }), true);
-  assert.equal(supportsFormElicitation({ elicitation: { form: {} } }), true);
-  
-  assert.notEqual(approvalDigest('relai_changes', baseArgs), approvalDigest('relai_changes', { ...baseArgs, work_id: 'work-b' }));
-  assert.notEqual(approvalDigest('relai_changes', baseArgs), approvalDigest('relai_changes', { ...baseArgs, removeUntracked: false }));
-  assert.notEqual(approvalDigest('relai_changes', baseArgs), approvalDigest('relai_changes', { ...baseArgs, workspace: 'other' }));
-  
-  const unsupportedCodec = fakeCodec();
-  const unsupported = await startApproval({ codec: unsupportedCodec, capabilities: {} });
-  assert.equal(unsupported.isError, true);
-  assert.equal(unsupported.structuredContent?.errorCode, 'APPROVAL_INTERACTION_UNAVAILABLE');
-  assert.equal(unsupported.structuredContent?.approvalRequired, true);
-  assert.equal(unsupported.structuredContent?.operation, 'reset');
-  assert.equal(unsupported.structuredContent?.workspace, 'repo');
-  assert.equal(unsupported.structuredContent?.work_id, 'work-a');
-  assert.equal(Object.hasOwn(unsupported.structuredContent || {}, 'approvalId'), false, 'unsupported clients must not create pending dashboard approvals');
-  assert.equal(Object.hasOwn(unsupported.structuredContent || {}, 'recovery'), false, 'unsupported clients must not advertise the removed dashboard approval fallback');
-  assert.match(unsupported.structuredContent?.nextAction || '', /client that supports MCP approval elicitation/i);
-  
-  const nativeCodec = fakeCodec();
-  const native = await startApproval({ codec: nativeCodec, capabilities: { elicitation: {} } });
-  assert.equal(native.resultType, 'input_required');
-  assert.equal(nativeCodec.lastClaims.kind, 'relai_approval');
-  assert.equal(nativeCodec.lastClaims.workId, 'work-a');
-  assert.equal(nativeCodec.lastClaims.operation, 'reset');
-  assert.equal(Object.hasOwn(nativeCodec.lastClaims, 'push'), false, 'generic approval state must not carry obsolete push-target claims');
-  
-  for (const [label, changedArgs, changedPrincipal] of [
-    ['work_id', { work_id: 'work-b' }, principal],
-    ['removeUntracked', { removeUntracked: false }, principal],
-    ['workspace', { workspace: 'other' }, principal],
-    ['principal', {}, otherPrincipal]
-  ]) {
-    const result = await requestApproval({
-      name: 'relai_changes',
-      args: { ...baseArgs, ...changedArgs },
-      requirement,
-      context: { principal: changedPrincipal, clientCapabilities: { elicitation: {} } },
-      rawContext: rawContext({ inputResponses: accepted(true), state: nativeCodec.lastClaims }),
-      codec: nativeCodec
-    });
-    assert.equal(result.structuredContent?.errorCode, label === 'principal' ? 'APPROVAL_PRINCIPAL_MISMATCH' : 'APPROVAL_TARGET_CHANGED', `${label} change must reject the approval`);
-  }
-  
-  const expiryCodec = fakeCodec();
-  await startApproval({ codec: expiryCodec, capabilities: { elicitation: {} } });
-  const expiredState = { ...expiryCodec.lastClaims, expiresAt: Date.now() - 1 };
-  const expired = await requestApproval({
-    name: 'relai_changes', args: baseArgs, requirement,
-    context: { principal, clientCapabilities: { elicitation: {} } },
-    rawContext: rawContext({ inputResponses: accepted(true), state: expiredState }),
-    codec: expiryCodec
-  });
-  assert.equal(expired.structuredContent?.errorCode, 'APPROVAL_GRANT_EXPIRED');
-  
-  const declineCodec = fakeCodec();
-  await startApproval({ codec: declineCodec, capabilities: { elicitation: {} } });
-  const declined = await requestApproval({
-    name: 'relai_changes', args: baseArgs, requirement,
-    context: { principal, clientCapabilities: { elicitation: {} } },
-    rawContext: rawContext({ inputResponses: accepted(false), state: declineCodec.lastClaims }),
-    codec: declineCodec
-  });
-  assert.equal(declined.structuredContent?.errorCode, 'APPROVAL_DECLINED');
-  
-  const reuseCodec = fakeCodec();
-  await startApproval({ codec: reuseCodec, capabilities: { elicitation: {} } });
-  const approvedNative = await requestApproval({
-    name: 'relai_changes', args: baseArgs, requirement,
-    context: { principal, clientCapabilities: { elicitation: {} } },
-    rawContext: rawContext({ inputResponses: accepted(true), state: reuseCodec.lastClaims }),
-    codec: reuseCodec
-  });
-  assert.equal(approvedNative, null, 'accepted native approval must allow the original operation to continue');
-  const reusedNative = await requestApproval({
-    name: 'relai_changes', args: baseArgs, requirement,
-    context: { principal, clientCapabilities: { elicitation: {} } },
-    rawContext: rawContext({ inputResponses: accepted(true), state: reuseCodec.lastClaims }),
-    codec: reuseCodec
-  });
-  assert.equal(reusedNative.structuredContent?.errorCode, 'APPROVAL_GRANT_CONSUMED');
-  
-  const timeoutCodec = fakeCodec();
-  await startApproval({ codec: timeoutCodec, capabilities: { elicitation: {} } });
-  const originalNow = Date.now;
-  Date.now = () => originalNow() + APPROVAL_TTL_MS + 1;
-  try {
-    const expiredByClock = await requestApproval({
-      name: 'relai_changes', args: baseArgs, requirement,
-      context: { principal, clientCapabilities: { elicitation: {} } },
-      rawContext: rawContext({ inputResponses: accepted(true), state: timeoutCodec.lastClaims }),
-      codec: timeoutCodec
-    });
-    assert.equal(expiredByClock.structuredContent?.errorCode, 'APPROVAL_GRANT_EXPIRED');
-  } finally {
-    Date.now = originalNow;
-  }
-  
-  console.log('Approval broker destructive-operation elicitation, unsupported-client fail-closed behavior, expiry, replay, and principal isolation tests passed.');
-  
-  async function startApproval({ codec, capabilities }) {
-    return requestApproval({
-      name: 'relai_changes',
-      args: baseArgs,
-      requirement,
-      context: { principal, clientCapabilities: capabilities },
-      rawContext: rawContext(),
-      codec
-    });
-  }
-  
-  function accepted(approved) {
-    return { approval: { action: 'accept', content: { approved } } };
-  }
-  
-  function rawContext({ inputResponses, state } = {}) {
-    return {
-      mcpReq: {
-        method: 'tools/call',
-        inputResponses,
-        requestState: () => state
-      }
-    };
-  }
-  
-  function fakeCodec() {
-    const claimsByGrant = new Map();
-    return {
-      lastClaims: null,
-      async mint(claims) {
-        const token = `grant-${claimsByGrant.size + 1}`;
-        this.lastClaims = structuredClone(claims);
-        claimsByGrant.set(token, structuredClone(claims));
-        return token;
-      },
-      async verify(token) {
-        const claims = claimsByGrant.get(token);
-        if (!claims) throw new Error('Unknown grant');
-        return structuredClone(claims);
-      }
-    };
-  }
-}
-await case_approval_broker_unit();
-
 // Formerly authorization-policy-unit.mjs
 async function case_authorization_policy_unit() {
   const __m0 = await import("node:assert/strict");
@@ -200,8 +18,6 @@ async function case_authorization_policy_unit() {
     const __m2 = await import("../src/tools/operationIds.js");
     const { OPERATION_IDS: OP } = __m2;
   
-    const __m3 = await import("../src/mcp/approval.ts");
-    const { approvalDigest } = __m3;
   
   const grant = createConsentPolicy({
     capabilities: [CAPABILITIES.REPOSITORY_READ, CAPABILITIES.REPOSITORY_WRITE],
@@ -228,19 +44,6 @@ async function case_authorization_policy_unit() {
   assert.equal(assertAuthorizedToolCall({ principal: stdioPrincipal, operationName: OP.EXEC, workspace: 'repo-b' }).kind, 'local_admin');
   assert.equal(isTrustedLocalPrincipal({ clientId: 'remote-client', authMode: 'local_session' }), false);
   
-  const destructiveApproval = {
-    action: 'reset', workspace: 'repo-a', work_id: 'work-a', removeUntracked: true
-  };
-  assert.notEqual(
-    approvalDigest('relai_changes', destructiveApproval),
-    approvalDigest('relai_changes', { ...destructiveApproval, work_id: 'work-b' }),
-    'approval state must not be reusable across logical tasks'
-  );
-  assert.notEqual(
-    approvalDigest('relai_changes', destructiveApproval),
-    approvalDigest('relai_changes', { ...destructiveApproval, removeUntracked: false }),
-    'approval state must bind the destructive cleanup scope instead of relying on a model-supplied confirmation token'
-  );
   
   assert.throws(
     () => assertAuthorizedToolCall({ principal, operationName: 'relai_unknown_operation', workspace: 'repo-a' }),
@@ -1240,15 +1043,12 @@ async function case_tool_action_catalog_parity_unit() {
   const __m0 = await import("node:assert/strict");
     const assert = __m0.default;
   
-    const __m1 = await import("../src/mcp/approval.ts");
-    const { approvalRequirement } = __m1;
   
     const __m2 = await import("../src/mcp/authorizationPolicy.ts");
     const { requiredCapability } = __m2;
   
     const __m3 = await import("../src/tools/actionCatalog.js");
     const { ACTION_REGISTRY,
-    catalogApprovalRequirement,
     getCatalogAction,
     getCatalogToolDefinitions,
     getCatalogTools,
@@ -1341,11 +1141,6 @@ async function case_tool_action_catalog_parity_unit() {
       assert.deepEqual(entry.required, actionMetadata.required);
     }
   
-    assert.deepEqual(catalogApprovalRequirement(entry.publicTool, args), approvalRequirement(entry.publicTool, args));
-    if (entry.publicTool === 'relai_publish' && entry.action === 'commit') {
-      const approvalArgs = { ...args, addAll: true };
-      assert.deepEqual(catalogApprovalRequirement(entry.publicTool, approvalArgs), approvalRequirement(entry.publicTool, approvalArgs));
-    }
   }
   
   for (const tool of ['relai_search', 'relai_process', 'relai_validate', 'relai_changes', 'relai_publish']) {
@@ -1399,7 +1194,6 @@ async function case_tool_action_catalog_parity_unit() {
       case 'relai_ui:viewport': Object.assign(args, { sessionId: 'ui_abcdefghijklmnopqrst', width: 1280, height: 720 }); break;
       case 'relai_browser:start': args.url = 'http://192.168.1.20/app'; break;
       case 'relai_browser:status':
-      case 'relai_browser:clear_profile': break;
       case 'relai_browser:tabs':
       case 'relai_browser:open_tab':
       case 'relai_browser:snapshot':
@@ -1457,8 +1251,6 @@ async function case_tool_action_contract_unit() {
     const __m2 = await import("@modelcontextprotocol/server");
     const { fromJsonSchema } = __m2;
   
-    const __m3 = await import("../src/mcp/approval.ts");
-    const { approvalRequirement } = __m3;
   
     const __m4 = await import("../src/mcp/authorizationPolicy.ts");
     const { requiredCapability } = __m4;
@@ -1468,7 +1260,7 @@ async function case_tool_action_contract_unit() {
     const { stableJson } = await import("../src/stableJson.js");
   
     const __m6 = await import("../src/tools/actionCatalog.js");
-    const { catalogApprovalRequirement, getToolActionCatalog } = __m6;
+    const { getToolActionCatalog } = __m6;
   
     const __m7 = await import("../src/tools/actionRegistry.js");
     const { OPERATION_REGISTRY, isToolSurfaceSourcePath } = __m7;
@@ -1610,15 +1402,6 @@ async function case_tool_action_contract_unit() {
     assert.ok(manifestAction, `${entry.publicTool}:${entry.action} must be present in the tool-surface manifest`);
     assert.equal(manifestAction.executionClass, entry.behavior.executionClass);
   
-    assert.deepEqual(
-      catalogApprovalRequirement(entry.publicTool, args),
-      approvalRequirement(entry.publicTool, args),
-      `${entry.publicTool}:${entry.action} approval policy must have one meaning across the catalog and runtime`
-    );
-    if (entry.publicTool === 'relai_publish' && entry.action === 'commit') {
-      const addAllArgs = { ...args, addAll: true };
-      assert.deepEqual(catalogApprovalRequirement(entry.publicTool, addAllArgs), approvalRequirement(entry.publicTool, addAllArgs));
-    }
   }
   
   for (const entry of catalog.filter(item => item.action !== 'default')) {
@@ -1645,31 +1428,15 @@ async function case_tool_action_contract_unit() {
   });
   assert.deepEqual(resolvedKeys.sort(), discoveredKeys.sort(), 'every discovered public action must be executable through the canonical resolver');
   
-  assert.ok(approvalRequirement('relai_changes', { action: 'reset', work_id: 'work_contract' }), 'workspace reset must remain approval-gated without a duplicate confirmation token');
-  const resetAction = catalog.find(entry => entry.publicTool === 'relai_changes' && entry.action === 'reset');
-  assert.equal(resetAction.fields.includes('confirmation'), false, 'reset must use native approval instead of a model-supplied magic confirmation field');
-  assert.equal(approvalRequirement('relai_publish', { action: 'push', work_id: 'work_contract' }), null, 'Git push must rely on publish capability authorization without a second approval interaction');
-  assert.equal(approvalRequirement('relai_publish', { action: 'push', work_id: 'work_contract', dryRun: true }), null, 'Git push dry-run must not request approval');
-  assert.equal(approvalRequirement('relai_publish', { action: 'commit', work_id: 'work_contract', message: 'Contract commit' }), null, 'implicit task-owned commit should not require extra approval');
-  assert.equal(approvalRequirement('relai_publish', { action: 'commit', work_id: 'work_contract', message: 'Contract commit', paths: ['src/selected.js'] }), null, 'explicit local commit scope must not require a second approval prompt');
-  assert.equal(approvalRequirement('relai_publish', { action: 'commit', message: 'Taskless explicit commit', paths: ['src/selected.js'] }), null, 'taskless explicit local commits must execute without dashboard approval');
-  assert.equal(approvalRequirement('relai_publish', { action: 'commit', work_id: 'work_contract', message: 'Contract commit', addAll: true }), null, 'explicit addAll local commits must not require dashboard approval');
-  assert.equal(approvalRequirement('relai_publish', { action: 'commit', message: 'Sensitive commit', paths: ['secret.txt'], sensitiveAuthorization: { operation: 'commit', paths: ['secret.txt'], reason: 'User explicitly requested this local commit.' } }), null, 'sensitiveAuthorization is the explicit local commit authorization and must not trigger a second approval layer');
+  assert.equal(catalog.some(entry => entry.publicTool === 'relai_changes' && entry.action === 'reset'), false,
+    'workspace-wide reset must not be advertised without a supported human approval interface');
+  assert.equal(catalog.some(entry => entry.publicTool === 'relai_browser' && entry.action === 'clear_profile'), false,
+    'profile clearing must not be exposed without an approval interface');
+  assert.throws(() => resolveExecutableToolCall('relai_changes', { action: 'reset', workspace: 'fixture' }, {}), /Unsupported action/);
+  assert.throws(() => resolveExecutableToolCall('relai_browser', { action: 'clear_profile', workspace: 'fixture' }, {}), /Unsupported action/);
   for (const entry of catalog.filter(item => item.publicTool === 'relai_browser')) {
     assert.equal(entry.capability, 'process:manage', `relai_browser:${entry.action} must use structured process/browser authorization rather than raw computer control`);
     assert.equal(entry.behavior.taskScope, 'optional', `relai_browser:${entry.action} must allow principal/workspace/session authority without synthetic durable work`);
-    const requirement = approvalRequirement('relai_browser', sampleArgs(entry));
-    if (entry.action === 'clear_profile') {
-      assert.ok(requirement, 'relai_browser:clear_profile must require explicit user approval because it deletes saved sign-ins and site data');
-    } else {
-      assert.equal(requirement, null, `relai_browser:${entry.action} must use principal authorization without a duplicate MCP approval flow`);
-    }
-  }
-  for (const entry of catalog.filter(item => item.publicTool === 'relai_desktop')) {
-    assert.equal(approvalRequirement('relai_desktop', sampleArgs(entry)), null, `relai_desktop:${entry.action} must use principal authorization without a duplicate MCP approval flow`);
-  }
-  for (const entry of catalog.filter(item => item.publicTool === 'relai_computer')) {
-    assert.equal(approvalRequirement('relai_computer', sampleArgs(entry)), null, `relai_computer:${entry.action} must never enter the MCP approval flow`);
   }
   
   console.log(`Dynamic public contract parity passed for ${definitions.length} tools and ${catalog.length} actions.`);
@@ -1708,7 +1475,6 @@ async function case_tool_action_contract_unit() {
       case 'relai_ui:viewport': Object.assign(args, { sessionId: 'ui_abcdefghijklmnopqrst', width: 1280, height: 720 }); break;
       case 'relai_browser:start': args.url = 'http://192.168.1.20/app'; break;
       case 'relai_browser:status':
-      case 'relai_browser:clear_profile': break;
       case 'relai_browser:tabs':
       case 'relai_browser:open_tab':
       case 'relai_browser:snapshot':
@@ -2106,7 +1872,6 @@ async function case_tool_output_validation_unit() {
       case 'relai_ui:stop': return { sessionId: 'ui_abcdefghijklmnopqrst' };
       case 'relai_browser:start': return { url: 'http://192.168.1.20/app' };
       case 'relai_browser:status':
-      case 'relai_browser:clear_profile': return {};
       case 'relai_browser:tabs':
       case 'relai_browser:open_tab':
       case 'relai_browser:snapshot':

@@ -37,7 +37,6 @@ const OPERATION_USE_CASE: Readonly<Record<string, AnalyticsUseCase>> = Object.fr
   [OP.CHANGES_CHECKPOINT]: 'review_recover',
   [OP.CHANGES_REPLAY]: 'review_recover',
   [OP.CHANGES_RESTORE]: 'review_recover',
-  [OP.CHANGES_RESET]: 'review_recover',
   [OP.CHANGES_TIDY_PLAN]: 'review_recover',
   [OP.CHANGES_TIDY_RUN]: 'review_recover',
   [OP.PUBLISH_COMMIT]: 'publish',

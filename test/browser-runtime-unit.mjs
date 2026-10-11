@@ -84,7 +84,7 @@ assert.deepEqual(fake.state.controlChanges.at(-1), { owner: 'ai', reason: '' });
 
 const expiringHandoff = await runtime.handoff(workspace, { sessionId, tabId: firstTabId, reason: 'sign_in', work_id: context.taskId }, context);
 assert.ok(Date.parse(expiringHandoff.handoff?.expiresAt || '') - Date.parse(expiringHandoff.handoff?.startedAt || '') === BROWSER_HANDOFF_TTL_MS,
-  'runtime handoff state must carry the same short-lived expiry as MCP elicitation state');
+  'runtime handoff state must retain its short-lived local expiry');
 const realDateNow = Date.now;
 Date.now = () => Date.parse(expiringHandoff.handoff.expiresAt) + 1;
 try {

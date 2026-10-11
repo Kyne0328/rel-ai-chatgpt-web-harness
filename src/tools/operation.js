@@ -108,7 +108,6 @@ function describeToolOperation(name, args = {}) {
       const count = Array.isArray(args.paths) ? args.paths.length : 0;
       return `Restoring ${count} tracked path${count === 1 ? '' : 's'}${suffix}`;
     }
-    case OP.CHANGES_RESET: return args.removeUntracked ? `Resetting and cleaning workspace${suffix}` : `Resetting tracked changes${suffix}`;
     case OP.PUBLISH_COMMIT: return `Creating Git commit${suffix}`;
     case OP.PUBLISH_PUSH: return `Publishing Git branch${suffix}`;
     case OP.PUBLISH_DRAFT_PR: return `Preparing draft pull request${suffix}`;

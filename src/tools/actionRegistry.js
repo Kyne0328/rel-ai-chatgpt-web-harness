@@ -100,7 +100,6 @@ const BROWSER_OMIT = Object.freeze({
   download: browserOmit('sessionId', 'tabId', 'timeoutMs', 'interaction', 'target', 'path'),
   handoff: browserOmit('sessionId', 'tabId', 'reason'),
   resume: browserOmit('sessionId'),
-  clear_profile: browserOmit(),
   stop: browserOmit('sessionId')
 });
 
@@ -157,13 +156,6 @@ const PUBLIC_BINDINGS_BY_OPERATION = Object.freeze({
     expose('relai_browser', 'download', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId', 'path', 'interaction', 'target'], omit: BROWSER_OMIT.download }) }),
     expose('relai_browser', 'handoff', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId'], omit: BROWSER_OMIT.handoff }) }),
     expose('relai_browser', 'resume', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId'], omit: BROWSER_OMIT.resume }) }),
-    expose('relai_browser', 'clear_profile', {
-      capability: PROCESS,
-      keepAction: true,
-      behavior: { taskScope: 'optional' },
-      publicContract: contract({ omit: BROWSER_OMIT.clear_profile }),
-      approval: () => ({ message: 'Clear saved browser sign-ins and site data for this Rel.AI browser profile?' })
-    }),
     expose('relai_browser', 'stop', { capability: PROCESS, keepAction: true, behavior: { taskScope: 'optional' }, publicContract: contract({ required: ['sessionId'], omit: BROWSER_OMIT.stop }) })
   ],
   [OP.UI]: [
@@ -216,10 +208,6 @@ const PUBLIC_BINDINGS_BY_OPERATION = Object.freeze({
   [OP.CHANGES_CHECKPOINT]: [expose('relai_changes', 'checkpoint', { capability: READ, behavior: { taskScope: 'optional' } })],
   [OP.CHANGES_REPLAY]: [expose('relai_changes', 'replay', { capability: READ })],
   [OP.CHANGES_RESTORE]: [expose('relai_changes', 'restore', { capability: WRITE })],
-  [OP.CHANGES_RESET]: [expose('relai_changes', 'reset', {
-    capability: WRITE,
-    approval: args => ({ message: `Discard tracked workspace changes${args.removeUntracked ? ' and remove untracked files and directories' : ''}?` })
-  })],
   [OP.CHANGES_TIDY_PLAN]: [expose('relai_changes', 'tidy_plan', { capability: READ })],
   [OP.CHANGES_TIDY_RUN]: [expose('relai_changes', 'tidy_run', { capability: WRITE })],
   [OP.PUBLISH_COMMIT]: [expose('relai_publish', 'commit', {
@@ -251,7 +239,6 @@ function expose(publicName, action, options = {}) {
     action,
     keepAction: options.keepAction === true,
     capability: String(options.capability || ''),
-    approval: typeof options.approval === 'function' ? options.approval : null,
     behavior: options.behavior ? Object.freeze({ ...options.behavior }) : null,
     publicContract: options.publicContract || null
   });
