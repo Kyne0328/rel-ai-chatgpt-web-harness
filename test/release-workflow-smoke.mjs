@@ -310,18 +310,12 @@ function verifyWorkflowContracts() {
   assert.match(windowsCi, /needs:\s+test/, 'Windows packaging must wait for the shared CI gate');
   assert.doesNotMatch(windowsCi, /npm run test:all/, 'Windows packaging must not rerun the cross-platform source suite');
   assert.ok(windowsPackageIndex >= 0, 'normal Windows CI must keep packaging after its platform checks');
+  assert.doesNotMatch(ciWorkflow, /benchmark:mutation-accounting:strict/,
+    'CI must not enforce machine-dependent mutation accounting latency on shared runners');
+  assert.doesNotMatch(workflow, /benchmark:mutation-accounting:strict/,
+    'release builds must not enforce machine-dependent mutation accounting latency on shared runners');
   for (const [name, platformGate] of [['normal CI', windowsCi], ['release', windowsRelease]]) {
-    const performanceStep = platformGate.replaceAll('\r\n', '\n').split('      - name: Enforce Windows repository mutation accounting budget\n')[1]?.split('\n      - ')[0];
-    assert.ok(performanceStep, `${name} must have a dedicated Windows mutation accounting gate`);
     assert.match(platformGate, /runs-on: windows-latest/);
-    assert.match(performanceStep, /^ {8}run: npm run benchmark:mutation-accounting:strict\s*$/m,
-      `${name} must use the single-owner strict benchmark without overriding its budgets`);
-    assert.doesNotMatch(performanceStep, /continue-on-error:|if:/,
-      `${name} must fail the job when the Windows budget fails`);
-    assert.equal(platformGate.split('npm run benchmark:mutation-accounting:strict').length - 1, 1);
-    const strictIndex = platformGate.indexOf('npm run benchmark:mutation-accounting:strict');
-    const packageIndex = platformGate.indexOf(name === 'normal CI' ? 'npm run electron:build:windows' : 'npm run electron:dist:windows');
-    assert.ok(strictIndex < packageIndex, `${name} must enforce Windows performance before packaging`);
     assert.match(platformGate, /node test\/windows-bookkeeping-ownership-unit\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
       `${name} must execute the native Windows bookkeeping regression and propagate its failure`);
     assert.match(platformGate, /node test\/windows-process-job-native-unit\.mjs\s+if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
@@ -352,7 +346,7 @@ function verifyWorkflowContracts() {
   assert.match(windowsRelease, /node test\/process-output-pipe-stall-unit\.mjs/, 'Windows release packaging must exercise descendant output-pipe shutdown on Windows');
   assert.match(macRelease, /node test\/process-cancellation-unit\.mjs/, 'macOS release packaging must exercise process-tree cancellation on macOS');
   assert.match(macRelease, /node test\/process-output-pipe-stall-unit\.mjs/, 'macOS release packaging must exercise descendant output-pipe shutdown on macOS');
-  assert.doesNotMatch(windowsRelease, /npm run test:release|npm run test:frontend|benchmark:(?!mutation-accounting:strict(?:\s|$))/, 'Windows release packaging must keep only platform-specific validation');
+  assert.doesNotMatch(windowsRelease, /npm run test:release|npm run test:frontend|benchmark:/, 'Windows release packaging must keep only platform-specific validation');
   for (const platformSection of [windowsRelease, linuxRelease, macRelease]) {
     assert.match(platformSection, /- release-gate/, 'every platform release build must wait for the shared release gate');
   }
