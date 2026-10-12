@@ -5,6 +5,14 @@
   min-height: 520px;
 }
 
+.browser-goal-account { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 14px 16px; margin-bottom: 12px; }
+.browser-goal-copy { flex: 1 1 260px; min-width: 0; }
+.browser-goal-copy > strong { font-size: 13px; }
+.browser-goal-copy > p { margin: 4px 0 0; font-size: 12px; color: var(--ui-text-secondary); }
+.browser-goal-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.browser-goal-controls button { white-space: nowrap; }
+.browser-goal-account > .connection-notice { width: 100%; margin: 0; }
+
 .browser-chrome {
   display: flex;
   min-width: 0;

@@ -50,7 +50,9 @@ const OPERATION_USE_CASE: Readonly<Record<string, AnalyticsUseCase>> = Object.fr
   [OP.WORK_HISTORY]: 'work_session',
   [OP.WORK_STOP]: 'work_session',
   [OP.WORK_FINISH]: 'work_session',
-  [OP.WORK_CANCEL]: 'work_session'
+  [OP.WORK_CANCEL]: 'work_session',
+  [OP.GOAL_STATUS]: 'work_session',
+  [OP.GOAL_STOP]: 'work_session'
 });
 
 function analyticsUseCaseForOperation(value: unknown): AnalyticsUseCase {

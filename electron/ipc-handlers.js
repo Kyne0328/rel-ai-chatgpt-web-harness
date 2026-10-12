@@ -76,7 +76,10 @@ function registerIpcHandlers(deps) {
     selectBrowserSession: deps.selectBrowserSession,
     selectBrowserTab: deps.selectBrowserTab,
     closeBrowserTab: deps.closeBrowserTab,
-    stopActiveBrowserSession: deps.stopActiveBrowserSession
+    stopActiveBrowserSession: deps.stopActiveBrowserSession,
+    startGoalLogin: deps.startGoalLogin,
+    getGoalLoginStatus: deps.getGoalLoginStatus,
+    signOutGoalLogin: deps.signOutGoalLogin
   });
   registerAnalyticsIpc({ ipc, channels: DESKTOP_IPC, getLocalUsage: deps.getLocalUsage });
   registerDesktopSettingsIpc({

@@ -209,6 +209,7 @@ async function createDesktopHost(options = {}) {
     session,
     getDashboardWindow: dashboardWindowManager.getWindow,
     openDashboard: route => showDashboardWindow(route),
+    goalLoginProfileDirectory: path.join(app.getPath('userData'), 'goal-chatgpt-profile'),
     clearPersistentData: () => browserProfiles.clearPersistentBrowserProfiles(browserProfileConfig()),
     listPersistentProfiles: () => browserProfiles.persistentBrowserProfileDirectories(browserProfileConfig()),
     readPersistentSites: profileDirectory => browserProfiles.readPersistentBrowserSites(profileDirectory),
@@ -263,7 +264,8 @@ async function createDesktopHost(options = {}) {
           image: preview.image
         };
       },
-      browserOperation: (payload, operationOptions) => browserSurfaceHost.run(payload, operationOptions)
+      browserOperation: (payload, operationOptions) => browserSurfaceHost.run(payload, operationOptions),
+      goalProtocol: (payload, operationOptions) => browserSurfaceHost.goalProtocolRequest(payload, operationOptions)
     },
     onLog: (message, logOptions) => publicConnectionLog(logOptions.source || 'local-service', message, logOptions),
     onExit: ({ code }) => {
@@ -425,6 +427,9 @@ async function createDesktopHost(options = {}) {
     selectBrowserTab: browserSurfaceHost.selectTab,
     closeBrowserTab: browserSurfaceHost.closeTab,
     stopActiveBrowserSession: browserSurfaceHost.stopActiveSession,
+    startGoalLogin: browserSurfaceHost.startGoalLogin,
+    getGoalLoginStatus: browserSurfaceHost.getGoalLoginStatus,
+    signOutGoalLogin: browserSurfaceHost.signOutGoalLogin,
     getRecoveryConfig,
     setTunnelApiKey: tunnelCredentials.setApiKey,
     openRecoverySetup,

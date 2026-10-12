@@ -1,4 +1,4 @@
-function registerBrowserSurfaceIpc({ ipc, channels, getBrowserState, setBrowserSurfaceBounds, setBrowserControl, respondBrowserPermission, listSavedBrowserSites, clearSavedBrowserSite, clearSavedBrowserData, selectBrowserSession, selectBrowserTab, closeBrowserTab, stopActiveBrowserSession }) {
+function registerBrowserSurfaceIpc({ ipc, channels, getBrowserState, setBrowserSurfaceBounds, setBrowserControl, respondBrowserPermission, listSavedBrowserSites, clearSavedBrowserSite, clearSavedBrowserData, selectBrowserSession, selectBrowserTab, closeBrowserTab, stopActiveBrowserSession, startGoalLogin, getGoalLoginStatus, signOutGoalLogin }) {
   ipc.handle(channels.DESKTOP_BROWSER_GET_STATE, 'Embedded browser state', () => getBrowserState());
   ipc.handle(channels.DESKTOP_BROWSER_SET_BOUNDS, 'Embedded browser surface', (_event, bounds) => setBrowserSurfaceBounds(normalizeBrowserBounds(bounds)));
   ipc.handle(channels.DESKTOP_BROWSER_SET_CONTROL, 'Embedded browser control', (_event, owner) => setBrowserControl(normalizeBrowserControl(owner)));
@@ -10,6 +10,9 @@ function registerBrowserSurfaceIpc({ ipc, channels, getBrowserState, setBrowserS
   ipc.handle(channels.DESKTOP_BROWSER_SELECT_TAB, 'Embedded browser tab selection', (_event, nativePageId) => selectBrowserTab(normalizeBrowserPageId(nativePageId)));
   ipc.handle(channels.DESKTOP_BROWSER_CLOSE_TAB, 'Embedded browser tab close', (_event, nativePageId) => closeBrowserTab(normalizeBrowserPageId(nativePageId)));
   ipc.handle(channels.DESKTOP_BROWSER_STOP, 'Embedded browser stop', () => stopActiveBrowserSession());
+  ipc.handle(channels.DESKTOP_GOAL_LOGIN_START, 'ChatGPT Goal Mode sign-in', () => startGoalLogin());
+  ipc.handle(channels.DESKTOP_GOAL_LOGIN_STATUS, 'ChatGPT Goal Mode account status', () => getGoalLoginStatus());
+  ipc.handle(channels.DESKTOP_GOAL_LOGIN_SIGN_OUT, 'ChatGPT Goal Mode sign-out', () => signOutGoalLogin());
 }
 
 function registerAnalyticsIpc({ ipc, channels, getLocalUsage }) {

@@ -9,7 +9,7 @@ import { classifyTaskIntent } from '../workflow/intent.js';
 import { buildTaskBootstrap } from '../context/context-builder.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 
-const TERMINAL_REFERENCE_OPERATIONS = new Set([OP.PROCESS_LIST, OP.PROCESS_READ, OP.PROCESS_STOP, OP.WORK_STATUS, OP.WORK_RESULT]);
+const TERMINAL_REFERENCE_OPERATIONS = new Set([OP.PROCESS_LIST, OP.PROCESS_READ, OP.PROCESS_STOP, OP.WORK_STATUS, OP.WORK_RESULT, OP.GOAL_STATUS, OP.GOAL_STOP]);
 
 function findReusableTask(config, workspace, args = {}, principal, conversationId = '') {
   const conversation = String(conversationId || '').trim();

@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 
 import { readAudit } from '../audit.js';
+import { dashboardGoalStatus } from '../chatgptGoalMode.js';
 import * as configEditor from '../configEditor.js';
 import { ensureConfig, getConfigPath, readConfig } from '../config.js';
 import * as connection from '../connectionProfile.js';
@@ -241,10 +242,12 @@ export function dashboardTaskSession(taskId: string, request: JsonRecord = {}): 
   };
   if (request.activityOnly === true) return { ok: true, activity };
   const audit = readAudit(config, { taskId, limit: 10000 });
+  const goalMode = dashboardGoalStatus(config, taskId);
   return {
     ok: true,
     session: {
       ...session,
+      ...(goalMode ? { goalMode } : {}),
       events: mergeTaskActivityEvents(session.events, activityPage.entries)
     },
     activity: activity.page,

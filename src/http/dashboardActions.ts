@@ -40,7 +40,7 @@ async function handleTaskControl(ctx: HttpRouteContext): Promise<void> {
     const action = String(payload.action || '').trim();
     const workId = String(payload.work_id || payload.workId || '').trim();
     const operationId = String(payload.operationId || '').trim();
-    if (action !== 'stop' && action !== 'cancel') throw new Error('action must be stop or cancel');
+    if (action !== 'stop' && action !== 'cancel' && action !== 'goal_stop') throw new Error('action must be stop, cancel or goal_stop');
     if (!workId) throw new Error('work_id is required');
     sendJson(ctx.res, 200, await controlDashboardTask(action, workId, operationId));
   } catch (error) {

@@ -129,6 +129,8 @@ const PUBLIC_BINDINGS_BY_OPERATION = Object.freeze({
   [OP.WORK_STOP]: [expose('relai_work', 'stop', { capability: READ })],
   [OP.WORK_FINISH]: [expose('relai_work', 'finish', { capability: READ })],
   [OP.WORK_CANCEL]: [expose('relai_work', 'cancel', { capability: READ })],
+  [OP.GOAL_STATUS]: [expose('relai_work', 'goal_status', { capability: READ })],
+  [OP.GOAL_STOP]: [expose('relai_work', 'goal_stop', { capability: READ })],
   [OP.SNAPSHOT]: [expose('relai_snapshot', 'default', { capability: READ })],
   [OP.READ]: [expose('relai_read', 'default', { capability: READ })],
   [OP.SEARCH_TEXT]: [expose('relai_search', 'text', { capability: READ })],

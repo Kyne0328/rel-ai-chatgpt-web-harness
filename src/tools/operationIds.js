@@ -8,6 +8,8 @@ const OPERATION_IDS = Object.freeze({
   WORK_STOP: 'work.stop',
   WORK_FINISH: 'work.finish',
   WORK_CANCEL: 'work.cancel',
+  GOAL_STATUS: 'goal.status',
+  GOAL_STOP: 'goal.stop',
   SNAPSHOT: 'snapshot',
   READ: 'read',
   SEARCH_TEXT: 'search.text',

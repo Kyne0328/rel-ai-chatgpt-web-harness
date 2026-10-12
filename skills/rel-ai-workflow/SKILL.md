@@ -1,11 +1,19 @@
 ---
 name: rel-ai-workflow
-description: Use when work must inspect, read, edit, test, build, debug, validate, review, or publish a configured repository through Rel.AI, including local UI or process execution. Do not use when the request needs no repository or local runtime access.
+description: Use when work must inspect, read, edit, test, build, debug, validate, review, or publish a configured repository through Rel.AI, including local UI or process execution, or when the user explicitly types /goal to opt into monitored project work. Do not use when the request needs no repository or local runtime access.
 ---
 
 # Rel.AI Workflow
 
 Own one durable `work_id` for each meaningful project goal and reuse it through investigation, implementation, review, and verification. New durable work starts with a proportional ordered `steps` plan; update step status/details with compact `taskProgress` patches and replace the full plan only when its structure changes. Projectless one-shot utility/control requests stay taskless and do not invent a workspace. Use `context` only when deeper bootstrap or continuity is needed.
+
+## ChatGPT Web Goal Mode
+
+Handle `/goal status` with `relai_work action:"goal_status"`, and `/goal stop` or `/goal cancel` with `relai_work action:"goal_stop"` for the exact active `work_id`. Handle these controls before interpreting a command as a new goal. Never treat a control command as an objective.
+
+When the user explicitly types `/goal` or `/goal <objective>` for project work, call `relai_work action:"begin"` with `goal:true`, the current objective, and the ordinary non-empty task plan. For bare `/goal`, reuse the objective already established in the conversation; if none exists, ask for it instead of guessing. This activates Rel.AI's protocol-only continuation monitor for the returned `work_id`; no second tool or separate ChatGPT skill installation is required. The user may provide a ChatGPT conversation URL; otherwise the monitor must link only a unique recent `/goal` message. Do not enable Goal Mode for ordinary requests or because the word “goal” appears in prose.
+
+Use `relai_work action:"goal_status"` with the exact `work_id` to check its monitor, and `relai_work action:"goal_stop"` to prevent future automatic messages without cancelling the underlying task. Only call `relai_work action:"cancel"` if the user also wants the work itself cancelled. The goal monitor needs an authenticated ChatGPT Web session and must report `linking`, `needs_auth`, or paused states honestly. Do not provide credentials in the chat.
 
 ## Shortest sufficient path
 

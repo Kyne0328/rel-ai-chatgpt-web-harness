@@ -86,7 +86,7 @@ const TASK_PROGRESS_PUBLIC_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  OP.WORK_CONTEXT, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT, OP.INSPECT, OP.SEARCH_SEMANTIC,
+  OP.WORK_CONTEXT, OP.GOAL_STATUS, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT, OP.INSPECT, OP.SEARCH_SEMANTIC,
   OP.PROCESS_READ, OP.PROCESS_LIST, OP.CHANGES_TIDY_PLAN, OP.VALIDATE_HTTP, OP.CHANGES_DIFF, OP.CHANGES_REPLAY,
   OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.PUBLISH_DRAFT_PR
 ]);
@@ -97,7 +97,7 @@ const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   ...READ_ONLY_TOOLS, OP.PROCESS_STOP, OP.CHANGES_RESTORE,
-  OP.WORK_PLAN, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+  OP.WORK_PLAN, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH, OP.GOAL_STATUS, OP.GOAL_STOP
 ]);
 const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
@@ -121,7 +121,8 @@ const PERSISTENT_PROCESS_TOOLS: ReadonlySet<string> = new Set([
 ]);
 const ALWAYS_IMMEDIATE_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_BEGIN, OP.WORK_PLAN, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT,
-  OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH
+  OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH,
+  OP.GOAL_STATUS, OP.GOAL_STOP
 ]);
 
 const DEFAULT_BEHAVIOR: Readonly<ToolBehavior> = Object.freeze({
@@ -186,7 +187,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. status lists receipts immediately. result retrieves operationId, waiting up to 5s for completion; waitMs:0 returns immediately. history pages authorized records. context restores continuity. stop with operationId stops one command. Task stop/cancel stops all. Keep the plan current. Finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
+    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. Set goal:true only for explicitly requested /goal monitoring, not routine tasks. goal_status reads it; goal_stop disables automatic continuation without cancelling the task. status lists receipts immediately. result retrieves operationId, waiting up to 5s for completion; waitMs:0 returns immediately. history pages authorized records. context restores continuity. stop with operationId stops one command. Task stop/cancel stops all. Keep the plan current. Finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },

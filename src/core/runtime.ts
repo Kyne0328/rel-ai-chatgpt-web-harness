@@ -4,6 +4,7 @@ import { readConfig } from '../config.js';
 import { initializeKnowledgeDatabase, maintainKnowledgeDatabase } from '../knowledgeStore.js';
 import { initializeStateDatabase, maintainStateDatabase } from '../stateDatabase.ts';
 import { initializeTelemetry } from '../telemetry.js';
+import { startGoalMonitor, stopGoalMonitor } from '../chatgptGoalMode.js';
 import { stopFallbackExecutionsForShutdown, verifyFallbackDurabilityForShutdown } from '../mcp/fallbackExecutions.js';
 
 export interface RelaiCoreRuntimeOptions {
@@ -45,6 +46,7 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
     const knowledgeDatabaseMs = performance.now() - knowledgeStarted;
     const telemetryStarted = performance.now();
     const telemetry = isolated ? false : initializeTelemetry(config);
+    if (!isolated) startGoalMonitor(config);
     const telemetrySetupMs = performance.now() - telemetryStarted;
     startup = {
       config,
@@ -67,6 +69,7 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
       shutdownPromise = Promise.resolve(emptyShutdownResult(isolated ? 'isolated' : 'not_started'));
       return shutdownPromise;
     }
+    stopGoalMonitor();
     shutdownPromise = shutdownCoreRuntime(config, { stopManagedProcessesOnShutdown });
     return shutdownPromise;
   }

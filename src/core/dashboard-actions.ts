@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { readConfig } from '../config.js';
+import { stopDashboardGoal } from '../chatgptGoalMode.js';
 import { callTool } from '../tools.js';
 
 export interface WorkspacePreflightFinding {
@@ -26,10 +27,11 @@ export function resolveWorkspaceFolder(workspaceAlias: string): string {
   return workspace.path;
 }
 
-export async function controlDashboardTask(action: 'stop' | 'cancel', workId: string, operationId = ''): Promise<Record<string, unknown>> {
+export async function controlDashboardTask(action: 'stop' | 'cancel' | 'goal_stop', workId: string, operationId = ''): Promise<Record<string, unknown>> {
   const taskId = String(workId || '').trim();
   if (!taskId) throw new Error('work_id is required');
-  if (!['stop', 'cancel'].includes(action)) throw new Error('action must be stop or cancel');
+  if (!['stop', 'cancel', 'goal_stop'].includes(action)) throw new Error('action must be stop, cancel or goal_stop');
+  if (action === 'goal_stop') return stopDashboardGoal(readConfig(), taskId);
   // The authenticated local dashboard may control tasks created by MCP clients.
   return callTool('relai_work', {
     action,

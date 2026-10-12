@@ -509,7 +509,9 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     ? (semantic.currentActivity || operationValue || 'Task is open.')
     : (session.summary || session.endReason || sessionDescription(session, false, operationValue, semantic));
   const [controlKey, setControlKey] = useState('');
-  useEffect(() => setControlKey(''), [id]);
+  const [stoppedGoalId, setStoppedGoalId] = useState('');
+  useEffect(() => { setControlKey(''); setStoppedGoalId(''); }, [id]);
+  const activeGoal = session.goalMode?.goalActive === true && stoppedGoalId !== id;
   const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
   const controlTask = useCallback(async (action, operationId = '') => {
     const key = operationId ? `stop:${operationId}` : action;
@@ -534,7 +536,10 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         toast(result.error || 'The task action could not be completed.', { variant: 'error' });
         return;
       }
-      toast(action === 'cancel'
+      if (action === 'goal_stop') setStoppedGoalId(id);
+      toast(action === 'goal_stop'
+        ? 'Goal stopped. The task is unchanged.'
+        : action === 'cancel'
         ? (result.status === 'cancelled' ? 'Task cancelled.' : 'Task cancellation requested.')
         : result.stoppedOperationCount
           ? `Stop requested for ${result.stoppedOperationCount} running action${result.stoppedOperationCount === 1 ? '' : 's'}.`
@@ -554,6 +559,13 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
       ),
       h('div', { className: 'task-detail-header-actions' },
         h(StatusPill, { state }),
+        session.goalMode?.state === 'needs_auth' ? h('a', { href: routeHref('browser'), className: 'buttonlike secondary' }, 'Sign in to ChatGPT') : null,
+        activeGoal ? h('button', {
+          className: 'secondary', type: 'button', 'data-stop-goal': '',
+          title: 'Stop automatic ChatGPT continuations without cancelling the task.',
+          disabled: Boolean(controlKey),
+          onClick: () => { void controlTask('goal_stop'); }
+        }, controlKey === 'goal_stop' ? 'Stopping…' : 'Stop Goal') : null,
         live && runningOperations.length ? h('button', {
           className: 'secondary', type: 'button', 'data-stop-task-operations': '',
           disabled: Boolean(controlKey),

@@ -363,7 +363,8 @@ async function verifyServiceNativeRequestLifecycle() {
     'src/httpServer.ts': { startHttpServer: options => { serverOptions = options; return server; } },
     'src/toolActivity.js': { getToolActivity: () => ({}), onToolActivity: () => () => {} },
     'src/desktopManager.ts': { configureDesktopNativeBridge() {} },
-    'src/browser/browserDriver.ts': { configureBrowserNativeBridge: operation => { browserOperation = operation; } }
+    'src/browser/browserDriver.ts': { configureBrowserNativeBridge: operation => { browserOperation = operation; } },
+    'src/chatgptGoalProtocol.js': { configureGoalBrowserTransport: () => {} }
   };
   const serviceUrl = new URL('../electron/service-process.js?native-request-lifecycle', import.meta.url).href;
   const resourceStub = 'data:text/javascript,' + encodeURIComponent(

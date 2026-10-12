@@ -153,6 +153,7 @@ function createBrowserRoute() {
 
     if (!state.active) {
       return h('section', { className: 'section browser-route' },
+        h(GoalModeAccount, { browser }),
         h('div', { className: 'browser-empty card' },
           h(Icon, { name: 'browser', className: 'browser-empty-icon', size: 28 }),
           h('h2', null, 'No local browser session'),
@@ -177,10 +178,13 @@ function createBrowserRoute() {
     const pageHost = hostOf(state.url);
     const viewportLabel = formatViewport(state.viewport);
     return h('section', { className: 'section browser-route', 'data-browser-control': userControl ? 'user' : 'ai' },
+      h(GoalModeAccount, { browser }),
       userControl ? h('div', { className: 'browser-takeover-banner', role: 'status' },
         h(Icon, { name: 'warning', size: 16 }),
         h('span', null,
-          handoffReason
+          handoffReason === 'goal_login'
+            ? 'Finish ChatGPT sign-in in this browser, then select Check sign-in above.'
+            : handoffReason
             ? `${handoffTitle(handoffReason)} Complete this step in the local browser. Enter passwords and verification codes here, not in ChatGPT. When finished, confirm in ChatGPT.`
             : 'Manual control is active. Return control to resume AI interaction.'
         ),
@@ -361,6 +365,51 @@ function createBrowserRoute() {
       )
     );
   };
+}
+
+function GoalModeAccount({ browser }) {
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const refresh = useCallback(async () => {
+    if (typeof browser?.goalLoginStatus !== 'function') return;
+    const next = await browser.goalLoginStatus();
+    setStatus(next);
+  }, [browser]);
+  useEffect(() => { void refresh().catch(error => setError(errorMessage(error))); }, [refresh]);
+  if (typeof browser?.goalLoginStart !== 'function') return null;
+  const act = async (action, method) => {
+    setBusy(action);
+    setError('');
+    try {
+      const result = await method();
+      if (result?.ok === false) throw new Error(result.error || 'Goal Mode account action failed.');
+      if (action === 'sign-out') setStatus(result);
+      else if (action === 'check') setStatus(result);
+      else setStatus(current => ({ ...current, browserOpen: true }));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy('');
+    }
+  };
+  const state = status?.state || 'checking';
+  const label = state === 'signed_in' ? 'Signed in' : state === 'sign_in_required' ? 'Not signed in' : state === 'unavailable' ? 'Unavailable' : 'Not verified';
+  return h('section', { className: 'card browser-goal-account', 'aria-label': 'ChatGPT Goal Mode account' },
+    h('div', { className: 'browser-goal-copy' },
+      h('strong', null, 'ChatGPT · Goal Mode'),
+      h('p', null, 'Sign in through the local browser. Passwords stay on ChatGPT; Goal Mode protocol access requires separate verification.')
+    ),
+    h('div', { className: 'browser-goal-controls' },
+      h(StatusPill, { label }),
+      h('button', { className: 'primary', type: 'button', disabled: Boolean(busy), onClick: () => { void act('sign-in', () => browser.goalLoginStart()); } }, busy === 'sign-in' ? 'Opening…' : status?.browserOpen ? 'Open sign-in' : 'Sign in to ChatGPT'),
+      h('button', { className: 'secondary', type: 'button', disabled: Boolean(busy), onClick: () => { void act('check', () => browser.goalLoginStatus()); } }, busy === 'check' ? 'Checking…' : 'Check sign-in'),
+      state === 'signed_in' || state === 'unverified' || status?.browserOpen
+        ? h('button', { className: 'secondary', type: 'button', disabled: Boolean(busy), onClick: () => { void act('sign-out', () => browser.goalLoginSignOut()); } }, busy === 'sign-out' ? 'Signing out…' : 'Sign out')
+        : null
+    ),
+    error ? h('p', { className: 'connection-notice bad', role: 'alert' }, error) : null
+  );
 }
 
 function RemoteBrowserPreview() {

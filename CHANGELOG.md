@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Introduce experimental protocol-only ChatGPT Web Goal Mode with task-level Stop Goal control.** The built-in `rel-ai-workflow` skill recognizes `/goal` and starts an ordinary durable work session with `goal:true`; `relai_work goal_status` and `goal_stop` control its protocol monitor without introducing another MCP tool. The monitor checks the current ChatGPT conversation branch and Rel.AI task activity, uses a transactional one-shot send guard, and provides a distinct `stop` action that does not cancel the coding task. The desktop task inspector includes Stop Goal for active goals without cancelling the underlying work. A dedicated ChatGPT sign-in panel in the Browser page uses a separate persistent Electron session and a native, allowlisted protocol bridge so no bearer token or cookies cross into MCP tool results. Real ChatGPT Web authentication and continuation compatibility still require live validation; unsupported challenges stop rather than trigger repeated requests.
+
 - **Remove unsupported MCP elicitation workflows from the public connector.** ChatGPT Web cannot render the native approval requests; workspace-wide reset and browser-profile clearing are no longer advertised or callable through the MCP tool surface rather than silently bypassing approval. Browser sign-in, MFA and CAPTCHA handoff now use the local-browser control and explicit `resume` path without MCP `input_required` or obsolete request-state plumbing. Host-native ChatGPT question forms remain available independently.
 
 ## [1.2.0] — 2026-10-06

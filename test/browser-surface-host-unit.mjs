@@ -20,12 +20,24 @@ class FakeSession extends EventEmitter {
     this.cacheCleared = 0;
     this.cookieValues = [];
     this.cookies = { get: async () => this.cookieValues };
+    this.authenticated = false;
+    this.requests = [];
+    this.fetch = async (url, options = {}) => {
+      this.requests.push({ url, options });
+      if (String(url).includes('/backend-api/f/conversation') && !String(url).includes('/prepare')) {
+        return new Response('event: message\ndata: {"ok":true}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      const data = String(url).endsWith('/api/auth/session')
+        ? this.authenticated ? { user: { id: 'test-account' }, accessToken: 'fixture-only' } : { user: null }
+        : { items: [] };
+      return new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
     this.certificateVerifier = undefined;
   }
   setPermissionRequestHandler(handler) { this.permissionRequestHandler = handler; }
   setPermissionCheckHandler(handler) { this.permissionCheckHandler = handler; }
   setCertificateVerifyProc(handler) { this.certificateVerifier = handler; }
-  async clearStorageData(options) { this.storageCleared += 1; this.storageClearOptions.push(options); this.cookieValues = []; }
+  async clearStorageData(options) { this.storageCleared += 1; this.storageClearOptions.push(options); this.cookieValues = []; this.authenticated = false; }
   async clearCache() { this.cacheCleared += 1; }
   async clearAuthCache() { this.authCacheCleared = (this.authCacheCleared || 0) + 1; }
 }
@@ -117,7 +129,8 @@ function createHarness({
   readPersistentSites = async () => [],
   recordPersistentSite = async () => {},
   flushPersistentSites = async () => {},
-  forgetPersistentSite = async () => {}
+  forgetPersistentSite = async () => {},
+  goalLoginProfileDirectory = ''
 } = {}) {
   const sessions = [];
   const views = [];
@@ -169,9 +182,52 @@ function createHarness({
     recordPersistentSite,
     flushPersistentSites,
     forgetPersistentSite,
+    goalLoginProfileDirectory,
     onEvent: event => events.push(event)
   });
   return { host, sessions, pathSessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents };
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-login-fixture');
+  const { host, pathSessions } = createHarness({ goalLoginProfileDirectory: directory });
+  const other = await host.run({ action: 'start' });
+  const first = await host.startGoalLogin();
+  assert.equal(first.ok, true);
+  assert.equal(first.browserOpen, true);
+  assert.equal(host.getState().url, 'https://chatgpt.com/');
+  assert.equal(host.getState().control, 'user', 'login must hand control to the user');
+  assert.equal(host.getState().activeSessionCount, 2, 'Goal Mode must not reuse a regular browser profile');
+  assert.equal((await host.getGoalLoginStatus()).state, 'sign_in_required');
+  const goalSession = pathSessions.get(path.resolve(directory));
+  assert.ok(goalSession, 'sign-in must use its dedicated persistent profile');
+  goalSession.authenticated = true;
+  assert.equal((await host.getGoalLoginStatus()).state, 'signed_in');
+  const fetched = await host.goalProtocolRequest({ method: 'GET', path: '/backend-api/conversations?offset=0&limit=1' });
+  assert.equal(fetched.ok, true);
+  assert.deepEqual(fetched.data.items, []);
+  const posted = await host.goalProtocolRequest({ method: 'POST', path: '/backend-api/f/conversation', raw: true,
+    body: { conversation_id: 'fixture-id' }, headers: { 'x-conduit-token': 'fixture-conduit' } });
+  assert.equal(posted.streamObserved, true, 'accepted streams must be drained without returning chat content or credentials');
+  const requested = goalSession.requests.at(-1);
+  assert.equal(requested.options.headers.authorization, 'Bearer fixture-only');
+  assert.ok(!JSON.stringify(fetched).includes('fixture-only'), 'session credential cannot be returned to the service process');
+  await assert.rejects(() => host.goalProtocolRequest({ method: 'GET', path: 'https://unrelated.test/backend-api/conversations' }), /Unsupported Goal Mode protocol endpoint/);
+  await assert.rejects(() => host.goalProtocolRequest({ method: 'POST', path: '/backend-api/conversations' }), /Unsupported Goal Mode protocol endpoint/);
+  await host.startGoalLogin();
+  assert.equal(host.getState().activeSessionCount, 2, 'reopening login must reuse its existing session');
+  const signedOut = await host.signOutGoalLogin();
+  assert.equal(signedOut.state, 'sign_in_required');
+  assert.equal(goalSession.storageCleared, 1, 'sign-out must clear the dedicated account profile');
+  assert.equal(host.getState().activeSessionCount, 1, 'sign-out must leave unrelated browser sessions untouched');
+  assert.equal((await host.getGoalLoginStatus()).state, 'sign_in_required');
+  goalSession.authenticated = true;
+  goalSession.cookieValues = [{ name: 'session', value: 'fixture-only', domain: '.chatgpt.com' }];
+  assert.ok((await host.listSavedSites()).sites.some(site => site.host === 'chatgpt.com'),
+    'dedicated Goal Mode data must appear in saved-site management');
+  await host.clearSavedData();
+  assert.equal(goalSession.authenticated, false, 'clear all saved browser data must clear Goal Mode login too');
+  await host.run({ action: 'close_session', nativeSessionId: other.nativeSessionId });
 }
 
 {
@@ -188,7 +244,10 @@ function createHarness({
     DESKTOP_BROWSER_SELECT_SESSION: 'select-session',
     DESKTOP_BROWSER_SELECT_TAB: 'select-tab',
     DESKTOP_BROWSER_CLOSE_TAB: 'close-tab',
-    DESKTOP_BROWSER_STOP: 'stop'
+    DESKTOP_BROWSER_STOP: 'stop',
+    DESKTOP_GOAL_LOGIN_START: 'goal-login-start',
+    DESKTOP_GOAL_LOGIN_STATUS: 'goal-login-status',
+    DESKTOP_GOAL_LOGIN_SIGN_OUT: 'goal-login-sign-out'
   };
   let receivedBounds = null;
   registerBrowserSurfaceIpc({
@@ -204,7 +263,10 @@ function createHarness({
     selectBrowserSession: () => ({}),
     selectBrowserTab: () => ({}),
     closeBrowserTab: () => ({}),
-    stopActiveBrowserSession: () => ({})
+    stopActiveBrowserSession: () => ({}),
+    startGoalLogin: () => ({ ok: true }),
+    getGoalLoginStatus: () => ({ ok: true }),
+    signOutGoalLogin: () => ({ ok: true })
   });
   handlers.get('set-bounds')({}, { visible: true, x: 12.4, y: 34.6, width: 900.2, height: 600.8 });
   assert.deepEqual(receivedBounds, { visible: true, x: 12, y: 35, width: 900, height: 601 }, 'visible browser bounds must stay visible across the dashboard IPC boundary');

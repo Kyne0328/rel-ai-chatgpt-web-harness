@@ -87,7 +87,8 @@ try {
     authorizationPolicy: createLocalAdminPolicy()
   };
   const clientTask = await callTool('relai_work', {
-    action: 'begin', workspace: 'repo', bootstrap: 'none', title: 'Client-owned dashboard cancellation fixture'
+    action: 'begin', workspace: 'repo', bootstrap: 'none', title: 'Client-owned dashboard cancellation fixture',
+    objective: 'Verify Goal Mode stop is separate from task cancellation', goal: true
   }, { principal: clientPrincipal, publicHttpOnly: false });
   await assert.rejects(
     () => callTool('relai_work', { action: 'cancel', work_id: clientTask.work_id }, { publicHttpOnly: false }),
@@ -103,6 +104,25 @@ try {
     error => error?.code === 'TASK_NOT_FOUND',
     'a different MCP client must not use dashboard control authority'
   );
+  const { dashboardGoalStatus } = await import('../src/chatgptGoalMode.js');
+  const { dashboardTaskSession } = await import('../src/core/dashboard-runtime.ts');
+  assert.equal(dashboardGoalStatus({ stateDir }, clientTask.work_id)?.goalActive, true);
+  assert.equal(dashboardTaskSession(clientTask.work_id)?.session?.goalMode?.goalActive, true,
+    'selected task detail must expose whether Goal Mode is active');
+  const goalStopReq = Readable.from([Buffer.from(JSON.stringify({ action: 'goal_stop', work_id: clientTask.work_id }))]);
+  goalStopReq.headers = { 'content-type': 'application/json' };
+  const goalStopResponse = responseRecorder();
+  await handleTaskControl({ req: goalStopReq, res: goalStopResponse.res, options: { maxBodyBytes: 1024 * 1024 } });
+  assert.equal(goalStopResponse.status(), 200);
+  assert.equal(goalStopResponse.json().goalActive, false);
+  assert.equal(goalStopResponse.json().state, 'stopped');
+  assert.equal(dashboardTaskSession(clientTask.work_id)?.session?.goalMode?.goalActive, false);
+  const ownerGoal = await callTool('relai_work', { action: 'goal_status', work_id: clientTask.work_id },
+    { principal: clientPrincipal, publicHttpOnly: false });
+  assert.equal(ownerGoal.state, 'stopped', 'the original MCP owner must still inspect Goal Mode');
+  assert.notEqual(readTaskHistorySessionRecord({ stateDir }, clientTask.work_id)?.status, 'cancelled',
+    'Stop Goal must not cancel the underlying task');
+
   const stopReq = Readable.from([Buffer.from(JSON.stringify({ action: 'stop', work_id: clientTask.work_id }))]);
   stopReq.headers = { 'content-type': 'application/json' };
   const stopResponse = responseRecorder();

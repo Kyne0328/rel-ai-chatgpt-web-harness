@@ -316,6 +316,7 @@ function nativeRequestTimeoutMs(method, payload) {
   // The user, rather than a machine operation, decides when the picker finishes.
   if (method === 'pickFolder') return 0;
   const requested = Number(payload?.timeoutMs);
+  if (method === 'goalProtocol') return 40_000;
   if (method === 'browserOperation' && Number.isFinite(requested)) {
     return Math.max(5_000, Math.min(35_000, Math.floor(requested) + 5_000));
   }
@@ -377,8 +378,10 @@ function loadDesktopManager() {
 
 function loadBrowserDriver() {
   if (!browserDriverPromise) {
-    browserDriverPromise = importResourceModule('src/browser/browserDriver.ts').then(browserDriver => {
+    browserDriverPromise = importResourceModule('src/browser/browserDriver.ts').then(async browserDriver => {
       browserDriver.configureBrowserNativeBridge((payload, options) => callNative('browserOperation', payload, options));
+      const protocol = await importResourceModule('src/chatgptGoalProtocol.js');
+      protocol.configureGoalBrowserTransport((payload, options) => callNative('goalProtocol', payload, options));
       return browserDriver;
     });
   }

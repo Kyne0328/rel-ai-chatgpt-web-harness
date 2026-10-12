@@ -11,11 +11,27 @@ const OPERATION_DEFINITION_VALUES = [
   {
     name: OP.WORK_BEGIN,
     title: "Start Logical Task",
-    description: "Create or reuse one durable logical work session for a meaningful Rel.AI user goal. Every durable task starts with a non-empty ordered plan and keeps it updated as evidence changes. Supply steps for a proportional multi-step plan; when omitted, Rel.AI atomically seeds one goal step so the task is never planless. Projectless one-shot utility/control requests should run taskless. action context is optional for deeper continuity/bootstrap retrieval; begin never scans the repository.",
-    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"title":{"type":"string","minLength":1,"maxLength":100},"objective":{"type":"string","minLength":1,"maxLength":500},"steps":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":80},"title":{"type":"string","minLength":1,"maxLength":300},"detail":{"type":"string","maxLength":500},"status":{"type":"string","enum":["pending","in_progress","completed","blocked","skipped"]}},"required":["title","status"],"additionalProperties":false}},"contextSummary":{"type":"string","maxLength":3000,"description":"Optional compact host-provided context that Rel.AI may preserve with this work session. Do not include chain-of-thought, secrets, or a full conversation transcript."},"bootstrap":{"type":"string","enum":["compact","full","none"],"description":"Preferred mode if a later context call is used. Begin never scans the repository."},"instructionPath":{"type":"string","maxLength":1000,"description":"Optional workspace-relative file or directory used to discover applicable nested AGENTS.md instructions when a project is bound."}},"required":[],"additionalProperties":false},
+    description: "Create or reuse one durable logical work session for a meaningful Rel.AI user goal. Set goal:true only when the user explicitly requests /goal and needs protocol-based ChatGPT Web continuation; otherwise omit it. Every durable task starts with a non-empty ordered plan and keeps it updated as evidence changes. Supply steps for a proportional multi-step plan; when omitted, Rel.AI atomically seeds one goal step so the task is never planless. Projectless one-shot utility/control requests should run taskless. action context is optional for deeper continuity/bootstrap retrieval; begin never scans the repository.",
+    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"title":{"type":"string","minLength":1,"maxLength":100},"objective":{"type":"string","minLength":1,"maxLength":500},"steps":{"type":"array","minItems":1,"maxItems":50,"items":{"type":"object","properties":{"id":{"type":"string","minLength":1,"maxLength":80},"title":{"type":"string","minLength":1,"maxLength":300},"detail":{"type":"string","maxLength":500},"status":{"type":"string","enum":["pending","in_progress","completed","blocked","skipped"]}},"required":["title","status"],"additionalProperties":false}},"goal":{"type":"boolean","description":"Only for explicit /goal requests; opt in to ChatGPT Web Goal Mode. Defaults to false."},"conversationUrl":{"type":"string","maxLength":300,"description":"Optional ChatGPT Web conversation URL when goal is true."},"contextSummary":{"type":"string","maxLength":3000,"description":"Optional compact host-provided context that Rel.AI may preserve with this work session. Do not include chain-of-thought, secrets, or a full conversation transcript."},"bootstrap":{"type":"string","enum":["compact","full","none"],"description":"Preferred mode if a later context call is used. Begin never scans the repository."},"instructionPath":{"type":"string","maxLength":1000,"description":"Optional workspace-relative file or directory used to discover applicable nested AGENTS.md instructions when a project is bound."}},"required":[],"additionalProperties":false},
     handlerName: 'startTask',
     behavior: {"taskScope":"none"},
     dashboard: {"category":"Workflow"}
+  },
+  {
+    name: OP.GOAL_STATUS,
+    title: 'ChatGPT Web Goal Status',
+    description: 'Read the monitoring state for one work session.',
+    inputSchema: { type: 'object', properties: { workspace: { type: 'string' } }, required: [], additionalProperties: false },
+    handlerName: 'goalStatus',
+    behavior: { taskScope: 'required' }, dashboard: { category: 'Workflow' }
+  },
+  {
+    name: OP.GOAL_STOP,
+    title: 'Stop ChatGPT Web Goal Mode',
+    description: 'Disable further automatic messages without cancelling the work session or running operations.',
+    inputSchema: { type: 'object', properties: { workspace: { type: 'string' } }, required: [], additionalProperties: false },
+    handlerName: 'goalStop',
+    behavior: { taskScope: 'required' }, dashboard: { category: 'Workflow' }
   },
   {
     name: OP.WORK_CONTEXT,

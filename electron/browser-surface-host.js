@@ -29,7 +29,8 @@ function createBrowserSurfaceHost(options = {}) {
     forgetPersistentSite = async () => {},
     onEvent = () => {},
     onStateChange = () => {},
-    onError = () => {}
+    onError = () => {},
+    goalLoginProfileDirectory = ''
   } = options;
   if (typeof WebContentsView !== 'function') throw new TypeError('Embedded browser requires Electron WebContentsView.');
   if (!session || typeof session.fromPartition !== 'function' || typeof session.fromPath !== 'function') {
@@ -45,6 +46,9 @@ function createBrowserSurfaceHost(options = {}) {
   let surfaceBounds = { visible: false, x: 0, y: 0, width: 1, height: 1 };
   let attached = null;
   let closingAll = null;
+  const goalProfileDirectory = goalLoginProfileDirectory ? path.resolve(goalLoginProfileDirectory) : '';
+  let goalLoginSessionId = '';
+  let goalLoginOpening = null;
 
   async function run(payload = {}, options = {}) {
     throwIfAborted(options.signal);
@@ -405,6 +409,7 @@ function createBrowserSurfaceHost(options = {}) {
         ]);
       }
       sessions.delete(nativeSessionId);
+      if (goalLoginSessionId === nativeSessionId) goalLoginSessionId = '';
       if (pinnedSessionId === nativeSessionId) pinnedSessionId = '';
       if (activeSessionId === nativeSessionId) activeSessionId = sessions.keys().next().value || '';
       if (options.emit === true && !closingAll) {
@@ -436,8 +441,13 @@ function createBrowserSurfaceHost(options = {}) {
     }
   }
 
+  async function savedProfileDirectories() {
+    const configured = await Promise.resolve(listPersistentProfiles());
+    return [...new Set([...(Array.isArray(configured) ? configured : []), ...(goalProfileDirectory ? [goalProfileDirectory] : [])])];
+  }
+
   async function listSavedSites() {
-    const profiles = await Promise.resolve(listPersistentProfiles());
+    const profiles = await savedProfileDirectories();
     const sites = new Map();
     for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
       const directory = path.resolve(String(profileDirectory || ''));
@@ -466,7 +476,7 @@ function createBrowserSurfaceHost(options = {}) {
     const origin = normalizeSavedSiteOrigin(value);
     if (!origin) throw new Error('Saved browser site must be an absolute HTTP or HTTPS origin.');
     return withSavedDataClear(async () => {
-      const profiles = await Promise.resolve(listPersistentProfiles());
+      const profiles = await savedProfileDirectories();
       let cleared = false;
       for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
         const directory = path.resolve(String(profileDirectory || ''));
@@ -481,7 +491,7 @@ function createBrowserSurfaceHost(options = {}) {
 
   async function clearSavedData() {
     return withSavedDataClear(async () => {
-      const profiles = await Promise.resolve(listPersistentProfiles());
+      const profiles = await savedProfileDirectories();
       for (const profileDirectory of Array.isArray(profiles) ? profiles : []) {
         const directory = path.resolve(String(profileDirectory || ''));
         if (!directory) continue;
@@ -516,6 +526,160 @@ function createBrowserSurfaceHost(options = {}) {
       await browserSession.clearCache();
       await browserSession.clearAuthCache?.();
     }
+  }
+
+  async function startGoalLogin() {
+    if (goalLoginOpening) return goalLoginOpening;
+    const opening = openGoalLogin();
+    goalLoginOpening = opening;
+    try { return await opening; } finally { if (goalLoginOpening === opening) goalLoginOpening = null; }
+  }
+
+  async function openGoalLogin() {
+    if (!goalProfileDirectory) throw new Error('Goal Mode sign-in is not available in this desktop environment.');
+    const existing = sessions.get(goalLoginSessionId);
+    if (existing && !existing.closePromise) {
+      await setControlForSession(existing.nativeSessionId, 'user', 'goal_login');
+      return { ok: true, browserOpen: true };
+    }
+    const started = await startSession({ profileDirectory: goalProfileDirectory });
+    goalLoginSessionId = started.nativeSessionId;
+    try {
+      const opened = await openPage({ nativeSessionId: started.nativeSessionId });
+      const record = requireSession(started.nativeSessionId);
+      const page = requirePage(record, opened.nativePageId);
+      await navigatePage(record, page, { url: 'https://chatgpt.com/' });
+      await setControlForSession(started.nativeSessionId, 'user', 'goal_login');
+      return { ok: true, browserOpen: true };
+    } catch (error) {
+      await closeSession(started.nativeSessionId, { emit: false }).catch(() => {});
+      throw error;
+    }
+  }
+
+  async function getGoalLoginStatus() {
+    if (!goalProfileDirectory) return { ok: true, available: false, state: 'unavailable' };
+    const browserOpen = sessions.has(goalLoginSessionId);
+    const browserSession = session.fromPath(goalProfileDirectory);
+    try {
+      const response = await browserSession.fetch('https://chatgpt.com/api/auth/session', {
+        credentials: 'include', redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(10_000)
+      });
+      if (!response.ok) return { ok: true, available: true, browserOpen, state: 'unverified' };
+      const contentLength = Number(response.headers?.get?.('content-length') || 0);
+      if (contentLength > 64 * 1024) return { ok: true, available: true, browserOpen, state: 'unverified' };
+      const data = await readGoalJson(response, 64 * 1024);
+      const signedIn = Boolean(data?.user && typeof data?.accessToken === 'string' && data.accessToken.length > 0);
+      return { ok: true, available: true, browserOpen, state: signedIn ? 'signed_in' : 'sign_in_required' };
+    } catch {
+      return { ok: true, available: true, browserOpen, state: 'unverified' };
+    }
+  }
+
+  // Only the trusted local service can request these fixed ChatGPT endpoints.
+  // Account credentials never cross the native IPC boundary or enter task logs.
+  async function goalProtocolRequest(payload = {}, options = {}) {
+    if (!goalProfileDirectory) throw new Error('Goal Mode account is unavailable.');
+    const method = String(payload.method || 'GET').toUpperCase();
+    const requestedPath = String(payload.path || '');
+    const target = new URL(requestedPath, 'https://chatgpt.com');
+    const readPath = /^\/backend-api\/conversations$|^\/backend-api\/conversation\/[0-9a-f-]{36}$/i;
+    const writePath = /^\/backend-api\/(?:f\/conversation(?:\/prepare)?|sentinel\/chat-requirements)$/;
+    if (target.origin !== 'https://chatgpt.com' || target.hash ||
+      !((method === 'GET' && readPath.test(target.pathname)) ||
+        (method === 'POST' && writePath.test(target.pathname)))) {
+      throw new Error('Unsupported Goal Mode protocol endpoint.');
+    }
+    const browserSession = session.fromPath(goalProfileDirectory);
+    const auth = await browserSession.fetch('https://chatgpt.com/api/auth/session', {
+      credentials: 'include', redirect: 'error', signal: AbortSignal.timeout(10_000)
+    });
+    if (!auth.ok) return { ok: false, status: 401 };
+    const account = await readGoalJson(auth, 64 * 1024);
+    const bearer = typeof account?.accessToken === 'string' ? account.accessToken : '';
+    if (!account?.user || !bearer) return { ok: false, status: 401 };
+    const requestHeaders = {
+      accept: payload.raw === true ? 'text/event-stream' : 'application/json',
+      authorization: `Bearer ${bearer}`,
+      origin: 'https://chatgpt.com',
+      referer: 'https://chatgpt.com/'
+    };
+    if (method === 'POST') requestHeaders['content-type'] = 'application/json';
+    for (const name of ['x-conduit-token', 'openai-sentinel-chat-requirements-token']) {
+      if (typeof payload.headers?.[name] === 'string') requestHeaders[name] = payload.headers[name];
+    }
+    const response = await browserSession.fetch(target.href, {
+      method, headers: requestHeaders, credentials: 'include', redirect: 'error',
+      ...(method === 'POST' ? { body: JSON.stringify(payload.body || {}) } : {}),
+      signal: options.signal || AbortSignal.timeout(payload.raw ? 120_000 : 15_000)
+    });
+    if (!response.ok) { await response.body?.cancel?.().catch(() => {}); return { ok: false, status: response.status }; }
+    if (payload.raw === true) {
+      const reader = response.body?.getReader?.();
+      if (!reader) return { ok: false, status: 502 };
+      let head = '';
+      let firstDone = false;
+      while (head.length < 64 * 1024) {
+        const chunk = await reader.read();
+        if (chunk.done) { firstDone = true; break; }
+        head += new TextDecoder().decode(chunk.value);
+        if ((head.includes('data:') || head.includes('event:')) && head.includes('\n')) break;
+      }
+      if (firstDone || (!head.includes('data:') && !head.includes('event:')) || /event:\s*error/i.test(head)) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, status: 502 };
+      }
+      // Drain the stream off the IPC path without retaining the generated text.
+      void (async () => {
+        let total = 0;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > 64 * 1024 * 1024) { await reader.cancel(); break; }
+          }
+        } catch {} finally { reader.releaseLock(); }
+      })();
+      return { ok: true, status: response.status, streamObserved: true };
+    }
+    const advertised = Number(response.headers?.get?.('content-length') || 0);
+    if (advertised > 8 * 1024 * 1024) throw new Error('Goal Mode response too large.');
+    const result = await readGoalJson(response, 8 * 1024 * 1024);
+    return { ok: true, status: response.status, data: result };
+  }
+
+  async function readGoalJson(response, maxBytes) {
+    const advertised = Number(response.headers?.get?.('content-length') || 0);
+    if (advertised > maxBytes) throw new Error('Goal Mode response exceeded its size limit.');
+    const reader = response.body?.getReader?.();
+    if (!reader) {
+      const text = await response.text();
+      if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error('Goal Mode response exceeded its size limit.');
+      return JSON.parse(text);
+    }
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) { await reader.cancel(); throw new Error('Goal Mode response exceeded its size limit.'); }
+      chunks.push(Buffer.from(value));
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+
+  async function signOutGoalLogin() {
+    if (!goalProfileDirectory) throw new Error('Goal Mode sign-in is not available.');
+    const record = sessions.get(goalLoginSessionId);
+    if (record) await closeSession(record.nativeSessionId, { emit: true });
+    const browserSession = session.fromPath(goalProfileDirectory);
+    await browserSession.clearStorageData();
+    await browserSession.clearCache();
+    await browserSession.clearAuthCache?.();
+    goalLoginSessionId = '';
+    return { ok: true, available: true, browserOpen: false, state: 'sign_in_required' };
   }
 
   async function stopActiveSession() {
@@ -1120,7 +1284,7 @@ function createBrowserSurfaceHost(options = {}) {
     throw browserError('BROWSER_USER_CONTROL_ACTIVE', `The user currently controls this browser session. Return control to AI before ${action.replaceAll('_', ' ')}.`);
   }
 
-  return Object.freeze({ run, getState, setBounds, setControl, respondPermission, listSavedSites, clearSavedSite, clearSavedData, selectSession, selectTab, closeTab, stopActiveSession, closeAll });
+  return Object.freeze({ run, getState, setBounds, setControl, respondPermission, listSavedSites, clearSavedSite, clearSavedData, selectSession, selectTab, closeTab, stopActiveSession, closeAll, startGoalLogin, getGoalLoginStatus, signOutGoalLogin, goalProtocolRequest });
 }
 
 function closeWebContents(contents) {
