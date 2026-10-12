@@ -8,7 +8,22 @@ import { createBrowserRuntime } from '../src/browser/browserRuntime.ts';
 import * as browserProfiles from '../src/browser/browserProfile.ts';
 
 import { createBrowserSurfaceHost } from '../electron/browser-surface-host.js';
+import { goalMessageExists } from '../electron/chatgpt-goal-composer.js';
 import { registerBrowserSurfaceIpc } from '../electron/ipc-handlers-dashboard.js';
+
+const branch = {
+  current_node: 'latest', mapping: {
+    a: { parent: null, message: null },
+    old: { parent: 'a', message: { author: { role: 'user' }, content: { parts: ['same prompt'] } } },
+    latest: { parent: 'old', message: { author: { role: 'assistant' } } }
+  }
+};
+assert.equal(goalMessageExists(branch, 'same prompt', 'latest'), false,
+  'an older identical prompt must not count as a newly accepted message');
+assert.equal(goalMessageExists(branch, 'same prompt', 'a'), true,
+  'a message on the descendant branch is eligible for readback');
+assert.equal(goalMessageExists(branch, 'same prompt', 'unknown'), false,
+  'readback must reject branches without the exact claimed parent');
 
 let nextWebContentsId = 100;
 
@@ -52,6 +67,9 @@ class FakeWebContents extends EventEmitter {
     this.focusCount = 0;
     this.executeJavaScriptError = null;
     this.onExecuteJavaScript = null;
+    this.goalBrowserScript = null;
+    this.insertedText = '';
+    this.goalClickCount = 0;
     this.capturePageHandler = null;
     this.inputEvents = [];
     this.debuggerCommands = [];
@@ -69,6 +87,12 @@ class FakeWebContents extends EventEmitter {
       attach: () => { this.debuggerAttached = true; },
       sendCommand: async (method, params = {}) => {
         this.debuggerCommands.push([method, params]);
+        if (method === 'Input.insertText') this.insertedText = params.text;
+        if ((method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter')
+          || (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased')) {
+          this.goalClickCount++;
+          this.onGoalClick?.();
+        }
         if (method === 'Accessibility.getFullAXTree') return { nodes: [] };
         if (method === 'Page.getLayoutMetrics') return { cssContentSize: { width: 1440, height: 900 } };
         if (method === 'Page.captureScreenshot') return { data: Buffer.from('fake-png').toString('base64') };
@@ -91,6 +115,7 @@ class FakeWebContents extends EventEmitter {
   async executeJavaScript(script) {
     this.onExecuteJavaScript?.();
     if (this.executeJavaScriptError) throw this.executeJavaScriptError;
+    if (String(script).includes('relai-goal-composer') && this.goalBrowserScript) return this.goalBrowserScript(script);
     if (String(script).includes('return { attached:')) return { attached: true, visible: true };
     return true;
   }
@@ -130,9 +155,35 @@ function createHarness({
   recordPersistentSite = async () => {},
   flushPersistentSites = async () => {},
   forgetPersistentSite = async () => {},
-  goalLoginProfileDirectory = ''
+  goalLoginProfileDirectory = '',
+  goalComposerState = 'ready'
 } = {}) {
   const sessions = [];
+  const goalWindows = [];
+  class FakeGoalWindow extends EventEmitter {
+    constructor(options) {
+      super();
+      this.options = options;
+      this.destroyed = false;
+      this.shown = false;
+      this.webContents = new FakeWebContents();
+      this.webContents.goalBrowserScript = script => {
+        if (script.includes('if ("probe" ===')) return goalComposerState === 'ready'
+          ? { state: 'ready', occupied: false }
+          : goalComposerState === 'occupied'
+            ? { state: 'ready', occupied: true } : { state: goalComposerState };
+        if (script.includes('if ("focus" ===')) return { state: 'focused' };
+        if (script.includes('if ("send" ===')) return this.webContents.insertedText
+          ? { state: 'send_ready', x: 40, y: 60 } : { state: 'text_mismatch' };
+        return { state: 'loading' };
+      };
+      goalWindows.push(this);
+    }
+    async loadURL(url) { return this.webContents.loadURL(url); }
+    show() { this.shown = true; }
+    close() { if (this.destroyed) return; this.destroyed = true; this.emit('closed'); this.webContents.close(); }
+    isDestroyed() { return this.destroyed; }
+  }
   const views = [];
   const webContents = [];
   const HarnessWebContentsView = class extends FakeWebContentsView {
@@ -168,6 +219,7 @@ function createHarness({
   const routes = [];
   const events = [];
   const host = createBrowserSurfaceHost({
+    BrowserWindow: FakeGoalWindow,
     WebContentsView: HarnessWebContentsView,
     session: sessionApi,
     getDashboardWindow: () => dashboard,
@@ -185,7 +237,7 @@ function createHarness({
     goalLoginProfileDirectory,
     onEvent: event => events.push(event)
   });
-  return { host, sessions, pathSessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents };
+  return { host, sessions, pathSessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents, goalWindows };
 }
 
 {
@@ -206,11 +258,25 @@ function createHarness({
   const fetched = await host.goalProtocolRequest({ method: 'GET', path: '/backend-api/conversations?offset=0&limit=1' });
   assert.equal(fetched.ok, true);
   assert.deepEqual(fetched.data.items, []);
+  assert.equal((await host.goalProtocolRequest({ method: 'POST',
+    path: '/backend-api/sentinel/chat-requirements/prepare', body: {} })).ok, true);
+  assert.equal((await host.goalProtocolRequest({ method: 'POST',
+    path: '/backend-api/sentinel/chat-requirements/finalize', body: { prepare_token: 'fixture-prepare' } })).ok, true);
+  await assert.rejects(() => host.goalProtocolRequest({ method: 'POST',
+    path: '/backend-api/sentinel/chat-requirements', body: { p: null } }), /Unsupported Goal Mode protocol endpoint/);
   const posted = await host.goalProtocolRequest({ method: 'POST', path: '/backend-api/f/conversation', raw: true,
     body: { conversation_id: 'fixture-id' }, headers: { 'x-conduit-token': 'fixture-conduit' } });
   assert.equal(posted.streamObserved, true, 'accepted streams must be drained without returning chat content or credentials');
   const requested = goalSession.requests.at(-1);
   assert.equal(requested.options.headers.authorization, 'Bearer fixture-only');
+  const outside = new AbortController();
+  await host.goalProtocolRequest({ method: 'GET', path: '/backend-api/conversations?offset=0&limit=1' },
+    { signal: outside.signal });
+  const combined = goalSession.requests.at(-1).options.signal;
+  assert.notEqual(combined, outside.signal, 'caller cancellation must not replace the request timeout');
+  assert.equal(combined.aborted, false);
+  outside.abort();
+  assert.equal(combined.aborted, true, 'explicit cancellation must still propagate');
   assert.ok(!JSON.stringify(fetched).includes('fixture-only'), 'session credential cannot be returned to the service process');
   await assert.rejects(() => host.goalProtocolRequest({ method: 'GET', path: 'https://unrelated.test/backend-api/conversations' }), /Unsupported Goal Mode protocol endpoint/);
   await assert.rejects(() => host.goalProtocolRequest({ method: 'POST', path: '/backend-api/conversations' }), /Unsupported Goal Mode protocol endpoint/);
@@ -228,6 +294,112 @@ function createHarness({
   await host.clearSavedData();
   assert.equal(goalSession.authenticated, false, 'clear all saved browser data must clear Goal Mode login too');
   await host.run({ action: 'close_session', nativeSessionId: other.nativeSessionId });
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-background-send-fixture');
+  const { host, pathSessions, goalWindows, routes } = createHarness({
+    goalLoginProfileDirectory: directory, goalComposerState: 'occupied'
+  });
+  await host.getGoalLoginStatus();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  let currentNode = 'a';
+  goalSession.authenticated = true;
+  goalSession.fetch = async url => {
+    if (String(url).endsWith('/api/auth/session')) {
+      return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'secret-not-returned' }));
+    }
+    if (String(url).includes('/backend-api/conversation/')) {
+      return new Response(JSON.stringify({
+        current_node: currentNode,
+        mapping: {
+          a: { parent: null, message: { id: 'assistant-1', author: { role: 'assistant' },
+            end_turn: true, status: 'finished_successfully' } },
+          sent: { parent: 'a', message: { author: { role: 'user' },
+            content: { parts: [goalWindows.at(-1)?.webContents.insertedText || ''] } } },
+          done: { parent: 'sent', message: { author: { role: 'assistant' },
+            end_turn: true, status: 'finished_successfully' } }
+        }
+      }));
+    }
+    throw new Error('Unexpected Goal Mode network request: ' + new URL(url).pathname);
+  };
+  const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
+  // A changed branch fails before any click.
+  currentNode = 'other';
+  const stale = await host.goalProtocolRequest({ action: 'continue', conversationId: target,
+    expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
+  assert.equal(stale.stale, true, JSON.stringify(stale));
+  assert.equal(goalWindows[0].webContents.goalClickCount, 0);
+  assert.equal(goalWindows[0].webContents.debuggerCommands.filter(([method]) => method === 'Input.insertText').length, 0,
+    'stale conversation must not replace saved drafts');
+  assert.equal(goalWindows[0].isDestroyed(), true);
+  // The accepted message comes from a single native composer click.
+  currentNode = 'a';
+  const nextWindow = goalWindows.length;
+  const sending = host.goalProtocolRequest({ action: 'continue', conversationId: target,
+    expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
+  // The hidden window is created synchronously; the test fixture owns the branch.
+  goalWindows[nextWindow].webContents.onGoalClick = () => { currentNode = 'sent'; };
+  const result = await sending;
+  assert.equal(result.accepted, true, JSON.stringify(result));
+  assert.equal(goalWindows[nextWindow].webContents.goalClickCount, 1);
+  assert.deepEqual(goalWindows[nextWindow].webContents.debuggerCommands
+    .filter(([method]) => method === 'Input.dispatchKeyEvent').map(([, params]) => [params.type, params.code]),
+  [['rawKeyDown', 'KeyA'], ['keyUp', 'KeyA'], ['keyDown', 'Enter'], ['keyUp', 'Enter']],
+    'existing composer selection must precede exactly one keyboard Send');
+  assert.equal(goalWindows[nextWindow].webContents.insertedText, 'Continue goal test');
+  assert.equal(goalWindows[nextWindow].shown, false, 'ordinary continuation must not open a visible browser');
+  assert.equal(routes.length, 0, 'background continuation must not open the dashboard');
+  assert.equal(host.getState().activeSessionCount, 0, 'temporary page must not appear as a user browser tab');
+  assert.equal(goalWindows[nextWindow].options.webPreferences.session, goalSession, 'session must reuse the signed-in Goal Mode profile');
+  assert.ok(!JSON.stringify(result).includes('secret-not-returned'));
+  const closed = new Promise(resolve => goalWindows[nextWindow].once('closed', resolve));
+  currentNode = 'done';
+  await Promise.race([closed, new Promise((_, reject) => setTimeout(() => reject(new Error(
+    'Background ChatGPT page should close after the assistant completes.')), 6500))]);
+  assert.equal(goalWindows[nextWindow].isDestroyed(), true);
+  await host.closeAll();
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-uncertain-send-fixture');
+  const { host, pathSessions, goalWindows } = createHarness({ goalLoginProfileDirectory: directory });
+  await host.getGoalLoginStatus();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  let clicked = false;
+  goalSession.fetch = async url => {
+    if (String(url).endsWith('/api/auth/session')) {
+      return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'private' }));
+    }
+    if (clicked) throw new Error('The network went down after a possible send.');
+    return new Response(JSON.stringify({ current_node: 'a', mapping: {} }));
+  };
+  const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
+  const sending = host.goalProtocolRequest({ action: 'continue', conversationId: target,
+    expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
+  goalWindows[0].webContents.onGoalClick = () => { clicked = true; };
+  const result = await sending;
+  assert.equal(result.uncertain, true, 'post-click network failure must not become a successful send');
+  assert.equal(goalWindows[0].webContents.goalClickCount, 1, 'do not retry a possibly accepted click');
+  assert.equal(goalWindows[0].shown, true, 'uncertain send must be visible for manual inspection');
+  await host.closeAll();
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-human-handoff-fixture');
+  const { host, goalWindows } = createHarness({
+    goalLoginProfileDirectory: directory, goalComposerState: 'verification'
+  });
+  const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
+  const result = await host.goalProtocolRequest({ action: 'continue', conversationId: target,
+    expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
+  assert.equal(result.needsUser, true);
+  assert.equal(goalWindows[0].shown, true, 'verification must open a visible browser for the user');
+  assert.equal(goalWindows[0].webContents.goalClickCount, 0, 'verification cannot trigger a send');
+  assert.equal(goalWindows[0].isDestroyed(), false, 'handoff keeps the page alive');
+  await host.closeAll();
+  assert.equal(goalWindows[0].isDestroyed(), true);
 }
 
 {

@@ -584,6 +584,9 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         live ? h('strong', null, currentTitle) : null,
         h('span', null, currentCopy)
       ),
+      session.goalMode?.state === 'paused' && session.goalMode.error
+        ? h('p', { className: 'connection-notice bad', role: 'status', 'data-goal-pause': '' }, session.goalMode.error)
+        : null,
       h(PlanSection, { plan: session.plan }),
       h('div', { className: 'task-detail-grid task-detail-facts' },
         h(Detail, { label: 'Project', value: session.workspace || 'No project' }),

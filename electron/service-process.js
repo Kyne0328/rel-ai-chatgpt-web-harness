@@ -316,7 +316,7 @@ function nativeRequestTimeoutMs(method, payload) {
   // The user, rather than a machine operation, decides when the picker finishes.
   if (method === 'pickFolder') return 0;
   const requested = Number(payload?.timeoutMs);
-  if (method === 'goalProtocol') return 40_000;
+  if (method === 'goalProtocol') return payload?.action === 'continue' ? 120_000 : 40_000;
   if (method === 'browserOperation' && Number.isFinite(requested)) {
     return Math.max(5_000, Math.min(35_000, Math.floor(requested) + 5_000));
   }

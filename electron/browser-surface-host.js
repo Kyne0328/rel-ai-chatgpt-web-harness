@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { layoutSnapshotExpression, normalizeBrowserSnapshotDetail } from '../src/browser/layoutSnapshot.js';
+import { goalComposerExpression, goalMessageExists, goalAssistantComplete } from './chatgpt-goal-composer.js';
 
 const MAX_SNAPSHOT_CHARS = 64 * 1024;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
@@ -17,6 +18,7 @@ const PAGE_ID = /^embedded_page_[A-Za-z0-9_-]{16,160}$/;
 
 function createBrowserSurfaceHost(options = {}) {
   const {
+    BrowserWindow,
     WebContentsView,
     session,
     getDashboardWindow,
@@ -49,6 +51,8 @@ function createBrowserSurfaceHost(options = {}) {
   const goalProfileDirectory = goalLoginProfileDirectory ? path.resolve(goalLoginProfileDirectory) : '';
   let goalLoginSessionId = '';
   let goalLoginOpening = null;
+  const goalContinuationWindows = new Set();
+  let goalContinuationInFlight = false;
 
   async function run(payload = {}, options = {}) {
     throwIfAborted(options.signal);
@@ -503,7 +507,7 @@ function createBrowserSurfaceHost(options = {}) {
   }
 
   async function withSavedDataClear(action) {
-    if (clearingSavedData || clearingProfiles.size || [...sessions.values()].some(record => record.persistent)) {
+    if (clearingSavedData || clearingProfiles.size || goalContinuationWindows.size || [...sessions.values()].some(record => record.persistent)) {
       throw browserError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Stop persistent browser sessions and wait for any current clear to finish before clearing saved browser data.');
     }
     clearingSavedData = true;
@@ -578,13 +582,167 @@ function createBrowserSurfaceHost(options = {}) {
 
   // Only the trusted local service can request these fixed ChatGPT endpoints.
   // Account credentials never cross the native IPC boundary or enter task logs.
+  // One signed-in ChatGPT page per continuation. Hidden during normal operation;
+  // reveal it for human verification or an uncertain submission. Never retry a click.
+  async function goalBrowserContinue(payload = {}, options = {}) {
+    const id = String(payload.conversationId || '');
+    const expectedNode = String(payload.expectedNodeId || '');
+    const parentMessageId = String(payload.parentMessageId || '');
+    const prompt = String(payload.prompt || '');
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
+      || !expectedNode || !parentMessageId || !prompt || prompt.length > 2048) {
+      throw new Error('Goal Mode continuation requires a valid conversation and exact parent.');
+    }
+    if (!goalProfileDirectory || typeof BrowserWindow !== 'function') {
+      throw new Error('Goal Mode background browser is not available.');
+    }
+    if (goalContinuationInFlight) throw new Error('Another Goal Mode browser continuation is in progress.');
+    goalContinuationInFlight = true;
+    const browserSession = session.fromPath(goalProfileDirectory);
+    const win = new BrowserWindow({
+      width: 1100, height: 800, show: false,
+      webPreferences: { session: browserSession, nodeIntegration: false, contextIsolation: true,
+        sandbox: true, webSecurity: true, backgroundThrottling: false }
+    });
+    goalContinuationWindows.add(win);
+    win.once('closed', () => goalContinuationWindows.delete(win));
+    let keepPage = false;
+    let clicked = false;
+    let stage = 'navigation';
+    const signal = options.signal;
+    const chatPath = '/backend-api/conversation/' + id;
+    const chatUrl = 'https://chatgpt.com/c/' + id;
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const fetchChat = async () => {
+      const response = await goalProtocolRequest({ method: 'GET', path: chatPath }, { signal });
+      if (!response.ok) throw new Error('ChatGPT conversation is not available to the signed-in account.');
+      return response.data;
+    };
+    const reveal = () => {
+      keepPage = true;
+      if (!win.isDestroyed?.()) win.show();
+    };
+    const stillOnChat = () => win.webContents.getURL().split(/[?#]/, 1)[0] === chatUrl;
+    try {
+      throwIfAborted(signal);
+      await withTimeout(withAbort(win.loadURL(chatUrl), signal, () => win.webContents.stop?.()),
+        18_000, 'ChatGPT browser navigation timed out.');
+      stage = 'composer';
+      let probe;
+      const readyUntil = Date.now() + 14_000;
+      do {
+        throwIfAborted(signal);
+        if (!stillOnChat()) { reveal(); return { ok: false, needsUser: true }; }
+        probe = await win.webContents.executeJavaScript(goalComposerExpression('probe'), true);
+        if (probe?.state === 'verification') { reveal(); return { ok: false, needsUser: true }; }
+        if (probe?.state === 'ready') break;
+        await delay(450);
+      } while (Date.now() < readyUntil);
+      if (probe?.state !== 'ready') {
+        reveal();
+        return { ok: false, needsUser: true };
+      }
+      stage = 'preflight';
+      if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true };
+      stage = 'draft';
+      const focused = await win.webContents.executeJavaScript(goalComposerExpression('focus'), true);
+      if (focused?.state !== 'focused') { reveal(); return { ok: false, needsUser: true }; }
+      const debuggerApi = await attachedDebugger(win.webContents);
+      // ChatGPT may restore an old unsent Goal Mode draft from this profile.
+      // The exact conversation branch was checked above. Replace the focused
+      // composer text in one edit; never append to a restored draft.
+      const modifiers = process.platform === 'darwin' ? 4 : 2;
+      await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers
+      });
+      await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers
+      });
+      await debuggerApi.sendCommand('Input.insertText', { text: prompt });
+      stage = 'send_button';
+      let send;
+      const sendUntil = Date.now() + 6_000;
+      do {
+        throwIfAborted(signal);
+        send = await win.webContents.executeJavaScript(goalComposerExpression('send', prompt), true);
+        if (send?.state === 'send_ready' || send?.state === 'text_mismatch' || send?.state === 'verification') break;
+        await delay(250);
+      } while (Date.now() < sendUntil);
+      if (send?.state !== 'send_ready' || !stillOnChat()) {
+        reveal();
+        return { ok: false, needsUser: true,
+          reason: stillOnChat() && ['text_mismatch', 'send_unavailable', 'verification'].includes(send?.state)
+            ? send.state : 'composer_unavailable' };
+      }
+      // User activity in another tab could have advanced the branch while loading.
+      if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true };
+      throwIfAborted(signal);
+      stage = 'submit';
+      clicked = true; // Every outcome after this point is potentially committed.
+      // Like codex-chatgpt-web, activate the focused form button by keyboard.
+      // This works without a visible window or coordinate-based hit testing.
+      await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'
+      });
+      await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13
+      });
+      stage = 'readback';
+      const verifyUntil = Date.now() + 12_000;
+      do {
+        throwIfAborted(signal);
+        const current = await fetchChat();
+        if (current.current_node !== expectedNode && goalMessageExists(current, prompt, expectedNode)) {
+          keepPage = true;
+          // The page stays alive until its response completes; the protocol monitor
+          // continues to enforce branch and task-activity checks independently.
+          let checking = false;
+          const startedAt = Date.now();
+          const timer = setInterval(async () => {
+            if (checking) return;
+            if (win.isDestroyed?.()) { clearInterval(timer); return; }
+            if (Date.now() - startedAt > 60 * 60_000) { clearInterval(timer); win.show(); return; }
+            checking = true;
+            try {
+              const current = await goalProtocolRequest({ method: 'GET', path: chatPath });
+              if (current.ok && goalMessageExists(current.data, prompt, expectedNode) && goalAssistantComplete(current.data)) {
+                clearInterval(timer);
+                win.close();
+              }
+            } catch {} finally { checking = false; }
+          }, 5_000);
+          timer.unref?.();
+          win.once('closed', () => clearInterval(timer));
+          return { ok: true, accepted: true };
+        }
+        await delay(600);
+      } while (Date.now() < verifyUntil);
+      reveal();
+      return { ok: false, uncertain: true, stage };
+    } catch (error) {
+      if (clicked) {
+        reveal();
+        return { ok: false, uncertain: true, stage };
+      }
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      // The site may change its composer or require account interaction.
+      // Surface the genuine browser rather than retrying with guessed selectors.
+      reveal();
+      return { ok: false, needsUser: true, stage };
+    } finally {
+      goalContinuationInFlight = false;
+      if (!keepPage && !win.isDestroyed?.()) win.close();
+    }
+  }
+
   async function goalProtocolRequest(payload = {}, options = {}) {
+    if (payload.action === 'continue') return goalBrowserContinue(payload, options);
     if (!goalProfileDirectory) throw new Error('Goal Mode account is unavailable.');
     const method = String(payload.method || 'GET').toUpperCase();
     const requestedPath = String(payload.path || '');
     const target = new URL(requestedPath, 'https://chatgpt.com');
     const readPath = /^\/backend-api\/conversations$|^\/backend-api\/conversation\/[0-9a-f-]{36}$/i;
-    const writePath = /^\/backend-api\/(?:f\/conversation(?:\/prepare)?|sentinel\/chat-requirements)$/;
+    const writePath = /^\/backend-api\/(?:f\/conversation(?:\/prepare)?|sentinel\/chat-requirements\/(?:prepare|finalize))$/;
     if (target.origin !== 'https://chatgpt.com' || target.hash ||
       !((method === 'GET' && readPath.test(target.pathname)) ||
         (method === 'POST' && writePath.test(target.pathname)))) {
@@ -608,10 +766,12 @@ function createBrowserSurfaceHost(options = {}) {
     for (const name of ['x-conduit-token', 'openai-sentinel-chat-requirements-token']) {
       if (typeof payload.headers?.[name] === 'string') requestHeaders[name] = payload.headers[name];
     }
+    const deadline = AbortSignal.timeout(payload.raw ? 120_000 : 15_000);
+    const requestSignal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
     const response = await browserSession.fetch(target.href, {
       method, headers: requestHeaders, credentials: 'include', redirect: 'error',
       ...(method === 'POST' ? { body: JSON.stringify(payload.body || {}) } : {}),
-      signal: options.signal || AbortSignal.timeout(payload.raw ? 120_000 : 15_000)
+      signal: requestSignal
     });
     if (!response.ok) { await response.body?.cancel?.().catch(() => {}); return { ok: false, status: response.status }; }
     if (payload.raw === true) {
@@ -672,6 +832,7 @@ function createBrowserSurfaceHost(options = {}) {
 
   async function signOutGoalLogin() {
     if (!goalProfileDirectory) throw new Error('Goal Mode sign-in is not available.');
+    for (const win of goalContinuationWindows) if (!win.isDestroyed?.()) win.close();
     const record = sessions.get(goalLoginSessionId);
     if (record) await closeSession(record.nativeSessionId, { emit: true });
     const browserSession = session.fromPath(goalProfileDirectory);
@@ -689,6 +850,7 @@ function createBrowserSurfaceHost(options = {}) {
   }
 
   function closeAll() {
+    for (const win of goalContinuationWindows) if (!win.isDestroyed?.()) win.close();
     if (closingAll) return closingAll;
     closingAll = Promise.resolve().then(async () => {
       const failures = [];

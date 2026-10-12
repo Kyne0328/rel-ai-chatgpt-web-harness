@@ -86,7 +86,7 @@ function activateGoal(config, args, context) {
     createdAt: existing?.createdAt || Date.now(),
     objective, conversationId, active: true, state: 'linking',
     observedNode: existing?.observedNode || '', stableSince: existing?.stableSince || 0,
-    pendingNode: existing?.pendingNode || '', error: '', updatedAt: Date.now()
+    pendingNode: existing?.pendingNode || '', error: '', challenge: null, updatedAt: Date.now()
   }, { reactivate: true });
   return publicGoal(goal);
 }
@@ -119,7 +119,8 @@ function stopDashboardGoal(config, workId) {
 function publicGoal(goal) {
   return { ok: true, work_id: goal.workId, goalActive: goal.active,
     state: goal.state, conversationId: goal.conversationId || null,
-    continuationCount: Number(goal.continuationCount || 0), error: goal.error || undefined };
+    continuationCount: Number(goal.continuationCount || 0), error: goal.error || undefined,
+    ...(goal.challenge ? { challenge: goal.challenge } : {}) };
 }
 
 function statusForTask(config, goal) {
@@ -180,14 +181,15 @@ async function pollGoal(config, workId, deps = {}) {
     goal = claimContinuation(config, workId, snapshot.nodeId, Number(live.calls || 0));
     if (!goal || controller.signal.aborted || !loadGoal(config, workId)?.active) return;
     try {
-      await sendContinue(goal.conversationId, snapshot.lastMessageId, { ...deps, workId: goal.workId, objective: goal.objective, signal: controller.signal });
+      await sendContinue(goal.conversationId, snapshot.lastMessageId, { ...deps, workId: goal.workId, objective: goal.objective, nodeId: snapshot.nodeId, signal: controller.signal });
       if (controller.signal.aborted || !loadGoal(config, workId)?.active) return;
-      saveGoal(config, { ...goal, state: 'monitoring',
+      saveGoal(config, { ...goal, state: 'monitoring', challenge: null,
         continuationCount: Number(goal.continuationCount || 0) + 1,
         updatedAt: Date.now() });
     } catch (error) {
       if (controller.signal.aborted) return;
       saveGoal(config, { ...goal, active: false, state: 'paused',
+        challenge: error?.challenge || null,
         error: error instanceof Error ? error.message : 'ChatGPT Web request failed.', updatedAt: Date.now() });
     }
   } catch (error) {

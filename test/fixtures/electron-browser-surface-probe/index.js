@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import { app, BrowserWindow, WebContentsView, nativeImage, session } from 'electron';
 import { createBrowserSurfaceHost } from '../../../electron/browser-surface-host.js';
+import { goalComposerExpression } from '../../../electron/chatgpt-goal-composer.js';
 
 const outputPath = process.env.RELAI_PROBE_OUTPUT_PATH;
 if (!outputPath) throw new Error('Embedded browser probe output path is required.');
@@ -153,7 +154,47 @@ app.whenReady().then(async () => {
     await host.setControl('ai');
     await host.run({ action: 'close_session', nativeSessionId: legacyHeadless.nativeSessionId });
     const finalState = host.getState();
+    // Verify the actual Electron browser can type and click while the page is hidden.
+    const hidden = new BrowserWindow({ show: false, width: 1000, height: 700,
+      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
+    let hiddenComposer;
+    try {
+      await hidden.loadURL('data:text/html,' + encodeURIComponent('<!doctype html><form onsubmit="event.preventDefault();window.submitted=(window.submitted||0)+1"><div id="prompt-textarea" contenteditable="true" role="textbox"><p>Continue goal abandoned draft</p></div><button id="composer-submit-button" type="submit">Send</button></form>'));
+      const editorBefore = await hidden.webContents.executeJavaScript(goalComposerExpression('probe'));
+      const focused = await hidden.webContents.executeJavaScript(goalComposerExpression('focus'));
+      hidden.webContents.debugger.attach('1.3');
+      const modifiers = process.platform === 'darwin' ? 4 : 2;
+      await hidden.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers
+      });
+      await hidden.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers
+      });
+      await hidden.webContents.debugger.sendCommand('Input.insertText', { text: 'Goal browser test' });
+      const replacedText = await hidden.webContents.executeJavaScript(`document.querySelector('#prompt-textarea').textContent`);
+      // The real ChatGPT composer is ProseMirror-like: an invisible placeholder
+      // can be present in a nested paragraph without changing visible text.
+      await hidden.webContents.executeJavaScript(`document.querySelector('#prompt-textarea').innerHTML = '<p>\\u200bGoal browser test</p>'`);
+      const mismatch = await hidden.webContents.executeJavaScript(goalComposerExpression('send', 'Different message'));
+      await hidden.webContents.executeJavaScript(`document.querySelector('#composer-submit-button').disabled = true`);
+      const unavailable = await hidden.webContents.executeJavaScript(goalComposerExpression('send', 'Goal browser test'));
+      await hidden.webContents.executeJavaScript(`document.querySelector('#composer-submit-button').disabled = false`);
+      const send = await hidden.webContents.executeJavaScript(goalComposerExpression('send', 'Goal browser test'));
+      if (send.state === 'send_ready') {
+        await hidden.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'
+        });
+        await hidden.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13
+        });
+      }
+      hiddenComposer = { editorBefore, focused, replacedText, mismatchState: mismatch.state,
+        unavailableState: unavailable.state, sendState: send.state,
+        clicks: await hidden.webContents.executeJavaScript('window.submitted || 0'),
+        hidden: !hidden.isVisible() };
+    } finally { hidden.close(); }
     fs.writeFileSync(outputPath, JSON.stringify({
+      hiddenComposer,
       started,
       positioned,
       resizedState,

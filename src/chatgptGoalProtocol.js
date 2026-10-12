@@ -38,6 +38,30 @@ function parseConversationUrl(value) {
   return assertConversationId(url.pathname.slice(3));
 }
 
+function protocolFailure(path, status) {
+  const stage = path.startsWith('/backend-api/f/conversation/prepare') ? 'conversation preparation'
+    : path.startsWith('/backend-api/sentinel/chat-requirements') ? 'chat requirements'
+      : path === '/backend-api/f/conversation' ? 'message submission' : 'conversation read';
+  const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
+  return Object.assign(new Error(`ChatGPT Web ${stage} failed (HTTP ${httpStatus || 'unknown'}).`), {
+    status: httpStatus, stage
+  });
+}
+
+// Retain only boolean challenge types. Never persist or display challenge tokens,
+// seeds, difficulty values, encrypted browser signals or raw response bodies.
+function requiredChatgptChallenges(result, phase) {
+  const types = [
+    ['proofofwork', 'proof-of-work'], ['turnstile', 'Turnstile'],
+    ['so', 'so'], ['arkose', 'Arkose']
+  ].filter(([key]) => result?.[key]?.required === true).map(([, label]) => label);
+  if (!types.length) return null;
+  const challenge = { phase, types };
+  const error = new Error(`ChatGPT requires ${types.join(', ')}; Goal Mode paused.`);
+  error.challenge = challenge;
+  return error;
+}
+
 function headers(credentials) {
   return {
     authorization: 'Bearer ' + credentials.bearer,
@@ -54,7 +78,7 @@ async function requestChatgpt(path, options = {}, deps = {}) {
   if (native) {
     const result = await native({ path, method: options.method || 'GET', body: options.body,
       headers: options.headers, raw: options.raw === true }, { signal: options.signal });
-    if (!result?.ok) throw Object.assign(new Error('ChatGPT Web request failed (' + (result?.status || 'unknown') + ').'), { status: result?.status || 0 });
+    if (!result?.ok) throw protocolFailure(path, result?.status);
     return options.raw ? { text: async () => result.streamObserved ? 'event: accepted\n\n' : '' } : result.data;
   }
   const credentials = deps.credentials || chatgptCredentials();
@@ -67,7 +91,7 @@ async function requestChatgpt(path, options = {}, deps = {}) {
     signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.raw ? STREAM_TIMEOUT_MS : REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(options.raw ? STREAM_TIMEOUT_MS : REQUEST_TIMEOUT_MS),
     redirect: 'error'
   });
-  if (!response.ok) throw Object.assign(new Error('ChatGPT Web request failed (' + response.status + ').'), { status: response.status });
+  if (!response.ok) throw protocolFailure(path, response.status);
   if (options.raw) return response;
   const advertised = Number(response.headers?.get?.('content-length') || 0);
   if (advertised > MAX_JSON_BYTES) throw new Error('ChatGPT conversation response exceeded the safe size limit.');
@@ -164,28 +188,63 @@ async function sendContinue(id, parentMessageId, deps = {}) {
   assertConversationId(id);
   if (!parentMessageId) throw new Error('A confirmed parent message is required.');
   if (!deps.workId || !deps.objective) throw new Error('Goal continuation requires the exact work ID and objective.');
-  // Do not attempt to circumvent sentinel proof-of-work or browser challenges.
+  const prompt = 'Continue goal ' + deps.workId + ': ' + deps.objective + '. Inspect this exact Rel.AI work_id, operation receipts and task state first. Do not repeat completed changes or operations. If finished, explicitly close that work session. If blocked or awaiting user input, explain the blocker instead of retrying.';
+  const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
+  if (native) {
+    const result = await native({ action: 'continue', conversationId: id, parentMessageId, expectedNodeId: deps.nodeId, prompt }, { signal: deps.signal });
+    if (result?.ok && result.accepted === true) return { accepted: true };
+    const stage = ['navigation', 'composer', 'preflight', 'draft', 'send_button', 'submit', 'readback']
+      .includes(result?.stage) ? ` (${result.stage})` : '';
+    if (result?.needsUser) {
+      const reason = result.reason === 'text_mismatch' ? 'Composer text could not be verified'
+        : result.reason === 'send_unavailable' ? 'Send button was unavailable'
+          : result.reason === 'verification' ? 'Browser verification is required'
+            : 'ChatGPT needs attention in the opened browser';
+      throw new Error(`${reason}${stage}; Goal Mode paused without retrying.`);
+    }
+    if (result?.stale) throw new Error('ChatGPT conversation changed before sending. Goal Mode paused without retrying.');
+    throw new Error(`ChatGPT browser send could not be verified${stage}; Goal Mode paused without retrying.`);
+  }
+  // Non-desktop development transport retains the fail-closed protocol flow.
+  const messageId = randomUUID();
+  // The chat-requirements token must be available before conversation preparation.
+  // Never attempt to solve proof-of-work, Turnstile, or other interactive challenges.
+  const requirementPrepare = await requestChatgpt('/backend-api/sentinel/chat-requirements/prepare', {
+    method: 'POST', body: {}, signal: deps.signal
+  }, deps);
+  const prepareChallenge = requiredChatgptChallenges(requirementPrepare, 'prepare');
+  if (prepareChallenge) throw prepareChallenge;
+  if (typeof requirementPrepare?.prepare_token !== 'string' || !requirementPrepare.prepare_token) {
+    throw new Error('ChatGPT chat requirements preparation did not return a prepare token.');
+  }
+  const requirement = await requestChatgpt('/backend-api/sentinel/chat-requirements/finalize', {
+    method: 'POST', body: { prepare_token: requirementPrepare.prepare_token }, signal: deps.signal
+  }, deps);
+  const finalizeChallenge = requiredChatgptChallenges(requirement, 'finalize');
+  if (finalizeChallenge) throw finalizeChallenge;
+  if (typeof requirement?.token !== 'string' || !requirement.token) {
+    throw new Error('ChatGPT requirements finalization returned no token; Goal Mode paused.');
+  }
   const prep = await requestChatgpt('/backend-api/f/conversation/prepare', {
     method: 'POST',
-    body: { conversation_id: id, model: 'auto' }, signal: deps.signal
+    headers: { 'openai-sentinel-chat-requirements-token': requirement.token },
+    body: {
+      conversation_id: id, model: 'auto', message_id: messageId,
+      timezone_offset_min: new Date().getTimezoneOffset(), supports_buffering: true,
+      client_prepare_state: 'none', conversation_mode: { kind: 'primary_assistant' }
+    }, signal: deps.signal
   }, deps);
   const conduit = prep?.conduit_token || prep?.token;
   if (!conduit || typeof conduit !== 'string') throw new Error('ChatGPT preparation did not provide a conduit token.');
-  const requirement = await requestChatgpt('/backend-api/sentinel/chat-requirements', {
-    method: 'POST', body: { p: null }, signal: deps.signal
-  }, deps);
-  if (!requirement?.token || requirement?.proofofwork?.required || requirement?.turnstile?.required) {
-    throw new Error('ChatGPT requires interactive verification; Goal Mode was paused.');
-  }
   const response = await requestChatgpt('/backend-api/f/conversation', {
     method: 'POST', raw: true, signal: deps.signal,
     headers: { accept: 'text/event-stream', 'x-conduit-token': conduit,
       'openai-sentinel-chat-requirements-token': requirement.token },
     body: {
       action: 'next', conversation_id: id, parent_message_id: parentMessageId,
-      client_prepare_state: 'success', model: 'auto',
-      messages: [{ id: randomUUID(), author: { role: 'user' },
-        content: { content_type: 'text', parts: ['Continue goal ' + deps.workId + ': ' + deps.objective + '. Inspect this exact Rel.AI work_id, operation receipts and task state first. Do not repeat completed changes or operations. If finished, explicitly close that work session. If blocked or awaiting user input, explain the blocker instead of retrying.'] } }]
+      client_prepare_state: 'success', model: 'auto', supports_buffering: true,
+      messages: [{ id: messageId, author: { role: 'user' },
+        content: { content_type: 'text', parts: [prompt] } }]
     }
   }, deps);
   // Consume rather than cancel the response stream. Some web turns outlive the

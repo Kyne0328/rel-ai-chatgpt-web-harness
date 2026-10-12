@@ -205,6 +205,7 @@ async function createDesktopHost(options = {}) {
   });
   const browserProfileConfig = () => configModule.readConfig({ allowMissing: true });
   const browserSurfaceHost = createBrowserSurfaceHost({
+    BrowserWindow,
     WebContentsView,
     session,
     getDashboardWindow: dashboardWindowManager.getWindow,
