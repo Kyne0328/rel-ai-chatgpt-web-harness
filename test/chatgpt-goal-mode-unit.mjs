@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseConversationUrl, activeMessages, turnState, findGoalConversation, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
-import { activateGoal, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal } from '../src/chatgptGoalMode.js';
+import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
+import { activateGoal, queueGoalDetection, checkGoalDetection, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
 import { withStateDatabase } from '../src/stateDatabase.ts';
 
@@ -51,6 +51,17 @@ test('conversation URL validation is bound to chatgpt.com', () => {
   assert.throws(() => parseConversationUrl('https://chatgpt.com/c/not-a-uuid'));
 });
 
+test('protocol conversation reads accept 9 MiB but retain a 32 MiB limit', async () => {
+  const content = 'x'.repeat(9 * 1024 * 1024);
+  const long = await getConversation(ID, { credentials,
+    fetch: async () => new Response(JSON.stringify({ current_node: 'large', content })) });
+  assert.equal(long.content.length, content.length);
+  await assert.rejects(() => getConversation(ID, { credentials,
+    fetch: async () => new Response(null, {
+      headers: { 'content-length': String(33 * 1024 * 1024) }
+    }) }), /response exceeded the safe size limit/);
+});
+
 test('current conversation branch is parsed without side branches', () => {
   const tree = conversation(ID);
   const messages = activeMessages(tree);
@@ -61,28 +72,86 @@ test('current conversation branch is parsed without side branches', () => {
   assert.equal(turnState(tree).complete, false);
 });
 
-test('goal discovery links only an exact unique slash command', async () => {
+test('unfinished assistant turns trigger one recovery at 4:30 since last Rel.AI call', () => {
+  const snapshot = { nodeId: 'assistant-node', role: 'assistant', text: 'Thinking', complete: false };
+  const task = { calls: 7, activeCalls: 0, lastActivityAt: 1_000 };
+  const goal = { active: true, state: 'monitoring' };
+  const first = unfinishedTurnUpdate(goal, snapshot, task, 1_000);
+  assert.equal(first.unfinishedProgressAt, 1_000);
+  assert.equal(first.active, true);
+  assert.equal(unfinishedTurnUpdate(first, snapshot, task, 270_999), null,
+    'the timer must not fire before 4 minutes 30 seconds');
+  const expanded = unfinishedTurnUpdate(first, { ...snapshot, text: 'Thinking more' }, task, 150_000);
+  assert.equal(expanded, null, 'generating text without new Rel.AI calls does not reset the timer');
+  const newCall = unfinishedTurnUpdate(first, snapshot, { calls: 8, lastActivityAt: 269_000 }, 269_000);
+  assert.equal(newCall.unfinishedProgressAt, 269_000, 'a new Rel.AI tool call resets the timer');
+  assert.equal(unfinishedTurnUpdate(newCall, snapshot,
+    { calls: 8, lastActivityAt: 269_000 }, 538_999), null);
+  const stalled = unfinishedTurnUpdate(newCall, snapshot,
+    { calls: 8, lastActivityAt: 269_000 }, 539_000);
+  assert.equal(stalled.state, 'stalled');
+  assert.equal(stalled.active, true, 'only verified recovery may send a new message');
+  assert.equal(stalled.pendingNode, undefined, 'stall detection itself must never submit');
+  const lateFirstPoll = unfinishedTurnUpdate({ active: true, state: 'monitoring' },
+    { ...snapshot, startedAt: 1_000 }, { calls: 12, lastActivityAt: 2_000 }, 260_000);
+  assert.equal(lateFirstPoll.unfinishedProgressAt, 2_000,
+    'the last tool call, not the monitor first seeing the turn, starts the timer');
+  assert.equal(unfinishedTurnUpdate(lateFirstPoll, { ...snapshot, startedAt: 1_000 },
+    { calls: 12, lastActivityAt: 2_000 }, 272_000)?.state, 'stalled');
+});
+
+test('stalled-turn stop uses the authorized native browser once and fails closed', async () => {
+  const calls = [];
+  assert.equal(await stopStalledTurn(ID, 'assistant-node', { nativeTransport: async payload => {
+    calls.push(payload);
+    return { ok: true, stopped: true };
+  } }), true);
+  assert.deepEqual(calls.map(call => call.action), ['stop_stalled']);
+  assert.equal(calls[0].expectedNodeId, 'assistant-node');
+  await assert.rejects(() => stopStalledTurn(ID, 'assistant-node', {
+    nativeTransport: async () => ({ ok: false, needsUser: true })
+  }), /could not be stopped and verified/);
+  await assert.rejects(() => stopStalledTurn(ID, 'assistant-node', { credentials,
+    fetch: async () => { throw new Error('Unsafe fallback called'); }
+  }), /requires the signed-in desktop browser/);
+});
+
+test('goal discovery links a unique recent slash command even when the objective is rewritten', async () => {
   const seen = [];
   const fetch = async url => {
     seen.push(url);
     if (url.includes('/backend-api/conversations?')) return response({ items: [{ id: ID }, { id: OTHER }] });
-    return response(conversation(url.endsWith(ID) ? ID : OTHER, url.endsWith(ID) ? '/goal Fix the current project' : '/goal Other project'));
+    return response(conversation(url.endsWith(ID) ? ID : OTHER,
+      url.endsWith(ID) ? '/goal start now. Do everything possible until the firmware is finished' : 'Ordinary conversation'));
   };
-  assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch, startedAt: Date.now() }), ID);
+  assert.equal(await findGoalConversation('Build offline HG6245D firmware', { credentials, fetch, startedAt: Date.now() }), ID);
   assert.ok(seen.some(url => url.endsWith(ID)));
+  assert.deepEqual(await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now() }),
+    { state: 'matched', conversationId: ID, messageId: 'user-1' });
   const ambiguous = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }, { id: OTHER }] })
     : response(conversation(ID));
   assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: ambiguous, startedAt: Date.now() }), null);
   const bareCommand = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] })
     : response(conversation(ID, '/goal'));
   assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: bareCommand, startedAt: Date.now() }), ID);
-  const stopCommand = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] })
-    : response(conversation(ID, '/goal stop'));
-  assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: stopCommand, startedAt: Date.now() }), null);
+  for (const control of ['/goal stop', '/goal status', '/goal cancel']) {
+    const stopCommand = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] })
+      : response(conversation(ID, control));
+    assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: stopCommand, startedAt: Date.now() }), null);
+  }
   const old = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] })
     : response({ ...conversation(ID), mapping: { ...conversation(ID).mapping,
       u: { parent: 'root', message: { id: 'old', author: { role: 'user' }, create_time: 1, content: { parts: ['/goal Fix the current project'] } } } } });
   assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: old, startedAt: Date.now() }), null);
+  const laterOrdinary = conversation(ID, '/goal Build firmware');
+  laterOrdinary.mapping.nextUser = { parent: 'a', message: { id: 'user-2', author: { role: 'user' },
+    create_time: Date.now() / 1000, content: { parts: ['Now review my notes'] } } };
+  laterOrdinary.mapping.nextAssistant = { parent: 'nextUser', message: { id: 'assistant-2',
+    author: { role: 'assistant' }, end_turn: true, status: 'finished_successfully' } };
+  laterOrdinary.current_node = 'nextAssistant';
+  assert.deepEqual(await findRecentGoalCommand({ credentials,
+    fetch: async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] }) : response(laterOrdinary),
+    startedAt: Date.now() }), { state: 'absent' }, 'an older /goal must not activate an unrelated later task');
 });
 
 test('goal record is scoped to principal and stopped without cancelling the task', () => {
@@ -104,6 +173,102 @@ test('goal record is scoped to principal and stopped without cancelling the task
     assert.equal(stopDashboardGoal(config, work_id).state, 'stopped');
     assert.equal(activateGoal(config, { work_id, objective: 'Fix the current project' }, context).goalActive, true,
       'only an explicit new start may reactivate a stopped goal');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('connector work begin detects /goal without an AI-supplied boolean and claims the command once', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-auto-goal-'));
+  try {
+    const config = { stateDir: dir };
+    const context = { connector: true, conversationId: 'opaque-host-session',
+      principal: 'chatgpt-principal' };
+    const calls = [];
+    const fetch = async url => {
+      calls.push(url);
+      return url.includes('/conversations?')
+        ? response({ items: [{ id: ID }] })
+        : response(conversation(ID, '/goal start now. Do everything possible until firmware is finished'));
+    };
+    const deps = { credentials, fetch, task: { status: 'planning' } };
+    const task = { work_id: 'firmware-work', workspace: 'pldt',
+      objective: 'Create fully verifiable HG6245D firmware offline' };
+    assert.deepEqual(queueGoalDetection(config, task, context, deps), { state: 'checking' });
+    assert.equal(goalStatus(config, { work_id: task.work_id }, context).state, 'checking');
+    for (let i = 0; i < 30 && goalStatus(config, { work_id: task.work_id }, context)?.state === 'checking'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const linked = goalStatus(config, { work_id: task.work_id }, context);
+    assert.equal(linked.goalActive, true, JSON.stringify(linked));
+    assert.equal(linked.conversationId, ID);
+    assert.equal(linked.state, 'monitoring');
+    assert.ok(calls.length >= 2);
+    assert.equal(queueGoalDetection(config, task, context, deps), null,
+      'an already registered goal must not be reset');
+    assert.throws(() => goalStatus(config, { work_id: task.work_id },
+      { ...context, principal: 'another-principal' }));
+    const competing = { ...task, work_id: 'unrelated-work' };
+    assert.deepEqual(queueGoalDetection(config, competing, context, deps), { state: 'checking' });
+    for (let i = 0; i < 30 && goalStatus(config, { work_id: competing.work_id }, context).state === 'checking'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(goalStatus(config, { work_id: competing.work_id }, context).state, 'ambiguous',
+      'one user command must not activate a second task');
+    assert.equal(stopGoal(config, { work_id: task.work_id }, context).state, 'stopped');
+    assert.equal(queueGoalDetection(config, { ...task, work_id: 'cli-work' },
+      { ...context, connector: false }, deps), null);
+    const stoppedEarly = { ...task, work_id: 'stopped-early' };
+    queueGoalDetection(config, stoppedEarly, context, deps);
+    assert.equal(stopGoal(config, { work_id: stoppedEarly.work_id }, context).state, 'stopped');
+    await checkGoalDetection(config, stoppedEarly.work_id, deps);
+    assert.equal(goalStatus(config, { work_id: stoppedEarly.work_id }, context).goalActive, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('auto detection is bounded, fails closed on ambiguity and does not invent a goal for ordinary work', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-goal-ambiguity-'));
+  try {
+    const config = { stateDir: dir };
+    const context = { connector: true, conversationId: 'host-session', principal: 'principal' };
+    const task = { work_id: 'ambiguous-test', workspace: 'example', objective: 'Make a build' };
+    const fetch = async url => url.includes('/conversations?')
+      ? response({ items: [{ id: ID }, { id: OTHER }] })
+      : response(conversation(url.endsWith(ID) ? ID : OTHER, '/goal start now'));
+    const deps = { credentials, fetch, task: { status: 'planning' } };
+    queueGoalDetection(config, task, context, deps);
+    for (let i = 0; i < 30 && goalStatus(config, { work_id: task.work_id }, context).state === 'checking'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(goalStatus(config, { work_id: task.work_id }, context).state, 'ambiguous');
+    assert.equal(goalStatus(config, { work_id: task.work_id }, context).goalActive, false);
+    assert.equal(dashboardGoalStatus(config, task.work_id), null,
+      'ordinary task inspector must not show an unconfirmed Goal Mode');
+
+    const normalTask = { ...task, work_id: 'ordinary-work' };
+    queueGoalDetection(config, normalTask, context, { ...deps,
+      fetch: async url => url.includes('/conversations?')
+        ? response({ items: [{ id: ID }] }) : response(conversation(ID, 'Please analyze this repository')) });
+    for (let i = 0; i < 30 && goalStatus(config, { work_id: normalTask.work_id }, context).state === 'checking'
+      && goalStatus(config, { work_id: normalTask.work_id }, context).state === 'checking'; i++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    const waiting = goalStatus(config, { work_id: normalTask.work_id }, context);
+    assert.equal(waiting.goalActive, false);
+    assert.equal(waiting.state, 'checking', 'one absent result schedules one bounded retry');
+    withStateDatabase(config, db => {
+      const key = 'chatgpt_goal_detection:' + normalTask.work_id;
+      const original = JSON.parse(db.prepare('SELECT value FROM state_meta WHERE key=?').get(key).value);
+      db.prepare('UPDATE state_meta SET value=? WHERE key=?')
+        .run(JSON.stringify({ ...original, nextAttemptAt: 0 }), key);
+    }, { transaction: true });
+    await checkGoalDetection(config, normalTask.work_id, { ...deps,
+      fetch: async url => url.includes('/conversations?')
+        ? response({ items: [{ id: ID }] }) : response(conversation(ID, 'No /goal request')) });
+    assert.equal(goalStatus(config, { work_id: normalTask.work_id }, context).state, 'not_requested');
+    assert.equal(goalStatus(config, { work_id: normalTask.work_id }, context).goalActive, false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

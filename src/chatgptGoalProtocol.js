@@ -13,7 +13,9 @@ function configureGoalBrowserTransport(transport) {
 function hasGoalBrowserTransport() { return typeof goalBrowserTransport === 'function'; }
 const REQUEST_TIMEOUT_MS = 15_000;
 const STREAM_TIMEOUT_MS = 2 * 60 * 60_000;
-const MAX_JSON_BYTES = 8 * 1024 * 1024;
+// Long tool-driven conversations regularly exceed the original 8 MiB bound.
+// Keep a finite ceiling; never buffer unlimited chat transcripts in the MCP process.
+const MAX_JSON_BYTES = 32 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function chatgptCredentials(env = process.env) {
@@ -152,36 +154,54 @@ function turnState(conversation) {
     lastMessageId: String(message?.id || ''),
     role,
     text: messageText(message),
+    startedAt: Number(message?.create_time || 0) * 1000,
     complete,
     userMessage: [...messages].reverse().find(n => n.message?.author?.role === 'user')?.message || null,
     messages
   };
 }
 
-async function findGoalConversation(objective, deps = {}) {
-  const expected = String(objective || '').trim().replace(/\s+/g, ' ').toLowerCase();
+async function findRecentGoalCommand(deps = {}) {
   const startedAt = Number(deps.startedAt || 0);
-  if (!expected) return null;
   const candidates = [];
   for (const summary of await listConversations(deps)) {
     const id = String(summary.id || '');
     if (!UUID.test(id)) continue;
     const conversation = await getConversation(id, deps);
-    const command = activeMessages(conversation).filter(n => n.message?.author?.role === 'user')
-      .reverse().find(n => /^\/goal(?:\s|$)/i.test(messageText(n.message).trim()));
-    if (!command) continue;
-    const commandTimestamp = Number(command.message?.create_time);
-    // A stale matching command from an old conversation must not bind a new goal.
-    // ChatGPT message timestamps are in Unix seconds, not milliseconds.
-    if (startedAt && (!Number.isFinite(commandTimestamp) || commandTimestamp <= 0
-      || commandTimestamp * 1000 < startedAt - 120_000)) continue;
-    const commandGoal = messageText(command.message).trim().replace(/^\/goal\s*/i, '').replace(/\s+/g, ' ').trim().toLowerCase();
-    // Bare /goal opts the current conversation in using the objective provided by
-    // the ChatGPT workflow. Control commands never count as a new goal.
-    if (commandGoal === expected || commandGoal === '') candidates.push(id);
-    if (candidates.length > 1) return null; // Never guess which tab is owned.
+    // Only the latest user message may start a new goal. A previous /goal
+    // followed by ordinary chat must not opt an unrelated task in later.
+    const command = activeMessages(conversation).filter(n => n.message?.author?.role === 'user').at(-1);
+    const text = messageText(command?.message).trim();
+    if (!/^\/goal(?:\s|$)/i.test(text)
+      || /^\/goal\s+(?:stop|cancel|status)(?:\s|$)/i.test(text)) continue;
+    const timestamp = Number(command.message?.create_time) * 1000;
+    // Only messages near this work's creation qualify. The objective may have
+    // been rewritten by ChatGPT, so comparing its wording is not reliable.
+    if (!startedAt || !Number.isFinite(timestamp) || timestamp < startedAt - 120_000
+      || timestamp > startedAt + 15_000) continue;
+    const messageId = String(command.message?.id || '').trim();
+    if (!messageId) continue;
+    candidates.push({ conversationId: id, messageId });
+    if (candidates.length > 1) return { state: 'ambiguous' };
   }
-  return candidates.length === 1 ? candidates[0] : null;
+  return candidates.length ? { state: 'matched', ...candidates[0] } : { state: 'absent' };
+}
+
+async function findGoalConversation(objective, deps = {}) {
+  if (!String(objective || '').trim()) return null;
+  const match = await findRecentGoalCommand(deps);
+  return match.state === 'matched' ? match.conversationId : null;
+}
+
+async function stopStalledTurn(id, expectedNodeId, deps = {}) {
+  assertConversationId(id);
+  if (!expectedNodeId) throw new Error('A confirmed stalled assistant node is required.');
+  const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
+  if (!native) throw new Error('Stalled ChatGPT turn requires the signed-in desktop browser to stop it safely.');
+  const result = await native({ action: 'stop_stalled', conversationId: id, expectedNodeId }, { signal: deps.signal });
+  if (result?.ok && result.stopped === true) return true;
+  if (result?.ok && result.alreadyFinished === true) return false;
+  throw new Error('Stalled ChatGPT response could not be stopped and verified; Goal Mode paused without sending.');
 }
 
 async function sendContinue(id, parentMessageId, deps = {}) {
@@ -270,4 +290,4 @@ async function sendContinue(id, parentMessageId, deps = {}) {
   return { accepted: true };
 }
 
-export { configureGoalBrowserTransport, hasGoalBrowserTransport, assertConversationId, parseConversationUrl, chatgptCredentials, getConversation, listConversations, activeMessages, messageText, turnState, findGoalConversation, sendContinue };
+export { configureGoalBrowserTransport, hasGoalBrowserTransport, assertConversationId, parseConversationUrl, chatgptCredentials, getConversation, listConversations, activeMessages, messageText, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue };

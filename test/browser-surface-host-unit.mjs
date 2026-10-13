@@ -115,7 +115,8 @@ class FakeWebContents extends EventEmitter {
   async executeJavaScript(script) {
     this.onExecuteJavaScript?.();
     if (this.executeJavaScriptError) throw this.executeJavaScriptError;
-    if (String(script).includes('relai-goal-composer') && this.goalBrowserScript) return this.goalBrowserScript(script);
+    if ((String(script).includes('relai-goal-composer') || String(script).includes('relai-goal-stop'))
+      && this.goalBrowserScript) return this.goalBrowserScript(script);
     if (String(script).includes('return { attached:')) return { attached: true, visible: true };
     return true;
   }
@@ -168,6 +169,7 @@ function createHarness({
       this.shown = false;
       this.webContents = new FakeWebContents();
       this.webContents.goalBrowserScript = script => {
+        if (script.includes('relai-goal-stop')) return { state: this.webContents.goalStopState || 'stop_ready' };
         if (script.includes('if ("probe" ===')) return goalComposerState === 'ready'
           ? { state: 'ready', occupied: false }
           : goalComposerState === 'occupied'
@@ -258,6 +260,22 @@ function createHarness({
   const fetched = await host.goalProtocolRequest({ method: 'GET', path: '/backend-api/conversations?offset=0&limit=1' });
   assert.equal(fetched.ok, true);
   assert.deepEqual(fetched.data.items, []);
+  const originalFetch = goalSession.fetch;
+  const longPayload = 'x'.repeat(9 * 1024 * 1024);
+  goalSession.fetch = async (url, options) => String(url).includes('/backend-api/conversation/')
+    ? new Response(JSON.stringify({ current_node: 'large', payload: longPayload }), { status: 200 })
+    : originalFetch(url, options);
+  const large = await host.goalProtocolRequest({ method: 'GET',
+    path: '/backend-api/conversation/b5b9731a-8496-4a92-9b44-55d080038c7d' });
+  assert.equal(large.data.payload.length, longPayload.length,
+    'a long conversation above 8 MiB must remain readable');
+  goalSession.fetch = async () => new Response(null, {
+    status: 200, headers: { 'content-length': String(33 * 1024 * 1024) }
+  });
+  await assert.rejects(() => host.goalProtocolRequest({ method: 'GET',
+    path: '/backend-api/conversation/b5b9731a-8496-4a92-9b44-55d080038c7d' }),
+  /response exceeded its size limit/, 'oversized responses must still fail safely');
+  goalSession.fetch = originalFetch;
   assert.equal((await host.goalProtocolRequest({ method: 'POST',
     path: '/backend-api/sentinel/chat-requirements/prepare', body: {} })).ok, true);
   assert.equal((await host.goalProtocolRequest({ method: 'POST',
@@ -294,6 +312,48 @@ function createHarness({
   await host.clearSavedData();
   assert.equal(goalSession.authenticated, false, 'clear all saved browser data must clear Goal Mode login too');
   await host.run({ action: 'close_session', nativeSessionId: other.nativeSessionId });
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-stalled-stop-fixture');
+  const { host, pathSessions, goalWindows } = createHarness({ goalLoginProfileDirectory: directory });
+  await host.getGoalLoginStatus();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
+  let status = 'in_progress';
+  let currentNode = 'a';
+  goalSession.authenticated = true;
+  goalSession.fetch = async url => {
+    if (String(url).endsWith('/api/auth/session')) return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'fixture-secret' }));
+    return new Response(JSON.stringify({ current_node: currentNode,
+      mapping: { a: { parent: null, message: { id: 'assistant-stalled', author: { role: 'assistant' },
+        end_turn: status === 'interrupted', status } } } }));
+  };
+  const stopping = host.goalProtocolRequest({ action: 'stop_stalled',
+    conversationId: target, expectedNodeId: 'a' });
+  goalWindows[0].webContents.onGoalClick = () => {
+    status = 'interrupted';
+    goalWindows[0].webContents.goalStopState = 'not_running';
+  };
+  const result = await stopping;
+  assert.deepEqual(result, { ok: true, stopped: true });
+  assert.equal(goalWindows[0].webContents.goalClickCount, 1, 'Stop was pressed exactly once');
+  assert.equal(goalWindows[0].isDestroyed(), true, 'verified stop closes the recovery window');
+  currentNode = 'other';
+  const stale = await host.goalProtocolRequest({ action: 'stop_stalled',
+    conversationId: target, expectedNodeId: 'a' });
+  assert.equal(stale.stale, true, 'different branch must not be stopped');
+  assert.equal(goalWindows[1].webContents.goalClickCount, 0);
+  currentNode = 'a';
+  status = 'in_progress';
+  const missingStop = host.goalProtocolRequest({ action: 'stop_stalled',
+    conversationId: target, expectedNodeId: 'a' });
+  goalWindows[2].webContents.goalStopState = 'not_running';
+  const failed = await missingStop;
+  assert.deepEqual(failed, { ok: false, needsUser: true, stage: 'stop_button' });
+  assert.equal(goalWindows[2].webContents.goalClickCount, 0, 'a missing Stop button cannot trigger a guessed action');
+  assert.equal(goalWindows[2].shown, true, 'uncertain recovery requires browser handoff');
+  await host.closeAll();
 }
 
 {

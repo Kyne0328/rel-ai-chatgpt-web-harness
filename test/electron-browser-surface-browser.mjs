@@ -66,7 +66,9 @@ try {
     editorBefore: { state: 'ready', occupied: true }, focused: { state: 'focused' },
     replacedText: 'Goal browser test',
     mismatchState: 'text_mismatch', unavailableState: 'send_unavailable',
-    sendState: 'send_ready', clicks: 1, hidden: true
+    sendState: 'send_ready', clicks: 1,
+    stopState: 'stop_ready', stopAfter: 'not_running', stopClicks: 1,
+    hidden: true
   }, 'real Electron must support native composer input and click without showing a window');
   assert.equal(probe.aiClickCount, 0, 'AI-owned browser surfaces must ignore human-style pointer input');
   assert.equal(probe.userState.control, 'user');

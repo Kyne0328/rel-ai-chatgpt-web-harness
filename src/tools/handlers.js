@@ -11,7 +11,7 @@ import { workspaceHistory } from './history.ts';
 import { relaiStatus } from './status.js';
 import { completeTask } from './completion.js';
 import { cancelTask, stopTaskOperations } from './cancellation.js';
-import { activateGoal, goalStatus, stopGoal } from '../chatgptGoalMode.js';
+import { activateGoal, queueGoalDetection, goalStatus, stopGoal } from '../chatgptGoalMode.js';
 import { relaiSearch } from '../bridge/search.js';
 import { relaiCodeInspect } from '../bridge/codeIntelligence.js';
 import { relaiExec } from '../bridge/exec.js';
@@ -51,9 +51,13 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   const initialSteps = Array.isArray(args.steps) && args.steps.length ? args.steps : defaultTaskSteps(args);
   const progress = hasPlan ? null : applyTaskProgressPatch(task.work_id, { steps: initialSteps });
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
-  if (args.goal === true) activateGoal(config,
-    { work_id: task.work_id, objective: args.objective || current?.objective || args.title, conversationUrl: args.conversationUrl },
-    { ...context, requestTaskContext: { session: current || { ...task, status: 'planning', workspace: workspace?.alias || '', objective: args.objective || args.title } } });
+  if (args.goal === true) {
+    activateGoal(config,
+      { work_id: task.work_id, objective: args.objective || current?.objective || args.title, conversationUrl: args.conversationUrl },
+      { ...context, requestTaskContext: { session: current || { ...task, status: 'planning', workspace: workspace?.alias || '', objective: args.objective || args.title } } });
+  } else {
+    queueGoalDetection(config, task, context);
+  }
   return {
     ...task,
     plan: progress?.plan || current?.plan,

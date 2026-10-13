@@ -46,6 +46,26 @@ function goalComposerExpression(action, expectedText = '') {
   })()`;
 }
 
+// Stop only the exact ChatGPT generation control in the active composer.
+// Never use a generic text search that could hit unrelated page actions.
+function goalStopExpression() {
+  return `(() => {
+    /* relai-goal-stop */
+    const challenge = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="arkoselabs"], #challenge-stage, #cf-challenge-running');
+    if (challenge || location.pathname.startsWith('/cdn-cgi/')) return { state: 'verification' };
+    const editor = document.querySelector('#prompt-textarea[contenteditable="true"], [data-testid="composer-text-input"][contenteditable="true"], [contenteditable="true"][role="textbox"]');
+    if (!editor) return { state: 'loading' };
+    const root = editor.closest('form') || document;
+    const buttons = [...root.querySelectorAll('button[data-testid="stop-button"], button[data-testid="composer-stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop response"], button[aria-label="Stop"]')].filter(button => {
+      const rect = button.getBoundingClientRect();
+      return !button.disabled && button.getAttribute('aria-disabled') !== 'true' && rect.width >= 1 && rect.height >= 1;
+    });
+    if (buttons.length !== 1) return { state: buttons.length ? 'ambiguous' : 'not_running' };
+    buttons[0].focus();
+    return { state: document.activeElement === buttons[0] ? 'stop_ready' : 'unavailable' };
+  })()`;
+}
+
 function goalMessageExists(conversation, expectedText, expectedParentNode) {
   const nodes = conversation?.mapping;
   let nodeId = conversation?.current_node;
@@ -68,4 +88,4 @@ function goalAssistantComplete(conversation) {
     && message.end_turn === true && message.status === 'finished_successfully';
 }
 
-export { goalComposerExpression, goalMessageExists, goalAssistantComplete };
+export { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantComplete };

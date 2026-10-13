@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { layoutSnapshotExpression, normalizeBrowserSnapshotDetail } from '../src/browser/layoutSnapshot.js';
-import { goalComposerExpression, goalMessageExists, goalAssistantComplete } from './chatgpt-goal-composer.js';
+import { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantComplete } from './chatgpt-goal-composer.js';
 
 const MAX_SNAPSHOT_CHARS = 64 * 1024;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
@@ -735,7 +735,95 @@ function createBrowserSurfaceHost(options = {}) {
     }
   }
 
+  async function goalBrowserStopStalled(payload = {}, options = {}) {
+    const id = String(payload.conversationId || '');
+    const expectedNode = String(payload.expectedNodeId || '');
+    if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id) || !expectedNode
+      || !goalProfileDirectory || typeof BrowserWindow !== 'function') {
+      throw new Error('Goal Mode recovery requires an exact signed-in conversation.');
+    }
+    if (goalContinuationInFlight) return { ok: false, needsUser: true };
+    goalContinuationInFlight = true;
+    const chatUrl = 'https://chatgpt.com/c/' + id;
+    const chatPath = '/backend-api/conversation/' + id;
+    const existing = [...goalContinuationWindows].find(window => !window.isDestroyed?.()
+      && window.webContents.getURL().split(/[?#]/, 1)[0] === chatUrl);
+    const win = existing || new BrowserWindow({ width: 1100, height: 800, show: false,
+      webPreferences: { session: session.fromPath(goalProfileDirectory), nodeIntegration: false,
+        contextIsolation: true, sandbox: true, webSecurity: true, backgroundThrottling: false } });
+    if (!existing) {
+      goalContinuationWindows.add(win);
+      win.once('closed', () => goalContinuationWindows.delete(win));
+    }
+    let keepPage = false;
+    let stage = 'navigation';
+    const signal = options.signal;
+    const read = async () => {
+      const response = await goalProtocolRequest({ method: 'GET', path: chatPath }, { signal });
+      if (!response.ok) throw new Error('ChatGPT conversation read failed.');
+      return response.data;
+    };
+    try {
+      throwIfAborted(signal);
+      if (!existing) await withTimeout(withAbort(win.loadURL(chatUrl), signal,
+        () => win.webContents.stop?.()), 18_000, 'Goal Mode stalled browser navigation timed out.');
+      if (win.webContents.getURL().split(/[?#]/, 1)[0] !== chatUrl) throw new Error('Wrong ChatGPT conversation.');
+      stage = 'preflight';
+      const before = await read();
+      if (before.current_node !== expectedNode) return { ok: false, stale: true };
+      const message = before.mapping?.[expectedNode]?.message;
+      if (message?.end_turn === true && message?.status === 'finished_successfully') {
+        return { ok: true, alreadyFinished: true };
+      }
+      stage = 'stop_button';
+      let probe;
+      const readyUntil = Date.now() + 6_000;
+      do {
+        throwIfAborted(signal);
+        probe = await win.webContents.executeJavaScript(goalStopExpression(), true);
+        if (probe?.state !== 'loading') break;
+        await new Promise(resolve => setTimeout(resolve, 300));
+      } while (Date.now() < readyUntil);
+      if (probe?.state !== 'stop_ready') throw new Error('ChatGPT Stop control is not available.');
+      // Exactly one native activation. Any ambiguous outcome is surfaced; the
+      // controller has already claimed this node and must never retry it.
+      stage = 'stop_click';
+      const debuggerApi = await attachedDebugger(win.webContents);
+      await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'
+      });
+      await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
+        type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13
+      });
+      stage = 'stop_readback';
+      const until = Date.now() + 12_000;
+      do {
+        throwIfAborted(signal);
+        const stopped = await win.webContents.executeJavaScript(goalStopExpression(), true);
+        if (stopped?.state === 'not_running') {
+          const after = await read();
+          const final = after.mapping?.[after.current_node]?.message;
+          if (after.current_node === expectedNode && final?.author?.role === 'assistant'
+            && (final?.end_turn === true || ['interrupted', 'cancelled', 'finished_successfully'].includes(final?.status))) {
+            return { ok: true, stopped: true };
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } while (Date.now() < until);
+      throw new Error('ChatGPT Stop did not confirm a settled assistant turn.');
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      keepPage = true;
+      if (!win.isDestroyed?.()) win.show();
+      return { ok: false, needsUser: true, stage };
+    } finally {
+      goalContinuationInFlight = false;
+      if (!keepPage && !win.isDestroyed?.()) win.close();
+    }
+  }
+
   async function goalProtocolRequest(payload = {}, options = {}) {
+    if (payload.action === 'stop_stalled') return goalBrowserStopStalled(payload, options);
     if (payload.action === 'continue') return goalBrowserContinue(payload, options);
     if (!goalProfileDirectory) throw new Error('Goal Mode account is unavailable.');
     const method = String(payload.method || 'GET').toUpperCase();
@@ -804,8 +892,11 @@ function createBrowserSurfaceHost(options = {}) {
       return { ok: true, status: response.status, streamObserved: true };
     }
     const advertised = Number(response.headers?.get?.('content-length') || 0);
-    if (advertised > 8 * 1024 * 1024) throw new Error('Goal Mode response too large.');
-    const result = await readGoalJson(response, 8 * 1024 * 1024);
+    // Match the bounded protocol reader: extended development conversations
+    // may exceed 8 MiB without being corrupt or requiring a manual restart.
+    const maxConversationBytes = 32 * 1024 * 1024;
+    if (advertised > maxConversationBytes) throw new Error('Goal Mode response exceeded its size limit.');
+    const result = await readGoalJson(response, maxConversationBytes);
     return { ok: true, status: response.status, data: result };
   }
 

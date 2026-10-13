@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import { app, BrowserWindow, WebContentsView, nativeImage, session } from 'electron';
 import { createBrowserSurfaceHost } from '../../../electron/browser-surface-host.js';
-import { goalComposerExpression } from '../../../electron/chatgpt-goal-composer.js';
+import { goalComposerExpression, goalStopExpression } from '../../../electron/chatgpt-goal-composer.js';
 
 const outputPath = process.env.RELAI_PROBE_OUTPUT_PATH;
 if (!outputPath) throw new Error('Embedded browser probe output path is required.');
@@ -188,9 +188,29 @@ app.whenReady().then(async () => {
           type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13
         });
       }
+      await hidden.webContents.executeJavaScript(`(() => {
+        const button = document.createElement('button');
+        button.setAttribute('data-testid', 'stop-button');
+        button.type = 'button';
+        button.textContent = 'Stop';
+        button.addEventListener('click', () => { window.stops = (window.stops || 0) + 1; button.remove(); });
+        document.querySelector('form').appendChild(button);
+      })()`);
+      const stop = await hidden.webContents.executeJavaScript(goalStopExpression());
+      if (stop.state === 'stop_ready') {
+        await hidden.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'
+        });
+        await hidden.webContents.debugger.sendCommand('Input.dispatchKeyEvent', {
+          type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13
+        });
+      }
+      const stopAfter = await hidden.webContents.executeJavaScript(goalStopExpression());
       hiddenComposer = { editorBefore, focused, replacedText, mismatchState: mismatch.state,
         unavailableState: unavailable.state, sendState: send.state,
         clicks: await hidden.webContents.executeJavaScript('window.submitted || 0'),
+        stopState: stop.state, stopAfter: stopAfter.state,
+        stopClicks: await hidden.webContents.executeJavaScript('window.stops || 0'),
         hidden: !hidden.isVisible() };
     } finally { hidden.close(); }
     fs.writeFileSync(outputPath, JSON.stringify({
