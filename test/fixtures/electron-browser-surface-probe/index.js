@@ -159,7 +159,7 @@ app.whenReady().then(async () => {
       webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false } });
     let hiddenComposer;
     try {
-      await hidden.loadURL('data:text/html,' + encodeURIComponent('<!doctype html><form onsubmit="event.preventDefault();window.submitted=(window.submitted||0)+1"><div id="prompt-textarea" contenteditable="true" role="textbox"><p>Continue goal abandoned draft</p></div><button id="composer-submit-button" type="submit">Send</button></form>'));
+      await hidden.loadURL('data:text/html,' + encodeURIComponent('<!doctype html><form onsubmit="event.preventDefault();window.submitted=(window.submitted||0)+1"><div contenteditable="true" role="textbox" hidden>Inactive composer</div><div id="prompt-textarea" contenteditable="true" role="textbox"><p>Continue goal abandoned draft</p></div><button id="composer-submit-button" type="submit">Send</button></form>'));
       const editorBefore = await hidden.webContents.executeJavaScript(goalComposerExpression('probe'));
       const focused = await hidden.webContents.executeJavaScript(goalComposerExpression('focus'));
       hidden.webContents.debugger.attach('1.3');

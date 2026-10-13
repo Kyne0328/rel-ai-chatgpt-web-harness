@@ -18,10 +18,15 @@ function goalComposerExpression(action, expectedText = '') {
   if (!['probe', 'focus', 'send'].includes(action)) throw new Error('Unsupported Goal Mode composer probe.');
   return `(() => {
     /* relai-goal-composer */
-    const editor = document.querySelector(${JSON.stringify(EDITOR)});
     const challenge = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="arkoselabs"], #challenge-stage, #cf-challenge-running');
     if (challenge || location.pathname.startsWith('/cdn-cgi/')) return { state: 'verification' };
-    if (!editor || !editor.isConnected) return { state: 'loading' };
+    const editors = [...document.querySelectorAll(${JSON.stringify(EDITOR)})].filter(candidate => {
+      if (!candidate.isConnected || candidate.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+      const rect = candidate.getBoundingClientRect();
+      return rect.width >= 1 && rect.height >= 1 && getComputedStyle(candidate).visibility !== 'hidden';
+    });
+    if (editors.length !== 1) return { state: editors.length ? 'unavailable' : 'loading' };
+    const editor = editors[0];
     const clean = value => String(value || '').replace(/[\u200b-\u200d\ufeff]/g, '').replace(/\u00a0/g, ' ').trim();
     const texts = [editor.value, editor.textContent, editor.innerText].map(clean);
     if (${JSON.stringify(action)} === 'probe') return { state: 'ready', occupied: texts.some(Boolean) };
