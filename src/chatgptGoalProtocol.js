@@ -37,8 +37,11 @@ function parseConversationUrl(value) {
   if (UUID.test(input)) return input;
   let url;
   try { url = new URL(input); } catch { throw new Error('Provide a ChatGPT conversation URL or ID.'); }
-  if (url.origin !== ORIGIN || !url.pathname.startsWith('/c/')) throw new Error('Only chatgpt.com/c/ conversation URLs are supported.');
-  return assertConversationId(url.pathname.slice(3));
+  const route = /^\/(?:g\/g-[A-Za-z0-9_-]+\/)?c\/([^/]+)\/?$/.exec(url.pathname);
+  if (url.origin !== ORIGIN || url.username || url.password || !route) {
+    throw new Error('Only ChatGPT conversation URLs on chatgpt.com are supported.');
+  }
+  return assertConversationId(route[1]);
 }
 
 function protocolFailure(path, status) {
@@ -160,6 +163,8 @@ function turnState(conversation) {
     text: messageText(message),
     startedAt: Number(message?.create_time || 0) * 1000,
     complete,
+    settled: role === 'assistant' && (message?.end_turn === true
+      || ['interrupted', 'cancelled'].includes(message?.status)),
     userMessage: [...messages].reverse().find(n => n.message?.author?.role === 'user')?.message || null,
     messages
   };
@@ -223,6 +228,9 @@ async function sendContinue(id, parentMessageId, deps = {}) {
       const reason = result.reason === 'text_mismatch' ? 'Composer text could not be verified'
         : result.reason === 'send_unavailable' ? 'Send button was unavailable'
           : result.reason === 'verification' ? 'Browser verification is required'
+            : result.reason === 'conversation_unavailable' ? 'The browser did not reach the linked ChatGPT conversation'
+              : result.reason === 'composer_unavailable' ? 'The ChatGPT composer did not become ready'
+                : result.reason === 'focus_unavailable' ? 'The ChatGPT composer could not receive input'
             : 'ChatGPT needs attention in the opened browser';
       throw new Error(`${reason}${stage}; Goal Mode paused without retrying.`);
     }

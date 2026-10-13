@@ -82,10 +82,10 @@ function goalMessageExists(conversation, expectedText, expectedParentNode) {
   return false;
 }
 
-function goalAssistantComplete(conversation) {
+function goalAssistantSettled(conversation) {
   const message = conversation?.mapping?.[conversation?.current_node]?.message;
   return message?.author?.role === 'assistant'
-    && message.end_turn === true && message.status === 'finished_successfully';
+    && (message.end_turn === true || ['interrupted', 'cancelled'].includes(message.status));
 }
 
-export { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantComplete };
+export { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantSettled };

@@ -352,6 +352,7 @@ async function verifyServiceNativeRequestLifecycle() {
   parentPort.postMessage = message => messages.push(message);
   let serverOptions;
   let browserOperation;
+  let goalOperation;
   const server = {
     listening: true,
     address: () => ({ port: 4567 }),
@@ -364,7 +365,7 @@ async function verifyServiceNativeRequestLifecycle() {
     'src/toolActivity.js': { getToolActivity: () => ({}), onToolActivity: () => () => {} },
     'src/desktopManager.ts': { configureDesktopNativeBridge() {} },
     'src/browser/browserDriver.ts': { configureBrowserNativeBridge: operation => { browserOperation = operation; } },
-    'src/chatgptGoalProtocol.js': { configureGoalBrowserTransport: () => {} }
+    'src/chatgptGoalProtocol.js': { configureGoalBrowserTransport: transport => { goalOperation = transport; } }
   };
   const serviceUrl = new URL('../electron/service-process.js?native-request-lifecycle', import.meta.url).href;
   const resourceStub = 'data:text/javascript,' + encodeURIComponent(
@@ -404,6 +405,19 @@ async function verifyServiceNativeRequestLifecycle() {
     mock.timers.tick(30_000);
     await machineTimeout;
     assert.equal(messages.at(-1).type, 'native-cancel', 'machine request deadlines must still cancel native work');
+
+    for (const action of ['stop_stalled', 'continue']) {
+      let settled = false;
+      const goalRequest = goalOperation({ action });
+      void goalRequest.then(() => { settled = true; }, () => { settled = true; });
+      const nativeGoalRequest = messages.at(-1);
+      mock.timers.tick(60_000);
+      await yieldTurn();
+      assert.equal(settled, false, 'Goal browser navigation and stop/send readback must outlive a single protocol-read deadline');
+      parentPort.emit('message', { data: { type: 'native-response', id: nativeGoalRequest.id,
+        ok: true, result: { ok: true } } });
+      assert.deepEqual(await goalRequest, { ok: true });
+    }
 
     const controller = new AbortController();
     const aborted = browserOperation({ action: 'snapshot' }, { signal: controller.signal });

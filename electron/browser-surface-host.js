@@ -4,8 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { layoutSnapshotExpression, normalizeBrowserSnapshotDetail } from '../src/browser/layoutSnapshot.js';
-import { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantComplete } from './chatgpt-goal-composer.js';
+import { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantSettled } from './chatgpt-goal-composer.js';
 import { readConversationProjection } from '../src/chatgptConversationReader.js';
+import { parseConversationUrl } from '../src/chatgptGoalProtocol.js';
 
 const MAX_SNAPSHOT_CHARS = 64 * 1024;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
@@ -16,6 +17,14 @@ const CONTROL_OWNERS = new Set(['ai', 'user']);
 const READ_ONLY_ACTIONS = new Set(['describe', 'snapshot', 'screenshot']);
 const SESSION_ID = /^embedded_browser_[A-Za-z0-9_-]{16,160}$/;
 const PAGE_ID = /^embedded_page_[A-Za-z0-9_-]{16,160}$/;
+
+function goalConversationMatches(webContents, conversationId) {
+  try {
+    return parseConversationUrl(webContents.getURL()).toLowerCase() === conversationId.toLowerCase();
+  } catch {
+    return false;
+  }
+}
 
 function createBrowserSurfaceHost(options = {}) {
   const {
@@ -623,7 +632,7 @@ function createBrowserSurfaceHost(options = {}) {
       keepPage = true;
       if (!win.isDestroyed?.()) win.show();
     };
-    const stillOnChat = () => win.webContents.getURL().split(/[?#]/, 1)[0] === chatUrl;
+    const stillOnChat = () => goalConversationMatches(win.webContents, id);
     try {
       throwIfAborted(signal);
       await withTimeout(withAbort(win.loadURL(chatUrl), signal, () => win.webContents.stop?.()),
@@ -633,21 +642,21 @@ function createBrowserSurfaceHost(options = {}) {
       const readyUntil = Date.now() + 14_000;
       do {
         throwIfAborted(signal);
-        if (!stillOnChat()) { reveal(); return { ok: false, needsUser: true }; }
+        if (!stillOnChat()) { reveal(); return { ok: false, needsUser: true, stage: 'navigation', reason: 'conversation_unavailable' }; }
         probe = await win.webContents.executeJavaScript(goalComposerExpression('probe'), true);
-        if (probe?.state === 'verification') { reveal(); return { ok: false, needsUser: true }; }
+        if (probe?.state === 'verification') { reveal(); return { ok: false, needsUser: true, stage, reason: 'verification' }; }
         if (probe?.state === 'ready') break;
         await delay(450);
       } while (Date.now() < readyUntil);
       if (probe?.state !== 'ready') {
         reveal();
-        return { ok: false, needsUser: true };
+        return { ok: false, needsUser: true, stage, reason: 'composer_unavailable' };
       }
       stage = 'preflight';
       if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true };
       stage = 'draft';
       const focused = await win.webContents.executeJavaScript(goalComposerExpression('focus'), true);
-      if (focused?.state !== 'focused') { reveal(); return { ok: false, needsUser: true }; }
+      if (focused?.state !== 'focused') { reveal(); return { ok: false, needsUser: true, stage, reason: 'focus_unavailable' }; }
       const debuggerApi = await attachedDebugger(win.webContents);
       // ChatGPT may restore an old unsent Goal Mode draft from this profile.
       // The exact conversation branch was checked above. Replace the focused
@@ -671,12 +680,13 @@ function createBrowserSurfaceHost(options = {}) {
       } while (Date.now() < sendUntil);
       if (send?.state !== 'send_ready' || !stillOnChat()) {
         reveal();
-        return { ok: false, needsUser: true,
+        return { ok: false, needsUser: true, stage,
           reason: stillOnChat() && ['text_mismatch', 'send_unavailable', 'verification'].includes(send?.state)
             ? send.state : 'composer_unavailable' };
       }
       // User activity in another tab could have advanced the branch while loading.
       if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true };
+      if (!stillOnChat()) { reveal(); return { ok: false, needsUser: true, stage: 'navigation', reason: 'conversation_unavailable' }; }
       throwIfAborted(signal);
       stage = 'submit';
       clicked = true; // Every outcome after this point is potentially committed.
@@ -706,7 +716,7 @@ function createBrowserSurfaceHost(options = {}) {
             checking = true;
             try {
               const current = await goalProtocolRequest({ method: 'GET', path: chatPath });
-              if (current.ok && goalMessageExists(current.data, prompt, expectedNode) && goalAssistantComplete(current.data)) {
+              if (current.ok && goalMessageExists(current.data, prompt, expectedNode) && goalAssistantSettled(current.data)) {
                 clearInterval(timer);
                 win.close();
               }
@@ -748,7 +758,7 @@ function createBrowserSurfaceHost(options = {}) {
     const chatUrl = 'https://chatgpt.com/c/' + id;
     const chatPath = '/backend-api/conversation/' + id;
     const existing = [...goalContinuationWindows].find(window => !window.isDestroyed?.()
-      && window.webContents.getURL().split(/[?#]/, 1)[0] === chatUrl);
+      && goalConversationMatches(window.webContents, id));
     const win = existing || new BrowserWindow({ width: 1100, height: 800, show: false,
       webPreferences: { session: session.fromPath(goalProfileDirectory), nodeIntegration: false,
         contextIsolation: true, sandbox: true, webSecurity: true, backgroundThrottling: false } });
@@ -768,12 +778,11 @@ function createBrowserSurfaceHost(options = {}) {
       throwIfAborted(signal);
       if (!existing) await withTimeout(withAbort(win.loadURL(chatUrl), signal,
         () => win.webContents.stop?.()), 18_000, 'Goal Mode stalled browser navigation timed out.');
-      if (win.webContents.getURL().split(/[?#]/, 1)[0] !== chatUrl) throw new Error('Wrong ChatGPT conversation.');
+      if (!goalConversationMatches(win.webContents, id)) throw new Error('Wrong ChatGPT conversation.');
       stage = 'preflight';
       const before = await read();
       if (before.current_node !== expectedNode) return { ok: false, stale: true };
-      const message = before.mapping?.[expectedNode]?.message;
-      if (message?.end_turn === true && message?.status === 'finished_successfully') {
+      if (goalAssistantSettled(before)) {
         return { ok: true, alreadyFinished: true };
       }
       stage = 'stop_button';
@@ -790,6 +799,8 @@ function createBrowserSurfaceHost(options = {}) {
       // controller has already claimed this node and must never retry it.
       stage = 'stop_click';
       const debuggerApi = await attachedDebugger(win.webContents);
+      throwIfAborted(signal);
+      if (!goalConversationMatches(win.webContents, id)) throw new Error('Wrong ChatGPT conversation.');
       await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
         type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'
       });

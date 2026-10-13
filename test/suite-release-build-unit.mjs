@@ -808,9 +808,10 @@ async function case_packaged_runtime_dependencies_unit() {
   }
   
   try {
-    for (const name of ['zod', 'piscina', 'vscode-jsonrpc', '7zip-bin', 'tar', 'yauzl']) copyDependency(name);
+    for (const name of ['zod', 'piscina', 'vscode-jsonrpc', '7zip-bin', 'tar', 'yauzl', '@streamparser/json']) copyDependency(name);
     fs.copyFileSync(path.join(repo, 'src/extensions/toolBundle.js'), path.join(staging, 'toolBundle.mjs'));
     await import(pathToFileURL(path.join(staging, 'toolBundle.mjs')).href);
+    fs.copyFileSync(path.join(repo, 'src/chatgptConversationReader.js'), path.join(staging, 'chatgptConversationReader.mjs'));
     const probe = path.join(staging, 'probe.mjs');
     const worker = path.join(staging, 'worker.mjs');
     fs.writeFileSync(worker, 'export default value => value + 1;');
@@ -834,6 +835,12 @@ async function case_packaged_runtime_dependencies_unit() {
   assert.equal(integerSchema.safeParse(1).success, true);
   assert.equal(integerSchema.safeParse('1').success, false);
   assert.equal(typeof createMessageConnection, 'function');
+  const { readConversationProjection } = await import('./chatgptConversationReader.mjs');
+  const projected = await readConversationProjection(new Response(JSON.stringify({ current_node: 'a',
+    mapping: { a: { parent: null, message: { id: 'assistant', author: { role: 'assistant' },
+      end_turn: true, status: 'finished_successfully' } } } })));
+  assert.equal(projected.current_node, 'a');
+  assert.equal(projected.mapping.a.message.id, 'assistant');
   const pool = new Piscina({ filename: fileURLToPath(new URL('./worker.mjs', import.meta.url)), minThreads: 1, maxThreads: 1 });
   try {
     assert.equal(await pool.run(41), 42);

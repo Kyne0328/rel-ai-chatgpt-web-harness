@@ -159,6 +159,7 @@
         "to": "node_modules",
         "filter": [
           "@modelcontextprotocol/core/**",
+          "@streamparser/json/**",
           "7zip-bin/**",
           "tar/**",
           "@isaacs/fs-minipass/**",

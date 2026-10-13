@@ -54,6 +54,8 @@ const requiredFiles = [
   resourcePath('node_modules', '@modelcontextprotocol', 'server', 'package.json'),
   resourcePath('node_modules', '@modelcontextprotocol', 'node', 'package.json'),
   resourcePath('node_modules', '@modelcontextprotocol', 'core', 'package.json'),
+  resourcePath('node_modules', '@streamparser', 'json', 'package.json'),
+  resourcePath('node_modules', '@streamparser', 'json', 'dist', 'mjs', 'index.js'),
   resourcePath('node_modules', '@midscene', 'computer', 'package.json'),
   resourcePath('node_modules', '@midscene', 'core', 'package.json'),
   resourcePath('node_modules', '@midscene', 'shared', 'package.json'),

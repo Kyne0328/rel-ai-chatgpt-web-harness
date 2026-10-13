@@ -4,9 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
-import { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal } from '../src/chatgptGoalMode.js';
+import { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, pollGoal } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
 import { withStateDatabase } from '../src/stateDatabase.ts';
+import { beginConnectorToolCall, getToolActivity, resetToolActivity, runWithToolActivity, requestCurrentTaskCancellation, onToolActivity } from '../src/toolActivity.js';
+import { recordTaskActivityEvent, clearTaskHistory } from '../src/taskHistoryStore.ts';
 
 const ID = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
 const OTHER = 'ca32ef5a-77b0-49f0-983d-b39c12c45ff2';
@@ -30,6 +32,162 @@ function conversation(id, goalText = '/goal Fix the current project') {
   };
 }
 
+async function withMonitoredGoal(t, run) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-goal-monitor-'));
+  const config = { stateDir: dir, workspaces: {} };
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() + 1_000 });
+  resetToolActivity();
+  const unsubscribe = onToolActivity(activity => recordTaskActivityEvent(config, activity));
+  const begin = beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.begin',
+    createTask: true, scopeId: 'goal-monitor-fixture', input: { title: 'Monitor fixture' } });
+  begin({ ok: true });
+  const work_id = begin.taskId;
+  const context = { principal: 'monitor-fixture', requestTaskContext: {
+    session: getToolActivity().tasks.find(task => task.id === work_id) } };
+  activateGoal(config, { work_id, objective: 'Complete monitor fixture',
+    conversationUrl: 'https://chatgpt.com/c/' + ID }, context);
+  const patchGoal = patch => withStateDatabase(config, db => {
+    const key = 'chatgpt_goal:' + work_id;
+    const goal = JSON.parse(db.prepare('SELECT value FROM state_meta WHERE key=?').get(key).value);
+    db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify({ ...goal, ...patch }), key);
+  }, { transaction: true });
+  patchGoal({ observedNode: 'a', stableSince: Date.now() - 100_000 });
+  const tree = conversation(ID);
+  const calls = [];
+  let onRead = () => {};
+  let onStop = () => { tree.mapping.a.message.status = 'interrupted'; };
+  const deps = { nativeTransport: async payload => {
+    calls.push(payload);
+    if (payload.action === 'continue') return { ok: true, accepted: true };
+    if (payload.action === 'stop_stalled') { onStop(); return { ok: true, stopped: true }; }
+    onRead();
+    return { ok: true, data: structuredClone(tree) };
+  } };
+  const task = () => getToolActivity().tasks.find(item => item.id === work_id);
+  const status = () => goalStatus(config, { work_id }, context);
+  const unfinished = () => {
+    tree.mapping.a.message.end_turn = false;
+    tree.mapping.a.message.status = 'in_progress';
+    t.mock.timers.tick(300_000);
+    patchGoal({ unfinishedTurnId: 'user-1', unfinishedTaskCalls: task().calls,
+      unfinishedProgressAt: task().lastActivityAt });
+  };
+  try {
+    await run({ config, work_id, context, tree, calls, deps, task, status, patchGoal, unfinished,
+      onRead: callback => { onRead = callback; }, onStop: callback => { onStop = callback; } });
+  } finally {
+    unsubscribe();
+    resetToolActivity();
+    t.mock.timers.reset();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('monitor continues an interrupted turn without pressing Stop again', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.tree.mapping.a.message.end_turn = false;
+    f.tree.mapping.a.message.status = 'interrupted';
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.deepEqual(f.calls.filter(call => call.action).map(call => call.action), ['continue']);
+    assert.match(f.calls.at(-1).prompt, new RegExp(f.work_id));
+    assert.match(f.calls.at(-1).prompt, /Complete monitor fixture/);
+    assert.equal(f.status().continuationCount, 1);
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 1,
+      'the same claimed branch must never receive another send');
+  });
+});
+
+test('monitor rechecks task activity after its final conversation read', async t => {
+  await withMonitoredGoal(t, async f => {
+    let reads = 0;
+    let operation;
+    f.onRead(() => {
+      if (++reads === 2) operation = beginConnectorToolCall({ tool: 'relai_read',
+        internalOperation: 'read', taskId: f.work_id, scopeId: 'goal-monitor-fixture' });
+    });
+    try {
+      await pollGoal(f.config, f.work_id, f.deps);
+      assert.equal(f.calls.filter(call => call.action === 'continue').length, 0,
+        'a new running operation must prevent a continuation');
+      assert.notEqual(f.status().state, 'sending');
+    } finally { operation?.({ ok: true }); }
+  });
+});
+
+test('monitor stops a stalled turn before sending once and refuses unconfirmed stop readback', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.unfinished();
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.deepEqual(f.calls.filter(call => call.action).map(call => call.action), ['stop_stalled', 'continue']);
+    assert.equal(f.status().continuationCount, 1);
+  });
+  await withMonitoredGoal(t, async f => {
+    f.unfinished();
+    f.onStop(() => {});
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.deepEqual(f.calls.filter(call => call.action).map(call => call.action), ['stop_stalled'],
+      'a stop receipt with a still-running branch cannot authorize Send');
+    assert.equal(f.status().state, 'paused');
+  });
+});
+
+test('monitor never continues work cancelled during Stop', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.unfinished();
+    f.onStop(() => {
+      f.tree.mapping.a.message.status = 'interrupted';
+      runWithToolActivity({ taskId: f.work_id }, () => requestCurrentTaskCancellation());
+    });
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.deepEqual(f.calls.filter(call => call.action).map(call => call.action), ['stop_stalled']);
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.status().goalActive, false);
+    assert.equal(f.status().state, 'cancelled', JSON.stringify(f.status()));
+  });
+});
+
+test('monitor stops automatic recovery when a continuation has no new tool activity', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.unfinished();
+    f.patchGoal({ continuationCount: 1, sentTaskCalls: f.task().calls });
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.calls.filter(call => call.action).length, 0);
+    assert.equal(f.status().goalActive, false);
+    assert.match(f.status().error, /No new Rel.AI task activity/);
+  });
+});
+
+test('monitor ends completed, failed and unavailable sessions without inventing success', async t => {
+  await withMonitoredGoal(t, async f => {
+    const finish = beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.finish',
+      taskId: f.work_id, scopeId: 'goal-monitor-fixture' });
+    finish.requestCompletion({ summary: 'Fixture complete' });
+    finish({ ok: true });
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.status().state, 'finished');
+    assert.equal(f.status().goalActive, false);
+    assert.equal(f.calls.length, 0, 'completion must stop before any browser request');
+  });
+  await withMonitoredGoal(t, async f => {
+    recordTaskActivityEvent(f.config, { task: { ...f.task(), status: 'failed', state: 'failed',
+      endedAt: Date.now(), terminalReason: 'Fixture task-start failure' } });
+    resetToolActivity();
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.status().state, 'failed');
+    assert.equal(f.status().goalActive, false);
+    assert.equal(f.calls.length, 0);
+  });
+  await withMonitoredGoal(t, async f => {
+    resetToolActivity();
+    await clearTaskHistory(f.config);
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.status().state, 'unavailable');
+    assert.equal(f.status().goalActive, false);
+    assert.equal(f.calls.length, 0);
+  });
+});
+
 test('Goal Mode reuses relai_work and is opt-in on begin', () => {
   const schemas = getToolSchemas();
   assert.equal(schemas.some(schema => schema.name === 'relai_goal'), false);
@@ -46,9 +204,13 @@ test('Goal Mode reuses relai_work and is opt-in on begin', () => {
 
 test('conversation URL validation is bound to chatgpt.com', () => {
   assert.equal(parseConversationUrl('https://chatgpt.com/c/' + ID), ID);
+  assert.equal(parseConversationUrl('https://chatgpt.com/g/g-p-rel-ai-mcp/c/' + ID), ID);
+  assert.equal(parseConversationUrl('https://chatgpt.com/g/g-custom/c/' + ID + '/?view=chat#reply'), ID);
   assert.equal(parseConversationUrl(ID), ID);
   assert.throws(() => parseConversationUrl('https://evil.example/c/' + ID));
   assert.throws(() => parseConversationUrl('https://chatgpt.com/c/not-a-uuid'));
+  assert.throws(() => parseConversationUrl('https://chatgpt.com/g/g-custom/c/' + ID + '/other'));
+  assert.throws(() => parseConversationUrl('https://user:private@chatgpt.com/c/' + ID));
 });
 
 test('protocol conversation reads stream only branch metadata, even above the old 32 MiB limit', async () => {
@@ -330,6 +492,9 @@ test('native composer handoff reports bounded send reasons without exposing page
     ['text_mismatch', /Composer text could not be verified/],
     ['send_unavailable', /Send button was unavailable/],
     ['verification', /Browser verification is required/],
+    ['conversation_unavailable', /did not reach the linked ChatGPT conversation/],
+    ['composer_unavailable', /composer did not become ready/],
+    ['focus_unavailable', /composer could not receive input/],
     ['unexpected-sensitive-input', /ChatGPT needs attention/]
   ]) {
     let calls = 0;

@@ -283,6 +283,21 @@ function resolvedGoalPlan(task) {
   return steps.some(step => step.status === 'blocked') ? 'blocked' : 'finished';
 }
 
+function terminalGoalState(task) {
+  if (!task) return 'unavailable';
+  if (!isTerminalTaskStatus(task.status)) return null;
+  if (task.status !== 'completed') return task.status;
+  return resolvedGoalPlan(task) === 'blocked' ? 'blocked' : 'finished';
+}
+
+function continuationTaskUnchanged(previous, current) {
+  return current && !terminalGoalState(current)
+    && current.status !== 'waiting_for_approval' && current.status !== 'blocked'
+    && Number(current.activeCalls || 0) === 0 && !resolvedGoalPlan(current)
+    && Number(current.calls || 0) === Number(previous.calls || 0)
+    && current.lastActivityAt === previous.lastActivityAt;
+}
+
 function unfinishedTurnUpdate(goal, snapshot, task, now = Date.now()) {
   const taskCalls = Number(task.calls || 0);
   const activityAt = typeof task.lastActivityAt === 'number'
@@ -311,9 +326,11 @@ async function pollGoal(config, workId, deps = {}) {
     let goal = loadGoal(config, workId);
     if (!goal?.active) return;
     const task = statusForTask(config, goal);
-    if (!task || isTerminalTaskStatus(task.status)) {
+    const terminalState = terminalGoalState(task);
+    if (terminalState) {
       saveGoal(config, { ...goal, active: false,
-        state: resolvedGoalPlan(task) === 'blocked' ? 'blocked' : 'finished', updatedAt: Date.now() });
+        state: terminalState, error: task ? '' : 'Work session is unavailable; completion is unknown.',
+        updatedAt: Date.now() });
       return;
     }
     // A fully resolved plan needs work-session finalization, not another AI
@@ -346,7 +363,7 @@ async function pollGoal(config, workId, deps = {}) {
     const live = statusForTask(config, goal);
     if (!live || isTerminalTaskStatus(live.status) || live.status === 'waiting_for_approval' || live.status === 'blocked'
       || Number(live.activeCalls || 0) > 0) return;
-    if (!snapshot.complete) {
+    if (!snapshot.settled) {
       if (snapshot.role === 'assistant') {
         const update = unfinishedTurnUpdate(goal, snapshot, live);
         if (update?.state === 'stalled') {
@@ -354,6 +371,11 @@ async function pollGoal(config, workId, deps = {}) {
           if (Number(goal.continuationCount || 0) >= MAX_CONTINUATIONS) {
             saveGoal(config, { ...goal, active: false, state: 'paused',
               error: 'Automatic continuation limit reached.', updatedAt: Date.now() });
+            return;
+          }
+          if (Number(goal.continuationCount || 0) > 0 && Number(live.calls || 0) <= Number(goal.sentTaskCalls || 0)) {
+            saveGoal(config, { ...goal, active: false, state: 'paused',
+              error: 'No new Rel.AI task activity after the previous continuation.', updatedAt: Date.now() });
             return;
           }
           // Claim the branch before touching ChatGPT's Stop button. Any
@@ -365,20 +387,18 @@ async function pollGoal(config, workId, deps = {}) {
             const latestTask = statusForTask(config, claimed);
             if (controller.signal.aborted || !loadGoal(config, workId)?.active) return;
             if (before.nodeId !== snapshot.nodeId || before.role !== 'assistant'
-              || !latestTask || Number(latestTask.activeCalls || 0) > 0
-              || Number(latestTask.calls || 0) !== Number(live.calls || 0)) {
+              || !continuationTaskUnchanged(live, latestTask)) {
               throw new Error('ChatGPT conversation or task changed before stalled-turn recovery.');
             }
-            const stopped = await stopStalledTurn(goal.conversationId, snapshot.nodeId, { ...deps, signal: controller.signal });
+            await stopStalledTurn(goal.conversationId, snapshot.nodeId, { ...deps, signal: controller.signal });
             if (controller.signal.aborted || !loadGoal(config, workId)?.active) return;
             const after = turnState(await getConversation(goal.conversationId, { ...deps, signal: controller.signal }));
             const current = statusForTask(config, claimed);
             if (after.nodeId !== snapshot.nodeId || after.role !== 'assistant' || !after.lastMessageId
-              || !current || Number(current.activeCalls || 0) > 0
-              || Number(current.calls || 0) !== Number(live.calls || 0)) {
+              || !continuationTaskUnchanged(live, current)) {
               throw new Error('ChatGPT conversation or task changed during stalled-turn recovery.');
             }
-            if (!stopped && !after.complete) throw new Error('ChatGPT response is still unfinished.');
+            if (!after.settled) throw new Error('ChatGPT response is still unfinished.');
             await sendContinue(goal.conversationId, after.lastMessageId, { ...deps,
               workId: claimed.workId, objective: claimed.objective, nodeId: after.nodeId,
               signal: controller.signal });
@@ -386,8 +406,10 @@ async function pollGoal(config, workId, deps = {}) {
             saveGoal(config, { ...claimed, state: 'monitoring', error: '',
               continuationCount: Number(claimed.continuationCount || 0) + 1, updatedAt: Date.now() });
           } catch (error) {
+            const terminal = terminalGoalState(statusForTask(config, claimed));
             if (!controller.signal.aborted) saveGoal(config, { ...claimed, active: false,
-              state: 'paused', error: error instanceof Error ? error.message : 'ChatGPT stalled-turn recovery failed.',
+              state: terminal || 'paused', error: terminal && terminal !== 'unavailable' ? ''
+                : error instanceof Error ? error.message : 'ChatGPT stalled-turn recovery failed.',
               updatedAt: Date.now() });
           }
         } else if (update) saveGoal(config, update);
@@ -408,7 +430,8 @@ async function pollGoal(config, workId, deps = {}) {
     // the earlier poll; if so, wait for the new turn to settle instead of posting.
     const fresh = turnState(await getConversation(goal.conversationId, { ...deps, signal: controller.signal }));
     if (controller.signal.aborted || !loadGoal(config, workId)?.active) return;
-    if (fresh.nodeId !== snapshot.nodeId || !fresh.complete || fresh.lastMessageId !== snapshot.lastMessageId) return;
+    if (fresh.nodeId !== snapshot.nodeId || !fresh.settled || fresh.lastMessageId !== snapshot.lastMessageId
+      || !continuationTaskUnchanged(live, statusForTask(config, goal))) return;
     // Record the intent BEFORE a request is attempted. A network failure never auto-replays.
     goal = claimContinuation(config, workId, snapshot.nodeId, Number(live.calls || 0));
     if (!goal || controller.signal.aborted || !loadGoal(config, workId)?.active) return;
@@ -462,4 +485,4 @@ function stopGoalMonitor() {
   for (const controller of activeDetections.values()) controller.abort();
 }
 
-export { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, startGoalMonitor, stopGoalMonitor };
+export { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, pollGoal, startGoalMonitor, stopGoalMonitor };

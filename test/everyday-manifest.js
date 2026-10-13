@@ -1,6 +1,9 @@
 // Explicit everyday regression executables.
 // Prefer adding behavior to an existing suite-*-unit.mjs file. Add a standalone file here only when process/global isolation or an independently maintained boundary is required.
 export const EVERYDAY_TEST_FILES = [
+  // Goal monitor globals and its isolated MCP child require separate processes.
+  "chatgpt-goal-mode-unit.mjs",
+  "chatgpt-goal-workflow-smoke.mjs",
   "test-output-tail-unit.mjs",
   "windows-process-job-artifact-unit.mjs",
   "taskless-replay-restart-unit.mjs",

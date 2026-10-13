@@ -157,7 +157,8 @@ function createHarness({
   flushPersistentSites = async () => {},
   forgetPersistentSite = async () => {},
   goalLoginProfileDirectory = '',
-  goalComposerState = 'ready'
+  goalComposerState = 'ready',
+  goalRedirectUrl = ''
 } = {}) {
   const sessions = [];
   const goalWindows = [];
@@ -181,7 +182,7 @@ function createHarness({
       };
       goalWindows.push(this);
     }
-    async loadURL(url) { return this.webContents.loadURL(url); }
+    async loadURL(url) { return this.webContents.loadURL(goalRedirectUrl || url); }
     show() { this.shown = true; }
     close() { if (this.destroyed) return; this.destroyed = true; this.emit('closed'); this.webContents.close(); }
     isDestroyed() { return this.destroyed; }
@@ -313,7 +314,8 @@ function createHarness({
 
 {
   const directory = path.join(os.tmpdir(), 'relai-goal-stalled-stop-fixture');
-  const { host, pathSessions, goalWindows } = createHarness({ goalLoginProfileDirectory: directory });
+  const { host, pathSessions, goalWindows } = createHarness({ goalLoginProfileDirectory: directory,
+    goalRedirectUrl: 'https://chatgpt.com/g/g-p-rel-ai-mcp/c/b5b9731a-8496-4a92-9b44-55d080038c7d' });
   await host.getGoalLoginStatus();
   const goalSession = pathSessions.get(path.resolve(directory));
   const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
@@ -338,27 +340,33 @@ function createHarness({
   assert.deepEqual(result, { ok: true, stopped: true });
   assert.equal(goalWindows[0].webContents.goalClickCount, 1, 'Stop was pressed exactly once');
   assert.equal(goalWindows[0].isDestroyed(), true, 'verified stop closes the recovery window');
+  const alreadyStopped = await host.goalProtocolRequest({ action: 'stop_stalled',
+    conversationId: target, expectedNodeId: 'a' });
+  assert.deepEqual(alreadyStopped, { ok: true, alreadyFinished: true });
+  assert.equal(goalWindows[1].webContents.goalClickCount, 0, 'an interrupted reply must not require another Stop click');
+  assert.equal(goalWindows[1].shown, false);
   currentNode = 'other';
   const stale = await host.goalProtocolRequest({ action: 'stop_stalled',
     conversationId: target, expectedNodeId: 'a' });
   assert.equal(stale.stale, true, 'different branch must not be stopped');
-  assert.equal(goalWindows[1].webContents.goalClickCount, 0);
+  assert.equal(goalWindows[2].webContents.goalClickCount, 0);
   currentNode = 'a';
   status = 'in_progress';
   const missingStop = host.goalProtocolRequest({ action: 'stop_stalled',
     conversationId: target, expectedNodeId: 'a' });
-  goalWindows[2].webContents.goalStopState = 'not_running';
+  goalWindows[3].webContents.goalStopState = 'not_running';
   const failed = await missingStop;
   assert.deepEqual(failed, { ok: false, needsUser: true, stage: 'stop_button' });
-  assert.equal(goalWindows[2].webContents.goalClickCount, 0, 'a missing Stop button cannot trigger a guessed action');
-  assert.equal(goalWindows[2].shown, true, 'uncertain recovery requires browser handoff');
+  assert.equal(goalWindows[3].webContents.goalClickCount, 0, 'a missing Stop button cannot trigger a guessed action');
+  assert.equal(goalWindows[3].shown, true, 'uncertain recovery requires browser handoff');
   await host.closeAll();
 }
 
 {
   const directory = path.join(os.tmpdir(), 'relai-goal-background-send-fixture');
   const { host, pathSessions, goalWindows, routes } = createHarness({
-    goalLoginProfileDirectory: directory, goalComposerState: 'occupied'
+    goalLoginProfileDirectory: directory, goalComposerState: 'occupied',
+    goalRedirectUrl: 'https://chatgpt.com/g/g-p-rel-ai-mcp/c/b5b9731a-8496-4a92-9b44-55d080038c7d'
   });
   await host.getGoalLoginStatus();
   const goalSession = pathSessions.get(path.resolve(directory));
@@ -424,6 +432,25 @@ function createHarness({
 }
 
 {
+  const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
+  for (const redirected of ['https://unrelated.test/c/' + target,
+    'https://chatgpt.com/g/g-p-other/c/ca32ef5a-77b0-49f0-983d-b39c12c45ff2',
+    'https://chatgpt.com/auth/login']) {
+    const { host, goalWindows } = createHarness({
+      goalLoginProfileDirectory: path.join(os.tmpdir(), 'relai-goal-invalid-redirect-fixture'),
+      goalRedirectUrl: redirected
+    });
+    const result = await host.goalProtocolRequest({ action: 'continue', conversationId: target,
+      expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
+    assert.deepEqual(result, { ok: false, needsUser: true, stage: 'navigation', reason: 'conversation_unavailable' });
+    assert.equal(goalWindows[0].webContents.insertedText, '', 'an unrelated page must not receive a draft');
+    assert.equal(goalWindows[0].webContents.goalClickCount, 0);
+    assert.equal(goalWindows[0].shown, true);
+    await host.closeAll();
+  }
+}
+
+{
   const directory = path.join(os.tmpdir(), 'relai-goal-uncertain-send-fixture');
   const { host, pathSessions, goalWindows } = createHarness({ goalLoginProfileDirectory: directory });
   await host.getGoalLoginStatus();
@@ -458,6 +485,8 @@ function createHarness({
   const result = await host.goalProtocolRequest({ action: 'continue', conversationId: target,
     expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
   assert.equal(result.needsUser, true);
+  assert.equal(result.stage, 'composer');
+  assert.equal(result.reason, 'verification');
   assert.equal(goalWindows[0].shown, true, 'verification must open a visible browser for the user');
   assert.equal(goalWindows[0].webContents.goalClickCount, 0, 'verification cannot trigger a send');
   assert.equal(goalWindows[0].isDestroyed(), false, 'handoff keeps the page alive');
