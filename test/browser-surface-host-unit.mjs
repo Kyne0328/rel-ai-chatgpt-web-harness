@@ -261,20 +261,17 @@ function createHarness({
   assert.equal(fetched.ok, true);
   assert.deepEqual(fetched.data.items, []);
   const originalFetch = goalSession.fetch;
-  const longPayload = 'x'.repeat(9 * 1024 * 1024);
+  const longPayload = 'x'.repeat(34 * 1024 * 1024);
   goalSession.fetch = async (url, options) => String(url).includes('/backend-api/conversation/')
-    ? new Response(JSON.stringify({ current_node: 'large', payload: longPayload }), { status: 200 })
+    ? new Response(JSON.stringify({ current_node: 'a', mapping: {
+      a: { parent: null, message: { id: 'a1', author: { role: 'assistant' },
+        end_turn: true, status: 'finished_successfully' } } }, private_blob: longPayload }), { status: 200 })
     : originalFetch(url, options);
-  const large = await host.goalProtocolRequest({ method: 'GET',
+  const large = await host.goalProtocolRequest({ method: 'GET', projectConversation: true,
     path: '/backend-api/conversation/b5b9731a-8496-4a92-9b44-55d080038c7d' });
-  assert.equal(large.data.payload.length, longPayload.length,
-    'a long conversation above 8 MiB must remain readable');
-  goalSession.fetch = async () => new Response(null, {
-    status: 200, headers: { 'content-length': String(33 * 1024 * 1024) }
-  });
-  await assert.rejects(() => host.goalProtocolRequest({ method: 'GET',
-    path: '/backend-api/conversation/b5b9731a-8496-4a92-9b44-55d080038c7d' }),
-  /response exceeded its size limit/, 'oversized responses must still fail safely');
+  assert.equal(large.data.mapping.a.message.id, 'a1');
+  assert.ok(JSON.stringify(large).length < 500, 'native IPC never transfers full conversation history');
+  assert.equal(large.data.private_blob, undefined);
   goalSession.fetch = originalFetch;
   assert.equal((await host.goalProtocolRequest({ method: 'POST',
     path: '/backend-api/sentinel/chat-requirements/prepare', body: {} })).ok, true);
@@ -327,7 +324,9 @@ function createHarness({
     if (String(url).endsWith('/api/auth/session')) return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'fixture-secret' }));
     return new Response(JSON.stringify({ current_node: currentNode,
       mapping: { a: { parent: null, message: { id: 'assistant-stalled', author: { role: 'assistant' },
-        end_turn: status === 'interrupted', status } } } }));
+        end_turn: status === 'interrupted', status } },
+      other: { parent: null, message: { id: 'assistant-other', author: { role: 'assistant' },
+        end_turn: true, status: 'finished_successfully' } } } }));
   };
   const stopping = host.goalProtocolRequest({ action: 'stop_stalled',
     conversationId: target, expectedNodeId: 'a' });
@@ -374,6 +373,8 @@ function createHarness({
         current_node: currentNode,
         mapping: {
           a: { parent: null, message: { id: 'assistant-1', author: { role: 'assistant' },
+            end_turn: true, status: 'finished_successfully' } },
+          other: { parent: null, message: { id: 'another', author: { role: 'assistant' },
             end_turn: true, status: 'finished_successfully' } },
           sent: { parent: 'a', message: { author: { role: 'user' },
             content: { parts: [goalWindows.at(-1)?.webContents.insertedText || ''] } } },
@@ -433,7 +434,9 @@ function createHarness({
       return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'private' }));
     }
     if (clicked) throw new Error('The network went down after a possible send.');
-    return new Response(JSON.stringify({ current_node: 'a', mapping: {} }));
+    return new Response(JSON.stringify({ current_node: 'a', mapping: {
+      a: { parent: null, message: { id: 'assistant-1', author: { role: 'assistant' },
+        end_turn: true, status: 'finished_successfully' } } } }));
   };
   const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
   const sending = host.goalProtocolRequest({ action: 'continue', conversationId: target,

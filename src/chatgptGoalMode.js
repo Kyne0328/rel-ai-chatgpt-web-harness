@@ -275,6 +275,14 @@ function statusForTask(config, goal) {
   return history || null;
 }
 
+function resolvedGoalPlan(task) {
+  const steps = task?.plan?.steps;
+  if (!Array.isArray(steps) || !steps.length
+    || !steps.some(step => step.status === 'completed')
+    || !steps.every(step => ['completed', 'blocked', 'skipped'].includes(step.status))) return null;
+  return steps.some(step => step.status === 'blocked') ? 'blocked' : 'finished';
+}
+
 function unfinishedTurnUpdate(goal, snapshot, task, now = Date.now()) {
   const taskCalls = Number(task.calls || 0);
   const activityAt = typeof task.lastActivityAt === 'number'
@@ -304,7 +312,17 @@ async function pollGoal(config, workId, deps = {}) {
     if (!goal?.active) return;
     const task = statusForTask(config, goal);
     if (!task || isTerminalTaskStatus(task.status)) {
-      saveGoal(config, { ...goal, active: false, state: 'finished', updatedAt: Date.now() });
+      saveGoal(config, { ...goal, active: false,
+        state: resolvedGoalPlan(task) === 'blocked' ? 'blocked' : 'finished', updatedAt: Date.now() });
+      return;
+    }
+    // A fully resolved plan needs work-session finalization, not another AI
+    // response. Never let a browser handoff failure hide known blockers.
+    const planOutcome = resolvedGoalPlan(task);
+    if (planOutcome && Number(task.activeCalls || 0) === 0) {
+      saveGoal(config, { ...goal, active: false, state: 'needs_finalization',
+        error: 'Work plan has no actionable steps left. Finalize with relai_work finish; preserve blocked steps.',
+        updatedAt: Date.now() });
       return;
     }
     if (!chatgptCredentials(deps.env || process.env) && !deps.nativeTransport && !hasGoalBrowserTransport()) {
@@ -444,4 +462,4 @@ function stopGoalMonitor() {
   for (const controller of activeDetections.values()) controller.abort();
 }
 
-export { activateGoal, queueGoalDetection, checkGoalDetection, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, startGoalMonitor, stopGoalMonitor, pollGoal };
+export { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, startGoalMonitor, stopGoalMonitor };

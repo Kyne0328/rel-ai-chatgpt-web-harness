@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
-import { activateGoal, queueGoalDetection, checkGoalDetection, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal } from '../src/chatgptGoalMode.js';
+import { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
 import { withStateDatabase } from '../src/stateDatabase.ts';
 
@@ -51,15 +51,29 @@ test('conversation URL validation is bound to chatgpt.com', () => {
   assert.throws(() => parseConversationUrl('https://chatgpt.com/c/not-a-uuid'));
 });
 
-test('protocol conversation reads accept 9 MiB but retain a 32 MiB limit', async () => {
-  const content = 'x'.repeat(9 * 1024 * 1024);
-  const long = await getConversation(ID, { credentials,
-    fetch: async () => new Response(JSON.stringify({ current_node: 'large', content })) });
-  assert.equal(long.content.length, content.length);
+test('protocol conversation reads stream only branch metadata, even above the old 32 MiB limit', async () => {
+  const payload = { ...conversation(ID), private_blob: 'x'.repeat(34 * 1024 * 1024) };
+  const projection = await getConversation(ID, { credentials,
+    fetch: async () => new Response(JSON.stringify(payload)) });
+  assert.equal(turnState(projection).lastMessageId, 'assistant-1');
+  assert.equal(turnState(projection).complete, true);
+  assert.equal(turnState(projection).userMessage.content.parts[0], '/goal Fix the current project');
+  assert.equal(JSON.stringify(projection).includes('xxxxxxxxxx'), false,
+    'unrelated body must be discarded before reaching Goal Mode');
+  assert.ok(JSON.stringify(projection).length < 3000);
+  const split = conversation(ID);
+  split.mapping.u.message.content.parts = ['/goal', 'stop'];
+  const splitProjection = await getConversation(ID, { credentials,
+    fetch: async () => new Response(JSON.stringify(split)) });
+  assert.equal(turnState(splitProjection).userMessage.content.parts.join('\n'), '/goal\nstop',
+    'split command text must not silently become bare /goal');
+  const splitMatch = await findRecentGoalCommand({ startedAt: Date.now(), credentials,
+    fetch: async url => url.includes('/conversations?')
+      ? response({ items: [{ id: ID }] }) : new Response(JSON.stringify(split)) });
+  assert.equal(splitMatch.state, 'absent');
+  const malformed = new Response('{"current_node":"a","mapping":');
   await assert.rejects(() => getConversation(ID, { credentials,
-    fetch: async () => new Response(null, {
-      headers: { 'content-length': String(33 * 1024 * 1024) }
-    }) }), /response exceeded the safe size limit/);
+    fetch: async () => malformed }), /token|json|parsing|ended/i);
 });
 
 test('current conversation branch is parsed without side branches', () => {
@@ -70,6 +84,16 @@ test('current conversation branch is parsed without side branches', () => {
   assert.equal(turnState(tree).complete, true);
   tree.mapping.a.message.end_turn = false;
   assert.equal(turnState(tree).complete, false);
+});
+
+test('resolved goal plans distinguish finished work from external blockers', () => {
+  assert.equal(resolvedGoalPlan({ plan: { steps: [
+    { status: 'completed' }, { status: 'blocked' }, { status: 'skipped' }
+  ] } }), 'blocked');
+  assert.equal(resolvedGoalPlan({ plan: { steps: [{ status: 'completed' }] } }), 'finished');
+  assert.equal(resolvedGoalPlan({ plan: { steps: [{ status: 'completed' }, { status: 'pending' }] } }), null);
+  assert.equal(resolvedGoalPlan({ plan: { steps: [{ status: 'in_progress' }] } }), null);
+  assert.equal(resolvedGoalPlan({ plan: { steps: [{ status: 'blocked' }] } }), null);
 });
 
 test('unfinished assistant turns trigger one recovery at 4:30 since last Rel.AI call', () => {

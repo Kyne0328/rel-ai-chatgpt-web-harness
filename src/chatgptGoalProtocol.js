@@ -1,6 +1,7 @@
 // ChatGPT Web protocol adapter. Undocumented endpoints: fail closed on drift or challenges.
 // Credentials are read from the process environment; never persist them with goal records.
 import { randomUUID } from 'node:crypto';
+import { readConversationProjection } from './chatgptConversationReader.js';
 
 const ORIGIN = 'https://chatgpt.com';
 let goalBrowserTransport = null;
@@ -79,7 +80,8 @@ async function requestChatgpt(path, options = {}, deps = {}) {
   const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
   if (native) {
     const result = await native({ path, method: options.method || 'GET', body: options.body,
-      headers: options.headers, raw: options.raw === true }, { signal: options.signal });
+      headers: options.headers, raw: options.raw === true,
+      ...(options.projectConversation ? { projectConversation: true } : {}) }, { signal: options.signal });
     if (!result?.ok) throw protocolFailure(path, result?.status);
     return options.raw ? { text: async () => result.streamObserved ? 'event: accepted\n\n' : '' } : result.data;
   }
@@ -95,6 +97,7 @@ async function requestChatgpt(path, options = {}, deps = {}) {
   });
   if (!response.ok) throw protocolFailure(path, response.status);
   if (options.raw) return response;
+  if (options.projectConversation) return readConversationProjection(response);
   const advertised = Number(response.headers?.get?.('content-length') || 0);
   if (advertised > MAX_JSON_BYTES) throw new Error('ChatGPT conversation response exceeded the safe size limit.');
   if (!response.body?.getReader) return response.json(); // Test transport with a bounded fixture.
@@ -120,7 +123,8 @@ async function listConversations(deps = {}) {
 }
 
 async function getConversation(id, deps = {}) {
-  return requestChatgpt('/backend-api/conversation/' + assertConversationId(id), { signal: deps.signal }, deps);
+  return requestChatgpt('/backend-api/conversation/' + assertConversationId(id),
+    { signal: deps.signal, projectConversation: true }, deps);
 }
 
 function activeMessages(conversation) {
@@ -290,4 +294,4 @@ async function sendContinue(id, parentMessageId, deps = {}) {
   return { accepted: true };
 }
 
-export { configureGoalBrowserTransport, hasGoalBrowserTransport, assertConversationId, parseConversationUrl, chatgptCredentials, getConversation, listConversations, activeMessages, messageText, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue };
+export { configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue };

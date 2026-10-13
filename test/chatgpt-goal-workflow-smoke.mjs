@@ -42,7 +42,30 @@ try {
   assert.ok(normal.work_id);
   assert.equal(normal.goalMode, undefined);
 
-  console.log('Goal Mode begin/status/stop uses existing relai_work, with normal work unchanged.');
+  client.call(7, 'relai_work', { action: 'begin', goal: true,
+    title: 'Offline milestone with hardware blocker', objective: 'Complete feasible work and record the blocker',
+    steps: [{ id: 'offline', title: 'Finish offline integration', status: 'in_progress' },
+      { id: 'hardware', title: 'Verify physical device', status: 'pending' }] });
+  const resolvable = structuredContentOf(await client.waitFor(7));
+  assert.ok(resolvable.work_id);
+  client.call(8, 'relai_work', { action: 'plan', work_id: resolvable.work_id,
+    steps: [{ id: 'offline', title: 'Finish offline integration', status: 'completed' },
+      { id: 'hardware', title: 'Verify physical device', status: 'blocked' }] });
+  const updated = structuredContentOf(await client.waitFor(8));
+  assert.equal(updated.ok, true);
+  client.call(9, 'relai_work', { action: 'context', work_id: resolvable.work_id, bootstrap: 'none' });
+  const completedReply = await client.waitFor(9);
+  assert.throws(() => structuredContentOf(completedReply), /already completed/,
+    'explicitly resolved Goal Mode plan must finalize the work session through its normal guarded path');
+
+  client.call(10, 'relai_work', { action: 'plan', work_id: normal.work_id,
+    steps: [{ id: 'goal', title: 'Ordinary task', status: 'completed' }] });
+  assert.equal(structuredContentOf(await client.waitFor(10)).ok, true);
+  client.call(11, 'relai_work', { action: 'context', work_id: normal.work_id, bootstrap: 'none' });
+  assert.notEqual(structuredContentOf(await client.waitFor(11)).status, 'completed',
+    'ordinary non-goal work must still require an explicit finish call');
+
+  console.log('Goal Mode lifecycle preserves blockers and closes resolved goals; ordinary work stays explicit.');
 } finally {
   await client.closeGracefully();
   fs.rmSync(temp, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 });

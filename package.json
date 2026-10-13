@@ -237,6 +237,7 @@
     "@opentelemetry/resources": "^2.11.0",
     "@opentelemetry/sdk-trace-node": "^2.11.0",
     "@opentelemetry/semantic-conventions": "^1.43.0",
+    "@streamparser/json": "0.0.26",
     "7zip-bin": "5.2.0",
     "commander": "^15.0.0",
     "execa": "^10.0.1",

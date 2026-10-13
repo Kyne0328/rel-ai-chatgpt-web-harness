@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import { layoutSnapshotExpression, normalizeBrowserSnapshotDetail } from '../src/browser/layoutSnapshot.js';
 import { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantComplete } from './chatgpt-goal-composer.js';
+import { readConversationProjection } from '../src/chatgptConversationReader.js';
 
 const MAX_SNAPSHOT_CHARS = 64 * 1024;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
@@ -614,7 +615,7 @@ function createBrowserSurfaceHost(options = {}) {
     const chatUrl = 'https://chatgpt.com/c/' + id;
     const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     const fetchChat = async () => {
-      const response = await goalProtocolRequest({ method: 'GET', path: chatPath }, { signal });
+      const response = await goalProtocolRequest({ method: 'GET', path: chatPath, projectConversation: true }, { signal });
       if (!response.ok) throw new Error('ChatGPT conversation is not available to the signed-in account.');
       return response.data;
     };
@@ -759,7 +760,7 @@ function createBrowserSurfaceHost(options = {}) {
     let stage = 'navigation';
     const signal = options.signal;
     const read = async () => {
-      const response = await goalProtocolRequest({ method: 'GET', path: chatPath }, { signal });
+      const response = await goalProtocolRequest({ method: 'GET', path: chatPath, projectConversation: true }, { signal });
       if (!response.ok) throw new Error('ChatGPT conversation read failed.');
       return response.data;
     };
@@ -891,9 +892,13 @@ function createBrowserSurfaceHost(options = {}) {
       })();
       return { ok: true, status: response.status, streamObserved: true };
     }
+    // Project the active conversation before IPC. Never transfer or retain
+    // the full conversation JSON when Goal Mode needs only branch metadata.
+    if (payload.projectConversation === true && method === 'GET'
+      && /^\/backend-api\/conversation\/[0-9a-f-]{36}$/i.test(target.pathname)) {
+      return { ok: true, status: response.status, data: await readConversationProjection(response) };
+    }
     const advertised = Number(response.headers?.get?.('content-length') || 0);
-    // Match the bounded protocol reader: extended development conversations
-    // may exceed 8 MiB without being corrupt or requiring a manual restart.
     const maxConversationBytes = 32 * 1024 * 1024;
     if (advertised > maxConversationBytes) throw new Error('Goal Mode response exceeded its size limit.');
     const result = await readGoalJson(response, maxConversationBytes);

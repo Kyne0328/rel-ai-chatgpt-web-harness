@@ -148,11 +148,28 @@ function scheduleIntelligenceWarmup(workspace, config) {
   timer.unref();
 }
 
-const taskPlanHandler = (_config, args, context) => {
+const taskPlanHandler = async (config, args, context) => {
   const taskId = String(context?.taskId || args.work_id || '').trim();
   const workspace = String(context?.requestTaskContext?.session?.workspace || '').trim();
   const result = applyTaskProgressPatch(taskId, { steps: args.steps });
   const plan = result?.plan || { revision: 0, steps: [] };
+  // The model's explicit plan update is the trusted completion evidence.
+  // Only Goal Mode plans that have no actionable steps remaining are closed;
+  // finish uses the SAME validated cleanup/integrity path as relai_work finish.
+  if (plan.steps.length && plan.steps.some(step => step.status === 'completed')
+    && plan.steps.every(step => ['completed', 'blocked', 'skipped'].includes(step.status))) {
+    let goal = null;
+    try { goal = goalStatus(config, { work_id: taskId }, context); } catch {}
+    const current = getToolActivity().tasks.find(item => String(item.id || item.taskId) === taskId);
+    if (goal?.goalActive && Number(current?.activeCalls || 0) === 1) {
+      const blocked = plan.steps.filter(step => step.status === 'blocked').map(step => step.title);
+      const summary = blocked.length
+        ? `Completed feasible plan steps; externally blocked: ${blocked.join('; ').slice(0, 650)}`
+        : 'Completed all planned work steps.';
+      const completion = await completeTask(config, { work_id: taskId, summary }, context);
+      if (!completion?.completionKnown) throw new Error('Goal Mode work plan could not be finalized safely. Use relai_work finish after resolving the reported completion blocker.');
+    }
+  }
   return {
     ok: true,
     ...(workspace ? { workspace } : {}),
