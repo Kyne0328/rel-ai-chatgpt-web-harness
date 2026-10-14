@@ -6,8 +6,8 @@ import { getStateDir } from './statePaths.js';
 import { currentMutationBootIdentity } from './mutationBootIdentity.js';
 import { persistedWindowsJobComplete } from './windowsProcessJob.ts';
 import { privatelyOwnedWindowsState, privatelyOwnedWindowsPaths } from './mutationWindowsStateAcl.js';
-import { canonicalWorkspaceAuthority } from './workspaceOperationQueue.js';
-import { listMutationProcessRecords, notifyRecoveryChange } from './mutationProcessOwnership.js';
+import { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock } from './workspaceOperationQueue.js';
+import { listMutationProcessRecords, notifyRecoveryChange, onMutationProcessRecoveryChange } from './mutationProcessOwnership.js';
 
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
 const MAX_RECORD_BYTES = 65536;
@@ -278,4 +278,121 @@ async function recoverMutationRecordsAtStartup(config, options = {}) {
   }
   return result;
 }
-export { mutationAutoRecoveryCheckpointInvalid, recoverMutationRecordsAtStartup };
+
+// Only workspaces with durable uncertainty acquire a startup barrier. Healthy
+// workspaces have no recovery timer or polling work.
+function startAutomaticMutationRecovery(config, options = {}) {
+  const groups = new Map();
+  const retryMs = options.retryMs || [5000, 15000, 60000, 300000];
+  let stopped = false;
+  let unsubscribe = () => {};
+
+  const trackWorkspace = (alias, workspace) => {
+    if (!workspace?.path) return null;
+    try {
+      const authority = canonicalWorkspaceAuthority(workspace.path);
+      const records = listMutationProcessRecords(config, alias, workspace.path);
+      const checkpoint = path.join(getStateDir(config), 'mutation-auto-recovery', hash(authority), 'legacy', 'checkpoint.json');
+      if (!records.length && !fs.existsSync(checkpoint)) return null;
+      bindWorkspaceOperationIdentity(alias, workspace.path);
+      let group = groups.get(authority);
+      if (!group) {
+        const owner = blockWorkspaceMutations(alias, 'Checking persisted mutation ownership.');
+        group = { alias, members: [], owner, attempt: 0, pending: true, running: null, timer: null };
+        groups.set(authority, group);
+      }
+      if (!group.members.some(member => member.alias === alias)) group.members.push({ alias, path: workspace.path });
+      return group;
+    } catch (error) {
+      const existing = groups.get('unverified:' + alias);
+      if (existing) return existing;
+      const owner = blockWorkspaceMutations(alias, 'Mutation recovery evidence could not be read.');
+      const group = {
+        alias, members: [], owner, attempt: 0, pending: true, running: null, timer: null,
+        failure: String(error?.message || error)
+      };
+      groups.set('unverified:' + alias, group);
+      return group;
+    }
+  };
+  for (const [alias, workspace] of Object.entries(config.workspaces || {})) trackWorkspace(alias, workspace);
+
+  const recheck = group => {
+    if (stopped || !group.pending) return Promise.resolve();
+    if (group.running) return group.running;
+    if (group.timer) { clearTimeout(group.timer); group.timer = null; }
+    group.running = (async () => {
+      if (group.failure) return { pending: true, errors: [{ workspace: group.alias, reason: group.failure }] };
+      let pending = false;
+      let couldSettleThisBoot = false;
+      const errors = [];
+      let released = 0;
+      for (const member of group.members) {
+        try {
+          const outcome = await reconcileWorkspaceMutationRecords(config, member.alias, member.path, options.bootIdentity);
+          released += outcome.released;
+          pending ||= outcome.pending;
+          if (outcome.pending) {
+            const remaining = listMutationProcessRecords(config, member.alias, member.path);
+            couldSettleThisBoot ||= remaining.some(record => record.nativeJob && !record.invalid && !record.incomplete);
+          }
+        } catch (error) {
+          pending = true;
+          errors.push({ workspace: member.alias, reason: String(error?.message || error) });
+        }
+      }
+      group.pending = pending;
+      group.nextEventAt = Date.now() + (options.eventMinMs ?? 5000);
+      if (!pending) {
+        for (const [key, value] of groups) if (value === group) groups.delete(key);
+        if (group.timer) { clearTimeout(group.timer); group.timer = null; }
+        if (group.owner?.created) clearOwnedWorkspaceMutationBlock(group.alias, group.owner.token);
+      } else if (couldSettleThisBoot && !errors.length && !stopped) {
+        const delay = retryMs[Math.min(group.attempt++, retryMs.length - 1)];
+        group.timer = setTimeout(() => { group.timer = null; void recheck(group); }, delay);
+        group.timer.unref?.();
+      }
+      return { released, pending, errors };
+    })().finally(() => { group.running = null; });
+    return group.running;
+  };
+
+  // An idle service has one lightweight event listener but no timers or scans.
+  // Newly uncertain commands join the monitor synchronously before verification.
+  unsubscribe = onMutationProcessRecoveryChange(change => {
+    if (stopped) return;
+    let newlyTracked = null;
+    if (change?.kind === 'uncertain' && typeof change.workspace === 'string') {
+      newlyTracked = trackWorkspace(change.workspace, config.workspaces?.[change.workspace]);
+      if (newlyTracked) void recheck(newlyTracked);
+    }
+    for (const group of groups.values()) {
+      if (group === newlyTracked) continue;
+      if (!group.pending || group.timer?.eventWake || Date.now() < (group.nextEventAt || 0)) continue;
+      if (group.timer) clearTimeout(group.timer);
+      group.timer = setTimeout(() => { group.timer = null; void recheck(group); }, 250);
+      group.timer.eventWake = true;
+      group.timer.unref?.();
+    }
+  });
+
+  const initial = Promise.all([...groups.values()].map(recheck)).then(reports => ({
+    released: reports.reduce((sum, report) => sum + (report?.released || 0), 0),
+    pending: [...groups.values()].filter(group => group.pending).length,
+    errors: reports.flatMap(report => report?.errors || [])
+  }));
+  return {
+    initial,
+    pendingCount: () => [...groups.values()].filter(group => group.pending).length,
+    stop() {
+      stopped = true;
+      unsubscribe();
+      for (const group of groups.values()) {
+        if (group.timer) clearTimeout(group.timer);
+        group.timer = null;
+      }
+    }
+  };
+}
+
+export { mutationAutoRecoveryCheckpointInvalid, recoverMutationRecordsAtStartup, startAutomaticMutationRecovery };

@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runWithMutationProcessOwnership, recordCurrentMutationProcess, listMutationProcessRecords, workspaceMutationSafetySummary } from '../src/mutationProcessOwnership.js';
+import { runWithMutationProcessOwnership, recordCurrentMutationProcess, listMutationProcessRecords, workspaceMutationSafetySummary, notifyRecoveryChange, markCurrentMutationProcessUncertain } from '../src/mutationProcessOwnership.js';
 import { assertNoRecoveredMutationProcess } from '../src/tools/execution.js';
-import { recoverMutationRecordsAtStartup } from '../src/mutationAutoRecovery.js';
+import { recoverMutationRecordsAtStartup, startAutomaticMutationRecovery } from '../src/mutationAutoRecovery.js';
+import { runWorkspaceOperation, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange } from '../src/workspaceOperationQueue.js';
 import { currentMutationBootIdentity } from '../src/mutationBootIdentity.js';
 
 const fixtureParent = process.platform === 'win32' ? os.homedir() : os.tmpdir();
@@ -140,6 +141,106 @@ try {
     const outcome = (await recoverMutationRecordsAtStartup(config, { bootIdentity: next }));
     assert.equal(outcome.released, 0);
     assert.ok(fs.existsSync(file));
+  }
+  // Idle startup does not hold a mutation barrier or schedule recovery retries.
+  {
+    const { config, file, folder } = scenario();
+    fs.rmSync(file);
+    const monitor = startAutomaticMutationRecovery(config, { bootIdentity: next });
+    assert.equal(monitor.pendingCount(), 0);
+    assert.deepEqual(await monitor.initial, { released: 0, pending: 0, errors: [] });
+    assert.equal(workspaceMutationBlockSummary('alpha', folder), null);
+    monitor.stop();
+  }
+  // Startup blocks mutation admission synchronously, before verification yields.
+  {
+    const { config, file, folder } = scenario();
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...record, bootIdentity: base }));
+    const monitor = startAutomaticMutationRecovery(config, { bootIdentity: next });
+    assert.equal(monitor.pendingCount(), 1);
+    assert.equal(workspaceMutationBlockSummary('alpha', folder)?.blocked, true);
+    await assert.rejects(runWorkspaceOperation('alpha', () => 'unsafe', {
+      taskId: 'startup-writer', scope: 'mutation'
+    }), error => error.code === 'WORKSPACE_MUTATION_BLOCKED');
+    assert.equal(await runWorkspaceOperation('alpha', () => 'readable', {
+      taskId: 'startup-reader', scope: 'workspace', mode: 'read'
+    }), 'readable');
+    assert.equal((await monitor.initial).released, 1);
+    assert.equal(monitor.pendingCount(), 0);
+    assert.equal(workspaceMutationBlockSummary('alpha', folder), null);
+    assert.equal(await runWorkspaceOperation('alpha', () => 'safe', {
+      taskId: 'post-recovery', scope: 'mutation'
+    }), 'safe');
+    monitor.stop();
+  }
+  // A verified native completion arriving after startup must wake recovery
+  // without a continuously running global process scanner.
+  if (process.platform === 'win32') {
+    const { config, file, folder } = scenario();
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const jobDir = path.join(config.stateDir, 'process-jobs', 'job-live-recovery');
+    fs.mkdirSync(jobDir, { recursive: true });
+    const nonce = 'b'.repeat(64);
+    delete record.bootIdentity;
+    record.nativeJob = { directory: jobDir, nonce };
+    fs.writeFileSync(file, JSON.stringify(record));
+    fs.writeFileSync(path.join(jobDir, 'request.json'), JSON.stringify({ protocol: 1, nonce }));
+    const monitor = startAutomaticMutationRecovery(config, {
+      bootIdentity: null, retryMs: [300000], eventMinMs: 0
+    });
+    assert.equal((await monitor.initial).pending, 1);
+    assert.equal(workspaceMutationBlockSummary('alpha', folder)?.blocked, true);
+    const recovered = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { off(); reject(new Error('Live ownership recovery did not settle.')); }, 10000);
+      const off = onWorkspaceMutationBlockChange(({ alias, mutationBlock }) => {
+        if (alias !== 'alpha' || mutationBlock?.blocked) return;
+        clearTimeout(timeout);
+        off();
+        resolve();
+      });
+    });
+    fs.writeFileSync(path.join(jobDir, 'receipt.json'), JSON.stringify({
+      protocol: 1, nonce, helperPid: record.pid, final: true,
+      jobComplete: true, cleanupConfirmed: true, activeProcesses: 0,
+      commandStarted: true, rootExited: true
+    }));
+    notifyRecoveryChange();
+    await recovered;
+    assert.equal(monitor.pendingCount(), 0);
+    assert.equal(fs.existsSync(file), false);
+    monitor.stop();
+  }
+  // An initially healthy service must also monitor a new uncertain subprocess.
+  {
+    const { config, file, folder } = scenario();
+    fs.rmSync(file);
+    const monitor = startAutomaticMutationRecovery(config, { bootIdentity: next });
+    assert.equal((await monitor.initial).pending, 0);
+    const pid = 599901;
+    const uncertainFile = runWithMutationProcessOwnership(config, 'alpha',
+      () => recordCurrentMutationProcess(pid), folder);
+    const original = JSON.parse(fs.readFileSync(uncertainFile, 'utf8'));
+    fs.writeFileSync(uncertainFile, JSON.stringify({ ...original, bootIdentity: base }));
+    const settled = new Promise((resolve, reject) => {
+      let sawBlocked = false;
+      const timeout = setTimeout(() => { off(); reject(new Error('New uncertainty was not recovered.')); }, 10000);
+      const off = onWorkspaceMutationBlockChange(({ alias, mutationBlock }) => {
+        if (alias !== 'alpha') return;
+        if (mutationBlock?.blocked) { sawBlocked = true; return; }
+        if (!sawBlocked) return;
+        clearTimeout(timeout);
+        off();
+        resolve();
+      });
+    });
+    assert.equal(runWithMutationProcessOwnership(config, 'alpha',
+      () => markCurrentMutationProcessUncertain(pid, 'simulated interruption', uncertainFile), folder), true);
+    assert.equal(workspaceMutationBlockSummary('alpha', folder)?.blocked, true);
+    await settled;
+    assert.equal(monitor.pendingCount(), 0);
+    assert.equal(fs.existsSync(uncertainFile), false);
+    monitor.stop();
   }
   console.log('Automatic mutation restart and reboot recovery gates passed.');
 } finally {

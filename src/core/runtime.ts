@@ -5,7 +5,8 @@ import { initializeKnowledgeDatabase, maintainKnowledgeDatabase } from '../knowl
 import { initializeStateDatabase, maintainStateDatabase } from '../stateDatabase.ts';
 import { initializeTelemetry } from '../telemetry.js';
 import { startGoalMonitor, stopGoalMonitor } from '../chatgptGoalMode.js';
-import { recoverMutationRecordsAtStartup } from '../mutationAutoRecovery.js';
+import { startAutomaticMutationRecovery } from '../mutationAutoRecovery.js';
+import { currentMutationBootIdentity } from '../mutationBootIdentity.js';
 import { stopFallbackExecutionsForShutdown, verifyFallbackDurabilityForShutdown } from '../mcp/fallbackExecutions.js';
 
 export interface RelaiCoreRuntimeOptions {
@@ -36,14 +37,22 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
   const stopManagedProcessesOnShutdown = options.stopManagedProcessesOnShutdown !== false;
   let startup: Record<string, unknown> | null = null;
   let shutdownPromise: Promise<CoreShutdownResult> | null = null;
+  let recoveryMonitor: ReturnType<typeof startAutomaticMutationRecovery> | null = null;
+  let bootWarmup: ReturnType<typeof setImmediate> | null = null;
 
   function start(): Record<string, unknown> {
     if (startup) return startup;
     const stateStarted = performance.now();
     const state = initializeStateDatabase(config);
     const stateDatabaseMs = performance.now() - stateStarted;
-    // Reconcile persisted mutation ownership before the tool server admits writes.
-    const mutationRecovery = isolated ? null : recoverMutationRecordsAtStartup(config);
+    // Install mutation barriers synchronously only for uncertain workspaces.
+    recoveryMonitor = isolated ? null : startAutomaticMutationRecovery(config);
+    const mutationRecovery = recoveryMonitor?.initial || null;
+    // Prewarm the native per-boot identity asynchronously before the first writer.
+    if (!isolated) {
+      bootWarmup = setImmediate(() => { bootWarmup = null; void currentMutationBootIdentity(); });
+      bootWarmup.unref?.();
+    }
     const knowledgeStarted = performance.now();
     const knowledge = initializeKnowledgeDatabase(config);
     const knowledgeDatabaseMs = performance.now() - knowledgeStarted;
@@ -74,6 +83,8 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
       return shutdownPromise;
     }
     stopGoalMonitor();
+    if (bootWarmup) clearImmediate(bootWarmup);
+    recoveryMonitor?.stop();
     shutdownPromise = shutdownCoreRuntime(config, { stopManagedProcessesOnShutdown });
     return shutdownPromise;
   }

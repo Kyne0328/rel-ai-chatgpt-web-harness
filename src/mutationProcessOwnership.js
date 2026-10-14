@@ -135,7 +135,7 @@ function markCurrentMutationProcessUncertain(pidValue, reason = '', preparedFile
     error.pid = pid;
     throw error;
   } finally {
-    notifyRecoveryChange();
+    notifyRecoveryChange({ kind: 'uncertain', workspace: current.workspace });
   }
 }
 
@@ -318,9 +318,9 @@ function onMutationProcessRecoveryChange(listener) {
   return () => recoveryListeners.delete(listener);
 }
 
-function notifyRecoveryChange() {
+function notifyRecoveryChange(change = null) {
   for (const listener of recoveryListeners) {
-    try { listener(); } catch { /* A projection cannot alter process cleanup. */ }
+    try { listener(change); } catch { /* A projection cannot alter process cleanup. */ }
   }
 }
 
