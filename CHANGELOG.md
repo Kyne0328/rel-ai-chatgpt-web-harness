@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Recover verified mutation ownership automatically across app restarts and OS reboots.** Record native machine/boot identities before mutating subprocess launch; reconcile eligible previous-boot records and verified Windows Job Object completion at service startup, while preserving fail-closed protection for live or uncertain descendants. Prepare historical-record checkpoints automatically for future verified reboot recovery, with exact-record audit and interrupted archival handling. No user-operated unlock, blind PID cleanup, or command replay. Thanks to [@jesussmile](https://github.com/jesussmile) for reporting and investigating the macOS issue [#21](https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/issues/21).
+
 - **Recover verified mutation ownership without restarting Rel.AI.** Preserve durable fail-closed records for genuinely uncertain descendants, but avoid redundant permanent in-memory quarantine; reconcile late native/process-group termination and release retained host capacity. Make watchdog quarantine owner-releasable after proven settlement, protect validation/diagnostics shell commands with mutation ownership, ensure standalone completion barriers honor workspace-global operations, classify raw Git mutations correctly, retain safe `ps` diagnostics, and add macOS lifecycle CI coverage.
 
 - **Finish resolved Goal Mode work without extra ChatGPT turns.** A goal plan explicitly resolved into completed/skipped and blocked steps now closes through the existing guarded work-session completion path, preserving hardware blockers. Goal monitoring distinguishes blocked vs finished results and stops unnecessary continuation attempts; incomplete plans are never silently completed.

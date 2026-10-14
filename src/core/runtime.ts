@@ -5,6 +5,7 @@ import { initializeKnowledgeDatabase, maintainKnowledgeDatabase } from '../knowl
 import { initializeStateDatabase, maintainStateDatabase } from '../stateDatabase.ts';
 import { initializeTelemetry } from '../telemetry.js';
 import { startGoalMonitor, stopGoalMonitor } from '../chatgptGoalMode.js';
+import { recoverMutationRecordsAtStartup } from '../mutationAutoRecovery.js';
 import { stopFallbackExecutionsForShutdown, verifyFallbackDurabilityForShutdown } from '../mcp/fallbackExecutions.js';
 
 export interface RelaiCoreRuntimeOptions {
@@ -41,6 +42,8 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
     const stateStarted = performance.now();
     const state = initializeStateDatabase(config);
     const stateDatabaseMs = performance.now() - stateStarted;
+    // Reconcile persisted mutation ownership before the tool server admits writes.
+    const mutationRecovery = isolated ? null : recoverMutationRecordsAtStartup(config);
     const knowledgeStarted = performance.now();
     const knowledge = initializeKnowledgeDatabase(config);
     const knowledgeDatabaseMs = performance.now() - knowledgeStarted;
@@ -54,6 +57,7 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
       state,
       knowledge,
       telemetry,
+      mutationRecovery,
       startupTimings: {
         stateDatabaseMs,
         knowledgeDatabaseMs,

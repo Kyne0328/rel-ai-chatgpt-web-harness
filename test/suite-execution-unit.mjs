@@ -1154,7 +1154,7 @@ async function case_validation_plan_unit() {
     fs.writeFileSync(file, JSON.stringify(tampered, null, 2));
     assert.throws(() => readValidationPlan(config, plan.planId, workspace), /signature is invalid/);
   } finally {
-    repositoryIntelligence.shutdown();
+    await repositoryIntelligence.shutdown();
     fs.rmSync(root, { recursive: true, force: true });
   }
   

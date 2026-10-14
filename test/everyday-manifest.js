@@ -88,6 +88,7 @@ export const EVERYDAY_TEST_FILES = [
   "mcp-stdio-legacy-rejection.mjs",
   "multi-chat-mcp-integration.mjs",
   "multi-chat-task-isolation-unit.mjs",
+  "mutation-auto-recovery-unit.mjs",
   "mutation-process-ownership-unit.mjs",
   "onboarding-config-smoke.mjs",
   "operation-timeline-unit.mjs",

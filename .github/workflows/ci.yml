@@ -50,7 +50,6 @@ jobs:
         run: xvfb-run --auto-servernum npm run test:web-automation
 
   mutation-macos:
-    needs: test
     runs-on: macos-15
     timeout-minutes: 15
     name: macOS mutation lifecycle (node 26)
@@ -65,7 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for suite in mutation-process-ownership process-cancellation process-output-pipe-stall workspace-operation-queue validation-parallelism git-exec-scope; do
+          for suite in mutation-auto-recovery mutation-process-ownership process-cancellation process-output-pipe-stall workspace-operation-queue validation-parallelism git-exec-scope; do
             node "test/${suite}-unit.mjs"
           done
 

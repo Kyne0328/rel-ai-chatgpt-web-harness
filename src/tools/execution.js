@@ -14,6 +14,7 @@ import { claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths }
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { bindWorkspaceOperationIdentity, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock, runWorkspaceOperation } from '../workspaceOperationQueue.js';
 import { isCurrentLiveValidationProcessRecord, listMutationProcessRecords, runWithMutationProcessOwnership } from '../mutationProcessOwnership.js';
+import { mutationAutoRecoveryCheckpointInvalid } from '../mutationAutoRecovery.js';
 import { inspectStructuredPatchTransaction, recoverStructuredPatchTransaction } from '../structuredPatchTransaction.js';
 import { authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.ts';
 import {
@@ -315,7 +316,7 @@ function assertNoRecoveredMutationProcess(config, workspace, workspacePath = '')
       throw error;
     }
     if (record) {
-      const error = new Error(`Workspace '${workspace}' retains unconfirmed process-tree termination for PID ${record.pid}. Restart or root-PID disappearance cannot clear this uncertainty. An operator must verify that relevant descendants have stopped before using the existing recovery-record cleanup procedure.`);
+      const error = new Error(`Workspace '${workspace}' retains unconfirmed process-tree termination for PID ${record.pid}. Restart or root-PID disappearance cannot clear this uncertainty. Rel.AI will recover automatically when reliable termination or later-boot evidence becomes available.`);
       error.code = 'WORKSPACE_MUTATION_TERMINATION_UNCERTAIN';
       error.retryable = false;
       error.pid = record.pid;
@@ -323,6 +324,13 @@ function assertNoRecoveredMutationProcess(config, workspace, workspacePath = '')
       error.terminationCertainty = 'unconfirmed';
       throw error;
     }
+  }
+  if (mutationAutoRecoveryCheckpointInvalid(config, workspace, workspacePath)) {
+    const error = new Error('Saved recovery evidence is missing or altered; Rel.AI cannot safely resume changes.');
+    error.code = 'WORKSPACE_MUTATION_RECOVERY_STATE_INVALID';
+    error.retryable = false;
+    error.executed = false;
+    throw error;
   }
 }
 

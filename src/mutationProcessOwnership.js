@@ -5,6 +5,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 import { readJsonFile, writeJsonAtomic } from './durableState.ts';
 import { getStateDir } from './statePaths.js';
+import { currentMutationBootIdentity } from './mutationBootIdentity.js';
+import { mutationAutoRecoveryCheckpointInvalid } from './mutationAutoRecovery.js';
 import { canonicalWorkspaceAuthority, workspaceMutationBlockSummary } from './workspaceOperationQueue.js';
 
 const ownershipContext = new AsyncLocalStorage();
@@ -44,15 +46,17 @@ function runWithoutMutationProcessOwnership(callback) {
   return ownershipContext.run(undefined, callback);
 }
 
-function prepareCurrentMutationProcess() {
+async function prepareCurrentMutationProcess() {
   const current = ownershipContext.getStore();
   if (!current) return null;
+  current.bootIdentity = await currentMutationBootIdentity();
   const file = path.join(mutationWorkspaceRoot(current.config, current.workspace, current.authority),
     `${runtimeId}-intent-${crypto.randomBytes(12).toString('hex')}.json`);
   // Persistence is a spawn admission barrier. A crash between this write and
   // PID attachment stays unknown rather than looking like confirmed completion.
   writeJsonAtomic(file, {
     schemaVersion: RECORD_SCHEMA_VERSION, runtimeId, workspace: current.workspace,
+    ...(current.bootIdentity ? { bootIdentity: current.bootIdentity } : {}),
     authority: current.authority, authorityStatus: current.authority ? 'bound' : 'unbound',
     ...(current.concurrentValidation ? { concurrentValidation: true } : {}),
     pid: 0, phase: 'preparing', terminationUncertain: true,
@@ -63,14 +67,29 @@ function prepareCurrentMutationProcess() {
   return file;
 }
 
+function attachCurrentMutationProcessJob(reference, preparedFile) {
+  const current = ownershipContext.getStore();
+  if (!current || !preparedFile || !reference) return false;
+  const previous = readJsonFile(preparedFile);
+  if (!previous || previous.runtimeId !== runtimeId || previous.authority !== current.authority
+    || previous.phase !== 'preparing') throw new Error('Native ownership record is not preparing.');
+  writeJsonAtomic(preparedFile, { ...previous, nativeJob: reference }, { mode: 0o600 });
+  return true;
+}
+
 function recordCurrentMutationProcess(pidValue, preparedFile = null) {
   const current = ownershipContext.getStore();
   const pid = Number(pidValue);
   if (!current || !Number.isSafeInteger(pid) || pid <= 0) return null;
   const file = preparedFile || mutationProcessRecordFile(current.config, current.workspace, runtimeId, pid, current.authority);
+  const previous = preparedFile ? readJsonFile(preparedFile) : null;
+  if (preparedFile && (!previous || previous.runtimeId !== runtimeId || previous.authority !== current.authority))
+    throw new Error('Prepared mutation ownership was replaced.');
   writeJsonAtomic(file, {
     schemaVersion: RECORD_SCHEMA_VERSION,
+    ...(previous?.nativeJob ? { nativeJob: previous.nativeJob } : {}),
     runtimeId,
+    ...(current.bootIdentity ? { bootIdentity: current.bootIdentity } : {}),
     workspace: current.workspace,
     authority: current.authority,
     authorityStatus: current.authority ? 'bound' : 'unbound',
@@ -277,7 +296,11 @@ function mutationProcessRecoverySummary(config, workspace, workspacePath = '') {
 function workspaceMutationSafetySummary(config, workspace, workspacePath = '') {
   try {
     return workspaceMutationBlockSummary(workspace, workspacePath)
-      || mutationProcessRecoverySummary(config, workspace, workspacePath);
+      || mutationProcessRecoverySummary(config, workspace, workspacePath)
+      || (mutationAutoRecoveryCheckpointInvalid(config, workspace, workspacePath)
+        ? recoverySummary('WORKSPACE_MUTATION_RECOVERY_STATE_INVALID', null,
+          'Saved mutation recovery evidence is missing or changed; changes remain protected.')
+        : null);
   } catch {
     return recoverySummary('WORKSPACE_MUTATION_RECOVERY_UNAVAILABLE', null,
       'Process recovery state cannot be verified. Project changes require review before they can resume.');
@@ -304,6 +327,8 @@ function notifyRecoveryChange() {
 export {
   workspaceMutationSafetySummary,
   onMutationProcessRecoveryChange,
+  notifyRecoveryChange,
+  attachCurrentMutationProcessJob,
   clearCurrentMutationProcess,
   listMutationProcessRecords,
   isCurrentLiveValidationProcessRecord,

@@ -13,7 +13,7 @@ import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
 import { acquireHostResource } from './hostResourceScheduler.js';
-import { clearCurrentMutationProcess, markCurrentMutationProcessUncertain, prepareCurrentMutationProcess, recordCurrentMutationProcess, runWithoutMutationProcessOwnership } from './mutationProcessOwnership.js';
+import { attachCurrentMutationProcessJob, clearCurrentMutationProcess, markCurrentMutationProcessUncertain, prepareCurrentMutationProcess, recordCurrentMutationProcess, runWithoutMutationProcessOwnership } from './mutationProcessOwnership.js';
 
 const internalObservationOutcomes = new WeakSet<object>();
 const ownedReadOnlyProcessOptions = new WeakSet<object>();
@@ -603,7 +603,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       });
     }
     const processStartedAt = Date.now();
-    const mutationProcessFile = prepareCurrentMutationProcess();
+    const mutationProcessFile = await prepareCurrentMutationProcess();
     let subprocess;
     try {
       if (process.platform === 'win32' && (mutationProcessFile || ownedReadOnlyProcessOptions.has(options)
@@ -614,6 +614,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
           ...(options.cwd ? { cwd: options.cwd } : {}),
           ...(shell ? { shellCommand: file } : {})
         });
+        if (mutationProcessFile) attachCurrentMutationProcessJob(windowsJob.ownershipReference(), mutationProcessFile);
       }
       if (options.signal?.aborted || (Number.isFinite(deadlineAtMs) && deadlineAtMs > 0 && Date.now() >= deadlineAtMs)) {
         if (mutationProcessFile) retireMutationProcess(0, mutationProcessFile);

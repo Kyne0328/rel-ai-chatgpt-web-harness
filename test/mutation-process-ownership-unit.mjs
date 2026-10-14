@@ -127,7 +127,8 @@ try {
     'legacy records without settled tree evidence must stay blocked');
   removeMutationProcessRecord(legacy);
 
-  for (const failAt of [1, 2]) {
+  // Windows durably binds its native job before process spawn (one extra write).
+  for (const failAt of (process.platform === 'win32' ? [1, 2, 3] : [1, 2])) {
     const originalMkdir = fs.mkdirSync;
     const originalSpawn = childProcess.spawn;
     let writes = 0;
@@ -153,13 +154,13 @@ try {
     try {
       await assert.rejects(runWithMutationProcessOwnership(config, workspace, () => runProcess(
         process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeout: 10000 }, config
-      )), error => failAt === 1
+      )), error => (failAt === 1 || (process.platform === 'win32' && failAt === 2))
         ? error.code === 'DURABLE_STATE_WRITE_FAILED' && error.details?.fsCode === 'ENOSPC'
         : error.code === 'PROCESS_SETUP_FAILED' && error.executed === true && error.terminationConfirmed === true);
-      assert.equal(spawns, failAt === 1 ? 0 : 1, 'durable intent failure must happen before spawn');
+      assert.equal(spawns, (failAt === 1 || (process.platform === 'win32' && failAt === 2)) ? 0 : 1, 'durable ownership failure must not bypass spawn admission');
       if (fixturePid) assert.equal(isProcessTreeAlive(fixturePid), false, 'post-spawn persistence failure must settle its fixture child');
       assert.deepEqual(listMutationProcessRecords(config, workspace), []);
-      if (process.platform === 'win32' && failAt === 2) {
+      if (process.platform === 'win32' && failAt >= 2) {
         assert.deepEqual(fs.readdirSync(path.join(config.stateDir, 'process-jobs')), [],
           'confirmed native cleanup removes the failed-start job directory');
       }

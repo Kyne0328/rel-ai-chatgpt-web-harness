@@ -148,6 +148,10 @@ export class WindowsProcessJob {
     } catch { /* PowerShell compiles or loads the source-pinned owner. */ }
   }
 
+  ownershipReference(): { directory: string; nonce: string } {
+    return { directory: this.directory, nonce: this.nonce };
+  }
+
   bind(pid: number | null | undefined): void {
     const helperPid = Number(pid) || 0;
     if (helperPid !== this.helperPid) this.completedReceipt = null;
@@ -240,6 +244,34 @@ export async function prepareWindowsProcessJob(config: Record<string, unknown>, 
     fs.rmSync(directory, { recursive: true, force: true });
     throw error;
   }
+}
+
+// Native all-process completion, not helper-PID disappearance, is recovery proof.
+export function persistedWindowsJobComplete(config: Record<string, unknown>, reference: {
+  directory?: string; nonce?: string
+}, helperPid = 0): boolean {
+  if (process.platform !== 'win32' || !/^[a-f0-9]{64}$/.test(String(reference?.nonce || '')))
+    return false;
+  const directory = path.resolve(String(reference?.directory || ''));
+  const parent = path.resolve(getStateDir(config), 'process-jobs');
+  if (path.dirname(directory).toLowerCase() !== parent.toLowerCase()
+    || !path.basename(directory).startsWith('job-')) return false;
+  try {
+    const stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    const requestPath = path.join(directory, 'request.json');
+    const receiptPath = path.join(directory, 'receipt.json');
+    if (!fs.lstatSync(requestPath).isFile() || !fs.lstatSync(receiptPath).isFile()
+      || fs.lstatSync(requestPath).isSymbolicLink() || fs.lstatSync(receiptPath).isSymbolicLink())
+      return false;
+    const request = readSmallJson(requestPath, 256 * 1024);
+    const receipt = readSmallJson(receiptPath);
+    return request?.protocol === PROTOCOL && request?.nonce === reference.nonce
+      && receipt?.protocol === PROTOCOL && receipt.nonce === reference.nonce
+      && Number(receipt.helperPid) > 0
+      && (!helperPid || receipt.helperPid === helperPid)
+      && completedNativeJob(receipt as unknown as WindowsJobReceipt);
+  } catch { return false; }
 }
 
 export function restoreWindowsProcessJob(directory: string, helperPid: number | null | undefined): WindowsProcessJob | null {
