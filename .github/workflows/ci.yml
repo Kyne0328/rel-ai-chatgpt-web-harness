@@ -49,6 +49,26 @@ jobs:
       - name: Test local browser capabilities
         run: xvfb-run --auto-servernum npm run test:web-automation
 
+  mutation-macos:
+    needs: test
+    runs-on: macos-15
+    timeout-minutes: 15
+    name: macOS mutation lifecycle (node 26)
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify mutation termination and recovery boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suite in mutation-process-ownership process-cancellation process-output-pipe-stall workspace-operation-queue validation-parallelism git-exec-scope; do
+            node "test/${suite}-unit.mjs"
+          done
+
   packaged-windows:
     needs: test
     runs-on: windows-latest

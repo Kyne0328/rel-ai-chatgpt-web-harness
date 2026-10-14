@@ -5,6 +5,9 @@ import path from 'node:path';
 
 import { relaiVerify } from '../src/bridge/validation.js';
 import { relaiDiagnosticsRun } from '../src/bridge/diagnosticsRunner.js';
+import { runValidationCommandWithMutationOwnership } from '../src/bridge/mutationCheck.js';
+import { runWorkspaceOperation } from '../src/workspaceOperationQueue.js';
+import { listMutationProcessRecords, recordCurrentMutationProcess, removeMutationProcessRecord, runWithMutationProcessOwnership } from '../src/mutationProcessOwnership.js';
 import { serializeConnectorResult } from '../src/tools/connector.js';
 import { toolResult } from '../src/mcp/results.js';
 import { outputSchemaFor } from '../src/tools/outputSchemas.js';
@@ -26,6 +29,50 @@ try {
       build: 'node -e "setTimeout(() => process.exit(0), 40)"'
     }
   }, null, 2));
+
+  const scope = { alias: 'validation-boundary', path: root };
+  const ownershipConfig = { stateDir: path.join(root, 'mutation-state'), workspaces: { 'validation-boundary': { path: root } } };
+  let releaseMutation;
+  let mutationStarted;
+  const started = new Promise(resolve => { mutationStarted = resolve; });
+  const release = new Promise(resolve => { releaseMutation = resolve; });
+  const heldMutation = runWorkspaceOperation(scope.alias, async () => {
+    mutationStarted();
+    await release;
+  }, { mode: 'write', scope: 'mutation', taskId: 'competing-edit' });
+  await started;
+  let executed = false;
+  const validated = runValidationCommandWithMutationOwnership(scope, ownershipConfig,
+    'node -e process.exit(0)', async () => { executed = true; }, undefined);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(executed, true, 'checks preserve concurrent-edit progress; final fingerprints validate freshness');
+  releaseMutation();
+  await Promise.all([heldMutation, validated]);
+
+  let releaseDiagnosticBlock;
+  let diagnosticBlockStarted;
+  const diagnosticStarted = new Promise(resolve => { diagnosticBlockStarted = resolve; });
+  const diagnosticRelease = new Promise(resolve => { releaseDiagnosticBlock = resolve; });
+  const concurrentEdit = runWorkspaceOperation(scope.alias, async () => {
+    diagnosticBlockStarted();
+    await diagnosticRelease;
+  }, { mode: 'write', scope: 'mutation', taskId: 'editing' });
+  await diagnosticStarted;
+  let diagnosticEntered = false;
+  const diagnostic = runValidationCommandWithMutationOwnership(scope, ownershipConfig,
+    'node -e process.exit(0)', async () => { diagnosticEntered = true; }, { exclusive: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(diagnosticEntered, false, 'diagnostics without final fingerprint checks must exclude concurrent edits');
+  releaseDiagnosticBlock();
+  await Promise.all([concurrentEdit, diagnostic]);
+  assert.equal(diagnosticEntered, true);
+
+  await runWithMutationProcessOwnership(ownershipConfig, scope.alias, () => recordCurrentMutationProcess(42042), scope.path);
+  const unsafeRecords = listMutationProcessRecords(ownershipConfig, scope.alias, scope.path);
+  assert.equal(unsafeRecords.length, 1);
+  assert.throws(() => runValidationCommandWithMutationOwnership(scope, ownershipConfig,
+    'node -e process.exit(0)', async () => {}), error => error?.code === 'WORKSPACE_MUTATION_TERMINATION_UNCERTAIN');
+  removeMutationProcessRecord(unsafeRecords[0]); // Only a synthetic record; no process was launched.
 
   const topology = discoverRepositoryTopology(root);
   const catalog = buildCheckCatalog(topology);

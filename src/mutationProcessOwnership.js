@@ -14,11 +14,11 @@ const RECORD_SCHEMA_VERSION = 3;
 const MAX_RECOVERY_RECORDS = 1000;
 const runtimeId = `runtime_${process.pid}_${crypto.randomBytes(12).toString('hex')}`;
 
-function runWithMutationProcessOwnership(config, workspace, callback, workspacePath = '') {
+function runWithMutationProcessOwnership(config, workspace, callback, workspacePath = '', options = {}) {
   const alias = String(workspace || '').trim();
   if (!alias) return callback();
   const authority = resolveMutationAuthority(config, alias, workspacePath);
-  const context = { config, workspace: alias, authority, records: new Set() };
+  const context = { config, workspace: alias, authority, records: new Set(), concurrentValidation: options.concurrentValidation === true };
   const settle = () => {
     let changed = false;
     for (const file of context.records) changed = activeMutationRecords.delete(file) || changed;
@@ -54,6 +54,7 @@ function prepareCurrentMutationProcess() {
   writeJsonAtomic(file, {
     schemaVersion: RECORD_SCHEMA_VERSION, runtimeId, workspace: current.workspace,
     authority: current.authority, authorityStatus: current.authority ? 'bound' : 'unbound',
+    ...(current.concurrentValidation ? { concurrentValidation: true } : {}),
     pid: 0, phase: 'preparing', terminationUncertain: true,
     startedAt: new Date().toISOString()
   }, { mode: 0o600 });
@@ -73,6 +74,7 @@ function recordCurrentMutationProcess(pidValue, preparedFile = null) {
     workspace: current.workspace,
     authority: current.authority,
     authorityStatus: current.authority ? 'bound' : 'unbound',
+    ...(current.concurrentValidation ? { concurrentValidation: true } : {}),
     pid,
     phase: 'active',
     terminationUncertain: true,
@@ -133,6 +135,11 @@ function clearCurrentMutationProcess(pidValue, preparedFile = null) {
     notifyRecoveryChange();
     return false;
   }
+}
+
+function isCurrentLiveValidationProcessRecord(record) {
+  return record?.concurrentValidation === true && record.runtimeId === runtimeId
+    && ['preparing', 'active'].includes(record.phase) && activeMutationRecords.has(record.file);
 }
 
 function listMutationProcessRecords(config, workspace, workspacePath = '') {
@@ -299,6 +306,7 @@ export {
   onMutationProcessRecoveryChange,
   clearCurrentMutationProcess,
   listMutationProcessRecords,
+  isCurrentLiveValidationProcessRecord,
   markCurrentMutationProcessUncertain,
   prepareCurrentMutationProcess,
   recordCurrentMutationProcess,

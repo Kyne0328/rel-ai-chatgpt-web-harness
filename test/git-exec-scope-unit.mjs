@@ -7,6 +7,9 @@ assert.equal(isExplicitBranchChange(OP.EXEC, { executable: 'git', argv: ['reset'
 assert.equal(isExplicitBranchChange(OP.EXEC, { executable: 'git', argv: ['merge', 'feature'] }), true);
 assert.equal(isExplicitBranchChange(OP.EXEC, { executable: 'git', argv: ['rebase', 'main'] }), true);
 assert.equal(isExplicitBranchChange(OP.EXEC, { executable: 'git', argv: ['switch', 'feature'] }), true);
+for (const subcommand of ['commit', 'cherry-pick', 'revert', 'pull', 'stash', 'worktree', 'branch', 'tag', 'add']) {
+  assert.equal(isExplicitBranchChange(OP.EXEC, { executable: 'git', argv: [subcommand, 'fixture'] }), true, `${subcommand} must own the workspace-global barrier`);
+}
 assert.equal(isExplicitBranchChange(OP.EXEC, { executable: 'git', argv: ['status', '--short'] }), false);
 assert.equal(isExplicitBranchChange(OP.EXEC, { executable: 'git', argv: ['checkout', '--', 'file.txt'] }), false);
 assert.equal(isExplicitBranchChange(OP.EXEC, { command: 'git reset --hard HEAD' }), true);

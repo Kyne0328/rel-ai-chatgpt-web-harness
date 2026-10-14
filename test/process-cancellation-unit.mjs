@@ -5,7 +5,8 @@ import path from 'node:path';
 import childProcess from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { syncBuiltinESMExports } from 'node:module';
-import { listMutationProcessRecords, runWithMutationProcessOwnership } from '../src/mutationProcessOwnership.js';
+import { listMutationProcessRecords, removeMutationProcessRecord, runWithMutationProcessOwnership } from '../src/mutationProcessOwnership.js';
+import { hostResourceStats } from '../src/hostResourceScheduler.js';
 
 import { isProcessTreeAlive, runProcess, summarizeCommand, terminateProcessTree } from '../src/process.js';
 import { verifyWindowsRootExitTermination } from './fixtures/windows-root-exit-termination.mjs';
@@ -286,6 +287,33 @@ try {
     process.kill = nativeKill;
     Object.defineProperty(process, 'platform', nativePlatform);
     syncBuiltinESMExports();
+  }
+
+  if (process.platform !== 'win32') {
+    // A detached descendant outside the original POSIX process group keeps a
+    // workspace ownership record, but must not permanently consume the global
+    // heavy-process lease after the managed process group has stopped.
+    const owner = 'detached-pipe-uncertain';
+    const detachedPidFile = path.join(root, 'posix-detached-uncertain.pid');
+    const before = hostResourceStats().heavy.active;
+    let detachedPid = 0;
+    try {
+      const result = await runWithMutationProcessOwnership(config, owner, () => runProcess(
+        process.execPath, [inheritedPipeParentScript, inheritedPipeChildScript, detachedPidFile],
+        { cwd: root, resourceClass: 'heavy', resourceOwner: owner, forceWaitMs: 100 }, config
+      ));
+      detachedPid = Number(fs.readFileSync(detachedPidFile, 'utf8'));
+      assert.equal(result.rootExitConfirmed, true);
+      assert.equal(result.terminationConfirmed, false, 'escaped pipe owner has unconfirmed termination');
+      assert.equal(listMutationProcessRecords(config, owner).length, 1, 'unsafe descendant uncertainty remains durable');
+      assert.equal(hostResourceStats().heavy.active, before, 'unmanaged detached pipe must not strand global host capacity');
+    } finally {
+      if (detachedPid > 0) {
+        try { process.kill(detachedPid, 'SIGKILL'); } catch {}
+        await waitForPidExit(detachedPid, 2000);
+      }
+      for (const record of listMutationProcessRecords(config, owner)) removeMutationProcessRecord(record);
+    }
   }
 
   if (process.platform === 'win32') {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Recover verified mutation ownership without restarting Rel.AI.** Preserve durable fail-closed records for genuinely uncertain descendants, but avoid redundant permanent in-memory quarantine; reconcile late native/process-group termination and release retained host capacity. Make watchdog quarantine owner-releasable after proven settlement, protect validation/diagnostics shell commands with mutation ownership, ensure standalone completion barriers honor workspace-global operations, classify raw Git mutations correctly, retain safe `ps` diagnostics, and add macOS lifecycle CI coverage.
+
 - **Finish resolved Goal Mode work without extra ChatGPT turns.** A goal plan explicitly resolved into completed/skipped and blocked steps now closes through the existing guarded work-session completion path, preserving hardware blockers. Goal monitoring distinguishes blocked vs finished results and stops unnecessary continuation attempts; incomplete plans are never silently completed.
 - **Stream-project ChatGPT conversations before IPC.** Replace full-response buffering and `JSON.parse` of conversation histories with a bounded streaming parser that retains current-node lineage, message status, exact `/goal` commands and verified continuation receipts only. Discard unrelated model text and metadata, retaining a fixed wire safety budget independently of memory use. Cover long conversations, split commands and malformed branches in regression tests.
 

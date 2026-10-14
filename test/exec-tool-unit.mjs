@@ -240,6 +240,8 @@ try {
     true,
     'provably read-only direct exec must use the no-mutation-scan path'
   );
+  assert.equal(isClearlyReadOnlyExec({ command: 'ps -ax' }), true, 'process inspection must remain available while mutations are quarantined');
+  assert.equal(isClearlyReadOnlyExec({ command: 'ps -ax > process.txt' }), false, 'redirected process inspection is a mutation');
   assert.equal(isClearlyReadOnlyExec({ command: 'git status --short --branch' }), true, 'simple read-only shell commands must skip mutation scans');
   assert.equal(isClearlyReadOnlyExec({ command: 'node --version' }), true, 'simple read-only Node shell commands must skip mutation scans');
   assert.equal(isClearlyReadOnlyExec({ command: 'git status && node --version' }), false, 'shell control operators must keep conservative mutation tracking');

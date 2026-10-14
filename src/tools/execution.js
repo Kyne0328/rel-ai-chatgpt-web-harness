@@ -12,8 +12,8 @@ import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/f
 import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
 import { claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths } from '../taskIntegrity.ts';
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
-import { bindWorkspaceOperationIdentity, blockWorkspaceMutations, runWorkspaceOperation } from '../workspaceOperationQueue.js';
-import { listMutationProcessRecords, runWithMutationProcessOwnership } from '../mutationProcessOwnership.js';
+import { bindWorkspaceOperationIdentity, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock, runWorkspaceOperation } from '../workspaceOperationQueue.js';
+import { isCurrentLiveValidationProcessRecord, listMutationProcessRecords, runWithMutationProcessOwnership } from '../mutationProcessOwnership.js';
 import { inspectStructuredPatchTransaction, recoverStructuredPatchTransaction } from '../structuredPatchTransaction.js';
 import { authorizedWorkspaceAliases } from '../mcp/authorizationPolicy.ts';
 import {
@@ -169,6 +169,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             workspace?.alias,
             hasAgentCancellationHandle(effectiveArgs, { taskId })
           );
+          let safelySettled = false;
           try {
             if (workspace && !directFilesystem && isMutationScope(queueScope)) {
               if (noSourceMutation) {
@@ -208,9 +209,13 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             const handled = await (workspace && !directFilesystem && isMutationScope(queueScope)
               ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal), workspace.path)
               : invokeHandler(effectiveArgs, watchdog.signal));
-            if (workspace && isMutationScope(queueScope) && hasUnconfirmedTermination(handled)) {
+            if (workspace && isMutationScope(queueScope) && hasUnconfirmedTermination(handled)
+              && !hasDurableMutationOwnership(config, workspace)) {
               blockWorkspaceMutations(workspace.alias, 'A mutating subprocess was cancelled or timed out, but Rel.AI could not confirm that its process tree exited.');
             }
+            safelySettled = watchdog.hasOwnedQuarantine()
+              && !hasUnconfirmedTermination(handled) && handled?.mutationUnknown !== true
+              && (!workspace || !hasDurableMutationOwnership(config, workspace));
             setSpanAttributes({
               'relai.tool.ok': handled?.ok !== false,
               'relai.tool.long_running': definition?.behavior?.longRunning === true,
@@ -218,12 +223,17 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             });
             return handled;
           } catch (error) {
-            if (workspace && isMutationScope(queueScope) && error?.terminationConfirmed === false && !isInternalReadOnlyProcessOutcome(error)) {
+            if (workspace && isMutationScope(queueScope) && error?.terminationConfirmed === false && !isInternalReadOnlyProcessOutcome(error)
+              && !hasDurableMutationOwnership(config, workspace)) {
               blockWorkspaceMutations(workspace.alias, 'A mutating subprocess failed and process-tree termination remains unconfirmed.');
+            }
+            if (watchdog.hasOwnedQuarantine() && error?.terminationConfirmed === true
+              && (!workspace || !hasDurableMutationOwnership(config, workspace))) {
+              safelySettled = true;
             }
             throw error;
           } finally {
-            watchdog.dispose();
+            watchdog.dispose({ safelySettled });
           }
         },
         queueOptions(
@@ -270,8 +280,18 @@ function isMutationScope(scope) {
   return scope === 'mutation' || scope === 'workspace';
 }
 
+// Durable subprocess ownership already gates the next mutation at admission.
+// Do not add a second, permanent in-memory quarantine with no release path.
+function hasDurableMutationOwnership(config, workspace) {
+  try { return listMutationProcessRecords(config, workspace.alias, workspace.path).length > 0; }
+  catch { return true; } // Unreadable recovery state must never authorize unlock.
+}
+
 function assertNoRecoveredMutationProcess(config, workspace, workspacePath = '') {
   for (const record of listMutationProcessRecords(config, workspace, workspacePath)) {
+    // Live validation already used optimistic fingerprint revalidation before
+    // completion; only interrupted or recovered checks quarantine new edits.
+    if (isCurrentLiveValidationProcessRecord(record)) continue;
     if (record.incomplete === true) {
       const error = new Error('Mutation recovery inventory exceeded its bounded limit; ownership remains incomplete and mutations are blocked until the outstanding state is reviewed.');
       error.code = 'WORKSPACE_MUTATION_RECOVERY_INCOMPLETE';
@@ -320,11 +340,12 @@ function mutationWatchdogTimeoutMs(executionName, args = {}, scope = '', agentCo
 }
 
 function createMutationWatchdog(scope, executionName, args, callerSignal, workspaceAlias = '', agentControlled = false) {
-  if (!isMutationScope(scope)) return { signal: callerSignal, dispose() {} };
+  if (!isMutationScope(scope)) return { signal: callerSignal, hasOwnedQuarantine() { return false; }, dispose() {} };
   const timeoutMs = mutationWatchdogTimeoutMs(executionName, args, scope, agentControlled);
   const controller = new AbortController();
   const signal = combineAbortSignals(callerSignal, controller.signal);
   let quarantineTimer = null;
+  let quarantineToken = null;
   let timer = null;
 
   const scheduleQuarantine = () => {
@@ -337,7 +358,8 @@ function createMutationWatchdog(scope, executionName, args, callerSignal, worksp
       ? signal.reason.message
       : 'Mutation cancellation was requested.';
     quarantineTimer = setTimeout(() => {
-      blockWorkspaceMutations(workspaceAlias, `${reason} The mutating operation did not settle within ${MUTATION_WATCHDOG_TERMINATION_GRACE_MS}ms after cancellation.`);
+      const block = blockWorkspaceMutations(workspaceAlias, `${reason} The mutating operation did not settle within ${MUTATION_WATCHDOG_TERMINATION_GRACE_MS}ms after cancellation.`);
+      if (block?.created) quarantineToken = block.token;
     }, MUTATION_WATCHDOG_TERMINATION_GRACE_MS);
   };
   const onAbort = () => scheduleQuarantine();
@@ -354,10 +376,12 @@ function createMutationWatchdog(scope, executionName, args, callerSignal, worksp
   }
   return {
     signal,
-    dispose() {
+    hasOwnedQuarantine() { return Boolean(quarantineToken); },
+    dispose({ safelySettled = false } = {}) {
       if (timer) clearTimeout(timer);
       if (quarantineTimer) clearTimeout(quarantineTimer);
       signal?.removeEventListener?.('abort', onAbort);
+      if (safelySettled && quarantineToken) clearOwnedWorkspaceMutationBlock(workspaceAlias, quarantineToken);
     }
   };
 }
@@ -418,16 +442,20 @@ function isExplicitBranchChange(executionName, args = {}) {
     const argv = Array.isArray(args.argv) ? args.argv.map(value => String(value || '')) : [];
     const commandIndex = gitSubcommandIndex(argv);
     const command = commandIndex >= 0 ? argv[commandIndex].toLowerCase() : '';
-    if (new Set(['switch', 'reset', 'merge', 'rebase']).has(command)) return true;
-    if (command !== 'checkout') return false;
+    // Every Git command not proven read-only may alter the shared index,
+    // refs, worktree metadata or repository configuration.
+    if (!command || isClearlyReadOnlyExec(args)) return false;
+    if (command !== 'checkout') return true;
     const tail = argv.slice(commandIndex + 1);
     if (tail.includes('--')) return false;
     if (tail.some(value => ['-b', '-B', '--detach', '--orphan'].includes(value))) return true;
     return tail.filter(value => value && !value.startsWith('-')).length === 1;
   }
   const command = String(args.command || '');
-  if (/\bgit(?:\.exe)?\b[^\r\n;&|]*\b(?:switch|reset|merge|rebase)\b/i.test(command)) return true;
-  return /\bgit(?:\.exe)?\b[^\r\n;&|]*\bcheckout\b(?![^\r\n;&|]*\s--(?:\s|$))/i.test(command);
+  if (!/\bgit(?:\.exe)?\b/i.test(command) || isClearlyReadOnlyExec(args)) return false;
+  if (/[\r\n;&|]/u.test(command)) return true;
+  if (/\bgit(?:\.exe)?\b[^\r\n;&|]*\bcheckout\b[^\r\n;&|]*\s--(?:\s|$)/i.test(command)) return false;
+  return true;
 }
 
 function detachedQueueTaskId(context = {}, queueScope = '') {

@@ -12,6 +12,7 @@ import { sanitizeDisplayText } from '../taskObservability.js';
 import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.js';
 import { resolveOneShotTimeoutMs } from '../executionControl.js';
 import { isClearlyReadOnlyExec } from '../executionClassification.js';
+import { runValidationCommandWithMutationOwnership } from './mutationCheck.js';
 import { finalizeValidationResult, normalizeCompletionSummary } from '../tools/completion.js';
 import { createValidationFingerprint, createValidationPlan, readValidationPlan } from './validationPlan.js';
 import { runSpan } from '../telemetry.js';
@@ -226,7 +227,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           'relai.validation.plan_id': String(args.planId || ''),
           'relai.validation.parallel_safe': executionPolicy.parallelSafe === true,
           'relai.validation.kind': executionPolicy.kind
-        }, () => runProcess(command, [], {
+        }, () => runValidationCommandWithMutationOwnership(workspace, config, command, () => runProcess(command, [], {
           cwd: path.resolve(workspace.path, unit.cwd || '.'),
           shell: true,
           commandString: command,
@@ -236,7 +237,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           resourceOwner: workspace.alias,
           outputSpillTaskId: outputSpillOwner({ taskId: currentTaskId, workspace: logicalWorkspaceAlias, principal: context.principal }),
           ...(fullOutput ? { maxOutputBytes: 16 * 1024 * 1024 } : {})
-        }, config));
+        }, config)));
         } finally {
           activeChecks.delete(index);
         }

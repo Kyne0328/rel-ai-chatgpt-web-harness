@@ -30,6 +30,20 @@ try {
   assert.equal(result.exitCode, 0);
   assert.deepEqual(listMutationProcessRecords(config, workspace), [], 'settled mutation subprocesses must clear durable ownership');
 
+  // Optimistic validation permits normal concurrent edits, but becomes a
+  // durable write barrier immediately if its subprocess cannot be stopped.
+  {
+    const liveConfig = { stateDir: path.join(root, 'validation-state'), workspaces: { validation: { path: root } } };
+    await runWithMutationProcessOwnership(liveConfig, 'validation', async () => {
+      const file = recordCurrentMutationProcess(424255);
+      assert.doesNotThrow(() => assertNoRecoveredMutationProcess(liveConfig, 'validation', root));
+      assert.equal(markCurrentMutationProcessUncertain(424255, 'Synthetic uncertain validation process.', file), true);
+      assert.throws(() => assertNoRecoveredMutationProcess(liveConfig, 'validation', root),
+        error => error.code === 'WORKSPACE_MUTATION_TERMINATION_UNCERTAIN');
+    }, root, { concurrentValidation: true });
+    for (const record of listMutationProcessRecords(liveConfig, 'validation', root)) removeMutationProcessRecord(record);
+  }
+
   const child = await import('node:child_process').then(({ spawn }) => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
     detached: process.platform !== 'win32',
     stdio: 'ignore',

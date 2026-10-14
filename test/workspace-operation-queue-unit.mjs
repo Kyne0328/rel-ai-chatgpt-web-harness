@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 import { getOperationDefinition } from '../src/tools/actionDefinitions.ts';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
-import { blockWorkspaceMutations, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations } from "../src/workspaceOperationQueue.js";
+import { blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations } from "../src/workspaceOperationQueue.js";
 
 assert.equal(getOperationDefinition(OP.EDIT)?.behavior?.concurrencyScope, 'mutation', 'relai_edit mutations must coordinate with other mutations without blocking reads');
 assert.equal(getOperationDefinition(OP.EXEC)?.behavior?.concurrencyScope, 'mutation', 'relai_exec mutating commands must advertise mutation-level coordination');
@@ -235,6 +235,74 @@ assert.equal(pendingWorkspaceOperations(), 0);
   assert.equal(pendingWorkspaceOperations(), 0);
 }
 
+// A standalone mutation boundary must not skip the outer workspace reader
+// barrier and overlap repository-global maintenance.
+{
+  const globalStarted = deferred();
+  const releaseGlobal = deferred();
+  const global = runWorkspaceOperation('standalone-global-barrier', async () => {
+    globalStarted.resolve();
+    await releaseGlobal.promise;
+  }, { mode: 'write', scope: 'workspace', taskId: 'global' });
+  await globalStarted.promise;
+  let entered = false;
+  const boundary = runWorkspaceMutationBoundary('standalone-global-barrier', async () => {
+    entered = true;
+  });
+  await nextTurn();
+  assert.equal(entered, false, 'standalone boundaries must wait for workspace-global writers');
+  releaseGlobal.resolve();
+  await Promise.all([global, boundary]);
+  assert.equal(entered, true);
+}
+
+// Nested mutation boundaries reuse their caller's outer read barrier even when
+// an exclusive writer is already queued, avoiding read/write self-deadlock.
+{
+  const taskStarted = deferred();
+  const enterBoundary = deferred();
+  const outerTask = runWorkspaceOperation('nested-global-barrier', async () => {
+    taskStarted.resolve();
+    await enterBoundary.promise;
+    await runWorkspaceMutationBoundary('nested-global-barrier', async () => {});
+  }, { mode: 'read', scope: 'task', taskId: 'validation' });
+  await taskStarted.promise;
+  const global = runWorkspaceOperation('nested-global-barrier', async () => {}, {
+    mode: 'write', scope: 'workspace', taskId: 'global'
+  });
+  await nextTurn();
+  enterBoundary.resolve();
+  await Promise.all([outerTask, global]);
+  assert.equal(pendingWorkspaceOperations(), 0);
+}
+
+// Async callbacks inherited from a finished reader must not keep a stale
+// privilege to skip the outer barrier after their originating lock was freed.
+{
+  const alias = 'stale-outer-owner';
+  const activateLate = deferred();
+  let lateEntered = false;
+  let lateBoundary;
+  await runWorkspaceOperation(alias, async () => {
+    lateBoundary = activateLate.promise.then(() => runWorkspaceMutationBoundary(alias, async () => {
+      lateEntered = true;
+    }));
+  }, { mode: 'read', scope: 'task', taskId: 'reader' });
+  const globalStarted = deferred();
+  const releaseGlobal = deferred();
+  const global = runWorkspaceOperation(alias, async () => {
+    globalStarted.resolve();
+    await releaseGlobal.promise;
+  }, { mode: 'write', scope: 'workspace', taskId: 'maintenance' });
+  await globalStarted.promise;
+  activateLate.resolve();
+  await nextTurn();
+  assert.equal(lateEntered, false, 'stale asynchronous context cannot bypass an exclusive writer');
+  releaseGlobal.resolve();
+  await Promise.all([global, lateBoundary]);
+  assert.equal(lateEntered, true);
+}
+
 // A rejected operation must still release the lock.
 await assert.rejects(
   runWorkspaceOperation('repo', async () => { throw new Error('boom'); }, { mode: 'write' }),
@@ -400,6 +468,20 @@ async function nextTurn() {
   releaseBlocker.resolve();
   await blocker;
   assert.equal(pendingWorkspaceOperations(), 0);
+}
+
+// Only the original quarantine creator may clear a proven-settled block.
+{
+  const alias = 'owned-quarantine-release';
+  const original = blockWorkspaceMutations(alias, 'synthetic incomplete owner');
+  const second = blockWorkspaceMutations(alias, 'another operation cannot take over');
+  assert.equal(original.created, true);
+  assert.equal(second.created, false);
+  assert.equal(second.token, undefined, 'another operation may not acquire the existing block token');
+  assert.equal(clearOwnedWorkspaceMutationBlock(alias, Symbol('other owner')), false);
+  assert.equal(clearOwnedWorkspaceMutationBlock(alias, original.token), true);
+  assert.equal(await runWorkspaceOperation(alias, async () => 'ready', { mode: 'write', scope: 'mutation', taskId: 'next' }), 'ready');
+  assert.equal(clearOwnedWorkspaceMutationBlock(alias, original.token), false);
 }
 
 // Already-aborted requests fail before their operation starts and leave no lock.

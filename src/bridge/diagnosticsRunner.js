@@ -1,6 +1,7 @@
 
 import * as path from 'node:path';
 import { runProcess, summarizeCommand } from '../process.js';
+import { runValidationCommandWithMutationOwnership } from './mutationCheck.js';
 import { detectVerifyChecks } from './checkDetection.js';
 import { clampNumber } from './limits.js';
 import { runSpan } from '../telemetry.js';
@@ -51,7 +52,7 @@ async function relaiDiagnosticsRun(workspace, config, args = {}, context = {}) {
           'relai.diagnostics.command': command,
           'relai.diagnostics.parallel_safe': policy.parallelSafe === true,
           'relai.diagnostics.kind': policy.kind
-        }, () => runProcess(command, [], {
+        }, () => runValidationCommandWithMutationOwnership(workspace, config, command, () => runProcess(command, [], {
           cwd: path.resolve(workspace.path, unit.cwd || '.'),
           shell: true,
           commandString: command,
@@ -60,7 +61,7 @@ async function relaiDiagnosticsRun(workspace, config, args = {}, context = {}) {
           signal,
           resourceClass: 'heavy',
           resourceOwner: workspace.alias
-        }, config));
+        }, config), { exclusive: true, signal }));
         } finally {
           activeDiagnostics.delete(index);
         }

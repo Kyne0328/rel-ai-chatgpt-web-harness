@@ -20,6 +20,17 @@ import * as path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const queueOwnerContext = new AsyncLocalStorage();
+const outerWorkspaceOwnership = new AsyncLocalStorage();
+
+function withOuterWorkspaceOwnership(workspace, operation) {
+  const held = new Map(outerWorkspaceOwnership.getStore() || []);
+  const lease = { active: true };
+  held.set(workspaceIdentity(workspace), lease);
+  return outerWorkspaceOwnership.run(held, async () => {
+    try { return await operation(); }
+    finally { lease.active = false; }
+  });
+}
 const locks = new Map();
 const mutationBlocks = new Map();
 const workspaceIdentities = new Map();
@@ -369,10 +380,11 @@ function blockWorkspaceMutations(workspaceAlias, reason) {
   const workspace = String(workspaceAlias || '').trim();
   if (!workspace) return null;
   const existing = mutationBlocks.get(workspaceIdentity(workspace));
-  if (existing) return { ...existing };
+  if (existing) return { created: false, blockedAt: existing.blockedAt };
   const block = {
     reason: reason instanceof Error ? reason.message : String(reason || 'Previous mutation termination was not confirmed.'),
-    blockedAt: new Date().toISOString()
+    blockedAt: new Date().toISOString(),
+    token: Symbol('mutation-quarantine-owner')
   };
   mutationBlocks.set(workspaceIdentity(workspace), block);
   for (const alias of workspaceOperationAliases(workspace)) {
@@ -382,7 +394,25 @@ function blockWorkspaceMutations(workspaceAlias, reason) {
   }
   const controller = mutationBlockControllerFor(workspace);
   if (!controller.signal.aborted) controller.abort(workspaceMutationBlockedError(workspace, block));
-  return { ...block };
+  return { ...block, created: true };
+}
+
+// A completed operation may release only the quarantine it created. Previously
+// rejected queued mutations stay rejected; new requests receive a fresh signal.
+function clearOwnedWorkspaceMutationBlock(workspaceAlias, token) {
+  const identity = workspaceIdentity(workspaceAlias);
+  const block = mutationBlocks.get(identity);
+  if (!token || !block || block.token !== token) return false;
+  for (const [key, candidate] of mutationBlocks) {
+    if (candidate === block) mutationBlocks.delete(key);
+  }
+  mutationBlockControllers.delete(identity);
+  for (const alias of workspaceOperationAliases(workspaceAlias)) {
+    for (const listener of mutationBlockListeners) {
+      try { listener({ alias, mutationBlock: workspaceMutationBlockSummary(alias) }); } catch {}
+    }
+  }
+  return true;
 }
 
 // Never expose raw termination errors, command lines, or another task's owner.
@@ -454,14 +484,14 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
         mode,
         queued: state.queue.length
       });
-      return operation();
+      return withOuterWorkspaceOwnership(workspace, operation);
     }, signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
   }
 
   if (scope === MUTATION_SCOPE) {
     throwIfWorkspaceMutationBlocked(workspace);
     const signal = mutationQueueSignal(workspace, options.signal);
-    return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => {
+    return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => withOuterWorkspaceOwnership(workspace, async () => {
       const enterMutationLane = (taskWaitMs = 0, taskState = null) => withLock(mutationKey(workspace), WRITE, async (mutationWaitMs, mutationState) => {
         throwIfWorkspaceMutationBlocked(workspace);
         const waitMs = workspaceWaitMs + taskWaitMs + mutationWaitMs;
@@ -479,10 +509,10 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
       const laneKey = taskKey(workspace, taskId);
       return withLock(laneKey, mode, (taskWaitMs, taskState) => enterMutationLane(taskWaitMs, taskState),
         signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
-    }, signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
+    }), signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
   }
 
-  return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => {
+  return withLock(outerKey, READ, async (workspaceWaitMs, workspaceState) => withOuterWorkspaceOwnership(workspace, async () => {
     const laneKey = taskKey(workspace, taskId);
     return withLock(laneKey, mode, async (taskWaitMs, taskState) => {
       const waitMs = workspaceWaitMs + taskWaitMs;
@@ -495,7 +525,7 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
       });
       return operation();
     }, options.signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
-  }, options.signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
+  }), options.signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
 }
 
 function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
@@ -503,6 +533,16 @@ function runWorkspaceMutationBoundary(workspaceAlias, operation, options = {}) {
   if (!workspace) {
     throwIfAborted(options.signal);
     return operation();
+  }
+  // Standalone completion must own the outer workspace reader barrier too.
+  // Nested validation already holds that barrier, so reacquiring it here can
+  // deadlock behind a waiting repository-wide writer.
+  if (outerWorkspaceOwnership.getStore()?.get(workspaceIdentity(workspace))?.active !== true) {
+    return runWorkspaceOperation(workspace, operation, {
+      ...options, mode: WRITE, scope: MUTATION_SCOPE,
+      taskId: String(options.taskId || 'standalone-mutation-boundary'),
+      bypassTaskLane: true
+    });
   }
   const queueTimeoutMs = Number.isFinite(Number(options.queueTimeoutMs)) && Number(options.queueTimeoutMs) > 0
     ? Math.floor(Number(options.queueTimeoutMs))
@@ -529,4 +569,4 @@ function pendingWorkspaceOperations() {
   return locks.size;
 }
 
-export { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, workspaceOperationAliases, blockWorkspaceMutations, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };
+export { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, workspaceOperationAliases, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };

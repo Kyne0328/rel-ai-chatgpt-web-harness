@@ -5,7 +5,7 @@ const UNSAFE_READ_ONLY_GIT_OPTIONS = new Set([
   '--ext-diff', '--textconv', '--filters', '--open-files-in-pager'
 ]);
 const READ_ONLY_INSPECTION_EXECUTABLES = new Set([
-  'cat', 'dir', 'grep', 'head', 'ls', 'pwd', 'tail', 'wc', 'where', 'which'
+  'cat', 'dir', 'grep', 'head', 'ls', 'pgrep', 'ps', 'pwd', 'tail', 'wc', 'where', 'which'
 ]);
 const READ_ONLY_FIND_UNSAFE_OPTIONS = new Set([
   '-delete', '-exec', '-execdir', '-ok', '-okdir', '-fls', '-fprint', '-fprint0', '-fprintf'

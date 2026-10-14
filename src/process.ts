@@ -471,6 +471,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
   const queueStartedAt = Date.now();
   let resourceLease: ResourceLease | null = null;
   let retainResourceLease = false;
+  let pendingTerminationOwner: { pid: number; file: string | null; safeToRecheck: boolean } | null = null;
   let failureCleanup: (() => Promise<boolean>) | null = null;
   let windowsJob: WindowsProcessJob | null = null;
   let ownedControllerClosed = false;
@@ -664,6 +665,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
           : terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs }))
           .catch(error => ({ exited: false, forced: true, error: errorMessage(error) }));
       await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
+      if (!outcome.exited) pendingTerminationOwner = { pid: subprocess.pid || 0, file: mutationProcessFile, safeToRecheck: true };
       if (mutationProcessFile) {
         if (outcome.exited) retireMutationProcess(subprocess.pid || 0, mutationProcessFile);
         else {
@@ -751,14 +753,31 @@ async function runProcess(command: string, args: readonly string[] = [], options
     const timedOut = windowsTermination.kind === 'timeout' || result.timedOut === true || signalTimedOut;
     const cancelled = !timedOut && (windowsTermination.kind === 'cancel' || result.isCanceled === true);
     const nativeReceipt = windowsJob?.receipt();
-    const terminationOutcome = windowsTerminationOutcome || (windowsJob ? (executed ? windowsJob.outcome() : { exited: true, forced: false }) : null) || ((timedOut || cancelled)
+    let terminationOutcome = windowsTerminationOutcome || (windowsJob ? (executed ? windowsJob.outcome() : { exited: true, forced: false }) : null) || ((timedOut || cancelled)
       ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
       : inheritedPipeDrain
         ? { exited: false, forced: false, error: 'The root exited but inherited output handles remained open; descendant termination is unconfirmed.' }
         : process.platform !== 'win32' && isProcessTreeAlive(subprocess)
           ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
           : null);
-    retainResourceLease = terminationOutcome?.exited === false;
+    if (terminationOutcome?.exited === false && !inheritedPipeDrain && process.platform !== 'win32'
+      && !isProcessGroupAlive(subprocess.pid)) {
+      terminationOutcome = { ...terminationOutcome, exited: true };
+    }
+    // A detached descendant outside the owned process group may still be a
+    // mutation hazard, but cannot hold a global host-resource reservation after
+    // the managed group is gone. The durable workspace block remains intact.
+    retainResourceLease = terminationOutcome?.exited === false
+      && (Boolean(windowsJob) || (process.platform !== 'win32' && isProcessGroupAlive(subprocess.pid)));
+    if (terminationOutcome?.exited === false) {
+      // An inherited pipe may belong to a descendant that escaped the process
+      // group. Group disappearance alone cannot prove its termination.
+      pendingTerminationOwner = {
+        pid: subprocess.pid || 0,
+        file: mutationProcessFile,
+        safeToRecheck: !inheritedPipeDrain || Boolean(windowsJob)
+      };
+    }
     if (terminationOutcome) {
       // Release only our stdio/child handles. This does not assert that the
       // process tree stopped; unconfirmed mutations retain their durable owner.
@@ -857,7 +876,9 @@ async function runProcess(command: string, args: readonly string[] = [], options
   } catch (cause) {
     if (failureCleanup) {
       const terminationConfirmed = await failureCleanup().catch(() => false);
-      retainResourceLease = !terminationConfirmed;
+      const pendingPid = pendingTerminationOwner?.pid || 0;
+      retainResourceLease = !terminationConfirmed
+        && (Boolean(windowsJob) || (process.platform !== 'win32' && pendingPid > 0 && isProcessGroupAlive(pendingPid)));
       const error = new Error(`Process setup or finalization failed; process-tree cleanup was attempted.${mutationOwnershipPersistenceError ? ` ${mutationOwnershipPersistenceError}` : ''}`, { cause });
       Object.assign(error, {
         code: 'PROCESS_SETUP_FAILED', executed, terminationConfirmed,
@@ -881,6 +902,26 @@ async function runProcess(command: string, args: readonly string[] = [], options
       resourceLease?.release();
       if (windowsJob && !executed) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
       else windowsJob?.cleanup();
+    } else if (pendingTerminationOwner && pendingTerminationOwner.pid > 0) {
+      const { pid, file } = pendingTerminationOwner;
+      // A timed-out termination check can become conclusive later. Supervise
+      // only this outstanding owner; do not poll every workspace or infer
+      // safety from a root PID disappearing on Windows.
+      const recheck = (): void => {
+        const confirmed = windowsJob
+          ? windowsJob.outcome().exited === true
+          : process.platform !== 'win32' && !isProcessGroupAlive(pid);
+        if (!confirmed) {
+          const timer = setTimeout(recheck, 500);
+          timer.unref?.();
+          return;
+        }
+        if (file && pendingTerminationOwner?.safeToRecheck) retireMutationProcess(pid, file);
+        resourceLease?.release();
+        windowsJob?.cleanup();
+      };
+      const timer = setTimeout(recheck, 500);
+      timer.unref?.();
     }
   }
 }
