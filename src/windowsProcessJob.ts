@@ -274,6 +274,16 @@ export function persistedWindowsJobComplete(config: Record<string, unknown>, ref
   } catch { return false; }
 }
 
+// Remove native evidence only after the linked durable mutation marker has
+// already been archived or retired. Failed cleanup leaves proof intact.
+export function cleanupPersistedWindowsJob(config: Record<string, unknown>, reference: {
+  directory?: string; nonce?: string
+}, helperPid = 0): boolean {
+  if (!persistedWindowsJobComplete(config, reference, helperPid)) return false;
+  try { fs.rmSync(String(reference.directory), { recursive: true, force: true }); return true; }
+  catch { return false; }
+}
+
 export function restoreWindowsProcessJob(directory: string, helperPid: number | null | undefined): WindowsProcessJob | null {
   const value = readSmallJson(path.join(directory, 'request.json'), 256 * 1024);
   if (!value || value.protocol !== PROTOCOL || typeof value.nonce !== 'string' || !/^[a-f0-9]{64}$/.test(value.nonce)) return null;

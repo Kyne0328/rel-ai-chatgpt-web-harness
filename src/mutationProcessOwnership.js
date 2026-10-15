@@ -77,6 +77,16 @@ function attachCurrentMutationProcessJob(reference, preparedFile) {
   return true;
 }
 
+function attachCurrentMutationProcessCgroup(reference, preparedFile) {
+  const current = ownershipContext.getStore();
+  if (!current || !preparedFile || !reference) return false;
+  const previous = readJsonFile(preparedFile);
+  if (!previous || previous.runtimeId !== runtimeId || previous.authority !== current.authority
+    || previous.phase !== 'preparing') throw new Error('Linux cgroup ownership record is not preparing.');
+  writeJsonAtomic(preparedFile, { ...previous, nativeCgroup: reference }, { mode: 0o600 });
+  return true;
+}
+
 function recordCurrentMutationProcess(pidValue, preparedFile = null) {
   const current = ownershipContext.getStore();
   const pid = Number(pidValue);
@@ -88,6 +98,7 @@ function recordCurrentMutationProcess(pidValue, preparedFile = null) {
   writeJsonAtomic(file, {
     schemaVersion: RECORD_SCHEMA_VERSION,
     ...(previous?.nativeJob ? { nativeJob: previous.nativeJob } : {}),
+    ...(previous?.nativeCgroup ? { nativeCgroup: previous.nativeCgroup } : {}),
     runtimeId,
     ...(current.bootIdentity ? { bootIdentity: current.bootIdentity } : {}),
     workspace: current.workspace,
@@ -329,6 +340,7 @@ export {
   onMutationProcessRecoveryChange,
   notifyRecoveryChange,
   attachCurrentMutationProcessJob,
+  attachCurrentMutationProcessCgroup,
   clearCurrentMutationProcess,
   listMutationProcessRecords,
   isCurrentLiveValidationProcessRecord,

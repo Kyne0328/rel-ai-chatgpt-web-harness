@@ -4,7 +4,8 @@ import path from 'node:path';
 import { readJsonFile, writeJsonAtomic } from './durableState.ts';
 import { getStateDir } from './statePaths.js';
 import { currentMutationBootIdentity } from './mutationBootIdentity.js';
-import { persistedWindowsJobComplete } from './windowsProcessJob.ts';
+import { persistedWindowsJobComplete, cleanupPersistedWindowsJob } from './windowsProcessJob.ts';
+import { linuxMutationCgroupEmpty, cleanupLinuxMutationCgroup } from './linuxMutationCgroup.js';
 import { privatelyOwnedWindowsState, privatelyOwnedWindowsPaths } from './mutationWindowsStateAcl.js';
 import { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock } from './workspaceOperationQueue.js';
 import { listMutationProcessRecords, notifyRecoveryChange, onMutationProcessRecoveryChange } from './mutationProcessOwnership.js';
@@ -28,8 +29,9 @@ function safeDir(dir, create = false) {
 }
 function safeFile(file, expected = null) {
   const s = fs.lstatSync(file);
-  if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1 || !privatelyOwned(file, s)
-    || s.size > MAX_RECORD_BYTES) throw new Error('Unsafe recovery record.');
+  if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1 || s.size > MAX_RECORD_BYTES)
+    throw new Error('Unsafe recovery record metadata.');
+  if (!privatelyOwned(file, s)) throw new Error('Recovery record ownership could not be verified.');
   const bytes = fs.readFileSync(file);
   const post = fs.lstatSync(file);
   if (s.ino !== post.ino || s.dev !== post.dev || s.size !== bytes.length
@@ -77,7 +79,7 @@ async function inventory(config, alias, directory, authorities, state) {
     safeDir(path.dirname(record.file));
     const e = { authority: record.authority, filename,
       ...safeFile(record.file), bootIdentity: record.bootIdentity || null,
-      nativeJob: record.nativeJob || null, pid: record.pid };
+      nativeJob: record.nativeJob || null, nativeCgroup: record.nativeCgroup || null, pid: record.pid };
     const key = entryKey(e);
     if (keys.has(key)) throw new Error('Duplicate mutation records.');
     keys.add(key);
@@ -88,7 +90,7 @@ async function archiveOne(state, root, item, evidence) {
   if (process.platform === 'win32') {
     const archive = path.join(root, 'archive');
     fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
-    if (!await privatelyOwnedWindowsPaths([root, archive]))
+    if (!await privatelyOwnedWindowsPaths([root, archive, recordFile(state, item)]))
       throw new Error('Recovery archive ACL cannot be verified.');
   }
   safeDir(root, true);
@@ -117,12 +119,25 @@ async function archiveOne(state, root, item, evidence) {
   notifyRecoveryChange();
   return true;
 }
+function nativeCompletionProof(config, record) {
+  if (record.nativeJob && persistedWindowsJobComplete(config, record.nativeJob, record.pid))
+    return 'verified-native-job-zero';
+  if (record.nativeCgroup && linuxMutationCgroupEmpty(record.nativeCgroup))
+    return 'verified-linux-cgroup-empty';
+  return null;
+}
+
+function cleanupNativeCompletion(config, record) {
+  if (record.nativeJob) cleanupPersistedWindowsJob(config, record.nativeJob, record.pid);
+  if (record.nativeCgroup) cleanupLinuxMutationCgroup(record.nativeCgroup);
+}
+
 function previousBoot(e, current) {
   return e.bootIdentity?.platform === current.platform
     && e.bootIdentity.host === current.host && e.bootIdentity.boot !== current.boot
     && typeof e.bootIdentity.boot === 'string';
 }
-async function reconcileLegacy(state, root, current, entries) {
+async function reconcileLegacy(config, state, root, current, entries) {
   if (process.platform === 'win32') {
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     if (!await privatelyOwnedWindowsPaths([root])) throw new Error('Recovery checkpoint ACL cannot be verified.');
@@ -157,9 +172,10 @@ async function reconcileLegacy(state, root, current, entries) {
   if (process.platform === 'win32') {
     const aclTargets = [root, checkpointPath];
     if (fs.existsSync(archivedDir)) aclTargets.push(archivedDir);
-    for (const [key] of expected) {
+    for (const [key, entry] of expected) {
       const archivedFile = path.join(archivedDir, key);
       if (fs.existsSync(archivedFile)) aclTargets.push(archivedFile);
+      else aclTargets.push(recordFile(state, entry));
     }
     if (!await privatelyOwnedWindowsPaths(aclTargets)) throw new Error('Recovery checkpoint ACL cannot be verified.');
   }
@@ -179,11 +195,17 @@ async function reconcileLegacy(state, root, current, entries) {
     }
     safeFile(hasOriginal ? original : archived, item);
   }
-  if (sameBoot) return 0;
   let released = 0;
   for (const item of expected.values()) {
-    if (fs.existsSync(recordFile(state, item)) && await archiveOne(state, root, item, 'verified-checkpoint-boot')) released++;
+    if (!fs.existsSync(recordFile(state, item))) continue;
+    const proof = sameBoot ? nativeCompletionProof(config, item) : 'verified-checkpoint-boot';
+    if (proof && await archiveOne(state, root, item, proof)) {
+      released++;
+      if (sameBoot) cleanupNativeCompletion(config, item);
+    }
   }
+  if ([...expected.values()].some(item => fs.existsSync(recordFile(state, item))))
+    return released;
   // Move the complete checkpoint and its audits out of the active recovery
   // directory atomically. Future interruptions can create a fresh checkpoint;
   // normal dashboard reads never rescan historical, already-proven archives.
@@ -207,19 +229,23 @@ async function reconcileWorkspaceMutationRecords(config, alias, workspacePath, b
   // A prior checkpoint owns its complete inventory until archival finishes.
   if (hasCheckpoint) {
     if (!boot) throw new Error('Recovery checkpoint cannot be verified without native boot identity.');
-    const released = await reconcileLegacy(state, legacyRoot, boot, entries);
+    const released = await reconcileLegacy(config, state, legacyRoot, boot, entries);
     return { released, pending: entries.length > released };
   }
   let released = 0;
   for (const entry of entries) {
     if (boot && previousBoot(entry, boot)) {
       if (await archiveOne(state, path.join(workspaceRoot, 'native-boot'), entry, 'verified-record-boot')) released++;
-    } else if (entry.nativeJob && persistedWindowsJobComplete(config, entry.nativeJob, entry.pid)) {
-      if (await archiveOne(state, path.join(workspaceRoot, 'native-job'), entry, 'verified-native-job-zero')) released++;
+    } else {
+      const proof = nativeCompletionProof(config, entry);
+      if (proof && await archiveOne(state, path.join(workspaceRoot, 'native-job'), entry, proof)) {
+        released++;
+        cleanupNativeCompletion(config, entry);
+      }
     }
   }
   const remaining = await inventory(config, alias, workspacePath, authorities, state);
-  if (remaining.length && boot) await reconcileLegacy(state, legacyRoot, boot, remaining);
+  if (remaining.length && boot) await reconcileLegacy(config, state, legacyRoot, boot, remaining);
   return { released, pending: remaining.length > 0 };
 }
 function mutationAutoRecoveryCheckpointInvalid(config, alias, workspacePath = '') {
@@ -251,7 +277,7 @@ function mutationAutoRecoveryCheckpointInvalid(config, alias, workspacePath = ''
       safeFile(fs.existsSync(original) ? original : archived, item);
       if (fs.existsSync(archived)) {
         const audit = readJsonFile(path.join(root, 'audit-' + key + '.json'));
-        if (audit?.digest !== item.digest || audit.evidence !== 'verified-checkpoint-boot') return true;
+        if (audit?.digest !== item.digest || !['verified-checkpoint-boot', 'verified-native-job-zero', 'verified-linux-cgroup-empty'].includes(audit.evidence)) return true;
       }
     }
     if (fs.existsSync(path.join(root, 'archive'))) {
@@ -334,7 +360,7 @@ function startAutomaticMutationRecovery(config, options = {}) {
           pending ||= outcome.pending;
           if (outcome.pending) {
             const remaining = listMutationProcessRecords(config, member.alias, member.path);
-            couldSettleThisBoot ||= remaining.some(record => record.nativeJob && !record.invalid && !record.incomplete);
+            couldSettleThisBoot ||= remaining.some(record => (record.nativeJob || record.nativeCgroup) && !record.invalid && !record.incomplete);
           }
         } catch (error) {
           pending = true;

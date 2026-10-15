@@ -16,7 +16,8 @@ import {
   runWithMutationProcessOwnership
 } from '../src/mutationProcessOwnership.js';
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-mutation-process-ownership-'));
+const fixtureParent = process.platform === 'win32' ? os.homedir() : os.tmpdir();
+const root = fs.mkdtempSync(path.join(fixtureParent, 'relai-mutation-process-ownership-'));
 const config = { stateDir: path.join(root, 'state') };
 const workspace = 'repo';
 
@@ -29,6 +30,76 @@ try {
   ));
   assert.equal(result.exitCode, 0);
   assert.deepEqual(listMutationProcessRecords(config, workspace), [], 'settled mutation subprocesses must clear durable ownership');
+
+  // A native-zero receipt must survive a failed lock-record deletion. The next
+  // reconciliation can then release it on the SAME boot, without a reboot.
+  if (process.platform === 'win32') {
+    const nativeConfig = { stateDir: path.join(root, 'native-receipt-state'),
+      workspaces: { native: { path: root } } };
+    const rm = fs.rmSync;
+    let denied = '';
+    fs.rmSync = function(target, ...args) {
+      if (String(target).includes('active-mutations-v3') && String(target).endsWith('.json')) {
+        denied = String(target);
+        throw Object.assign(new Error('Injected lock-file unlink failure.'), { code: 'EPERM' });
+      }
+      return rm.call(fs, target, ...args);
+    };
+    syncBuiltinESMExports();
+    let nativeResult;
+    try {
+      nativeResult = await runWithMutationProcessOwnership(nativeConfig, 'native', () => runProcess(
+        process.execPath, ['-e', 'process.stdout.write("native-complete")'],
+        { timeout: 10000 }, nativeConfig
+      ), root);
+    } finally {
+      fs.rmSync = rm;
+      syncBuiltinESMExports();
+    }
+    assert.equal(nativeResult.exitCode, 0);
+    assert.equal(nativeResult.terminationConfirmed, true);
+    assert.ok(denied && fs.existsSync(denied), 'failed mutation-record cleanup must remain visible');
+    const [orphan] = listMutationProcessRecords(nativeConfig, 'native', root);
+    assert.ok(orphan?.nativeJob?.directory && fs.existsSync(orphan.nativeJob.directory),
+      'native completion evidence must outlive a failed record deletion');
+    const { persistedWindowsJobComplete } = await import('../src/windowsProcessJob.ts');
+    assert.equal(persistedWindowsJobComplete(nativeConfig, orphan.nativeJob, orphan.pid), true);
+    const { recoverMutationRecordsAtStartup } = await import('../src/mutationAutoRecovery.js');
+    const { currentMutationBootIdentity } = await import('../src/mutationBootIdentity.js');
+    const recovery = await recoverMutationRecordsAtStartup(nativeConfig, {
+      bootIdentity: await currentMutationBootIdentity()
+    });
+    assert.equal(recovery.released, 1, JSON.stringify(recovery));
+    assert.deepEqual(listMutationProcessRecords(nativeConfig, 'native', root), []);
+  }
+
+  // A detached grandchild that redirects stdio stays in a delegated Linux
+  // cgroup even after setsid(). No persistent scan or PID-only proof is needed.
+  if (process.platform === 'linux') {
+    const { prepareLinuxMutationCgroup, cleanupLinuxMutationCgroup } = await import('../src/linuxMutationCgroup.js');
+    const probe = prepareLinuxMutationCgroup();
+    if (probe) {
+      cleanupLinuxMutationCgroup(probe);
+      const linuxConfig = { stateDir: path.join(root, 'linux-cgroup-state'),
+        workspaces: { linux: { path: root } } };
+      const childScript = path.join(root, 'linux-escaped-grandchild.mjs');
+      const parentScript = path.join(root, 'linux-detaching-parent.mjs');
+      fs.writeFileSync(childScript, 'setInterval(() => {}, 1000);\n');
+      fs.writeFileSync(parentScript, [
+        "import { spawn } from 'node:child_process';",
+        "const child = spawn(process.execPath, [process.argv[2]], { detached: true, stdio: 'ignore' });",
+        "child.unref();",
+        "process.stdout.write(String(child.pid));"
+      ].join('\n'));
+      const detached = await runWithMutationProcessOwnership(linuxConfig, 'linux', () => runProcess(
+        process.execPath, [parentScript, childScript], { timeout: 10000 }, linuxConfig
+      ), root);
+      assert.equal(detached.exitCode, 0, detached.stderr);
+      assert.equal(detached.terminationConfirmed, true,
+        'cgroup v2 must prove detached descendants stopped before release');
+      assert.deepEqual(listMutationProcessRecords(linuxConfig, 'linux', root), []);
+    }
+  }
 
   // Optimistic validation permits normal concurrent edits, but becomes a
   // durable write barrier immediately if its subprocess cannot be stopped.

@@ -32,7 +32,8 @@ try {
     assert.ok(fs.existsSync(file));
     const cp = path.join(config.stateDir, 'mutation-auto-recovery');
     assert.equal(fs.existsSync(cp), true, 'uncertain same-boot record receives future recovery evidence');
-    assert.equal((await recoverMutationRecordsAtStartup(config, { bootIdentity: next })).released, 1);
+    const afterVerifiedBoot = await recoverMutationRecordsAtStartup(config, { bootIdentity: next });
+    assert.equal(afterVerifiedBoot.released, 1, JSON.stringify(afterVerifiedBoot));
     assert.deepEqual(listMutationProcessRecords(config, 'alpha', config.workspaces.alpha.path), []);
   }
   // A new-format record containing original boot identity recovers without a checkpoint.
@@ -210,6 +211,29 @@ try {
     assert.equal(monitor.pendingCount(), 0);
     assert.equal(fs.existsSync(file), false);
     monitor.stop();
+  }
+  // A reboot checkpoint must not hide later native all-process proof on the
+  // SAME OS boot. This previously forced an unnecessary reboot.
+  if (process.platform === 'win32') {
+    const { config, file } = scenario();
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const job = path.join(config.stateDir, 'process-jobs', 'job-checkpoint-native');
+    fs.mkdirSync(job, { recursive: true });
+    const nonce = 'c'.repeat(64);
+    record.bootIdentity = base;
+    record.nativeJob = { directory: job, nonce };
+    fs.writeFileSync(file, JSON.stringify(record));
+    fs.writeFileSync(path.join(job, 'request.json'), JSON.stringify({ protocol: 1, nonce }));
+    assert.equal((await recoverMutationRecordsAtStartup(config, { bootIdentity: base })).released, 0);
+    fs.writeFileSync(path.join(job, 'receipt.json'), JSON.stringify({
+      protocol: 1, nonce, helperPid: record.pid, final: true,
+      jobComplete: true, cleanupConfirmed: true, activeProcesses: 0,
+      commandStarted: true, rootExited: true
+    }));
+    const result = await recoverMutationRecordsAtStartup(config, { bootIdentity: base });
+    assert.equal(result.released, 1, JSON.stringify(result));
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(fs.existsSync(job), false, 'retired native proof must not leak its helper directory');
   }
   // An initially healthy service must also monitor a new uncertain subprocess.
   {

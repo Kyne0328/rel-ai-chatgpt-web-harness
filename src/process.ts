@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { execa, type Options as ExecaOptions } from 'execa';
 import { prepareWindowsProcessJob, type WindowsProcessJob } from './windowsProcessJob.ts';
+import { prepareLinuxMutationCgroup, linuxMutationCgroupCommand, linuxMutationCgroupEmpty, settleLinuxMutationCgroup, cleanupLinuxMutationCgroup } from './linuxMutationCgroup.js';
 import { resolveGitExecutable } from './gitExecutable.js';
 import { isTimeoutAbort } from './abortSignals.js';
 import { executionOutcome } from './executionOutcome.js';
@@ -13,7 +14,7 @@ import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
 import { acquireHostResource } from './hostResourceScheduler.js';
-import { attachCurrentMutationProcessJob, clearCurrentMutationProcess, markCurrentMutationProcessUncertain, prepareCurrentMutationProcess, recordCurrentMutationProcess, runWithoutMutationProcessOwnership } from './mutationProcessOwnership.js';
+import { attachCurrentMutationProcessCgroup, attachCurrentMutationProcessJob, clearCurrentMutationProcess, markCurrentMutationProcessUncertain, prepareCurrentMutationProcess, recordCurrentMutationProcess, runWithoutMutationProcessOwnership } from './mutationProcessOwnership.js';
 
 const internalObservationOutcomes = new WeakSet<object>();
 const ownedReadOnlyProcessOptions = new WeakSet<object>();
@@ -474,6 +475,8 @@ async function runProcess(command: string, args: readonly string[] = [], options
   let pendingTerminationOwner: { pid: number; file: string | null; safeToRecheck: boolean } | null = null;
   let failureCleanup: (() => Promise<boolean>) | null = null;
   let windowsJob: WindowsProcessJob | null = null;
+  let mutationProcessFile: string | null = null;
+  let linuxCgroup: { directory: string; nonce: string } | null = null;
   let ownedControllerClosed = false;
   if (resourceClass) {
     reportPhase('host-queued');
@@ -603,9 +606,13 @@ async function runProcess(command: string, args: readonly string[] = [], options
       });
     }
     const processStartedAt = Date.now();
-    const mutationProcessFile = await prepareCurrentMutationProcess();
+    mutationProcessFile = await prepareCurrentMutationProcess();
     let subprocess;
     try {
+      if (process.platform === 'linux' && mutationProcessFile && !shell) {
+        linuxCgroup = prepareLinuxMutationCgroup();
+        if (linuxCgroup) attachCurrentMutationProcessCgroup(linuxCgroup, mutationProcessFile);
+      }
       if (process.platform === 'win32' && (mutationProcessFile || ownedReadOnlyProcessOptions.has(options)
         || options.nativeOwnership === true)) {
         windowsJob = await prepareWindowsProcessJob(config, {
@@ -619,6 +626,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       if (options.signal?.aborted || (Number.isFinite(deadlineAtMs) && deadlineAtMs > 0 && Date.now() >= deadlineAtMs)) {
         if (mutationProcessFile) retireMutationProcess(0, mutationProcessFile);
         if (windowsJob) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
+        if (linuxCgroup) cleanupLinuxMutationCgroup(linuxCgroup);
         windowsJob = null;
         const expired = !options.signal?.aborted || isTimeoutAbort(options.signal);
         return {
@@ -627,12 +635,16 @@ async function runProcess(command: string, args: readonly string[] = [], options
           ...(mutationOwnershipPersistenceError ? { mutationOwnershipPersistenceError } : {})
         };
       }
-      subprocess = execa(windowsJob?.executable || file, windowsJob?.args || (shell ? [] : processArgs),
-        windowsJob ? { ...execaOptions, shell: false, env: windowsJob.environment } : execaOptions);
+      const linuxLaunch = linuxCgroup ? linuxMutationCgroupCommand(linuxCgroup, file, processArgs) : null;
+      subprocess = execa(windowsJob?.executable || linuxLaunch?.executable || file,
+        windowsJob?.args || linuxLaunch?.args || (shell ? [] : processArgs),
+        windowsJob ? { ...execaOptions, shell: false, env: windowsJob.environment }
+          : linuxLaunch ? { ...execaOptions, shell: false } : execaOptions);
       windowsJob?.bind(subprocess.pid);
     } catch (error) {
       if (mutationProcessFile) retireMutationProcess(0, mutationProcessFile);
       if (windowsJob) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
+      if (linuxCgroup) cleanupLinuxMutationCgroup(linuxCgroup);
       throw error;
     }
     const subprocessClose = observeSubprocessClose(subprocess.nodeChildProcess);
@@ -663,8 +675,9 @@ async function runProcess(command: string, args: readonly string[] = [], options
       const outcome = !executed
         ? { exited: true, forced: false }
         : await (windowsJob ? windowsJob.stop('stop', forceWaitMs)
+          : linuxCgroup ? settleLinuxMutationCgroup(linuxCgroup, forceWaitMs)
           : terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs }))
-          .catch(error => ({ exited: false, forced: true, error: errorMessage(error) }));
+          .catch((error: unknown) => ({ exited: false, forced: true, error: errorMessage(error) }));
       await settleTerminatedSubprocess(subprocess, subprocessClose, forceWaitMs);
       if (!outcome.exited) pendingTerminationOwner = { pid: subprocess.pid || 0, file: mutationProcessFile, safeToRecheck: true };
       if (mutationProcessFile) {
@@ -754,14 +767,14 @@ async function runProcess(command: string, args: readonly string[] = [], options
     const timedOut = windowsTermination.kind === 'timeout' || result.timedOut === true || signalTimedOut;
     const cancelled = !timedOut && (windowsTermination.kind === 'cancel' || result.isCanceled === true);
     const nativeReceipt = windowsJob?.receipt();
-    let terminationOutcome = windowsTerminationOutcome || (windowsJob ? (executed ? windowsJob.outcome() : { exited: true, forced: false }) : null) || ((timedOut || cancelled)
+    let terminationOutcome = windowsTerminationOutcome || (windowsJob ? (executed ? windowsJob.outcome() : { exited: true, forced: false }) : null) || (linuxCgroup ? await settleLinuxMutationCgroup(linuxCgroup, forceWaitMs) : null) || ((timedOut || cancelled)
       ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
       : inheritedPipeDrain
         ? { exited: false, forced: false, error: 'The root exited but inherited output handles remained open; descendant termination is unconfirmed.' }
         : process.platform !== 'win32' && isProcessTreeAlive(subprocess)
           ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
           : null);
-    if (terminationOutcome?.exited === false && !inheritedPipeDrain && process.platform !== 'win32'
+    if (terminationOutcome?.exited === false && !inheritedPipeDrain && !linuxCgroup && process.platform !== 'win32'
       && !isProcessGroupAlive(subprocess.pid)) {
       terminationOutcome = { ...terminationOutcome, exited: true };
     }
@@ -769,14 +782,14 @@ async function runProcess(command: string, args: readonly string[] = [], options
     // mutation hazard, but cannot hold a global host-resource reservation after
     // the managed group is gone. The durable workspace block remains intact.
     retainResourceLease = terminationOutcome?.exited === false
-      && (Boolean(windowsJob) || (process.platform !== 'win32' && isProcessGroupAlive(subprocess.pid)));
+      && (Boolean(windowsJob) || (linuxCgroup ? !linuxMutationCgroupEmpty(linuxCgroup) : process.platform !== 'win32' && isProcessGroupAlive(subprocess.pid)));
     if (terminationOutcome?.exited === false) {
       // An inherited pipe may belong to a descendant that escaped the process
       // group. Group disappearance alone cannot prove its termination.
       pendingTerminationOwner = {
         pid: subprocess.pid || 0,
         file: mutationProcessFile,
-        safeToRecheck: !inheritedPipeDrain || Boolean(windowsJob)
+        safeToRecheck: !inheritedPipeDrain || Boolean(windowsJob) || Boolean(linuxCgroup)
       };
     }
     if (terminationOutcome) {
@@ -879,7 +892,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       const terminationConfirmed = await failureCleanup().catch(() => false);
       const pendingPid = pendingTerminationOwner?.pid || 0;
       retainResourceLease = !terminationConfirmed
-        && (Boolean(windowsJob) || (process.platform !== 'win32' && pendingPid > 0 && isProcessGroupAlive(pendingPid)));
+        && (Boolean(windowsJob) || (linuxCgroup ? !linuxMutationCgroupEmpty(linuxCgroup) : process.platform !== 'win32' && pendingPid > 0 && isProcessGroupAlive(pendingPid)));
       const error = new Error(`Process setup or finalization failed; process-tree cleanup was attempted.${mutationOwnershipPersistenceError ? ` ${mutationOwnershipPersistenceError}` : ''}`, { cause });
       Object.assign(error, {
         code: 'PROCESS_SETUP_FAILED', executed, terminationConfirmed,
@@ -902,24 +915,33 @@ async function runProcess(command: string, args: readonly string[] = [], options
     if (!retainResourceLease) {
       resourceLease?.release();
       if (windowsJob && !executed) fs.rmSync(windowsJob.directory, { recursive: true, force: true });
-      else windowsJob?.cleanup();
+      else if (!mutationProcessFile || !fs.existsSync(mutationProcessFile)) windowsJob?.cleanup();
+      if (linuxCgroup && (!mutationProcessFile || !fs.existsSync(mutationProcessFile))) cleanupLinuxMutationCgroup(linuxCgroup);
+      // A failed durable-marker cleanup must retain its native all-process
+      // completion receipt. Startup reconciliation needs that evidence.
     } else if (pendingTerminationOwner && pendingTerminationOwner.pid > 0) {
       const { pid, file } = pendingTerminationOwner;
       // A timed-out termination check can become conclusive later. Supervise
       // only this outstanding owner; do not poll every workspace or infer
       // safety from a root PID disappearing on Windows.
+      let rechecks = 0;
       const recheck = (): void => {
         const confirmed = windowsJob
           ? windowsJob.outcome().exited === true
+          : linuxCgroup ? linuxMutationCgroupEmpty(linuxCgroup)
           : process.platform !== 'win32' && !isProcessGroupAlive(pid);
         if (!confirmed) {
-          const timer = setTimeout(recheck, 500);
+          const delay = Math.min(60000, 500 * (2 ** Math.min(rechecks++, 7)));
+          const timer = setTimeout(recheck, delay);
           timer.unref?.();
           return;
         }
         if (file && pendingTerminationOwner?.safeToRecheck) retireMutationProcess(pid, file);
         resourceLease?.release();
-        windowsJob?.cleanup();
+        if (!file || !fs.existsSync(file)) {
+          windowsJob?.cleanup();
+          if (linuxCgroup) cleanupLinuxMutationCgroup(linuxCgroup);
+        }
       };
       const timer = setTimeout(recheck, 500);
       timer.unref?.();

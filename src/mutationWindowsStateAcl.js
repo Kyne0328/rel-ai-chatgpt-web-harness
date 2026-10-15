@@ -34,7 +34,9 @@ function privatelyOwnedWindowsState(file) {
   if (process.platform !== 'win32') return false;
   try {
     const proof = checked.get(path.resolve(file));
-    return Boolean(proof && Date.now() - proof.at < 5000 && proof.stamp === fingerprint(file));
+    // ACL proof is tied to the file's full native metadata fingerprint. A
+    // fixed clock TTL can expire mid-transaction and strand a valid recovery.
+    return Boolean(proof && proof.stamp === fingerprint(file));
   } catch { return false; }
 }
 async function privatelyOwnedWindowsPaths(files) {
