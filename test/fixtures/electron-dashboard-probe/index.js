@@ -171,6 +171,8 @@ app.whenReady().then(async () => {
   await passiveMcpSession.close();
   const connectionSaveLifecycle = await exerciseConnectionSaveLifecycle(win);
   const uniformTunnels = await exerciseUniformTunnels(win);
+  const goalAccounts = await exerciseGoalAccounts(win);
+  accessibility.push(goalAccounts.accessibility);
   const usageRequestOrdering = await exerciseUsageRequestOrdering(win);
   const updateModalTransitions = await exerciseUpdateModalTransitions(win);
 
@@ -515,6 +517,7 @@ app.whenReady().then(async () => {
     passiveRouteStability,
     connectionSaveLifecycle,
     uniformTunnels,
+    goalAccounts,
     usageRequestOrdering,
     updateModalTransitions,
     taskInteraction,
@@ -1416,4 +1419,124 @@ async function exerciseUniformTunnels(win) {
   }))()`);
   await win.webContents.executeJavaScript(`(() => { delete window.relaiDesktop; delete window.__uniformTunnelProbe; location.hash = '#tasks'; })()`);
   return { actions, ...updated };
+}
+
+async function exerciseGoalAccounts(win) {
+  await win.webContents.executeJavaScript(`(() => {
+    const accounts = [
+      { tunnelId: 'tunnel_accountA12345', label: 'Personal', enabled: true, state: 'signed_in', browserOpen: false, account: { email: 'a@example.invalid' } },
+      { tunnelId: 'tunnel_accountB12345', label: 'School', enabled: true, state: 'sign_in_required', browserOpen: false }
+    ];
+    const probe = window.__goalAccountsProbe = { accounts, starts: [], outs: [], statusRequests: [] };
+    const settings = () => ({ port: 3333, tunnelId: accounts[0].tunnelId, tunnelLabel: accounts[0].label,
+      tunnelApiKeyConfigured: true, additionalTunnels: accounts.slice(1).map(item => ({ ...item, apiKeyConfigured: true })) });
+    window.relaiDesktop = {
+      getSettings: async () => structuredClone(settings()), saveSettings: async () => ({ ok: true }),
+      saveTunnel: async input => {
+        accounts.push({ tunnelId: input.tunnelId, label: input.label, enabled: true, state: 'sign_in_required', browserOpen: false });
+        return { ok: true, connections: settings().additionalTunnels, statuses: [] };
+      },
+      removeTunnel: async id => {
+        accounts.splice(accounts.findIndex(item => item.tunnelId === id), 1);
+        return { ok: true, connections: settings().additionalTunnels, statuses: [] };
+      },
+      browser: {
+      getState: async () => ({ available: true, active: false }),
+      setBounds: async () => ({}),
+      goalLoginStatus: async input => {
+        probe.statusRequests.push(input || null);
+        return structuredClone(input?.tunnelId
+          ? accounts.find(item => item.tunnelId === input.tunnelId) : { ok: true, available: true, connections: accounts });
+      },
+      goalLoginStart: async input => { probe.starts.push(input.tunnelId); const account = accounts.find(item => item.tunnelId === input.tunnelId); account.browserOpen = true; return { ok: true, browserOpen: true, tunnelId: input.tunnelId }; },
+      goalLoginSignOut: async input => { probe.outs.push(input.tunnelId); const account = accounts.find(item => item.tunnelId === input.tunnelId); delete account.account; account.state = 'sign_in_required'; account.browserOpen = false; return structuredClone(account); }
+    } };
+    location.hash = '#settings/connection?tunnel=tunnel_accountB12345';
+  })()`);
+  await waitFor(win, `document.querySelector('[aria-label="ChatGPT Goal Mode connection"]')?.value === 'tunnel_accountB12345' && document.querySelector('.connection-goal-account button.primary')?.disabled === false`);
+  await win.webContents.executeJavaScript(`(() => {
+    window.__goalAccountsProbe.card = document.querySelector('.connection-goal-account');
+    location.hash = '#settings/connection?tunnel=tunnel_accountA12345';
+  })()`);
+  await waitFor(win, `document.querySelector('.connection-goal-identity')?.textContent === 'a@example.invalid'`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/connection?tunnel=tunnel_accountB12345'`);
+  await win.webContents.executeJavaScript(`(() => {
+    const select = document.querySelector('[aria-label="ChatGPT Goal Mode connection"]');
+    select.value = 'tunnel_accountB12345'; select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(win, `document.querySelector('.connection-goal-identity')?.textContent === 'No verified account' && document.querySelector('.connection-goal-account button.primary')?.disabled === false`);
+  await win.webContents.executeJavaScript(`document.querySelector('.connection-goal-account button.primary').click()`);
+  await waitFor(win, `window.__goalAccountsProbe.starts.length === 1 && document.querySelector('.connection-goal-account button.primary')?.disabled === false`);
+  await win.webContents.executeJavaScript(`(() => {
+    const account = window.__goalAccountsProbe.accounts[1]; account.state = 'signed_in'; account.account = { email: 'b@example.invalid' };
+  })()`);
+  await waitFor(win, `document.querySelector('.connection-goal-identity')?.textContent === 'b@example.invalid'`);
+  const accessibility = await auditAccessibility(win, axePath, 'goal-mode-connection');
+  await win.webContents.executeJavaScript(`document.querySelector('.connection-goal-account').scrollIntoView({ block: 'center' })`);
+  await waitForCapturePaint(win);
+  fs.mkdirSync(screenshotDir, { recursive: true });
+  fs.writeFileSync(path.join(screenshotDir, 'goal-accounts.png'), (await win.webContents.capturePage()).toPNG());
+  win.setContentSize(375, 800);
+  await win.webContents.executeJavaScript(`document.querySelector('.connection-goal-account').scrollIntoView({ block: 'center' })`);
+  await waitForCapturePaint(win);
+  const narrowOverflow = await win.webContents.executeJavaScript(`document.documentElement.scrollWidth > innerWidth`);
+  fs.writeFileSync(path.join(screenshotDir, 'goal-accounts-narrow.png'), (await win.webContents.capturePage()).toPNG());
+  win.setSize(1280, 900);
+  const previousTheme = await win.webContents.executeJavaScript(`document.documentElement.dataset.theme`);
+  await win.webContents.executeJavaScript(`document.documentElement.dataset.theme = 'light'`);
+  await waitForCapturePaint(win);
+  await win.webContents.executeJavaScript(`document.getAnimations().filter(animation => animation instanceof CSSTransition).forEach(animation => animation.finish())`);
+  await waitForCapturePaint(win);
+  fs.writeFileSync(path.join(screenshotDir, 'goal-accounts-light.png'), (await win.webContents.capturePage()).toPNG());
+  await win.webContents.executeJavaScript(`document.documentElement.dataset.theme = ${JSON.stringify(previousTheme)}`);
+  await win.webContents.executeJavaScript(`[...document.querySelectorAll('.connection-goal-account button')].find(button => button.textContent === 'Sign out').click()`);
+  await waitFor(win, `window.__goalAccountsProbe.outs.length === 1 && document.querySelector('.connection-goal-identity')?.textContent === 'No verified account'`);
+  await win.webContents.executeJavaScript(`(() => {
+    const select = document.querySelector('[aria-label="ChatGPT Goal Mode connection"]');
+    select.value = 'tunnel_accountA12345'; select.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  await waitFor(win, `document.querySelector('.connection-goal-identity')?.textContent === 'a@example.invalid'`);
+  const result = await win.webContents.executeJavaScript(`({ starts: window.__goalAccountsProbe.starts, outs: window.__goalAccountsProbe.outs,
+    retainedAccount: document.querySelector('.connection-goal-identity').textContent,
+    deepLinkPreservedCard: document.querySelector('.connection-goal-account') === window.__goalAccountsProbe.card })`);
+  await win.webContents.executeJavaScript(`(() => {
+    document.querySelector('#tunnelSettings').open = true;
+    document.querySelector('.additional-tunnels-heading button').click();
+  })()`);
+  await waitFor(win, `document.querySelector('#additionalTunnelForm')`);
+  await win.webContents.executeJavaScript(`(() => {
+    for (const [id, value] of [['additionalTunnelLabel', 'New account'], ['additionalTunnelId', 'tunnel_accountC12345'], ['additionalTunnelApiKey', 'fixture-runtime-key']]) {
+      const input = document.getElementById(id);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  })()`);
+  await waitFor(win, `document.querySelector('#additionalTunnelId')?.value === 'tunnel_accountC12345'`);
+  await win.webContents.executeJavaScript(`document.querySelector('.additional-tunnel-form-actions button').click()`);
+  await waitFor(win, `document.querySelectorAll('.connection-goal-select option').length === 3`);
+  await win.webContents.executeJavaScript(`(() => {
+    const row = [...document.querySelectorAll('.additional-tunnel-row')].find(row => row.textContent.includes('tunnel_accountC12345'));
+    [...row.querySelectorAll('button')].find(button => button.textContent === 'Remove').click();
+  })()`);
+  await waitFor(win, `document.querySelector('.modal-actions')`);
+  await win.webContents.executeJavaScript(`[...document.querySelectorAll('.modal-actions button')].find(button => button.textContent === 'Remove tunnel').click()`);
+  await waitFor(win, `document.querySelectorAll('.connection-goal-select option').length === 2`);
+  result.inventoryPreservedCard = await win.webContents.executeJavaScript(`document.querySelector('.connection-goal-account') === window.__goalAccountsProbe.card`);
+  await win.webContents.executeJavaScript(`(() => {
+    const account = window.__goalAccountsProbe.accounts[1];
+    account.browserOpen = true;
+    window.__goalAccountsProbe.browserStatusStart = window.__goalAccountsProbe.statusRequests.length;
+    window.relaiDesktop.browser.getState = async () => ({ available: true, active: false, handoffReason: 'goal_login', goalTunnelId: account.tunnelId });
+    location.hash = '#browser';
+  })()`);
+  await waitFor(win, `document.querySelector('.browser-route') && !document.querySelector('.connection-goal-account')`);
+  await win.webContents.executeJavaScript(`(() => {
+    const account = window.__goalAccountsProbe.accounts[1];
+    account.state = 'signed_in'; account.account = { email: 'b@example.invalid' };
+  })()`);
+  await waitFor(win, `document.querySelector('.browser-route [role="status"]')?.textContent.includes('sign-in verified')`);
+  result.browserScopedChecks = await win.webContents.executeJavaScript(`window.__goalAccountsProbe.statusRequests
+    .slice(window.__goalAccountsProbe.browserStatusStart).every(input => input?.tunnelId === 'tunnel_accountB12345')`);
+  await win.webContents.executeJavaScript(`(() => { delete window.relaiDesktop; delete window.__goalAccountsProbe; location.hash = '#tasks'; })()`);
+  return { ...result, narrowOverflow, accessibility };
 }

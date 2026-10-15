@@ -16,6 +16,7 @@ export interface HttpServerOptions {
   port?: number;
   token?: string;
   allowNoAuth?: boolean;
+  getTunnelIds?: () => readonly string[];
   writeProfile?: boolean;
   maxBodyBytes?: number;
   isolated?: boolean;

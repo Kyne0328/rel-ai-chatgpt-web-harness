@@ -72,6 +72,22 @@ try {
   assert.equal(commitA.ok, true, 'commit falls back to the remaining single staged write');
   assert.equal(fs.readFileSync(path.join(wsRoot, 'fileA.txt'), 'utf8'), 'A\n', 'fileA committed');
 
+  const owned = workspaceWrite(workspace, config, { stage: 'start', work_id: 'owner-a', path: 'owned.txt', content: 'A' });
+  for (const stage of ['append', 'commit', 'abort']) {
+    assert.throws(() => workspaceWrite(workspace, config, {
+      stage, work_id: 'owner-b', writeId: owned.writeId, ...(stage === 'append' ? { content: 'B' } : {})
+    }), error => error.code === 'STAGED_EDIT_OWNER_MISMATCH', 'another work session cannot ' + stage + ' an exact staged payload');
+  }
+  assert.throws(() => workspaceWrite(workspace, config, { stage: 'append', work_id: 'owner-b', content: 'B' }),
+    /No staged edit payload found/, 'fallback must never select a different task payload');
+  workspaceWrite(workspace, config, { stage: 'start', work_id: 'owner-b', path: 'owned-b.txt', content: 'B' });
+  workspaceWrite(workspace, config, { stage: 'append', work_id: 'owner-a', content: 'A2' });
+  workspaceWrite(workspace, config, { stage: 'commit', work_id: 'owner-a' });
+  assert.equal(fs.readFileSync(path.join(wsRoot, 'owned.txt'), 'utf8'), 'AA2');
+  workspaceWrite(workspace, config, { stage: 'commit', work_id: 'owner-b' });
+  assert.equal(fs.readFileSync(path.join(wsRoot, 'owned-b.txt'), 'utf8'), 'B',
+    'each task retains fallback within its own payload set');
+
   console.log('Staged-write fallback unit test passed.');
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

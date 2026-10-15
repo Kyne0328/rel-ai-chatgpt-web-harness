@@ -1,4 +1,6 @@
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { timingSafeEqual } from 'node:crypto';
+import { tunnelLocalToken } from '../mcp/tunnelIdentity.js';
 import { readConfig } from '../config.js';
 import { scheduleLocalTransportEvent } from '../localAnalytics.ts';
 import { createRelaiCoreRuntime } from './runtime.ts';
@@ -59,6 +61,17 @@ export function createLocalMcpAuthorization(authMode: McpAuthMode, clientId: str
     authMode,
     authInfo: { clientId, scopes: ['mcp'], authorizationPolicy: createLocalAdminPolicy() }
   };
+}
+
+export function createTunnelMcpAuthorization(localToken: string, authorization: string, tunnelIds: readonly string[]): McpAuthorization | null {
+  const supplied = Buffer.from(authorization.trim());
+  for (const tunnelId of [...new Set(tunnelIds)].slice(0, 13)) {
+    const expected = Buffer.from('Bearer ' + tunnelLocalToken(localToken, tunnelId));
+    if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) {
+      return createLocalMcpAuthorization(MCP_AUTH_MODE.STATIC_BEARER, 'secure-tunnel:' + tunnelId);
+    }
+  }
+  return null;
 }
 
 export function createMcpServerForRequest(

@@ -5,7 +5,7 @@ import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
 import { readJsonFile, writeJsonAtomic } from './durableState.ts';
 import { getStateDir } from './statePaths.js';
-import { resolveSafePath } from './safety.js';
+import { isPathInside, realRootOf, resolveSafePath } from './safety.js';
 
 const SCHEMA_VERSION = 2;
 
@@ -66,12 +66,14 @@ function completeStructuredPatchTransaction(config, workspace) {
 }
 
 function inspectStructuredPatchTransaction(config, workspace) {
+  assertNoOverlappingTransaction(config, workspace);
   const record = readTransaction(config, workspace);
   const status = record ? (record.status || 'active') : 'absent';
   return { pending: Boolean(record && !['committed', 'rolled_back'].includes(status)), status };
 }
 
 function recoverStructuredPatchTransaction(config, workspace) {
+  assertNoOverlappingTransaction(config, workspace);
   const record = readTransaction(config, workspace);
   if (!record) return { recovered: false, restored: [] };
   if (record.status === 'committed' || record.status === 'rolled_back') {
@@ -132,16 +134,53 @@ function matchesState(current, exists, hash) {
 }
 
 function readTransaction(config, workspace) {
-  const record = readJsonFile(transactionPath(config, workspace), {
+  const record = readTransactionFile(transactionPath(config, workspace));
+  if (record && path.resolve(record.workspaceRoot) !== path.resolve(workspace.path)) {
+    throw new Error('Structured patch recovery state belongs to a different workspace root.');
+  }
+  return record;
+}
+
+function readTransactionFile(file) {
+  return readJsonFile(file, {
     validate: value => Boolean(value && typeof value === 'object'
       && (value.schemaVersion === 1 || value.schemaVersion === SCHEMA_VERSION)
       && (value.status == null || ['active', 'committed', 'rolled_back'].includes(value.status))
       && typeof value.workspaceRoot === 'string' && Array.isArray(value.entries))
   });
-  if (record && path.resolve(record.workspaceRoot) !== path.resolve(workspace.path)) {
-    throw new Error('Structured patch recovery state belongs to a different workspace root.');
+}
+
+function assertNoOverlappingTransaction(config, workspace) {
+  const ownFile = transactionPath(config, workspace);
+  let files;
+  try { files = fs.readdirSync(path.dirname(ownFile)); }
+  catch (error) { if (error?.code === 'ENOENT') return; throw error; }
+  const pending = message => Object.assign(new Error(message), {
+    code: 'WORKSPACE_EDIT_RECOVERY_PENDING', executed: false, retryable: false
+  });
+  if (files.length > 1000) throw pending('Edit recovery inventory is incomplete; changes remain blocked.');
+  const root = physicalRoot(workspace.path);
+  for (const name of files) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    const file = path.join(path.dirname(ownFile), name);
+    if (file === ownFile) continue;
+    const record = readTransactionFile(file);
+    if (!record || ['committed', 'rolled_back'].includes(record.status)) continue;
+    const otherRoot = physicalRoot(record.workspaceRoot);
+    if (isPathInside(root, otherRoot) || isPathInside(otherRoot, root)) {
+      throw pending('An overlapping project folder has an interrupted edit transaction. Recover it through its original workspace before changing this folder.');
+    }
   }
-  return record;
+}
+
+function physicalRoot(directory) {
+  let root;
+  try { root = realRootOf(directory); }
+  catch (error) {
+    if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error;
+    root = path.resolve(directory);
+  }
+  return process.platform === 'win32' ? root.toLowerCase() : root;
 }
 
 function cleanupTransaction(config, workspace) {

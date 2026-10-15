@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
@@ -8,7 +8,7 @@ import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection, tunnelRuntimeView } from '../../connection-state.js';
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
-import { currentRoutePath } from '../../router.js';
+import { currentRoutePath, getRouteSnapshot, subscribeRoute } from '../../router.js';
 import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL } from './connection-guidance.js';
 import { restartConnection } from './connection-recovery.js';
 import { supportPolicyView } from './desktop-update-policy.js';
@@ -118,6 +118,8 @@ function SettingsField({ label, help = '', error = '', children, inputId }) {
 
 function ConnectionPage({ data }) {
   const controlsRef = useRef(null);
+  const [connectionsRevision, setConnectionsRevision] = useState(0);
+  const connectionsChanged = useCallback(() => setConnectionsRevision(revision => revision + 1), []);
   const state = connectionStateFor(data);
   const summary = connectionSummary(state);
   const action = connectionPrimaryAction(state);
@@ -165,9 +167,127 @@ function ConnectionPage({ data }) {
     h(ConnectionLayers, { state, summary }),
     guideMode ? h(ConnectionGuide, { mode: guideMode, tunnelId, workspaceAlias }) : null,
     h('section', { id: 'connectionControls', className: 'connection-controls-section', ref: controlsRef },
-      h(DesktopConnectionSettings, { expanded: String(state.publicEndpoint?.status || '') === 'disabled', primaryTunnel })
+      h(DesktopConnectionSettings, { expanded: String(state.publicEndpoint?.status || '') === 'disabled', primaryTunnel, onConnectionsChange: connectionsChanged })
     ),
+    h(GoalModeAccount, { browser: window.relaiDesktop?.browser, connectionsRevision }),
     typeof window.relaiDesktop?.logout === 'function' ? h(Card, { title: 'Connection controls' }, h(LogoutRow)) : null
+  );
+}
+
+function GoalModeAccount({ browser, connectionsRevision }) {
+  const route = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
+  const routeTunnelId = new URLSearchParams(route.search).get('tunnel') || '';
+  const [status, setStatus] = useState(null);
+  const [selectedTunnelId, setSelectedTunnelId] = useState(routeTunnelId);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const requestVersion = useRef(0);
+  const invalidateRequests = useCallback(() => { requestVersion.current++; }, []);
+  useEffect(() => {
+    if (!routeTunnelId) return;
+    invalidateRequests();
+    setError('');
+    setSelectedTunnelId(routeTunnelId);
+  }, [routeTunnelId, invalidateRequests]);
+  const applyStatus = useCallback(next => {
+    if (Array.isArray(next?.connections)) {
+      setStatus(next);
+      setSelectedTunnelId(current => current || next.connections.find(item => item.enabled !== false)?.tunnelId || '');
+    } else {
+      setStatus(current => Array.isArray(current?.connections) && next?.tunnelId
+        ? { ...current, connections: current.connections.map(item => item.tunnelId === next.tunnelId ? next : item) }
+        : next);
+    }
+  }, []);
+  const refresh = useCallback(async account => {
+    if (typeof browser?.goalLoginStatus !== 'function') return;
+    const version = ++requestVersion.current;
+    const next = await browser.goalLoginStatus(account);
+    if (version === requestVersion.current) applyStatus(next);
+    return next;
+  }, [browser, applyStatus]);
+  useEffect(() => {
+    void refresh().catch(error => setError(messageOf(error)));
+    return invalidateRequests;
+  }, [refresh, invalidateRequests, connectionsRevision]);
+  const hasConnections = Array.isArray(status?.connections);
+  useEffect(() => {
+    // Keep the initial connection inventory before loading a deep-linked account;
+    // otherwise that response can supersede the list and remove the selector.
+    if (selectedTunnelId && hasConnections) void refresh({ tunnelId: selectedTunnelId }).catch(error => setError(messageOf(error)));
+  }, [refresh, selectedTunnelId, hasConnections]);
+  const connections = status?.connections;
+  const selected = Array.isArray(connections) ? connections.find(item => item.tunnelId === selectedTunnelId) : status;
+  useEffect(() => {
+    if (!selected?.browserOpen || selected.state === 'signed_in') return undefined;
+    let disposed = false;
+    let timer;
+    const check = async () => {
+      if (disposed) return;
+      let delay = 2_000;
+      try {
+        const next = await refresh(selectedTunnelId ? { tunnelId: selectedTunnelId } : undefined);
+        delay = Math.max(delay, Number(next?.retryAfterMs || 0));
+      }
+      catch (cause) { if (!disposed) setError(messageOf(cause)); }
+      if (!disposed) timer = setTimeout(check, delay);
+    };
+    timer = setTimeout(check, 2_000);
+    return () => { disposed = true; clearTimeout(timer); invalidateRequests(); };
+  }, [refresh, selectedTunnelId, selected?.browserOpen, selected?.state, invalidateRequests]);
+  if (typeof browser?.goalLoginStart !== 'function') return null;
+  const act = async (action, method) => {
+    setBusy(action);
+    setError('');
+    try {
+      const result = await method();
+      if (result?.ok === false) throw new Error(result.error || 'Goal Mode account action failed.');
+      if (action === 'sign-out') applyStatus(result);
+      else if (action === 'check') { applyStatus(result); await refresh(); }
+      else await refresh(selectedTunnelId ? { tunnelId: selectedTunnelId } : undefined);
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy('');
+    }
+  };
+  const state = selected?.state || 'checking';
+  const label = state === 'signed_in' ? 'Signed in' : state === 'sign_in_required' ? 'Not signed in'
+    : state === 'disabled' ? 'Connection disabled' : state === 'unavailable' ? 'Unavailable' : state === 'checking' ? 'Checking sign-in' : 'Not verified';
+  const account = selectedTunnelId ? { tunnelId: selectedTunnelId } : undefined;
+  const unavailable = Boolean(busy) || !status || (Array.isArray(connections) && (!selected || selected.enabled === false));
+  const tone = state === 'signed_in' ? 'good' : state === 'checking' ? 'working'
+    : state === 'sign_in_required' || state === 'unverified' ? 'warn' : 'neutral';
+  return h('section', { className: 'card connection-goal-account', 'aria-labelledby': 'goalModeTitle' },
+    h('div', { className: 'card-head' },
+      h('h3', { id: 'goalModeTitle' }, 'Goal Mode'),
+      h(StatusPill, { label, tone, role: 'status' })
+    ),
+    h('div', { className: 'card-body connection-goal-body' },
+      h('p', { className: 'connection-goal-description' }, 'Sign in to let Goal Mode continue unfinished ChatGPT tasks.'),
+      Array.isArray(connections) && !connections.length
+        ? h('p', { className: 'settings-help' }, 'Add a tunnel in Connection settings to sign in.') : null,
+      h('div', { className: 'connection-goal-account-row' },
+        Array.isArray(connections) && connections.length ? h('label', { className: 'connection-goal-select' }, 'Connection',
+          h('select', { value: selectedTunnelId, disabled: Boolean(busy), 'aria-label': 'ChatGPT Goal Mode connection',
+            onChange: event => { requestVersion.current++; setError(''); setSelectedTunnelId(event.target.value); } },
+          selectedTunnelId && !selected ? h('option', { value: selectedTunnelId }, 'Connection unavailable') : null,
+          connections.map(item => h('option', { key: item.tunnelId, value: item.tunnelId }, item.label || item.tunnelId)))) : null,
+        h('div', { className: 'connection-goal-copy' },
+          h('span', null, 'ChatGPT account'),
+          h('strong', { className: 'connection-goal-identity' }, selected?.account?.email || selected?.account?.name || 'No verified account'),
+          h('p', { className: 'settings-help' }, 'Use the ChatGPT account that owns this tunnel.')
+        )
+      ),
+      h('div', { className: 'connection-goal-controls' },
+        state !== 'signed_in' || selected?.browserOpen
+          ? h('button', { className: 'primary', type: 'button', disabled: unavailable, onClick: () => { void act('sign-in', () => browser.goalLoginStart(account)); } }, busy === 'sign-in' ? 'Opening…' : selected?.browserOpen ? 'Open sign-in' : 'Sign in to ChatGPT') : null,
+        h('button', { className: 'secondary', type: 'button', disabled: unavailable, onClick: () => { void act('check', () => browser.goalLoginStatus({ ...account, refresh: true })); } }, busy === 'check' ? 'Checking…' : 'Refresh sign-in'),
+        state === 'signed_in' || state === 'unverified' || selected?.browserOpen
+          ? h('button', { className: 'secondary', type: 'button', disabled: unavailable, onClick: () => { void act('sign-out', () => browser.goalLoginSignOut(account)); } }, busy === 'sign-out' ? 'Signing out…' : 'Sign out') : null
+      ),
+      error ? h('p', { className: 'connection-notice bad', role: 'alert' }, error) : null
+    )
   );
 }
 
@@ -255,7 +375,7 @@ function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
   );
 }
 
-function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
+function DesktopConnectionSettings({ expanded = false, primaryTunnel = null, onConnectionsChange }) {
   const [form, setForm] = useState(null);
   const [saved, setSaved] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -391,6 +511,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
         disabled: saveState === 'saving',
         onBusyChange: setTunnelBusy,
         onChange: async ({ connections, statuses }) => {
+          onConnectionsChange?.();
           setForm(current => ({ ...current, additionalTunnels: connections, additionalTunnelStatuses: statuses }));
           const settings = await desktop.getSettings();
           setForm(current => ({ ...current, tunnelId: settings.tunnelId || '', tunnelLabel: settings.tunnelLabel || 'Connection 1',

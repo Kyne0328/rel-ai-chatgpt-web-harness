@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
+import { tunnelLocalToken } from '../src/mcp/tunnelIdentity.js';
 import { resolveResourcePath } from './resource-path.js';
 import { createTunnelLogParser } from './tunnel-log-parser.js';
 import { sanitizeDiagnosticValue, sanitizeText } from '../src/diagnostics.js';
@@ -12,6 +13,8 @@ const DOCTOR_TIMEOUT_MS = 15_000;
 const DOCTOR_MAX_OUTPUT_BYTES = 128 * 1024;
 const START_POLL_MS = 200;
 const HEALTH_REQUEST_TIMEOUT_MS = 1_500;
+const MAX_HEALTH_BODY_BYTES = 4096;
+const LOCAL_MCP_POLL_PROOF_MAX_AGE_MS = 60_000;
 const MONITOR_INTERVAL_MS = 2_000;
 const DEGRADED_FAILURE_THRESHOLD = 3;
 const FAILED_FAILURE_THRESHOLD = 30;
@@ -83,6 +86,8 @@ function createSecureTunnelRuntime({
     const apiKey = normalizeRequiredSecret(config.apiKey, 'OpenAI tunnel runtime API key');
     const localToken = normalizeRequiredSecret(config.localToken, 'Rel.AI local bearer token');
     const port = normalizePort(config.port);
+    const localMcp = { url: `http://127.0.0.1:${port}/mcp`,
+      authorization: `Bearer ${tunnelLocalToken(localToken, tunnelId)}` };
     const runGeneration = ++generation;
     stopping = false;
     transportFailureStreak = 0;
@@ -156,7 +161,7 @@ function createSecureTunnelRuntime({
         cwd: path.dirname(healthUrlFile),
         env: makeEnvironment({
           CONTROL_PLANE_API_KEY: apiKey,
-          REL_AI_LOCAL_AUTH_HEADER: `Bearer ${localToken}`
+          REL_AI_LOCAL_AUTH_HEADER: `Bearer ${tunnelLocalToken(localToken, tunnelId)}`
         }),
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
@@ -203,6 +208,7 @@ function createSecureTunnelRuntime({
         healthUrlFile,
         fetchImpl,
         tunnelId,
+        localMcp,
         timeoutMs: Number(config.timeoutMs || START_TIMEOUT_MS),
         getFatalFailure: () => fatalFailure,
         onPhase: (phase, healthUrl = '') => {
@@ -238,6 +244,7 @@ function createSecureTunnelRuntime({
         tunnelId,
         healthUrl: operational.healthUrl,
         fetchImpl,
+        localMcp,
         getFatalFailure: () => fatalFailure
       });
       return { ok: true, process: ownedChild, ...snapshot() };
@@ -252,7 +259,7 @@ function createSecureTunnelRuntime({
     }
   }
 
-  async function monitorTunnel({ runGeneration, ownedChild, tunnelId, healthUrl, fetchImpl, getFatalFailure }) {
+  async function monitorTunnel({ runGeneration, ownedChild, tunnelId, healthUrl, fetchImpl, localMcp, getFatalFailure }) {
     let consecutiveFailures = 0;
     let outageStartedAt = 0;
     while (runGeneration === generation && child === ownedChild && ownedChild.exitCode === null && !stopping) {
@@ -263,8 +270,9 @@ function createSecureTunnelRuntime({
 
       let operational;
       try {
-        operational = await tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId });
+        operational = await tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId, localMcp });
         if (runGeneration !== generation || child !== ownedChild || stopping) return;
+        if (getFatalFailure()) return;
       } catch (error) {
         if (runGeneration !== generation || child !== ownedChild || stopping) return;
         if (FATAL_TUNNEL_CODES.has(String(error?.code || ''))) {
@@ -390,7 +398,7 @@ function createSecureTunnelRuntime({
         cwd: doctorCwd,
         env: makeEnvironment({
           CONTROL_PLANE_API_KEY: apiKey,
-          REL_AI_LOCAL_AUTH_HEADER: `Bearer ${localToken}`
+          REL_AI_LOCAL_AUTH_HEADER: `Bearer ${tunnelLocalToken(localToken, tunnelId)}`
         }),
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
@@ -576,7 +584,7 @@ function collectDoctorOutput(child, { timeoutMs, maxBytes, stopProcess }) {
   });
 }
 
-async function waitForOperational({ ownedChild, healthUrlFile, fetchImpl, tunnelId, timeoutMs, getFatalFailure, onPhase }) {
+async function waitForOperational({ ownedChild, healthUrlFile, fetchImpl, tunnelId, localMcp, timeoutMs, getFatalFailure, onPhase }) {
   const deadline = Date.now() + Math.max(1000, timeoutMs);
   let healthUrl = '';
   let localReadyAnnounced = false;
@@ -593,7 +601,7 @@ async function waitForOperational({ ownedChild, healthUrlFile, fetchImpl, tunnel
       catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error?.code)) throw error; }
     }
     if (healthUrl) {
-      const operational = await tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId });
+      const operational = await tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId, localMcp });
       if (operational.localAlive && !localReadyAnnounced) {
         localReadyAnnounced = true;
         onPhase('locally_ready', healthUrl);
@@ -623,7 +631,7 @@ async function waitForOperational({ ownedChild, healthUrlFile, fetchImpl, tunnel
   throw new Error(`OpenAI Secure MCP Tunnel did not become ready within ${Math.round(timeoutMs / 1000)} seconds${lastError ? `: ${lastError}` : '.'}`);
 }
 
-async function tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId }) {
+async function tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId, localMcp }) {
   const live = await probeUrl(fetchImpl, `${healthUrl}/healthz`);
   if (!live.ok) {
     return {
@@ -637,7 +645,7 @@ async function tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId }) {
   }
 
   const [ready, admin, controlPlane, responseDelivery] = await Promise.all([
-    probeUrl(fetchImpl, `${healthUrl}/readyz`),
+    probeUrl(fetchImpl, `${healthUrl}/readyz`, true),
     readTunnelAdminStatus(fetchImpl, healthUrl),
     readTunnelHealthComponent(fetchImpl, healthUrl, 'control-plane'),
     readTunnelHealthComponent(fetchImpl, healthUrl, 'response-delivery')
@@ -684,6 +692,20 @@ async function tunnelOperationalSnapshot({ fetchImpl, healthUrl, tunnelId }) {
   }
 
   if (!ready.ok) {
+    // OAuth discovery is optional for this static-bearer route. tunnel-client
+    // can retain its startup timeout after the route recovers. Override only
+    // that exact failure with current control-plane and local admission proof.
+    if (ready.oauthDiscoveryTimedOut && observedTunnelId === tunnelId
+      && bearerRouteReportedReady(admin.value, localMcp.url)
+      && controlPlane.value?.status === 'ok' && !controlPlane.value.limited
+      && controlPlane.value.details.consecutiveFailures === 0
+      && recentPollProof(controlPlane.value.details.lastSuccess)
+      && responseDelivery.value?.status === 'ok' && !responseDelivery.value.limited
+      && await localMcpAdmissionReady(fetchImpl, localMcp)) {
+      return { ok: true, localAlive: true, recoverInPlace: false, status: admin.value,
+        health: Object.freeze({ ...health, readiness: Object.freeze({ source: 'authenticated_local_mcp',
+          reasonCode: 'retained_oauth_discovery_timeout' }) }) };
+    }
     return {
       ok: false,
       localAlive: true,
@@ -823,15 +845,69 @@ async function readTunnelAdminStatus(fetchImpl, healthUrl) {
   }
 }
 
-async function probeUrl(fetchImpl, url) {
+async function probeUrl(fetchImpl, url, readReadinessReason = false) {
   try {
     const response = await fetchImpl(url, { signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS) });
-    return response?.ok
-      ? { ok: true, status: Number(response.status || 200) }
-      : { ok: false, status: Number(response?.status || 0), error: `${new URL(url).pathname} returned HTTP ${response?.status || 0}` };
+    if (response?.ok) return { ok: true, status: Number(response.status || 200) };
+    let oauthDiscoveryTimedOut = false;
+    if (readReadinessReason && response?.status === 503) {
+      const reason = await boundedHealthText(response);
+      oauthDiscoveryTimedOut = /^oauth discovery failed:/i.test(reason)
+        && reason.includes('context deadline exceeded');
+    }
+    return { ok: false, status: Number(response?.status || 0),
+      error: `${new URL(url).pathname} returned HTTP ${response?.status || 0}`, oauthDiscoveryTimedOut };
   } catch (error) {
     return { ok: false, error: messageOf(error) };
   }
+}
+
+function recentPollProof(value) {
+  const age = Date.now() - Date.parse(String(value || ''));
+  return Number.isFinite(age) && age >= 0 && age <= LOCAL_MCP_POLL_PROOF_MAX_AGE_MS;
+}
+
+function bearerRouteReportedReady(status, expectedUrl) {
+  if (status.mcp_server_url !== expectedUrl) return false;
+  const main = Array.isArray(status.channels) ? status.channels.filter(channel => channel?.name === 'main') : [];
+  return main.length === 1 && main[0].enabled === true && main[0].server_kind === 'external'
+    && main[0].transport_kind === 'http-streamable' && main[0].probe_status === 'ok'
+    && !mcpProbeFailed(status);
+}
+
+async function localMcpAdmissionReady(fetchImpl, localMcp) {
+  try {
+    const response = await fetchImpl(localMcp.url, { method: 'GET',
+      headers: { Authorization: localMcp.authorization }, redirect: 'error',
+      signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS) });
+    // The authenticated stateless endpoint rejects GET with this protocol
+    // response. Missing/revoked bearer credentials instead return HTTP 401.
+    if (response.status !== 405 || response.headers?.get?.('allow') !== 'POST') {
+      await response.body?.cancel?.();
+      return false;
+    }
+    const result = JSON.parse(await boundedHealthText(response));
+    return result?.jsonrpc === '2.0' && result?.error?.code === -32600;
+  } catch { return false; }
+}
+
+async function boundedHealthText(response) {
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const text = typeof response.text === 'function' ? await response.text() : '';
+    return Buffer.byteLength(text, 'utf8') <= MAX_HEALTH_BODY_BYTES ? text : '';
+  }
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return Buffer.concat(chunks).toString('utf8');
+      size += value.byteLength;
+      if (size > MAX_HEALTH_BODY_BYTES) { await reader.cancel(); return ''; }
+      chunks.push(Buffer.from(value));
+    }
+  } finally { reader.releaseLock(); }
 }
 
 function tunnelIdFromStatus(status = {}) {

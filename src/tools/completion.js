@@ -222,11 +222,16 @@ async function finalizeDuplicateCompletion(config, workspace, context, previous,
     ...handlerContext, taskId: context.taskId, workspace: workspace.alias
   }) : null;
   const summary = String(previous.summary || '').trim() || 'Task already completed.';
+  // Completion may precede this idempotent finish (for example, a resolved
+  // Goal Mode plan). A completion timestamp is not validation evidence.
+  const authority = workspace && !previous.validationAt
+    ? readCompletionIntegrity(config, context.taskId, workspace.alias) : null;
+  const validationAt = String(previous.validationAt || authority?.validationAt || '');
   const completion = requestCurrentTaskCompletion({
     summary,
     validationStatus: previous.validation || 'not_run',
     validationLevel: previous.validationLevel || '',
-    validationAt: previous.validationAt || previous.completedAt || '',
+    validationAt,
     changedFiles: Array.isArray(previous.changedFiles) ? previous.changedFiles : [],
     residualChangedFiles: Array.isArray(previous.residualChangedFiles) ? previous.residualChangedFiles : [],
     residualState: String(previous.residualState || (Array.isArray(previous.residualChangedFiles) && previous.residualChangedFiles.length ? 'preserved_uncommitted' : 'clean'))
@@ -243,7 +248,7 @@ async function finalizeDuplicateCompletion(config, workspace, context, previous,
     summary,
     validationStatus: previous.validation || 'not_run',
     validationLevel: previous.validationLevel || '',
-    validationAt: previous.validationAt || previous.completedAt || '',
+    validationAt,
     changedFiles: Array.isArray(previous.changedFiles) ? previous.changedFiles : [],
     residualChangedFiles: Array.isArray(previous.residualChangedFiles) ? previous.residualChangedFiles : [],
     residualState: String(previous.residualState || (Array.isArray(previous.residualChangedFiles) && previous.residualChangedFiles.length ? 'preserved_uncommitted' : 'clean')),

@@ -44,6 +44,14 @@ parentPort.on('message', event => {
     return;
   }
   if (message.type === 'native-event') {
+    if (message.event?.resource === 'goal' && message.event.type === 'account_signed_in') {
+      const tunnelId = String(message.event.tunnelId || '');
+      if ((desktopContext.tunnelConnections || []).some(item => item.tunnelId === tunnelId && item.enabled !== false)) {
+        void loadCoreDesktopOperations().then(core => core.resumeDesktopGoalsForAccount(tunnelId))
+          .catch(error => post({ type: 'log', level: 'warning', message: `Goal sign-in event failed: ${errorMessage(error)}` }));
+      }
+      return;
+    }
     void loadBrowserDriver()
       .then(browserDriver => browserDriver.dispatchBrowserNativeEvent(message.event || {}))
       .catch(error => post({ type: 'log', level: 'warning', message: `Browser event bridge failed: ${errorMessage(error)}` }));
@@ -109,6 +117,7 @@ async function startService(payload = {}) {
       host,
       port,
       token,
+      getTunnelIds: () => (desktopContext.tunnelConnections || []).filter(item => item.enabled !== false).map(item => item.tunnelId),
       publicUrl: '',
       exitOnError: false,
       writeProfile: false,
@@ -236,6 +245,7 @@ function updateDesktopContext(next = {}) {
     ...desktopContext,
     ...(hasStatus ? { status: next.status } : {}),
     ...(Object.hasOwn(next, 'runtimeAccess') ? { runtimeAccess: next.runtimeAccess } : {}),
+    ...(Object.hasOwn(next, 'tunnelConnections') ? { tunnelConnections: next.tunnelConnections } : {}),
     ...(Object.hasOwn(next, 'runtimeLogs') ? { runtimeLogs: next.runtimeLogs } : {}),
     ...(Object.hasOwn(next, 'reducedBackgroundWork') ? { reducedBackgroundWork: next.reducedBackgroundWork === true } : {})
   };

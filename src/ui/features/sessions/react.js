@@ -559,7 +559,7 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
       ),
       h('div', { className: 'task-detail-header-actions' },
         h(StatusPill, { state }),
-        session.goalMode?.state === 'needs_auth' ? h('a', { href: routeHref('browser'), className: 'buttonlike secondary' }, 'Sign in to ChatGPT') : null,
+        session.goalMode?.state === 'needs_auth' || session.goalMode?.authRequired ? h('a', { href: routeHref('settings/connection', { tunnel: session.goalMode.tunnelId }), className: 'buttonlike secondary' }, 'Sign in to ChatGPT') : null,
         activeGoal ? h('button', {
           className: 'secondary', type: 'button', 'data-stop-goal': '',
           title: 'Stop automatic ChatGPT continuations without cancelling the task.',
@@ -584,8 +584,11 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         live ? h('strong', null, currentTitle) : null,
         h('span', null, currentCopy)
       ),
-      session.goalMode?.state === 'paused' && session.goalMode.error
-        ? h('p', { className: 'connection-notice bad', role: 'status', 'data-goal-pause': '' }, session.goalMode.error)
+      ['paused', 'retrying', 'verifying', 'needs_auth', 'rate_limited'].includes(session.goalMode?.state) && session.goalMode.error
+        ? h('p', { className: 'connection-notice bad', role: 'status', 'data-goal-pause': '' },
+          session.goalMode.goalActive
+            ? `Goal Mode retry ${session.goalMode.retryCount}/${session.goalMode.maxRetries}: ${session.goalMode.error}`
+            : session.goalMode.error)
         : null,
       h(PlanSection, { plan: session.plan }),
       h('div', { className: 'task-detail-grid task-detail-facts' },

@@ -10,9 +10,17 @@ function registerBrowserSurfaceIpc({ ipc, channels, getBrowserState, setBrowserS
   ipc.handle(channels.DESKTOP_BROWSER_SELECT_TAB, 'Embedded browser tab selection', (_event, nativePageId) => selectBrowserTab(normalizeBrowserPageId(nativePageId)));
   ipc.handle(channels.DESKTOP_BROWSER_CLOSE_TAB, 'Embedded browser tab close', (_event, nativePageId) => closeBrowserTab(normalizeBrowserPageId(nativePageId)));
   ipc.handle(channels.DESKTOP_BROWSER_STOP, 'Embedded browser stop', () => stopActiveBrowserSession());
-  ipc.handle(channels.DESKTOP_GOAL_LOGIN_START, 'ChatGPT Goal Mode sign-in', () => startGoalLogin());
-  ipc.handle(channels.DESKTOP_GOAL_LOGIN_STATUS, 'ChatGPT Goal Mode account status', () => getGoalLoginStatus());
-  ipc.handle(channels.DESKTOP_GOAL_LOGIN_SIGN_OUT, 'ChatGPT Goal Mode sign-out', () => signOutGoalLogin());
+  ipc.handle(channels.DESKTOP_GOAL_LOGIN_START, 'ChatGPT Goal Mode sign-in', (_event, account) => startGoalLogin(normalizeGoalAccount(account)));
+  ipc.handle(channels.DESKTOP_GOAL_LOGIN_STATUS, 'ChatGPT Goal Mode account status', (_event, account) => getGoalLoginStatus(normalizeGoalAccount(account, true)));
+  ipc.handle(channels.DESKTOP_GOAL_LOGIN_SIGN_OUT, 'ChatGPT Goal Mode sign-out', (_event, account) => signOutGoalLogin(normalizeGoalAccount(account)));
+}
+
+function normalizeGoalAccount(value, allowRefresh = false) {
+  if (value == null) return {};
+  if (typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => key !== 'tunnelId' && !(allowRefresh && key === 'refresh'))
+    || (Object.hasOwn(value, 'refresh') && typeof value.refresh !== 'boolean')
+    || !/^tunnel_[A-Za-z0-9_-]{8,200}$/.test(String(value.tunnelId || ''))) throw new Error('Select a configured ChatGPT tunnel.');
+  return { tunnelId: String(value.tunnelId), ...(Object.hasOwn(value, 'refresh') ? { refresh: value.refresh } : {}) };
 }
 
 function registerAnalyticsIpc({ ipc, channels, getLocalUsage }) {

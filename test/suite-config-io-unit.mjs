@@ -868,6 +868,12 @@ async function case_route_policy_unit() {
   
   assert.equal(routeAllowsParam('activity', 'search'), true);
   assert.equal(routeAllowsParam('code', 'file'), true);
+  assert.equal(normalizeRouteKey('browser?tunnel=tunnel_accountB12345'), 'browser?tunnel=tunnel_accountB12345');
+  assert.equal(normalizeRouteKey('browser?tunnel=..%2Fprivate&token=secret'), 'browser');
+  assert.equal(routeAllowsParam('browser', 'tunnel'), true);
+  assert.equal(normalizeRouteKey('settings/connection?tunnel=tunnel_accountB12345'), 'settings/connection?tunnel=tunnel_accountB12345');
+  assert.equal(normalizeRouteKey('settings/connection?tunnel=..%2Fprivate&token=secret'), 'settings/connection');
+  assert.equal(routeAllowsParam('settings/connection', 'tunnel'), true);
   assert.equal(routeAllowsParam('workspaces', 'create'), true);
   assert.equal(routeAllowsParam('activity', 'token'), false);
   assert.equal(routeAllowsParam('settings', 'workspace'), false);

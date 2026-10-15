@@ -232,6 +232,13 @@ try {
   ]);
   assert.deepEqual(result.uniformTunnels.removed, ['tunnel_first123456']);
   assert.equal(result.uniformTunnels.remaining, true);
+  assert.deepEqual(result.goalAccounts.starts, ['tunnel_accountB12345']);
+  assert.deepEqual(result.goalAccounts.outs, ['tunnel_accountB12345']);
+  assert.equal(result.goalAccounts.retainedAccount, 'a@example.invalid', 'account selection, automatic sign-in check and scoped sign-out must preserve the other account');
+  assert.equal(result.goalAccounts.narrowOverflow, false, 'account controls must stay usable without horizontal page overflow on a narrow window');
+  assert.equal(result.goalAccounts.deepLinkPreservedCard, true, 'tunnel deep links must update the mounted account selector');
+  assert.equal(result.goalAccounts.inventoryPreservedCard, true, 'adding and removing tunnels must refresh the mounted account inventory');
+  assert.equal(result.goalAccounts.browserScopedChecks, true, 'automatic browser sign-in checks must inspect only the displayed login account');
   const operationDiagnostics = result.operationDiagnostics;
   assert.deepEqual(operationDiagnostics.legacy, { unknownTiming: true, unknownTermination: true, liveClocks: 0 });
   assert.equal(operationDiagnostics.keyboardExpanded, true, 'native timing disclosure must open from the keyboard');
@@ -301,7 +308,7 @@ try {
   const standard400 = result.responsive.find(item => item.name === 'css-320-zoom-400');
   assert.equal(standard400.zoomFactor, 4);
   assert.ok(standard400.viewportWidth >= 300 && standard400.viewportWidth <= 320, JSON.stringify(standard400));
-  assert.equal(result.accessibility.length, 3, JSON.stringify(result.accessibility));
+  assert.deepEqual(result.accessibility.map(audit => audit.route).sort(), ['activity', 'goal-mode-connection', 'tasks', 'workspaces']);
   const seriousAccessibilityViolations = result.accessibility.flatMap(audit => audit.violations
     .filter(violation => ['critical', 'serious'].includes(violation.impact))
     .map(violation => ({ route: audit.route, ...violation })));

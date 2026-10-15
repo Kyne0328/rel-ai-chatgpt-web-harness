@@ -11,7 +11,7 @@ import { executeToolCall } from '../src/tools/execution.js';
 import { serializeConnectorResult } from '../src/tools/connector.js';
 import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
-import { recoverStructuredPatchTransaction } from '../src/structuredPatchTransaction.js';
+import { beginStructuredPatchTransaction, recoverStructuredPatchTransaction } from '../src/structuredPatchTransaction.js';
 
 const originals = { rename: fs.renameSync, rm: fs.rmSync, fetch: globalThis.fetch, open: fs.promises.open, rmAsync: fs.promises.rm };
 const thisFile = fileURLToPath(import.meta.url);
@@ -81,6 +81,28 @@ if (process.argv[2] === 'recover') {
     assert.equal(result.status, 73, result.stderr || result.error?.message);
   };
   try {
+    await check('overlapping-root-admission', async f => {
+      const nested = { alias: 'nested-recovery', path: path.join(f.workspace.path, 'nested') };
+      fs.mkdirSync(nested.path);
+      f.config.workspaces[nested.alias] = { path: nested.path };
+      const target = path.join(nested.path, 'file.txt');
+      fs.writeFileSync(target, 'before');
+      beginStructuredPatchTransaction(f.config, f.workspace,
+        [{ path: 'nested/file.txt', exists: true, content: Buffer.from('before') }],
+        [{ path: 'nested/file.txt', exists: true, text: 'partial' }]);
+      fs.writeFileSync(target, 'partial');
+      const mutateNested = () => executeToolCall({
+        config: f.config, name: OP.EDIT, executionName: OP.EDIT,
+        effectiveArgs: { workspace: nested.alias, path: 'file.txt', content: 'after', returnDiff: false },
+        context: {}, definition: { behavior: { concurrencyScope: 'mutation' },
+          handler: (_config, input, context) => planEdit(nested, f.config, input, context) }, started: Date.now()
+      });
+      await assert.rejects(mutateNested, error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING' && error.executed === false);
+      assert.equal(fs.readFileSync(target, 'utf8'), 'partial', 'refused admission must preserve the interrupted bytes');
+      recoverStructuredPatchTransaction(f.config, f.workspace);
+      assert.equal((await mutateNested()).value.ok, true, 'the nested workspace becomes writable after verified parent recovery');
+      assert.equal(fs.readFileSync(target, 'utf8'), 'after');
+    });
     await check('committed-cleanup-failure', async f => {
       fs.writeFileSync(f.file('a.txt'), 'old\n');
       fs.rmSync = function (file, ...args) {

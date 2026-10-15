@@ -10,7 +10,7 @@ import { isClearlyReadOnlyExec } from '../executionClassification.js';
 import { resolveWorkspace } from '../config.js';
 import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
-import { claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths } from '../taskIntegrity.ts';
+import { assertTaskWorkspaceRoot, claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths } from '../taskIntegrity.ts';
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { bindWorkspaceOperationIdentity, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock, runWorkspaceOperation } from '../workspaceOperationQueue.js';
 import { isCurrentLiveValidationProcessRecord, listMutationProcessRecords, runWithMutationProcessOwnership } from '../mutationProcessOwnership.js';
@@ -173,6 +173,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           let safelySettled = false;
           try {
             if (workspace && !directFilesystem && isMutationScope(queueScope)) {
+              if (taskId) assertTaskWorkspaceRoot(config, taskId, workspace);
               if (noSourceMutation) {
                 if (inspectStructuredPatchTransaction(config, workspace).pending === true) {
                   const error = new Error('This non-source operation cannot proceed while active edit recovery is pending. Inspect the retained recovery state before requesting a real mutation.');

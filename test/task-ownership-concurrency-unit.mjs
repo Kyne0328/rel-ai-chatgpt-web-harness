@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { flushAuditWrites } from '../src/audit.js';
-import { readConfig } from '../src/config.js';
+import { readConfig, invalidateConfigCache } from '../src/config.js';
 import { flushLocalAnalytics } from '../src/localAnalytics.js';
 import { classifyStatusOwnership } from '../src/repo/gitOps.js';
 import { gitStatusArgs } from '../src/repo/gitStatus.js';
@@ -154,6 +154,52 @@ try {
   assert.equal(staleAddAllPublish.addAll, undefined, 'taskless addAll publish must not echo caller-owned addAll');
   assert.deepEqual(staleAddAllPublish.paths, ['src/stale-add-all.js']);
   assert.equal(git('show', '--name-only', '--format=', 'HEAD').trim(), 'src/stale-add-all.js');
+
+  const aliasedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  aliasedConfig.workspaces.alias = { path: workspacePath };
+  aliasedConfig.workspaces.nested = { path: path.join(workspacePath, 'src') };
+  fs.writeFileSync(configPath, JSON.stringify(aliasedConfig));
+  invalidateConfigCache();
+  const aliasA = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'Physical owner A' });
+  const aliasB = await callTool('relai_work', { action: 'begin', workspace: 'alias', title: 'Physical owner B' });
+  await callTool('relai_edit', { workspace: 'app', work_id: aliasA.work_id, path: 'src/shared.js', oldText: 'left = 1', newText: 'left = 2' });
+  await callTool('relai_edit', { workspace: 'alias', work_id: aliasB.work_id, path: 'src/shared.js', oldText: 'right = 2', newText: 'right = 3' });
+  assert.ok(taskCommitOwnership(readConfig(), aliasA.work_id, 'app').conflictingFiles.includes('src/shared.js'),
+    'aliases of the same physical repository must share conflicting file ownership');
+  const refusedAlias = await callTool('relai_publish', { action: 'commit', workspace: 'app', work_id: aliasA.work_id, message: 'Must refuse mixed aliases' });
+  assert.equal(refusedAlias.ok, false, 'default commit must refuse another alias task contribution');
+  const nested = await callTool('relai_work', { action: 'begin', workspace: 'nested', title: 'Nested physical owner' });
+  await callTool('relai_edit', { workspace: 'nested', work_id: nested.work_id, path: 'shared.js', oldText: 'right = 3', newText: 'right = 4' });
+  const nestedOwnership = taskCommitOwnership(readConfig(), nested.work_id, 'nested');
+  assert.ok(nestedOwnership.conflictingFiles.includes('shared.js'),
+    'nested-root ownership must translate paths into the same physical file: ' + JSON.stringify(nestedOwnership));
+  const aggregated = await callTool('relai_publish', { action: 'commit', workspace: 'app', message: 'Explicitly aggregate alias contributions', paths: ['src/shared.js'] });
+  assert.equal(aggregated.ok, true);
+  const fresh = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'New owner after alias publication' });
+  await callTool('relai_edit', { workspace: 'app', work_id: fresh.work_id, path: 'src/shared.js', oldText: 'left = 2', newText: 'left = 4' });
+  assert.deepEqual(taskCommitOwnership(readConfig(), fresh.work_id, 'app').conflictingFiles, [],
+    'publication must retire peer-alias claims rather than poison later independent work');
+
+  const targetA = path.join(root, 'target-a');
+  const targetB = path.join(root, 'target-b');
+  const link = path.join(root, 'retargeted');
+  for (const target of [targetA, targetB]) fs.mkdirSync(path.join(target, 'project'), { recursive: true });
+  fs.symlinkSync(targetA, link, process.platform === 'win32' ? 'junction' : 'dir');
+  aliasedConfig.workspaces.retargeted = { path: path.join(link, 'project') };
+  fs.writeFileSync(configPath, JSON.stringify(aliasedConfig));
+  invalidateConfigCache();
+  const oldRootTask = await callTool('relai_work', { action: 'begin', workspace: 'retargeted', title: 'Original physical root' });
+  await callTool('relai_edit', { workspace: 'retargeted', work_id: oldRootTask.work_id, path: 'file.txt', content: 'original' });
+  fs.unlinkSync(link);
+  fs.symlinkSync(targetB, link, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(() => callTool('relai_edit', { workspace: 'retargeted', work_id: oldRootTask.work_id, path: 'file.txt', content: 'wrong owner' }),
+    error => error.code === 'TASK_WORKSPACE_ROOT_CHANGED', 'an existing task must not silently move its ownership to the new root');
+  const newRootTask = await callTool('relai_work', { action: 'begin', workspace: 'retargeted', title: 'Current physical root' });
+  await callTool('relai_edit', { workspace: 'retargeted', work_id: newRootTask.work_id, path: 'file.txt', content: 'current' });
+  assert.equal(fs.readFileSync(path.join(targetA, 'project/file.txt'), 'utf8'), 'original');
+  assert.equal(fs.readFileSync(path.join(targetB, 'project/file.txt'), 'utf8'), 'current');
+  assert.deepEqual(taskCommitOwnership(readConfig(), newRootTask.work_id, 'retargeted').conflictingFiles, [],
+    'claims for a previous physical root must not conflict with the new physical folder');
 
   console.log('Independent concurrent task ownership stays narrow by default and supports explicit workspace aggregation.');
 } finally {

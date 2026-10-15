@@ -1,5 +1,6 @@
 // Read-only DOM probes for ChatGPT's normal composer. No network APIs, token
 // access, or challenge execution is injected into the page.
+import { goalMessageExists } from '../src/chatgptConversationReader.js';
 const EDITOR = [
   '#prompt-textarea[contenteditable="true"]',
   '[data-testid="composer-text-input"][contenteditable="true"]',
@@ -69,22 +70,6 @@ function goalStopExpression() {
     buttons[0].focus();
     return { state: document.activeElement === buttons[0] ? 'stop_ready' : 'unavailable' };
   })()`;
-}
-
-function goalMessageExists(conversation, expectedText, expectedParentNode) {
-  const nodes = conversation?.mapping;
-  let nodeId = conversation?.current_node;
-  const seen = new Set();
-  let found = false;
-  while (nodeId && nodes?.[nodeId] && !seen.has(nodeId) && seen.size < 50) {
-    if (nodeId === expectedParentNode) return found;
-    seen.add(nodeId);
-    const message = nodes[nodeId].message;
-    if (message?.author?.role === 'user' && Array.isArray(message.content?.parts)
-      && message.content.parts.join('\n').trim() === expectedText) found = true;
-    nodeId = nodes[nodeId].parent;
-  }
-  return false;
 }
 
 function goalAssistantSettled(conversation) {

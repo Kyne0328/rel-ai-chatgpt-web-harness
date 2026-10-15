@@ -1,3 +1,19 @@
+.connection-goal-body { display: grid; gap: 16px; }
+.connection-goal-description { margin: 0; color: var(--ui-text-secondary); font-size: 12px; line-height: 1.6; }
+.connection-goal-account-row { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 16px 24px; min-width: 0; }
+.connection-goal-select { display: grid; flex: 0 1 240px; gap: 6px; min-width: 0; max-width: 100%; color: var(--ui-text-secondary); font-size: 12px; }
+.connection-goal-select select { width: 100%; min-width: 0; min-height: 36px; }
+.connection-goal-copy { display: grid; flex: 1 1 220px; min-width: 0; gap: 6px; font-size: 12px; }
+.connection-goal-copy > span { color: var(--ui-text-secondary); }
+.connection-goal-identity { overflow-wrap: anywhere; }
+.connection-goal-copy .settings-help { margin: 0; }
+.connection-goal-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.connection-goal-body > .connection-notice { margin: 0; }
+@media (max-width: 640px) {
+  .connection-goal-select { flex-basis: 100%; }
+  .connection-goal-select select, .connection-goal-controls button { min-height: 44px; }
+}
+
 .settings-loading { padding: 24px; color: var(--ui-text-secondary); }
 .workspace-validation-preference-row {
   display: flex;

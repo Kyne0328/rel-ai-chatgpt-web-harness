@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { mock } from 'node:test';
 import { configureBrowserNativeBridge } from '../src/browser/browserDriver.ts';
 import { createBrowserRuntime } from '../src/browser/browserRuntime.ts';
 import * as browserProfiles from '../src/browser/browserProfile.ts';
@@ -157,6 +158,7 @@ function createHarness({
   flushPersistentSites = async () => {},
   forgetPersistentSite = async () => {},
   goalLoginProfileDirectory = '',
+  getGoalConnections = null,
   goalComposerState = 'ready',
   goalRedirectUrl = ''
 } = {}) {
@@ -238,9 +240,181 @@ function createHarness({
     flushPersistentSites,
     forgetPersistentSite,
     goalLoginProfileDirectory,
+    getGoalConnections,
     onEvent: event => events.push(event)
   });
   return { host, sessions, pathSessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents, goalWindows };
+}
+
+{
+  const connections = [
+    { tunnelId: 'tunnel_accountA12345', label: 'Account A', enabled: true },
+    { tunnelId: 'tunnel_accountB12345', label: 'Account B', enabled: true }
+  ];
+  const { host, pathSessions, goalWindows, events } = createHarness({
+    goalLoginProfileDirectory: path.join(os.tmpdir(), 'relai-goal-multiple-account-fixture', 'legacy-profile'),
+    getGoalConnections: () => connections
+  });
+  const initial = await host.getGoalLoginStatus();
+  assert.deepEqual(initial.connections.map(item => item.state), ['sign_in_required', 'sign_in_required']);
+  const [[directoryA, sessionA], [directoryB, sessionB]] = [...pathSessions];
+  assert.notEqual(directoryA, directoryB, 'different tunnels must never share cookies or storage');
+  sessionA.authenticated = true;
+  const originalFetchA = sessionA.fetch;
+  sessionA.fetch = async (url, options) => String(url).endsWith('/api/auth/session')
+    ? new Response(JSON.stringify(sessionA.authenticated
+      ? { user: { name: 'Fixture A', email: 'a@example.invalid' }, accessToken: 'secret-account-a' } : { user: null }))
+    : originalFetchA(url, options);
+  assert.equal((await host.getGoalLoginStatus({ tunnelId: connections[0].tunnelId })).account.email, 'a@example.invalid');
+  assert.equal((await host.getGoalLoginStatus({ tunnelId: connections[1].tunnelId })).state, 'sign_in_required');
+  assert.equal((await host.goalProtocolRequest({ tunnelId: connections[1].tunnelId, path: '/backend-api/conversations' })).status, 401,
+    'an unsigned account cannot borrow authentication from another tunnel');
+  await assert.rejects(() => host.goalProtocolRequest({ path: '/backend-api/conversations' }), error => error.code === 'GOAL_ACCOUNT_UNAVAILABLE');
+  await assert.rejects(() => host.startGoalLogin({ tunnelId: 'tunnel_unknown12345' }), /configured tunnel/);
+  await host.startGoalLogin({ tunnelId: connections[0].tunnelId });
+  await host.startGoalLogin({ tunnelId: connections[1].tunnelId });
+  assert.equal(host.getState().activeSessionCount, 2);
+  assert.equal(host.getState().goalTunnelId, connections[1].tunnelId, 'the browser must identify its displayed login account');
+  sessionB.authenticated = true;
+  assert.equal((await host.getGoalLoginStatus({ tunnelId: connections[1].tunnelId })).state, 'signed_in');
+  await host.getGoalLoginStatus({ tunnelId: connections[1].tunnelId });
+  assert.deepEqual(events.filter(event => event.resource === 'goal'), [
+    { resource: 'goal', type: 'account_signed_in', tunnelId: connections[1].tunnelId }
+  ], 'a verified login window must notify Core once, without exposing account identity or tokens');
+  let node = 'a';
+  let readsB = 0;
+  sessionB.fetch = async url => {
+    if (String(url).endsWith('/api/auth/session')) return new Response(JSON.stringify({ user: { id: 'fixture-b' }, accessToken: 'secret-account-b' }));
+    readsB++;
+    return new Response(JSON.stringify({ current_node: node, mapping: {
+      a: { parent: null, message: { id: 'assistant-b', author: { role: 'assistant' }, end_turn: true } },
+      sent: { parent: 'a', message: { id: 'user-b', author: { role: 'user' }, content: { parts: ['Continue goal account B'] } } }
+    } }));
+  };
+  const readsA = sessionA.requests.length;
+  const sendingB = host.goalProtocolRequest({ action: 'continue', tunnelId: connections[1].tunnelId,
+    conversationId: 'ca32ef5a-77b0-49f0-983d-b39c12c45ff2', expectedNodeId: 'a', parentMessageId: 'assistant-b', prompt: 'Continue goal account B' });
+  goalWindows[0].webContents.onGoalClick = () => { node = 'sent'; };
+  assert.equal((await sendingB).accepted, true);
+  assert.equal(goalWindows[0].options.webPreferences.session, sessionB);
+  assert.equal(sessionA.requests.length, readsA, 'Account B continuation must never read Account A');
+  assert.ok(readsB >= 3);
+  await host.signOutGoalLogin({ tunnelId: connections[0].tunnelId });
+  assert.equal(sessionA.authenticated, false);
+  assert.equal((await host.getGoalLoginStatus({ tunnelId: connections[0].tunnelId })).state, 'sign_in_required');
+  assert.equal(sessionB.authenticated, true, 'signing out Account A must preserve Account B');
+  assert.equal(host.getState().activeSessionCount, 1);
+  assert.equal(goalWindows[0].isDestroyed(), false, 'signing out Account A must preserve Account B generation');
+  assert.doesNotMatch(JSON.stringify(initial), /secret-account/);
+  connections[1].enabled = false;
+  await assert.rejects(() => host.goalProtocolRequest({ tunnelId: connections[1].tunnelId, path: '/backend-api/conversations' }), /configured tunnel/);
+  assert.equal((await host.getGoalLoginStatus()).connections[1].state, 'disabled');
+  await host.closeAll();
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-auth-coordination-fixture');
+  mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const { host, pathSessions } = createHarness({ goalLoginProfileDirectory: directory });
+  await host.startGoalLogin();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  goalSession.authenticated = true;
+  const pendingStatus = host.getGoalLoginStatus();
+  const reads = await Promise.all(Array.from({ length: 4 }, () => host.goalProtocolRequest({
+    path: '/backend-api/conversations?offset=0&limit=1' })));
+  assert.ok(reads.every(result => result.ok));
+  assert.equal((await pendingStatus).state, 'signed_in');
+  assert.equal(goalSession.requests.filter(r => r.url.endsWith('/api/auth/session')).length, 1,
+    'concurrent goal reads must share authentication without transferring its bearer');
+  assert.ok(!JSON.stringify(reads).includes('fixture-only'));
+  const originalFetch = goalSession.fetch;
+  goalSession.fetch = async url => String(url).includes('/backend-api/')
+    ? new Response('private upstream body', { status: 429, headers: { 'retry-after': '180' } })
+    : originalFetch(url);
+  assert.deepEqual(await host.goalProtocolRequest({ path: '/backend-api/conversations' }),
+    { ok: false, status: 429, retryAfterMs: 180_000 });
+  assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).deferred, true,
+    'the browser bridge must also stop retained-page reads during the account cooldown');
+  const requestsBeforeStatus = goalSession.requests.length;
+  assert.equal((await host.getGoalLoginStatus()).state, 'unverified');
+  assert.equal(goalSession.requests.length, requestsBeforeStatus,
+    'automatic sign-in checks must respect the account cooldown');
+  await host.signOutGoalLogin();
+  mock.timers.tick(180_000);
+  assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).status, 401,
+    'sign-out must invalidate authentication cached for goal reads');
+  await host.closeAll();
+  mock.timers.reset();
+}
+
+{
+  const tunnelId = 'tunnel_refresh12345';
+  const { host, pathSessions, events } = createHarness({
+    goalLoginProfileDirectory: path.join(os.tmpdir(), 'relai-goal-refresh-fixture'),
+    getGoalConnections: () => [{ tunnelId, label: 'Refresh', enabled: true }]
+  });
+  await host.getGoalLoginStatus({ tunnelId });
+  const goalSession = [...pathSessions.values()][0];
+  goalSession.authenticated = true;
+  assert.equal((await host.getGoalLoginStatus({ tunnelId, refresh: true })).state, 'signed_in');
+  assert.deepEqual(events.filter(event => event.resource === 'goal'), [
+    { resource: 'goal', type: 'account_signed_in', tunnelId }
+  ], 'an explicit verified refresh must resume authentication waits without a login window');
+  await host.getGoalLoginStatus({ tunnelId });
+  assert.equal(events.filter(event => event.resource === 'goal').length, 1,
+    'ordinary cached status inspection must not repeatedly resume goals');
+  await host.closeAll();
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-clear-auth-fixture');
+  const { host, pathSessions } = createHarness({ goalLoginProfileDirectory: directory });
+  await host.getGoalLoginStatus();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  for (const clear of [() => host.clearSavedData(), () => host.clearSavedSite('https://chatgpt.com')]) {
+    goalSession.authenticated = true;
+    assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).ok, true);
+    await clear();
+    assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).status, 401,
+      'cleared browser data must not leave a reusable bearer');
+  }
+  // A request racing Sign out must neither read nor repopulate authentication.
+  goalSession.authenticated = true;
+  const clearStorage = goalSession.clearStorageData.bind(goalSession);
+  let releaseClear;
+  let enteredClear;
+  const clearing = new Promise(resolve => { enteredClear = resolve; });
+  goalSession.clearStorageData = async options => {
+    enteredClear();
+    await new Promise(resolve => { releaseClear = resolve; });
+    return clearStorage(options);
+  };
+  const signingOut = host.signOutGoalLogin();
+  await clearing;
+  try {
+    assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).status, 401);
+  } finally { releaseClear(); await signingOut; }
+  assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).status, 401);
+  const originalFetch = goalSession.fetch;
+  let releaseAuth;
+  let enteredAuth;
+  const authenticating = new Promise(resolve => { enteredAuth = resolve; });
+  goalSession.fetch = async (url, options) => {
+    if (!url.endsWith('/api/auth/session')) return originalFetch(url, options);
+    enteredAuth();
+    await new Promise(resolve => { releaseAuth = resolve; });
+    return new Response(JSON.stringify({ user: { id: 'before-clear' }, accessToken: 'obsolete-fixture-token' }));
+  };
+  const pendingRead = host.goalProtocolRequest({ path: '/backend-api/conversations' });
+  await authenticating;
+  // Restore normal clearing: the preceding sign-out test held its storage call.
+  goalSession.clearStorageData = clearStorage;
+  await host.clearSavedData();
+  releaseAuth();
+  assert.equal((await pendingRead).status, 401, 'a late authentication response must not repopulate a cleared profile');
+  goalSession.fetch = originalFetch;
+  assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).status, 401);
+  await host.closeAll();
 }
 
 {
@@ -356,9 +530,9 @@ function createHarness({
     conversationId: target, expectedNodeId: 'a' });
   goalWindows[3].webContents.goalStopState = 'not_running';
   const failed = await missingStop;
-  assert.deepEqual(failed, { ok: false, needsUser: true, stage: 'stop_button' });
+  assert.deepEqual(failed, { ok: false, notSent: true, stage: 'stop_button' });
   assert.equal(goalWindows[3].webContents.goalClickCount, 0, 'a missing Stop button cannot trigger a guessed action');
-  assert.equal(goalWindows[3].shown, true, 'uncertain recovery requires browser handoff');
+  assert.equal(goalWindows[3].shown, false, 'failed recovery must stay hidden for automatic retry');
   await host.closeAll();
 }
 
@@ -442,10 +616,11 @@ function createHarness({
     });
     const result = await host.goalProtocolRequest({ action: 'continue', conversationId: target,
       expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
-    assert.deepEqual(result, { ok: false, needsUser: true, stage: 'navigation', reason: 'conversation_unavailable' });
+    assert.deepEqual(result, { ok: false, notSent: true, stage: 'navigation', reason: 'conversation_unavailable' });
     assert.equal(goalWindows[0].webContents.insertedText, '', 'an unrelated page must not receive a draft');
     assert.equal(goalWindows[0].webContents.goalClickCount, 0);
-    assert.equal(goalWindows[0].shown, true);
+    assert.equal(goalWindows[0].shown, false);
+    assert.equal(goalWindows[0].isDestroyed(), true, 'known unsent navigation failure releases the hidden window');
     await host.closeAll();
   }
 }
@@ -472,26 +647,84 @@ function createHarness({
   const result = await sending;
   assert.equal(result.uncertain, true, 'post-click network failure must not become a successful send');
   assert.equal(goalWindows[0].webContents.goalClickCount, 1, 'do not retry a possibly accepted click');
-  assert.equal(goalWindows[0].shown, true, 'uncertain send must be visible for manual inspection');
+  assert.equal(goalWindows[0].shown, false, 'uncertain send must stay hidden during receipt reconciliation');
   await host.closeAll();
 }
 
 {
-  const directory = path.join(os.tmpdir(), 'relai-goal-human-handoff-fixture');
+  const directory = path.join(os.tmpdir(), 'relai-goal-quiet-verification-fixture');
   const { host, goalWindows } = createHarness({
     goalLoginProfileDirectory: directory, goalComposerState: 'verification'
   });
   const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
   const result = await host.goalProtocolRequest({ action: 'continue', conversationId: target,
     expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal test' });
-  assert.equal(result.needsUser, true);
+  assert.equal(result.notSent, true);
   assert.equal(result.stage, 'composer');
   assert.equal(result.reason, 'verification');
-  assert.equal(goalWindows[0].shown, true, 'verification must open a visible browser for the user');
+  assert.equal(goalWindows[0].shown, false, 'verification must not automatically open a browser');
   assert.equal(goalWindows[0].webContents.goalClickCount, 0, 'verification cannot trigger a send');
-  assert.equal(goalWindows[0].isDestroyed(), false, 'handoff keeps the page alive');
+  assert.equal(goalWindows[0].isDestroyed(), true, 'known unsent attempts must release their window');
   await host.closeAll();
   assert.equal(goalWindows[0].isDestroyed(), true);
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-preflight-cancel-fixture');
+  const { host, pathSessions, goalWindows } = createHarness({ goalLoginProfileDirectory: directory });
+  await host.getGoalLoginStatus();
+  const controller = new AbortController();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  let reads = 0;
+  goalSession.fetch = async url => {
+    if (String(url).endsWith('/api/auth/session')) return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'fake' }));
+    if (++reads === 2) controller.abort();
+    return new Response(JSON.stringify({ current_node: 'a', mapping: {
+      a: { parent: null, message: { id: 'assistant-1', author: { role: 'assistant' }, end_turn: true } }
+    } }));
+  };
+  const payload = { action: 'continue', conversationId: 'b5b9731a-8496-4a92-9b44-55d080038c7d',
+    expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal cancellation fixture' };
+  try {
+    const sending = host.goalProtocolRequest(payload, { signal: controller.signal });
+    const rejected = assert.rejects(sending, error => error.code === 'BROWSER_OPERATION_CANCELLED');
+    assert.deepEqual(await host.goalProtocolRequest(payload), { ok: false, busy: true, notSent: true },
+      'concurrent goals must receive a deferrable pre-Send outcome');
+    await rejected;
+    assert.equal(goalWindows[0].webContents.goalClickCount, 0, 'cancellation during final preflight must veto Send');
+    assert.equal(goalWindows[0].shown, false);
+    assert.equal(goalWindows[0].isDestroyed(), true);
+  } finally { await host.closeAll(); }
+}
+
+{
+  const directory = path.join(os.tmpdir(), 'relai-goal-large-cleanup-fixture');
+  const { host, pathSessions, goalWindows } = createHarness({ goalLoginProfileDirectory: directory });
+  await host.getGoalLoginStatus();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  let currentNode = 'a';
+  let large = false;
+  goalSession.fetch = async url => {
+    if (String(url).endsWith('/api/auth/session')) return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'fake' }));
+    return new Response(JSON.stringify({ current_node: currentNode, mapping: {
+      a: { parent: null, message: { id: 'assistant-1', author: { role: 'assistant' }, end_turn: true } },
+      sent: { parent: 'a', message: { id: 'user-2', author: { role: 'user' }, content: { parts: ['Continue goal cleanup fixture'] } } },
+      done: { parent: 'sent', message: { id: 'assistant-2', author: { role: 'assistant' }, end_turn: true,
+        content: { parts: [large ? 'x'.repeat(33 * 1024 * 1024) : 'Done'] } } }
+    } }));
+  };
+  mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
+  try {
+    const sending = host.goalProtocolRequest({ action: 'continue', conversationId: 'b5b9731a-8496-4a92-9b44-55d080038c7d',
+      expectedNodeId: 'a', parentMessageId: 'assistant-1', prompt: 'Continue goal cleanup fixture' });
+    goalWindows[0].webContents.onGoalClick = () => { currentNode = 'sent'; };
+    assert.equal((await sending).accepted, true);
+    currentNode = 'done'; large = true;
+    mock.timers.tick(5_000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(goalWindows[0].isDestroyed(), true, 'completed chats above 32 MiB must close through streaming projection');
+    assert.equal(goalWindows[0].shown, false);
+  } finally { mock.timers.reset(); await host.closeAll(); }
 }
 
 {
@@ -514,6 +747,7 @@ function createHarness({
     DESKTOP_GOAL_LOGIN_SIGN_OUT: 'goal-login-sign-out'
   };
   let receivedBounds = null;
+  let receivedGoalAccount = null;
   registerBrowserSurfaceIpc({
     ipc,
     channels,
@@ -528,8 +762,8 @@ function createHarness({
     selectBrowserTab: () => ({}),
     closeBrowserTab: () => ({}),
     stopActiveBrowserSession: () => ({}),
-    startGoalLogin: () => ({ ok: true }),
-    getGoalLoginStatus: () => ({ ok: true }),
+    startGoalLogin: account => { receivedGoalAccount = account; return { ok: true }; },
+    getGoalLoginStatus: account => { receivedGoalAccount = account; return { ok: true }; },
     signOutGoalLogin: () => ({ ok: true })
   });
   handlers.get('set-bounds')({}, { visible: true, x: 12.4, y: 34.6, width: 900.2, height: 600.8 });
@@ -538,6 +772,13 @@ function createHarness({
   assert.throws(() => handlers.get('permission')({}, 'browser_permission_abcdefghijklmnop', 'yes'), /must be a boolean/i);
   assert.equal(handlers.get('clear-saved-site')({}, 'https://Example.test/path').origin, 'https://example.test');
   assert.throws(() => handlers.get('clear-saved-site')({}, 'file:///tmp/browser'), /absolute HTTP or HTTPS origin/i);
+  handlers.get('goal-login-start')({}, { tunnelId: 'tunnel_accountA12345' });
+  assert.deepEqual(receivedGoalAccount, { tunnelId: 'tunnel_accountA12345' });
+  handlers.get('goal-login-status')({}, { tunnelId: 'tunnel_accountA12345', refresh: true });
+  assert.deepEqual(receivedGoalAccount, { tunnelId: 'tunnel_accountA12345', refresh: true });
+  assert.throws(() => handlers.get('goal-login-start')({}, { tunnelId: 'tunnel_accountA12345', refresh: true }), /configured ChatGPT tunnel/);
+  assert.throws(() => handlers.get('goal-login-start')({}, { tunnelId: '../other-profile' }), /configured ChatGPT tunnel/);
+  assert.throws(() => handlers.get('goal-login-status')({}, { tunnelId: 'tunnel_accountA12345', profileDirectory: '/private' }), /configured ChatGPT tunnel/);
 }
 
 {

@@ -31,9 +31,9 @@ if (surface === 'dashboard') {
       selectTab: nativePageId => ipcRenderer.invoke('desktop:browser:select-tab', nativePageId),
       closeTab: nativePageId => ipcRenderer.invoke('desktop:browser:close-tab', nativePageId),
       stop: () => ipcRenderer.invoke('desktop:browser:stop'),
-      goalLoginStart: () => ipcRenderer.invoke('desktop:goal:login-start'),
-      goalLoginStatus: () => ipcRenderer.invoke('desktop:goal:login-status'),
-      goalLoginSignOut: () => ipcRenderer.invoke('desktop:goal:login-sign-out'),
+      goalLoginStart: account => ipcRenderer.invoke('desktop:goal:login-start', account),
+      goalLoginStatus: account => ipcRenderer.invoke('desktop:goal:login-status', account),
+      goalLoginSignOut: account => ipcRenderer.invoke('desktop:goal:login-sign-out', account),
       onState: callback => subscribe('desktop:browser-state', callback, 'Browser-state')
     },
     copyText: text => ipcRenderer.invoke('url:copy', text),

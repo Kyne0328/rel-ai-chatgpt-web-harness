@@ -77,15 +77,17 @@ Frontend behavior is protected at several levels: focused model/store/router/SSE
 
 ## Secure tunnel ownership
 
+All tunnel runtimes share the same local MCP service. Core authenticates each configured tunnel as a distinct principal; task and Goal Mode ownership stay scoped to that principal. ChatGPT Goal Mode sign-in uses a separate Electron browser profile for each Tunnel ID. The browser host never falls back to another connection's profile. Local dashboard authentication remains separate from tunnel forwarding credentials.
+
 `electron/secure-tunnel-runtime.js` owns one bundled OpenAI tunnel-client child process. The primary connection uses one runtime directly; `electron/tunnel-runtime-pool.js` creates the same runtime once per additional ChatGPT tunnel. Each runtime:
 
 - resolves the reviewed platform binary from packaged resources;
 - passes its configured tunnel ID and control-plane key;
 - maps the tunnel's `main` channel to the same private local `/mcp` service;
-- injects the same Rel.AI bearer token only on the local forwarding hop;
+- injects a tunnel-specific Rel.AI bearer, derived from the private installation token and Tunnel ID, only on the local forwarding hop;
 - binds tunnel-client health to its own local ephemeral health address and health-file identity;
 - treats `/healthz` as the local child-liveness boundary, consumes v0.0.15 structured control-plane and response-delivery health, and keeps a live child in place while remote readiness/routing recovers;
-- uses `/readyz` for the ready/running decision without turning prolonged OpenAI-side backoff into an outer process restart; and
+- uses `/readyz` for the ready/running decision without turning prolonged OpenAI-side backoff into an outer process restart. A retained OAuth-discovery timeout on the static-bearer route can recover only with matching tunnel/channel identity, recent successful polling, healthy response delivery, and a fresh authenticated local MCP admission check. Diagnostics retain the alternate readiness source; other readiness failures remain degraded; and
 - terminates the child only for explicit restart/shutdown, child exit, fatal tunnel errors, or sustained local-liveness failure.
 
 `electron/tunnel-credentials.js` retains the primary runtime API key for backward-compatible setup. `electron/tunnel-connections.js` stores additional Tunnel IDs, labels, enablement, and encrypted runtime keys. Both credential paths use Electron `safeStorage`; renderer-facing state never contains decrypted keys.
@@ -138,6 +140,10 @@ The task systems answer different lifecycle questions and remain separate:
 | Dashboard read model | `src/http/dashboardData.js` |
 
 Display state and 100% progress are never completion authority. For an explicit durable work session, completion is an explicit lifecycle record; Rel.AI records whether validation is passed, failed, stale, not run, or not required without using that evidence as a universal permission gate.
+
+Staged file and patch payloads belong to their creating `work_id`, whose principal is verified by the tool dispatcher. Exact IDs and fallback lookup enforce the same owner; legacy unowned payloads cannot be adopted by a work session. File ownership conflicts compare physical paths across aliases and nested project roots while retaining the existing per-workspace history. Publication reconciles the corresponding peer claims from a complete Git observation.
+
+Edit recovery records retain their original root for exact rollback. An active transaction blocks mutations through overlapping roots until recovery succeeds through that original workspace. Workspace resolution checks the current physical root, including parent links; a work session cannot silently transfer its mutation ownership when that root changes.
 
 Background execution has one identity per operation, with multiple operations attributed to the same `work_id`. Task history owns the retained operation records; work-bound files in `fallback-executions` index `operationId` to its task rather than duplicating execution state. Legacy single-operation records remain readable. Status returns the retained operation collection and supports exact operation lookup. Resource conflicts remain governed by `workspaceOperationQueue`; background requests wait there cooperatively instead of failing because their logical task already has another command. Exact retries reuse running or undelivered terminal operations. Stopping one operation leaves its siblings open, while task-wide stop/cancel reaches all operations and completion waits for all outstanding work.
 

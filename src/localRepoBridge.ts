@@ -632,7 +632,7 @@ function handleWriteStart(workspace: BridgeWorkspace, config: BridgeConfig, args
   const safe = resolveSafePath(workspace.path, relativePath, { operation: "write" });
   const writeId = makeOperationId();
   createStagedPayload(config, workspace, writeId, {
-    id: writeId, workspace: workspace.alias, root: workspace.path,
+    id: writeId, workspace: workspace.alias, root: workspace.path, workId: String(args.work_id || ''),
     path: safe.relativePath,
     expectedSha256: String(args.expectedSha256 || "").trim(),
     bytes: Buffer.byteLength(args.content, "utf8"),
@@ -650,8 +650,8 @@ function handleWriteStart(workspace: BridgeWorkspace, config: BridgeConfig, args
 function handleWriteAppend(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs) {
   if (args.dryRun === true) throw new Error("Staged content append does not persist dry-run payloads.");
   if (typeof args.content !== "string") throw new Error("Staged content append requires writeId and a content chunk string.");
-  const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path);
-  const payload = appendStagedPayload(config, workspace, writeId, args.content);
+  const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path, args.work_id);
+  const payload = appendStagedPayload(config, workspace, writeId, args.content, args.work_id);
   return {
     ok: true, workspace: workspace.alias, path: payload.path,
     operation: "stagedFullFileWrite:append", writeId,
@@ -661,9 +661,9 @@ function handleWriteAppend(workspace: BridgeWorkspace, config: BridgeConfig, arg
 }
 
 function handleWriteCommit(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs) {
-  const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path);
-  const payload = readStagedPayload(config, workspace, writeId);
-  const content = readStagedContent(config, workspace, writeId);
+  const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path, args.work_id);
+  const payload = readStagedPayload(config, workspace, writeId, args.work_id);
+  const content = readStagedContent(config, workspace, writeId, args.work_id);
   if (Buffer.byteLength(content, "utf8") !== payload.bytes) {
     throw new Error(`Staged edit payload size mismatch for writeId ${writeId}. Abort it and start again.`);
   }
@@ -676,7 +676,7 @@ function handleWriteCommit(workspace: BridgeWorkspace, config: BridgeConfig, arg
     expectedSha256: payload.expectedSha256 || ""
   });
   if (!args.dryRun) {
-    try { clearStagedPayload(config, workspace, writeId); }
+    try { clearStagedPayload(config, workspace, writeId, args.work_id); }
     catch (error) {
       Object.assign(error as object, { handlerResult: { ...result, ok: false, error: 'File operation completed, but its staged payload could not be retired.' } });
       throw error;
@@ -687,7 +687,7 @@ function handleWriteCommit(workspace: BridgeWorkspace, config: BridgeConfig, arg
 
 function handleWriteAbort(workspace: BridgeWorkspace, config: BridgeConfig, args: BridgeArgs) {
   const writeId = validateWriteId(args.writeId);
-  const existed = clearStagedPayload(config, workspace, writeId);
+  const existed = clearStagedPayload(config, workspace, writeId, args.work_id);
   return { ok: true, workspace: workspace.alias, operation: "stagedFullFileWrite:abort", writeId, cleared: existed };
 }
 
@@ -1013,16 +1013,16 @@ const STAGED_PRUNE_TTL_MS = 24 * 60 * 60 * 1000;
 //   2. If a path is supplied, the unique fresh staged write for that path.
 //   3. Exactly one fresh staged write total (the normal single in-flight case).
 //   4. Otherwise refuse and list the candidates so the caller passes id/path.
-function resolveStagedWriteId(config: BridgeConfig, workspace: BridgeWorkspace, rawWriteId: unknown, targetPath: unknown): string {
+function resolveStagedWriteId(config: BridgeConfig, workspace: BridgeWorkspace, rawWriteId: unknown, targetPath: unknown, workId = ''): string {
   const text = String(rawWriteId || "").trim();
   // An explicit path is a constraint, never a hint to discard during recovery.
   const wantPath = stagedRelativePath(workspace, targetPath);
   if (text && /^op_[a-z0-9]+_[a-f0-9]{12}$/.test(text) && fs.existsSync(stagedMetadataPath(config, workspace, text))) {
-    const exact = readStagedPayload(config, workspace, text);
+    const exact = readStagedPayload(config, workspace, text, workId);
     if (wantPath && exact.path !== wantPath) throw new Error('Staged edit path does not match the supplied writeId. No payload was changed.');
     return text;
   }
-  const fresh = listStagedPayloads(config, workspace)
+  const fresh = listStagedPayloads(config, workspace, workId)
     .filter((item) => item.ageMs == null || item.ageMs <= STAGED_FALLBACK_TTL_MS);
 
   if (wantPath) {
@@ -1052,25 +1052,28 @@ function stagedAmbiguityError(candidates: BridgeRecord[], suppliedId: unknown): 
   return new Error(`Multiple staged edit payloads are pending; refusing to guess which to use. Pass the exact writeId, or the target path, for the one you mean. Pending: ${list}.`);
 }
 
-function listStagedPayloads(config: BridgeConfig, workspace: BridgeWorkspace): BridgeRecord[] {
+function listStagedPayloads(config: BridgeConfig, workspace: BridgeWorkspace, workId: string): BridgeRecord[] {
   const dir = stagedDir(config, workspace);
   let names;
   try { names = fs.readdirSync(dir); } catch { return []; }
   const now = Date.now();
   const out = [];
   for (const name of names) {
-    const item = readStagedFile(dir, name, now);
+    const item = readStagedFile(dir, name, now, workspace, workId);
     if (item) out.push(item);
   }
   out.sort((a, b) => b.mtime - a.mtime);
   return out;
 }
 
-function readStagedFile(dir: string, name: string, now: number): BridgeRecord | null {
+function readStagedFile(dir: string, name: string, now: number, workspace: BridgeWorkspace, workId: string): BridgeRecord | null {
   if (!name.endsWith(".json")) return null;
   const id = name.slice(0, -5);
   if (!/^op_[a-z0-9]+_[a-f0-9]{12}$/.test(id)) return null;
   const file = path.join(dir, name);
+  let payload;
+  try { payload = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+  if (!stagedOwnerMatches(payload, workId) || payload.workspace !== workspace.alias || payload.root !== workspace.path) return null;
   let mtime;
   try { mtime = fs.statSync(file).mtimeMs; } catch { return null; }
   if (mtime && (now - mtime) > STAGED_PRUNE_TTL_MS) {
@@ -1078,9 +1081,22 @@ function readStagedFile(dir: string, name: string, now: number): BridgeRecord | 
     try { fs.rmSync(path.join(dir, `${id}.payload`), { force: true }); } catch {}
     return null;
   }
-  let payload;
-  try { payload = JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
   return { id, path: payload.path || null, mtime, ageMs: mtime ? now - mtime : null };
+}
+
+function stagedOwnerMatches(payload: BridgeRecord, workId: string): boolean {
+  return (payload.workId == null || typeof payload.workId === 'string') && (payload.workId || '') === String(workId || '');
+}
+
+function assertStagedOwner(payload: BridgeRecord, workspace: BridgeWorkspace, workId: string): void {
+  // The dispatcher verifies that work_id belongs to the authenticated principal.
+  // An exact ID or fallback lookup must preserve that same work-session owner.
+  if (!stagedOwnerMatches(payload, workId)) {
+    throw Object.assign(new Error('Staged edit payload is not owned by this work session.'), {
+      code: 'STAGED_EDIT_OWNER_MISMATCH', executed: false, retryable: false
+    });
+  }
+  if (payload.workspace !== workspace.alias || payload.root !== workspace.path) throw new Error('Staged edit payload belongs to a different workspace.');
 }
 
 function createStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, metadata: BridgeRecord, content: string): void {
@@ -1102,8 +1118,8 @@ function writeStagedMetadata(config: BridgeConfig, workspace: BridgeWorkspace, w
   writeJsonAtomic(file, payload, { mode: 0o600 });
 }
 
-function appendStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, content: string): BridgeRecord {
-  const payload = readStagedPayload(config, workspace, writeId);
+function appendStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, content: string, workId = ''): BridgeRecord {
+  const payload = readStagedPayload(config, workspace, writeId, workId);
   const file = stagedPayloadPath(config, workspace, writeId);
   const chunk = Buffer.from(content, 'utf8');
   const handle = fs.openSync(file, 'r+');
@@ -1134,12 +1150,12 @@ function appendStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, w
   }
 }
 
-function readStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string): BridgeRecord {
+function readStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, workId = ''): BridgeRecord {
   const metadataFile = stagedMetadataPath(config, workspace, writeId);
   const payloadFile = stagedPayloadPath(config, workspace, writeId);
   if (!fs.existsSync(metadataFile) || !fs.existsSync(payloadFile)) throw new Error(`No staged edit payload found for writeId ${writeId}. Start again with relai_edit stage='start'.`);
   const payload = JSON.parse(fs.readFileSync(metadataFile, "utf8"));
-  if (payload.workspace !== workspace.alias || payload.root !== workspace.path) throw new Error("Staged edit payload belongs to a different workspace.");
+  assertStagedOwner(payload, workspace, workId);
   if (!Number.isInteger(payload.chunkCount) || payload.chunkCount < 1 || !Number.isInteger(payload.bytes) || payload.bytes < 0) {
     throw new Error(`Staged edit payload metadata is invalid for writeId ${writeId}. Abort it and start again.`);
   }
@@ -1152,14 +1168,16 @@ function readStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, wri
   return payload;
 }
 
-function readStagedContent(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string): string {
+function readStagedContent(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, workId = ''): string {
+  readStagedPayload(config, workspace, writeId, workId);
   return fs.readFileSync(stagedPayloadPath(config, workspace, writeId), "utf8");
 }
 
-function clearStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string): boolean {
+function clearStagedPayload(config: BridgeConfig, workspace: BridgeWorkspace, writeId: string, workId = ''): boolean {
   const metadataFile = stagedMetadataPath(config, workspace, writeId);
   const payloadFile = stagedPayloadPath(config, workspace, writeId);
   const existed = fs.existsSync(metadataFile) || fs.existsSync(payloadFile);
+  if (existed) assertStagedOwner(JSON.parse(fs.readFileSync(metadataFile, 'utf8')), workspace, workId);
   fs.rmSync(metadataFile, { force: true });
   fs.rmSync(payloadFile, { force: true });
   return existed;

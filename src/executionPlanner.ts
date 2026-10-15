@@ -65,7 +65,7 @@ async function runStagedWrite(workspace: PlannerWorkspace, config: PlannerConfig
   const startResult = workspaceWrite(workspace, config, { stage: 'start', path, work_id, content: chunks[0], dryRun, suppressJournal, expectedSha256 });
   const { writeId } = startResult;
   for (let i = 1; i < chunks.length; i++) {
-    workspaceWrite(workspace, config, { stage: 'append', writeId, content: chunks[i], suppressJournal });
+    workspaceWrite(workspace, config, { stage: 'append', writeId, work_id, content: chunks[i], suppressJournal });
   }
   return workspaceWrite(workspace, config, { stage: 'commit', writeId, work_id, dryRun, suppressJournal });
 }
@@ -360,7 +360,7 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
     }
     const writeId = makeOperationId();
     createStagedPayload(config, workspace, writeId, {
-      id: writeId, kind: 'patch', workspace: workspace.alias, root: workspace.path,
+      id: writeId, kind: 'patch', workspace: workspace.alias, root: workspace.path, workId: String(args.work_id || ''),
       bytes: Buffer.byteLength(args.updateText, 'utf8'), chunkCount: 1, createdAt: new Date().toISOString()
     }, args.updateText);
     return { ok: true, workspace: workspace.alias, operation: 'stagedPatch:start', writeId, chunks: 1,
@@ -371,38 +371,38 @@ async function handleStagedEdit(workspace: PlannerWorkspace, config: PlannerConf
     if (hasPatchChunk === hasContentChunk) {
       throw new Error("relai_edit stage='append' requires exactly one of updateText or content.");
     }
-    const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path);
-    const payload = readStagedPayload(config, workspace, writeId);
+    const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path, args.work_id);
+    const payload = readStagedPayload(config, workspace, writeId, args.work_id);
     if (hasContentChunk) {
       if (payload.kind === 'patch') throw new Error('Staged payload is a patch, not a full-file write. Append updateText instead.');
       const result = workspaceWrite(workspace, config, { ...args, writeId });
       return { ...result, plannerPath: 'write:staged', plannerReason: 'content chunk provided — appending to a staged full-file write' };
     }
     if (payload.kind !== 'patch') throw new Error('Staged payload is a full-file write, not a patch. Append content instead.');
-    const appended = appendStagedPayload(config, workspace, writeId, args.updateText);
+    const appended = appendStagedPayload(config, workspace, writeId, args.updateText, args.work_id);
     return { ok: true, workspace: workspace.alias, operation: 'stagedPatch:append', writeId, chunks: appended.chunkCount };
   }
 
   if (stage === 'commit' || stage === 'abort') {
-    const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path);
-    const payload = readStagedPayload(config, workspace, writeId);
+    const writeId = resolveStagedWriteId(config, workspace, args.writeId, args.path, args.work_id);
+    const payload = readStagedPayload(config, workspace, writeId, args.work_id);
     if (payload.kind !== 'patch') {
       const result = workspaceWrite(workspace, config, { ...args, writeId });
       const out = { ...result, plannerPath: 'write:staged', plannerReason: `staged full-file write ${stage}` };
       return stage === 'commit' ? attachPost(out, await runPostActions(workspace, config, args, out.changedFiles, signal, out)) : out;
     }
     if (stage === 'abort') {
-      const existed = clearStagedPayload(config, workspace, writeId);
+      const existed = clearStagedPayload(config, workspace, writeId, args.work_id);
       return { ok: true, workspace: workspace.alias, operation: 'stagedPatch:abort', writeId, cleared: existed };
     }
-    const patch = readStagedContent(config, workspace, writeId);
+    const patch = readStagedContent(config, workspace, writeId, args.work_id);
     if (Buffer.byteLength(patch, 'utf8') !== payload.bytes) {
       throw new Error(`Staged patch payload size mismatch for writeId ${writeId}. Abort it and start again.`);
     }
     const result = await relaiApplyPatch(workspace, config, { ...args, patch, returnDiff: false }, { signal });
     const out = { ...result, operation: 'stagedPatch:commit', writeId, plannerPath: 'apply-update:staged' };
     if (!args.dryRun) {
-      try { clearStagedPayload(config, workspace, writeId); }
+      try { clearStagedPayload(config, workspace, writeId, args.work_id); }
       catch (error) {
         throw Object.assign(error instanceof Error ? error : new Error(String(error)), { handlerResult: { ...out, ok: false, error: 'Patch processing returned, but the staged payload could not be retired. Reconcile the recorded effects before retrying.' } });
       }

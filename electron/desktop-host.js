@@ -211,6 +211,7 @@ async function createDesktopHost(options = {}) {
     getDashboardWindow: dashboardWindowManager.getWindow,
     openDashboard: route => showDashboardWindow(route),
     goalLoginProfileDirectory: path.join(app.getPath('userData'), 'goal-chatgpt-profile'),
+    getGoalConnections: configuredGoalConnections,
     clearPersistentData: () => browserProfiles.clearPersistentBrowserProfiles(browserProfileConfig()),
     listPersistentProfiles: () => browserProfiles.persistentBrowserProfileDirectories(browserProfileConfig()),
     readPersistentSites: profileDirectory => browserProfiles.readPersistentBrowserSites(profileDirectory),
@@ -983,12 +984,20 @@ async function createDesktopHost(options = {}) {
 
   function syncServiceContext() {
     const { taskActivity: _taskActivity, ...status } = currentStatus;
-    const context = { status, runtimeAccess: updateRuntimeAccess() };
+    const context = { status, runtimeAccess: updateRuntimeAccess(), tunnelConnections: configuredGoalConnections() };
     const key = JSON.stringify(context);
     if (key === lastServiceContextKey) return false;
     lastServiceContextKey = key;
     serviceProcessClient.updateContext(context);
     return true;
+  }
+
+  function configuredGoalConnections() {
+    const primary = readGuiConfig().tunnelId;
+    return [
+      ...(primary ? [{ tunnelId: primary, label: tunnelConnections.launcherLabel(primary), enabled: true }] : []),
+      ...tunnelConnections.list().filter(item => item.tunnelId !== primary)
+    ].map(({ tunnelId, label, enabled }) => ({ tunnelId, label, enabled }));
   }
 
   function startServer() {

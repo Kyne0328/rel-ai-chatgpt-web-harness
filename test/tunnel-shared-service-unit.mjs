@@ -10,6 +10,7 @@ import { getTaskHistoryDir, writeSession } from '../src/taskHistoryStorage.ts';
 import { createStdioPrincipal, principalFingerprint } from '../src/mcp/principal.ts';
 import { normalizeTunnelLogRecord } from '../electron/tunnel-log-parser.js';
 import { createTunnelRuntimePool } from '../electron/tunnel-runtime-pool.js';
+import { tunnelLocalToken } from '../src/mcp/tunnelIdentity.js';
 import { startHttpTestServer, stopHttpTestServer, localHttpFetch } from './helpers/http-test-server.mjs';
 import { createHttpMcpSession, mcpBody, mcpHeaders } from './helpers/http-mcp.mjs';
 
@@ -169,6 +170,103 @@ try {
   assert.equal(starts.length, 1, 'duplicate tunnel entries must not spawn competing clients');
   assert.equal(starts[0].apiKey, 'last');
   await pool.stop();
+
+  // Real HTTP requests prove tunnel identity survives the canonical MCP
+  // dispatcher and guards task/goal ownership, including forged metadata.
+  const scopedConfig = path.join(temp, 'scoped-tunnels.json');
+  const scopedWorkspace = path.join(temp, 'scoped-workspace');
+  fs.mkdirSync(scopedWorkspace);
+  fs.writeFileSync(scopedConfig, JSON.stringify({ version: 3, stateDir: path.join(temp, 'scoped-state'), workspaces: { scoped: { path: scopedWorkspace } } }));
+  const previousEnvironment = { config: process.env.REL_AI_MCP_CONFIG, state: process.env.REL_AI_MCP_STATE_DIR,
+    bearer: process.env.REL_AI_CHATGPT_WEB_BEARER, cookie: process.env.REL_AI_CHATGPT_WEB_COOKIE };
+  process.env.REL_AI_MCP_CONFIG = scopedConfig;
+  process.env.REL_AI_MCP_STATE_DIR = path.join(temp, 'scoped-state');
+  process.env.REL_AI_CHATGPT_WEB_BEARER = '';
+  process.env.REL_AI_CHATGPT_WEB_COOKIE = '';
+  const tunnelA = 'tunnel_accountA12345';
+  const tunnelB = 'tunnel_accountB12345';
+  let configured = [tunnelA, tunnelB];
+  const { startHttpServer } = await import('../src/httpServer.ts');
+  const scopedServer = startHttpServer({ host: '127.0.0.1', port: 0, token: 'scoped-fixture-master',
+    isolated: true, writeProfile: false, getTunnelIds: () => configured });
+  try {
+    if (!scopedServer.listening) await new Promise(resolve => scopedServer.once('listening', resolve));
+    const scopedBase = `http://127.0.0.1:${scopedServer.address().port}`;
+    const tokenA = tunnelLocalToken('scoped-fixture-master', tunnelA);
+    const tokenB = tunnelLocalToken('scoped-fixture-master', tunnelB);
+    assert.notEqual(tokenA, tokenB);
+    const admittedGet = await localHttpFetch(scopedBase + '/mcp', { headers: { authorization: 'Bearer ' + tokenA } });
+    assert.equal(admittedGet.status, 405, 'authenticated stateless GET must reach the method guard');
+    assert.equal(admittedGet.headers.get('allow'), 'POST');
+    assert.equal((await admittedGet.json()).error.code, -32600);
+    const rejectedGet = await localHttpFetch(scopedBase + '/mcp', { headers: { authorization: 'Bearer invalid-fixture-token' } });
+    assert.equal(rejectedGet.status, 401, 'the read-only admission probe must still reject invalid bearer credentials');
+    const clientA = await createHttpMcpSession(scopedBase, { token: tokenA });
+    const clientB = await createHttpMcpSession(scopedBase, { token: tokenB });
+    const created = await clientA.request('tools/call', { name: 'relai_work', arguments: {
+      action: 'begin', title: 'Account A goal', objective: 'Prove tunnel ownership', goal: true,
+      conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d'
+    } });
+    const scopedWorkId = created.body.result.structuredContent.work_id;
+    assert.ok(scopedWorkId);
+    const ownGoal = await clientA.request('tools/call', { name: 'relai_work', arguments: { action: 'goal_status', work_id: scopedWorkId } });
+    assert.equal(ownGoal.body.result.structuredContent.tunnelId, tunnelA);
+    const otherGoal = await clientB.request('tools/call', { name: 'relai_work', arguments: { action: 'goal_stop', work_id: scopedWorkId },
+      _meta: { tunnelId: tunnelA, clientId: 'secure-tunnel:' + tunnelA } }, { extraHeaders: { 'x-relai-tunnel-id': tunnelA } });
+    assert.equal(otherGoal.body.result.isError, true, 'a different tunnel cannot adopt a goal by forging its ID');
+    assert.equal((await clientA.request('tools/call', { name: 'relai_work', arguments: { action: 'goal_status', work_id: scopedWorkId } }))
+      .body.result.structuredContent.goalActive, true);
+    const scopedTool = async (client, name, args) => {
+      const reply = await client.request('tools/call', { name, arguments: args });
+      assert.equal(reply.response.status, 200);
+      const value = reply.body.result.structuredContent;
+      if (value.status !== 'running' || !value.operationId) return value;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const receipt = await client.request('tools/call', { name: 'relai_work', arguments: {
+          action: 'result', workspace: args.workspace, work_id: args.work_id, operationId: value.operationId
+        } });
+        const operation = receipt.body.result.structuredContent.backgroundOperation;
+        if (operation?.status === 'running') continue;
+        assert.ok(operation?.result, JSON.stringify(receipt.body));
+        return operation.result;
+      }
+      assert.fail('scoped staging operation did not settle');
+    };
+    const ownerA = await scopedTool(clientA, 'relai_work', { action: 'begin', workspace: 'scoped', title: 'Staging owner A' });
+    const ownerB = await scopedTool(clientB, 'relai_work', { action: 'begin', workspace: 'scoped', title: 'Staging owner B' });
+    for (const kind of ['content', 'updateText']) {
+      const startArgs = kind === 'content' ? { path: 'scoped.txt', content: 'A\n' }
+        : { updateText: '*** Begin Patch\n*** Add File: scoped-patch.txt\n+A\n*** End Patch' };
+      const staged = await scopedTool(clientA, 'relai_edit', { workspace: 'scoped', work_id: ownerA.work_id, stage: 'start', ...startArgs });
+      assert.equal(staged.ok, true);
+      for (const stage of ['append', 'commit', 'abort']) {
+        const rejected = await scopedTool(clientB, 'relai_edit', { workspace: 'scoped', work_id: ownerB.work_id,
+          stage, writeId: staged.writeId, ...(stage === 'append' ? { [kind]: 'B\n' } : {}) });
+        assert.equal(rejected.ok, false, 'another tunnel must not ' + stage + ' a staged ' + kind + ' payload');
+      }
+      const noFallback = await scopedTool(clientB, 'relai_edit', { workspace: 'scoped', work_id: ownerB.work_id,
+        stage: 'append', [kind]: 'B\n' });
+      assert.equal(noFallback.ok, false, 'fallback must not disclose or select another tunnel payload');
+      assert.ok(!JSON.stringify(noFallback).includes(staged.writeId), 'foreign staged IDs must not enter fallback diagnostics');
+      const committed = await scopedTool(clientA, 'relai_edit', { workspace: 'scoped', work_id: ownerA.work_id, stage: 'commit' });
+      assert.equal(committed.ok, true, JSON.stringify(committed));
+      assert.equal(fs.readFileSync(path.join(scopedWorkspace, kind === 'content' ? 'scoped.txt' : 'scoped-patch.txt'), 'utf8'), 'A\n');
+    }
+    configured = [tunnelA];
+    const removed = await clientB.request('tools/list');
+    assert.equal(removed.response.status, 401, 'removed or disabled tunnels immediately lose authentication');
+    await clientA.request('tools/call', { name: 'relai_work', arguments: { action: 'goal_stop', work_id: scopedWorkId } });
+    console.log('Scoped tunnel authentication keeps Account A goals inaccessible to Account B.');
+  } finally {
+    scopedServer.closeAllConnections();
+    await new Promise(resolve => scopedServer.close(resolve));
+    await scopedServer.waitForShutdown();
+    for (const [name, value] of Object.entries({ REL_AI_MCP_CONFIG: previousEnvironment.config,
+      REL_AI_MCP_STATE_DIR: previousEnvironment.state, REL_AI_CHATGPT_WEB_BEARER: previousEnvironment.bearer,
+      REL_AI_CHATGPT_WEB_COOKIE: previousEnvironment.cookie })) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
 
   const workspace = path.join(temp, 'workspace');
   fs.mkdirSync(workspace);

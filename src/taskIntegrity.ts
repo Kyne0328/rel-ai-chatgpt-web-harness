@@ -11,7 +11,7 @@ import { readJsonFile } from './durableState.ts';
 import { getStateDir } from './statePaths.js';
 import { setStateMeta, stateDatabasePath, stateMetaValue, withStateDatabase } from './stateDatabase.ts';
 import { OPERATION_IDS as OP } from './tools/operationIds.js';
-import { fileSha256, resolveSafePath } from './safety.js';
+import { fileSha256, isPathInside, realRootOf, resolveSafePath } from './safety.js';
 
 const STORE_VERSION = 1;
 // Integrity writes share durable-state.sqlite with short analytics transactions.
@@ -139,6 +139,7 @@ async function recordTaskIntegrityEvent(config: IntegrityConfig, event: Integrit
         const workspaceState = normalizeWorkspaceState(readWorkspaceRow(db, workspace.alias) || createWorkspaceState(workspace.alias));
         applyWorkspaceIntegrityEvent(workspaceState, event, repository.changedFiles, repository.opaqueDirectories);
         writeWorkspaceRow(db, workspace.alias, workspaceState);
+        reconcilePeerWorkspaceOwners(db, config, workspace, repository.statusOutput === undefined ? null : repository.changedFiles, repository.opaqueDirectories);
         return null;
       }
       let authority = readTaskRow(db, taskId);
@@ -155,10 +156,11 @@ async function recordTaskIntegrityEvent(config: IntegrityConfig, event: Integrit
       }
       const ownedWorkspace = resolveWorkspace(config, authority.workspace || workspaceAlias);
       const workspaceState = readWorkspaceRow(db, ownedWorkspace.alias) || createWorkspaceState(ownedWorkspace.alias);
-      const projection = applyIntegrityEvent(authority, workspaceState, ownedWorkspace, event, repository.changedFiles, repository.opaqueDirectories);
+      applyIntegrityEvent(authority, workspaceState, ownedWorkspace, event, repository.changedFiles, repository.opaqueDirectories);
       writeTaskRow(db, taskId, authority);
       writeWorkspaceRow(db, ownedWorkspace.alias, workspaceState);
-      return projection;
+      reconcilePeerWorkspaceOwners(db, config, ownedWorkspace, repository.statusOutput === undefined ? null : repository.changedFiles, repository.opaqueDirectories);
+      return integrityProjection(authority, workspaceState, physicalTaskOwnership(db, config, authority, workspaceState));
     });
   } catch (error) {
     if (error instanceof TaskIntegrityError) throw error;
@@ -179,7 +181,7 @@ async function ensureTaskBaseline(
   options: { signal?: AbortSignal; onStatusOutput?: (statusOutput: string) => void } = {}
 ): Promise<IntegrityAuthority | null> {
   options.signal?.throwIfAborted?.();
-  const initial = readTaskIntegrity(config, taskId, workspaceAlias);
+  const initial = assertTaskWorkspaceRoot(config, taskId, resolveWorkspace(config, workspaceAlias));
   if (!initial?.baseline.pending) return initial;
   const key = `${stateDatabasePath(config)}\0${workspaceAlias}\0${taskId}`;
   const existing = pendingBaselineCaptures.get(key);
@@ -215,6 +217,7 @@ async function captureTaskBaseline(
     }
     writeTaskRow(db, taskId, authority);
     writeWorkspaceRow(db, workspaceAlias, state);
+    reconcilePeerWorkspaceOwners(db, config, workspace, repository.statusOutput === undefined ? null : repository.baseline.changedFiles, repository.baseline.opaqueDirectories);
     return authority;
   }, options.signal ? { signal: options.signal } : {});
 }
@@ -231,6 +234,15 @@ function readTaskIntegrity(config: IntegrityConfig, taskId: unknown, workspaceAl
   }
 }
 
+function assertTaskWorkspaceRoot(config: IntegrityConfig, taskId: string, workspace: { alias: string; path: string }): IntegrityAuthority | null {
+  const authority = readTaskIntegrity(config, taskId, workspace.alias);
+  if (authority?.workspacePath && physicalOwnershipPath(authority.workspacePath) !== physicalOwnershipPath(workspace.path)) {
+    throw new TaskIntegrityError('TASK_WORKSPACE_ROOT_CHANGED',
+      'This work session belongs to a different physical project folder. Start a new work session for the current folder; existing file ownership was preserved.');
+  }
+  return authority;
+}
+
 function taskOwnedChangedFiles(config: IntegrityConfig, taskId: unknown, workspaceAlias = ''): string[] {
   const authority = readTaskIntegrity(config, taskId, workspaceAlias);
   return deliverableTaskOwnedFiles(authority);
@@ -241,7 +253,7 @@ function taskCommitOwnership(config: IntegrityConfig, taskId: unknown, workspace
     const authority = readTaskRow(db, taskId);
     if (!authority || (workspaceAlias && authority.workspace !== workspaceAlias)) return { ownedFiles: [], conflictingFiles: [] };
     const workspace = normalizeWorkspaceState(readWorkspaceRow(db, authority.workspace) || createWorkspaceState(authority.workspace));
-    return filterEphemeralOwnership(taskCommitOwnershipFromState(workspace, String(taskId || '')), authority);
+    return filterEphemeralOwnership(physicalTaskOwnership(db, config, authority, workspace), authority);
   }, { transaction: true, readonly: true });
 }
 
@@ -256,7 +268,7 @@ function claimTaskChangedFiles(config: IntegrityConfig, taskId: unknown, workspa
     const workspaceState = normalizeWorkspaceState(readWorkspaceRow(db, workspace) || createWorkspaceState(workspace));
     for (const file of files) addWorkspaceOwner(workspaceState, file, owner);
     writeWorkspaceRow(db, workspace, workspaceState);
-    return taskCommitOwnershipFromState(workspaceState, owner);
+    return physicalTaskOwnership(db, config, authority, workspaceState);
   });
 }
 
@@ -306,7 +318,8 @@ function releaseTaskChangedFiles(config: IntegrityConfig, taskId: unknown, works
     const workspaceState = normalizeWorkspaceState(readWorkspaceRow(db, workspace) || createWorkspaceState(workspace));
     for (const file of files) removeWorkspaceOwner(workspaceState, file, owner);
     writeWorkspaceRow(db, workspace, workspaceState);
-    return taskCommitOwnershipFromState(workspaceState, owner);
+    const authority = readTaskRow(db, owner);
+    return authority ? physicalTaskOwnership(db, config, authority, workspaceState) : taskCommitOwnershipFromState(workspaceState, owner);
   });
 }
 
@@ -326,7 +339,7 @@ function applyIntegrityEvent(
   event: IntegrityEvent,
   repositoryChanged: string[] | null = null,
   opaqueDirectories: string[] = []
-): IntegrityProjection {
+): void {
   const tool = clean(event.tool);
   const timestamp = clean(event.ts) || new Date().toISOString();
   const changedFiles = exactChangedFiles(event);
@@ -404,7 +417,6 @@ function applyIntegrityEvent(
     );
   }
 
-  return integrityProjection(authority, workspaceState);
 }
 
 function applyWorkspaceIntegrityEvent(workspaceState: WorkspaceIntegrityState, event: IntegrityEvent, repositoryChanged: string[] | null = null, opaqueDirectories: string[] = []): void {
@@ -448,12 +460,11 @@ function readIntegrityProjection(config: IntegrityConfig, taskId: string, worksp
     }
     const workspace = clean(authority.workspace || workspaceAlias);
     const workspaceState = readWorkspaceRow(db, workspace) || createWorkspaceState(workspace);
-    return integrityProjection(authority, workspaceState);
+    return integrityProjection(authority, workspaceState, physicalTaskOwnership(db, config, authority, workspaceState));
   }, { transaction: true, readonly: true });
 }
 
-function integrityProjection(authority: IntegrityAuthority, workspaceState: WorkspaceIntegrityState): IntegrityProjection {
-  const ownership = taskCommitOwnershipFromState(normalizeWorkspaceState(workspaceState), authority.taskId);
+function integrityProjection(authority: IntegrityAuthority, workspaceState: WorkspaceIntegrityState, ownership: OwnershipProjection): IntegrityProjection {
   return {
     taskMutationGeneration: authority.mutationGeneration,
     taskValidatedMutationGeneration: authority.latestValidatedMutationGeneration,
@@ -752,6 +763,87 @@ function taskCommitOwnershipFromState(workspaceState: WorkspaceIntegrityState, t
   return { ownedFiles: unique(ownedFiles).sort(), conflictingFiles: unique(conflictingFiles).sort() };
 }
 
+function physicalOwnershipPath(root: string, file = ''): string {
+  let physical;
+  try { physical = realRootOf(root); }
+  catch (error) {
+    if (!['ENOENT', 'ENOTDIR'].includes(errorCode(error))) throw error;
+    physical = path.resolve(root);
+  }
+  const absolute = path.resolve(physical, file);
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+}
+
+// Keep the existing per-workspace history/generations, but compare claims using
+// physical paths. Alias names and nested roots cannot split one file's owners.
+function workspaceClaims(db: DatabaseSync, config: IntegrityConfig, alias = '') {
+  const rows = db.prepare('SELECT workspace,payload FROM workspace_integrity WHERE workspace<>?').all(alias) as Array<{ workspace: string; payload: string }>;
+  const roots = new Map<string, string>();
+  const owners = new Map<string, IntegrityAuthority | null>();
+  return rows.map(row => {
+    const state = normalizeWorkspaceState(parseIntegrityPayload(row.payload, 'workspace') as WorkspaceIntegrityState);
+    const claims: Array<{ file: string; owner: string; absolute: string }> = [];
+    for (const [file, fileOwners] of Object.entries(state.uncommittedOwners)) {
+      for (const owner of fileOwners) {
+        if (owner !== AMBIENT_OWNER && !owners.has(owner)) owners.set(owner, readTaskRow(db, owner));
+        const root = owners.get(owner)?.workspacePath || config.workspaces?.[row.workspace]?.path;
+        if (!root) continue;
+        if (!roots.has(root)) roots.set(root, physicalOwnershipPath(root));
+        const absolute = path.resolve(roots.get(root)!, file);
+        claims.push({ file, owner, absolute: process.platform === 'win32' ? absolute.toLowerCase() : absolute });
+      }
+    }
+    return { alias: row.workspace, state, claims };
+  });
+}
+
+function physicalTaskOwnership(db: DatabaseSync, config: IntegrityConfig, authority: IntegrityAuthority, state: WorkspaceIntegrityState): OwnershipProjection {
+  const own = taskCommitOwnershipFromState(normalizeWorkspaceState(state), authority.taskId);
+  if (!own.ownedFiles.length || !authority.workspacePath) return own;
+  const root = physicalOwnershipPath(authority.workspacePath);
+  const paths = new Map(own.ownedFiles.map(file => {
+    const absolute = path.resolve(root, file);
+    return [process.platform === 'win32' ? absolute.toLowerCase() : absolute, file];
+  }));
+  const conflicting = new Set<string>();
+  for (const peer of workspaceClaims(db, config)) {
+    for (const claim of peer.claims) {
+      const file = paths.get(claim.absolute);
+      if (file && claim.owner !== authority.taskId) conflicting.add(file);
+    }
+  }
+  return { ownedFiles: own.ownedFiles, conflictingFiles: [...conflicting].sort() };
+}
+
+function reconcilePeerWorkspaceOwners(db: DatabaseSync, config: IntegrityConfig, workspace: { alias: string; path: string }, changed: string[] | null, opaque: readonly string[] = []): void {
+  if (!Array.isArray(changed)) return;
+  // Porcelain -z paths are relative to the Git worktree root even when the
+  // authorized workspace is nested beneath it. Never interpret them as cwd paths.
+  let observationRoot = physicalOwnershipPath(workspace.path);
+  while (!fs.existsSync(path.join(observationRoot, '.git'))) {
+    const parent = path.dirname(observationRoot);
+    if (parent === observationRoot) return;
+    observationRoot = parent;
+  }
+  const root = observationRoot;
+  const key = (file: string) => {
+    const absolute = path.resolve(root, file);
+    return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  };
+  const dirty = new Set(changed.map(key));
+  const directories = opaque.map(key);
+  for (const peer of workspaceClaims(db, config, workspace.alias)) {
+    let updated = false;
+    for (const claim of peer.claims) {
+      if (!isPathInside(claim.absolute, root) || dirty.has(claim.absolute)
+        || directories.some(directory => isPathInside(claim.absolute, directory))) continue;
+      removeWorkspaceOwner(peer.state, claim.file, claim.owner);
+      updated = true;
+    }
+    if (updated) writeWorkspaceRow(db, peer.alias, peer.state);
+  }
+}
+
 function integrityDir(config: IntegrityConfig): string {
   return path.join(getStateDir(config), 'task-integrity');
 }
@@ -909,6 +1001,7 @@ function errorCode(error: unknown): string {
 
 export {
   TaskIntegrityError,
+  assertTaskWorkspaceRoot,
   claimTaskChangedFiles,
   captureNativeMutationPaths,
   readTaskIntegrity,

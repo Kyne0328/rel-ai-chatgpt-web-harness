@@ -353,6 +353,7 @@ async function verifyServiceNativeRequestLifecycle() {
   let serverOptions;
   let browserOperation;
   let goalOperation;
+  const resumedAccounts = [];
   const server = {
     listening: true,
     address: () => ({ port: 4567 }),
@@ -365,7 +366,8 @@ async function verifyServiceNativeRequestLifecycle() {
     'src/toolActivity.js': { getToolActivity: () => ({}), onToolActivity: () => () => {} },
     'src/desktopManager.ts': { configureDesktopNativeBridge() {} },
     'src/browser/browserDriver.ts': { configureBrowserNativeBridge: operation => { browserOperation = operation; } },
-    'src/chatgptGoalProtocol.js': { configureGoalBrowserTransport: transport => { goalOperation = transport; } }
+    'src/chatgptGoalProtocol.js': { configureGoalBrowserTransport: transport => { goalOperation = transport; } },
+    'src/core/desktop-operations.ts': { resumeDesktopGoalsForAccount: tunnelId => { resumedAccounts.push(tunnelId); return { ok: true }; } }
   };
   const serviceUrl = new URL('../electron/service-process.js?native-request-lifecycle', import.meta.url).href;
   const resourceStub = 'data:text/javascript,' + encodeURIComponent(
@@ -387,6 +389,15 @@ async function verifyServiceNativeRequestLifecycle() {
     send('start', 'start-native-test');
     await yieldTurn();
     assert.ok(serverOptions, 'the production service must install its native callbacks on HTTP startup');
+    parentPort.emit('message', { data: { type: 'context', context: { tunnelConnections: [
+      { tunnelId: 'tunnel_accountA12345', enabled: true }, { tunnelId: 'tunnel_accountB12345', enabled: false }
+    ] } } });
+    assert.deepEqual(serverOptions.getTunnelIds(), ['tunnel_accountA12345'], 'only configured enabled tunnels may authenticate to the shared service');
+    for (const tunnelId of ['tunnel_accountA12345', 'tunnel_accountB12345', 'tunnel_unknown12345']) {
+      parentPort.emit('message', { data: { type: 'native-event', event: { resource: 'goal', type: 'account_signed_in', tunnelId } } });
+    }
+    await yieldTurn();
+    assert.deepEqual(resumedAccounts, ['tunnel_accountA12345'], 'sign-in events must never resume disabled or unknown connections');
     mock.timers.enable({ apis: ['setTimeout'] });
 
     let pickerSettled = false;
@@ -418,6 +429,15 @@ async function verifyServiceNativeRequestLifecycle() {
         ok: true, result: { ok: true } } });
       assert.deepEqual(await goalRequest, { ok: true });
     }
+
+    const goalController = new AbortController();
+    const preparingGoal = goalOperation({ action: 'continue' }, { signal: goalController.signal });
+    const goalAbort = assert.rejects(preparingGoal, error => error.code === 'BROWSER_OPERATION_CANCELLED');
+    const preparingGoalId = messages.at(-1).id;
+    goalController.abort();
+    await goalAbort;
+    assert.equal(messages.at(-1).type, 'native-cancel', 'task cancellation must reach the in-flight Goal sender');
+    assert.equal(messages.at(-1).id, preparingGoalId);
 
     const controller = new AbortController();
     const aborted = browserOperation({ action: 'snapshot' }, { signal: controller.signal });

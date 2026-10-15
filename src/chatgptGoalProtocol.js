@@ -5,10 +5,16 @@ import { readConversationProjection } from './chatgptConversationReader.js';
 
 const ORIGIN = 'https://chatgpt.com';
 let goalBrowserTransport = null;
+let accountScopes = new WeakMap();
+const DISCOVERY_CACHE_MS = 120_000;
+const RATE_LIMIT_DEFAULT_MS = 300_000;
+const READ_WINDOW_MS = 60_000;
+const MAX_ACCOUNT_READS = 30;
 
 function configureGoalBrowserTransport(transport) {
   if (transport !== null && typeof transport !== 'function') throw new TypeError('Goal browser transport must be a function or null.');
   goalBrowserTransport = transport;
+  accountScopes = new WeakMap();
 }
 
 function hasGoalBrowserTransport() { return typeof goalBrowserTransport === 'function'; }
@@ -44,13 +50,13 @@ function parseConversationUrl(value) {
   return assertConversationId(route[1]);
 }
 
-function protocolFailure(path, status) {
+function protocolFailure(path, status, retryAfterMs = 0) {
   const stage = path.startsWith('/backend-api/f/conversation/prepare') ? 'conversation preparation'
     : path.startsWith('/backend-api/sentinel/chat-requirements') ? 'chat requirements'
       : path === '/backend-api/f/conversation' ? 'message submission' : 'conversation read';
   const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
   return Object.assign(new Error(`ChatGPT Web ${stage} failed (HTTP ${httpStatus || 'unknown'}).`), {
-    status: httpStatus, stage
+    status: httpStatus, stage, retryAfterMs
   });
 }
 
@@ -79,13 +85,71 @@ function headers(credentials) {
   };
 }
 
+function accountScope(deps) {
+  const transport = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null)
+    || deps.fetch || globalThis.fetch;
+  let accounts = accountScopes.get(transport);
+  if (!accounts) { accounts = new Map(); accountScopes.set(transport, accounts); }
+  const key = deps.tunnelId || deps.credentials || 'local';
+  if (!accounts.has(key)) accounts.set(key, { reads: [], cooldownUntil: 0, rateLimits: 0, discovery: new Map() });
+  const scope = accounts.get(key);
+  scope.cooldownUntil = Math.max(scope.cooldownUntil, Number(deps.cooldownUntil || 0));
+  scope.rateLimits = Math.max(scope.rateLimits, Number(deps.rateLimitCount || 0));
+  return scope;
+}
+
+function retryAfterMilliseconds(value) {
+  if (value == null || value === '') return 0;
+  const seconds = Number(value);
+  const milliseconds = Number.isFinite(seconds) ? seconds * 1_000 : Date.parse(value) - Date.now();
+  return Number.isFinite(milliseconds) ? Math.max(0, Math.min(milliseconds, 86_400_000)) : 0;
+}
+
+function rateLimitError(until, deferred = true) {
+  return Object.assign(new Error('ChatGPT reads are rate limited; waiting for the account cooldown.'),
+    { status: 429, retryAt: until, deferred });
+}
+
+function rememberRateLimit(error, deps) {
+  const scope = accountScope(deps);
+  if (!error.deferred && scope.cooldownUntil <= Date.now()) scope.rateLimits = Math.min(scope.rateLimits + 1, 4);
+  const suppliedDelay = Number(error.retryAfterMs) || 0;
+  const delay = suppliedDelay > 0 ? Math.max(error.deferred ? 1_000 : 60_000, Math.min(suppliedDelay, 86_400_000))
+    : RATE_LIMIT_DEFAULT_MS * 2 ** Math.max(0, scope.rateLimits - 1);
+  scope.cooldownUntil = Math.max(scope.cooldownUntil, Date.now() + delay);
+  try { deps.onRateLimit?.({ until: scope.cooldownUntil, count: scope.rateLimits }); } catch {}
+  return Object.assign(error, { retryAt: scope.cooldownUntil });
+}
+
 async function requestChatgpt(path, options = {}, deps = {}) {
+  options.signal?.throwIfAborted();
+  const scope = accountScope(deps);
+  const now = Date.now();
+  if (scope.cooldownUntil > now) throw rateLimitError(scope.cooldownUntil);
+  if (!options.method || options.method === 'GET') {
+    scope.reads = scope.reads.filter(time => time > now - READ_WINDOW_MS);
+    if (scope.reads.length >= MAX_ACCOUNT_READS) throw Object.assign(
+      new Error('ChatGPT account read budget reached; deferring this read.'),
+      { deferred: true, retryAt: scope.reads[0] + READ_WINDOW_MS });
+    scope.reads.push(now);
+  }
+  try {
+    return await requestChatgptUncoordinated(path, options, deps);
+  } catch (error) {
+    if (error?.status === 429) throw rememberRateLimit(error, deps);
+    throw error;
+  }
+}
+
+async function requestChatgptUncoordinated(path, options = {}, deps = {}) {
   const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
   if (native) {
     const result = await native({ path, method: options.method || 'GET', body: options.body,
+      ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}),
       headers: options.headers, raw: options.raw === true,
       ...(options.projectConversation ? { projectConversation: true } : {}) }, { signal: options.signal });
-    if (!result?.ok) throw protocolFailure(path, result?.status);
+    if (!result?.ok) throw Object.assign(protocolFailure(path, result?.status, result?.retryAfterMs),
+      { deferred: result?.deferred === true });
     return options.raw ? { text: async () => result.streamObserved ? 'event: accepted\n\n' : '' } : result.data;
   }
   const credentials = deps.credentials || chatgptCredentials();
@@ -98,7 +162,11 @@ async function requestChatgpt(path, options = {}, deps = {}) {
     signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.raw ? STREAM_TIMEOUT_MS : REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(options.raw ? STREAM_TIMEOUT_MS : REQUEST_TIMEOUT_MS),
     redirect: 'error'
   });
-  if (!response.ok) throw protocolFailure(path, response.status);
+  if (!response.ok) {
+    const retryAfterMs = retryAfterMilliseconds(response.headers?.get?.('retry-after'));
+    await response.body?.cancel?.().catch(() => {});
+    throw protocolFailure(path, response.status, retryAfterMs);
+  }
   if (options.raw) return response;
   if (options.projectConversation) return readConversationProjection(response);
   const advertised = Number(response.headers?.get?.('content-length') || 0);
@@ -128,6 +196,43 @@ async function listConversations(deps = {}) {
 async function getConversation(id, deps = {}) {
   return requestChatgpt('/backend-api/conversation/' + assertConversationId(id),
     { signal: deps.signal, projectConversation: true }, deps);
+}
+
+function waitForDiscovery(promise, signal) {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
+async function discoveryRead(key, load, deps) {
+  deps.signal?.throwIfAborted();
+  const scope = accountScope(deps);
+  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil);
+  const existing = scope.discovery.get(key);
+  if (existing?.promise) return { value: await waitForDiscovery(existing.promise, deps.signal), cached: false };
+  if (existing && Date.now() < existing.expiresAt) return { value: existing.value, cached: true };
+  // Shared requests own their deadline. Cancelling one task must not cancel
+  // another task's discovery or retain an unbounded request.
+  const record = { promise: null };
+  record.promise = Promise.resolve().then(() => load({ ...deps,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })).then(value => {
+    scope.discovery.set(key, { value, expiresAt: Date.now() + DISCOVERY_CACHE_MS });
+    while (scope.discovery.size > 32) {
+      const oldest = [...scope.discovery].find(([key, entry]) => key !== 'catalog' && !entry.promise)?.[0];
+      if (oldest === undefined) break;
+      scope.discovery.delete(oldest);
+    }
+    return value;
+  }, error => {
+    if (scope.discovery.get(key) === record) scope.discovery.delete(key);
+    throw error;
+  });
+  scope.discovery.set(key, record);
+  return { value: await waitForDiscovery(record.promise, deps.signal), cached: false };
 }
 
 function activeMessages(conversation) {
@@ -173,27 +278,78 @@ function turnState(conversation) {
 async function findRecentGoalCommand(deps = {}) {
   const startedAt = Number(deps.startedAt || 0);
   const candidates = [];
-  for (const summary of await listConversations(deps)) {
+  let correlatedId = '';
+  try { correlatedId = parseConversationUrl(deps.conversationCorrelation); } catch {}
+  const summaries = correlatedId ? [{ id: correlatedId }]
+    : (await discoveryRead('catalog', listConversations, deps)).value;
+  for (const summary of summaries) {
     const id = String(summary.id || '');
     if (!UUID.test(id)) continue;
-    const conversation = await getConversation(id, deps);
-    // Only the latest user message may start a new goal. A previous /goal
-    // followed by ordinary chat must not opt an unrelated task in later.
-    const command = activeMessages(conversation).filter(n => n.message?.author?.role === 'user').at(-1);
-    const text = messageText(command?.message).trim();
-    if (!/^\/goal(?:\s|$)/i.test(text)
-      || /^\/goal\s+(?:stop|cancel|status)(?:\s|$)/i.test(text)) continue;
-    const timestamp = Number(command.message?.create_time) * 1000;
-    // Only messages near this work's creation qualify. The objective may have
-    // been rewritten by ChatGPT, so comparing its wording is not reliable.
-    if (!startedAt || !Number.isFinite(timestamp) || timestamp < startedAt - 120_000
-      || timestamp > startedAt + 15_000) continue;
-    const messageId = String(command.message?.id || '').trim();
-    if (!messageId) continue;
+    const updated = typeof summary.update_time === 'number' ? summary.update_time * 1_000 : Date.parse(summary.update_time || '');
+    if (!correlatedId && Number.isFinite(updated) && updated < startedAt - 120_000) continue;
+    let evidence;
+    let cached = false;
+    if (correlatedId) evidence = goalCommandEvidence(await getConversation(id, deps));
+    else {
+      const result = await discoveryRead(id, async shared => goalCommandEvidence(await getConversation(id, shared)), deps);
+      evidence = result.value;
+      cached = result.cached;
+    }
+    const match = goalEvidenceForWork(evidence, deps, correlatedId);
+    // Only the initiating turn near work creation qualifies; later user turns
+    // cannot displace a verified explicit-goal receipt on the active branch.
+    if (!match || !recentGoalEvidence(match, startedAt)) continue;
+    const messageId = match.messageId;
+    if (cached) {
+      // Cached catalog evidence reduces scans, but cannot authorize linking.
+      // Reverify the exact branch and receipt in a fresh, uncached read.
+      const fresh = goalEvidenceForWork(goalCommandEvidence(await getConversation(id, deps)), deps, correlatedId);
+      if (!fresh || fresh.messageId !== messageId || !recentGoalEvidence(fresh, startedAt)) continue;
+    }
     candidates.push({ conversationId: id, messageId });
     if (candidates.length > 1) return { state: 'ambiguous' };
   }
   return candidates.length ? { state: 'matched', ...candidates[0] } : { state: 'absent' };
+}
+
+function recentGoalEvidence(evidence, startedAt) {
+  return startedAt && evidence.messageId && Number.isFinite(evidence.timestamp)
+    && evidence.timestamp >= startedAt - 120_000 && evidence.timestamp <= startedAt + 15_000;
+}
+
+function goalEvidenceForWork(evidence, deps, correlatedId) {
+  if (deps.explicitGoal) {
+    // Explicit activation is authorized by an exact tool receipt, not by the
+    // user's wording. Never let a known conversation ID bypass this proof.
+    return evidence.receipts.find(receipt => receipt.workId === deps.workId) || null;
+  }
+  if (!evidence.requested || (deps.requireWorkReceipt && !correlatedId && !evidence.workIds.includes(deps.workId))) return null;
+  return evidence;
+}
+
+function goalCommandEvidence(conversation) {
+  const messages = activeMessages(conversation);
+  const command = messages.filter(n => n.message?.author?.role === 'user').at(-1);
+  const text = messageText(command?.message).trim();
+  const receipts = [];
+  let user = null;
+  for (const node of messages) {
+    if (node.message?.author?.role === 'user') user = node.message;
+    if (node.message?.author?.role !== 'tool' || !user) continue;
+    for (const workId of node.message?.content?.workIds || []) {
+      receipts.push({ workId, timestamp: Number(user.create_time) * 1_000,
+        messageId: String(user.id || '').trim() });
+    }
+  }
+  return {
+    requested: /^\/goal(?:\s|$)/i.test(text) && !/^\/goal\s+(?:stop|cancel|status)(?:\s|$)/i.test(text),
+    timestamp: Number(command?.message?.create_time) * 1_000,
+    messageId: String(command?.message?.id || '').trim(),
+    workIds: [...new Set(messages.slice(messages.indexOf(command) + 1)
+      .filter(node => node.message?.author?.role === 'tool')
+      .flatMap(node => node.message?.content?.workIds || []))],
+    receipts
+  };
 }
 
 async function findGoalConversation(objective, deps = {}) {
@@ -207,99 +363,133 @@ async function stopStalledTurn(id, expectedNodeId, deps = {}) {
   if (!expectedNodeId) throw new Error('A confirmed stalled assistant node is required.');
   const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
   if (!native) throw new Error('Stalled ChatGPT turn requires the signed-in desktop browser to stop it safely.');
-  const result = await native({ action: 'stop_stalled', conversationId: id, expectedNodeId }, { signal: deps.signal });
+  const result = await native({ action: 'stop_stalled', conversationId: id, expectedNodeId,
+    ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}) }, { signal: deps.signal });
+  if (result?.status === 429) throw rememberRateLimit(Object.assign(
+    protocolFailure('/backend-api/conversation/' + id, 429, result.retryAfterMs),
+    { notSent: true, deferred: result.deferred === true }), deps);
   if (result?.ok && result.stopped === true) return true;
   if (result?.ok && result.alreadyFinished === true) return false;
-  throw new Error('Stalled ChatGPT response could not be stopped and verified; Goal Mode paused without sending.');
+  throw Object.assign(new Error('Stalled ChatGPT response could not be stopped and verified.'), {
+    notSent: true, deferred: result?.busy === true
+  });
+}
+
+function goalContinuationPrompt(workId, objective) {
+  return 'Continue goal ' + workId + ': ' + objective + '. Inspect this exact Rel.AI work_id, operation receipts and task state first. Do not repeat completed changes or operations. If finished, explicitly close that work session. If blocked or awaiting user input, explain the blocker instead of retrying.';
 }
 
 async function sendContinue(id, parentMessageId, deps = {}) {
   assertConversationId(id);
   if (!parentMessageId) throw new Error('A confirmed parent message is required.');
   if (!deps.workId || !deps.objective) throw new Error('Goal continuation requires the exact work ID and objective.');
-  const prompt = 'Continue goal ' + deps.workId + ': ' + deps.objective + '. Inspect this exact Rel.AI work_id, operation receipts and task state first. Do not repeat completed changes or operations. If finished, explicitly close that work session. If blocked or awaiting user input, explain the blocker instead of retrying.';
+  const prompt = goalContinuationPrompt(deps.workId, deps.objective);
   const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
   if (native) {
-    const result = await native({ action: 'continue', conversationId: id, parentMessageId, expectedNodeId: deps.nodeId, prompt }, { signal: deps.signal });
+    const scope = accountScope(deps);
+    if (scope.cooldownUntil > Date.now()) throw Object.assign(rateLimitError(scope.cooldownUntil), { notSent: true });
+    let result;
+    try {
+      result = await native({ action: 'continue', conversationId: id, parentMessageId, expectedNodeId: deps.nodeId, prompt,
+        ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}) }, { signal: deps.signal });
+    } catch (error) {
+      if (error?.code === 'GOAL_ACCOUNT_UNAVAILABLE') error.notSent = true;
+      if (error?.status === 429) throw rememberRateLimit(error, deps);
+      throw error;
+    }
+    if (result?.status === 429) throw rememberRateLimit(Object.assign(
+      protocolFailure('/backend-api/conversation/' + id, 429, result.retryAfterMs),
+      { notSent: result.notSent === true, deferred: result.deferred === true }), deps);
     if (result?.ok && result.accepted === true) return { accepted: true };
+    const failure = message => Object.assign(new Error(message), {
+      notSent: result?.notSent === true, deferred: result?.busy === true
+    });
     const stage = ['navigation', 'composer', 'preflight', 'draft', 'send_button', 'submit', 'readback']
       .includes(result?.stage) ? ` (${result.stage})` : '';
-    if (result?.needsUser) {
+    if (result?.busy) throw failure('Goal browser sender is busy; continuation deferred.');
+    if (result?.stale) throw failure('ChatGPT conversation changed before sending.');
+    if (result?.needsUser || result?.notSent) {
       const reason = result.reason === 'text_mismatch' ? 'Composer text could not be verified'
         : result.reason === 'send_unavailable' ? 'Send button was unavailable'
           : result.reason === 'verification' ? 'Browser verification is required'
             : result.reason === 'conversation_unavailable' ? 'The browser did not reach the linked ChatGPT conversation'
               : result.reason === 'composer_unavailable' ? 'The ChatGPT composer did not become ready'
                 : result.reason === 'focus_unavailable' ? 'The ChatGPT composer could not receive input'
-            : 'ChatGPT needs attention in the opened browser';
-      throw new Error(`${reason}${stage}; Goal Mode paused without retrying.`);
+            : 'ChatGPT needs attention';
+      throw failure(`${reason}${stage}; continuation was not sent.`);
     }
-    if (result?.stale) throw new Error('ChatGPT conversation changed before sending. Goal Mode paused without retrying.');
-    throw new Error(`ChatGPT browser send could not be verified${stage}; Goal Mode paused without retrying.`);
+    throw failure(`ChatGPT browser send could not be verified${stage}; checking the receipt without resending.`);
   }
   // Non-desktop development transport retains the fail-closed protocol flow.
-  const messageId = randomUUID();
-  // The chat-requirements token must be available before conversation preparation.
-  // Never attempt to solve proof-of-work, Turnstile, or other interactive challenges.
-  const requirementPrepare = await requestChatgpt('/backend-api/sentinel/chat-requirements/prepare', {
-    method: 'POST', body: {}, signal: deps.signal
-  }, deps);
-  const prepareChallenge = requiredChatgptChallenges(requirementPrepare, 'prepare');
-  if (prepareChallenge) throw prepareChallenge;
-  if (typeof requirementPrepare?.prepare_token !== 'string' || !requirementPrepare.prepare_token) {
-    throw new Error('ChatGPT chat requirements preparation did not return a prepare token.');
-  }
-  const requirement = await requestChatgpt('/backend-api/sentinel/chat-requirements/finalize', {
-    method: 'POST', body: { prepare_token: requirementPrepare.prepare_token }, signal: deps.signal
-  }, deps);
-  const finalizeChallenge = requiredChatgptChallenges(requirement, 'finalize');
-  if (finalizeChallenge) throw finalizeChallenge;
-  if (typeof requirement?.token !== 'string' || !requirement.token) {
-    throw new Error('ChatGPT requirements finalization returned no token; Goal Mode paused.');
-  }
-  const prep = await requestChatgpt('/backend-api/f/conversation/prepare', {
-    method: 'POST',
-    headers: { 'openai-sentinel-chat-requirements-token': requirement.token },
-    body: {
-      conversation_id: id, model: 'auto', message_id: messageId,
-      timezone_offset_min: new Date().getTimezoneOffset(), supports_buffering: true,
-      client_prepare_state: 'none', conversation_mode: { kind: 'primary_assistant' }
-    }, signal: deps.signal
-  }, deps);
-  const conduit = prep?.conduit_token || prep?.token;
-  if (!conduit || typeof conduit !== 'string') throw new Error('ChatGPT preparation did not provide a conduit token.');
-  const response = await requestChatgpt('/backend-api/f/conversation', {
-    method: 'POST', raw: true, signal: deps.signal,
-    headers: { accept: 'text/event-stream', 'x-conduit-token': conduit,
-      'openai-sentinel-chat-requirements-token': requirement.token },
-    body: {
-      action: 'next', conversation_id: id, parent_message_id: parentMessageId,
-      client_prepare_state: 'success', model: 'auto', supports_buffering: true,
-      messages: [{ id: messageId, author: { role: 'user' },
-        content: { content_type: 'text', parts: [prompt] } }]
+  let submitted = false;
+  try {
+    const messageId = randomUUID();
+    // The chat-requirements token must be available before conversation preparation.
+    // Never attempt to solve proof-of-work, Turnstile, or other interactive challenges.
+    const requirementPrepare = await requestChatgpt('/backend-api/sentinel/chat-requirements/prepare', {
+      method: 'POST', body: {}, signal: deps.signal
+    }, deps);
+    const prepareChallenge = requiredChatgptChallenges(requirementPrepare, 'prepare');
+    if (prepareChallenge) throw prepareChallenge;
+    if (typeof requirementPrepare?.prepare_token !== 'string' || !requirementPrepare.prepare_token) {
+      throw new Error('ChatGPT chat requirements preparation did not return a prepare token.');
     }
-  }, deps);
-  // Consume rather than cancel the response stream. Some web turns outlive the
-  // initial SSE handoff; buffering full model output would exhaust app memory.
-  // An interrupted stream is uncertain and is never automatically resent.
-  let observedEvent = false;
-  if (response.body?.getReader) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let last = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = last + decoder.decode(value, { stream: true });
-      if (chunk.includes('data:') || chunk.includes('event:')) observedEvent = true;
-      last = chunk.slice(-8);
+    const requirement = await requestChatgpt('/backend-api/sentinel/chat-requirements/finalize', {
+      method: 'POST', body: { prepare_token: requirementPrepare.prepare_token }, signal: deps.signal
+    }, deps);
+    const finalizeChallenge = requiredChatgptChallenges(requirement, 'finalize');
+    if (finalizeChallenge) throw finalizeChallenge;
+    if (typeof requirement?.token !== 'string' || !requirement.token) {
+      throw new Error('ChatGPT requirements finalization returned no token; Goal Mode paused.');
     }
-  } else {
-    const stream = await response.text(); // Fixture adapter only.
-    observedEvent = stream.includes('data:') || stream.includes('event:');
+    const prep = await requestChatgpt('/backend-api/f/conversation/prepare', {
+      method: 'POST',
+      headers: { 'openai-sentinel-chat-requirements-token': requirement.token },
+      body: {
+        conversation_id: id, model: 'auto', message_id: messageId,
+        timezone_offset_min: new Date().getTimezoneOffset(), supports_buffering: true,
+        client_prepare_state: 'none', conversation_mode: { kind: 'primary_assistant' }
+      }, signal: deps.signal
+    }, deps);
+    const conduit = prep?.conduit_token || prep?.token;
+    if (!conduit || typeof conduit !== 'string') throw new Error('ChatGPT preparation did not provide a conduit token.');
+    submitted = true;
+    const response = await requestChatgpt('/backend-api/f/conversation', {
+      method: 'POST', raw: true, signal: deps.signal,
+      headers: { accept: 'text/event-stream', 'x-conduit-token': conduit,
+        'openai-sentinel-chat-requirements-token': requirement.token },
+      body: {
+        action: 'next', conversation_id: id, parent_message_id: parentMessageId,
+        client_prepare_state: 'success', model: 'auto', supports_buffering: true,
+        messages: [{ id: messageId, author: { role: 'user' },
+          content: { content_type: 'text', parts: [prompt] } }]
+      }
+    }, deps);
+    // Consume rather than cancel the response stream. Some web turns outlive the
+    // initial SSE handoff; buffering full model output would exhaust app memory.
+    // An interrupted stream is uncertain and is never automatically resent.
+    let observedEvent = false;
+    if (response.body?.getReader) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let last = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = last + decoder.decode(value, { stream: true });
+        if (chunk.includes('data:') || chunk.includes('event:')) observedEvent = true;
+        last = chunk.slice(-8);
+      }
+    } else {
+      const stream = await response.text(); // Fixture adapter only.
+      observedEvent = stream.includes('data:') || stream.includes('event:');
+    }
+    if (!observedEvent) throw new Error('ChatGPT did not return the expected conversation event stream.');
+    return { accepted: true };
+  } catch (error) {
+    if (!submitted && error instanceof Error) error.notSent = true;
+    throw error;
   }
-  if (!observedEvent) throw new Error('ChatGPT did not return the expected conversation event stream.');
-  return { accepted: true };
 }
 
-export { configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue };
+export { configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };

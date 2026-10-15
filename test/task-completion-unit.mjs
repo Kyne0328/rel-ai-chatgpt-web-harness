@@ -9,6 +9,8 @@ import { flushTaskHistoryPersistence, readTaskHistorySessionRecord, withTaskHist
 import { startFallbackExecution, resetFallbackExecutions } from "../src/mcp/fallbackExecutions.js";
 import { principalFingerprint } from "../src/mcp/principal.ts";
 import { toolResult } from "../src/mcp/results.js";
+import { invokeRelaiTool } from '../src/mcp/toolInvocation.js';
+import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { readSessionPolicy } from "../src/policyResolver.js";
 import { readTaskIntegrity } from '../src/taskIntegrity.ts';
 import { taskEphemeralDirectory } from '../src/taskEphemeral.ts';
@@ -130,6 +132,18 @@ try {
   assert.equal(readOnlyCompletion.validationStatus, 'not_required');
   assert.equal(readOnlyCompletion.completionKnown, true);
   assert.deepEqual(readOnlyCompletion.changedFiles || [], [], 'read-only completion must not claim ambient repository changes');
+
+  const duplicateReadArgs = { action: 'finish', work_id: unvalidatedTask, summary: 'Confirm existing completion.' };
+  const duplicateReadCompletion = await invokeRelaiTool({
+    config: readConfig(), name: 'relai_work', args: duplicateReadArgs,
+    context: { publicHttpOnly: true, principal: 'local:trusted' },
+    validateOutput: output => validateToolOutput(readConfig(), 'relai_work', duplicateReadArgs, output)
+  });
+  assert.equal(duplicateReadCompletion.isError, false, 'a duplicate finish without validation must pass MCP response validation');
+  assert.equal(duplicateReadCompletion.structuredContent.completionKnown, true);
+  assert.equal(duplicateReadCompletion.structuredContent.duplicate, true);
+  assert.equal(duplicateReadCompletion.structuredContent.validationStatus, 'not_required');
+  assert.equal(duplicateReadCompletion.structuredContent.validationAt, '', 'completion time must not be presented as validation evidence');
 
   // Reading a retained result must not reopen or revise a terminal task.
   let retainedRuns = 0;
@@ -498,6 +512,8 @@ try {
   assert.equal(duplicateCompletion.work_id, taskId);
   assert.equal(duplicateCompletion.duplicate, true);
   assert.equal(duplicateCompletion.summary, 'Implemented and validated the requested code changes.');
+  assert.equal(duplicateCompletion.validationAt, completion.validationAt, 'duplicate completion must preserve the original validation evidence');
+  await validateToolOutput(readConfig(), 'relai_work', { action: 'finish', work_id: taskId, summary: 'Confirm existing completion.' }, duplicateCompletion);
   const completedTasksAfterDuplicate = readLocalUsageSnapshot(readConfig(), analyticsMonth).taskIntents.reduce((sum, row) => sum + Number(row.tasks || 0), 0);
   assert.equal(completedTasksAfterDuplicate, completedTasksAfter, 'duplicate completion must not inflate work-type analytics');
 

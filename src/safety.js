@@ -131,42 +131,14 @@ function validateRelativePath(relativePath, label = "Path", options = {}) {
   return value;
 }
 
-// Workspace roots are resolved once per tool call at minimum, and once per path for
-// batch reads and batch edits. The root itself is a stable directory for the life of
-// the process, so its realpath is memoized; the *candidate* path is still resolved
-// every time, which is what actually detects a symlink escaping the workspace.
-const REAL_ROOT_CACHE_LIMIT = 64;
-const realRootCache = new Map();
-
+// Any ancestor can be a retargeted junction, even when the leaf is an ordinary
+// directory. Resolve the current physical root before authorization and I/O.
 function realRootOf(root) {
-  const key = String(root);
-  // A symlink or Windows junction can be retargeted while the server is running.
-  // Never cache those roots: retaining the old realpath would make later operations
-  // continue against a repository the configured path no longer points to.
-  const cacheable = rootCanBeCached(key);
-  if (cacheable) {
-    const cached = realRootCache.get(key);
-    if (cached !== undefined) return cached;
-  }
-  const resolved = fs.realpathSync(key);
-  if (!cacheable) return resolved;
-  if (realRootCache.size >= REAL_ROOT_CACHE_LIMIT) {
-    realRootCache.delete(realRootCache.keys().next().value);
-  }
-  realRootCache.set(key, resolved);
-  return resolved;
-}
-
-function rootCanBeCached(root) {
-  try {
-    return !fs.lstatSync(root).isSymbolicLink();
-  } catch {
-    return false;
-  }
+  return fs.realpathSync.native(String(root));
 }
 
 function clearRealRootCache() {
-  realRootCache.clear();
+  // Retained for callers invalidating config; root resolution is always fresh.
 }
 
 function resolveSafePath(root, relativePath, options = {}) {

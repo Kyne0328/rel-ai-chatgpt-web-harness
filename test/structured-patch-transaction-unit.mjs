@@ -6,7 +6,8 @@ import path from 'node:path';
 import {
   beginStructuredPatchTransaction,
   completeStructuredPatchTransaction,
-  recoverStructuredPatchTransaction
+  recoverStructuredPatchTransaction,
+  inspectStructuredPatchTransaction
 } from '../src/structuredPatchTransaction.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-structured-patch-tx-'));
@@ -56,6 +57,36 @@ try {
   completeStructuredPatchTransaction(config, workspace);
   assert.equal(recoverStructuredPatchTransaction(config, workspace).recovered, false);
   assert.equal(fs.readFileSync(existing, 'utf8'), 'committed\n');
+
+  const nested = { alias: 'nested', path: path.join(workspacePath, 'nested') };
+  const independent = { alias: 'independent', path: path.join(root, 'independent') };
+  fs.mkdirSync(nested.path);
+  fs.mkdirSync(independent.path);
+  const nestedFile = path.join(nested.path, 'file.txt');
+  fs.writeFileSync(nestedFile, 'before');
+  beginStructuredPatchTransaction(config, workspace,
+    [{ path: 'nested/file.txt', exists: true, content: Buffer.from('before') }],
+    [{ path: 'nested/file.txt', exists: true, text: 'partial' }]);
+  fs.writeFileSync(nestedFile, 'partial');
+  assert.throws(() => recoverStructuredPatchTransaction(config, nested),
+    error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING',
+    'nested roots must not bypass their parent recovery record');
+  assert.throws(() => inspectStructuredPatchTransaction(config, nested),
+    error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING');
+  assert.throws(() => beginStructuredPatchTransaction(config, nested, []),
+    error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING');
+  assert.equal(recoverStructuredPatchTransaction(config, independent).recovered, false);
+  assert.equal(fs.readFileSync(nestedFile, 'utf8'), 'partial');
+  assert.equal(recoverStructuredPatchTransaction(config, workspace).recovered, true);
+  assert.equal(fs.readFileSync(nestedFile, 'utf8'), 'before');
+  beginStructuredPatchTransaction(config, nested,
+    [{ path: 'file.txt', exists: true, content: Buffer.from('before') }],
+    [{ path: 'file.txt', exists: true, text: 'partial' }]);
+  fs.writeFileSync(nestedFile, 'partial');
+  assert.throws(() => recoverStructuredPatchTransaction(config, workspace),
+    error => error.code === 'WORKSPACE_EDIT_RECOVERY_PENDING',
+    'parent roots must not bypass their nested recovery record');
+  recoverStructuredPatchTransaction(config, nested);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

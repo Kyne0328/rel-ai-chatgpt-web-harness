@@ -42,7 +42,8 @@ function createBrowserSurfaceHost(options = {}) {
     onEvent = () => {},
     onStateChange = () => {},
     onError = () => {},
-    goalLoginProfileDirectory = ''
+    goalLoginProfileDirectory = '',
+    getGoalConnections = null
   } = options;
   if (typeof WebContentsView !== 'function') throw new TypeError('Embedded browser requires Electron WebContentsView.');
   if (!session || typeof session.fromPartition !== 'function' || typeof session.fromPath !== 'function') {
@@ -59,8 +60,13 @@ function createBrowserSurfaceHost(options = {}) {
   let attached = null;
   let closingAll = null;
   const goalProfileDirectory = goalLoginProfileDirectory ? path.resolve(goalLoginProfileDirectory) : '';
-  let goalLoginSessionId = '';
-  let goalLoginOpening = null;
+  const goalLoginSessionIds = new Map();
+  const goalLoginOpenings = new Map();
+  const goalProtocolAuth = new Map();
+  const goalProtocolLimits = new Map();
+  const confirmedGoalLogins = new Set();
+  const goalWindowAccounts = new Map();
+  const goalAccountsDirectory = goalProfileDirectory ? path.join(path.dirname(goalProfileDirectory), 'goal-chatgpt-accounts') : '';
   const goalContinuationWindows = new Set();
   let goalContinuationInFlight = false;
 
@@ -423,7 +429,8 @@ function createBrowserSurfaceHost(options = {}) {
         ]);
       }
       sessions.delete(nativeSessionId);
-      if (goalLoginSessionId === nativeSessionId) goalLoginSessionId = '';
+      for (const [account, id] of goalLoginSessionIds) if (id === nativeSessionId) goalLoginSessionIds.delete(account);
+      confirmedGoalLogins.delete(nativeSessionId);
       if (pinnedSessionId === nativeSessionId) pinnedSessionId = '';
       if (activeSessionId === nativeSessionId) activeSessionId = sessions.keys().next().value || '';
       if (options.emit === true && !closingAll) {
@@ -457,7 +464,11 @@ function createBrowserSurfaceHost(options = {}) {
 
   async function savedProfileDirectories() {
     const configured = await Promise.resolve(listPersistentProfiles());
-    return [...new Set([...(Array.isArray(configured) ? configured : []), ...(goalProfileDirectory ? [goalProfileDirectory] : [])])];
+    const accountProfiles = goalAccountsDirectory
+      ? (await fs.promises.readdir(goalAccountsDirectory, { withFileTypes: true }).catch(() => []))
+        .filter(entry => entry.isDirectory() && /^[a-f0-9]{64}$/.test(entry.name)).map(entry => path.join(goalAccountsDirectory, entry.name)) : [];
+    return [...new Set([...(Array.isArray(configured) ? configured : []), ...accountProfiles,
+      ...(goalProfileDirectory ? [goalProfileDirectory] : [])])];
   }
 
   async function listSavedSites() {
@@ -533,68 +544,105 @@ function createBrowserSurfaceHost(options = {}) {
   }
 
   async function clearNativeProfileData(directory, origin = '') {
-    await flushPersistentSites(directory);
-    const browserSession = session.fromPath(directory);
-    await browserSession.clearStorageData(origin ? { origin } : undefined);
-    if (!origin) {
-      await browserSession.clearCache();
-      await browserSession.clearAuthCache?.();
+    goalProtocolAuth.delete(directory);
+    try {
+      await flushPersistentSites(directory);
+      const browserSession = session.fromPath(directory);
+      await browserSession.clearStorageData(origin ? { origin } : undefined);
+      if (!origin) {
+        await browserSession.clearCache();
+        await browserSession.clearAuthCache?.();
+      }
+    } finally { goalProtocolAuth.delete(directory); }
+  }
+
+  function goalAccount(tunnelId = '') {
+    if (!goalProfileDirectory) throw Object.assign(new Error('Goal Mode sign-in is unavailable.'), { code: 'GOAL_ACCOUNT_UNAVAILABLE' });
+    if (!getGoalConnections) return { tunnelId: '', directory: goalProfileDirectory };
+    const connection = getGoalConnections().find(item => item.tunnelId === tunnelId && item.enabled !== false);
+    if (!connection || !/^tunnel_[A-Za-z0-9_-]{8,200}$/.test(tunnelId)) {
+      throw Object.assign(new Error('Select the configured tunnel for this ChatGPT Goal Mode account.'), { code: 'GOAL_ACCOUNT_UNAVAILABLE' });
+    }
+    return { tunnelId, label: connection.label, enabled: connection.enabled !== false,
+      directory: path.join(goalAccountsDirectory, crypto.createHash('sha256').update(tunnelId).digest('hex')) };
+  }
+
+  async function startGoalLogin(input = {}) {
+    const account = goalAccount(String(input.tunnelId || ''));
+    if (goalLoginOpenings.has(account.tunnelId)) return goalLoginOpenings.get(account.tunnelId);
+    const opening = openGoalLogin(account);
+    goalLoginOpenings.set(account.tunnelId, opening);
+    try { return await opening; } finally {
+      if (goalLoginOpenings.get(account.tunnelId) === opening) goalLoginOpenings.delete(account.tunnelId);
     }
   }
 
-  async function startGoalLogin() {
-    if (goalLoginOpening) return goalLoginOpening;
-    const opening = openGoalLogin();
-    goalLoginOpening = opening;
-    try { return await opening; } finally { if (goalLoginOpening === opening) goalLoginOpening = null; }
-  }
-
-  async function openGoalLogin() {
-    if (!goalProfileDirectory) throw new Error('Goal Mode sign-in is not available in this desktop environment.');
-    const existing = sessions.get(goalLoginSessionId);
+  async function openGoalLogin(account) {
+    const existing = sessions.get(goalLoginSessionIds.get(account.tunnelId));
     if (existing && !existing.closePromise) {
+      confirmedGoalLogins.delete(existing.nativeSessionId);
       await setControlForSession(existing.nativeSessionId, 'user', 'goal_login');
-      return { ok: true, browserOpen: true };
+      return { ok: true, browserOpen: true, ...(account.tunnelId ? { tunnelId: account.tunnelId } : {}) };
     }
-    const started = await startSession({ profileDirectory: goalProfileDirectory });
-    goalLoginSessionId = started.nativeSessionId;
+    const started = await startSession({ profileDirectory: account.directory });
+    goalLoginSessionIds.set(account.tunnelId, started.nativeSessionId);
     try {
       const opened = await openPage({ nativeSessionId: started.nativeSessionId });
       const record = requireSession(started.nativeSessionId);
       const page = requirePage(record, opened.nativePageId);
       await navigatePage(record, page, { url: 'https://chatgpt.com/' });
       await setControlForSession(started.nativeSessionId, 'user', 'goal_login');
-      return { ok: true, browserOpen: true };
+      return { ok: true, browserOpen: true, ...(account.tunnelId ? { tunnelId: account.tunnelId } : {}) };
     } catch (error) {
       await closeSession(started.nativeSessionId, { emit: false }).catch(() => {});
       throw error;
     }
   }
 
-  async function getGoalLoginStatus() {
+  async function getGoalLoginStatus(input = {}) {
     if (!goalProfileDirectory) return { ok: true, available: false, state: 'unavailable' };
-    const browserOpen = sessions.has(goalLoginSessionId);
-    const browserSession = session.fromPath(goalProfileDirectory);
+    if (getGoalConnections && !input.tunnelId) {
+      const connections = await Promise.all(getGoalConnections().map(connection => connection.enabled === false
+        ? { ...connection, available: false, state: 'disabled', browserOpen: false }
+        : getGoalLoginStatus({ tunnelId: connection.tunnelId })));
+      return { ok: true, available: true, connections };
+    }
+    const disabled = getGoalConnections?.().find(item => item.tunnelId === input.tunnelId && item.enabled === false);
+    if (disabled) return { ...disabled, ok: true, available: false, state: 'disabled', browserOpen: false };
+    const account = goalAccount(String(input.tunnelId || ''));
+    const loginId = goalLoginSessionIds.get(account.tunnelId);
+    const browserOpen = sessions.has(loginId);
+    const browserSession = session.fromPath(account.directory);
+    const metadata = { ok: true, available: true, browserOpen,
+      ...(account.tunnelId ? { tunnelId: account.tunnelId, label: account.label, enabled: account.enabled } : {}) };
     try {
-      const response = await browserSession.fetch('https://chatgpt.com/api/auth/session', {
-        credentials: 'include', redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(10_000)
-      });
-      if (!response.ok) return { ok: true, available: true, browserOpen, state: 'unverified' };
-      const contentLength = Number(response.headers?.get?.('content-length') || 0);
-      if (contentLength > 64 * 1024) return { ok: true, available: true, browserOpen, state: 'unverified' };
-      const data = await readGoalJson(response, 64 * 1024);
-      const signedIn = Boolean(data?.user && typeof data?.accessToken === 'string' && data.accessToken.length > 0);
-      return { ok: true, available: true, browserOpen, state: signedIn ? 'signed_in' : 'sign_in_required' };
+      const rateLimit = goalReadAdmission(account, true);
+      if (rateLimit) return { ...metadata, state: 'unverified', retryAfterMs: rateLimit.retryAfterMs };
+      const auth = await readGoalProtocolAuth(account, browserSession, input.refresh === true);
+      if (!auth.ok) {
+        rememberGoalReadLimit(account, auth);
+        if (auth.status === 401) confirmedGoalLogins.delete(loginId);
+        return { ...metadata, state: auth.status === 401 ? 'sign_in_required' : 'unverified',
+          ...(auth.retryAfterMs ? { retryAfterMs: auth.retryAfterMs } : {}) };
+      }
+      if (account.tunnelId && (input.refresh === true || (browserOpen && loginId && !confirmedGoalLogins.has(loginId)))) {
+        if (loginId) confirmedGoalLogins.add(loginId);
+        onEvent({ resource: 'goal', type: 'account_signed_in', tunnelId: account.tunnelId });
+      }
+      return { ...metadata, state: 'signed_in', account: auth.account };
     } catch {
-      return { ok: true, available: true, browserOpen, state: 'unverified' };
+      return { ...metadata, state: 'unverified' };
     }
   }
 
   // Only the trusted local service can request these fixed ChatGPT endpoints.
   // Account credentials never cross the native IPC boundary or enter task logs.
   // One signed-in ChatGPT page per continuation. Hidden during normal operation;
-  // reveal it for human verification or an uncertain submission. Never retry a click.
+  // Failed attempts stay hidden. The service owns retries and receipt reconciliation.
   async function goalBrowserContinue(payload = {}, options = {}) {
+    const account = goalAccount(String(payload.tunnelId || ''));
+    const rateLimit = goalReadAdmission(account);
+    if (rateLimit) return rateLimit;
     const id = String(payload.conversationId || '');
     const expectedNode = String(payload.expectedNodeId || '');
     const parentMessageId = String(payload.parentMessageId || '');
@@ -606,16 +654,17 @@ function createBrowserSurfaceHost(options = {}) {
     if (!goalProfileDirectory || typeof BrowserWindow !== 'function') {
       throw new Error('Goal Mode background browser is not available.');
     }
-    if (goalContinuationInFlight) throw new Error('Another Goal Mode browser continuation is in progress.');
-    goalContinuationInFlight = true;
-    const browserSession = session.fromPath(goalProfileDirectory);
+    if (goalContinuationInFlight) return { ok: false, busy: true, notSent: true };
+    const browserSession = session.fromPath(account.directory);
     const win = new BrowserWindow({
       width: 1100, height: 800, show: false,
       webPreferences: { session: browserSession, nodeIntegration: false, contextIsolation: true,
         sandbox: true, webSecurity: true, backgroundThrottling: false }
     });
+    goalContinuationInFlight = true;
     goalContinuationWindows.add(win);
-    win.once('closed', () => goalContinuationWindows.delete(win));
+    goalWindowAccounts.set(win, account.tunnelId);
+    win.once('closed', () => { goalContinuationWindows.delete(win); goalWindowAccounts.delete(win); });
     let keepPage = false;
     let clicked = false;
     let stage = 'navigation';
@@ -624,13 +673,33 @@ function createBrowserSurfaceHost(options = {}) {
     const chatUrl = 'https://chatgpt.com/c/' + id;
     const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
     const fetchChat = async () => {
-      const response = await goalProtocolRequest({ method: 'GET', path: chatPath, projectConversation: true }, { signal });
-      if (!response.ok) throw new Error('ChatGPT conversation is not available to the signed-in account.');
+      const response = await goalProtocolRequest({ method: 'GET', path: chatPath, projectConversation: true,
+        tunnelId: account.tunnelId }, { signal });
+      if (!response.ok) throw Object.assign(new Error('ChatGPT conversation is not available to the signed-in account.'),
+        { status: response.status, retryAfterMs: response.retryAfterMs, deferred: response.deferred });
       return response.data;
     };
-    const reveal = () => {
+    const retainPage = () => {
+      if (keepPage) return;
       keepPage = true;
-      if (!win.isDestroyed?.()) win.show();
+      let checking = false;
+      const startedAt = Date.now();
+      const timer = setInterval(async () => {
+        if (checking) return;
+        if (win.isDestroyed?.()) { clearInterval(timer); return; }
+        if (Date.now() - startedAt > 60 * 60_000) { clearInterval(timer); win.close(); return; }
+        checking = true;
+        try {
+          const current = await goalProtocolRequest({ method: 'GET', path: chatPath, projectConversation: true,
+            tunnelId: account.tunnelId });
+          if (current.ok && goalMessageExists(current.data, prompt, expectedNode) && goalAssistantSettled(current.data)) {
+            clearInterval(timer);
+            win.close();
+          }
+        } catch {} finally { checking = false; }
+      }, 5_000);
+      timer.unref?.();
+      win.once('closed', () => clearInterval(timer));
     };
     const stillOnChat = () => goalConversationMatches(win.webContents, id);
     try {
@@ -642,21 +711,20 @@ function createBrowserSurfaceHost(options = {}) {
       const readyUntil = Date.now() + 14_000;
       do {
         throwIfAborted(signal);
-        if (!stillOnChat()) { reveal(); return { ok: false, needsUser: true, stage: 'navigation', reason: 'conversation_unavailable' }; }
+        if (!stillOnChat()) return { ok: false, notSent: true, stage: 'navigation', reason: 'conversation_unavailable' };
         probe = await win.webContents.executeJavaScript(goalComposerExpression('probe'), true);
-        if (probe?.state === 'verification') { reveal(); return { ok: false, needsUser: true, stage, reason: 'verification' }; }
+        if (probe?.state === 'verification') return { ok: false, notSent: true, stage, reason: 'verification' };
         if (probe?.state === 'ready') break;
         await delay(450);
       } while (Date.now() < readyUntil);
       if (probe?.state !== 'ready') {
-        reveal();
-        return { ok: false, needsUser: true, stage, reason: 'composer_unavailable' };
+        return { ok: false, notSent: true, stage, reason: 'composer_unavailable' };
       }
       stage = 'preflight';
-      if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true };
+      if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true, notSent: true };
       stage = 'draft';
       const focused = await win.webContents.executeJavaScript(goalComposerExpression('focus'), true);
-      if (focused?.state !== 'focused') { reveal(); return { ok: false, needsUser: true, stage, reason: 'focus_unavailable' }; }
+      if (focused?.state !== 'focused') return { ok: false, notSent: true, stage, reason: 'focus_unavailable' };
       const debuggerApi = await attachedDebugger(win.webContents);
       // ChatGPT may restore an old unsent Goal Mode draft from this profile.
       // The exact conversation branch was checked above. Replace the focused
@@ -679,14 +747,13 @@ function createBrowserSurfaceHost(options = {}) {
         await delay(250);
       } while (Date.now() < sendUntil);
       if (send?.state !== 'send_ready' || !stillOnChat()) {
-        reveal();
-        return { ok: false, needsUser: true, stage,
+        return { ok: false, notSent: true, stage,
           reason: stillOnChat() && ['text_mismatch', 'send_unavailable', 'verification'].includes(send?.state)
             ? send.state : 'composer_unavailable' };
       }
       // User activity in another tab could have advanced the branch while loading.
-      if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true };
-      if (!stillOnChat()) { reveal(); return { ok: false, needsUser: true, stage: 'navigation', reason: 'conversation_unavailable' }; }
+      if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true, notSent: true };
+      if (!stillOnChat()) return { ok: false, notSent: true, stage: 'navigation', reason: 'conversation_unavailable' };
       throwIfAborted(signal);
       stage = 'submit';
       clicked = true; // Every outcome after this point is potentially committed.
@@ -704,42 +771,25 @@ function createBrowserSurfaceHost(options = {}) {
         throwIfAborted(signal);
         const current = await fetchChat();
         if (current.current_node !== expectedNode && goalMessageExists(current, prompt, expectedNode)) {
-          keepPage = true;
+          retainPage();
           // The page stays alive until its response completes; the protocol monitor
           // continues to enforce branch and task-activity checks independently.
-          let checking = false;
-          const startedAt = Date.now();
-          const timer = setInterval(async () => {
-            if (checking) return;
-            if (win.isDestroyed?.()) { clearInterval(timer); return; }
-            if (Date.now() - startedAt > 60 * 60_000) { clearInterval(timer); win.show(); return; }
-            checking = true;
-            try {
-              const current = await goalProtocolRequest({ method: 'GET', path: chatPath });
-              if (current.ok && goalMessageExists(current.data, prompt, expectedNode) && goalAssistantSettled(current.data)) {
-                clearInterval(timer);
-                win.close();
-              }
-            } catch {} finally { checking = false; }
-          }, 5_000);
-          timer.unref?.();
-          win.once('closed', () => clearInterval(timer));
           return { ok: true, accepted: true };
         }
         await delay(600);
       } while (Date.now() < verifyUntil);
-      reveal();
+      retainPage();
       return { ok: false, uncertain: true, stage };
     } catch (error) {
+      const rateLimit = error?.status === 429 ? { status: 429, retryAfterMs: error.retryAfterMs, deferred: error.deferred } : {};
       if (clicked) {
-        reveal();
-        return { ok: false, uncertain: true, stage };
+        retainPage();
+        return { ok: false, uncertain: true, stage, ...rateLimit };
       }
       if (signal?.aborted || error?.name === 'AbortError') throw error;
       // The site may change its composer or require account interaction.
-      // Surface the genuine browser rather than retrying with guessed selectors.
-      reveal();
-      return { ok: false, needsUser: true, stage };
+      // Report a confirmed pre-Send failure; never open a manual continuation window.
+      return { ok: false, notSent: true, stage, ...rateLimit };
     } finally {
       goalContinuationInFlight = false;
       if (!keepPage && !win.isDestroyed?.()) win.close();
@@ -747,31 +797,37 @@ function createBrowserSurfaceHost(options = {}) {
   }
 
   async function goalBrowserStopStalled(payload = {}, options = {}) {
+    const account = goalAccount(String(payload.tunnelId || ''));
+    const rateLimit = goalReadAdmission(account);
+    if (rateLimit) return rateLimit;
     const id = String(payload.conversationId || '');
     const expectedNode = String(payload.expectedNodeId || '');
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id) || !expectedNode
       || !goalProfileDirectory || typeof BrowserWindow !== 'function') {
       throw new Error('Goal Mode recovery requires an exact signed-in conversation.');
     }
-    if (goalContinuationInFlight) return { ok: false, needsUser: true };
-    goalContinuationInFlight = true;
+    if (goalContinuationInFlight) return { ok: false, busy: true, notSent: true };
     const chatUrl = 'https://chatgpt.com/c/' + id;
     const chatPath = '/backend-api/conversation/' + id;
     const existing = [...goalContinuationWindows].find(window => !window.isDestroyed?.()
-      && goalConversationMatches(window.webContents, id));
+      && goalWindowAccounts.get(window) === account.tunnelId && goalConversationMatches(window.webContents, id));
     const win = existing || new BrowserWindow({ width: 1100, height: 800, show: false,
-      webPreferences: { session: session.fromPath(goalProfileDirectory), nodeIntegration: false,
+      webPreferences: { session: session.fromPath(account.directory), nodeIntegration: false,
         contextIsolation: true, sandbox: true, webSecurity: true, backgroundThrottling: false } });
+    goalContinuationInFlight = true;
     if (!existing) {
       goalContinuationWindows.add(win);
-      win.once('closed', () => goalContinuationWindows.delete(win));
+      goalWindowAccounts.set(win, account.tunnelId);
+      win.once('closed', () => { goalContinuationWindows.delete(win); goalWindowAccounts.delete(win); });
     }
     let keepPage = false;
     let stage = 'navigation';
     const signal = options.signal;
     const read = async () => {
-      const response = await goalProtocolRequest({ method: 'GET', path: chatPath, projectConversation: true }, { signal });
-      if (!response.ok) throw new Error('ChatGPT conversation read failed.');
+      const response = await goalProtocolRequest({ method: 'GET', path: chatPath, projectConversation: true,
+        tunnelId: account.tunnelId }, { signal });
+      if (!response.ok) throw Object.assign(new Error('ChatGPT conversation read failed.'),
+        { status: response.status, retryAfterMs: response.retryAfterMs, deferred: response.deferred });
       return response.data;
     };
     try {
@@ -825,9 +881,9 @@ function createBrowserSurfaceHost(options = {}) {
       throw new Error('ChatGPT Stop did not confirm a settled assistant turn.');
     } catch (error) {
       if (signal?.aborted || error?.name === 'AbortError') throw error;
-      keepPage = true;
-      if (!win.isDestroyed?.()) win.show();
-      return { ok: false, needsUser: true, stage };
+      keepPage = Boolean(existing);
+      return { ok: false, notSent: true, stage,
+        ...(error?.status === 429 ? { status: 429, retryAfterMs: error.retryAfterMs, deferred: error.deferred } : {}) };
     } finally {
       goalContinuationInFlight = false;
       if (!keepPage && !win.isDestroyed?.()) win.close();
@@ -837,7 +893,7 @@ function createBrowserSurfaceHost(options = {}) {
   async function goalProtocolRequest(payload = {}, options = {}) {
     if (payload.action === 'stop_stalled') return goalBrowserStopStalled(payload, options);
     if (payload.action === 'continue') return goalBrowserContinue(payload, options);
-    if (!goalProfileDirectory) throw new Error('Goal Mode account is unavailable.');
+    const account = goalAccount(String(payload.tunnelId || ''));
     const method = String(payload.method || 'GET').toUpperCase();
     const requestedPath = String(payload.path || '');
     const target = new URL(requestedPath, 'https://chatgpt.com');
@@ -848,14 +904,15 @@ function createBrowserSurfaceHost(options = {}) {
         (method === 'POST' && writePath.test(target.pathname)))) {
       throw new Error('Unsupported Goal Mode protocol endpoint.');
     }
-    const browserSession = session.fromPath(goalProfileDirectory);
-    const auth = await browserSession.fetch('https://chatgpt.com/api/auth/session', {
-      credentials: 'include', redirect: 'error', signal: AbortSignal.timeout(10_000)
-    });
-    if (!auth.ok) return { ok: false, status: 401 };
-    const account = await readGoalJson(auth, 64 * 1024);
-    const bearer = typeof account?.accessToken === 'string' ? account.accessToken : '';
-    if (!account?.user || !bearer) return { ok: false, status: 401 };
+    const browserSession = session.fromPath(account.directory);
+    const rateLimit = goalReadAdmission(account, method === 'GET');
+    if (rateLimit) return rateLimit;
+    const auth = await readGoalProtocolAuth(account, browserSession);
+    if (!auth.ok) { rememberGoalReadLimit(account, auth); return auth; }
+    throwIfAborted(options.signal);
+    const admission = goalReadAdmission(account);
+    if (admission) return admission;
+    const bearer = auth.bearer;
     const requestHeaders = {
       accept: payload.raw === true ? 'text/event-stream' : 'application/json',
       authorization: `Bearer ${bearer}`,
@@ -873,7 +930,13 @@ function createBrowserSurfaceHost(options = {}) {
       ...(method === 'POST' ? { body: JSON.stringify(payload.body || {}) } : {}),
       signal: requestSignal
     });
-    if (!response.ok) { await response.body?.cancel?.().catch(() => {}); return { ok: false, status: response.status }; }
+    if (!response.ok) {
+      await response.body?.cancel?.().catch(() => {});
+      if (response.status === 401) goalProtocolAuth.delete(account.directory);
+      const failure = goalReadFailure(response);
+      rememberGoalReadLimit(account, failure);
+      return failure;
+    }
     if (payload.raw === true) {
       const reader = response.body?.getReader?.();
       if (!reader) return { ok: false, status: 502 };
@@ -916,6 +979,74 @@ function createBrowserSurfaceHost(options = {}) {
     return { ok: true, status: response.status, data: result };
   }
 
+  function goalReadFailure(response) {
+    const retryAfter = response.headers?.get?.('retry-after');
+    const seconds = retryAfter == null || retryAfter === '' ? NaN : Number(retryAfter);
+    const delay = Number.isFinite(seconds) ? seconds * 1_000 : Date.parse(retryAfter || '') - Date.now();
+    return { ok: false, status: response.status,
+      ...(response.status === 429 && Number.isFinite(delay)
+        ? { retryAfterMs: Math.max(0, Math.min(delay, 86_400_000)) } : {}) };
+  }
+
+  function goalReadAdmission(account, consume = false) {
+    if (clearingSavedData || clearingProfiles.has(profileDirectoryKey(account.directory))) {
+      return { ok: false, status: 401, notSent: true };
+    }
+    const now = Date.now();
+    let limit = goalProtocolLimits.get(account.directory);
+    if (!limit) { limit = { reads: [], until: 0, count: 0 }; goalProtocolLimits.set(account.directory, limit); }
+    if (limit.until > now) return { ok: false, status: 429, retryAfterMs: limit.until - now, deferred: true, notSent: true };
+    if (!consume) return null;
+    limit.reads = limit.reads.filter(time => time > now - 60_000);
+    if (limit.reads.length >= 30) return { ok: false, status: 429,
+      retryAfterMs: limit.reads[0] + 60_000 - now, deferred: true, notSent: true };
+    limit.reads.push(now);
+    return null;
+  }
+
+  function rememberGoalReadLimit(account, result) {
+    if (result.status !== 429 || result.deferred) return;
+    const limit = goalProtocolLimits.get(account.directory);
+    if (limit.until <= Date.now()) limit.count = Math.min(limit.count + 1, 4);
+    const delay = result.retryAfterMs > 0 ? Math.max(60_000, result.retryAfterMs) : 300_000 * 2 ** (limit.count - 1);
+    limit.until = Math.max(limit.until, Date.now() + delay);
+    result.retryAfterMs = limit.until - Date.now();
+  }
+
+  async function readGoalProtocolAuth(account, browserSession, refresh = false) {
+    const existing = goalProtocolAuth.get(account.directory);
+    if (existing?.promise) return existing.promise;
+    if (existing && !refresh && Date.now() < existing.expiresAt) return existing.result;
+    const record = { promise: null };
+    record.promise = (async () => {
+      try {
+        const response = await browserSession.fetch('https://chatgpt.com/api/auth/session', {
+          credentials: 'include', redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(10_000)
+        });
+        if (!response.ok) {
+          await response.body?.cancel?.().catch(() => {});
+          return goalReadFailure(response);
+        }
+        const data = await readGoalJson(response, 64 * 1024);
+        if (goalProtocolAuth.get(account.directory) !== record || clearingSavedData
+          || clearingProfiles.has(profileDirectoryKey(account.directory)) || !data?.user
+          || typeof data.accessToken !== 'string' || !data.accessToken) {
+          return { ok: false, status: 401 };
+        }
+        const result = { ok: true, bearer: data.accessToken,
+          account: { name: String(data.user.name || '').slice(0, 100), email: String(data.user.email || '').slice(0, 200) } };
+        const expires = Date.parse(data.expires || '');
+        goalProtocolAuth.set(account.directory, { result,
+          expiresAt: Math.min(Date.now() + 60_000, Number.isFinite(expires) ? expires : Infinity) });
+        return result;
+      } finally {
+        if (goalProtocolAuth.get(account.directory) === record) goalProtocolAuth.delete(account.directory);
+      }
+    })();
+    goalProtocolAuth.set(account.directory, record);
+    return record.promise;
+  }
+
   async function readGoalJson(response, maxBytes) {
     const advertised = Number(response.headers?.get?.('content-length') || 0);
     if (advertised > maxBytes) throw new Error('Goal Mode response exceeded its size limit.');
@@ -937,17 +1068,34 @@ function createBrowserSurfaceHost(options = {}) {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
 
-  async function signOutGoalLogin() {
-    if (!goalProfileDirectory) throw new Error('Goal Mode sign-in is not available.');
-    for (const win of goalContinuationWindows) if (!win.isDestroyed?.()) win.close();
-    const record = sessions.get(goalLoginSessionId);
-    if (record) await closeSession(record.nativeSessionId, { emit: true });
-    const browserSession = session.fromPath(goalProfileDirectory);
-    await browserSession.clearStorageData();
-    await browserSession.clearCache();
-    await browserSession.clearAuthCache?.();
-    goalLoginSessionId = '';
-    return { ok: true, available: true, browserOpen: false, state: 'sign_in_required' };
+  async function signOutGoalLogin(input = {}) {
+    const account = goalAccount(String(input.tunnelId || ''));
+    const profileKey = profileDirectoryKey(account.directory);
+    if (clearingSavedData || clearingProfiles.has(profileKey)) {
+      throw browserError('BROWSER_PROFILE_ALREADY_ACTIVE', 'This browser profile is already being cleared.');
+    }
+    clearingProfiles.add(profileKey);
+    goalProtocolAuth.delete(account.directory);
+    try {
+      // Wait for this account's pending login before clearing it, so it cannot
+      // reopen a signed-in session after a concurrent Sign out.
+      await goalLoginOpenings.get(account.tunnelId)?.catch(() => {});
+      for (const win of goalContinuationWindows) {
+        if (goalWindowAccounts.get(win) === account.tunnelId && !win.isDestroyed?.()) win.close();
+      }
+      const record = sessions.get(goalLoginSessionIds.get(account.tunnelId));
+      if (record) await closeSession(record.nativeSessionId, { emit: true });
+      const browserSession = session.fromPath(account.directory);
+      await browserSession.clearStorageData();
+      await browserSession.clearCache();
+      await browserSession.clearAuthCache?.();
+      goalLoginSessionIds.delete(account.tunnelId);
+      return { ok: true, available: true, browserOpen: false, state: 'sign_in_required',
+        ...(account.tunnelId ? { tunnelId: account.tunnelId, label: account.label, enabled: account.enabled } : {}) };
+    } finally {
+      goalProtocolAuth.delete(account.directory);
+      clearingProfiles.delete(profileKey);
+    }
   }
 
   async function stopActiveSession() {
@@ -1072,6 +1220,7 @@ function createBrowserSurfaceHost(options = {}) {
       control: record?.control || 'ai',
       profile: record ? (record.persistent ? 'persistent' : 'ephemeral') : '',
       handoffReason: record?.handoffReason || '',
+      goalTunnelId: [...goalLoginSessionIds].find(([, id]) => id === record?.nativeSessionId)?.[0] || '',
       permissionRequests: [...sessions.values()].flatMap(candidate => [...candidate.pendingPermissions.values()].map(publicPermissionRequest)),
       viewport: record ? { ...record.viewport } : null,
       nativeSessionId: record?.nativeSessionId || '',

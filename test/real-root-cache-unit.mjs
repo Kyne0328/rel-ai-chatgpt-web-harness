@@ -31,6 +31,13 @@ try {
   assert.equal(first, fs.realpathSync(firstTarget));
   assert.equal(second, fs.realpathSync(secondTarget));
   assert.notEqual(second, first, 'a retargeted symlink or junction must not reuse the old cached repository root');
+  for (const target of [firstTarget, secondTarget]) fs.mkdirSync(path.join(target, 'nested'));
+  const nested = path.join(link, 'nested');
+  assert.equal(realRootOf(nested), fs.realpathSync(path.join(secondTarget, 'nested')));
+  fs.unlinkSync(link);
+  fs.symlinkSync(firstTarget, link, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(realRootOf(nested), fs.realpathSync(path.join(firstTarget, 'nested')),
+    'an ordinary directory beneath a retargeted parent link must resolve its current physical root');
   console.log('Retargeted workspace roots are resolved against the current filesystem target.');
 } finally {
   clearRealRootCache();

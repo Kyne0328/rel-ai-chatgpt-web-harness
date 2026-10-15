@@ -12,6 +12,43 @@ const PATHS = [
   '$.mapping.*.message.content.parts.*'
 ];
 
+// Opaque host session IDs cannot identify a Web chat. Retain only exact work
+// IDs from bounded JSON tool receipts so discovery can prove the association.
+function receiptWorkIds(text) {
+  if (typeof text !== 'string' || text.length > MAX_COMMAND_CHARS) return [];
+  let receipt;
+  try { receipt = JSON.parse(text); } catch { return []; }
+  const ids = new Set();
+  const visit = (value, depth) => {
+    if (!value || typeof value !== 'object' || depth > 3 || ids.size >= 8) return;
+    if (typeof value.work_id === 'string' && value.work_id.length <= 128) ids.add(value.work_id);
+    visit(value.structuredContent, depth + 1);
+    for (const part of Array.isArray(value.content) ? value.content.slice(0, 8) : []) {
+      if (part?.type === 'text' && typeof part.text === 'string' && part.text.length <= MAX_COMMAND_CHARS) {
+        try { visit(JSON.parse(part.text), depth + 1); } catch {}
+      }
+    }
+  };
+  visit(receipt, 0);
+  return [...ids];
+}
+
+function goalMessageExists(conversation, expectedText, expectedParentNode) {
+  const nodes = conversation?.mapping;
+  let nodeId = conversation?.current_node;
+  const seen = new Set();
+  let found = false;
+  while (nodeId && nodes?.[nodeId] && !seen.has(nodeId) && seen.size < 1000) {
+    if (nodeId === expectedParentNode) return found;
+    seen.add(nodeId);
+    const message = nodes[nodeId].message;
+    if (message?.author?.role === 'user' && Array.isArray(message.content?.parts)
+      && message.content.parts.join('\n').trim() === expectedText) found = true;
+    nodeId = nodes[nodeId].parent;
+  }
+  return false;
+}
+
 function conversationProjection() {
   const result = { current_node: '', mapping: Object.create(null) };
   let nodes = 0;
@@ -51,6 +88,10 @@ function conversationProjection() {
     if (stack.length === 6 && stack[4]?.key === 'content' && stack[5]?.key === 'parts'
       && Number.isSafeInteger(key) && key >= 0) {
       const parts = message.content.parts;
+      const workIds = receiptWorkIds(value);
+      if (workIds.length && key < 8) message.content.workIds = [...new Set([
+        ...(message.content.workIds || []), ...workIds
+      ])].slice(0, 8);
       // The command can span multiple content parts. Preserve the complete
       // command or nothing: a partial '/goal' must not pass as a bare command.
       if (typeof value !== 'string' || key >= 8 || value.length > MAX_COMMAND_CHARS) {
@@ -102,4 +143,4 @@ async function readConversationProjection(response) {
   return result;
 }
 
-export { readConversationProjection };
+export { readConversationProjection, goalMessageExists };

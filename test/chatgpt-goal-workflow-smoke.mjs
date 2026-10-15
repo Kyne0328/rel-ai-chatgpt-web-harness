@@ -65,6 +65,15 @@ try {
   assert.notEqual(structuredContentOf(await client.waitFor(11)).status, 'completed',
     'ordinary non-goal work must still require an explicit finish call');
 
+  client.call(12, 'relai_work', { action: 'finish', work_id: resolvable.work_id,
+    summary: 'Confirm the resolved goal is already complete.' });
+  const duplicateFinishReply = await client.waitFor(12);
+  const duplicateFinish = structuredContentOf(duplicateFinishReply);
+  assert.equal(duplicateFinishReply.result.isError, false, 'finish after automatic Goal Mode completion must pass MCP response validation');
+  assert.equal(duplicateFinish.completionKnown, true);
+  assert.equal(duplicateFinish.duplicate, true);
+  assert.equal(duplicateFinish.validationAt, '', 'finishing a goal must not invent a validation timestamp');
+
   console.log('Goal Mode lifecycle preserves blockers and closes resolved goals; ordinary work stays explicit.');
 } finally {
   await client.closeGracefully();

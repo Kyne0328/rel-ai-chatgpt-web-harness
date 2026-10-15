@@ -5,6 +5,7 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createSecureTunnelRuntime } from '../electron/secure-tunnel-runtime.js';
 import { makeTunnelProcessEnvironment } from '../src/processEnvironment.js';
+import { tunnelLocalToken } from '../src/mcp/tunnelIdentity.js';
 
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-secure-tunnel-'));
 let spawned = null;
@@ -103,7 +104,7 @@ try {
   assert.ok(spawned.args.includes('tunnel_example123456'));
   assert.ok(spawned.args.includes('url=http://127.0.0.1:3333/mcp,channel=main'));
   assert.equal(spawned.options.env.CONTROL_PLANE_API_KEY, 'sk-runtime-example-123456789');
-  assert.equal(spawned.options.env.REL_AI_LOCAL_AUTH_HEADER, 'Bearer local-secret');
+  assert.equal(spawned.options.env.REL_AI_LOCAL_AUTH_HEADER, 'Bearer ' + tunnelLocalToken('local-secret', 'tunnel_example123456'));
   assert.equal(spawned.options.env.OPENAI_API_KEY, undefined, 'the tunnel must not inherit unrelated application credentials');
   assert.equal(spawned.options.env.SSH_AUTH_SOCK, undefined, 'the tunnel must not inherit the user SSH agent');
   assert.equal(spawned.args.includes('cloudflared'), false);
@@ -144,6 +145,92 @@ try {
   assert.equal(runtime.snapshot().recoveryMode, '', 'stopped tunnel state must not retain stale recovery ownership');
   assert.equal(runtime.snapshot().tunnelHealth, null, 'stopped tunnel state must not retain stale structured health');
   assert.ok(logs.some(entry => entry.source === 'openai-tunnel'));
+
+  // tunnel-client can retain a startup-only OAuth timeout in /readyz even
+  // while its configured bearer MCP route and control-plane are healthy.
+  let readinessBody = 'oauth discovery failed: oauth discovery GET http://127.0.0.1:3333: context deadline exceeded';
+  let localBearerAccepted = true;
+  let mainProbeStatus = 'ok';
+  let recentPoll = true;
+  let structuredHealthAvailable = true;
+  let localReplyValid = true;
+  let configuredRouteMatches = true;
+  let rejectDuringAdmission = false;
+  let localAdmissions = 0;
+  let stops = 0;
+  const oauthRuntime = createSecureTunnelRuntime({
+    spawnImpl: fakeSpawn,
+    fetchImpl: async (url, options = {}) => {
+      if (url === 'http://127.0.0.1:3333/mcp') {
+        localAdmissions++;
+        assert.equal(options.method, 'GET');
+        assert.equal(options.redirect, 'error', 'the local bearer must never follow redirects');
+        assert.equal(options.headers.Authorization, 'Bearer ' + tunnelLocalToken('oauth-fixture-local', 'tunnel_example123456'));
+        if (rejectDuringAdmission) spawned.child.stderr.emit('data', '{"level":"ERROR","msg":"request failed","component":"controlplane","status_code":401}');
+        if (!localReplyValid) return new Response('not an MCP response', { status: 405, headers: { allow: 'POST' } });
+        return new Response(JSON.stringify(localBearerAccepted
+          ? { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'POST required' } }
+          : { ok: false, error: 'Authorization required' }), {
+          status: localBearerAccepted ? 405 : 401, headers: { allow: 'POST' }
+        });
+      }
+      if (url.endsWith('/readyz')) return new Response(readinessBody, { status: 503 });
+      if (url.endsWith('/api/status')) return response(200, {
+        tunnel_metadata: { id: 'tunnel_example123456' },
+        mcp_server_url: configuredRouteMatches ? 'http://127.0.0.1:3333/mcp' : 'http://127.0.0.1:9999/mcp',
+        channels: [{ name: 'main', enabled: true, server_kind: 'external', transport_kind: 'http-streamable', probe_status: mainProbeStatus }]
+      });
+      if (url.includes('/health/') && !structuredHealthAvailable) return response(404);
+      if (url.endsWith('/health/control-plane')) {
+        const data = await (await fetchTunnel(url)).json();
+        data.details.last_success = new Date(Date.now() - (recentPoll ? 0 : 120_000)).toISOString();
+        return response(200, data);
+      }
+      return fetchTunnel(url);
+    },
+    stopProcess: async child => { stops++; child.exitCode = 0; return { exited: true, forced: false }; },
+    resolveExecutable: () => process.execPath,
+    makeEnvironment: makeTunnelProcessEnvironment,
+    stateDir: path.join(stateDir, 'oauth-timeout'),
+    monitorIntervalMs: 50,
+    degradedFailureThreshold: 1
+  });
+  try {
+    const started = await oauthRuntime.start({ tunnelId: 'tunnel_example123456', port: 3333,
+      localToken: 'oauth-fixture-local', apiKey: 'oauth-fixture-runtime', timeoutMs: 1000 });
+    assert.equal(started.state, 'running', 'a retained optional discovery timeout must not quarantine a verified bearer route');
+    assert.equal(started.tunnelHealth.readiness.source, 'authenticated_local_mcp');
+    assert.ok(localAdmissions > 0);
+    const child = spawned.child;
+    localBearerAccepted = false;
+    await waitFor(() => oauthRuntime.snapshot().state === 'degraded');
+    localBearerAccepted = true;
+    await waitFor(() => oauthRuntime.snapshot().state === 'running');
+    for (const setFailure of [
+      value => { mainProbeStatus = value ? 'failed' : 'ok'; },
+      value => { recentPoll = !value; },
+      value => { structuredHealthAvailable = !value; },
+      value => { localReplyValid = !value; },
+      value => { configuredRouteMatches = !value; },
+      value => { controlPlaneDegraded = value; },
+      value => { deliveryDegraded = value; },
+      value => { readinessBody = value ? 'MCP channel is unavailable' : 'oauth discovery failed: context deadline exceeded'; },
+      value => { readinessBody = value ? 'oauth discovery failed: authentication rejected' : 'oauth discovery failed: context deadline exceeded'; },
+      value => { readinessBody = value ? 'oauth discovery failed: ' + 'x'.repeat(4096) + 'context deadline exceeded' : 'oauth discovery failed: context deadline exceeded'; }
+    ]) {
+      setFailure(true);
+      await waitFor(() => oauthRuntime.snapshot().state === 'degraded');
+      setFailure(false);
+      await waitFor(() => oauthRuntime.snapshot().state === 'running');
+    }
+    assert.equal(stops, 0, 'in-place readiness recovery must preserve the existing tunnel process');
+    assert.equal(spawned.child, child);
+    assert.ok(!JSON.stringify(oauthRuntime.snapshot()).includes('oauth-fixture-local'));
+    rejectDuringAdmission = true;
+    await waitFor(() => oauthRuntime.snapshot().state === 'failed');
+    assert.equal(oauthRuntime.snapshot().errorCode, 'tunnel_authentication_failed');
+    assert.equal(child.exitCode, 0, 'an in-flight local success cannot supersede an authoritative runtime-key rejection');
+  } finally { await oauthRuntime.stop(); }
 
   operational = false;
   controlPlaneDegraded = true;
@@ -447,7 +534,7 @@ try {
   assert.ok(doctorSpawned.args.includes('--explain'));
   assert.ok(doctorSpawned.args.includes('url=http://127.0.0.1:3333/mcp,channel=main'));
   assert.equal(doctorSpawned.options.env.CONTROL_PLANE_API_KEY, 'sk-doctor-secret');
-  assert.equal(doctorSpawned.options.env.REL_AI_LOCAL_AUTH_HEADER, 'Bearer local-secret');
+  assert.equal(doctorSpawned.options.env.REL_AI_LOCAL_AUTH_HEADER, 'Bearer ' + tunnelLocalToken('local-secret', 'tunnel_example123456'));
   assert.equal(diagnosis.ok, false, 'failed doctor checks must remain a completed diagnostic result rather than a spawn failure');
   assert.equal(diagnosis.exitCode, 2);
   assert.deepEqual(diagnosis.failedChecks, ['mcp_server_reachable']);
