@@ -279,6 +279,7 @@
     "@opentelemetry/resources",
     "@opentelemetry/sdk-trace-node",
     "@opentelemetry/semantic-conventions",
+    "@streamparser/json",
     "7zip-bin",
     "commander",
     "execa",

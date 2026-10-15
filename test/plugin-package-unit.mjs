@@ -53,7 +53,7 @@ try {
   ];
   const packedFiles = new Set(metadata.files.map(item => item.path.replaceAll('\\', '/')));
   for (const relative of expected) assert.ok(packedFiles.has(relative), `artifact missing ${relative}`);
-  for (const dependency of ['@modelcontextprotocol/server', '@opentelemetry/api', 'web-tree-sitter']) {
+  for (const dependency of ['@modelcontextprotocol/server', '@opentelemetry/api', '@streamparser/json', 'web-tree-sitter']) {
     assert.ok(
       fs.existsSync(path.join(builtRoot, 'node_modules', dependency, 'package.json')),
       `artifact must bundle runtime dependency ${dependency}`

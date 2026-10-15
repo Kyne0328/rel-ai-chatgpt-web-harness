@@ -441,7 +441,7 @@ try {
     headers: { ...dashboardHeaders, 'content-type': 'application/json' },
     body: JSON.stringify({ action: 'delete', alias: 'secondary', confirmDelete: true })
   }).then(response => response.json());
-  assert.equal(workspaceDelete.ok, true);
+  assert.equal(workspaceDelete.ok, true, JSON.stringify(workspaceDelete));
   assert.equal(fs.existsSync(secondaryIndexDirectory), false,
     'deleting a project must remove its Repository Intelligence cache immediately');
   assert.equal(readTaskHistorySessionRecord(workspaceStateConfig, 'secondary-history'), null,

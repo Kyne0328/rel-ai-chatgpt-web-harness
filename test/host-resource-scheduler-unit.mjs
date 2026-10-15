@@ -4,13 +4,15 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { installDeterministicHostMemory } from './helpers/deterministic-host-memory.mjs';
 
 process.env.REL_AI_MCP_PERSISTENT_PROCESS_LIMIT = '2';
 process.env.REL_AI_MCP_HEAVY_PROCESS_LIMIT = '1';
 process.env.REL_AI_MCP_REPOSITORY_QUERY_LIMIT = '6';
 
-process.env.REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS = '1000';
+const shortQueueTimeoutFixture = process.argv.includes('--short-persistent-queue-timeout');
+if (shortQueueTimeoutFixture) process.env.REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS = '1000';
 await import('./host-memory-pressure-unit.js');
 const restoreHostMemory = installDeterministicHostMemory();
 
@@ -28,19 +30,23 @@ const {
 } = await import('../src/processManager.js');
 
 try {
-  await verifyRoundRobinFairness();
-  await verifyQueueCancellation();
-  await verifyProcessDeadlineQueue();
-  await verifyBoundedHeavyAdmission();
-  await verifyQueuedIndexDetach();
-  await verifyDefaultPersistentQueueTimeout();
-  await verifyRepositoryQueryTimeoutExcludesQueueWait();
-  await verifyPersistentCapacityIncludesRestartOrphans();
+  if (shortQueueTimeoutFixture) {
+    await verifyDefaultPersistentQueueTimeout();
+  } else {
+    await verifyRoundRobinFairness();
+    await verifyQueueCancellation();
+    await verifyProcessDeadlineQueue();
+    await verifyBoundedHeavyAdmission();
+    await verifyQueuedIndexDetach();
+    await verifyDefaultPersistentQueueTimeoutInSeparateRuntime();
+    await verifyRepositoryQueryTimeoutExcludesQueueWait();
+    await verifyPersistentCapacityIncludesRestartOrphans();
+  }
 } finally {
   restoreHostMemory();
 }
 
-console.log('Host resource scheduling, bounded heavy execution, fairness, timeout, and restart-capacity tests passed.');
+if (!shortQueueTimeoutFixture) console.log('Host resource scheduling, bounded heavy execution, fairness, timeout, and restart-capacity tests passed.');
 
 async function verifyRoundRobinFairness() {
   const scheduler = createFairResourceScheduler({ heavy: 1 });
@@ -139,6 +145,20 @@ async function verifyQueuedIndexDetach() {
     await repositoryIntelligence.shutdown().catch(() => {});
     fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
+}
+
+async function verifyDefaultPersistentQueueTimeoutInSeparateRuntime() {
+  // Only the timeout contract needs a one-second queue. The restart-capacity
+  // test uses production admission timing while native shutdown completes.
+  const child = spawn(process.execPath,
+    [fileURLToPath(import.meta.url), '--short-persistent-queue-timeout'],
+    { env: { ...process.env, REL_AI_MCP_PERSISTENT_QUEUE_TIMEOUT_MS: '1000' },
+      windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const [exitCode] = await once(child, 'exit');
+  assert.equal(exitCode, 0, 'bounded persistent queue timeout fixture failed: ' + stderr);
 }
 
 async function verifyDefaultPersistentQueueTimeout() {
