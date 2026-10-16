@@ -35,6 +35,7 @@ function verifyNativeCli(file) {
     '--control-plane.tunnel-id',
     '--control-plane.api-key',
     '--mcp.server-url',
+    '--mcp.forward-trace-context',
     '--mcp.extra-headers',
     '--mcp.discovery-extra-headers',
     '--health.listen-addr',

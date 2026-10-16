@@ -526,6 +526,7 @@ function tunnelConnectionArgs(command, tunnelId, port) {
     '--control-plane.tunnel-id', tunnelId,
     '--control-plane.api-key', 'env:CONTROL_PLANE_API_KEY',
     '--mcp.server-url', `url=http://127.0.0.1:${port}/mcp,channel=main`,
+    '--mcp.forward-trace-context=true',
     '--mcp.extra-headers', 'Authorization: env:REL_AI_LOCAL_AUTH_HEADER',
     '--mcp.discovery-extra-headers', 'Authorization: env:REL_AI_LOCAL_AUTH_HEADER'
   ];

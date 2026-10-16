@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { context as traceContext, propagation, trace } from '@opentelemetry/api';
+import { runMcpRequestSpan } from '../src/core/mcp-runtime.ts';
 import { normalizeConfig } from '../src/config.js';
 
 import { initializeTelemetry, runSpan, sanitizeAttributes, setTelemetryDiagnosticsEnabled, shutdownTelemetry, summarizeCommandForTelemetry, telemetrySampleRatio, telemetryStatus } from '../src/telemetry.js';
@@ -173,6 +175,35 @@ try {
       new RegExp(secret)
     );
     assert.ok(diagnosticProvider, 'the actual SDK provider must initialize for diagnostic tests');
+    const mcpContext = { config: { stateDir: root, telemetry: { diagnosticsEnabled: true, sampleRatio: 1 } } };
+    const parentA = '00-11111111111111111111111111111111-1111111111111111-01';
+    const parentB = '00-22222222222222222222222222222222-2222222222222222-01';
+    const metadata = { traceparent: parentA, tracestate: 'relai=upstream', baggage: 'private=must-not-propagate' };
+    const spanContext = () => trace.getSpan(traceContext.active())?.spanContext();
+    await runMcpRequestSpan(mcpContext, { metadata }, async () => {
+      assert.equal(spanContext()?.traceId, parentA.split('-')[1], 'MCP metadata must join the forwarded trace');
+      assert.equal(spanContext()?.traceState?.serialize(), 'relai=upstream');
+      assert.equal(propagation.getBaggage(traceContext.active()), undefined, 'MCP metadata must not inject baggage');
+    });
+    await runMcpRequestSpan(mcpContext, { metadata, carrier: { traceparent: parentB, tracestate: 'relai=caller' } }, async () => {
+      assert.equal(spanContext()?.traceId, parentB.split('-')[1], 'caller HTTP context must win over forwarded metadata');
+      assert.equal(spanContext()?.traceState?.serialize(), 'relai=caller');
+    });
+    for (const details of [
+      { metadata, carrier: { traceparent: 'invalid' } },
+      { metadata, carrier: { tracestate: 'relai=caller' } },
+      { metadata: { traceparent: 'invalid' } },
+      { metadata: { traceparent: ['invalid'] } },
+      { metadata: { traceparent: 'x'.repeat(513) } }
+    ]) {
+      await runMcpRequestSpan(mcpContext, details, async () => {
+        assert.notEqual(spanContext()?.traceId, parentA.split('-')[1], 'malformed or caller-owned context must not fall back to another parent');
+      });
+    }
+    await Promise.all([parentA, parentB].map(traceparent => runMcpRequestSpan(mcpContext, { metadata: { traceparent } }, async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(spanContext()?.traceId, traceparent.split('-')[1], 'overlapping MCP requests must retain separate trace context');
+    })));
     await diagnosticProvider.forceFlush();
 
     const diagnosticPayload = Buffer.concat(
@@ -202,6 +233,9 @@ try {
     await activeStarted;
     const racingSpan = runSpan(diagnosticsConfig, 'relai.test.pending_at_opt_out', {}, async () => 'race operation completed');
     await setTelemetryDiagnosticsEnabled(diagnosticsConfig, false);
+    await runMcpRequestSpan(mcpContext, { metadata }, async () => {
+      assert.equal(trace.getSpan(traceContext.active()), undefined, 'diagnostics opt-out must suppress forwarded MCP spans');
+    });
     const directDisabledSpan = diagnosticProvider.getTracer('relai-opt-out-test').startSpan('relai.test.direct_sdk_disabled');
     directDisabledSpan.end();
     assert.equal(await racingSpan, 'race operation completed', 'a pending telemetry setup must not change the primary operation');

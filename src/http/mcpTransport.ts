@@ -237,7 +237,8 @@ async function handleMcpStreamableObserved(ctx: HttpRouteContext): Promise<void>
       protocolVersion: MCP_PROTOCOL_VERSION,
       method: String(message?.method || ''),
       principalId,
-      carrier: ctx.req.headers as JsonRecord
+      carrier: ctx.req.headers as JsonRecord,
+      metadata: objectValue(message?.params?._meta)
     }, async () => {
       const requestAbort = createHttpRequestAbortScope(ctx.req, ctx.res);
       try {
@@ -297,7 +298,8 @@ async function handleLegacyMcpRequest(
     protocolVersion: String(details.params.protocolVersion || headerValue(ctx.req.headers, 'mcp-protocol-version') || 'legacy'),
     method: String(message?.method || ''),
     principalId: details.principalId,
-    carrier: ctx.req.headers as JsonRecord
+    carrier: ctx.req.headers as JsonRecord,
+    metadata: objectValue(message?.params?._meta)
   }, async () => {
     try {
       await getCoreNodeHandler()(ctx.req as unknown as Parameters<CoreNodeHandler>[0], ctx.res, message);

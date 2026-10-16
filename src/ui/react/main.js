@@ -410,7 +410,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
               type: 'button',
               'aria-haspopup': 'dialog',
               'aria-expanded': paletteOpen ? 'true' : 'false',
-              'aria-label': 'Quick navigation',
               title: 'Open quick navigation',
               onClick: openPalette
             },

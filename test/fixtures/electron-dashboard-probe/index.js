@@ -995,7 +995,8 @@ async function auditAccessibility(win, runtimePath, route) {
       id: item.id,
       impact: item.impact || '',
       help: item.help,
-      nodes: item.nodes.length
+      nodes: item.nodes.length,
+      elements: item.nodes.map(node => ({ target: node.target, html: node.html, failureSummary: node.failureSummary }))
     }))
   }))`);
 }

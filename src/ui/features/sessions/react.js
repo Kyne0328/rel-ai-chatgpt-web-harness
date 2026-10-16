@@ -454,7 +454,6 @@ const TaskRow = memo(function TaskRow({ session, selected, onSelect }) {
     type: 'button',
     'data-task-id': id,
     'aria-current': selected ? 'true' : undefined,
-    'aria-label': `${title}. ${state.label}. ${project}. ${toolCalls} tool call${toolCalls === 1 ? '' : 's'}. ${projectFiles} project file${projectFiles === 1 ? '' : 's'}.`,
     title,
     onClick: () => flushSync(() => onSelect(id))
   },

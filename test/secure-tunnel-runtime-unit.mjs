@@ -103,6 +103,7 @@ try {
   assert.ok(spawned.args.includes('--control-plane.tunnel-id'));
   assert.ok(spawned.args.includes('tunnel_example123456'));
   assert.ok(spawned.args.includes('url=http://127.0.0.1:3333/mcp,channel=main'));
+  assert.ok(spawned.args.includes('--mcp.forward-trace-context=true'), 'managed tunnels must forward W3C context to MCP metadata');
   assert.equal(spawned.options.env.CONTROL_PLANE_API_KEY, 'sk-runtime-example-123456789');
   assert.equal(spawned.options.env.REL_AI_LOCAL_AUTH_HEADER, 'Bearer ' + tunnelLocalToken('local-secret', 'tunnel_example123456'));
   assert.equal(spawned.options.env.OPENAI_API_KEY, undefined, 'the tunnel must not inherit unrelated application credentials');

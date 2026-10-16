@@ -169,14 +169,28 @@ export function finishMcpSpanTimings(): void {
 
 export function runMcpRequestSpan<T>(
   context: CoreMcpRequestContext,
-  details: { protocolVersion?: unknown; method?: unknown; principalId?: unknown; carrier?: Record<string, unknown> },
+  details: { protocolVersion?: unknown; method?: unknown; principalId?: unknown; carrier?: Record<string, unknown>; metadata?: Record<string, unknown> },
   callback: () => Promise<T>
 ): Promise<T> {
   return runSpan(context.config, 'relai.mcp.request', {
     'mcp.protocol.version': String(details.protocolVersion || ''),
     'mcp.method': String(details.method || ''),
     'mcp.authenticated': Boolean(details.principalId)
-  }, callback, { carrier: details.carrier || {} });
+  }, callback, { carrier: mcpTraceCarrier(details.carrier || {}, details.metadata || {}) });
+}
+
+function mcpTraceCarrier(headers: Record<string, unknown>, metadata: Record<string, unknown>): Record<string, unknown> {
+  // A caller-owned header context wins as a unit, including malformed context.
+  // Never combine one caller's parent with another caller's trace state.
+  if (Object.keys(headers).some(key => ['traceparent', 'tracestate'].includes(key.toLowerCase()))) return headers;
+  const carrier = { ...headers };
+  for (const key of ['traceparent', 'tracestate']) {
+    const value = metadata[key];
+    if (typeof value === 'string' && value.length <= 512) carrier[key] = value;
+  }
+  // OpenTelemetry validates the W3C values. Other MCP metadata, including
+  // baggage, is deliberately excluded from this fallback carrier.
+  return carrier;
 }
 
 export async function startMcpStdio(): Promise<unknown> {

@@ -187,6 +187,8 @@ configured workspace → files / Git / commands / checks
 
 The tunnel runtime API key is used by the bundled tunnel client to operate the configured OpenAI tunnel. The separate Rel.AI bearer token protects the loopback tunnel-client-to-MCP hop and is not the credential you enter in ChatGPT.
 
+Rel.AI pins the full tunnel-client 0.0.16 distribution. It automatically reports optional MCP response timing to the tunnel service; this measures downstream transport, MCP work, SDK processing, and backpressure, rather than server execution alone. Managed tunnels explicitly enable W3C trace-context forwarding through MCP request metadata. Rel.AI uses it when HTTP trace context is absent, forwards no metadata baggage, and exports spans only while diagnostic telemetry is enabled. Before rolling back to an older client, remove the trace-forwarding flag from its launch configuration.
+
 A reconnect restores transport. It does not rewrite repository history or pretend an interrupted mutation completed successfully.
 
 ## Local repository tools
