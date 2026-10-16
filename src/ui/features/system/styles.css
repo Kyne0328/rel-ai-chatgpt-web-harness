@@ -153,7 +153,7 @@
 .diagnostic-copy p { @apply mt-1.5 text-[12px] leading-relaxed; color: var(--ui-text-secondary); }
 .diagnostic-copy details { @apply mt-3; }
 .diagnostic-copy summary { @apply flex min-h-11 cursor-pointer items-center text-[11px] font-semibold; }
-.diagnostic-copy pre { @apply mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-lg p-3 text-[11px]; background: var(--ui-canvas); border: 1px solid var(--ui-border-subtle); }
+.diagnostic-copy pre { @apply mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words p-3; border-radius: var(--technical-radius, 7px); font-size: var(--technical-font-size, 12px); line-height: var(--technical-line-height, 1.6); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
 .diagnostic-context { @apply mt-3 grid overflow-hidden rounded-lg; border: 1px solid var(--ui-border-subtle); }
 .diagnostic-context-row { @apply grid items-center gap-3 border-b px-3 py-2 last:border-b-0; grid-template-columns: auto auto minmax(0,1fr); border-color: var(--ui-border-subtle); }
 .diagnostic-context-row code, .diagnostic-context-row span, .diagnostic-context-row small { @apply text-[11px]; }
@@ -172,7 +172,7 @@
 .diagnostic-log-repeat { color: var(--ui-text-tertiary); }
 .diagnostic-log-details { @apply border-t px-3 py-3 text-[11px]; border-color: var(--ui-border-subtle); color: var(--ui-text-secondary); }
 .diagnostic-log-details strong { @apply block mb-2; color: var(--ui-text-primary); }
-.diagnostic-log-details pre { @apply max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg p-3 text-[11px]; background: var(--ui-canvas); border: 1px solid var(--ui-border-subtle); }
+.diagnostic-log-details pre { @apply max-h-64 overflow-auto whitespace-pre-wrap break-words p-3; border-radius: var(--technical-radius, 7px); font-size: var(--technical-font-size, 12px); line-height: var(--technical-line-height, 1.6); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
 .diagnostic-log-empty { @apply rounded-lg p-4 text-center text-[11px]; background: var(--ui-surface-secondary); color: var(--ui-text-secondary); }
 .diagnostic-clear { @apply flex flex-col gap-1 rounded-xl p-4; background: var(--ui-status-success-background); border: 1px solid color-mix(in srgb, var(--ui-status-success-foreground) 28%, transparent); }
 .diagnostic-clear span { @apply text-[11px]; color: var(--ui-text-secondary); }

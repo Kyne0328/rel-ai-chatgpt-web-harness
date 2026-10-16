@@ -31,11 +31,45 @@ app.whenReady().then(async () => {
     await win.loadURL(targetUrl);
     const result = await win.webContents.executeJavaScript(`(async () => {
       const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const until = async (predicate, label) => {
+        const deadline = Date.now() + 5000;
+        while (!predicate()) {
+          if (Date.now() >= deadline) throw new Error('Timed out waiting for ' + label);
+          await wait(10);
+        }
+      };
+      const nativeFetch = window.fetch.bind(window);
+      const detailRequests = [];
+      let retryDetailFails = true;
+      let releaseSlowDetail;
+      const activityEntries = [
+        { eventId: 'task-return-event', timestamp: new Date().toISOString(), tool: 'relai_read', title: 'Read fixture', summary: 'Activity return context fixture', status: 'succeeded', workspace: 'app', taskId: 'probe-task' },
+        { eventId: 'other-task-event', timestamp: new Date().toISOString(), tool: 'relai_read', title: 'Read fixture', summary: 'Different task activity fixture', status: 'succeeded', workspace: 'app', taskId: 'no-change-task' }
+      ];
+      const taskSession = (id, title) => ({ work_id: id, title, workspace: 'app', status: 'completed', events: [], changedFiles: [] });
+      window.fetch = async (input, options) => {
+        const url = new URL(String(input), location.href);
+        if (url.pathname === '/api/logs') return new Response(JSON.stringify({ ok: true, entries: activityEntries }), { headers: { 'Content-Type': 'application/json' } });
+        if (url.pathname !== '/api/tasks/session') return nativeFetch(input, options);
+        const id = url.searchParams.get('task');
+        detailRequests.push(id);
+        const respond = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+        if (id === 'retry-detail-task') return retryDetailFails
+          ? respond({ ok: false, error: 'Temporary detail failure.' }, 503)
+          : respond({ ok: true, session: taskSession(id, 'Recovered retained task') });
+        if (id === 'slow-detail-task') return new Promise(resolve => { releaseSlowDetail = () => resolve(respond({ ok: true, session: taskSession(id, 'Stale delayed task') })); });
+        if (id === 'mismatched-detail-task') return respond({ ok: true, session: taskSession('another-task', 'Wrong task') });
+        if (id === 'missing-detail-task') return respond({ ok: false, error: 'Work session not found.' }, 404);
+        if (id === 'summary-error-task') return respond({ ok: false, error: 'Summary details temporarily unavailable.' }, 503);
+        const summary = snapshot.tasks.find(task => task.work_id === id);
+        return summary ? respond({ ok: true, session: { ...summary, events: activityEntries.filter(entry => entry.taskId === id) } }) : respond({ ok: false, error: 'Work session not found.' }, 404);
+      };
       history.replaceState(null, '', '#code?task=probe-task&file=src%2Fnew.js');
       const host = document.createElement('div');
       document.body.replaceChildren(host);
       const module = await import('/public/dashboard-react.js');
       let snapshot = {
+        config: { workspaces: [{ alias: 'app' }] },
         tasks: [
           { work_id: 'probe-task', changeRevision: 1, title: 'Changes viewer probe', status: 'running', workspace: 'app', changedFiles: ['src/example.js', 'src/new.js'] },
           { work_id: 'no-change-task', title: 'No changes', status: 'completed', workspace: 'app', changedFiles: [] },
@@ -163,10 +197,43 @@ app.whenReady().then(async () => {
       result.routeAfterPendingDiff = location.hash;
       location.hash = '#code?task=probe-task&file=missing.js';
       await wait(250);
-      result.invalidFileFallback = {
+      await until(() => document.querySelector('[data-code-editor][role="alert"]')?.textContent.includes('missing.js'), 'missing requested file explanation');
+      result.invalidFileContext = {
         heading: document.querySelector('[data-code-file-heading]')?.textContent.trim() || '',
-        routeFile: new URLSearchParams(location.hash.split('?')[1] || '').get('file')
+        routeFile: new URLSearchParams(location.hash.split('?')[1] || '').get('file'),
+        recoveryVisible: document.querySelector('[data-code-editor]')?.textContent.includes('Choose a changed file or refresh') === true,
+        selectedOtherFile: Boolean(document.querySelector('[data-code-file].active'))
       };
+      location.hash = '#code?task=retained-task&file=src%2Fretained.js';
+      await until(() => document.querySelector('[data-code-task]')?.value === 'retained-task' && document.querySelector('[data-code-file="src/retained.js"]') && document.querySelector('.monaco-diff-editor'), 'retained task changes');
+      result.retainedTaskIdentity = {
+        selected: document.querySelector('[data-code-task]')?.value,
+        routeTask: new URLSearchParams(location.hash.split('?')[1]).get('task'),
+        heading: document.querySelector('[data-code-file-heading]')?.textContent.trim(),
+        requested: window.relaiCodeProbe.taskRequests().at(-1),
+        otherTaskAvailable: Boolean(document.querySelector('[data-code-task] option[value="probe-task"]'))
+      };
+      location.hash = '#code?task=unavailable-task&file=src%2Fretained.js';
+      await until(() => document.querySelector('[data-code-task-error]') && document.querySelector('[data-code-refresh]')?.textContent === 'Retry', 'unavailable retained task retry');
+      result.unavailableTaskContext = {
+        selected: document.querySelector('[data-code-task]')?.value,
+        routeTask: new URLSearchParams(location.hash.split('?')[1]).get('task'),
+        routeFile: new URLSearchParams(location.hash.split('?')[1]).get('file'),
+        errorIdentifiesTask: document.querySelector('[data-code-task-error]')?.textContent.includes('unavailable-task') === true,
+        returnTask: new URLSearchParams(document.querySelector('[data-code-task-link]')?.hash.split('?')[1]).get('task')
+      };
+      window.relaiCodeProbe.setUnavailableTaskAvailable(true);
+      document.querySelector('[data-code-refresh]').click();
+      await until(() => !document.querySelector('[data-code-task-error]') && document.querySelector('[data-code-file="src/retained.js"]') && document.querySelector('.monaco-diff-editor'), 'retained task retry recovery');
+      result.unavailableTaskRecovered = document.querySelector('[data-code-task]')?.value === 'unavailable-task';
+      const aggregateTasks = snapshot.tasks;
+      snapshot = { ...snapshot, tasks: [] };
+      listeners.forEach(listener => listener());
+      location.hash = '#code?task=retained-task&file=src%2Fretained.js';
+      await until(() => document.querySelector('[data-code-task]')?.value === 'retained-task' && document.querySelector('[data-code-file="src/retained.js"]') && document.querySelector('.monaco-diff-editor'), 'retained task without aggregate summaries');
+      result.retainedTaskWithoutSummaries = [...document.querySelectorAll('[data-code-task] option')].map(option => option.value);
+      snapshot = { ...snapshot, tasks: aggregateTasks };
+      listeners.forEach(listener => listener());
       location.hash = '#tasks?task=probe-task';
       for (let attempt = 0; attempt < 20 && !document.querySelector('[data-task-id="probe-task"]'); attempt += 1) await wait(25);
       document.querySelector('[data-task-id="probe-task"]')?.click();
@@ -174,6 +241,117 @@ app.whenReady().then(async () => {
       result.taskFileHrefs = [...document.querySelectorAll('.task-file-link')].map(link => link.getAttribute('href') || '');
       result.editorCountAfterUnmount = window.monaco?.editor?.getEditors?.().length || 0;
       result.modelCountAfterUnmount = window.monaco?.editor?.getModels?.().length || 0;
+      location.hash = '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open';
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[aria-label="Task status filter"]')?.value === 'open' && document.querySelector('.task-file-link')?.hash.includes('from=tasks'), 'task filter route hydration');
+      result.scopedTaskFileHref = document.querySelector('.task-file-link').getAttribute('href');
+      document.querySelector('.task-file-link').click();
+      await until(() => document.querySelector('[data-code-task-link]')?.hash.includes('search=Changes+viewer'), 'contextual return link');
+      result.filteredTaskReturnHref = document.querySelector('[data-code-task-link]').getAttribute('href');
+      document.querySelector('[data-code-task-link]').click();
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[data-task-id="probe-task"].is-selected'), 'restored task selection');
+      result.restoredTaskContext = {
+        search: document.querySelector('[aria-label="Search tasks"]')?.value,
+        status: document.querySelector('[aria-label="Task status filter"]')?.value,
+        workspace: document.querySelector('[aria-label="Project filter"]')?.value,
+        selected: document.querySelector('.task-row.is-selected')?.dataset.taskId,
+        scopeExplained: document.querySelector('[data-task-search-scope]')?.textContent.includes('loaded tasks') === true
+      };
+      document.querySelector('#session-tab-activity').click();
+      const taskActivityLink = () => document.querySelector('#session-panel-activity .session-inline-actions a');
+      const activityTaskLink = () => document.querySelector('.activity-session-actions a[href^="#tasks"]');
+      await until(() => taskActivityLink(), 'task Activity link');
+      result.scopedTaskActivityHref = taskActivityLink().getAttribute('href');
+      result.taskEventActivityHref = document.querySelector('[data-task-event-link]')?.getAttribute('href');
+      taskActivityLink().click();
+      await until(() => document.querySelector('.activity-row-trigger')?.textContent.includes('Activity return context fixture'), 'contextual task activity');
+      result.activityOwnFiltersInitiallyEmpty = !new URLSearchParams(location.hash.split('?')[1]).has('search') && !new URLSearchParams(location.hash.split('?')[1]).has('status');
+      document.querySelector('.activity-row-trigger').click();
+      await until(() => activityTaskLink(), 'Activity task return link');
+      const activitySearch = document.querySelector('input[placeholder="Search activity"]');
+      activitySearch.value = 'Activity return context';
+      activitySearch.dispatchEvent(new Event('input', { bubbles: true }));
+      await until(() => new URLSearchParams(location.hash.split('?')[1]).get('search') === 'Activity return context', 'independent Activity search');
+      result.activityTaskReturnHref = activityTaskLink().getAttribute('href');
+      document.querySelector('.activity-session-actions a[href^="#activity"]').click();
+      await until(() => !new URLSearchParams(location.hash.split('?')[1]).has('search') && new URLSearchParams(location.hash.split('?')[1]).get('returnSearch') === 'Changes viewer', 'Task activity retains origin context');
+      result.activityNestedReturnHref = activityTaskLink().getAttribute('href');
+      activityTaskLink().click();
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[data-task-id="probe-task"].is-selected'), 'Tasks Activity Tasks roundtrip');
+      result.activityRestoredTaskContext = {
+        search: document.querySelector('[aria-label="Search tasks"]')?.value,
+        status: document.querySelector('[aria-label="Task status filter"]')?.value,
+        workspace: document.querySelector('[aria-label="Project filter"]')?.value,
+        selected: document.querySelector('.task-row.is-selected')?.dataset.taskId
+      };
+      location.hash = '#tasks?task=probe-task&search=Changes+viewer&taskStatus=open';
+      await until(() => document.querySelector('[aria-label="Project filter"]')?.value === '' && taskActivityLink()?.hash.includes('returnSearch=Changes+viewer'), 'all-projects Tasks Activity context');
+      document.querySelector('#session-tab-activity').click();
+      taskActivityLink().click();
+      await until(() => document.querySelector('.activity-row-trigger'), 'all-projects origin task activity');
+      document.querySelector('.activity-row-trigger').click();
+      await until(() => activityTaskLink(), 'all-projects origin Activity return link');
+      result.activityAllProjectsReturnHref = activityTaskLink().getAttribute('href');
+      activityTaskLink().click();
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[data-task-id="probe-task"].is-selected'), 'all-projects Activity roundtrip');
+      result.activityAllProjectsRestored = document.querySelector('[aria-label="Project filter"]')?.value === '';
+      location.hash = '#activity?workspace=app&task=no-change-task&time=all&from=tasks&returnTask=probe-task&returnWorkspace=app&returnSearch=Changes+viewer&returnTaskStatus=open';
+      await until(() => document.querySelector('.activity-row-trigger')?.textContent.includes('Different task activity fixture'), 'different Activity task selection');
+      document.querySelector('.activity-row-trigger').click();
+      await until(() => activityTaskLink()?.hash.includes('task=no-change-task'), 'different task return link');
+      result.activityDifferentTaskReturnHref = activityTaskLink().getAttribute('href');
+      location.hash = '#tasks?task=probe-task&search=nomatch&taskStatus=completed';
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'nomatch' && document.querySelector('[aria-label="Task status filter"]')?.value === 'completed', 'changed task filters');
+      result.filteredSelection = {
+        emptyExplainsLoadedScope: document.querySelector('.task-list .empty')?.textContent.includes('No loaded tasks match') === true,
+        selectionExplained: Boolean(document.querySelector('[data-task-selection-context]')),
+        selectedTaskVisible: document.querySelector('.task-detail-header h2')?.textContent === 'Changes viewer probe'
+      };
+      location.hash = '#tasks?task=probe-task';
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === '' && document.querySelector('.task-file-link')?.hash.includes('from=tasks'), 'all projects task route');
+      document.querySelector('.task-file-link').click();
+      await until(() => document.querySelector('[data-code-task-link]'), 'all projects return link');
+      result.allProjectsReturnHref = document.querySelector('[data-code-task-link]').getAttribute('href');
+      location.hash = '#tasks?task=retry-detail-task';
+      await until(() => document.querySelector('[data-task-detail-state="error"]') && document.querySelector('[data-retry-task-detail]'), 'structured detail error');
+      result.taskDetailFailure = {
+        identifiesTask: document.querySelector('[data-task-detail-state]')?.textContent.includes('retry-detail-task') === true,
+        selectPromptAbsent: !document.querySelector('[data-session-inspector]')?.textContent.includes('Select a task'),
+        messageVisible: document.querySelector('[data-task-detail-state]')?.textContent.includes('Temporary detail failure.') === true
+      };
+      retryDetailFails = false;
+      document.querySelector('[data-retry-task-detail]').click();
+      await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task', 'detail retry success');
+      result.taskDetailRetry = {
+        attempts: detailRequests.filter(id => id === 'retry-detail-task').length,
+        errorCleared: !document.querySelector('[data-task-detail-state]'),
+        routeTask: new URLSearchParams(location.hash.split('?')[1]).get('task')
+      };
+      location.hash = '#tasks?task=missing-detail-task';
+      await until(() => document.querySelector('[data-task-detail-state="unavailable"]'), 'missing task distinction');
+      result.missingTaskDetails = {
+        retryVisible: Boolean(document.querySelector('[data-retry-task-detail]')),
+        identifiesTask: document.querySelector('[data-task-detail-state]')?.textContent.includes('missing-detail-task') === true
+      };
+      location.hash = '#tasks?task=mismatched-detail-task';
+      await until(() => document.querySelector('[data-task-detail-state="error"]'), 'mismatched task rejection');
+      result.mismatchedTaskRejected = !document.querySelector('.task-detail-header h2') && document.querySelector('[data-task-detail-state]')?.textContent.includes('did not match') === true;
+      snapshot = { ...snapshot, tasks: [...snapshot.tasks, taskSession('summary-error-task', 'Last available summary')] };
+      listeners.forEach(listener => listener());
+      location.hash = '#tasks?task=summary-error-task';
+      await until(() => document.querySelector('[data-task-detail-state="error"]') && document.querySelector('.task-detail-header h2')?.textContent === 'Last available summary', 'preserved summary on hydration failure');
+      result.summarySurvivesDetailFailure = document.querySelector('[data-task-detail-state]')?.textContent.includes('Showing the last available task details.') === true;
+      location.hash = '#tasks?task=slow-detail-task';
+      await until(() => releaseSlowDetail && document.querySelector('[data-task-detail-state="loading"]'), 'pending retained task');
+      result.taskDetailLoading = {
+        loading: document.querySelector('[data-task-detail-state]')?.getAttribute('aria-busy') === 'true',
+        selectPromptAbsent: !document.querySelector('[data-session-inspector]')?.textContent.includes('Select a task')
+      };
+      location.hash = '#tasks?task=retry-detail-task';
+      await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task', 'newer task selection');
+      releaseSlowDetail();
+      await wait(0);
+      await wait(0);
+      result.lateTaskDetailsIgnored = document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task';
       location.hash = '#home';
       await wait(50);
       return result;

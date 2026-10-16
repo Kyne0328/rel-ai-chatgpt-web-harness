@@ -145,7 +145,7 @@ async function waitForStableRoute(win, hash, title, stableChecks = 6) {
       title: document.getElementById('pageTitle')?.textContent || '',
       sessions: Boolean(document.querySelector('[data-sessions-react]')),
       summary: Boolean(document.querySelector('[data-session-summary]')),
-      tasksEmpty: document.querySelector('.sessions-history-card .empty')?.textContent?.trim() === 'No tasks yet.',
+      tasksEmpty: document.querySelector('.sessions-history-card .empty')?.textContent?.trim() === 'No tasks loaded.',
       inspectorEmpty: Boolean(document.querySelector('.session-inspector .inspector-empty')),
       dashboardState: Boolean(document.querySelector('#routeRoot .dashboard-state')),
       recovery: Boolean(document.getElementById('dashboardRecoveryNotice'))

@@ -2064,13 +2064,30 @@ async function case_usage_ui_contract_unit() {
   assert.match(workspacesReact, /Loading analytics…/, 'Project analytics must expose an explicit loading state');
   assert.match(workspacesReact, /Analytics unavailable/, 'Project analytics must expose an explicit failure state');
   assert.match(workspacesReact, /routeHref\('usage'/, 'Project cards must retain a direct Analytics drill-down');
-  assert.match(usageReact, /role: 'tooltip'/, 'Analytics metric help must expose tooltip semantics');
-  assert.match(usageReact, /'aria-describedby': helpId/, 'Analytics metric help triggers must reference their tooltip text');
-  assert.match(usageReact, /event\.key === 'Escape'/, 'Analytics metric tooltips must be dismissible with Escape');
+  const React = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { Tooltip } = await import('../src/ui/components/tooltip.js');
+  const markup = renderToStaticMarkup(React.createElement(Tooltip, {
+    id: 'metric-help-fixture', content: 'How this metric is calculated'
+  }, React.createElement('button', { type: 'button', 'aria-label': 'About actions' }, '?')));
+  assert.match(markup, /aria-describedby="metric-help-fixture"/, 'Tooltip triggers must reference the explanation');
+  assert.match(markup, /role="tooltip"/, 'Metric explanations must expose tooltip semantics');
+  assert.match(markup, /hidden=""/, 'Tooltip explanations start visually closed');
+  assert.match(markup, /visibility:hidden/, 'An unmeasured tooltip must stay invisible until its initial placement is known');
+  assert.match(markup, /How this metric is calculated/, 'The referenced explanation must be retained for assistive technology');
+  assert.doesNotMatch(markup, /aria-expanded/, 'A tooltip must not advertise an unrelated disclosure state');
+  for (const consumer of [usageReact, charts, read('src/ui/components/operation-diagnostics.js')]) {
+    assert.match(consumer, /h\(Tooltip,/, 'Metrics, matrix cells and diagnostics must use the shared tooltip contract');
+  }
   assert.match(usageRender, /percentage points[\s\S]{0,80}90% to 95% is \+5 pp/i, 'Rate help must explain percentage points with an example');
-  assert.match(usageCss, /\.usage-metric-help\.is-open \.usage-metric-tooltip/, 'Analytics metric tooltips must have an explicit visible state');
-  assert.match(usageReact, /'aria-expanded': open \? 'true' : 'false'/, 'Analytics metric help must expose its expanded state to assistive technology');
-  assert.match(usageReact, /onClick: \(\) => setOpen\(value => !value\)/, 'Analytics metric help must support explicit touch and click toggling');
+  // Pointer transfer, Escape, focus and viewport geometry are exercised in the rendered fixture.
+  const { processStopResult } = await import('../src/ui/features/processes/index.js');
+  assert.equal(processStopResult({ status: 'stopped', terminationConfirmed: true }).status, 'success');
+  for (const uncertain of [undefined, {}, { status: 'stopped' }, { status: 'stopping', terminationConfirmed: true }, { status: 'orphaned', terminationConfirmed: false }]) {
+    assert.equal(processStopResult(uncertain).status, 'error', 'A successful request must not imply confirmed process termination');
+  }
+  assert.equal(processStopResult({ ok: false, error: 'Try again' }).message, 'Try again');
+  assert.equal(processStopResult({ status: 'orphaned', terminationError: 'Subprocess is still running' }).message, 'Subprocess is still running');
   assert.match(charts, /event\.key === 'ArrowLeft'/, 'Analytics timeline must support keyboard period navigation');
   assert.match(charts, /event\.key === 'ArrowRight'/, 'Analytics timeline must support keyboard period navigation');
   assert.match(charts, /analytics-matrix-grid/, 'The work-type matrix must render explicit categorical row and column labels instead of numeric chart axes');

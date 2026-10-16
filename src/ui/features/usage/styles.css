@@ -22,19 +22,15 @@
 .usage-side-by-side { @apply grid min-w-0 gap-3; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .usage-side-by-side > .card { min-width: 0; }
 .usage-loading { @apply rounded-xl border p-5 text-[12px]; color: var(--ui-text-secondary); border-color: var(--ui-border-default); background: var(--ui-surface-primary); }
-.usage-metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); border: 1px solid var(--ui-border-default); border-radius: var(--radius-lg); overflow: visible; background: var(--ui-surface-primary); }
+.usage-metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); border: 1px solid var(--ui-border-default); border-radius: var(--card-radius, 10px); overflow: visible; background: var(--ui-surface-primary); }
 .usage-metric { @apply grid min-w-0 gap-1 p-4; border-right: 1px solid var(--ui-border-default); border-bottom: 0; }
 .usage-metric:last-child { border-right: 0; }
 .usage-metric-label-row { @apply flex min-w-0 items-center justify-between gap-1; }
 .usage-metric-label-main { @apply flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden; }
 .usage-metric-icon { @apply shrink-0; color: var(--ui-text-tertiary); }
 .usage-metric-label { @apply min-w-0 text-[12px] font-semibold uppercase leading-tight tracking-[0.04em]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
-.usage-metric-help { display: inline-flex; }
 .usage-metric-help-trigger { @apply relative grid shrink-0 place-items-center p-0; width: 44px; height: 44px; min-width: 44px; min-height: 44px; margin: -13px -12px -13px 0; border: 0; border-radius: 999px; color: var(--ui-text-tertiary); background: transparent; cursor: help; }
 .usage-metric-help-trigger:hover, .usage-metric-help-trigger:focus-visible { color: var(--ui-text-primary); background: var(--ui-surface-secondary); }
-.usage-metric-tooltip { position: absolute; z-index: var(--z-toast); top: 46px; left: 12px; right: 12px; padding: 8px 10px; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); background: var(--ui-surface-raised); color: var(--ui-text-primary); font-size: 13px; font-weight: 500; line-height: 1.6; letter-spacing: normal; text-transform: none; opacity: 0; visibility: hidden; pointer-events: auto; }
-.usage-metric-help.is-open .usage-metric-tooltip { opacity: 1; visibility: visible; }
-.usage-metric.help-open { z-index: var(--z-sticky); }
 .usage-metric strong { @apply text-[18px] font-extrabold; overflow-wrap: anywhere; color: var(--ui-text-primary); }
 .usage-breakdown .card-head p { @apply m-0 mt-1 text-[12px]; color: var(--ui-text-secondary); }
 .usage-table-wrap { @apply w-full overflow-x-auto; }
@@ -150,12 +146,10 @@
 .analytics-matrix-bubble::before { content: ''; width: var(--matrix-bubble-size); height: var(--matrix-bubble-size); border: 1px solid color-mix(in srgb,var(--ui-action-primary) 82%,var(--ui-surface-primary) 18%); border-radius: 999px; background: var(--ui-action-primary); opacity: var(--matrix-bubble-opacity); box-shadow: 0 0 0 1px color-mix(in srgb,var(--ui-action-primary) 20%,transparent); transition: opacity 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }
 .analytics-matrix-bubble:hover::before, .analytics-matrix-bubble:focus-visible::before { opacity: 1; border-color: color-mix(in srgb,var(--ui-action-primary) 72%,var(--ui-surface-primary) 28%); box-shadow: 0 0 0 3px color-mix(in srgb,var(--ui-action-primary) 18%,transparent); }
 .analytics-matrix-bubble:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 1px; }
-.analytics-matrix-tooltip { position: absolute; z-index: var(--z-toast); left: 50%; bottom: calc(100% + 8px); display: none; width: max-content; max-width: 250px; transform: translateX(-50%); @apply rounded-lg border px-3 py-2 text-left text-[11px] font-medium leading-4; border-color: var(--ui-border-default); background: var(--ui-surface-raised); color: var(--ui-text-secondary); box-shadow: var(--ui-shadow-popover); pointer-events: none; opacity: 1; }
 .analytics-matrix-tooltip strong, .analytics-matrix-tooltip span, .analytics-matrix-tooltip small { display: block; }
 .analytics-matrix-tooltip strong { @apply mb-1 text-[12px] font-bold; color: var(--ui-text-primary); }
 .analytics-matrix-tooltip span { @apply font-semibold; color: var(--ui-action-primary); }
 .analytics-matrix-tooltip small { @apply mt-0.5 text-[10px]; color: var(--ui-text-tertiary); }
-.analytics-matrix-bubble:hover .analytics-matrix-tooltip, .analytics-matrix-bubble:focus-visible .analytics-matrix-tooltip { display: block; }
 @media (prefers-reduced-motion: reduce) {
   .analytics-matrix-bubble::before { transition: none; }
 }

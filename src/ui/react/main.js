@@ -16,6 +16,8 @@ import { createRoot } from 'react-dom/client';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Icon } from '../components/icons.js';
+import { OverlayFrame } from '../components/overlay-frame.js';
+import { toast } from '../components/toast.js';
 import { StatusPill } from '../components/pill.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary } from '../connection-state.js';
 import { DEVELOPER_FEATURE_CHANGE_EVENT, DEVELOPER_FEATURES, readDeveloperFeatureEnabled } from '../developer-mode.js';
@@ -409,13 +411,15 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
               id: 'commandPaletteBtn',
               type: 'button',
               'aria-haspopup': 'dialog',
+              'aria-label': `Open quick navigation ${shortcut}`,
+              'aria-keyshortcuts': /Mac|iPhone|iPad/.test(navigator.platform || '') ? 'Meta+K' : 'Control+K',
               'aria-expanded': paletteOpen ? 'true' : 'false',
               title: 'Open quick navigation',
               onClick: openPalette
             },
               h(Icon, { name: 'search' }),
-              h('span', { className: 'command-trigger-label' }, 'Quick navigation'),
-              h('kbd', null, shortcut)
+              h('span', { className: 'command-trigger-label' }, 'Quick navigation '),
+              h('kbd', { 'aria-hidden': 'true' }, shortcut)
             ),
             h(UpdateStatusPill),
             h(StatusPill, {
@@ -561,12 +565,28 @@ function MobileNavigation({ extensionsEnabled, open, route, setOpen }) {
         h('span', { className: 'nav-label' }, 'More')
       ),
       h('div', { className: 'mobile-nav-more-menu' },
-        moreItems.map(item => h(NavLink, {
+        moreItems.filter(item => item.id !== 'system' && item.id !== 'settings').map(item => h(NavLink, {
           key: item.id,
           item,
-          active: route.owner === item.id,
+          active: route.path === item.path,
           onClick: () => setOpen(false)
-        }))
+        })),
+        [
+          { id: 'system', label: 'System', items: SYSTEM_NAV_ITEMS },
+          { id: 'settings', label: 'Settings', items: SETTINGS_NAV_ITEMS }
+        ].map(group => h('section', {
+          key: group.id,
+          className: 'mobile-nav-group',
+          'aria-labelledby': `mobile-nav-${group.id}-title`
+        },
+          h('h2', { className: 'mobile-nav-group-title', id: `mobile-nav-${group.id}-title` }, group.label),
+          group.items.map(item => h(NavLink, {
+            key: item.id,
+            item,
+            active: route.path === item.path,
+            onClick: () => setOpen(false)
+          }))
+        ))
       )
     )
   );
@@ -914,95 +934,96 @@ function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onCl
 
   const execute = command => {
     if (!command) return;
-    Promise.resolve(command.run()).catch(debugError);
+    Promise.resolve().then(() => command.run()).catch(error => {
+      debugError(error);
+      toast(`Could not complete ${command.label.toLowerCase()}. Try again or open Troubleshooting.`, { variant: 'error' });
+    });
   };
   const activeId = visible.length ? `command-option-${safeIndex}` : undefined;
-  return h(Dialog.Root, {
+  return h(OverlayFrame, {
     open,
-    onOpenChange: next => { if (!next) onClose(); }
-  }, h(Dialog.Portal, null,
-    h(Dialog.Overlay, { asChild: true },
-      h('div', { id: '__relai-modal-backdrop', className: 'overlay-backdrop modal-backdrop' },
-        h(Dialog.Content, {
-          asChild: true,
-          onOpenAutoFocus: event => {
-            event.preventDefault();
-            queueMicrotask(() => inputRef.current?.focus({ preventScroll: true }));
-          },
-          onCloseAutoFocus: event => {
-            event.preventDefault();
-            if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true });
-          }
-        }, h('div', { className: 'modal-panel modal-wide command-panel' },
-          h('header', { className: 'modal-head' },
-            h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, 'Quick navigation'))
-          ),
-          h('div', { className: 'modal-body' },
-            h('div', { className: 'command-palette' },
-              h('label', { className: 'command-search-wrap' },
-                h('span', { className: 'sr-only' }, 'Search pages, settings, actions, and projects'),
-                h(Icon, { name: 'search' }),
-                h('input', {
-                  className: 'command-search',
-                  type: 'search',
-                  role: 'combobox',
-                  autoComplete: 'off',
-                  placeholder: 'Search pages, actions, or projects',
-                  'aria-autocomplete': 'list',
-                  'aria-expanded': visible.length ? 'true' : 'false',
-                  'aria-controls': 'commandPaletteList',
-                  'aria-describedby': 'commandPaletteHelp',
-                  'aria-activedescendant': activeId,
-                  ref: inputRef,
-                  value: query,
-                  onChange: event => { setQuery(event.target.value); setActiveIndex(0); },
-                  onKeyDown: event => {
-                    if (event.key === 'ArrowDown') {
-                      event.preventDefault();
-                      setActiveIndex(index => visible.length ? (index + 1) % visible.length : 0);
-                    } else if (event.key === 'ArrowUp') {
-                      event.preventDefault();
-                      setActiveIndex(index => visible.length ? (index - 1 + visible.length) % visible.length : 0);
-                    } else if (event.key === 'Enter' && visible[safeIndex]) {
-                      event.preventDefault();
-                      execute(visible[safeIndex]);
-                    }
-                  }
-                }),
-                h('kbd', null, 'Esc')
-              ),
-              h(Dialog.Description, { asChild: true }, h('div', { className: 'command-help' }, h('span', { id: 'commandPaletteHelp' }, 'Use ↑ and ↓ to move, then press Enter.'))),
-              h('span', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, resultAnnouncement),
-              h('div', { className: 'command-list', id: 'commandPaletteList', role: 'listbox', 'aria-label': 'Quick navigation results' },
-                visible.length
-                  ? visible.map((command, index) => h('div', {
-                      className: `command-option${index === safeIndex ? ' active' : ''}`,
-                      id: `command-option-${index}`,
-                      key: command.id,
-                      role: 'option',
-                      'aria-selected': index === safeIndex ? 'true' : 'false',
-                      'data-command-index': String(index),
-                      onMouseEnter: () => {
-                        if (index !== safeIndex) setActiveIndex(index);
-                        preloadReactNavigationTarget(command.href);
-                      },
-                      onClick: () => execute(command),
-                      onTouchStart: () => {
-                        if (index !== safeIndex) setActiveIndex(index);
-                        preloadReactNavigationTarget(command.href);
-                      }
-                    },
-                    h('span', { className: 'command-option-copy' }, h('strong', null, command.label), h('small', null, command.description)),
-                    h('span', { className: 'command-group' }, command.group)
-                  ))
-                  : h('div', { className: 'command-empty' }, 'No matching page, action, or project.')
-              )
-            )
-          )
-        ))
+    size: 'wide',
+    className: 'command-panel',
+    onOpenChange: next => { if (!next) onClose(); },
+    backdropProps: { id: '__relai-modal-backdrop' },
+    contentProps: {
+      onOpenAutoFocus: event => {
+        event.preventDefault();
+        queueMicrotask(() => inputRef.current?.focus({ preventScroll: true }));
+      },
+      onCloseAutoFocus: event => {
+        event.preventDefault();
+        if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true });
+        else document.getElementById('pageTitle')?.focus({ preventScroll: true });
+      }
+    }
+  },
+    h('header', { className: 'modal-head' },
+      h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, 'Quick navigation'))
+    ),
+    h('div', { className: 'modal-body' },
+      h('div', { className: 'command-palette' },
+        h('label', { className: 'command-search-wrap' },
+          h('span', { className: 'sr-only' }, 'Search pages, settings, actions, and projects'),
+          h(Icon, { name: 'search' }),
+          h('input', {
+            className: 'command-search',
+            type: 'search',
+            role: 'combobox',
+            autoComplete: 'off',
+            placeholder: 'Search pages, actions, or projects',
+            'aria-autocomplete': 'list',
+            'aria-expanded': visible.length ? 'true' : 'false',
+            'aria-controls': 'commandPaletteList',
+            'aria-describedby': 'commandPaletteHelp',
+            'aria-activedescendant': activeId,
+            ref: inputRef,
+            value: query,
+            onChange: event => { setQuery(event.target.value); setActiveIndex(0); },
+            onKeyDown: event => {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                setActiveIndex(index => visible.length ? (index + 1) % visible.length : 0);
+              } else if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                setActiveIndex(index => visible.length ? (index - 1 + visible.length) % visible.length : 0);
+              } else if (event.key === 'Enter' && visible[safeIndex]) {
+                event.preventDefault();
+                execute(visible[safeIndex]);
+              }
+            }
+          }),
+          h('kbd', null, 'Esc')
+        ),
+        h(Dialog.Description, { asChild: true }, h('div', { className: 'command-help' }, h('span', { id: 'commandPaletteHelp' }, 'Use ↑ and ↓ to move, then press Enter.'))),
+        h('span', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, resultAnnouncement),
+        h('div', { className: 'command-list', id: 'commandPaletteList', role: 'listbox', 'aria-label': 'Quick navigation results' },
+          visible.length
+            ? visible.map((command, index) => h('div', {
+                className: `command-option${index === safeIndex ? ' active' : ''}`,
+                id: `command-option-${index}`,
+                key: command.id,
+                role: 'option',
+                'aria-selected': index === safeIndex ? 'true' : 'false',
+                'data-command-index': String(index),
+                onMouseEnter: () => {
+                  if (index !== safeIndex) setActiveIndex(index);
+                  preloadReactNavigationTarget(command.href);
+                },
+                onClick: () => execute(command),
+                onTouchStart: () => {
+                  if (index !== safeIndex) setActiveIndex(index);
+                  preloadReactNavigationTarget(command.href);
+                }
+              },
+              h('span', { className: 'command-option-copy' }, h('strong', null, command.label), h('small', null, command.description)),
+              h('span', { className: 'command-group' }, command.group)
+            ))
+            : h('div', { className: 'command-empty' }, 'No matching page, action, or project.')
+        )
       )
     )
-  ));
+  );
 }
 
 function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePalette) {
@@ -1079,24 +1100,17 @@ const OverlayHost = memo(function OverlayHost({ drawer, modal }) {
 const ModalPortal = memo(function ModalPortal({ descriptor }) {
   const descriptorRef = useRef(descriptor);
   descriptorRef.current = descriptor;
-  return h(Dialog.Root, {
+  return h(OverlayFrame, {
     open: true,
+    size: descriptor.size,
     onOpenChange: next => {
       if (next) return;
       const current = descriptorRef.current;
       if (current.confirmation) current.confirmation.onCancel?.();
       else if (current.dismissEnabled) void current.onDismiss?.();
-    }
-  }, h(Dialog.Portal, null,
-    h(Dialog.Overlay, { asChild: true },
-      h('div', {
-        id: '__relai-modal-backdrop',
-        className: 'overlay-backdrop modal-backdrop',
-        'data-react-overlay': 'modal'
-      })
-    ),
-    h(Dialog.Content, {
-      asChild: true,
+    },
+    backdropProps: { id: '__relai-modal-backdrop', 'data-react-overlay': 'modal' },
+    contentProps: {
       'aria-describedby': descriptor.description ? '__relai-modal-desc' : undefined,
       onEscapeKeyDown: event => {
         if (descriptor.confirmation || !descriptor.dismissEnabled) event.preventDefault();
@@ -1109,21 +1123,21 @@ const ModalPortal = memo(function ModalPortal({ descriptor }) {
         if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
         else document.getElementById('pageTitle')?.focus({ preventScroll: true });
       }
-    }, h('div', { className: `modal-panel modal-${descriptor.size}` },
-      h('header', { className: 'modal-head', inert: descriptor.confirmation ? true : undefined },
-        h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, descriptor.title)),
-        h(Dialog.Description, { id: '__relai-modal-desc', className: 'sr-only' }, descriptor.description || descriptor.title || 'Dialog'),
-        descriptor.showClose ? h('button', {
-          type: 'button',
-          className: 'modal-close',
-          'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
-          onClick: () => { void descriptor.onDismiss?.(); }
-        }, h(CloseIcon)) : null
-      ),
-      h('div', { className: 'modal-body', inert: descriptor.confirmation ? true : undefined }, h(OverlayContent, { content: descriptor.content })),
-      descriptor.confirmation ? h(ModalConfirmation, { confirmation: descriptor.confirmation }) : null
-    ))
-  ));
+    }
+  },
+    h('header', { className: 'modal-head', inert: descriptor.confirmation ? true : undefined },
+      h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, descriptor.title)),
+      h(Dialog.Description, { id: '__relai-modal-desc', className: 'sr-only' }, descriptor.description || descriptor.title || 'Dialog'),
+      descriptor.showClose ? h('button', {
+        type: 'button',
+        className: 'modal-close',
+        'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
+        onClick: () => { void descriptor.onDismiss?.(); }
+      }, h(CloseIcon)) : null
+    ),
+    h('div', { className: 'modal-body', inert: descriptor.confirmation ? true : undefined }, h(OverlayContent, { content: descriptor.content })),
+    descriptor.confirmation ? h(ModalConfirmation, { confirmation: descriptor.confirmation }) : null
+  );
 });
 
 function OverlayContent({ content }) {
@@ -1194,39 +1208,33 @@ function ModalConfirmation({ confirmation }) {
 }
 
 const DrawerPortal = memo(function DrawerPortal({ descriptor }) {
-  return h(Dialog.Root, {
+  return h(OverlayFrame, {
     open: true,
-    onOpenChange: next => { if (!next) descriptor.onDismiss?.(); }
-  }, h(Dialog.Portal, null,
-    h(Dialog.Overlay, { asChild: true },
-      h('div', {
-        id: '__relai-drawer-backdrop',
-        className: 'overlay-backdrop drawer-backdrop',
-        'data-react-overlay': 'drawer'
-      })
-    ),
-    h(Dialog.Content, {
-      asChild: true,
+    kind: 'drawer',
+    className: descriptor.panelClass,
+    onOpenChange: next => { if (!next) descriptor.onDismiss?.(); },
+    backdropProps: { id: '__relai-drawer-backdrop', 'data-react-overlay': 'drawer' },
+    contentProps: {
       'aria-describedby': descriptor.description ? '__relai-drawer-desc' : undefined,
       onCloseAutoFocus: event => {
         event.preventDefault();
         if (descriptor.opener instanceof HTMLElement && descriptor.opener.isConnected) descriptor.opener.focus({ preventScroll: true });
         else document.getElementById('pageTitle')?.focus({ preventScroll: true });
       }
-    }, h('div', { className: ['drawer-panel', descriptor.panelClass].filter(Boolean).join(' ') },
-      h('div', { className: 'drawer-head' },
-        h(Dialog.Title, { asChild: true }, h('h2', { className: 'drawer-title' }, descriptor.title)),
-        h(Dialog.Description, { id: '__relai-drawer-desc', className: 'sr-only' }, descriptor.description || descriptor.title || 'Drawer navigation'),
-        h('button', {
-          className: 'secondary compact-button',
-          type: 'button',
-          'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
-          onClick: descriptor.onDismiss
-        }, 'Close')
-      ),
-      h('div', { className: 'drawer-body' }, descriptor.content)
-    ))
-  ));
+    }
+  },
+    h('div', { className: 'drawer-head' },
+      h(Dialog.Title, { asChild: true }, h('h2', { className: 'drawer-title' }, descriptor.title)),
+      h(Dialog.Description, { id: '__relai-drawer-desc', className: 'sr-only' }, descriptor.description || descriptor.title || 'Drawer navigation'),
+      h('button', {
+        className: 'secondary compact-button',
+        type: 'button',
+        'aria-label': descriptor.title ? `Close ${descriptor.title}` : 'Close dialog',
+        onClick: descriptor.onDismiss
+      }, 'Close')
+    ),
+    h('div', { className: 'drawer-body' }, descriptor.content)
+  );
 });
 
 function CloseIcon() {

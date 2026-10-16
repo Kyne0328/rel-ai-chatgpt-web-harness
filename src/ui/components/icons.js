@@ -92,6 +92,7 @@ const ICONS = Object.freeze({
   diagnostics: TriangleAlert,
   usage: ChartNoAxesCombined,
   extensions: Puzzle,
+  puzzle: Puzzle,
   settings: Settings,
   search: Search,
   more: Ellipsis,
@@ -115,12 +116,15 @@ const ICONS = Object.freeze({
   trash: Trash2
 });
 
-export function Icon({ name, className = '', size = 18, strokeWidth = 1.8, ...props }) {
+export function Icon({ name, className = '', size = 16, strokeWidth = 1.8, style, ...props }) {
   const Component = ICONS[name] || CircleHelp;
   return h(Component, {
     className: ['ui-icon', className].filter(Boolean).join(' '),
     size,
     strokeWidth,
+    // Inline dimensions are the single size authority; surrounding control CSS
+    // must size its hit area independently of the decorative glyph.
+    style: { ...style, width: size, height: size, strokeWidth },
     'aria-hidden': 'true',
     focusable: 'false',
     ...props

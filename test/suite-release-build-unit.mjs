@@ -1215,6 +1215,8 @@ async function case_update_available_modal_unit() {
   assert.match(supportPolicyModalView(deprecatedPolicy).description, /September|2026|before/i);
   assert.equal(supportPolicyModalView(requiredPolicy).blocking, true);
   assert.equal(supportPolicyModalView(requiredPolicy).allowLater, false);
+  assert.match(source, /This notice blocks dashboard access/, 'Blocking update copy must describe the enforced dashboard restriction');
+  assert.doesNotMatch(source, /You can still use the dashboard/, 'Blocking update copy must not promise unavailable access');
   assert.match(supportPolicyModalView(emergencyPolicy).title, /critical/i);
   
   assert.equal(availableUpdateModalView({ state: 'idle', availableVersion: '0.27.5' }), null);

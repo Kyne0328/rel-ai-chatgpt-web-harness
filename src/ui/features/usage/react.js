@@ -8,6 +8,7 @@ import {
   isPrimaryAnalyticsUseCase
 } from '../../../contracts/analyticsTaxonomy.js';
 import { Icon } from '../../components/icons.js';
+import { Tooltip } from '../../components/tooltip.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref } from '../../router.js';
 import { ANALYTICS_RANGES, analyticsBounds, workspaceOptions } from './range-model.js';
 import { loadAnalyticsData } from './data.js';
@@ -153,7 +154,7 @@ function AnalyticsToolbar({ end, loading, onDateChange, onRangeChange, onRefresh
             key,
             type: 'button',
             'data-usage-range-option': key,
-            'aria-label': label,
+            'aria-label': `${rangeButtonLabel(key, label)}: ${label}`,
             title: label,
             'aria-pressed': range === key ? 'true' : 'false',
             onClick: () => onRangeChange(key)
@@ -329,37 +330,20 @@ function formatShare(value) {
 }
 
 function Metric({ metric }) {
-  const [open, setOpen] = useState(false);
   const helpId = `usage-metric-help-${metric.key}`;
   const sparkValues = Array.isArray(metric.values) ? metric.values : [];
-  return h('article', { className: `usage-metric ${metric.tone}${open ? ' help-open' : ''}`.trim() },
+  return h('article', { className: `usage-metric ${metric.tone}`.trim() },
     h('div', { className: 'usage-metric-label-row' },
       h('span', { className: 'usage-metric-label-main' },
         h(Icon, { name: METRIC_ICONS[metric.key] || 'usage', className: 'usage-metric-icon', size: 16 }),
         h('span', { className: 'usage-metric-label' }, metric.label)
       ),
-      metric.help ? h('span', {
-        className: `usage-metric-help${open ? ' is-open' : ''}`,
-        onPointerEnter: () => setOpen(true),
-        onPointerLeave: () => setOpen(false),
-        onFocus: () => setOpen(true),
-        onBlur: () => setOpen(false)
-      },
+      metric.help ? h(Tooltip, { id: helpId, content: metric.help, className: 'usage-metric-tooltip' },
         h('button', {
           type: 'button',
           className: 'usage-metric-help-trigger',
-          'aria-label': `About ${metric.label}`,
-          'aria-describedby': helpId,
-          'aria-expanded': open ? 'true' : 'false',
-          onClick: () => setOpen(value => !value),
-          onKeyDown: event => {
-            if (event.key === 'Escape') {
-              setOpen(false);
-              event.stopPropagation();
-            }
-          }
-        }, h(Icon, { name: 'help', size: 17 })),
-        h('span', { id: helpId, role: 'tooltip', className: 'usage-metric-tooltip' }, metric.help)
+          'aria-label': `About ${metric.label}`
+        }, h(Icon, { name: 'help', size: 17 }))
       ) : null
     ),
     h('div', { className: 'usage-metric-value' },

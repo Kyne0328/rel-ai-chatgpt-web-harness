@@ -468,6 +468,9 @@ async function case_task_inspector_lifecycle_unit() {
       window: { matchMedia: () => ({ matches: false }) },
       getWorkspaceFilter: () => params.get('workspace') || '',
       getRouteParams: () => new URLSearchParams(params),
+      getRouteSnapshot: () => ({ path: 'tasks', search: params.toString() }),
+      subscribeRoute: () => () => {},
+      useSyncExternalStore: (_subscribe, getSnapshot) => getSnapshot(),
       replaceRouteParams: patch => {
         for (const [key, value] of Object.entries(patch)) {
           if (value) params.set(key, value); else params.delete(key);

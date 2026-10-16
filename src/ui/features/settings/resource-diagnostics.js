@@ -37,7 +37,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
         metric('Available physical memory', bytes(pressure.physicalAvailableBytes)),
         metric('Total physical memory', bytes(pressure.physicalTotalBytes)),
         metric('Rel.AI service memory', bytes(current.rssBytes))),
-      h('div', { className: 'resource-diagnostics-lanes', 'aria-label': 'Resource admission lanes' }, lanes.length ? lanes.map(([name, lane]) => {
+      h('div', { className: 'resource-diagnostics-lanes', role: 'group', 'aria-label': 'Resource admission lanes' }, lanes.length ? lanes.map(([name, lane]) => {
         const queue = host.queues?.[name] || {};
         return h('section', { className: 'resource-diagnostics-lane', key: name },
           h('h4', null, LANE_LABELS[name] || name),

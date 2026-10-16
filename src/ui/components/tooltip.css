@@ -1,0 +1,5 @@
+.ui-tooltip { position: fixed; z-index: var(--z-toast); display: block; width: max-content; max-width: min(320px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); overflow: auto; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--ui-border-default); border-radius: var(--technical-radius, 7px); background: var(--ui-surface-raised); color: var(--ui-text-primary); box-shadow: var(--ui-shadow-popover); font-size: var(--technical-font-size, 12px); font-weight: 500; line-height: var(--technical-line-height, 1.6); letter-spacing: normal; text-align: left; text-transform: none; white-space: normal; overflow-wrap: anywhere; pointer-events: auto; }
+.ui-tooltip[hidden] { display: none; }
+@media (forced-colors: active) {
+  .ui-tooltip { border-color: CanvasText; background: Canvas; color: CanvasText; box-shadow: none; }
+}

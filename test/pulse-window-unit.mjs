@@ -102,7 +102,133 @@ const pulseHtml = readFileSync(new URL('../electron/renderer/pulse.html', import
 const pulseCss = readFileSync(new URL('../electron/renderer/pulse.css', import.meta.url), 'utf8');
 const pulseRenderer = readFileSync(new URL('../electron/renderer/pulse.js', import.meta.url), 'utf8');
 const preloadSource = readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
+
+async function verifyNativeUtilityFeedback() {
+  const { runInNewContext } = await import('node:vm');
+  const control = () => ({
+    disabled: false, textContent: 'Open', dataset: {}, attributes: new Map(),
+    setAttribute(name, value) { this.attributes.set(name, value); },
+    removeAttribute(name) { this.attributes.delete(name); }
+  });
+  const pulseButton = control();
+  const pulseError = { hidden: true, textContent: '' };
+  const pulseBridge = {};
+  const pulseContext = { Error, openButton: pulseButton, actionErrorEl: pulseError, window: { relaiPulse: pulseBridge } };
+  const pulseStart = pulseRenderer.indexOf('async function openDashboardWithFeedback()');
+  const pulseEnd = pulseRenderer.indexOf("\nopenButton.addEventListener", pulseStart);
+  assert.ok(pulseStart >= 0 && pulseEnd > pulseStart);
+  runInNewContext(pulseRenderer.slice(pulseStart, pulseEnd), pulseContext);
+  await pulseContext.openDashboardWithFeedback();
+  assert.equal(pulseError.hidden, false, 'An absent Pulse bridge must expose a visible recovery message');
+  assert.match(pulseError.textContent, /app menu/i);
+  pulseBridge.openDashboard = async () => { throw new Error('Fixture open failure'); };
+  await pulseContext.openDashboardWithFeedback();
+  assert.equal(pulseError.textContent, 'Fixture open failure');
+  assert.equal(pulseButton.disabled, false, 'A rejected dashboard action must be retryable');
+  pulseBridge.openDashboard = async () => ({ ok: false, error: 'Fixture unavailable' });
+  await pulseContext.openDashboardWithFeedback();
+  assert.equal(pulseError.textContent, 'Fixture unavailable', 'Structured failures are not successful opens');
+  let resolveOpen;
+  let calls = 0;
+  pulseBridge.openDashboard = (...args) => { assert.equal(args.length, 0, 'Pulse must use the canonical no-route dashboard opener'); calls += 1; return new Promise(resolve => { resolveOpen = resolve; }); };
+  const pending = pulseContext.openDashboardWithFeedback();
+  await pulseContext.openDashboardWithFeedback();
+  assert.equal(calls, 1, 'Repeated activation must not duplicate a pending dashboard action');
+  assert.equal(pulseButton.attributes.get('aria-busy'), 'true');
+  resolveOpen({ ok: true });
+  await pending;
+  assert.equal(pulseError.hidden, true, 'A successful retry must clear the previous error');
+  assert.equal(pulseButton.disabled, false);
+  assert.equal(pulseButton.attributes.has('aria-busy'), false);
+
+  const recoveryRenderer = readFileSync(new URL('../electron/renderer/status.js', import.meta.url), 'utf8');
+  const errors = [];
+  const statusUpdates = [];
+  const timers = [];
+  const recoveryBridge = { copyUrl: async () => ({ ok: false, error: 'Fixture copy failure' }) };
+  const recoveryContext = {
+    Error, cleanupWarning: '', currentStatus: { serverRunning: true, tunnelId: 'synthetic-id' }, window: { electronAPI: recoveryBridge, setTimeout: callback => timers.push(callback) },
+    setActionError: message => errors.push(message), updateUI: status => statusUpdates.push(status),
+    localStorage: { getItem: () => null }
+  };
+  const extract = (start, end) => {
+    const from = recoveryRenderer.indexOf(start);
+    const to = recoveryRenderer.indexOf(end, from);
+    assert.ok(from >= 0 && to > from);
+    return recoveryRenderer.slice(from, to);
+  };
+  runInNewContext([
+    extract('function restoreControlAvailability(', '\nfunction initDisclosures'),
+    extract('async function withBusy(', '\nfunction bindEvents'),
+    extract('function runAsync(', '\nfunction escapeText')
+  ].join('\n'), recoveryContext);
+  const copyButton = control();
+  await recoveryContext.runAsync(recoveryContext.copyWithFeedback(copyButton, 'synthetic-id', 'Copied'));
+  assert.equal(errors.at(-1), 'Fixture copy failure', 'Recovery utility failures must reach the visible action error');
+  assert.equal(copyButton.disabled, false);
+  assert.equal(copyButton.textContent, 'Open', 'A failed copy must not announce success');
+  recoveryBridge.copyUrl = async () => { throw new Error('Fixture rejected copy'); };
+  await recoveryContext.runAsync(recoveryContext.copyWithFeedback(copyButton, 'synthetic-id', 'Copied'));
+  assert.equal(errors.at(-1), 'Fixture rejected copy');
+  recoveryBridge.copyUrl = async () => ({ ok: true });
+  await recoveryContext.runAsync(recoveryContext.copyWithFeedback(copyButton, 'synthetic-id', 'Copied'));
+  assert.equal(copyButton.textContent, 'Copied');
+  assert.equal(errors.at(-1), '');
+  timers.at(-1)();
+  assert.equal(copyButton.disabled, false);
+  assert.equal(copyButton.textContent, 'Open');
+
+  const settingsButton = control();
+  await recoveryContext.withBusy(settingsButton, 'Opening…', async () => ({ ok: false, error: 'Fixture settings failure' }));
+  assert.equal(errors.at(-1), 'Fixture settings failure');
+  assert.equal(statusUpdates.length, 0, 'Structured utility failures must not replace connection status');
+  assert.equal(settingsButton.disabled, false);
+  assert.equal(settingsButton.textContent, 'Open');
+  await recoveryContext.withBusy(settingsButton, 'Opening…', async () => { throw new Error('Fixture rejected settings'); });
+  assert.equal(errors.at(-1), 'Fixture rejected settings');
+  await recoveryContext.withBusy(settingsButton, 'Opening…', async () => null);
+  assert.equal(errors.at(-1), '', 'A successful utility retry clears its failure');
+  await recoveryContext.withBusy(settingsButton, 'Stopping…', async () => ({ serverRunning: false, cleanup: { clean: false } }));
+  assert.match(recoveryContext.cleanupWarning, /could not confirm.*background processes/, 'Cleanup uncertainty must remain visible despite a returned stopped status');
+  await recoveryContext.withBusy(settingsButton, 'Opening…', async () => null);
+  assert.match(recoveryContext.cleanupWarning, /could not confirm/, 'A successful unrelated utility must not erase cleanup uncertainty');
+  assert.equal(statusUpdates.at(-1).serverRunning, false, 'Recovery must still apply authoritative service status');
+
+  let resolveDashboard;
+  let dashboardCalls = 0;
+  const dashboardButton = { ...control(), id: 'dashboardBtn' };
+  const dashboardPending = recoveryContext.withBusy(dashboardButton, 'Opening…', () => {
+    dashboardCalls += 1;
+    return new Promise(resolve => { resolveDashboard = resolve; });
+  });
+  dashboardButton.disabled = false; // Simulate a concurrent status render.
+  await recoveryContext.withBusy(dashboardButton, 'Opening…', async () => { dashboardCalls += 1; });
+  assert.equal(dashboardCalls, 1, 'Pending ownership must survive a status-render disabled-state change');
+  recoveryContext.currentStatus.serverRunning = false;
+  resolveDashboard(null);
+  await dashboardPending;
+  assert.equal(dashboardButton.disabled, true, 'Settling a utility must preserve current dashboard availability');
+
+  const tunnelCopy = { ...control(), id: 'copyBtn' };
+  let resolveCopy;
+  let copyCalls = 0;
+  recoveryBridge.copyUrl = () => { copyCalls += 1; return new Promise(resolve => { resolveCopy = resolve; }); };
+  const copyPending = recoveryContext.copyWithFeedback(tunnelCopy, 'synthetic-id', 'Copied');
+  tunnelCopy.disabled = false;
+  await recoveryContext.copyWithFeedback(tunnelCopy, 'synthetic-id', 'Copied');
+  assert.equal(copyCalls, 1, 'Status updates must not duplicate a pending copy');
+  resolveCopy({ ok: true });
+  await copyPending;
+  recoveryContext.currentStatus.tunnelId = '';
+  timers.at(-1)();
+  assert.equal(tunnelCopy.disabled, true, 'Copy feedback must not reenable copying an unavailable tunnel ID');
+}
+await verifyNativeUtilityFeedback();
+
 assert.match(pulseHtml, /id="pulseTaskCount"/, 'compact Pulse markup must expose the active task count');
+assert.doesNotMatch(pulseHtml, /id="pulseCompactCopy"[^>]*aria-label=/, 'Compact Pulse must retain its visible dynamic text as its accessible name');
+assert.match(pulseHtml, /id="pulseCompactCopy"[^>]*aria-describedby="pulseCompactAction"/, 'Compact Pulse must separately describe the expand/collapse action');
+assert.match(pulseRenderer, /setText\(compactActionDescription, value \? 'Hide activity details' : 'Show activity details'\)/, 'Compact Pulse action description must track expansion state');
 assert.match(pulseHtml, /id="pulseTaskList"/, 'expanded Pulse must expose a task list');
 assert.match(pulseHtml, /id="pulseActivity"/, 'expanded Pulse must expose the current activity line');
 assert.doesNotMatch(pulseHtml, /id="pulseCopy"/, 'expanded Pulse must not expose a redundant copy-details action');
@@ -141,7 +267,6 @@ assert.doesNotMatch(pulseRenderer, /pointerenter|pointerleave|scheduleHoverOpen|
 assert.match(pulseRenderer, /querySelector\('\.pulse-bar'\)[\s\S]{0,160}!expanded[\s\S]{0,80}setExpanded\(true\)/, 'clicking the compact Pulse must expand it');
 assert.match(pulseRenderer, /event\.key === 'Escape' && expanded/, 'Escape must collapse an expanded Pulse');
 assert.match(pulseRenderer, /taskNames\.join\(' · '\)/, 'expanded Pulse must render active task names');
-assert.match(pulseRenderer, /relaiPulse\?\.openDashboard\?\.\(\)/, 'Pulse must use the same no-route dashboard opener as the tray');
 assert.match(pulseRenderer, /document\.addEventListener\('visibilitychange', handleVisibilityChange\)/, 'Pulse elapsed-time updates must react to renderer visibility changes');
 assert.match(pulseRenderer, /document\.visibilityState === 'hidden'[\s\S]{0,120}stopElapsedTimer\(\)/, 'hidden Pulse windows must stop the one-second elapsed timer');
 assert.doesNotMatch(pulseRenderer, /openDashboard\?\.\(currentModel\.route/, 'Pulse must not turn a dashboard open into a deep-link navigation requirement');

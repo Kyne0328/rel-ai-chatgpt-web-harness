@@ -38,3 +38,44 @@ Cross-feature infrastructure remains in `src/ui/`: routing, API access, canonica
 7. Desktop-only authority must use the approved preload bridge (`window.relaiDesktop`); feature code must not import Electron or expose new privileged renderer behavior without an IPC contract.
 8. Add focused tests for the feature/model/store boundary that changed and browser/Electron acceptance only where the real interaction crosses those boundaries.
 9. Keep `public/dashboard-app.js`, `public/dashboard-react.js`, `public/dashboard.css`, and `public/dashboard-chunks/` generated. Edit source under `src/ui/` or the production dashboard entry, then run `npm run build:frontend` and `npm run verify:generated`.
+
+## Shared visual roles
+
+The product identity is charcoal surfaces with lime primary actions (and semantic light-theme equivalents). Keep status information, success, warning and danger distinct from brand selection. Use the generated `--ui-*` palette; do not introduce feature palettes or decorative card elevation.
+
+Geometry is role-based in `styles/app.css`:
+
+| Role | Token / contract |
+| --- | --- |
+| Normal action and field | `--control-height` = 44px, `--control-radius` = 7px |
+| Dense desktop action | `--control-height-dense` = 36px; explicit `.dense-button`, 44px for coarse pointers |
+| Compact action copy | `.compact-button` reduces padding/type only; its target remains 44px |
+| Card and composite container | `--card-radius` = 10px, `--card-inset` = 16px |
+| Dialog or drawer | `--overlay-radius` = 13px, `--overlay-inset` = 20px |
+| Search/filter container | `--filter-inset` = 12px, `--stack-gap` = 12px |
+| Selection control | `--selection-radius` = 7px; use semantic selection/action colors |
+| Technical output | `--technical-font-size` = 12px, `--technical-line-height` = 1.6, `--technical-radius` = 7px |
+| Noninteractive status | `--status-height` = 36px; explicit `.status-pill-compact` = 24px |
+| Text hierarchy | `--text-page-title`, `--text-section-title`, `--text-card-title`, `--text-metric`, `--text-metric-compact` |
+
+Use the 4/8/12/16/24px spacing scale for equivalent roles. Specialized workbench/inspector layouts may retain meaningful density and hierarchy. Technical output must explicitly choose wrapped prose, unwrapped commands/logs, JSON, or diff whitespace; visual alignment must not truncate content or change that policy. Empty views must distinguish first use, no results, no selection, loading, unavailable data and recoverable error.
+
+No user-facing density preference exists. The former dormant `data-density="compact"` overrides are removed; do not reintroduce a global setting to justify isolated compact controls. Native Browser chrome and Pulse retain their specialist geometry and need complete hit-area checks. Setup/Recovery use system theme; dashboard/Pulse follow the selected theme. Electron typography is intentionally separate until equivalent roles are verified on its native surfaces.
+
+### Control and icon states
+
+Use native buttons for actions, anchors for navigation, and native fields. Shared primary, secondary and danger classes provide rest/hover/active/focus/disabled states. Danger feedback retains its danger palette. Disabled rules must beat component variants. Busy actions need a visible progress label plus `aria-busy="true"`; the owning feature must also prevent repeat submissions and decide whether Cancel remains available. CSS alone does not disable an `aria-disabled` anchor or button: the owner must block activation. An async error should remain visible with a useful recovery action.
+
+`Icon` is decorative by default. Its `size` (default 16) and `strokeWidth` props are authoritative, including inline dimensions, and must not be overridden by a feature glyph selector. Give an icon-only control its own accessible name and independently sized hit area. Use the central Lucide registry, including `puzzle` for extension skills; unknown names retain a safe help fallback. Do not add a second icon family.
+
+### Overlay composition and workflow ownership
+
+Use `components/overlay-frame.js` for the controlled Radix Root/Portal/Overlay/Content and panel geometry. `OverlayFrame` accepts `open`, `onOpenChange`, `kind` (modal/drawer), modal `size` (compact/standard/wide), `className`, `backdropProps`, `contentProps`, `panelProps` and children. Compose `Dialog.Title`, optional `Dialog.Description`, `.modal-head/.modal-body` or drawer equivalents inside it. When no description is appropriate, pass `'aria-describedby': undefined` through `contentProps`.
+
+The frame does not own business policy. Keep dirty checks, busy dismissal locks, destructive Cancel-first focus, nested AlertDialog resolution, combobox keyboard behavior, and initial/return-focus callbacks with the feature. Forward these callbacks through `contentProps` without replacing them with a generic close handler. Initial focus and focus restoration must be tested when the original trigger is removed, a nested confirmation is cancelled, a save fails, or an async operation remains busy.
+
+### Navigation and accessibility verification
+
+Desktop navigation, narrow More groups and Quick navigation consume the canonical navigation catalog. All System and Settings child destinations must be reachable without search at narrow widths. Preserve route guards, developer gating, active-page indication, parameter-owned selection and project context. Quick navigation has a persistent accessible name independent of shortcut visibility.
+
+Validate changes in both themes at 1180/1024/980/760/761/520/420/320 CSS px as relevant, with keyboard use, 200%/400% zoom, reduced motion, forced colors, long Unicode paths and interrupted/repeated actions. Focus must remain visible and controls must reflow; code and matrices may keep necessary local two-dimensional scrolling. WCAG 2.2 AA target-size requirements are not a blanket 44px rule, but 44px remains this product's normal control target. Source declarations and unit tests do not establish rendered or assistive-technology conformance.

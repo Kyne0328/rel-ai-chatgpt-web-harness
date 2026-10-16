@@ -25,18 +25,21 @@ function ChangesRoute({ data = {} }) {
   const bridge = window.relaiDesktop?.codeWorkspace || HTTP_CODE_BRIDGE;
   const tasks = useMemo(() => codeTasks(data), [data]);
 
-  if (!tasks.length) return h(EmptyChangesState);
+  const routeTask = useRouteTaskId(tasks);
+  if (!routeTask.selectedTaskId) return h(EmptyChangesState);
   return h(ChangesDesktop, {
+    key: routeTask.selectedTaskId,
     bridge,
-    tasks
+    tasks,
+    ...routeTask
   });
 }
 
-function ChangesDesktop({ bridge, tasks }) {
-  const { selectedTaskId, requestedFilePath, selectTask } = useRouteTaskId(tasks);
+function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, selectTask, returnContext }) {
   const selectedTask = tasks.find(task => task.id === selectedTaskId) || null;
   const [workspace, setWorkspace] = useState(null);
   const [workspaceError, setWorkspaceError] = useState('');
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [filePath, setFilePath] = useState('');
   const [diffFile, setDiffFile] = useState(null);
   const [viewerMessage, setViewerMessage] = useState('Loading task changes…');
@@ -56,14 +59,21 @@ function ChangesDesktop({ bridge, tasks }) {
   taskIdRef.current = selectedTaskId;
   filePathRef.current = filePath;
 
-  const loadDiff = useCallback(async (taskId, path) => {
-    const normalizedTaskId = String(taskId || '').trim();
+  const loadDiff = useCallback(async (requestedTask, path) => {
+    const normalizedTaskId = String(requestedTask || '').trim();
     const normalizedPath = String(path || '').trim();
     if (!normalizedTaskId || !normalizedPath) return false;
     const request = ++diffRequestRef.current;
     pendingDiffPathRef.current = normalizedPath;
+    if (normalizedPath !== filePathRef.current) {
+      setDiffFile(null);
+      setViewerMessage('Loading file diff…');
+      setViewerTone('');
+    }
     try {
       const file = await bridge.diff(normalizedTaskId, normalizedPath);
+      if (file?.ok === false) throw new Error(file.error || 'The file diff could not be loaded.');
+      if (taskId(file) !== normalizedTaskId || file?.path !== normalizedPath) throw new Error('The returned diff did not match the requested task and file. Try again.');
       if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId) return false;
       if (currentRoutePath() !== 'code' || readRequestedTaskId() !== normalizedTaskId) return false;
       if (readRequestedFilePath() && readRequestedFilePath() !== normalizedPath) return false;
@@ -87,12 +97,25 @@ function ChangesDesktop({ bridge, tasks }) {
     }
   }, [bridge]);
 
-  const refreshWorkspace = useCallback(async (taskId, { refreshCurrent = true } = {}) => {
-    const normalizedTaskId = String(taskId || '').trim();
+  const showUnavailableFile = useCallback(path => {
+    diffRequestRef.current += 1;
+    filePathRef.current = '';
+    pendingDiffPathRef.current = '';
+    setFilePath('');
+    setDiffFile(null);
+    setViewerMessage(`The requested file “${path}” is not available for this task. Choose a changed file or refresh to try again.`);
+    setViewerTone('error');
+  }, []);
+
+  const refreshWorkspace = useCallback(async (requestedTask, { refreshCurrent = true } = {}) => {
+    const normalizedTaskId = String(requestedTask || '').trim();
     if (!normalizedTaskId) return;
     const request = ++workspaceRequestRef.current;
+    setWorkspaceLoading(true);
     try {
       const nextWorkspace = await bridge.get(normalizedTaskId);
+      if (nextWorkspace?.ok === false) throw new Error(nextWorkspace.error || 'Task changes could not be loaded.');
+      if (taskId(nextWorkspace) !== normalizedTaskId) throw new Error('The returned changes did not match the requested task. Try again.');
       if (request !== workspaceRequestRef.current || taskIdRef.current !== normalizedTaskId) return;
       setWorkspace(nextWorkspace);
       setWorkspaceError('');
@@ -101,6 +124,10 @@ function ChangesDesktop({ bridge, tasks }) {
       const currentPath = filePathRef.current;
       const requestedPath = readRequestedFilePath();
       const currentStillExists = Boolean(currentPath && changedFiles.includes(currentPath));
+      if (requestedPath && !changedFiles.includes(requestedPath)) {
+        showUnavailableFile(requestedPath);
+        return;
+      }
       if (currentPath && !currentStillExists) {
         diffRequestRef.current += 1;
         filePathRef.current = '';
@@ -122,7 +149,6 @@ function ChangesDesktop({ bridge, tasks }) {
         setViewerTone('');
         return;
       }
-      if (requestedPath && !changedFiles.includes(requestedPath)) replaceRouteParams({ file: nextPath });
       if (nextPath !== currentPath || refreshCurrent) await loadDiff(normalizedTaskId, nextPath);
     } catch (error) {
       if (request !== workspaceRequestRef.current || taskIdRef.current !== normalizedTaskId) return;
@@ -132,8 +158,10 @@ function ChangesDesktop({ bridge, tasks }) {
       setDiffFile(null);
       setViewerMessage(messageFor(error));
       setViewerTone('error');
+    } finally {
+      if (request === workspaceRequestRef.current && taskIdRef.current === normalizedTaskId) setWorkspaceLoading(false);
     }
-  }, [bridge, loadDiff]);
+  }, [bridge, loadDiff, showUnavailableFile]);
 
   useEffect(() => {
     workspaceRequestRef.current += 1;
@@ -184,10 +212,14 @@ function ChangesDesktop({ bridge, tasks }) {
 
   const changedFiles = useMemo(() => changedTextFiles(workspace), [workspace]);
   useEffect(() => {
-    if (!requestedFilePath || !changedFiles.includes(requestedFilePath)) return;
+    if (!workspace || !requestedFilePath) return;
+    if (!changedFiles.includes(requestedFilePath)) {
+      showUnavailableFile(requestedFilePath);
+      return;
+    }
     if (requestedFilePath === filePathRef.current || requestedFilePath === pendingDiffPathRef.current) return;
     void loadDiff(selectedTaskId, requestedFilePath);
-  }, [changedFiles, loadDiff, requestedFilePath, selectedTaskId]);
+  }, [changedFiles, loadDiff, requestedFilePath, selectedTaskId, showUnavailableFile, workspace]);
   const visibleFiles = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return changedFiles.filter(file => !normalized || file.toLowerCase().includes(normalized));
@@ -225,13 +257,21 @@ function ChangesDesktop({ bridge, tasks }) {
           'data-code-task': '',
           value: selectedTaskId,
           onChange: event => selectTask(event.target.value)
-        }, tasks.map(task => h('option', { key: task.id, value: task.id }, task.label)))
+        },
+          !selectedTask ? h('option', { value: selectedTaskId }, `Requested task · ${selectedTaskId}`) : null,
+          tasks.map(task => h('option', { key: task.id, value: task.id }, task.label))
+        )
       ),
       h('div', { className: 'code-toolbar-actions' },
         h('a', {
           className: 'buttonlike secondary',
           'data-code-task-link': '',
-          href: routeHref('tasks', { workspace: selectedTask?.workspace, task: selectedTaskId })
+          href: routeHref('tasks', {
+            workspace: returnContext ? returnContext.workspace : selectedTask?.workspace || workspace?.workspace,
+            task: selectedTaskId,
+            search: returnContext?.search,
+            taskStatus: returnContext?.taskStatus
+          })
         }, h(Icon, { name: 'chevronLeft' }), h('span', null, 'Task')),
         canOpenIde ? h(React.Fragment, null,
           h('select', {
@@ -256,11 +296,15 @@ function ChangesDesktop({ bridge, tasks }) {
           className: 'secondary',
           type: 'button',
           'data-code-refresh': '',
+          disabled: workspaceLoading,
           onClick: () => { void refreshWorkspace(selectedTaskId, { refreshCurrent: true }); }
-        }, 'Refresh')
+        }, workspaceLoading ? 'Loading…' : workspaceError ? 'Retry' : 'Refresh')
       )
     ),
     h('div', { className: 'code-workspace-meta', 'data-code-meta': '' }, meta),
+    workspaceError ? h('p', { className: 'connection-notice bad', role: 'alert', 'data-code-task-error': '' },
+      `Changes for task ${selectedTaskId} could not be loaded. ${workspaceError} Use Retry to try again, or return to the task.`
+    ) : null,
     h('div', { className: 'code-workbench' },
       h('aside', { className: 'code-explorer', 'aria-label': 'Changed task files' },
         h('div', { className: 'code-explorer-head' },
@@ -282,7 +326,7 @@ function ChangesDesktop({ bridge, tasks }) {
       ),
       h('section', { className: 'code-editor-pane', 'aria-label': 'Task diff viewer' },
         h('div', { className: 'code-editor-toolbar' },
-          h('div', { className: 'code-file-heading mono', 'data-code-file-heading': '' }, filePath || 'No file selected'),
+          h('div', { className: 'code-file-heading mono', 'data-code-file-heading': '' }, requestedFilePath || filePath || 'No file selected'),
           h('div', { className: 'code-view-controls' },
             h('span', { className: 'code-keyboard-hint' }, h('kbd', null, 'Ctrl+M'), ' changes whether Tab moves focus'),
             h('div', { className: 'code-diff-layout', role: 'group', 'aria-label': 'Diff layout' },
@@ -312,7 +356,8 @@ function DiffViewer({ file, message, tone, layout }) {
   if (!file) {
     return h('div', {
       className: `code-editor-host code-editor-message${tone ? ` ${tone}` : ''}`,
-      'data-code-editor': ''
+      'data-code-editor': '',
+      role: tone === 'error' ? 'alert' : 'status'
     }, message || 'Choose a changed file to review its diff.');
   }
   return h(MonacoDiffViewer, { file, layout });
@@ -481,10 +526,12 @@ function useRouteTaskId(tasks) {
   const requestedTaskId = String(params.get('task') || '').trim();
   const requestedFilePath = String(params.get('file') || '').trim();
   const taskIds = useMemo(() => tasks.map(task => task.id), [tasks]);
-  const selectedTaskId = taskIds.includes(requestedTaskId) ? requestedTaskId : (taskIds[0] || '');
+  // Explicit identity is authoritative even when the retained task is absent
+  // from the bounded dashboard summary. Only an unscoped visit gets a default.
+  const selectedTaskId = requestedTaskId || taskIds[0] || '';
 
   useEffect(() => {
-    if (!selectedTaskId || requestedTaskId === selectedTaskId) return;
+    if (!selectedTaskId || requestedTaskId) return;
     replaceRouteParams({ task: selectedTaskId, file: null });
   }, [requestedTaskId, selectedTaskId]);
 
@@ -494,7 +541,12 @@ function useRouteTaskId(tasks) {
     replaceRouteParams({ task: next, file: null });
   };
 
-  return { selectedTaskId, requestedFilePath, selectTask };
+  const returnContext = params.get('from') === 'tasks' ? {
+    workspace: params.get('workspace') || '',
+    search: params.get('search') || '',
+    taskStatus: params.get('taskStatus') || ''
+  } : null;
+  return { selectedTaskId, requestedFilePath, selectTask, returnContext };
 }
 
 function readRequestedTaskId() {

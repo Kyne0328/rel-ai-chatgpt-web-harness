@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import axe from 'axe-core';
+import { UIUX_MANUAL_CHECKS, UIUX_ROUTE_COVERAGE } from './helpers/uiux-coverage-manifest.mjs';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -82,7 +83,7 @@ try {
   mcpSession = await createHttpMcpSession(`http://127.0.0.1:${port}`, { token, clientName: 'dashboard-live-rendering-acceptance' });
   const listed = await mcpSession.request('tools/list');
   assert.equal(listed.response.status, 200, JSON.stringify(listed.body));
-  const result = await waitForProbeResult(outputPath, 45_000).catch(async error => {
+  const result = await waitForProbeResult(outputPath, 180_000).catch(async error => {
     if (child?.exitCode == null) child.kill('SIGKILL');
     const [code] = await Promise.race([
       closePromise,
@@ -268,7 +269,18 @@ try {
     assert.equal(scenario.horizontalOverflow, false, `${scenario.name} has horizontal overflow`);
     assert.equal(scenario.mobileNavScrollable, false, `${scenario.name} hides primary navigation behind horizontal scrolling`);
     if (scenario.viewportWidth <= 760) assert.equal(scenario.mobileMoreVisible, true, `${scenario.name} does not expose the mobile More navigation control`);
-    assert.equal(scenario.topbarIntersects, true, `${scenario.name} topbar is outside the visual viewport`);
+    const shortMobile = scenario.viewportWidth <= 760 && scenario.viewportHeight <= 480;
+    assert.equal(scenario.topbarPosition, shortMobile ? 'static' : 'sticky', `${scenario.name} uses the wrong header scroll regime`);
+    if (shortMobile) {
+      assert.equal(scenario.headerControlFocus?.focused, true, `${scenario.name} quick navigation cannot receive focus`);
+      assert.equal(scenario.headerControlFocus?.focusVisible, true, `${scenario.name} quick navigation lacks keyboard focus indication`);
+      assert.equal(scenario.headerControlFocus?.contained, true, `${scenario.name} focused header control is outside the viewport or behind bottom navigation`);
+      assert.equal(scenario.headerControlFocus?.unobscured, true, `${scenario.name} focused header control is obscured`);
+      assert.equal(scenario.topbarRestoredAtScrollTop, true, `${scenario.name} static header is not reachable by scrolling to the top`);
+      assert.equal(scenario.contentFocusRestored, true, `${scenario.name} header reachability check lost task-row focus`);
+    } else {
+      assert.equal(scenario.topbarIntersects, true, `${scenario.name} sticky topbar is outside the visual viewport`);
+    }
     assert.equal(scenario.taskRowIntersects, true, `${scenario.name} has no visible task row`);
     assert.equal(scenario.primaryControlIntersects, true, `${scenario.name} has no reachable primary control`);
     assert.equal(scenario.focusVisible, true, `${scenario.name} does not show keyboard focus: ${JSON.stringify(scenario)}`);
@@ -313,6 +325,50 @@ try {
     .filter(violation => ['critical', 'serious'].includes(violation.impact))
     .map(violation => ({ route: audit.route, ...violation })));
   assert.deepEqual(seriousAccessibilityViolations, [], `Critical/serious axe violations: ${JSON.stringify(seriousAccessibilityViolations)}`);
+
+  assert.deepEqual(result.uiuxCoverage.manual, UIUX_MANUAL_CHECKS, 'automated coverage must retain explicit unperformed manual checks');
+  assert.equal(result.uiuxCoverage.routes.length, UIUX_ROUTE_COVERAGE.length * 4, 'all routes need both themes and desktop/reflow coverage');
+  for (const theme of ['dark', 'light']) for (const viewport of ['desktop', 'reflow-320']) {
+    assert.deepEqual(result.uiuxCoverage.routes.filter(item => item.theme === theme && item.viewport === viewport).map(item => item.route).sort(), UIUX_ROUTE_COVERAGE.map(item => item.route).sort());
+  }
+  for (const route of result.uiuxCoverage.routes) {
+    assert.equal(route.regionHasContent, true, JSON.stringify(route));
+    assert.equal(route.horizontalOverflow, false, JSON.stringify(route));
+    assert.ok(fs.existsSync(route.screenshot), 'missing screenshot: ' + route.screenshot);
+    if (route.viewport === 'reflow-320') assert.ok(route.viewportWidth >= 319 && route.viewportWidth <= 320, JSON.stringify(route));
+  }
+  for (const tab of result.uiuxCoverage.extensionTabs) {
+    assert.equal(tab.panelPresent, true, JSON.stringify(tab));
+    assert.equal(tab.horizontalOverflow, false, JSON.stringify(tab));
+  }
+  assert.ok(result.uiuxCoverage.extensionSelection.before.name.includes('Search'));
+  assert.equal(result.uiuxCoverage.extensionSelection.afterName, result.uiuxCoverage.extensionSelection.before.name);
+  assert.equal(result.uiuxCoverage.extensionSelection.toggledBackToAll, true);
+  const selectedTemplate = rows => rows.filter(item => item.checked).map(item => item.value);
+  assert.equal(selectedTemplate(result.uiuxCoverage.extensionSelection.radiosAfter).length, 1);
+  assert.notDeepEqual(selectedTemplate(result.uiuxCoverage.extensionSelection.radiosBefore), selectedTemplate(result.uiuxCoverage.extensionSelection.radiosAfter));
+  for (const link of result.uiuxCoverage.navigation) {
+    assert.equal(link.found, true, JSON.stringify(link));
+    assert.match(link.quickNavigationName, /quick navigation.*(?:Ctrl|⌘).*K/i, JSON.stringify(link));
+    assert.match(link.shortcut, /(?:Control|Meta)\+K/, JSON.stringify(link));
+  }
+  for (const spacing of result.uiuxCoverage.textSpacing) assert.equal(spacing.horizontalOverflow, false, JSON.stringify(spacing));
+  assert.equal(result.uiuxCoverage.activityKeyboard.offrangeTab, true);
+  assert.equal(result.uiuxCoverage.activityKeyboard.before.rowCount, 161);
+  assert.ok(result.uiuxCoverage.activityKeyboard.before.mountedRows < 160, 'Activity keeps virtualization');
+  assert.deepEqual(result.uiuxCoverage.activityKeyboard.visited, Array.from({ length: 160 }, (_, index) => index + 2));
+  assert.equal(result.uiuxCoverage.activityKeyboard.focusedAfterTick, result.uiuxCoverage.activityKeyboard.focusedBeforeTick);
+  assert.equal(result.uiuxCoverage.tooltipCoverage.themes.length, 2);
+  assert.equal(result.uiuxCoverage.tooltipCoverage.edges.length, 6);
+  assert.equal(result.uiuxCoverage.tooltipCoverage.clippedAnchorDismissed, true);
+  assert.equal(result.uiuxCoverage.tooltipCoverage.diagnostics.focusPreserved, true);
+  assert.equal(result.uiuxCoverage.sharedControls.themes.length, 2);
+  assert.deepEqual(result.uiuxCoverage.sharedControls.failures, [], JSON.stringify(result.uiuxCoverage.sharedControls));
+  const coverageViolations = result.uiuxCoverage.accessibility.flatMap(audit => audit.violations.map(violation => ({ route: audit.route, ...violation })));
+  // Every discovered impact level is retained and gated; automated results are
+  // still not a substitute for the documented manual assistive-technology checks.
+  assert.deepEqual(coverageViolations, [], 'Route accessibility failures: ' + JSON.stringify(coverageViolations));
+
   assert.equal(result.failures.length, 0, JSON.stringify(result.failures));
   await closePromise;
   console.log(`Real Electron Chromium dashboard acceptance passed across ${result.responsive.length} viewport scenarios; fixture screenshots were generated and their existence checked.`);

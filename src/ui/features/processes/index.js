@@ -1,6 +1,17 @@
 import { processOutputView, processStateView } from '../../task-identity.js';
 import { formatDuration, timeAgo } from '../../utils.js';
 
+export function processStopResult(result) {
+  if (result?.ok === false) return { status: 'error', message: String(result.error || 'The stop request failed.').slice(0, 320) };
+  if (result?.terminationConfirmed === true && ['stopped', 'exited', 'failed'].includes(result.status)) {
+    return { status: 'success', message: '' };
+  }
+  return {
+    status: 'error',
+    message: String(result?.terminationError || result?.error || 'Rel.AI could not confirm that the process and its subprocesses stopped. Check its status before retrying.').slice(0, 320)
+  };
+}
+
 export function processListView(data = {}, now = Date.now()) {
   const processes = orderProcesses(data.managedProcesses || []);
   const rows = processes.map(process => processRowView(process, now));

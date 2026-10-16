@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import './styles.css';
 import * as Dialog from '@radix-ui/react-dialog';
 import { fetchJson, invalidateCache, postJson } from '../../api.js';
 import { copyText } from '../../clipboard.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
+import { OverlayFrame } from '../../components/overlay-frame.js';
 import { toast } from '../../components/toast.js';
 
 const h = React.createElement;
@@ -212,7 +213,15 @@ function createExtensionsRoute() {
       ) : null,
 
       h('div', { className: 'extensions-tabs-row' },
-        h(ExtensionTabs, { activeTab, setActiveTab, stats }),
+        h(ExtensionTabs, {
+          activeTab,
+          setActiveTab: tab => {
+            setActiveTab(tab);
+            if ((tab === 'installed' && filterStatus === 'installed')
+              || (tab === 'discover' && filterStatus === 'needs_setup')) setFilterStatus('all');
+          },
+          stats
+        }),
         (activeTab === 'installed' || activeTab === 'discover') && data ? h(ExtensionsFilterToolbar, {
           activeTab,
           searchQuery,
@@ -345,65 +354,52 @@ function ExtensionsFilterToolbar({
   const isInstalled = activeTab === 'installed';
   const totalCount = isInstalled ? installedCount : catalogCount;
   const hasFilter = filterKind !== 'all' || filterStatus !== 'all' || Boolean(searchQuery.trim());
+  const kindLabels = { all: 'All types', skill: 'Skills', cli: 'CLI tools' };
+  const statusLabels = { all: 'All statuses', updates: 'Updates', needs_setup: 'Setup needed', installed: 'Installed' };
+  const typeOptions = [['all', 'All types'], ['skill', 'Skills', 'puzzle'], ['cli', 'CLI tools', 'processes']];
+  const statusOptions = isInstalled
+    ? [['all', 'All statuses'], ['updates', 'Updates', 'download'], ['needs_setup', 'Setup needed', 'warning']]
+    : [['all', 'All statuses'], ['updates', 'Updates', 'download'], ['installed', 'Installed', 'check']];
 
-  return h('div', { className: 'extensions-filter-toolbar flex-1' },
-    h('div', { className: 'extensions-filter-top' },
+  const filterButton = (value, label, icon, selected, onSelect) => h('button', {
+    key: value,
+    type: 'button',
+    className: `extensions-filter-pill${selected === value ? ' is-active' : ''}`,
+    'aria-pressed': selected === value,
+    onClick: () => onSelect(selected === value ? 'all' : value)
+  }, icon ? h(Icon, { name: icon, size: 12 }) : null, label);
+
+  return h('div', { className: 'extensions-filter-toolbar' },
+    h('div', { className: 'extensions-search-field field' },
+      h('label', { htmlFor: 'extensions-search' }, 'Search extensions'),
       h('div', { className: 'extensions-search-box' },
-        h(Icon, { name: 'search', size: 15, className: 'extensions-search-icon' }),
+        h(Icon, { name: 'search', size: 16, className: 'extensions-search-icon' }),
         h('input', {
+          id: 'extensions-search',
           type: 'search',
           className: 'extensions-search-input',
-          placeholder: isInstalled ? 'Search installed extensions by name, command, or publisher…' : 'Search catalog by name, command, or skill…',
+          placeholder: isInstalled ? 'Name, command, or publisher' : 'Name, command, or skill',
           value: searchQuery,
-          onChange: e => setSearchQuery(e.target.value)
+          onChange: event => setSearchQuery(event.target.value)
         }),
         searchQuery ? h('button', {
           type: 'button',
           className: 'extensions-search-clear',
           'aria-label': 'Clear search',
           onClick: () => setSearchQuery('')
-        }, h(Icon, { name: 'close', size: 14 })) : null
+        }, h(Icon, { name: 'close', size: 16 })) : null
+      )
+    ),
+    h('div', { className: 'extensions-filter-groups' },
+      h('div', { className: 'extensions-filter-pills', role: 'group', 'aria-label': 'Extension type' },
+        ...typeOptions.map(([value, label, icon]) => filterButton(value, label, icon, filterKind, setFilterKind))
       ),
-      h('div', { className: 'extensions-filter-pills' },
-        h('button', {
-          type: 'button',
-          className: `extensions-filter-pill${filterKind === 'all' ? ' is-active' : ''}`,
-          onClick: () => setFilterKind('all')
-        }, 'All types'),
-        h('button', {
-          type: 'button',
-          className: `extensions-filter-pill${filterKind === 'skill' ? ' is-active' : ''}`,
-          onClick: () => setFilterKind(filterKind === 'skill' ? 'all' : 'skill')
-        }, h(Icon, { name: 'puzzle', size: 12 }), ' Skills'),
-        h('button', {
-          type: 'button',
-          className: `extensions-filter-pill${filterKind === 'cli' ? ' is-active' : ''}`,
-          onClick: () => setFilterKind(filterKind === 'cli' ? 'all' : 'cli')
-        }, h(Icon, { name: 'processes', size: 12 }), ' CLI tools'),
-        isInstalled ? h('button', {
-          type: 'button',
-          className: `extensions-filter-pill${filterStatus === 'updates' ? ' is-active' : ''}`,
-          onClick: () => setFilterStatus(filterStatus === 'updates' ? 'all' : 'updates')
-        }, h(Icon, { name: 'download', size: 12 }), ' Updates') : null,
-        isInstalled ? h('button', {
-          type: 'button',
-          className: `extensions-filter-pill${filterStatus === 'needs_setup' ? ' is-active' : ''}`,
-          onClick: () => setFilterStatus(filterStatus === 'needs_setup' ? 'all' : 'needs_setup')
-        }, h(Icon, { name: 'warning', size: 12 }), ' Setup needed') : null,
-        !isInstalled ? h('button', {
-          type: 'button',
-          className: `extensions-filter-pill${filterStatus === 'updates' ? ' is-active' : ''}`,
-          onClick: () => setFilterStatus(filterStatus === 'updates' ? 'all' : 'updates')
-        }, h(Icon, { name: 'download', size: 12 }), ' Updates') : null,
-        !isInstalled ? h('button', {
-          type: 'button',
-          className: `extensions-filter-pill${filterStatus === 'installed' ? ' is-active' : ''}`,
-          onClick: () => setFilterStatus(filterStatus === 'installed' ? 'all' : 'installed')
-        }, 'Installed') : null
+      h('div', { className: 'extensions-filter-pills', role: 'group', 'aria-label': 'Extension status' },
+        ...statusOptions.map(([value, label, icon]) => filterButton(value, label, icon, filterStatus, setFilterStatus))
       )
     ),
     hasFilter ? h('div', { className: 'extensions-filter-summary' },
-      h('span', null, `Filtering ${isInstalled ? 'installed' : 'catalog'} extensions (${totalCount} total)`),
+      h('span', null, `${kindLabels[filterKind] || filterKind}; ${statusLabels[filterStatus] || filterStatus}${searchQuery.trim() ? `; search: “${searchQuery.trim()}”` : ''}. ${totalCount} ${isInstalled ? 'installed' : 'catalog'} extensions in total.`),
       h('button', {
         type: 'button',
         className: 'extensions-filter-reset',
@@ -624,7 +620,6 @@ function ExtensionProCard({
     className: `extension-pro-card kind-${extension.kind || 'skill'}`,
     'data-extension-id': extension.id
   },
-    h('div', { className: 'extension-card-kind-accent' }),
     h('div', { className: 'extension-card-inner' },
       h('div', { className: 'extension-card-header' },
         h('div', { className: 'extension-card-identity' },
@@ -791,179 +786,188 @@ function ExtensionInspectorDialog({
   const isSkill = extension.kind === 'skill';
   const errorCopy = extensionErrorCopy(extension.error);
 
-  return h(Dialog.Root, { open: true, onOpenChange: open => { if (!open) onClose(); } },
-    h(Dialog.Portal, null,
-      h(Dialog.Overlay, { className: 'overlay-backdrop modal-backdrop' },
-        h(Dialog.Content, { className: 'modal-panel modal-wide' },
-          h('header', { className: 'modal-head' },
-            h(Dialog.Title, { asChild: true },
-              h('div', { className: 'flex items-center gap-2.5' },
-                h(Icon, { name: isSkill ? 'puzzle' : 'processes', size: 18 }),
-                h('h2', { className: 'modal-title' }, extension.name || extension.id)
-              )
+  const returnFocusRef = useRef(typeof document === 'undefined' ? null : document.activeElement);
+  return h(OverlayFrame, {
+    open: true,
+    size: 'wide',
+    className: 'extensions-inspector',
+    onOpenChange: open => { if (!open) onClose(); },
+    contentProps: {
+      onCloseAutoFocus: event => {
+        const target = returnFocusRef.current?.isConnected
+          ? returnFocusRef.current
+          : document.querySelector('[data-extensions-react] [role="tab"][aria-selected="true"]');
+        if (target) { event.preventDefault(); target.focus({ preventScroll: true }); }
+      }
+    }
+  },
+    h('header', { className: 'modal-head' },
+      h(Dialog.Title, { asChild: true },
+        h('div', { className: 'flex items-center gap-2.5' },
+          h(Icon, { name: isSkill ? 'puzzle' : 'processes', size: 18 }),
+          h('h2', { className: 'modal-title' }, extension.name || extension.id)
+        )
+      ),
+      h('button', {
+        type: 'button',
+        className: 'modal-close',
+        'aria-label': 'Close dialog',
+        onClick: onClose
+      }, h(Icon, { name: 'close', size: 16 }))
+    ),
+
+    h(Dialog.Description, { className: 'sr-only' }, 'Review extension details, declared permissions, and package files.'),
+    h('div', { className: 'modal-body' },
+      h('div', { className: 'extension-modal-content' },
+        h('div', { className: 'extension-modal-header' },
+          h('div', { className: 'extension-modal-icon' },
+            h(Icon, { name: isSkill ? 'puzzle' : 'processes', size: 24 })
+          ),
+          h('div', { className: 'flex flex-col min-w-0 flex-1' },
+            h('div', { className: 'flex flex-wrap items-center gap-2' },
+              h('strong', { className: 'text-base font-bold' }, extension.name || extension.id),
+              extension.version ? h('span', { className: 'extension-version-tag' }, `v${extension.version}`) : null,
+              extension.autoInstall ? h('span', { className: 'extension-auto-install-pill' }, 'Managed tool') : null
             ),
-            h('button', {
-              type: 'button',
-              className: 'modal-close',
-              'aria-label': 'Close dialog',
-              onClick: onClose
-            }, h(Icon, { name: 'close', size: 16 }))
-          ),
-
-          h('div', { className: 'modal-body' },
-            h('div', { className: 'extension-modal-content' },
-              h('div', { className: 'extension-modal-header' },
-                h('div', { className: 'extension-modal-icon' },
-                  h(Icon, { name: isSkill ? 'puzzle' : 'processes', size: 24 })
-                ),
-                h('div', { className: 'flex flex-col min-w-0 flex-1' },
-                  h('div', { className: 'flex flex-wrap items-center gap-2' },
-                    h('strong', { className: 'text-base font-bold' }, extension.name || extension.id),
-                    extension.version ? h('span', { className: 'extension-version-tag' }, `v${extension.version}`) : null,
-                    extension.autoInstall ? h('span', { className: 'extension-auto-install-pill' }, 'Managed tool') : null
-                  ),
-                  h('p', { className: 'mt-1 text-sm text-[var(--ui-text-secondary)]' }, extension.description),
-                  h('div', { className: 'flex flex-wrap items-center gap-3 mt-2 text-xs text-[var(--ui-text-tertiary)]' },
-                    h('span', null, 'Publisher: ', publisherUrl
-                      ? h('a', { href: publisherUrl, target: '_blank', rel: 'noopener noreferrer', className: 'text-[var(--ui-text-primary)] underline' }, publisherName)
-                      : h('strong', { className: 'text-[var(--ui-text-primary)]' }, publisherName)
-                    ),
-                    extension.repository ? h('a', {
-                      href: extension.repository,
-                      target: '_blank',
-                      rel: 'noopener noreferrer',
-                      className: 'extensions-source-repo-link'
-                    }, h(Icon, { name: 'externalLink', size: 12 }), 'Source repository') : null
-                  )
-                )
+            h('p', { className: 'mt-1 text-sm text-[var(--ui-text-secondary)]' }, extension.description),
+            h('div', { className: 'flex flex-wrap items-center gap-3 mt-2 text-xs text-[var(--ui-text-tertiary)]' },
+              h('span', null, 'Publisher: ', publisherUrl
+                ? h('a', { href: publisherUrl, target: '_blank', rel: 'noopener noreferrer', className: 'text-[var(--ui-text-primary)] underline' }, publisherName)
+                : h('strong', { className: 'text-[var(--ui-text-primary)]' }, publisherName)
               ),
-
-              extension.error ? h('div', { className: 'extension-alert-box' },
-                h(Icon, { name: 'warning', size: 16, className: 'shrink-0 mt-0.5' }),
-                h('div', { className: 'flex flex-col gap-1' },
-                  h('strong', { className: 'font-semibold' }, 'Action needed:'),
-                  h('span', null, errorCopy.message),
-                  errorCopy.detail ? h('code', { className: 'text-[10px] break-all' }, errorCopy.detail) : null
-                )
-              ) : null,
-
-              h('div', { className: 'extension-modal-details-grid' },
-                h('div', { className: 'extension-detail-cell' },
-                  h('span', { className: 'extension-detail-cell-label' }, 'Extension ID'),
-                  h('code', { className: 'extension-detail-cell-value' }, extension.id)
-                ),
-                h('div', { className: 'extension-detail-cell' },
-                  h('span', { className: 'extension-detail-cell-label' }, 'Type'),
-                  h('span', { className: 'extension-detail-cell-value' }, isSkill ? 'Skill' : 'CLI tool')
-                ),
-                h('div', { className: 'extension-detail-cell' },
-                  h('span', { className: 'extension-detail-cell-label' }, 'Compatible Rel.AI versions'),
-                  h('span', { className: 'extension-detail-cell-value' }, extension.compatibility?.relai || '>=1.0.0')
-                ),
-                extension.entrypoints?.skill ? h('div', { className: 'extension-detail-cell' },
-                  h('span', { className: 'extension-detail-cell-label' }, 'Skill file'),
-                  h('code', { className: 'extension-detail-cell-value' }, extension.entrypoints.skill)
-                ) : null,
-                extension.entrypoints?.command ? h('div', { className: 'extension-detail-cell' },
-                  h('span', { className: 'extension-detail-cell-label' }, 'Command'),
-                  h('code', { className: 'extension-detail-cell-value' }, extension.entrypoints.command)
-                ) : null,
-                h('div', { className: 'extension-detail-cell' },
-                  h('span', { className: 'extension-detail-cell-label' }, 'Status'),
-                  h('span', { className: 'extension-detail-cell-value flex items-center gap-1.5' },
-                    h(Icon, { name: isInstalled ? (extension.ready ? 'check' : 'warning') : 'info', size: 14 }),
-                    isInstalled ? (extension.ready ? 'Ready' : 'Setup needed') : 'Available in catalog'
-                  )
-                )
-              ),
-
-              h('div', { className: 'flex flex-col gap-2' },
-                h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-[var(--ui-text-tertiary)]' }, 'Declared permissions'),
-                (extension.permissions || []).length ? h('div', { className: 'grid gap-2' },
-                  extension.permissions.map(perm => {
-                    const meta = PERMISSION_METADATA[perm] || {
-                      label: perm,
-                      category: 'System',
-                      description: perm,
-                      icon: 'shield'
-                    };
-                    return h('div', { key: perm, className: 'flex items-start gap-3 rounded-lg border border-[var(--ui-border-subtle)] bg-[var(--ui-surface-secondary)] p-2.5' },
-                      h('div', { className: 'p-1.5 rounded bg-[var(--ui-surface-raised)] text-[var(--ui-text-secondary)]' }, h(Icon, { name: meta.icon, size: 14 })),
-                      h('div', { className: 'flex flex-col min-w-0' },
-                        h('div', { className: 'flex items-center gap-2' },
-                          h('strong', { className: 'text-xs font-semibold text-[var(--ui-text-primary)]' }, meta.label),
-                          h('span', { className: 'text-[11px] text-[var(--ui-text-tertiary)] uppercase' }, meta.category)
-                        ),
-                        h('p', { className: 'text-xs text-[var(--ui-text-secondary)] mt-0.5' }, meta.description)
-                      )
-                    );
-                  })
-                ) : h('p', { className: 'text-xs text-[var(--ui-text-secondary)]' }, 'This extension requests no additional permissions.')
-              ),
-
-              Array.isArray(extension.files) && extension.files.length ? h('div', { className: 'flex flex-col gap-1.5' },
-                h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-[var(--ui-text-tertiary)]' }, `Package files and SHA-256 checksums (${extension.files.length})`),
-                h('div', { className: 'extension-files-table-wrapper' },
-                  h('table', { className: 'extension-files-table' },
-                    h('thead', null,
-                      h('tr', null,
-                        h('th', null, 'File path'),
-                        h('th', null, 'SHA-256 checksum'),
-                        h('th', null, 'Status')
-                      )
-                    ),
-                    h('tbody', null,
-                      extension.files.map(file => h('tr', { key: file.path },
-                        h('td', null, file.path),
-                        h('td', { className: 'text-[var(--ui-text-tertiary)] font-mono text-[11px]' }, file.sha256 ? `${file.sha256.slice(0, 16)}…` : '—'),
-                        h('td', null, h('span', { className: 'ok flex items-center gap-1 text-[11px]' }, h(Icon, { name: 'check', size: 11 }), 'Verified'))
-                      ))
-                    )
-                  )
-                )
-              ) : null
-            )
-          ),
-
-          h('footer', { className: 'modal-footer shrink-0 px-5 pb-5' },
-            h('div', { className: 'modal-actions' },
               extension.repository ? h('a', {
                 href: extension.repository,
                 target: '_blank',
                 rel: 'noopener noreferrer',
-                className: 'buttonlike secondary'
-              }, h(Icon, { name: 'externalLink', size: 14 }), 'Open on GitHub') : null
-            ),
-            h('div', { className: 'modal-actions' },
-              h('button', {
-                type: 'button',
-                className: 'secondary',
-                onClick: onClose
-              }, 'Close'),
-
-              hasUpdate ? h('button', {
-                type: 'button',
-                className: 'primary',
-                disabled: Boolean(busy),
-                onClick: () => onInstall(catalogEntry || extension, 'update')
-              }, busy ? 'Updating…' : `Update to v${catalogEntry?.version}`) : null,
-
-              !isInstalled ? h('button', {
-                type: 'button',
-                className: 'primary',
-                disabled: Boolean(busy),
-                onClick: () => onInstall(extension, 'install')
-              }, busy ? 'Installing…' : 'Install extension') : null,
-
-              isInstalled && onRemove ? h('button', {
-                type: 'button',
-                className: 'danger',
-                disabled: Boolean(busy),
-                onClick: () => onRemove(extension)
-              }, busy ? 'Removing…' : 'Remove extension') : null
+                className: 'extensions-source-repo-link'
+              }, h(Icon, { name: 'externalLink', size: 12 }), 'Source repository') : null
             )
           )
-        )
+        ),
+
+        extension.error ? h('div', { className: 'extension-alert-box' },
+          h(Icon, { name: 'warning', size: 16, className: 'shrink-0 mt-0.5' }),
+          h('div', { className: 'flex flex-col gap-1' },
+            h('strong', { className: 'font-semibold' }, 'Action needed:'),
+            h('span', null, errorCopy.message),
+            errorCopy.detail ? h('code', { className: 'text-[10px] break-all' }, errorCopy.detail) : null
+          )
+        ) : null,
+
+        h('div', { className: 'extension-modal-details-grid' },
+          h('div', { className: 'extension-detail-cell' },
+            h('span', { className: 'extension-detail-cell-label' }, 'Extension ID'),
+            h('code', { className: 'extension-detail-cell-value' }, extension.id)
+          ),
+          h('div', { className: 'extension-detail-cell' },
+            h('span', { className: 'extension-detail-cell-label' }, 'Type'),
+            h('span', { className: 'extension-detail-cell-value' }, isSkill ? 'Skill' : 'CLI tool')
+          ),
+          h('div', { className: 'extension-detail-cell' },
+            h('span', { className: 'extension-detail-cell-label' }, 'Compatible Rel.AI versions'),
+            h('span', { className: 'extension-detail-cell-value' }, extension.compatibility?.relai || '>=1.0.0')
+          ),
+          extension.entrypoints?.skill ? h('div', { className: 'extension-detail-cell' },
+            h('span', { className: 'extension-detail-cell-label' }, 'Skill file'),
+            h('code', { className: 'extension-detail-cell-value' }, extension.entrypoints.skill)
+          ) : null,
+          extension.entrypoints?.command ? h('div', { className: 'extension-detail-cell' },
+            h('span', { className: 'extension-detail-cell-label' }, 'Command'),
+            h('code', { className: 'extension-detail-cell-value' }, extension.entrypoints.command)
+          ) : null,
+          h('div', { className: 'extension-detail-cell' },
+            h('span', { className: 'extension-detail-cell-label' }, 'Status'),
+            h('span', { className: 'extension-detail-cell-value flex items-center gap-1.5' },
+              h(Icon, { name: isInstalled ? (extension.ready ? 'check' : 'warning') : 'info', size: 14 }),
+              isInstalled ? (extension.ready ? 'Ready' : 'Setup needed') : 'Available in catalog'
+            )
+          )
+        ),
+
+        h('div', { className: 'flex flex-col gap-2' },
+          h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-[var(--ui-text-tertiary)]' }, 'Declared permissions'),
+          (extension.permissions || []).length ? h('div', { className: 'grid gap-2' },
+            extension.permissions.map(perm => {
+              const meta = PERMISSION_METADATA[perm] || {
+                label: perm,
+                category: 'System',
+                description: perm,
+                icon: 'shield'
+              };
+              return h('div', { key: perm, className: 'flex items-start gap-3 rounded-lg border border-[var(--ui-border-subtle)] bg-[var(--ui-surface-secondary)] p-2.5' },
+                h('div', { className: 'p-1.5 rounded bg-[var(--ui-surface-raised)] text-[var(--ui-text-secondary)]' }, h(Icon, { name: meta.icon, size: 14 })),
+                h('div', { className: 'flex flex-col min-w-0' },
+                  h('div', { className: 'flex items-center gap-2' },
+                    h('strong', { className: 'text-xs font-semibold text-[var(--ui-text-primary)]' }, meta.label),
+                    h('span', { className: 'text-[11px] text-[var(--ui-text-tertiary)] uppercase' }, meta.category)
+                  ),
+                  h('p', { className: 'text-xs text-[var(--ui-text-secondary)] mt-0.5' }, meta.description)
+                )
+              );
+            })
+          ) : h('p', { className: 'text-xs text-[var(--ui-text-secondary)]' }, 'This extension requests no additional permissions.')
+        ),
+
+        Array.isArray(extension.files) && extension.files.length ? h('div', { className: 'flex flex-col gap-1.5' },
+          h('h4', { className: 'text-xs font-bold uppercase tracking-wider text-[var(--ui-text-tertiary)]' }, `Package files and SHA-256 checksums (${extension.files.length})`),
+          h('div', { className: 'extension-files-table-wrapper' },
+            h('table', { className: 'extension-files-table' },
+              h('thead', null,
+                h('tr', null,
+                  h('th', null, 'File path'),
+                  h('th', null, 'SHA-256 checksum'),
+                  h('th', null, 'Status')
+                )
+              ),
+              h('tbody', null,
+                extension.files.map(file => h('tr', { key: file.path },
+                  h('td', null, file.path),
+                  h('td', { className: 'text-[var(--ui-text-tertiary)] font-mono text-[11px]' }, file.sha256 || '—'),
+                  h('td', null, h('span', { className: 'ok flex items-center gap-1 text-[11px]' }, h(Icon, { name: 'check', size: 11 }), 'Verified'))
+                ))
+              )
+            )
+          )
+        ) : null
+      )
+    ),
+
+    h('footer', { className: 'modal-footer extension-modal-footer shrink-0 px-5 pb-5' },
+      h('div', { className: 'modal-actions' },
+        extension.repository ? h('a', {
+          href: extension.repository,
+          target: '_blank',
+          rel: 'noopener noreferrer',
+          className: 'buttonlike secondary'
+        }, h(Icon, { name: 'externalLink', size: 14 }), 'Open on GitHub') : null
+      ),
+      h('div', { className: 'modal-actions' },
+        h('button', {
+          type: 'button',
+          className: 'secondary',
+          onClick: onClose
+        }, 'Close'),
+
+        hasUpdate ? h('button', {
+          type: 'button',
+          className: 'primary',
+          disabled: Boolean(busy),
+          onClick: () => onInstall(catalogEntry || extension, 'update')
+        }, busy ? 'Updating…' : `Update to v${catalogEntry?.version}`) : null,
+
+        !isInstalled ? h('button', {
+          type: 'button',
+          className: 'primary',
+          disabled: Boolean(busy),
+          onClick: () => onInstall(extension, 'install')
+        }, busy ? 'Installing…' : 'Install extension') : null,
+
+        isInstalled && onRemove ? h('button', {
+          type: 'button',
+          className: 'danger',
+          disabled: Boolean(busy),
+          onClick: () => onRemove(extension)
+        }, busy ? 'Removing…' : 'Remove extension') : null
       )
     )
   );
@@ -1151,13 +1155,21 @@ function DeveloperPanel({ installRoot }) {
           h('h3', { className: 'text-base font-bold text-[var(--ui-text-primary)]' }, 'Manifest templates'),
           h('p', { className: 'text-xs text-[var(--ui-text-secondary)] mt-0.5' }, currentTemplate.description)
         ),
-        h('div', { className: 'developer-template-selector' },
-          Object.entries(TEMPLATES).map(([key, tpl]) => h('button', {
+        h('fieldset', { className: 'developer-template-selector' },
+          h('legend', { className: 'sr-only' }, 'Manifest template'),
+          Object.entries(TEMPLATES).map(([key, tpl]) => h('label', {
             key,
-            type: 'button',
-            className: `developer-template-button${selectedTemplate === key ? ' is-active' : ''}`,
-            onClick: () => setSelectedTemplate(key)
-          }, tpl.label))
+            className: `developer-template-button${selectedTemplate === key ? ' is-active' : ''}`
+          },
+            h('input', {
+              type: 'radio',
+              name: 'extension-manifest-template',
+              value: key,
+              checked: selectedTemplate === key,
+              onChange: () => setSelectedTemplate(key)
+            }),
+            tpl.label
+          ))
         )
       ),
 
@@ -1214,7 +1226,7 @@ function DeveloperPanel({ installRoot }) {
 }
 
 function EmptyExtensionsState({ icon, title, copy, actionLabel, onAction }) {
-  return h('div', { className: 'card p-8' },
+  return h('div', { className: 'card extensions-empty-state' },
     h('div', { className: 'empty-state text-center' },
       h('div', { className: 'empty-state-icon mx-auto mb-2 text-[var(--ui-text-tertiary)]' },
         h(Icon, { name: icon, size: 32 })
@@ -1229,8 +1241,8 @@ function EmptyExtensionsState({ icon, title, copy, actionLabel, onAction }) {
 }
 
 function ExtensionsLoadingSkeleton() {
-  return h('div', { className: 'extensions-list-grid' },
-    [1, 2, 3, 4].map(idx => h('div', { key: idx, className: 'extension-skeleton-card' },
+  return h('div', { className: 'extensions-list-grid', role: 'status', 'aria-label': 'Loading extensions' },
+    [1, 2, 3, 4].map(idx => h('div', { key: idx, className: 'extension-skeleton-card', 'aria-hidden': true },
       h('div', { className: 'flex items-center gap-3' },
         h('div', { className: 'skeleton-shimmer h-11 w-11 rounded-xl' }),
         h('div', { className: 'flex flex-col gap-1.5 flex-1' },

@@ -111,6 +111,8 @@ assert.match(report.reportText, /not evidence of a memory leak/);
 const render = value => renderToStaticMarkup(React.createElement(ResourceDiagnostics, { resources: value, onRefresh: () => {} }));
 const markup = render(report.resourceDiagnostics);
 assert.match(markup, /System resources/);
+const admissionGroup = markup.match(/<div\b[^>]*aria-label="Resource admission lanes"[^>]*>/)?.[0] || '';
+assert.match(admissionGroup, /\brole="group"/, 'Resource admission lanes must expose a naming-supported semantic group');
 assert.doesNotMatch(markup, /reservation|reserve floor|Commit admission|Recent pressure decisions/);
 assert.match(markup, /Memory readings are informational/);
 assert.match(markup, /Commit headroom/);

@@ -60,23 +60,35 @@ button {
   transition: background-color var(--dur) var(--ease), border-color var(--dur) var(--ease),
     color var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur) var(--ease);
 }
-button:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-control); }
-button:active { transform: translateY(1px); }
-button:disabled { color: var(--ui-text-disabled); background: var(--ui-disabled-background); border-color: var(--ui-disabled-border); opacity: 1; cursor: not-allowed; transform: none; -webkit-text-fill-color: var(--ui-text-disabled); }
+button:hover:where(:not(:disabled)):where(:not([aria-disabled="true"])) { background: var(--ui-surface-raised); border-color: var(--ui-border-control); }
+button:active:where(:not(:disabled)):where(:not([aria-disabled="true"])):where(:not([aria-busy="true"])):where(:not([data-state="loading"])) { transform: translateY(1px); }
 button.primary {
   color: var(--ui-action-primary-foreground);
   background: var(--ui-action-primary);
   border-color: var(--ui-action-primary);
   box-shadow: var(--ui-electron-elevation1);
 }
-button.primary:hover { background: var(--ui-action-primary-hover); border-color: var(--ui-action-primary-hover); box-shadow: var(--ui-electron-elevation1); }
-button.primary:active { background: var(--ui-action-primary-active); border-color: var(--ui-action-primary-active); }
+button.primary:hover:where(:not(:disabled)):where(:not([aria-disabled="true"])) { background: var(--ui-action-primary-hover); border-color: var(--ui-action-primary-hover); box-shadow: var(--ui-electron-elevation1); }
+button.primary:active:where(:not(:disabled)):where(:not([aria-disabled="true"])) { background: var(--ui-action-primary-active); border-color: var(--ui-action-primary-active); }
 button.secondary { color: var(--ui-text-secondary); }
 button.danger { color: var(--ui-status-danger-foreground); background: var(--ui-status-danger-background); border-color: var(--ui-status-danger-border); }
 button.success { color: var(--ui-status-success-foreground); background: var(--ui-status-success-background); border-color: var(--ui-status-success-border); }
 button[data-state="loading"] { cursor: progress; opacity: .8; pointer-events: none; }
 button[data-state="success"] { color: var(--ui-status-success-foreground); border-color: var(--ui-status-success-border); background: var(--ui-status-success-background); }
 button[data-state="error"] { color: var(--ui-status-danger-foreground); border-color: var(--ui-status-danger-border); background: var(--ui-status-danger-background); }
+button.danger:hover:where(:not(:disabled)):where(:not([aria-disabled="true"])) { background: var(--ui-status-danger-background); border-color: var(--ui-status-danger-foreground); }
+button.danger:active:where(:not(:disabled)):where(:not([aria-disabled="true"])) { background: var(--ui-status-danger-background); border-color: var(--ui-status-danger-foreground); box-shadow: inset 0 0 0 1px var(--ui-status-danger-foreground); }
+/* Availability is authoritative over variant and transient outcome styles. */
+button:is(:disabled, [aria-disabled="true"]) {
+  color: var(--ui-text-disabled);
+  background: var(--ui-disabled-background);
+  border-color: var(--ui-disabled-border);
+  opacity: 1;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+  -webkit-text-fill-color: var(--ui-text-disabled);
+}
 button[aria-busy="true"] { cursor: progress; }
 input[type="text"], input[type="number"], input[type="password"] {
   width: 100%;
@@ -417,7 +429,7 @@ label, .field-label { display: block; margin: 14px 0 7px; color: var(--ui-text-s
 .wizard-value-step-head > div { min-width: 0; }
 .wizard-value-step-head strong { display: block; font-size: var(--font-14); }
 .wizard-value-step-head p { margin: 3px 0 0; color: var(--ui-text-secondary); font-size: var(--font-12); line-height: 1.55; }
-.wizard-step-number { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--ui-action-primary); border-radius: 50%; background: var(--ui-selection-background); color: var(--ui-action-primary); font-size: var(--font-11); font-weight: var(--weight-bold); }
+.wizard-step-number { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--ui-action-primary); border-radius: 50%; background: var(--ui-selection-background); color: var(--ui-text-primary); font-size: var(--font-11); font-weight: var(--weight-bold); }
 .wizard-open-button { width: fit-content; min-height: 44px; margin-left: 36px; }
 .wizard-standalone-button { margin-left: 0; }
 .wizard-field-group { display: grid; gap: 7px; margin-left: 36px; }

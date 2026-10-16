@@ -1,33 +1,13 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { diagnosticDuration, diagnosticTime, operationDiagnostics, runtimeBuildDiagnostics } from '../operation-diagnostics.js';
+
+import { Tooltip } from './tooltip.js';
 
 const h = React.createElement;
 
 function DiagnosticHelp({ label = 'More information', children }) {
-  const [open, setOpen] = useState(false);
-  const tooltipId = `operation-diagnostics-help-${useId().replaceAll(':', '')}`;
-  return h('span', {
-    className: `operation-diagnostics-help${open ? ' is-open' : ''}`,
-    onPointerEnter: () => setOpen(true),
-    onPointerLeave: () => setOpen(false),
-    onFocus: () => setOpen(true),
-    onBlur: () => setOpen(false)
-  },
-  h('button', {
-    type: 'button',
-    className: 'operation-diagnostics-help-trigger',
-    'aria-label': label,
-    'aria-describedby': tooltipId,
-    'aria-expanded': open ? 'true' : 'false',
-    onClick: () => setOpen(value => !value),
-    onKeyDown: event => {
-      if (event.key === 'Escape') {
-        setOpen(false);
-        event.stopPropagation();
-      }
-    }
-  }, '?'),
-  h('span', { id: tooltipId, role: 'tooltip', className: 'operation-diagnostics-tooltip' }, children));
+  return h(Tooltip, { content: children, className: 'operation-diagnostics-tooltip' },
+    h('button', { type: 'button', className: 'operation-diagnostics-help-trigger', 'aria-label': label }, '?'));
 }
 
 export function OperationDiagnostics({ operation, live = false }) {

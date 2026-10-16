@@ -1,10 +1,10 @@
 .filter-bar {
   display: grid;
   min-width: 0;
-  gap: 10px;
-  padding: 12px;
+  gap: var(--stack-gap);
+  padding: var(--filter-inset);
   border: 1px solid var(--ui-border-default);
-  border-radius: var(--radius-lg);
+  border-radius: var(--card-radius);
   background: var(--ui-surface-primary);
 }
 .filter-bar-controls { display: flex; min-width: 0; align-items: center; gap: 8px; }
@@ -23,7 +23,7 @@
 .filter-field > span, .filter-field legend { color: var(--ui-text-primary); font-size: 12px; font-weight: 700; }
 .filter-field small { color: var(--ui-text-secondary); font-size: 12px; line-height: 1.5; }
 .filter-radio-field { margin: 0; padding: 0; border: 0; }
-.filter-radio-options { display: grid; overflow: hidden; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
+.filter-radio-options { display: grid; overflow: hidden; border: 1px solid var(--ui-border-control); border-radius: var(--selection-radius); }
 .filter-radio-options label { display: flex; min-height: 44px; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--ui-border-subtle); font-weight: 500; }
 .filter-radio-options label:last-child { border-bottom: 0; }
 .filter-state-toggle { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; display: grid; place-items: center; }

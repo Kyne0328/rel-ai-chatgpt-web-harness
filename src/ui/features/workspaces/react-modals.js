@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
+import { OverlayFrame } from '../../components/overlay-frame.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { fetchJson, invalidateCache, postJson, requestDashboardRefresh } from '../../api.js';
@@ -266,7 +267,11 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
   }, [path]);
 
   const clearDirty = () => { if (formRef.current) markUnsaved(formRef.current, false); };
-  const requestClose = () => dirty ? setConfirmDiscard(true) : onClose?.();
+  const requestClose = () => {
+    if (busy) return;
+    if (dirty) setConfirmDiscard(true);
+    else onClose?.();
+  };
   const browse = async () => {
     setPickerBusy(true);
     const result = await postJson('/api/pick-folder', {}, { timeout: 0 });
@@ -354,14 +359,16 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
 
 export function DeleteProjectModal({ alias = '', onClose, opener = null }) {
   const [busy, setBusy] = useState(false);
+  const [forgetLocalData, setForgetLocalData] = useState(true);
   const cancelRef = useRef(null);
-  const descriptor = deleteConfirmation(alias);
-  return h(ProjectModal, { title: descriptor.title, opener, onDismiss: onClose, size: 'compact', showClose: false, initialFocus: () => cancelRef.current },
+  const requestClose = () => { if (!busy) onClose?.(); };
+  const descriptor = deleteConfirmation(alias, { forgetLocalData, setForgetLocalData, disabled: busy });
+  return h(ProjectModal, { title: descriptor.title, opener, onDismiss: requestClose, size: 'compact', showClose: false, initialFocus: () => cancelRef.current },
     h('div', { className: 'confirm-dialog', 'aria-busy': busy ? 'true' : undefined },
-      h('div', { className: 'confirm-dialog-copy' }, h('strong', null, descriptor.message), h('span', null, descriptor.detail)),
+      h('div', { className: 'confirm-dialog-copy' }, h('strong', null, descriptor.message), h('span', null, descriptor.detail), descriptor.control),
       h('div', { className: 'modal-actions' },
-        h('button', { type: 'button', className: 'secondary', disabled: busy, ref: cancelRef, onClick: onClose }, 'Cancel'),
-        h('button', { type: 'button', className: 'danger', disabled: busy, onClick: () => { void deleteProject(alias, { setBusy, onSuccess: onClose }); } }, busy ? 'Deleting…' : descriptor.confirmLabel)
+        h('button', { type: 'button', className: 'secondary', disabled: busy, ref: cancelRef, onClick: requestClose }, 'Cancel'),
+        h('button', { type: 'button', className: 'danger', disabled: busy, onClick: () => { void deleteProject(alias, { forgetLocalData, setBusy, onSuccess: onClose }); } }, busy ? 'Deleting…' : descriptor.confirmLabel)
       )
     )
   );
@@ -468,74 +475,71 @@ function relativeOperationalValue(label, timestamp) {
 
 function ProjectModal({ children, confirmation = null, initialFocus, onDismiss, onResolveConfirmation, opener, showClose = true, size = 'standard', title }) {
   const confirmCancelRef = useRef(null);
-  return h(Dialog.Root, {
+  return h(OverlayFrame, {
     open: true,
+    size,
+    backdropProps: { id: '__relai-modal-backdrop' },
     onOpenChange: next => {
       if (next) return;
       if (confirmation) onResolveConfirmation?.(false);
       else onDismiss?.();
+    },
+    contentProps: {
+      'aria-describedby': undefined,
+      onOpenAutoFocus: event => {
+        event.preventDefault();
+        queueMicrotask(() => {
+          const target = initialFocus?.();
+          if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+        });
+      },
+      onEscapeKeyDown: event => {
+        if (confirmation) event.preventDefault();
+      },
+      onPointerDownOutside: event => {
+        if (confirmation) event.preventDefault();
+      },
+      onCloseAutoFocus: event => {
+        event.preventDefault();
+        if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true });
+        else document.getElementById('pageTitle')?.focus({ preventScroll: true });
+      }
     }
-  }, h(Dialog.Portal, null,
-    h(Dialog.Overlay, { asChild: true },
-      h('div', { id: '__relai-modal-backdrop', className: 'overlay-backdrop modal-backdrop' },
-        h(Dialog.Content, {
+  },
+    h('header', { className: 'modal-head', inert: confirmation ? true : undefined },
+      h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, title)),
+      showClose ? h('button', { type: 'button', className: 'modal-close', 'aria-label': `Close ${title}`, onClick: onDismiss }, h(Icon, { name: 'close', size: 16 })) : null
+    ),
+    h('div', { className: 'modal-body', inert: confirmation ? true : undefined }, children),
+    confirmation ? h(AlertDialog.Root, { open: true },
+      h('div', { className: 'modal-inline-confirm-layer' },
+        h(AlertDialog.Content, {
           asChild: true,
           onOpenAutoFocus: event => {
             event.preventDefault();
-            queueMicrotask(() => {
-              const target = initialFocus?.();
-              if (target instanceof HTMLElement) target.focus({ preventScroll: true });
-            });
+            queueMicrotask(() => confirmCancelRef.current?.focus({ preventScroll: true }));
           },
           onEscapeKeyDown: event => {
-            if (confirmation) event.preventDefault();
-          },
-          onPointerDownOutside: event => {
-            if (confirmation) event.preventDefault();
-          },
-          onCloseAutoFocus: event => {
             event.preventDefault();
-            if (opener instanceof HTMLElement && opener.isConnected) opener.focus({ preventScroll: true });
-            else document.getElementById('pageTitle')?.focus({ preventScroll: true });
+            onResolveConfirmation?.(false);
           }
-        }, h('div', { className: `modal-panel modal-${size}` },
-          h('header', { className: 'modal-head', inert: confirmation ? true : undefined },
-            h(Dialog.Title, { asChild: true }, h('h2', { className: 'modal-title' }, title)),
-            showClose ? h('button', { type: 'button', className: 'modal-close', 'aria-label': `Close ${title}`, onClick: onDismiss }, h(Icon, { name: 'close', size: 16 })) : null
-          ),
-          h('div', { className: 'modal-body', inert: confirmation ? true : undefined }, children),
-          confirmation ? h(AlertDialog.Root, { open: true },
-            h('div', { className: 'modal-inline-confirm-layer' },
-              h(AlertDialog.Content, {
-                asChild: true,
-                onOpenAutoFocus: event => {
-                  event.preventDefault();
-                  queueMicrotask(() => confirmCancelRef.current?.focus({ preventScroll: true }));
-                },
-                onEscapeKeyDown: event => {
-                  event.preventDefault();
-                  onResolveConfirmation?.(false);
-                }
-              }, h('section', { className: 'modal-inline-confirm-card' },
-                h(AlertDialog.Title, { asChild: true }, h('h3', { className: 'modal-inline-confirm-title' }, confirmation.title)),
-                h(AlertDialog.Description, { asChild: true },
-                  h('div', { className: 'confirm-dialog-copy' },
-                    h('strong', null, confirmation.message),
-                    confirmation.detail ? h('span', null, confirmation.detail) : null,
-                    confirmation.control || null
-                  )
-                ),
-                h('div', { className: 'modal-actions' },
-                  h(AlertDialog.Cancel, { asChild: true }, h('button', { type: 'button', className: 'secondary', ref: confirmCancelRef, onClick: () => onResolveConfirmation?.(false) }, 'Cancel')),
-                  h(AlertDialog.Action, { asChild: true }, h('button', { type: 'button', className: confirmation.danger ? 'danger' : 'primary', onClick: () => onResolveConfirmation?.(true) }, confirmation.confirmLabel || 'Continue'))
-                )
-              ))
+        }, h('section', { className: 'modal-inline-confirm-card' },
+          h(AlertDialog.Title, { asChild: true }, h('h3', { className: 'modal-inline-confirm-title' }, confirmation.title)),
+          h(AlertDialog.Description, { asChild: true },
+            h('div', { className: 'confirm-dialog-copy' },
+              h('strong', null, confirmation.message),
+              confirmation.detail ? h('span', null, confirmation.detail) : null,
+              confirmation.control || null
             )
-          ) : null
+          ),
+          h('div', { className: 'modal-actions' },
+            h(AlertDialog.Cancel, { asChild: true }, h('button', { type: 'button', className: 'secondary', ref: confirmCancelRef, onClick: () => onResolveConfirmation?.(false) }, 'Cancel')),
+            h(AlertDialog.Action, { asChild: true }, h('button', { type: 'button', className: confirmation.danger ? 'danger' : 'primary', onClick: () => onResolveConfirmation?.(true) }, confirmation.confirmLabel || 'Continue'))
+          )
         ))
       )
-    )
-  ));
+    ) : null
+  );
 }
 
 function projectPathStatus(paths, infos) {
@@ -560,7 +564,7 @@ function genericPathStatus(info, repair) {
   if (errorFinding) return { text: repair ? errorFinding.message : `${errorFinding.message} You can save this folder before cloning the project.`, tone: repair ? 'error' : 'warn' };
   return repair ? { text: 'The selected folder could not be verified.', tone: 'warn' } : { text: '', tone: '' };
 }
-function deleteConfirmation(alias, { forgetLocalData, setForgetLocalData }) {
+function deleteConfirmation(alias, { forgetLocalData, setForgetLocalData, disabled = false }) {
   return {
     title: 'Delete project from Rel.AI?',
     message: `'${alias}' will be removed from Rel.AI.`,
@@ -571,6 +575,7 @@ function deleteConfirmation(alias, { forgetLocalData, setForgetLocalData }) {
       h('input', {
         type: 'checkbox',
         checked: forgetLocalData,
+        disabled,
         onChange: event => setForgetLocalData(event.currentTarget.checked)
       }),
       h('span', null, 'Forget stored activity for this project')

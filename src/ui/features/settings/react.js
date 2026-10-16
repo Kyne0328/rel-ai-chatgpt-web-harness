@@ -117,6 +117,13 @@ function SettingsField({ label, help = '', error = '', children, inputId }) {
 }
 
 
+function SettingsReadError({ message, onRetry, busy = false }) {
+  return h('div', { className: 'settings-read-error' },
+    h('p', { className: 'settings-help', role: 'alert' }, message),
+    h('button', { className: 'secondary compact-button', type: 'button', disabled: busy, onClick: onRetry }, busy ? 'Retrying…' : 'Try again')
+  );
+}
+
 function ConnectionPage({ data }) {
   const controlsRef = useRef(null);
   const [connectionsRevision, setConnectionsRevision] = useState(0);
@@ -182,6 +189,7 @@ function GoalModeAccount({ browser, connectionsRevision }) {
   const [selectedTunnelId, setSelectedTunnelId] = useState(routeTunnelId);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
   const requestVersion = useRef(0);
   const invalidateRequests = useCallback(() => { requestVersion.current++; }, []);
   useEffect(() => {
@@ -203,19 +211,29 @@ function GoalModeAccount({ browser, connectionsRevision }) {
   const refresh = useCallback(async account => {
     if (typeof browser?.goalLoginStatus !== 'function') return;
     const version = ++requestVersion.current;
-    const next = await browser.goalLoginStatus(account);
-    if (version === requestVersion.current) applyStatus(next);
-    return next;
+    setRefreshing(true);
+    setError('');
+    try {
+      const next = await browser.goalLoginStatus(account);
+      if (!next || next.ok === false || (!Array.isArray(next.connections) && typeof next.state !== 'string')) throw new Error(next?.error || 'Goal Mode sign-in status could not be loaded.');
+      if (version === requestVersion.current) applyStatus(next);
+      return next;
+    } catch (cause) {
+      if (version === requestVersion.current) setError(messageOf(cause));
+      throw cause;
+    } finally {
+      if (version === requestVersion.current) setRefreshing(false);
+    }
   }, [browser, applyStatus]);
   useEffect(() => {
-    void refresh().catch(error => setError(messageOf(error)));
+    void refresh().catch(() => {});
     return invalidateRequests;
   }, [refresh, invalidateRequests, connectionsRevision]);
   const hasConnections = Array.isArray(status?.connections);
   useEffect(() => {
     // Keep the initial connection inventory before loading a deep-linked account;
     // otherwise that response can supersede the list and remove the selector.
-    if (selectedTunnelId && hasConnections) void refresh({ tunnelId: selectedTunnelId }).catch(error => setError(messageOf(error)));
+    if (selectedTunnelId && hasConnections) void refresh({ tunnelId: selectedTunnelId }).catch(() => {});
   }, [refresh, selectedTunnelId, hasConnections]);
   const connections = status?.connections;
   const selected = Array.isArray(connections) ? connections.find(item => item.tunnelId === selectedTunnelId) : status;
@@ -230,7 +248,7 @@ function GoalModeAccount({ browser, connectionsRevision }) {
         const next = await refresh(selectedTunnelId ? { tunnelId: selectedTunnelId } : undefined);
         delay = Math.max(delay, Number(next?.retryAfterMs || 0));
       }
-      catch (cause) { if (!disposed) setError(messageOf(cause)); }
+      catch { /* The current refresh reports its own error; stale reads are ignored. */ }
       if (!disposed) timer = setTimeout(check, delay);
     };
     timer = setTimeout(check, 2_000);
@@ -252,11 +270,11 @@ function GoalModeAccount({ browser, connectionsRevision }) {
       setBusy('');
     }
   };
-  const state = selected?.state || 'checking';
+  const state = selected?.state || (error ? 'load_error' : 'checking');
   const label = state === 'signed_in' ? 'Signed in' : state === 'sign_in_required' ? 'Not signed in'
-    : state === 'disabled' ? 'Connection disabled' : state === 'unavailable' ? 'Unavailable' : state === 'checking' ? 'Checking sign-in' : 'Not verified';
+    : state === 'disabled' ? 'Connection disabled' : state === 'unavailable' ? 'Unavailable' : state === 'checking' ? 'Checking sign-in' : state === 'load_error' ? 'Could not load sign-in' : 'Not verified';
   const account = selectedTunnelId ? { tunnelId: selectedTunnelId } : undefined;
-  const unavailable = Boolean(busy) || !status || (Array.isArray(connections) && (!selected || selected.enabled === false));
+  const unavailable = Boolean(busy) || refreshing || !status || (Array.isArray(connections) && (!selected || selected.enabled === false));
   const tone = state === 'signed_in' ? 'good' : state === 'checking' ? 'working'
     : state === 'sign_in_required' || state === 'unverified' ? 'warn' : 'neutral';
   return h('section', { className: 'card connection-goal-account', 'aria-labelledby': 'goalModeTitle' },
@@ -283,7 +301,7 @@ function GoalModeAccount({ browser, connectionsRevision }) {
       h('div', { className: 'connection-goal-controls' },
         state !== 'signed_in' || selected?.browserOpen
           ? h('button', { className: 'primary', type: 'button', disabled: unavailable, onClick: () => { void act('sign-in', () => browser.goalLoginStart(account)); } }, busy === 'sign-in' ? 'Opening…' : selected?.browserOpen ? 'Open sign-in' : 'Sign in to ChatGPT') : null,
-        h('button', { className: 'secondary', type: 'button', disabled: unavailable, onClick: () => { void act('check', () => browser.goalLoginStatus({ ...account, refresh: true })); } }, busy === 'check' ? 'Checking…' : 'Refresh sign-in'),
+        h('button', { className: 'secondary', type: 'button', disabled: Boolean(busy) || refreshing || typeof browser?.goalLoginStatus !== 'function', onClick: () => { void refresh(status ? { ...account, refresh: true } : undefined).catch(() => {}); } }, refreshing ? 'Checking…' : error ? 'Retry sign-in status' : 'Refresh sign-in'),
         state === 'signed_in' || state === 'unverified' || selected?.browserOpen
           ? h('button', { className: 'secondary', type: 'button', disabled: unavailable, onClick: () => { void act('sign-out', () => browser.goalLoginSignOut(account)); } }, busy === 'sign-out' ? 'Signing out…' : 'Sign out') : null
       ),
@@ -550,6 +568,29 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
   const [validation, setValidation] = useState(null);
   const busyRef = useRef(false);
   const nameInputRef = useRef(null);
+  const draftBaseline = useRef(draft);
+  const dirty = open && ['label', 'tunnelId', 'apiKey', 'enabled'].some(key => draft[key] !== draftBaseline.current[key]);
+  const resetDraft = (next = { label: '', tunnelId: '', apiKey: '', originalTunnelId: '', apiKeyConfigured: false }) => {
+    draftBaseline.current = next;
+    setDraft(next);
+    setValidation(null);
+    setShowSecret(false);
+  };
+  const edit = async connection => {
+    if (disabled || busyRef.current) return;
+    if (open && draft.originalTunnelId === connection.tunnelId) { nameInputRef.current?.focus(); return; }
+    if (dirty) {
+      busyRef.current = true;
+      setBusy('switch');
+      let discard;
+      try {
+        discard = await confirmAction({ title: 'Discard tunnel changes?', message: 'Discard unsaved changes and edit another tunnel?', detail: 'Your current tunnel changes will not be saved.', confirmLabel: 'Discard changes', cancelLabel: 'Keep editing', danger: true });
+      } finally { busyRef.current = false; setBusy(''); }
+      if (!discard) return;
+    }
+    resetDraft({ label: connection.label || '', tunnelId: connection.tunnelId, apiKey: '', originalTunnelId: connection.tunnelId, apiKeyConfigured: connection.apiKeyConfigured !== false, enabled: connection.enabled !== false });
+    setOpen(true);
+  };
   useEffect(() => { onBusyChange?.(Boolean(busy)); }, [busy, onBusyChange]);
   useEffect(() => { if (open) nameInputRef.current?.focus(); }, [open, draft.originalTunnelId]);
 
@@ -570,6 +611,8 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
     if (issue) {
       setValidation(issue);
       setOpen(true);
+      const inputId = { label: 'additionalTunnelLabel', tunnelId: 'additionalTunnelId', apiKey: 'additionalTunnelApiKey' }[issue.field];
+      window.requestAnimationFrame(() => document.getElementById(inputId)?.focus());
       return;
     }
     busyRef.current = true;
@@ -582,6 +625,7 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
         apiKey: draft.apiKey,
         enabled: draft.enabled
       });
+      if (!result || (result.ok === false && result.saved !== true)) throw new Error(result?.error || 'The tunnel could not be saved.');
       await onChange?.({
         connections: Array.isArray(result?.connections) ? result.connections : connections,
         statuses: Array.isArray(result?.statuses) ? result.statuses : statuses
@@ -589,12 +633,13 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
       setShowSecret(false);
       requestDashboardRefresh();
       if (result?.ok === false) {
-        setDraft(current => ({ ...current, originalTunnelId: result.connection?.tunnelId || current.tunnelId, apiKey: '', apiKeyConfigured: true }));
+        const savedDraft = { ...draft, originalTunnelId: result.connection?.tunnelId || draft.tunnelId, apiKey: '', apiKeyConfigured: true };
+        resetDraft(savedDraft);
         toast(result?.error || result?.status?.error || 'The tunnel was saved, but it could not connect.', { variant: 'error' });
       } else {
         toast(draft.originalTunnelId ? 'ChatGPT tunnel saved.' : 'ChatGPT tunnel added.', { variant: 'success' });
         setOpen(false);
-        setDraft({ label: '', tunnelId: '', apiKey: '', originalTunnelId: '', apiKeyConfigured: false });
+        resetDraft();
       }
     } catch (error) {
       toast(messageOf(error), { variant: 'error' });
@@ -622,7 +667,7 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
         statuses: Array.isArray(result?.statuses) ? result.statuses : []
       });
       if (result?.ok === false) throw new Error(result.error || 'The tunnel could not be removed.');
-      if (draft.originalTunnelId === connection.tunnelId) setOpen(false);
+      if (draft.originalTunnelId === connection.tunnelId) { setOpen(false); resetDraft(); }
       requestDashboardRefresh();
       toast('ChatGPT tunnel removed.', { variant: 'success' });
     } catch (error) {
@@ -633,7 +678,7 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
     }
   };
 
-  return h('section', { className: 'additional-tunnels', 'aria-labelledby': 'additionalTunnelsTitle' },
+  return h('section', { className: 'additional-tunnels', 'aria-labelledby': 'additionalTunnelsTitle', 'data-unsaved-changes': dirty ? 'true' : 'false' },
     h('div', { className: 'additional-tunnels-heading' },
       h('div', null,
         h('strong', { id: 'additionalTunnelsTitle' }, 'ChatGPT tunnel connections'),
@@ -643,10 +688,10 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
         className: 'secondary compact-button',
         type: 'button',
         disabled: disabled || Boolean(busy),
-        onClick: () => { setDraft({ label: '', tunnelId: '', apiKey: '', originalTunnelId: '', apiKeyConfigured: false }); setValidation(null); setShowSecret(false); setOpen(value => !value); },
+        onClick: () => { if (busyRef.current) return; resetDraft(); setOpen(value => !value); },
         'aria-expanded': String(open),
         'aria-controls': 'additionalTunnelForm'
-      }, open ? 'Cancel' : 'Add tunnel')
+      }, open ? dirty ? 'Cancel and discard' : 'Cancel' : 'Add tunnel')
     ),
     rows.length ? h(React.Fragment, null,
       h('p', { className: 'additional-tunnel-summary', role: 'status' }, statusSummary),
@@ -666,7 +711,7 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
             h('div', { className: 'additional-tunnel-actions' },
               h(StatusPill, { label: view.label, tone: view.tone }),
               h('button', { className: 'secondary compact-button', type: 'button', disabled: disabled || Boolean(busy),
-                onClick: () => { setDraft({ label: connection.label || '', tunnelId: connection.tunnelId, apiKey: '', originalTunnelId: connection.tunnelId, apiKeyConfigured: connection.apiKeyConfigured !== false, enabled: connection.enabled !== false }); setValidation(null); setShowSecret(false); setOpen(true); }
+                onClick: () => { void edit(connection); }
               }, 'Edit'),
               h('button', {
                 className: 'secondary compact-button',
@@ -679,7 +724,11 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
         })
       )
     ) : h('p', { className: 'muted additional-tunnels-empty' }, 'No ChatGPT tunnel connection is configured yet.'),
-    open ? h('div', { id: 'additionalTunnelForm', className: 'additional-tunnel-form' },
+    open ? h('form', { id: 'additionalTunnelForm', className: 'additional-tunnel-form', noValidate: true,
+      'aria-label': draft.originalTunnelId ? 'Edit ChatGPT tunnel' : 'Add ChatGPT tunnel',
+      'aria-busy': Boolean(busy),
+      onSubmit: event => { event.preventDefault(); void add(); }
+    },
       h(SettingsField, {
         label: 'Connection name',
         help: 'A local label such as Personal, School, or Account 2.',
@@ -734,12 +783,13 @@ function TunnelConnections({ primary = null, connections = [], statuses = [], de
         h('button', {
           className: 'secondary compact-button password-toggle',
           type: 'button',
+          disabled: disabled || Boolean(busy),
           onClick: () => setShowSecret(value => !value)
         }, showSecret ? 'Hide' : 'Show')
       )),
       h('div', { className: 'additional-tunnel-form-actions' },
         h('a', { className: 'buttonlike secondary compact-button', href: 'https://platform.openai.com/settings/organization/tunnels', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI Tunnels'),
-        h('button', { className: 'primary', type: 'button', disabled: disabled || Boolean(busy), onClick: () => void add() }, busy === 'add' ? 'Adding…' : 'Add ChatGPT tunnel')
+        h('button', { className: 'primary', type: 'submit', disabled: disabled || Boolean(busy) }, busy === 'add' ? draft.originalTunnelId ? 'Saving…' : 'Adding…' : draft.originalTunnelId ? 'Save changes' : 'Add ChatGPT tunnel')
       )
     ) : null
   );
@@ -852,10 +902,15 @@ function BrowserDataSettings() {
   const browser = window.relaiDesktop?.browser;
   const [model, setModel] = useState({ loading: true, sites: [], activePersistent: false, error: '' });
   const [busy, setBusy] = useState('');
+  const requestVersion = useRef(0);
   const load = useCallback(async () => {
     if (!browser?.listSavedSites || !browser?.getState) return;
+    const version = ++requestVersion.current;
+    setModel(current => ({ ...current, loading: true, error: '' }));
     try {
       const [saved, state] = await Promise.all([browser.listSavedSites(), browser.getState()]);
+      if (!saved || saved.ok === false || !Array.isArray(saved.sites) || !state || state.ok === false || !Array.isArray(state.sessions)) throw new Error(saved?.error || state?.error || 'Saved browser sites could not be loaded.');
+      if (version !== requestVersion.current) return;
       const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
       setModel({
         loading: false,
@@ -864,15 +919,19 @@ function BrowserDataSettings() {
         error: ''
       });
     } catch (error) {
-      setModel(current => ({ ...current, loading: false, error: messageOf(error) }));
+      if (version === requestVersion.current) setModel(current => ({ ...current, loading: false, error: messageOf(error) }));
     }
   }, [browser]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const requests = requestVersion;
+    void load();
+    return () => { requests.current++; };
+  }, [load]);
   useEffect(() => typeof browser?.onState === 'function' ? browser.onState(state => {
     const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
     setModel(current => ({ ...current, activePersistent: sessions.some(session => session?.profile === 'persistent') }));
   }) : undefined, [browser]);
-  if (!browser?.listSavedSites || !browser?.clearSavedSite || !browser?.clearSavedData) {
+  if (!browser?.listSavedSites || !browser?.getState || !browser?.clearSavedSite || !browser?.clearSavedData) {
     return h(Card, { title: 'Browser data' }, h('p', { className: 'settings-help' }, 'Saved browser-data controls are available only inside the installed Rel.AI desktop app.'));
   }
 
@@ -939,7 +998,7 @@ function BrowserDataSettings() {
       ),
       h('div', { className: 'browser-site-disclosure-body' },
         model.loading ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading saved sites…') : null,
-        model.error ? h('p', { className: 'settings-help', role: 'alert' }, model.error) : null,
+        model.error ? h(SettingsReadError, { message: model.error, busy: model.loading || Boolean(busy), onRetry: () => void load() }) : null,
         !model.loading && !model.error && accountSites.length
           ? h(BrowserSiteList, { sites: accountSites, busy, disabled: model.activePersistent, onRemove: clearSite })
           : null,
@@ -1039,18 +1098,24 @@ function DesktopNotificationsSettings() {
   const bridge = window.relaiDesktop;
   const [preferences, setPreferences] = useState(null);
   const [pending, setPending] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => {
     if (!bridge?.getNotificationPreferences) return undefined;
     let active = true;
+    setLoadError('');
     void bridge.getNotificationPreferences().then(result => {
+      if (!result || result.ok === false) throw new Error(result?.error || 'Desktop notification preferences could not be loaded.');
       if (active) setPreferences(normalizeNotificationPreferences(result?.preferences || result));
-    }).catch(() => { if (active) setPreferences(null); });
+    }).catch(error => { if (active) setLoadError(messageOf(error)); });
     return () => { active = false; };
-  }, [bridge]);
+  }, [bridge, loadAttempt]);
 
-  if (!bridge?.setNotificationPreferences || !bridge?.getNotificationPreferences || !preferences) {
+  if (!bridge?.setNotificationPreferences || !bridge?.getNotificationPreferences) {
     return h(Card, { title: 'Desktop notifications' }, h('p', { className: 'muted' }, 'Desktop notification controls are available only inside the installed Rel.AI desktop app.'));
   }
+  if (loadError) return h(Card, { title: 'Desktop notifications' }, h(SettingsReadError, { message: loadError, onRetry: () => { setLoadError(''); setLoadAttempt(value => value + 1); } }));
+  if (!preferences) return h(Card, { title: 'Desktop notifications' }, h('div', { className: 'settings-loading', role: 'status' }, 'Loading notification preferences…'));
   const update = async patch => {
     if (pending) return;
     const previous = preferences;
@@ -1103,6 +1168,8 @@ function normalizeNotificationPreferences(value = {}) {
 
 function ApplicationPage() {
   const [lifecycle, setLifecycle] = useState(undefined);
+  const [lifecycleError, setLifecycleError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const developerOptionsUnlocked = readDeveloperOptionsUnlocked();
   const [developerFeatures, setDeveloperFeatures] = useState(() => Object.fromEntries(
     DEVELOPER_FEATURE_FLAGS.map(feature => [feature.id, readDeveloperFeatureEnabled(feature.id)])
@@ -1110,13 +1177,18 @@ function ApplicationPage() {
   const desktop = window.relaiDesktop;
   useEffect(() => {
     let active = true;
+    setLifecycleError('');
     if (typeof desktop?.getLifecycleStatus !== 'function') setLifecycle(null);
-    else void desktop.getLifecycleStatus().then(status => { if (active) setLifecycle(status); }).catch(() => { if (active) setLifecycle(null); });
+    else void desktop.getLifecycleStatus().then(status => {
+      if (!status || status.ok === false) throw new Error(status?.error || 'App settings could not be loaded.');
+      if (active) setLifecycle(status);
+    }).catch(error => { if (active) setLifecycleError(messageOf(error)); });
     return () => { active = false; };
-  }, [desktop]);
+  }, [desktop, loadAttempt]);
   return h(React.Fragment, null,
     h(SettingsHeader, { title: 'App' }),
-    lifecycle === undefined ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading app settings…') : h(React.Fragment, null,
+    lifecycleError ? h(Card, { title: 'App settings' }, h(SettingsReadError, { message: lifecycleError, onRetry: () => { setLifecycleError(''); setLoadAttempt(value => value + 1); } }))
+      : lifecycle === undefined ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading app settings…') : h(React.Fragment, null,
       h(StartupSettings, { initial: lifecycle }),
       h(ApplicationUpdates, { lifecycle }),
       developerOptionsUnlocked ? h(DeveloperOptions, {
@@ -1151,12 +1223,14 @@ function TelemetrySettings() {
   const [settings, setSettings] = useState(null);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
+    setLoadError('');
     void fetchJson('/api/telemetry', { cache: 'no-store' }).then(result => {
       if (!active) return;
-      if (!result?.ok) throw new Error(result?.error || 'Telemetry settings could not be loaded.');
+      if (!result?.ok || !result.settings) throw new Error(result?.error || 'Telemetry settings could not be loaded.');
       setSettings(result.settings || {});
       setLoadError('');
     }).catch(error => {
@@ -1164,7 +1238,7 @@ function TelemetrySettings() {
       setLoadError(messageOf(error));
     });
     return () => { active = false; };
-  }, []);
+  }, [loadAttempt]);
 
   const updateDiagnostics = async enabled => {
     if (!settings || busy) return;
@@ -1183,7 +1257,8 @@ function TelemetrySettings() {
 
   if (!settings) {
     return h(Card, { title: 'Diagnostics' },
-      h('p', { className: 'settings-help', role: loadError ? 'alert' : 'status' }, loadError || 'Loading telemetry settings…')
+      loadError ? h(SettingsReadError, { message: loadError, onRetry: () => { setLoadError(''); setLoadAttempt(value => value + 1); } })
+        : h('p', { className: 'settings-help', role: 'status' }, 'Loading telemetry settings…')
     );
   }
 
@@ -1517,18 +1592,29 @@ function LocalDataSettings() {
   const [usage, setUsage] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [loading, setLoading] = useState(true);
+  const requestVersion = useRef(0);
   const load = useCallback(async () => {
     if (!bridge?.getLocalDataUsage) return;
+    const version = ++requestVersion.current;
+    setLoading(true);
+    setError('');
     try {
       const result = await bridge.getLocalDataUsage();
-      if (result?.ok === false) throw new Error(result.error || 'Local data use could not be calculated.');
-      setUsage(result || {}); setError('');
-    } catch (loadError) { setError(messageOf(loadError)); }
+      if (!result || result.ok === false) throw new Error(result?.error || 'Local data use could not be calculated.');
+      if (version === requestVersion.current) { setUsage(result); setError(''); }
+    } catch (loadError) {
+      if (version === requestVersion.current) setError(messageOf(loadError));
+    } finally { if (version === requestVersion.current) setLoading(false); }
   }, [bridge]);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const requests = requestVersion;
+    void load();
+    return () => { requests.current++; };
+  }, [load]);
   if (!bridge?.getLocalDataUsage) return h(Card, { title: 'Local data & storage', className: 'desktop-local-data-panel' }, h('p', { className: 'settings-help' }, 'Local data controls are available only inside the installed Rel.AI desktop app.'));
   if (!usage && !error) return h(Card, { title: 'Local data & storage', className: 'desktop-local-data-panel' }, h('div', { className: 'settings-loading', role: 'status' }, 'Calculating local data use…'));
-  if (!usage) return h(Card, { title: 'Local data & storage', className: 'desktop-local-data-panel' }, h('p', { className: 'settings-help' }, error));
+  if (!usage) return h(Card, { title: 'Local data & storage', className: 'desktop-local-data-panel' }, h(SettingsReadError, { message: error, busy: loading, onRetry: () => void load() }));
   const categories = usage.categories || {};
   const active = Math.max(0, Number(usage.activeTaskCount || 0));
   const clearTemporary = async () => {
@@ -1580,6 +1666,8 @@ function LocalDataSettings() {
     if (!result?.ok) toast(result?.error || 'The Rel.AI data folder could not be opened.', { variant: 'error' });
   };
   return h(Card, { title: 'Local data & storage', className: 'desktop-local-data-panel' },
+    error ? h(SettingsReadError, { message: `${error} Showing the last loaded data use.`, busy: loading || Boolean(busy), onRetry: () => void load() }) : null,
+    loading ? h('p', { className: 'settings-help', role: 'status' }, 'Refreshing local data use…') : null,
     h('div', { className: 'local-data-summary' },
       h('div', null, h('span', null, 'Total Rel.AI local data'), h('strong', null, `${formatBytes(usage.totalBytes, { zero: true })}${usage.approximate ? ' approx.' : ''}`)),
       h('small', null, 'Log out in Connection can remove all local Rel.AI data.')
@@ -1592,10 +1680,10 @@ function LocalDataSettings() {
       h(DataRow, { label: 'Other Rel.AI app data', bytes: categories.other?.bytes })
     ),
     h('div', { className: 'local-data-actions' },
-      h('button', { className: 'secondary', type: 'button', disabled: active > 0 || busy === 'temporary', onClick: () => void clearTemporary() }, busy === 'temporary' ? 'Clearing…' : 'Clear temporary output'),
-      h('button', { className: 'secondary danger', type: 'button', disabled: active > 0 || busy === 'history', onClick: () => void clearHistory() }, busy === 'history' ? 'Clearing…' : 'Clear task & activity history'),
-      h('button', { className: 'secondary danger', type: 'button', disabled: busy === 'analytics', onClick: () => void clearAnalytics() }, busy === 'analytics' ? 'Clearing…' : 'Clear analytics'),
-      h('button', { className: 'secondary danger', type: 'button', disabled: busy === 'logs', onClick: () => void clearAppLog() }, busy === 'logs' ? 'Clearing…' : 'Clear app log'),
+      h('button', { className: 'secondary', type: 'button', disabled: loading || Boolean(error) || active > 0 || busy === 'temporary', onClick: () => void clearTemporary() }, busy === 'temporary' ? 'Clearing…' : 'Clear temporary output'),
+      h('button', { className: 'secondary danger', type: 'button', disabled: loading || Boolean(error) || active > 0 || busy === 'history', onClick: () => void clearHistory() }, busy === 'history' ? 'Clearing…' : 'Clear task & activity history'),
+      h('button', { className: 'secondary danger', type: 'button', disabled: loading || Boolean(error) || busy === 'analytics', onClick: () => void clearAnalytics() }, busy === 'analytics' ? 'Clearing…' : 'Clear analytics'),
+      h('button', { className: 'secondary danger', type: 'button', disabled: loading || Boolean(error) || busy === 'logs', onClick: () => void clearAppLog() }, busy === 'logs' ? 'Clearing…' : 'Clear app log'),
       h('button', { className: 'secondary', type: 'button', disabled: busy === 'folder', onClick: () => void openFolder() }, busy === 'folder' ? 'Opening…' : 'Data folder')
     ),
     active > 0 ? h('p', { className: 'settings-help' }, `Finish the ${active === 1 ? 'active task' : `${active} active tasks`} before clearing local task data.`) : null
@@ -1719,7 +1807,7 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
         h('div', null, runtimeNotice.message)
       ) : null,
       developer.name ? h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': developer.username ? `${developer.name} on GitHub (@${developer.username})` : `${developer.name} on GitHub` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')) : null,
-      h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': 'Rel.AI MCP source code on GitHub' }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
+      h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${repositoryLabel(repositoryUrl)} source code on GitHub` }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
     ),
     h(Card, { title: 'Legal & privacy' },
       h(AboutRow, { label: 'Privacy' }, documentLink('PRIVACY.md', 'Privacy Policy')),

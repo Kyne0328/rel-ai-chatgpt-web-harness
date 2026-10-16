@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHttpMcpSession } from '../../helpers/http-mcp.mjs';
+import { exerciseUIUXCoverage } from './ui-coverage.js';
 
 const targetUrl = process.env.RELAI_PROBE_TARGET_URL;
 const outputPath = process.env.RELAI_PROBE_OUTPUT_PATH;
@@ -368,6 +369,7 @@ app.whenReady().then(async () => {
         mobileNavScrollable: Boolean(mobileNavVisible && mobileNav.scrollWidth > mobileNav.clientWidth + 1),
         mobileMoreVisible: Boolean(mobileNavVisible && intersects(mobileMore)),
         topbarIntersects: intersects(topbar),
+        topbarPosition: topbar ? getComputedStyle(topbar).position : '',
         taskRowIntersects: rows.some(intersects),
         primaryControlIntersects: primaryControls.some(intersects),
         focusVisible,
@@ -384,6 +386,36 @@ app.whenReady().then(async () => {
         forcedColorsSupported: CSS.supports('forced-color-adjust', 'none')
       };
     })()`);
+    if (measurement.viewportWidth <= 760 && measurement.viewportHeight <= 480) {
+      await win.webContents.executeJavaScript(`(() => {
+        window.__responsiveContentFocus = document.activeElement;
+        document.getElementById('commandPaletteBtn').focus();
+      })()`);
+      await waitForCapturePaint(win);
+      measurement.headerControlFocus = await win.webContents.executeJavaScript(`(() => {
+        const button = document.getElementById('commandPaletteBtn'), rect = button.getBoundingClientRect();
+        const nav = document.querySelector('.mobile-nav'), navRect = nav.getBoundingClientRect();
+        const bottom = getComputedStyle(nav).display === 'none' ? innerHeight : Math.min(innerHeight, navRect.top);
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        return { focused: document.activeElement === button, focusVisible: button.matches(':focus-visible'),
+          left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, contentBottom: bottom,
+          contained: rect.left >= 0 && rect.right <= innerWidth + 1 && rect.top >= 0 && rect.bottom <= bottom + 1,
+          unobscured: Boolean(hit && button.contains(hit)) };
+      })()`);
+      await win.webContents.executeJavaScript('window.scrollTo(0, 0)');
+      await waitForCapturePaint(win);
+      measurement.topbarRestoredAtScrollTop = await win.webContents.executeJavaScript(`(() => {
+        const rect = document.querySelector('.topbar').getBoundingClientRect();
+        return scrollY === 0 && rect.top >= 0 && rect.top < innerHeight && rect.bottom > 0 && rect.right > 0 && rect.left < innerWidth;
+      })()`);
+      measurement.contentFocusRestored = await win.webContents.executeJavaScript(`(() => {
+        const previous = window.__responsiveContentFocus;
+        previous?.focus();
+        delete window.__responsiveContentFocus;
+        return Boolean(previous?.isConnected && document.activeElement === previous);
+      })()`);
+      await waitForCapturePaint(win);
+    }
     if (measurement.viewportWidth <= 760) {
       await win.webContents.executeJavaScript(`document.querySelector('.task-row')?.click()`);
       await waitFor(win, `document.querySelector('[data-session-inspector] .task-detail-header h2')`);
@@ -506,7 +538,9 @@ app.whenReady().then(async () => {
     responsive.push(measurement);
   }
 
+  const uiuxCoverage = await exerciseUIUXCoverage({ win, axePath, screenshotDir, auditAccessibility, waitFor, waitForCapturePaint });
   const result = {
+    uiuxCoverage,
     initialHydration,
     initial,
     liveToolUpdate,
@@ -988,9 +1022,10 @@ async function auditAccessibility(win, runtimePath, route) {
   }
   return await win.webContents.executeJavaScript(`axe.run(document, {
     runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'] },
-    resultTypes: ['violations']
+    resultTypes: ['violations', 'incomplete']
   }).then(result => ({
     route: ${JSON.stringify(route)},
+    incomplete: result.incomplete,
     violations: result.violations.map(item => ({
       id: item.id,
       impact: item.impact || '',

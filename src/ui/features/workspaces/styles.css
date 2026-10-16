@@ -49,7 +49,9 @@
 .workspace-readiness-fact dd strong { @apply block text-[12px]; }
 .workspace-readiness-fact dd small { @apply mt-1 block text-[11px] leading-5; color: var(--ui-text-secondary); }
 .workspace-notice { @apply flex flex-wrap gap-2 border-b px-4 py-3 text-[12px]; background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground); border-color: color-mix(in srgb, var(--ui-status-warning-foreground) 25%, transparent); }
-.workspace-actions { @apply flex flex-wrap items-center gap-2 px-3 py-2.5; }
+.workspace-actions { @apply flex flex-wrap items-center gap-2; padding: 12px var(--card-inset); }
+.workspace-actions > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.workspace-identity strong { overflow-wrap: anywhere; }
 .workspace-primary-actions { @apply border-b; border-color: var(--ui-border-default); }
 .workspace-operational { @apply grid gap-0; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .workspace-operational > * { @apply border-b border-r p-3; border-color: var(--ui-border-subtle); }
@@ -64,14 +66,14 @@
 .ws-project-form { @apply gap-3; }
 .ws-project-name-section, .ws-source-section, .ws-project-details-section { @apply grid gap-2; }
 .ws-form-label, .ws-source-heading { @apply block text-[12px] font-semibold; color: var(--ui-text-primary); }
-.ws-project-name-field { @apply flex min-h-10 items-center overflow-hidden rounded-xl; border: 1px solid var(--ui-border-control); background: var(--ui-surface-primary); }
+.ws-project-name-field { @apply flex items-center overflow-hidden; min-height: var(--control-height); border-radius: var(--control-radius); border: 1px solid var(--ui-border-control); background: var(--ui-surface-primary); }
 .ws-project-name-field:focus-within { border-color: var(--ui-action-primary); box-shadow: 0 0 0 1px var(--ui-action-primary); }
-.ws-project-name-field input { @apply min-w-0 flex-1 border-0 bg-transparent px-2.5; min-height: 40px; outline: none; }
+.ws-project-name-field input { @apply min-w-0 flex-1 border-0 bg-transparent px-2.5; min-height: calc(var(--control-height) - 2px); outline: none; }
 .ws-folder-icon { @apply grid shrink-0 place-items-center; color: var(--ui-text-tertiary); }
 .ws-project-name-field > .ws-folder-icon { @apply ml-3; }
 .ws-form-help { @apply text-[12px] leading-6; color: var(--ui-text-secondary); }
 .ws-source-heading { @apply mt-1; }
-.ws-source-folder-box { @apply overflow-hidden rounded-xl; border: 1px solid var(--ui-border-default); background: var(--ui-surface-primary); transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease; }
+.ws-source-folder-box { @apply overflow-hidden; border-radius: var(--card-radius); border: 1px solid var(--ui-border-default); background: var(--ui-surface-primary); transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease; }
 .ws-source-folder-box.is-drop-active { border-color: var(--ui-action-primary); background: color-mix(in srgb, var(--ui-action-primary) 7%, var(--ui-surface-primary)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 16%, transparent); }
 .ws-source-folder-list { @apply m-0 p-0; list-style: none; }
 .ws-source-folder-row { @apply grid min-h-12 items-center gap-3 px-3 py-2; grid-template-columns: auto minmax(0,1fr) auto; }
@@ -98,7 +100,7 @@ textarea.ws-form-path { @apply min-h-24 resize-y; }
 .ws-form-status.warn { color: var(--ui-status-warning-foreground); }
 .ws-form-status.error { color: var(--ui-status-danger-foreground); }
 .ws-form-conflict { @apply rounded-lg px-3 py-2 text-[12px] leading-5; background: var(--ui-status-danger-background); border: 1px solid color-mix(in srgb, var(--ui-status-danger-foreground) 38%, transparent); color: var(--ui-status-danger-foreground); }
-.ws-project-details-box { @apply overflow-hidden rounded-xl; border: 1px solid var(--ui-border-default); background: var(--ui-surface-primary); }
+.ws-project-details-box { @apply overflow-hidden; border-radius: var(--card-radius); border: 1px solid var(--ui-border-default); background: var(--ui-surface-primary); }
 .workspace-repair-copy { @apply text-[12px] leading-5; color: var(--ui-text-secondary); }
 .workspace-repair-identity { @apply grid gap-1 rounded-lg p-3; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
 .workspace-repair-identity span { @apply text-[11px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }

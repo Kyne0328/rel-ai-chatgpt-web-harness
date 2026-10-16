@@ -6,13 +6,15 @@ import {
   LinearScale,
   LineElement,
   PointElement,
-  Tooltip
+  Tooltip as ChartTooltip
 } from 'chart.js';
 import { color as chartColor } from 'chart.js/helpers';
 import { Line } from 'react-chartjs-2';
 import { COLOR_THEMES } from '../colorTokens.mjs';
 
-ChartJS.register(CategoryScale, LinearScale, LineElement, PointElement, Filler, Tooltip);
+import { Tooltip } from './tooltip.js';
+
+ChartJS.register(CategoryScale, LinearScale, LineElement, PointElement, Filler, ChartTooltip);
 
 const h = React.createElement;
 const LIGHT_FALLBACK = Object.freeze({
@@ -263,7 +265,13 @@ export function AnalyticsBubbleMatrixChart({ cells = [], xLabels = [], yLabels =
         const valueText = `${cell.value.toLocaleString()} ${cell.value === 1 ? 'action' : 'actions'}`;
         const shareText = `${formatMatrixShare(cell.share)} of ${workType} activity`;
         return h('div', { key: `cell-${y}-${x}`, className: 'analytics-matrix-cell' },
-          h('button', {
+          h(Tooltip, {
+            className: 'analytics-matrix-tooltip',
+            content: h(React.Fragment, null,
+              h('strong', null, `${workType} × ${useCase}`),
+              h('span', null, valueText),
+              h('small', null, shareText))
+          }, h('button', {
             ref: element => { bubbleRefs.current[index] = element; },
             type: 'button',
             tabIndex: activeCellIndex === index ? 0 : -1,
@@ -273,15 +281,9 @@ export function AnalyticsBubbleMatrixChart({ cells = [], xLabels = [], yLabels =
               '--matrix-bubble-opacity': String(matrixBubbleOpacity(cell.value, maxValue))
             },
             'aria-label': `${workType} × ${useCase}: ${valueText}; ${shareText}`,
-            title: `${workType} × ${useCase}: ${valueText}`,
             onFocus: () => setFocusedCellIndex(index),
             onKeyDown: event => onBubbleKeyDown(event, index)
-          },
-          h('span', { className: 'analytics-matrix-tooltip', 'aria-hidden': 'true' },
-            h('strong', null, `${workType} × ${useCase}`),
-            h('span', null, valueText),
-            h('small', null, shareText)
-          ))
+          }))
         );
       })
     ])

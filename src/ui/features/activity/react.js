@@ -8,7 +8,7 @@ import React, {
 } from 'react';
 import './styles.css';
 import { flushSync } from 'react-dom';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { fetchJson } from '../../api.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
@@ -23,7 +23,6 @@ import { operationDiagnostics } from '../../operation-diagnostics.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import {
   activityAbsoluteTime,
-  activityActionLabel,
   activityDisplayAction,
   activityFileLocation,
   activityFilterTransition,
@@ -98,6 +97,9 @@ function ActivityView({ data = {} }) {
   const listAtTopRef = useRef(true);
   const tableWrapRef = useRef(null);
   const selectionFocusRef = useRef(false);
+  const pendingKeyboardFocusRef = useRef('');
+  const keyboardOriginRef = useRef(null);
+  const [focusedHistoryEventId, setFocusedHistoryEventId] = useState('');
   const liveAnnouncementReadyRef = useRef(false);
   const liveAnnouncementTimerRef = useRef(0);
   const pendingLiveAnnouncementRef = useRef(0);
@@ -116,17 +118,75 @@ function ActivityView({ data = {} }) {
     sorted: true,
     sessionTitle: entry => activitySessionView(entry, sessionIndex).title
   }), [allEntries, filterState, now, sessionIndex]);
+  const focusedHistoryIndex = filteredEntries.findIndex(entry => activityEventId(entry) === focusedHistoryEventId);
   const rowVirtualizer = useVirtualizer({
     count: filteredEntries.length,
     getScrollElement: () => listPaneRef.current,
     estimateSize: () => 54,
     overscan: 8,
+    rangeExtractor: range => {
+      const indices = defaultRangeExtractor(range);
+      return focusedHistoryIndex < 0 || indices.includes(focusedHistoryIndex) ? indices : [...indices, focusedHistoryIndex].sort((a, b) => a - b);
+    },
     getItemKey: index => activityEventId(filteredEntries[index]) || index
   });
   const filteredEntriesRef = useRef(filteredEntries);
   const rowVirtualizerRef = useRef(rowVirtualizer);
   filteredEntriesRef.current = filteredEntries;
   rowVirtualizerRef.current = rowVirtualizer;
+  // Preserve native table/button semantics while making every loaded virtual
+  // row reachable without pointer scrolling.
+  const onHistoryKeyDown = useCallback(event => {
+    const trigger = event.target.closest?.('.activity-row-trigger');
+    if (!trigger || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === 'Tab') { pendingKeyboardFocusRef.current = ''; return; }
+    const row = trigger.closest('[data-activity-event-id]');
+    const entries = filteredEntriesRef.current;
+    const index = entries.findIndex(entry => activityEventId(entry) === row?.dataset.activityEventId);
+    if (index < 0) return;
+    let next;
+    if (event.key === 'ArrowDown') next = Math.min(entries.length - 1, index + 1);
+    else if (event.key === 'ArrowUp') next = Math.max(0, index - 1);
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = entries.length - 1;
+    else if (event.key === 'PageDown') next = Math.min(entries.length - 1, index + 10);
+    else if (event.key === 'PageUp') next = Math.max(0, index - 10);
+    else return;
+    event.preventDefault();
+    const nextId = activityEventId(entries[next]);
+    pendingKeyboardFocusRef.current = nextId;
+    keyboardOriginRef.current = trigger;
+    rowVirtualizerRef.current?.scrollToIndex(next, { align: 'auto' });
+    const mounted = [...(listPaneRef.current?.querySelectorAll('[data-activity-event-id]') || [])]
+      .find(element => element.dataset.activityEventId === nextId);
+    if (mounted) {
+      mounted.querySelector('.activity-row-trigger')?.focus({ preventScroll: true });
+      pendingKeyboardFocusRef.current = '';
+    }
+  }, []);
+  const measureActivityRow = useCallback(element => {
+    if (!element) return;
+    rowVirtualizerRef.current?.measureElement(element);
+    if (element.dataset.activityEventId !== pendingKeyboardFocusRef.current) return;
+    const active = document.activeElement;
+    const origin = keyboardOriginRef.current;
+    if (active === origin || (active === document.body && origin?.isConnected === false)) {
+      element.querySelector('.activity-row-trigger')?.focus({ preventScroll: true });
+    }
+    pendingKeyboardFocusRef.current = '';
+  }, []);
+  useEffect(() => {
+    if (!filteredEntries.some(entry => activityEventId(entry) === pendingKeyboardFocusRef.current)) pendingKeyboardFocusRef.current = '';
+  }, [filteredEntries]);
+  useEffect(() => {
+    const release = event => {
+      if (listPaneRef.current?.contains(event.target)) return;
+      pendingKeyboardFocusRef.current = '';
+      setFocusedHistoryEventId('');
+    };
+    document.addEventListener('pointerdown', release, true);
+    return () => document.removeEventListener('pointerdown', release, true);
+  }, []);
   const selectedEntry = useMemo(
     () => allEntries.find(entry => activityEventId(entry) === selectedEventId) || null,
     [allEntries, selectedEventId]
@@ -483,13 +543,18 @@ function ActivityView({ data = {} }) {
           ) : null,
           h('div', { className: 'card-body' },
             h('div', { className: 'table-wrap', ref: tableWrapRef },
-              h('table', { className: 'data-table activity-table' },
-                h('caption', { className: 'sr-only' }, 'Activity history'),
+              h('table', { className: 'data-table activity-table', 'aria-rowcount': filteredEntries.length + 1, onKeyDown: onHistoryKeyDown,
+                onFocusCapture: event => setFocusedHistoryEventId(event.target.closest?.('[data-activity-event-id]')?.dataset.activityEventId || ''),
+                onBlurCapture: event => {
+                  if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) { pendingKeyboardFocusRef.current = ''; setFocusedHistoryEventId(''); }
+                }
+              },
+                h('caption', { className: 'sr-only' }, 'Activity history. Use Up and Down to move between loaded events, Home and End for the first and last, and Enter to inspect an event.'),
                 h('colgroup', null,
                   h('col', { className: 'activity-col-time' }),
                   h('col', { className: 'activity-col-message' })
                 ),
-                h('thead', null, h('tr', null,
+                h('thead', null, h('tr', { 'aria-rowindex': 1 },
                   h('th', { scope: 'col', className: 'activity-time-column' }, 'Time'),
                   h('th', { scope: 'col', className: 'activity-message-column' }, 'Activity')
                 )),
@@ -503,7 +568,8 @@ function ActivityView({ data = {} }) {
                     sessionIndex,
                     highlightedEventIds,
                     onSelect: selectEntry,
-                    virtualizer: rowVirtualizer
+                    virtualizer: rowVirtualizer,
+                    measureElement: measureActivityRow
                   })
                 )
               )
@@ -623,6 +689,7 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, isNe
     className,
     ref: measureElement,
     'data-index': virtualIndex,
+    'aria-rowindex': virtualIndex + 2,
     'data-activity-event-id': eventId
   },
     h('td', {
@@ -635,9 +702,9 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, isNe
         className: 'activity-row-trigger',
         type: 'button',
         'data-focus-key': `activity-${eventId}`,
-        'aria-label': activityActionLabel(entry),
         onClick: activate
       },
+        h('span', { className: 'sr-only' }, 'Open activity details: '),
         h('span', { className: 'activity-row-status' }, h(ActivityRowStatus, { value: status })),
         h('span', { className: 'activity-message-copy', title: message }, message),
         h('span', { className: 'activity-row-meta' },
@@ -650,19 +717,20 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, isNe
   );
 });
 
-function renderActivityRows({ entries, historyLoading, loadError, requestedEventId, selectedEventId, sessionIndex, highlightedEventIds, onSelect, virtualizer }) {
+function renderActivityRows({ entries, historyLoading, loadError, requestedEventId, selectedEventId, sessionIndex, highlightedEventIds, onSelect, virtualizer, measureElement }) {
   if (entries.length) {
     const virtualRows = virtualizer.getVirtualItems();
     const totalSize = virtualizer.getTotalSize();
-    const paddingTop = virtualRows.length ? virtualRows[0].start : 0;
+    let previousEnd = 0;
     const paddingBottom = virtualRows.length ? Math.max(0, totalSize - virtualRows.at(-1).end) : 0;
     return [
-      paddingTop ? h(ActivitySpacerRow, { key: 'virtual-top', height: paddingTop }) : null,
-      ...virtualRows.map(row => {
+      ...virtualRows.flatMap(row => {
+        const gap = Math.max(0, row.start - previousEnd);
+        previousEnd = row.end;
         const entry = entries[row.index];
         const eventId = activityEventId(entry);
         const session = activitySessionView(entry, sessionIndex);
-        return h(ActivityRow, {
+        return [gap ? h(ActivitySpacerRow, { key: `virtual-gap-${row.index}`, height: gap }) : null, h(ActivityRow, {
           key: eventId,
           entry,
           requested: Boolean(requestedEventId && eventId === requestedEventId),
@@ -671,9 +739,9 @@ function renderActivityRows({ entries, historyLoading, loadError, requestedEvent
           taskTitle: session.title || 'Task',
           project: session.workspace || entry.workspace || 'No project',
           onSelect,
-          measureElement: virtualizer.measureElement,
+          measureElement,
           virtualIndex: row.index
-        });
+        })];
       }),
       paddingBottom ? h(ActivitySpacerRow, { key: 'virtual-bottom', height: paddingBottom }) : null
     ];
@@ -752,11 +820,11 @@ function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy 
         h('div', { className: 'activity-session-actions' },
           h('a', {
             className: 'section-action',
-            href: routeHref('tasks', { workspace: session.workspace || entry.workspace, task: session.id })
+            href: activityTaskHref(session.id, session.workspace || entry.workspace)
           }, 'Open task'),
           h('a', {
             className: 'section-action',
-            href: routeHref('activity', { workspace: session.workspace || entry.workspace, task: session.id, time: 'all' })
+            href: routeHref('activity', { workspace: session.workspace || entry.workspace, task: session.id, time: 'all', ...activityTaskReturnContext(session.id) })
           }, 'Task activity')
         )
       ) : null,
@@ -1013,6 +1081,30 @@ function openActivityFilters({ filterState, filterOptions, onApply }) {
   });
 }
 
+// Keep Tasks filters separate from Activity filters and tied to their original task.
+function activityTaskReturnContext(taskId = '') {
+  const params = getRouteParams();
+  const returnTask = params.get('returnTask');
+  if (params.get('from') !== 'tasks' || !returnTask || (taskId && returnTask !== taskId)) return {};
+  return {
+    from: 'tasks',
+    returnTask,
+    returnWorkspace: params.get('returnWorkspace') || '',
+    returnSearch: params.get('returnSearch'),
+    returnTaskStatus: params.get('returnTaskStatus')
+  };
+}
+
+function activityTaskHref(taskId, workspace) {
+  const context = activityTaskReturnContext(taskId);
+  return routeHref('tasks', context.from === 'tasks' ? {
+    workspace: context.returnWorkspace,
+    task: taskId,
+    search: context.returnSearch,
+    taskStatus: context.returnTaskStatus
+  } : { workspace, task: taskId });
+}
+
 function readRouteState() {
   const params = getRouteParams();
   const requestedRange = String(params.get('time') || '').toLowerCase();
@@ -1058,6 +1150,7 @@ function statusFilterLabel(status) {
 
 function activityRouteParams(filterState) {
   return {
+    ...activityTaskReturnContext(),
     workspace: filterState.workspace,
     search: filterState.search || null,
     time: filterState.timeRange === '1h' ? null : filterState.timeRange,

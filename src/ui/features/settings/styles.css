@@ -45,7 +45,7 @@
 .additional-tunnel-copy > span, .additional-tunnel-copy > small { overflow-wrap: anywhere; font-size: 12px; color: var(--ui-text-secondary); }
 .additional-tunnel-error { color: var(--ui-status-danger-foreground) !important; }
 .additional-tunnel-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
-.additional-tunnel-form { display: grid; gap: 14px; padding-top: 4px; }
+.additional-tunnel-form { display: grid; gap: var(--stack-gap); padding-top: 4px; }
 .additional-tunnel-form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .additional-tunnels-empty { margin: 0; }
 @media (max-width: 640px) {
@@ -90,6 +90,9 @@
 .settings-external-link:hover { color: var(--ui-text-primary); }
 .settings-form-grid { @apply grid max-w-5xl gap-4; grid-template-columns: repeat(auto-fit,minmax(280px,1fr)); }
 .settings-field { @apply grid min-w-0 gap-1.5; }
+.settings-read-error { display: grid; justify-items: start; gap: 8px; }
+.settings-read-error .settings-help { color: var(--ui-status-danger-foreground); }
+.settings-panel-body, .settings-read-error { min-width: 0; overflow-wrap: anywhere; }
 .settings-field > label { @apply text-[12px] font-semibold; }
 .settings-help { @apply m-0 text-[12px] leading-5; color: var(--ui-text-secondary); }
 .settings-toggle-row { @apply min-h-14 py-2.5; }

@@ -15,7 +15,7 @@
   <header class="pulse-bar">
     <div class="pulse-mark" aria-hidden="true"><img src="relai-logo.png" srcset="relai-logo.png 1x" alt="" width="20" height="20" decoding="async"></div>
 
-    <button class="pulse-compact-copy" id="pulseCompactCopy" type="button" aria-expanded="false" aria-controls="pulseIsland" aria-label="Show activity details">
+    <button class="pulse-compact-copy" id="pulseCompactCopy" type="button" aria-expanded="false" aria-controls="pulseIsland" aria-describedby="pulseCompactAction">
       <span class="pulse-state-dot" aria-hidden="true"></span>
       <span class="pulse-state-label" id="pulseState">Working</span>
       <span class="pulse-task-count" id="pulseTaskCount" hidden></span>
@@ -24,6 +24,7 @@
       <span class="pulse-compact-title" id="pulseCompactTitle">Starting…</span>
     </button>
 
+    <span id="pulseCompactAction" hidden>Show activity details</span>
     <div class="pulse-expanded-brand" aria-hidden="true">Rel.AI</div>
     <div class="pulse-expanded-state" aria-hidden="true">
       <span class="pulse-state-dot" aria-hidden="true"></span>
@@ -63,6 +64,7 @@
       </div>
     </div>
 
+    <p class="pulse-action-error" id="pulseActionError" role="alert" hidden></p>
     <footer class="pulse-footer">
       <button class="pulse-open" id="pulseOpen" type="button" tabindex="-1">
         <span id="pulseOpenLabel">Open in Rel.AI</span>

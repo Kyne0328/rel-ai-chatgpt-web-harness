@@ -4,7 +4,7 @@ import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
-import { processListView } from './index.js';
+import { processListView, processStopResult } from './index.js';
 
 const h = React.createElement;
 const PROCESS_STORE_KEYS = Object.freeze(['managedProcesses']);
@@ -55,22 +55,24 @@ const ProcessRow = memo(function ProcessRow({ row }) {
     const confirmed = await confirmAction({
       title: 'Stop background process?',
       message: 'Are you sure you want to terminate "' + row.label + '"?',
-      detail: 'Any running commands or subprocesses associated with this process will be stopped immediately.',
+      detail: 'Rel.AI will request a stop, allow up to 3 seconds for a graceful exit, then try to end remaining subprocesses. Unsaved work may be lost. The process status will show whether stopping was confirmed.',
       confirmLabel: 'Stop process',
       danger: true
     });
     if (!confirmed) return;
     setStopState('loading');
     setStopError('');
-    const result = await postJson('/api/processes/stop', { processId: row.stopProcessId, graceMs: 3000 }, { timeout: 10000 });
-    if (result?.ok === false) {
+    try {
+      const result = await postJson('/api/processes/stop', { processId: row.stopProcessId, graceMs: 3000 }, { timeout: 10000 });
+      const outcome = processStopResult(result);
+      setStopState(outcome.status);
+      setStopError(outcome.message);
+    } catch (error) {
       setStopState('error');
-      setStopError(String(result.error || 'The command could not be stopped.').slice(0, 320));
-      return;
+      setStopError(String(error?.message || 'The stop request could not be completed. Check the process status before retrying.').slice(0, 320));
+    } finally {
+      requestDashboardRefresh();
     }
-    setStopState('success');
-    setStopError('');
-    requestDashboardRefresh();
   };
   const stopText = stopState === 'loading' ? 'Stopping…' : stopState === 'success' ? 'Stopped' : stopState === 'error' ? 'Try again' : 'Stop';
   const state = row.state;
@@ -115,7 +117,7 @@ const ProcessRow = memo(function ProcessRow({ row }) {
       )
     ),
     stopError ? h('div', { className: 'connection-notice bad process-stop-error', role: 'alert' },
-      h('strong', null, 'Could not stop command'),
+      h('strong', null, 'Stop not confirmed'),
       h('div', null, stopError)
     ) : null,
     h('div', { className: 'process-command-summary' }, h('code', null, row.commandSummary)),

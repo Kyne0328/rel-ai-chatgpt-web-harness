@@ -1,6 +1,8 @@
 const { contextBridge } = require('electron');
 
 let revision = 1;
+let unavailableTaskAvailable = false;
+const taskRequests = [];
 let diffDelayMs = 75;
 let content = [
   'const answer = 42;',
@@ -11,6 +13,8 @@ let content = [
 ].join('\n');
 
 contextBridge.exposeInMainWorld('relaiCodeProbe', {
+  taskRequests: () => [...taskRequests],
+  setUnavailableTaskAvailable: value => { unavailableTaskAvailable = value; },
   setRevision(value, delayMs = 75) {
     revision = value;
     diffDelayMs = delayMs;
@@ -21,9 +25,13 @@ contextBridge.exposeInMainWorld('relaiCodeProbe', {
 contextBridge.exposeInMainWorld('relaiDesktop', {
   codeWorkspace: {
     editors: async () => ({ editors: [] }),
-    get: async () => ({
+    get: async taskId => {
+      taskRequests.push(taskId);
+      if (taskId === 'unavailable-task' && !unavailableTaskAvailable) throw new Error('Retained task unavailable.');
+      const retained = taskId !== 'probe-task';
+      return ({
       ok: true,
-      work_id: 'probe-task',
+      work_id: taskId,
       workspace: 'app',
       workspaceMode: 'visible',
       integrationStatus: 'not_applicable',
@@ -31,7 +39,7 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
       readOnly: true,
       writable: false,
       files: ['src/example.js', 'src/new.js'],
-      changedFiles: ['src/example.js', 'src/new.js'],
+      changedFiles: retained ? ['src/retained.js'] : ['src/example.js', 'src/new.js'],
       changedFileStatuses: {
         'src/example.js': { code: 'M', label: 'Modified', tone: 'warning' },
         'src/new.js': { code: 'U', label: 'Untracked', tone: 'info' }
@@ -44,14 +52,15 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
       commitHeads: [],
       commitSource: '',
       truncated: false
-    }),
-    diff: async (_taskId, requestedPath) => {
+    });
+    },
+    diff: async (taskId, requestedPath) => {
       const requestedContent = content;
       const requestedRevision = revision;
       await new Promise(resolve => setTimeout(resolve, diffDelayMs));
       return {
       ok: true,
-      work_id: 'probe-task',
+      work_id: taskId,
       workspace: 'app',
       path: requestedPath,
       content: requestedContent,

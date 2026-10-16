@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { EXTENSIONS_REPOSITORY_URL, PERMISSION_METADATA, TABS, TEMPLATES } from '../src/ui/features/extensions/metadata.js';
 import { parseExtensionManifest, PERMISSIONS } from '../src/extensions/registry.js';
@@ -72,5 +73,137 @@ assert.match(reactCode, /type: 'url'/, 'Source input must use native URL validat
 assert.match(reactCode, /action: 'add_source'/);
 assert.match(reactCode, /action: 'remove_source'/);
 assert.match(reactCode, /installed extension.*will stay installed/s, 'Source removal must explain that installed extensions are retained');
+
+// 6. Selection semantics and keyboard-native field contracts.
+const flatten = node => node == null || node === false ? [] : Array.isArray(node)
+  ? node.flatMap(flatten)
+  : typeof node === 'object' ? [node, ...flatten(node.children)] : [];
+const textOf = node => node == null || node === false ? '' : Array.isArray(node)
+  ? node.map(textOf).join('')
+  : typeof node === 'object' ? textOf(node.children) : String(node);
+const context = {
+  React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
+  Icon: () => null,
+  OverlayFrame: () => null,
+  Dialog: { Title: 'dialog-title', Description: 'dialog-description' },
+  TABS, TEMPLATES, PERMISSION_METADATA,
+  EXTENSION_SCHEMA_URL: 'https://example.test/schema',
+  useMemo: compute => compute(),
+  useEffect: () => {}
+};
+let slots = [];
+let cursor = 0;
+context.useState = initial => {
+  const index = cursor++;
+  if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial;
+  return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }];
+};
+context.useRef = initial => context.useState(() => ({ current: initial }))[0];
+vm.runInNewContext(
+  reactCode.replace(/^import .*;\n/gm, '').replace(/^export \{.*\};$/m, '')
+    + '\nglobalThis.components = { ExtensionsFilterToolbar, DeveloperPanel, ExtensionTabs, ExtensionInspectorDialog, ExtensionsLoadingSkeleton, Route: createExtensionsRoute() };',
+  context
+);
+const render = (component, props = {}) => { cursor = 0; return component(props); };
+let filterState = { activeTab: 'installed', searchQuery: '', filterKind: 'all', filterStatus: 'all', installedCount: 3 };
+const toolbar = () => render(context.components.ExtensionsFilterToolbar, {
+  ...filterState,
+  setSearchQuery: value => { filterState.searchQuery = value; },
+  setFilterKind: value => { filterState.filterKind = value; },
+  setFilterStatus: value => { filterState.filterStatus = value; }
+});
+const button = (tree, label) => flatten(tree).find(node => node.type === 'button' && textOf(node) === label);
+const group = (tree, label) => flatten(tree).find(node => node.props.role === 'group' && node.props['aria-label'] === label);
+const pressedLabels = tree => flatten(tree).filter(node => node.type === 'button' && node.props['aria-pressed'] === true).map(textOf);
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension type')), ['All types']);
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension status')), ['All statuses']);
+button(toolbar(), 'Skills').props.onClick();
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension type')), ['Skills'], 'A selected type must be exposed as pressed');
+button(toolbar(), 'Skills').props.onClick();
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension type')), ['All types'], 'Selecting the active type must retain toggle-to-all behavior');
+button(toolbar(), 'CLI tools').props.onClick();
+button(toolbar(), 'Setup needed').props.onClick();
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension type')), ['CLI tools']);
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension status')), ['Setup needed']);
+button(toolbar(), 'Setup needed').props.onClick();
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension status')), ['All statuses'], 'Status toggles must clear independently of type');
+button(toolbar(), 'Updates').props.onClick();
+let search = flatten(toolbar()).find(node => node.type === 'input' && node.props.type === 'search');
+const label = flatten(toolbar()).find(node => node.type === 'label' && node.props.htmlFor === search.props.id);
+assert.equal(textOf(label), 'Search extensions', 'Search must have a persistent associated visible label');
+search.props.onChange({ target: { value: 'sample' } });
+assert.equal(textOf(flatten(toolbar()).find(node => node.type === 'label')), 'Search extensions', 'Typing must not replace the search name');
+assert.match(textOf(toolbar()), /CLI tools; Updates; search: “sample”/, 'Filter summary identifies each chosen value');
+button(toolbar(), 'Reset filters').props.onClick();
+assert.equal(filterState.searchQuery, '');
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension type')), ['All types']);
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension status')), ['All statuses']);
+filterState.activeTab = 'discover';
+button(toolbar(), 'Installed').props.onClick();
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension status')), ['Installed']);
+button(toolbar(), 'Installed').props.onClick();
+assert.deepEqual(pressedLabels(group(toolbar(), 'Extension status')), ['All statuses']);
+
+slots = [];
+let developer = render(context.components.DeveloperPanel, { installRoot: '' });
+let radios = flatten(developer).filter(node => node.type === 'input' && node.props.type === 'radio');
+assert.equal(radios.length, templatesList.length);
+assert.equal(new Set(radios.map(node => node.props.name)).size, 1, 'Native radios share one keyboard selection group');
+assert.equal(radios.filter(node => node.props.checked).length, 1);
+const templateGroup = flatten(developer).find(node => node.type === 'fieldset');
+assert.equal(textOf(flatten(templateGroup).find(node => node.type === 'legend')), 'Manifest template');
+radios.find(node => node.props.value === 'cliBinary').props.onChange();
+developer = render(context.components.DeveloperPanel, { installRoot: '' });
+radios = flatten(developer).filter(node => node.type === 'input' && node.props.type === 'radio');
+assert.deepEqual(radios.filter(node => node.props.checked).map(node => node.props.value), ['cliBinary'], 'Template choice remains exclusive');
+assert.equal(textOf(flatten(developer).find(node => node.type === 'pre')), TEMPLATES.cliBinary.code, 'Selected template controls the displayed code');
+
+slots = [];
+slots[1] = { ok: true, installed: [], catalog: [], sources: [] };
+const route = () => render(context.components.Route);
+const routeComponent = (tree, name) => flatten(tree).find(node => node.type === context.components[name]);
+routeComponent(route(), 'ExtensionsFilterToolbar').props.setFilterStatus('needs_setup');
+routeComponent(route(), 'ExtensionTabs').props.setActiveTab('discover');
+assert.equal(routeComponent(route(), 'ExtensionsFilterToolbar').props.filterStatus, 'all', 'Installed-only status must not remain silently active in Discover');
+routeComponent(route(), 'ExtensionsFilterToolbar').props.setFilterStatus('updates');
+routeComponent(route(), 'ExtensionTabs').props.setActiveTab('installed');
+assert.equal(routeComponent(route(), 'ExtensionsFilterToolbar').props.filterStatus, 'updates', 'A status supported by both sections may remain selected');
+routeComponent(route(), 'ExtensionTabs').props.setActiveTab('discover');
+routeComponent(route(), 'ExtensionsFilterToolbar').props.setFilterStatus('installed');
+routeComponent(route(), 'ExtensionTabs').props.setActiveTab('installed');
+assert.equal(routeComponent(route(), 'ExtensionsFilterToolbar').props.filterStatus, 'all', 'Discover-only status must not filter the Installed section');
+
+// 7. Inspector presentation retains workflow callbacks, complete identifiers, and a focus fallback.
+slots = [];
+let closed = 0;
+let fallbackFocused = 0;
+let openerFocused = 0;
+let prevented = 0;
+const opener = { isConnected: true, focus: () => { openerFocused++; } };
+context.document = { activeElement: opener, querySelector: () => ({ focus: () => { fallbackFocused++; } }) };
+const checksum = 'a'.repeat(64);
+const inspector = render(context.components.ExtensionInspectorDialog, {
+  extension: { id: 'publisher.example', name: 'Example', kind: 'skill', version: '1.0.0', ready: true, files: [{ path: 'SKILL.md', sha256: checksum }], permissions: [] },
+  busy: '',
+  onClose: () => { closed++; },
+  onInstall: () => {},
+  onRemove: () => {}
+});
+assert.equal(inspector.type, context.OverlayFrame);
+assert.equal(inspector.props.size, 'wide');
+inspector.props.onOpenChange(false);
+assert.equal(closed, 1, 'Frame delegates dismissal to the feature callback');
+assert.ok(flatten(inspector).some(node => node.type === 'dialog-description'), 'Inspector supplies a dialog description');
+assert.ok(textOf(inspector).includes(checksum), 'Inspector keeps the complete checksum available');
+inspector.props.contentProps.onCloseAutoFocus({ preventDefault: () => { prevented++; } });
+assert.equal(prevented, 1);
+assert.equal(openerFocused, 1, 'Inspector restores its actual opener even without a Radix Trigger');
+opener.isConnected = false;
+inspector.props.contentProps.onCloseAutoFocus({ preventDefault: () => { prevented++; } });
+assert.equal(prevented, 2);
+assert.equal(fallbackFocused, 1, 'Removed opener falls back to the selected Extensions tab');
+const loading = render(context.components.ExtensionsLoadingSkeleton);
+assert.equal(loading.props.role, 'status');
+assert.equal(loading.props['aria-label'], 'Loading extensions');
 
 console.log('Extensions UI and design intelligence unit tests passed.');

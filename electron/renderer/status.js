@@ -1,6 +1,7 @@
 let currentStatus = {};
 let previousAnnouncementKey = '';
 let actionError = '';
+let cleanupWarning = '';
 let clockTimer = null;
 let windowFitFrame = 0;
 let lastWindowFit = { width: 0, height: 0 };
@@ -226,7 +227,7 @@ function renderEndpoint(view) {
   if (currentStatus.tunnelId) {
     endpoint.textContent = currentStatus.tunnelId;
     endpoint.className = 'endpoint-box';
-    copyButton.disabled = false;
+    copyButton.disabled = Boolean(copyButton.dataset.pending) || copyButton.dataset.state === 'success';
   } else {
     endpoint.textContent = 'Waiting for connection setup…';
     if (view.key === 'stopped') endpoint.textContent = 'Set up the ChatGPT connection, then start Rel.AI.';
@@ -297,12 +298,11 @@ function renderLastTask() {
 
 function renderError(view) {
   const connectionFailed = view.key === 'failed';
-  const failed = connectionFailed || Boolean(actionError);
+  const failed = connectionFailed || Boolean(actionError) || Boolean(cleanupWarning);
   document.getElementById('errorPanel').hidden = !failed;
-  document.getElementById('errorTitle').textContent = connectionFailed ? 'Connection needs attention' : 'Action needs attention';
-  document.getElementById('errorMessage').textContent = connectionFailed
-    ? currentStatus.error || 'The Secure MCP Tunnel did not become ready.'
-    : actionError;
+  document.getElementById('errorTitle').textContent = actionError ? 'Action needs attention' : cleanupWarning ? 'Stop not confirmed' : 'Connection needs attention';
+  document.getElementById('errorMessage').textContent = actionError || cleanupWarning
+    || currentStatus.error || 'The Secure MCP Tunnel did not become ready.';
   for (const id of ['retryBtn', 'restartAppBtn', 'errorSettingsBtn']) {
     document.getElementById(id).hidden = !connectionFailed;
   }
@@ -316,9 +316,10 @@ function setActionError(value) {
 
 function renderControls() {
   const toggle = document.getElementById('serverToggleBtn');
-  toggle.textContent = currentStatus.serverRunning ? 'Stop Rel.AI' : 'Start Rel.AI';
+  if (!toggle.dataset.pending) toggle.textContent = currentStatus.serverRunning ? 'Stop Rel.AI' : 'Start Rel.AI';
   toggle.className = currentStatus.serverRunning ? 'danger compact-control' : 'primary compact-control';
-  document.getElementById('dashboardBtn').disabled = !currentStatus.serverRunning;
+  const dashboard = document.getElementById('dashboardBtn');
+  dashboard.disabled = Boolean(dashboard.dataset.pending) || !currentStatus.serverRunning;
   document.getElementById('appVersion').textContent = currentStatus.version ? `v${currentStatus.version}` : '—';
 }
 
@@ -537,15 +538,37 @@ function safeDiagnosticText(value) {
     .replace(/\b(token|secret|password|authorization|api[_-]?key|authtoken|client[_-]?secret)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]');
 }
 
+function restoreControlAvailability(button) {
+  if (button.id === 'copyBtn') button.disabled = !currentStatus.tunnelId;
+  else if (button.id === 'dashboardBtn') button.disabled = !currentStatus.serverRunning;
+  else button.disabled = false;
+  if (button.id === 'serverToggleBtn') button.textContent = currentStatus.serverRunning ? 'Stop Rel.AI' : 'Start Rel.AI';
+}
+
 async function copyWithFeedback(button, text, successText = 'Copied') {
-  await window.electronAPI.copyUrl(text);
+  if (button.dataset.pending || button.disabled) return;
   const original = button.textContent;
-  button.dataset.state = 'success';
-  button.textContent = successText;
-  window.setTimeout(() => {
+  button.disabled = true;
+  button.dataset.pending = 'true';
+  button.dataset.state = 'loading';
+  try {
+    const result = await window.electronAPI.copyUrl(text);
+    if (result?.ok === false) throw new Error(result.error || 'Copy failed. Try again.');
+    setActionError('');
+    button.dataset.state = 'success';
+    button.textContent = successText;
+    window.setTimeout(() => {
+      delete button.dataset.state;
+      button.textContent = original;
+      delete button.dataset.pending;
+      restoreControlAvailability(button);
+    }, 1300);
+  } catch (error) {
     delete button.dataset.state;
-    button.textContent = original;
-  }, 1300);
+    delete button.dataset.pending;
+    restoreControlAvailability(button);
+    throw error;
+  }
 }
 
 function initDisclosures() {
@@ -570,20 +593,27 @@ function tunnelLabel(status) {
 }
 
 async function withBusy(button, label, action) {
+  if (button.dataset.pending || button.disabled) return;
   const original = button.textContent;
   button.disabled = true;
+  button.dataset.pending = 'true';
   button.dataset.state = 'loading';
   button.textContent = label;
   try {
     const result = await action();
-    setActionError('');
+    if (result?.ok === false) throw new Error(result.error || 'The action could not be completed. Try again.');
+    if (result?.cleanup) cleanupWarning = result.cleanup.clean === false
+      ? 'The stop request finished, but Rel.AI could not confirm that all background processes and connections ended. Review recent app logs before retrying.'
+      : '';
     if (result) updateUI(result);
+    setActionError('');
   } catch (error) {
     setActionError(error instanceof Error ? error.message : 'The action could not be completed.');
   } finally {
-    button.disabled = false;
+    delete button.dataset.pending;
     delete button.dataset.state;
     if (button.textContent === label) button.textContent = original;
+    restoreControlAvailability(button);
   }
 }
 
@@ -610,17 +640,23 @@ function bindEvents() {
   });
   document.getElementById('dashboardBtn').addEventListener('click', () => {
     runAsync(withBusy(document.getElementById('dashboardBtn'), 'Opening…', async () => {
-      await window.electronAPI.openDashboard();
+      const result = await window.electronAPI.openDashboard();
+      if (result?.ok === false) throw new Error(result.error || 'The dashboard could not open. Try again.');
       return null;
     }));
   });
   for (const id of ['settingsBtn', 'errorSettingsBtn']) {
-    document.getElementById(id).addEventListener('click', () => runAsync(window.electronAPI.openRecoverySetup()));
+    document.getElementById(id).addEventListener('click', () => runAsync(withBusy(document.getElementById(id), 'Opening…', async () => {
+      const result = await window.electronAPI.openRecoverySetup();
+      if (result?.ok === false) throw new Error(result.error || 'Connection settings could not open. Try again.');
+      return null;
+    })));
   }
 }
 
 function runAsync(promise) {
-  Promise.resolve(promise).catch(error => {
+  return Promise.resolve(promise).catch(error => {
+    setActionError(error instanceof Error ? error.message : 'The action could not be completed. Try again.');
     if (localStorage.getItem('relai_debug') === '1') console.error(error);
   });
 }

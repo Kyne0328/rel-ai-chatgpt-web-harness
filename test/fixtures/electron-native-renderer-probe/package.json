@@ -1,0 +1,6 @@
+{
+  "name": "relai-electron-native-renderer-probe",
+  "private": true,
+  "type": "module",
+  "main": "index.js"
+}

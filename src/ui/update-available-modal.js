@@ -236,7 +236,7 @@ function supportUpdateAction(status = {}) {
 function UpdateNoticeContent({ view, status, onLater, onAction }) {
   const action = supportUpdateAction(status);
   const detail = view.detail || (view.blocking
-    ? 'You can still use the dashboard and update controls, but Rel.AI cannot work with ChatGPT until a supported version is installed.'
+    ? 'This notice blocks dashboard access. Use the update control below to install a supported version before continuing with Rel.AI and ChatGPT.'
     : 'You can update now or continue. Rel.AI will show this notice again on a later launch until you update.');
   if (view.state === 'installing') {
     return h('div', { className: 'update-installing-modal', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true', 'aria-busy': 'true' },

@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { flushSync } from 'react-dom';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { copyText } from '../../clipboard.js';
@@ -7,7 +7,7 @@ import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { OperationDiagnostics, RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { formatDuration, timeAgo } from '../../utils.js';
-import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref, setWorkspaceFilter } from '../../router.js';
+import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, replaceRouteParams, routeHref, setWorkspaceFilter, subscribeRoute } from '../../router.js';
 import { activityEventId } from '../../activity-event.js';
 import { orderWorkspacesAlphabetically } from '../../components/workspace-menu.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
@@ -54,6 +54,8 @@ export function createSessionsRoute(useDashboardSlices) {
 }
 
 function SessionsPage({ data = {} }) {
+  const route = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
+  const routeParams = useMemo(() => new URLSearchParams(route.search), [route.search]);
   const workspace = getWorkspaceFilter();
   const scopeKey = workspace || '__all__';
   const requestedId = String(getRouteParams().get('task') || '').trim();
@@ -65,8 +67,14 @@ function SessionsPage({ data = {} }) {
     [data.tasks, olderSessions]
   );
   const allSessions = useMemo(() => sessionsForDisplay({ tasks: taskSource }, workspace), [taskSource, workspace]);
-  const [taskQuery, setTaskQuery] = useState('');
-  const [taskStatus, setTaskStatus] = useState('all');
+  const routeSearch = routeParams.get('search') || '';
+  const [taskQuery, setTaskQuery] = useState(routeSearch);
+  const taskStatus = routeParams.get('taskStatus') || 'all';
+  useEffect(() => { setTaskQuery(routeSearch); }, [routeSearch]);
+  const changeTaskQuery = value => {
+    setTaskQuery(value);
+    replaceRouteParams({ search: value });
+  };
   const sessions = useMemo(
     () => allSessions.filter(session => sessionMatchesFilters(session, taskQuery, taskStatus)),
     [allSessions, taskQuery, taskStatus]
@@ -90,11 +98,12 @@ function SessionsPage({ data = {} }) {
     const state = workSessionStateView(session);
     return count + (state.active === true || state.open === true ? 1 : 0);
   }, 0);
-  const [selectedId, setSelectedId] = useState('');
+  const [selectedId, setSelectedId] = useState(requestedId);
   const taskListRef = useRef(null);
   const selectedIdRef = useRef('');
   selectedIdRef.current = selectedId;
   const [hydrated, setHydrated] = useState(null);
+  const [hydrationState, setHydrationState] = useState(null);
   const [detailRefresh, setDetailRefresh] = useState(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
@@ -105,7 +114,7 @@ function SessionsPage({ data = {} }) {
   const offPageTaskSource = selectedSummary ? null : data.tasks;
   const selectedHydrationCacheTtl = selectedSummary && isOngoingSession(selectedSummary) ? 1000 : 60_000;
   const selectedHydratedSession = hydrated?.id === selectedId ? hydrated.session : null;
-  const selectedDetail = selectedSummary || selectedHydratedSession
+  const selectedDetail = selectedId === requestedId && (selectedSummary || selectedHydratedSession)
     ? mergeSessionDetail(selectedHydratedSession || {}, selectedSummary || {}, data)
     : null;
 
@@ -116,6 +125,7 @@ function SessionsPage({ data = {} }) {
     if (getRouteParams().get('task') !== id) replaceRouteParams({ task: id });
     if (selectedIdRef.current !== id) {
       setHydrated(null);
+      setHydrationState(null);
       setDetailRefresh(null);
       setActiveTab('overview');
       setOlderExpanded(false);
@@ -134,10 +144,11 @@ function SessionsPage({ data = {} }) {
   }, [requestedId, selectSession]);
 
   useEffect(() => {
-    if (!selectedId || selectedSummary || requestedId) return;
+    if (requestedId) return;
     setSelectedId('');
     setHydrated(null);
-  }, [requestedId, selectedId, selectedSummary]);
+    setHydrationState(null);
+  }, [requestedId]);
 
   useEffect(() => {
     if (!selectedId) return undefined;
@@ -145,16 +156,32 @@ function SessionsPage({ data = {} }) {
     const forceRefresh = detailRefresh?.id === selectedId;
     if (selectedSummaryHasTrace && !forceRefresh) {
       setHydrated({ id: selectedId, session: selectedSummary });
+      setHydrationState({ id: selectedId, status: 'ready' });
       return undefined;
     }
     let cancelled = false;
+    setHydrationState({ id: selectedId, status: 'loading' });
     void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}`, {
       cacheTtlMs: selectedHydrationCacheTtl,
       // Off-page detail has no live summary to supersede a cached response.
       ...(forceRefresh || !selectedSummary ? { cache: 'no-store' } : {})
     })
       .then(response => {
-        if (cancelled || request !== hydrationRequest.current || response?.ok === false || !response?.session) return;
+        if (cancelled || request !== hydrationRequest.current) return;
+        if (response?.ok === false || !response?.session) {
+          const unavailable = response?.httpStatus === 404 || (response?.ok !== false && !response?.session);
+          setHydrationState({
+            id: selectedId,
+            status: unavailable ? 'unavailable' : 'error',
+            message: response?.error || (unavailable ? 'No retained details were found for this task.' : 'Task details could not be loaded.')
+          });
+          return;
+        }
+        if (sessionIdentifier(response.session) !== selectedId) {
+          setHydrationState({ id: selectedId, status: 'error', message: 'The returned details did not match the requested task. Try again.' });
+          return;
+        }
+        setHydrationState({ id: selectedId, status: 'ready' });
         setHydrated(previous => {
           const sameTask = previous?.id === selectedId;
           const previousEvents = sameTask ? previous.session?.events || [] : [];
@@ -173,7 +200,9 @@ function SessionsPage({ data = {} }) {
         });
       })
       .catch(error => {
-        if (!cancelled && request === hydrationRequest.current) toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
+        if (!cancelled && request === hydrationRequest.current) {
+          setHydrationState({ id: selectedId, status: 'error', message: error instanceof Error ? error.message : String(error) });
+        }
       });
     return () => {
       cancelled = true;
@@ -308,12 +337,14 @@ function SessionsPage({ data = {} }) {
             value: taskQuery,
             placeholder: 'Search tasks',
             'aria-label': 'Search tasks',
-            onChange: event => setTaskQuery(event.target.value)
+            'aria-describedby': 'task-search-scope',
+            maxLength: 200,
+            onChange: event => changeTaskQuery(event.target.value)
           })
         ),
         h('label', { className: 'filter-field' },
           h('span', { className: 'sr-only' }, 'Task status filter'),
-          h('select', { 'aria-label': 'Task status filter', value: taskStatus, onChange: event => setTaskStatus(event.target.value) },
+          h('select', { 'aria-label': 'Task status filter', value: taskStatus, onChange: event => replaceRouteParams({ taskStatus: event.target.value }) },
             h('option', { value: 'all' }, 'All statuses'),
             h('option', { value: 'open' }, 'Open'),
             h('option', { value: 'attention' }, 'Needs attention'),
@@ -321,11 +352,18 @@ function SessionsPage({ data = {} }) {
             h('option', { value: 'ended' }, 'Other ended')
           )
         ),
+        (taskQuery || taskStatus !== 'all') ? h('button', {
+          className: 'secondary', type: 'button',
+          onClick: () => { setTaskQuery(''); replaceRouteParams({ search: null, taskStatus: null }); }
+        }, 'Clear filters') : null,
         h(ProjectFilter, { workspaces: data.config?.workspaces || [], selected: workspace }),
         h('span', { className: 'feature-count' }, sessions.length === allSessions.length
           ? sessionCountLabel(allSessions, workspace)
           : `${sessions.length} of ${allSessions.length} tasks`)
       )
+    ),
+    h('p', { id: 'task-search-scope', className: 'sessions-summary-line', 'data-task-search-scope': '' },
+      `Search and status filters apply to ${allSessions.length} loaded task${allSessions.length === 1 ? '' : 's'}${workspace ? ` in ${workspace}` : ''}.${canLoadOlder ? ' Load older tasks to search more retained history.' : ''}`
     ),
     h('section', { className: 'card sessions-history-card' },
       h('div', { className: 'sessions-master-detail' },
@@ -340,11 +378,11 @@ function SessionsPage({ data = {} }) {
                   })
                 ))
               )
-            : h('div', { className: 'empty' }, taskQuery || taskStatus !== 'all' ? 'No tasks match these filters.' : 'No tasks yet.'),
+            : h('div', { className: 'empty' }, taskQuery || taskStatus !== 'all' ? 'No loaded tasks match these filters.' : 'No tasks loaded.'),
           (remaining > 0 || canLoadOlder) && h('div', { className: 'session-list-footer' },
             h('span', null, remaining > 0
               ? `${remaining} older task${remaining === 1 ? '' : 's'} hidden`
-              : 'More retained task history is available'),
+              : knownHistoryAvailability === true ? 'More retained task history is available' : 'Check for older retained tasks'),
             h('button', {
               className: 'secondary',
               type: 'button',
@@ -359,6 +397,15 @@ function SessionsPage({ data = {} }) {
           )
         ),
         h('aside', { className: 'session-inspector', 'data-session-inspector': '' },
+          selectedDetail && !sessions.some(session => sessionIdentifier(session) === requestedId)
+            ? h('p', { className: 'sessions-summary-line', 'data-task-selection-context': '' }, 'This selected task is outside the loaded, filtered list.')
+            : null,
+          requestedId ? h(TaskDetailFeedback, {
+            taskId: requestedId,
+            state: hydrationState?.id === requestedId ? hydrationState : { status: 'loading' },
+            hasDetail: Boolean(selectedDetail),
+            onRetry: () => refreshSelectedSession(requestedId)
+          }) : null,
           selectedDetail
             ? h(SessionInspector, {
                 session: selectedDetail,
@@ -373,13 +420,32 @@ function SessionsPage({ data = {} }) {
                 loadOlderActivity,
                 onControlComplete: refreshSelectedSession
               })
-            : h('div', { className: 'inspector-empty' },
+            : !requestedId ? h('div', { className: 'inspector-empty' },
                 h('strong', null, 'Select a task'),
                 h('span', null, 'View its overview, activity, and technical details here.')
-              )
+              ) : null
         )
       )
     )
+  );
+}
+
+function TaskDetailFeedback({ taskId, state, hasDetail, onRetry }) {
+  if (state.status === 'ready') return null;
+  const loading = state.status === 'loading';
+  const title = loading
+    ? hasDetail ? 'Loading full task details…' : 'Loading task…'
+    : state.status === 'unavailable' ? 'Task details unavailable' : 'Could not load task details';
+  return h('div', {
+    className: hasDetail ? 'connection-notice' : 'inspector-empty',
+    role: loading ? 'status' : 'alert',
+    'aria-busy': loading,
+    'data-task-detail-state': state.status
+  },
+    h('strong', null, title),
+    !hasDetail ? h('span', { className: 'mono' }, taskId) : null,
+    !loading ? h('span', null, `${state.message || 'Try loading this task again.'}${hasDetail ? ' Showing the last available task details.' : ''}`) : null,
+    !loading ? h('button', { className: 'secondary', type: 'button', 'data-retry-task-detail': '', onClick: onRetry }, 'Retry task details') : null
   );
 }
 
@@ -621,7 +687,7 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     h('div', { className: 'inspector-panel', id: 'session-panel-activity', role: 'tabpanel', 'aria-labelledby': 'session-tab-activity', tabIndex: 0, hidden: activeTab !== 'activity', 'data-session-panel': 'activity' },
       h(TaskTraceSection, { session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }),
       h('div', { className: 'session-inline-actions' },
-        h('a', { className: 'buttonlike secondary', href: routeHref('activity', { workspace: session.workspace, task: id, time: 'all' }) }, 'Open in Activity')
+        h('a', { className: 'buttonlike secondary', href: taskActivityHref(session) }, 'Open in Activity')
       )
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-technical', role: 'tabpanel', 'aria-labelledby': 'session-tab-technical', tabIndex: 0, hidden: activeTab !== 'technical', 'data-session-panel': 'technical' },
@@ -739,7 +805,7 @@ function FailureHistorySection({ session }) {
     h('p', null,
       h('span', null, label),
       h('span', { 'aria-hidden': 'true' }, ' · '),
-      h('a', { href: routeHref('activity', { workspace: session.workspace, task: sessionIdentifier(session), time: 'all' }) }, 'View activity')
+      h('a', { href: taskActivityHref(session) }, 'View activity')
     )
   );
 }
@@ -760,7 +826,7 @@ function ChangedFileGroup({ title, files, session = null }) {
   const visible = expanded ? ordered : ordered.slice(0, DETAIL_FILE_PREVIEW);
   const moreControl = hiddenCount
     ? session
-      ? h('a', { className: 'task-file-more', href: routeHref('code', { task: sessionIdentifier(session) }) }, `View all ${ordered.length} in Changes`)
+      ? h('a', { className: 'task-file-more', href: taskChangesHref(sessionIdentifier(session)) }, `View all ${ordered.length} in Changes`)
       : h('button', {
           className: 'task-file-more',
           type: 'button',
@@ -774,6 +840,32 @@ function ChangedFileGroup({ title, files, session = null }) {
   );
 }
 
+function taskActivityHref(session, eventParams = {}) {
+  const params = getRouteParams();
+  const taskId = sessionIdentifier(session);
+  return routeHref('activity', {
+    workspace: session.workspace,
+    task: taskId,
+    time: 'all',
+    ...eventParams,
+    from: 'tasks',
+    returnTask: taskId,
+    returnWorkspace: params.get('workspace') || '',
+    returnSearch: params.get('search'),
+    returnTaskStatus: params.get('taskStatus')
+  });
+}
+
+function taskChangesHref(taskId, file) {
+  const params = getRouteParams();
+  return routeHref('code', {
+    workspace: params.get('workspace') || '',
+    task: taskId, file, from: 'tasks',
+    search: params.get('search'),
+    taskStatus: params.get('taskStatus')
+  });
+}
+
 function FileList({ files, session = null, moreControl = null }) {
   const taskId = session ? sessionIdentifier(session) : '';
   const rows = files.map(file => {
@@ -781,7 +873,7 @@ function FileList({ files, session = null, moreControl = null }) {
     return h('li', { className: 'task-file-link-row', key: file },
       h('a', {
         className: 'task-file-link',
-        href: routeHref('code', { task: taskId, file }),
+        href: taskChangesHref(taskId, file),
         'aria-label': `Open ${file} in Changes`
       }, h('code', null, file))
     );
@@ -833,11 +925,10 @@ function EventRow({ event, session, older = false }) {
   const timestamp = eventTimestampValue(event);
   const status = event.status || (event.ok === false ? 'failed' : 'succeeded');
   const command = String(event.command || '').trim();
-  const href = routeHref('activity', {
+  const href = taskActivityHref(session, {
     workspace: event.workspace || session.workspace,
     task: event.taskId || sessionIdentifier(session),
-    event: activityEventId(event),
-    time: 'all'
+    event: activityEventId(event)
   });
   return h('a', {
     className: 'task-event task-event-link',

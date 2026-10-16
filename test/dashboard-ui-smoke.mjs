@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { Icon } from '../src/ui/components/icons.js';
 import { OperationDiagnostics, RuntimeBuildIdentity } from '../src/ui/components/operation-diagnostics.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,6 +17,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 const settingsReact = read('src/ui/features/settings/react.js');
 const reactShell = read('src/ui/react/main.js');
+
+assert.match(reactShell, /id: 'commandPaletteBtn'[\s\S]*?'aria-label': `Open quick navigation \$\{shortcut\}`/, 'quick navigation must retain its purpose and visible platform shortcut in its accessible name at every width');
+assert.match(reactShell, /className: 'command-trigger-label'\s*\},\s*'Quick navigation\s+'/, 'quick navigation needs textual whitespace before its shortcut; a CSS gap does not separate its visible label text');
 
 assert.match(settingsReact, /about-runtime-mismatch/, 'Runtime/source skew needs a bounded developer-facing notice instead of staying invisible');
 assert.match(settingsReact, /Beta \/ pre-release \(developers & testers\)/, 'the beta release option must identify its developer/tester audience before selection');
@@ -111,7 +115,28 @@ assert.match(activityReact, /const fileLocation = activityFileLocation\(entry\)/
 assert.match(activityReact, /readableSection\('File location', fileLocationText\)/, 'Activity details must expose successful local file destinations without requiring Technical details');
 assert.match(activityReact, /command \? h\(CommandDetail, \{ command \}\) : null/, 'Activity details must expose the full recorded command without requiring Technical details');
 
-console.log('Dashboard UI ownership contracts passed.');
+
+// Render real Lucide glyphs: declared size/stroke must survive shared CSS, and
+// every navigation name must resolve through the registry rather than fallback.
+const renderIcon = props => renderToStaticMarkup(React.createElement(Icon, props));
+assert.equal(renderIcon({ name: 'puzzle' }), renderIcon({ name: 'extensions' }), 'skill and Extensions glyph aliases must resolve to Puzzle');
+assert.notEqual(renderIcon({ name: 'puzzle' }), renderIcon({ name: 'help' }), 'a skill must not silently render the fallback Help glyph');
+assert.equal(renderIcon({ name: 'unknown-future-icon' }), renderIcon({ name: 'help' }), 'unknown external names retain the safe help fallback');
+for (const item of navigationCommands({ includeExtensions: true })) {
+  if (item.icon === 'about') continue;
+  assert.notEqual(renderIcon({ name: item.icon }), renderIcon({ name: 'help' }), `${item.label} must have a registered icon`);
+}
+for (const size of [12, 16, 18, 24, 32]) {
+  const markup = renderIcon({ name: 'puzzle', size, strokeWidth: 2 });
+  assert.match(markup, new RegExp(`width="${size}"`));
+  assert.match(markup, new RegExp(`height="${size}"`));
+  assert.match(markup, new RegExp(`style="[^"]*width:${size}px;[^"]*height:${size}px`));
+  assert.match(markup, /stroke-width:2/);
+  assert.match(markup, /aria-hidden="true"/);
+  assert.match(markup, /focusable="false"/);
+}
+
+console.log('Dashboard UI ownership and icon rendering contracts passed.');
 
 // Render the actual shared inspector component, including older uninstrumented events.
 const renderDiagnostics = props => renderToStaticMarkup(React.createElement(OperationDiagnostics, props));

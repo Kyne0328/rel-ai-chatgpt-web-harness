@@ -513,3 +513,8 @@ button { font: inherit; }
   .pulse-state-dot { forced-color-adjust: none; background: CanvasText; border: 1px solid CanvasText; }
   .pulse-task-row { border: 1px solid CanvasText; }
 }
+
+.pulse-island:has(.pulse-action-error:not([hidden])) { overflow-y: auto; overscroll-behavior: contain; }
+.pulse-island:has(.pulse-action-error:not([hidden])) .pulse-footer { flex-shrink: 0; }
+.pulse-action-error { flex-shrink: 0; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--ui-status-danger-border); border-radius: 7px; color: var(--ui-text-primary); background: var(--ui-surface-secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.pulse-action-error[hidden] { display: none; }

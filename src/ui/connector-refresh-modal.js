@@ -70,9 +70,9 @@ function initConnectorRefreshModal(options = {}) {
         ))
       ),
       h('p', { className: 'muted' }, view.businessNote),
-      h('p', { className: 'muted' }, 'This notice will not appear again for this connector update.'),
+      h('p', { className: 'muted' }, 'Dismissing this notice records your acknowledgment for this connector update. Rel.AI cannot verify whether you refreshed the connector in ChatGPT.'),
       h('div', { className: 'modal-actions' },
-        h('button', { type: 'button', className: 'primary', onClick: () => modal?.close() }, 'Done')
+        h('button', { type: 'button', className: 'primary', onClick: () => modal?.close() }, 'Dismiss notice')
       )
     );
 

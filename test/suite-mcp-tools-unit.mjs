@@ -343,6 +343,11 @@ async function case_connector_refresh_modal_unit() {
     };
   }
   
+  const { readFileSync } = await import('node:fs');
+  const noticeSource = readFileSync(new URL('../src/ui/connector-refresh-modal.js', import.meta.url), 'utf8');
+  assert.match(noticeSource, /Dismiss notice/, 'The notice action must describe acknowledgment rather than verified refresh');
+  assert.match(noticeSource, /cannot verify whether you refreshed/, 'External connector refresh must remain explicitly unverified');
+
   const freshInstallStorage = memoryStorage();
   assert.equal(prepareConnectorRefreshNotice({
     currentVersion: '0.27.4',

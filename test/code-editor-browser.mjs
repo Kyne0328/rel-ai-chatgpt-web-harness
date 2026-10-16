@@ -61,11 +61,40 @@ try {
   assert.equal(result.selectedFileHeading, 'src/new.js', 'task file links must be able to deep-link to the exact changed file');
   assert.deepEqual(result.sameTaskFileNavigation, { heading: 'src/example.js', routeFile: 'src/example.js' }, 'same-task file navigation must update the displayed diff');
   assert.equal(result.routeAfterPendingDiff, '#activity?task=outside-task', 'a delayed diff must not overwrite another page after leaving Changes');
-  assert.deepEqual(result.invalidFileFallback, { heading: 'src/example.js', routeFile: 'src/example.js' }, 'a missing-file deep link must resolve to a valid changed file');
+  assert.deepEqual(result.invalidFileContext, { heading: 'missing.js', routeFile: 'missing.js', recoveryVisible: true, selectedOtherFile: false }, 'a missing-file deep link must keep its identity and explain recovery instead of silently substituting another file');
+  assert.deepEqual(result.retainedTaskIdentity, { selected: 'retained-task', routeTask: 'retained-task', heading: 'src/retained.js', requested: 'retained-task', otherTaskAvailable: true }, 'a retained task absent from the aggregate must load its own changes even when another task is available');
+  assert.deepEqual(result.unavailableTaskContext, { selected: 'unavailable-task', routeTask: 'unavailable-task', routeFile: 'src/retained.js', errorIdentifiesTask: true, returnTask: 'unavailable-task' }, 'unavailable task changes must retain the requested context and expose recovery');
+  assert.equal(result.unavailableTaskRecovered, true, 'Retry must load the same requested task after a transient failure');
+  assert.deepEqual(result.retainedTaskWithoutSummaries, ['retained-task'], 'an explicit retained task must be resolvable when the aggregate has no tasks');
   assert.deepEqual(result.taskFileHrefs, [
-    '#code?task=probe-task&file=src%2Fexample.js',
-    '#code?task=probe-task&file=src%2Fnew.js'
+    '#code?task=probe-task&file=src%2Fexample.js&from=tasks',
+    '#code?task=probe-task&file=src%2Fnew.js&from=tasks'
   ], 'task project-file items must link to their exact file in Changes');
+  assert.equal(result.scopedTaskFileHref, '#code?workspace=app&task=probe-task&file=src%2Fexample.js&from=tasks&search=Changes+viewer&taskStatus=open', 'Task links must retain the bounded project, query and status context');
+  assert.equal(result.filteredTaskReturnHref, '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open');
+  assert.deepEqual(result.restoredTaskContext, { search: 'Changes viewer', status: 'open', workspace: 'app', selected: 'probe-task', scopeExplained: true }, 'returning from Changes must restore filters and task selection with honest loaded-history scope');
+  const taskActivityParams = new URLSearchParams(result.scopedTaskActivityHref.split('?')[1]);
+  assert.deepEqual(Object.fromEntries(taskActivityParams), { workspace: 'app', task: 'probe-task', time: 'all', from: 'tasks', returnTask: 'probe-task', returnWorkspace: 'app', returnSearch: 'Changes viewer', returnTaskStatus: 'open' }, 'Tasks Activity links must keep their own filter namespace and origin task');
+  const taskEventActivityParams = new URLSearchParams(result.taskEventActivityHref.split('?')[1]);
+  assert.equal(taskEventActivityParams.get('returnTask'), 'probe-task', 'individual task events must preserve return selection');
+  assert.equal(taskEventActivityParams.get('returnSearch'), 'Changes viewer', 'individual task events must preserve task search');
+  assert.equal(taskEventActivityParams.get('returnTaskStatus'), 'open', 'individual task events must preserve task status');
+  assert.equal(result.activityOwnFiltersInitiallyEmpty, true, 'Tasks search and status must not silently filter Activity');
+  assert.equal(result.activityTaskReturnHref, '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open', 'Activity edits must not overwrite Tasks return filters');
+  assert.equal(result.activityNestedReturnHref, result.activityTaskReturnHref, 'Task activity navigation must retain the originating Tasks context');
+  assert.deepEqual(result.activityRestoredTaskContext, { search: 'Changes viewer', status: 'open', workspace: 'app', selected: 'probe-task' }, 'Tasks Activity Tasks must restore the rendered search, status, project and selection');
+  assert.equal(result.activityAllProjectsReturnHref, '#tasks?task=probe-task&search=Changes+viewer&taskStatus=open', 'Activity must preserve explicit all-projects Tasks scope');
+  assert.equal(result.activityAllProjectsRestored, true, 'the all-projects scope must remain unscoped after a rendered Activity roundtrip');
+  assert.equal(result.activityDifferentTaskReturnHref, '#tasks?workspace=app&task=no-change-task', 'opening a different Activity task must not inherit another task’s return filters');
+  assert.deepEqual(result.filteredSelection, { emptyExplainsLoadedScope: true, selectionExplained: true, selectedTaskVisible: true }, 'changing filters must retain and explain an explicit selection outside the loaded results');
+  assert.equal(result.allProjectsReturnHref, '#tasks?task=probe-task', 'an all-projects Tasks visit must not become project-scoped on return');
+  assert.deepEqual(result.taskDetailFailure, { identifiesTask: true, selectPromptAbsent: true, messageVisible: true }, 'structured detail failures must show task-specific error and retry rather than an unselected state');
+  assert.deepEqual(result.taskDetailRetry, { attempts: 2, errorCleared: true, routeTask: 'retry-detail-task' }, 'detail Retry must bypass the failed read and preserve the requested task');
+  assert.deepEqual(result.missingTaskDetails, { retryVisible: true, identifiesTask: true }, 'not-found tasks must have a distinct unavailable state with a recovery action');
+  assert.equal(result.mismatchedTaskRejected, true, 'task detail responses must match the requested identity');
+  assert.equal(result.summarySurvivesDetailFailure, true, 'a detail read failure must retain and label the last available summary');
+  assert.deepEqual(result.taskDetailLoading, { loading: true, selectPromptAbsent: true }, 'pending retained tasks must have a distinct loading state');
+  assert.equal(result.lateTaskDetailsIgnored, true, 'a late response for an older task must not replace a newer selection');
   assert.deepEqual(result.statusBadges.map(item => item.code), ['M', 'U'], 'changed-file markers must expose real Git states instead of hardcoding M');
   assert.match(result.statusBadges[0]?.title || '', /^Modified:/);
   assert.match(result.statusBadges[1]?.title || '', /^Untracked:/);

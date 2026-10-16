@@ -13,12 +13,14 @@ const shell = document.getElementById('pulseShell');
 const toggle = document.getElementById('pulseToggle');
 const island = document.getElementById('pulseIsland');
 const openButton = document.getElementById('pulseOpen');
+const actionErrorEl = document.getElementById('pulseActionError');
 const workspaceRow = document.getElementById('pulseWorkspaceRow');
 const tasksBlock = document.getElementById('pulseTasksBlock');
 const taskList = document.getElementById('pulseTaskList');
 const tasksCount = document.getElementById('pulseTasksCount');
 const progress = document.getElementById('pulseProgress');
 const compactCopy = document.getElementById('pulseCompactCopy');
+const compactActionDescription = document.getElementById('pulseCompactAction');
 const stateEl = document.getElementById('pulseState');
 const expandedStateEl = document.getElementById('pulseExpandedState');
 const taskCountElement = document.getElementById('pulseTaskCount');
@@ -201,7 +203,7 @@ function renderPulse() {
 
   const openText = currentModel.actionRequired ? 'Review in Rel.AI' : 'Open in Rel.AI';
   setText(openLabelEl, openText);
-  const openLabel = `${currentModel.actionRequired ? 'Review' : 'Open'} ${title}`;
+  const openLabel = `${openText}: ${title}`;
   if (openButton.getAttribute('aria-label') !== openLabel) openButton.setAttribute('aria-label', openLabel);
   tickElapsed();
   syncWorkingHeartbeat();
@@ -455,7 +457,8 @@ function applyExpandedAccessibility(value) {
   else island.setAttribute('inert', '');
   openButton.tabIndex = value ? 0 : -1;
   compactCopy?.setAttribute('aria-expanded', String(value));
-  compactCopy?.setAttribute('aria-label', value ? 'Hide activity details' : 'Show activity details');
+  // Let the changing visible status/title remain the button's accessible name.
+  setText(compactActionDescription, value ? 'Hide activity details' : 'Show activity details');
 }
 
 function applyExpandedLayout(value) {
@@ -489,9 +492,28 @@ document.addEventListener('keydown', event => {
     toggle.focus();
   }
 });
-openButton.addEventListener('click', () => {
-  Promise.resolve(window.relaiPulse?.openDashboard?.()).catch(() => {});
-});
+async function openDashboardWithFeedback() {
+  if (openButton.disabled) return;
+  openButton.disabled = true;
+  openButton.setAttribute('aria-busy', 'true');
+  actionErrorEl.hidden = true;
+  actionErrorEl.textContent = '';
+  try {
+    if (typeof window.relaiPulse?.openDashboard !== 'function') {
+      throw new Error('The dashboard is unavailable from Pulse. Open Rel.AI from the app menu.');
+    }
+    const result = await window.relaiPulse.openDashboard();
+    if (result?.ok === false) throw new Error(result.error || 'The dashboard could not open. Try again.');
+  } catch (error) {
+    actionErrorEl.textContent = error instanceof Error ? error.message : 'The dashboard could not open. Try again.';
+    actionErrorEl.hidden = false;
+    openButton.scrollIntoView?.({ block: 'nearest' });
+  } finally {
+    openButton.disabled = false;
+    openButton.removeAttribute('aria-busy');
+  }
+}
+openButton.addEventListener('click', () => { void openDashboardWithFeedback(); });
 let elapsedTimer = null;
 function startElapsedTimer() {
   if (elapsedTimer != null || document.visibilityState === 'hidden') return;

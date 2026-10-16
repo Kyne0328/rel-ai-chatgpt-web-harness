@@ -101,6 +101,17 @@ const legacyProperties = [
   '--shadow-window', '--shadow-popover', '--grad-surface', '--grad-accent', '--grad-app',
   '--elev-1', '--elev-2', '--glow-accent', '--glow-green'
 ];
+function hasCustomPropertyIdentifier(source, property) {
+  return new RegExp(`(?<![\\w-])${property}(?![\\w-])`).test(source);
+}
+
+// Legacy identifiers are forbidden in both declarations and references, but a
+// longer role name (for example --text-page-title) is a different property.
+for (const property of legacyProperties) {
+  assert.equal(hasCustomPropertyIdentifier(`:root { ${property}: inherit; }`, property), true);
+  assert.equal(hasCustomPropertyIdentifier(`a { color: var(${property}, inherit); }`, property), true);
+  assert.equal(hasCustomPropertyIdentifier(`:root { ${property}-role: 1px; } a { width: var(${property}-role); }`, property), false);
+}
 for (const relativePath of [
   'src/ui/styles/app.css',
   'electron/renderer/app.css',
@@ -109,7 +120,7 @@ for (const relativePath of [
 ]) {
   const source = read(relativePath);
   for (const property of legacyProperties) {
-    assert.equal(source.includes(property), false, `${relativePath} retains removed compatibility property ${property}`);
+    assert.equal(hasCustomPropertyIdentifier(source, property), false, `${relativePath} retains removed compatibility property ${property}`);
   }
 }
 

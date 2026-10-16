@@ -2,6 +2,7 @@
 @import "./color-tokens.css";
 @import "../components/filter-controls.css";
 @import "../components/operation-diagnostics.css";
+@import "../components/tooltip.css";
 @import "../features/home/styles.css";
 @import "../features/onboarding/styles.css";
 @import "../features/settings/styles.css";
@@ -40,6 +41,25 @@
   --ease-out: cubic-bezier(.16, 1, .3, 1);
   --sidebar-width: 240px;
   --control-height: 44px;
+  --control-height-dense: 36px;
+  --control-radius: var(--radius-md);
+  --selection-radius: var(--radius-md);
+  --card-radius: var(--radius-lg);
+  --overlay-radius: var(--radius-xl);
+  --card-inset: var(--space-4);
+  --overlay-inset: 20px;
+  --filter-inset: var(--space-3);
+  --stack-gap: var(--space-3);
+  --technical-font-size: var(--font-12);
+  --technical-line-height: 1.6;
+  --technical-radius: var(--radius-md);
+  --status-height: 36px;
+  --status-height-compact: 24px;
+  --text-page-title: 23px;
+  --text-section-title: var(--font-16);
+  --text-card-title: var(--font-13);
+  --text-metric: var(--font-24);
+  --text-metric-compact: 18px;
   --z-skip: 100;
   --z-toast: 80;
   --z-modal: 50;
@@ -275,7 +295,7 @@
     box-shadow: var(--ui-shadow-topbar);
   }
   .title-wrap { @apply min-w-0 flex-1 py-0.5; }
-  .page-title { @apply text-[23px] font-extrabold; line-height: 1.35; overflow-wrap: anywhere; }
+  .page-title { @apply font-extrabold; font-size: var(--text-page-title); line-height: 1.35; overflow-wrap: anywhere; }
   .page-subtitle { @apply mt-1 text-[13px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
   .top-controls { @apply flex min-w-0 items-center justify-end gap-2; }
 
@@ -300,23 +320,35 @@
   .workspace-menu-option > span:first-child { @apply min-w-0 flex-1 truncate; }
   .workspace-menu-option > span:last-child { @apply shrink-0; color: var(--ui-status-success-foreground); }
 
-  .ui-icon { @apply size-4 shrink-0 fill-none stroke-current; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .ui-icon { @apply shrink-0 fill-none stroke-current; stroke-linecap: round; stroke-linejoin: round; }
 
   button, .buttonlike {
-    @apply inline-flex items-center justify-center gap-2 rounded-md px-3 text-[13px] font-semibold transition-[background-color,border-color,color,opacity,transform] duration-150;
-    min-height: 44px;
+    @apply inline-flex items-center justify-center gap-2 px-3 text-[13px] font-semibold transition-[background-color,border-color,color,opacity,transform] duration-150;
+    min-height: var(--control-height);
+    border-radius: var(--control-radius);
     background: var(--ui-surface-secondary);
     border: 1px solid var(--ui-border-default);
     color: var(--ui-text-primary);
   }
-  button:hover:not(:disabled), .buttonlike:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-control); }
-  button:active:not(:disabled), .buttonlike:active { transform: translateY(1px); }
+  button:hover:not(:disabled):where(:not([aria-disabled="true"])), .buttonlike:hover:where(:not([aria-disabled="true"])) { background: var(--ui-surface-raised); border-color: var(--ui-border-control); }
+  button:active:not(:disabled):where(:not([aria-disabled="true"])):where(:not([aria-busy="true"])), .buttonlike:active:where(:not([aria-disabled="true"])):where(:not([aria-busy="true"])) { transform: translateY(1px); }
   button.primary, .buttonlike.primary { background: var(--ui-action-primary); border-color: var(--ui-action-primary); color: var(--ui-action-primary-foreground); }
-  button.primary:hover:not(:disabled), .buttonlike.primary:hover { background: var(--ui-action-primary-hover); border-color: var(--ui-action-primary-hover); }
-  button.primary:active:not(:disabled), .buttonlike.primary:active { background: var(--ui-action-primary-active); border-color: var(--ui-action-primary-active); }
+  button.primary:hover:not(:disabled):where(:not([aria-disabled="true"])), .buttonlike.primary:hover:where(:not([aria-disabled="true"])) { background: var(--ui-action-primary-hover); border-color: var(--ui-action-primary-hover); }
+  button.primary:active:not(:disabled):where(:not([aria-disabled="true"])), .buttonlike.primary:active:where(:not([aria-disabled="true"])) { background: var(--ui-action-primary-active); border-color: var(--ui-action-primary-active); }
   button.secondary, .buttonlike.secondary { background: var(--ui-surface-secondary); border-color: var(--ui-border-default); color: var(--ui-text-primary); }
   button.danger, .buttonlike.danger { background: var(--ui-status-danger-background); border-color: var(--ui-status-danger-border); color: var(--ui-status-danger-foreground); }
+  button.danger:hover:not(:disabled):where(:not([aria-disabled="true"])), .buttonlike.danger:hover:where(:not([aria-disabled="true"])) {
+    background: var(--ui-status-danger-background);
+    border-color: var(--ui-status-danger-foreground);
+    color: var(--ui-status-danger-foreground);
+  }
+  button.danger:active:not(:disabled):where(:not([aria-disabled="true"])), .buttonlike.danger:active:where(:not([aria-disabled="true"])) {
+    background: var(--ui-status-danger-background);
+    border-color: var(--ui-status-danger-foreground);
+    box-shadow: inset 0 0 0 1px var(--ui-status-danger-foreground);
+  }
   .compact-button { @apply px-2.5 py-1 text-[12px]; }
+  .dense-button { min-height: var(--control-height-dense); padding-inline: var(--space-2); font-size: var(--font-12); }
 
   .command-trigger { @apply min-w-[190px] justify-start; border-color: var(--ui-border-default) !important; }
   .command-trigger > svg { @apply size-4 shrink-0 fill-none stroke-current; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
@@ -338,15 +370,16 @@
   a.section-action:hover { color: var(--ui-action-primary); }
 
   .card, .metric, .workspace-card, .tool-card {
-    @apply min-w-0 overflow-hidden rounded-lg;
+    @apply min-w-0 overflow-hidden;
+    border-radius: var(--card-radius);
     background: var(--ui-surface-primary);
     border: 1px solid var(--ui-border-subtle);
     box-shadow: none;
   }
   .card-head { @apply flex min-h-12 items-center justify-between gap-4 border-b px-4 py-3; border-color: var(--ui-border-default); }
-  .card-head h3 { @apply text-[13px] font-bold; }
+  .card-head h3 { @apply font-bold; font-size: var(--text-card-title); }
   .layout-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .card-body { @apply min-w-0 p-4; }
+  .card-body { @apply min-w-0; padding: var(--card-inset); }
   .card-body.flush { @apply p-0; }
   .list { @apply flex flex-col; }
   .list-item { @apply flex min-h-12 items-center gap-3 border-b px-3 py-2.5 last:border-b-0; border-color: var(--ui-border-subtle); }
@@ -356,11 +389,13 @@
   .item-time { @apply ml-auto shrink-0 text-[12px]; color: var(--ui-text-tertiary); }
 
   .status-pill {
-    @apply inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[12px] font-semibold;
+    @apply inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[12px] font-semibold;
+    min-height: var(--status-height);
     background: var(--ui-surface-secondary);
     border: 1px solid var(--ui-border-default);
     color: var(--ui-text-secondary);
   }
+  .status-pill.status-pill-compact { min-height: var(--status-height-compact); font-size: var(--font-11); }
   .status-pill::before { content: ""; @apply size-1.5 rounded-full; background: var(--ui-status-neutral-foreground); }
   .status-pill.ok, .status-pill.good, .status-pill.ready { color: var(--ui-status-success-foreground); background: var(--ui-status-success-background); border-color: var(--ui-status-success-border); }
   .status-pill.ok::before, .status-pill.good::before, .status-pill.ready::before { background: var(--ui-status-success-foreground); }
@@ -373,17 +408,19 @@
   .connection-status-link:hover { filter: brightness(1.08); }
 
   input, select, textarea {
-    @apply w-full rounded-lg px-3 transition-[border-color,box-shadow,background-color];
+    @apply w-full px-3 transition-[border-color,box-shadow,background-color];
+    border-radius: var(--control-radius);
     background: var(--ui-surface-secondary);
     border: 1px solid var(--ui-border-control);
   }
-  input:hover, select:hover, textarea:hover { border-color: var(--ui-action-primary); }
+  input:hover:not(:disabled), select:hover:not(:disabled), textarea:hover:not(:disabled) { border-color: var(--ui-action-primary); }
   input:focus, select:focus, textarea:focus {
     border-color: var(--ui-action-primary);
     outline: 2px solid var(--ui-focus-ring);
     outline-offset: 1px;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 20%, transparent);
   }
+  input[aria-invalid="true"], select[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: var(--ui-status-danger-foreground); }
   input::placeholder, textarea::placeholder { color: var(--ui-text-tertiary); }
   textarea { @apply min-h-24 resize-y py-2.5; }
   label { @apply text-[12px] font-semibold; }
@@ -435,16 +472,15 @@
   .modal-backdrop, #__relai-modal-backdrop { @apply fixed inset-0; z-index: var(--z-modal); background: var(--ui-overlay-modal); backdrop-filter: blur(4px); animation: overlay-enter 180ms var(--ease-out) both; }
   .drawer-backdrop, #__relai-drawer-backdrop { @apply fixed inset-0; z-index: var(--z-drawer); background: var(--ui-overlay-drawer); backdrop-filter: blur(4px); animation: overlay-enter 180ms var(--ease-out) both; }
   .modal-shell, .modal-panel { @apply fixed left-1/2 top-1/2 z-[51] max-h-[calc(100dvh-32px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-xl; width: min(600px, calc(100vw - 32px)); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); box-shadow: var(--ui-shadow-popover); z-index: calc(var(--z-modal) + 1); animation: modal-enter 220ms var(--ease-out) both; }
-  .modal-panel { @apply flex flex-col; }
+  .modal-panel { @apply flex flex-col; border-radius: var(--overlay-radius); }
   .modal-panel.modal-compact { width: min(500px, calc(100vw - 32px)); }
   .modal-panel.modal-wide { width: min(680px, calc(100vw - 32px)); }
-  .modal-head { @apply flex min-h-14 shrink-0 items-center justify-between gap-3 px-5; }
+  .modal-head { @apply flex min-h-14 shrink-0 items-center justify-between gap-3; padding-inline: var(--overlay-inset); }
   .drawer-head { @apply flex min-h-14 shrink-0 items-center justify-between gap-3 border-b px-4; border-color: var(--ui-border-default); background: var(--ui-surface-primary); }
-  .modal-title, .drawer-title { @apply text-[16px] font-bold; }
+  .modal-title, .drawer-title { @apply font-bold; font-size: var(--text-section-title); }
   .modal-close { @apply grid size-11 min-h-11 shrink-0 place-items-center rounded-lg p-0 leading-none; background: transparent; border-color: transparent; color: var(--ui-text-secondary); }
-  .modal-close .ui-icon { @apply size-[18px]; }
   .modal-close:hover:not(:disabled) { background: var(--ui-surface-secondary); border-color: var(--ui-border-subtle); color: var(--ui-text-primary); }
-  .modal-body { @apply min-h-0 overflow-y-auto px-5 pb-5; overscroll-behavior: contain; }
+  .modal-body { @apply min-h-0 overflow-y-auto; padding: 0 var(--overlay-inset) var(--overlay-inset); overscroll-behavior: contain; }
   .modal-footer { @apply mt-2 flex items-end justify-between gap-4 border-t pt-4; border-color: var(--ui-border-subtle); }
   .modal-actions { @apply flex shrink-0 flex-wrap justify-end gap-2; }
   .modal-danger-zone { @apply grid gap-1; }
@@ -453,8 +489,9 @@
   .modal-inline-confirm-card { @apply grid w-full max-w-[460px] gap-3 rounded-xl p-4; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); box-shadow: var(--ui-shadow-popover); }
   .modal-inline-confirm-title { @apply text-[15px] font-bold; }
   .modal-step-list { @apply grid gap-1 pl-5 text-[13px] leading-5; list-style: decimal; color: var(--ui-text-secondary); }
-  .drawer-body { @apply min-h-0 flex-1 overflow-y-auto p-5; overscroll-behavior: contain; }
+  .drawer-body { @apply min-h-0 flex-1 overflow-y-auto; padding: var(--overlay-inset); overscroll-behavior: contain; }
   .drawer-panel { @apply fixed bottom-4 right-4 top-4 flex w-[min(760px,calc(100vw-48px))] flex-col overflow-hidden rounded-xl; z-index: calc(var(--z-drawer) + 1); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); box-shadow: var(--ui-shadow-popover); animation: drawer-enter 240ms var(--ease-out) both; }
+  .drawer-panel { border-radius: var(--overlay-radius); }
   .session-detail-drawer { width: min(820px, calc(100vw - 48px)); }
   @media (max-width: 900px) { .session-detail-drawer { width: min(640px, calc(100vw - 32px)); } }
   .confirm-dialog { @apply flex flex-col gap-3; }
@@ -464,7 +501,7 @@
   .activity-detail-section h3 { @apply text-[12px]; }
   .detail-field { @apply grid gap-3 border-b py-2 text-[12px] last:border-b-0; grid-template-columns: 110px minmax(0,1fr); border-color: var(--ui-border-subtle); }
   .detail-field-label { @apply font-semibold; color: var(--ui-text-secondary); }
-  .detail-pre { @apply max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg p-3 text-[12px] leading-6; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
+  .detail-pre { @apply max-h-80 overflow-auto whitespace-pre-wrap break-words p-3; border-radius: var(--technical-radius); font-size: var(--technical-font-size); line-height: var(--technical-line-height); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
   .activity-detail-actions { @apply flex justify-end; }
 
   .command-panel { @apply w-[min(680px,calc(100vw-32px))]; }
@@ -490,7 +527,6 @@
   .toast-marker { @apply grid size-6 place-items-center rounded-full text-[12px] font-bold; color: var(--ui-status-neutral-foreground); background: var(--ui-status-neutral-background); border: 1px solid var(--ui-status-neutral-border); }
   .toast-copy { @apply min-w-0 break-words leading-5; }
   .toast-dismiss { @apply size-11 min-h-11 shrink-0 rounded-lg px-0; background: transparent; border-color: transparent; color: var(--ui-text-secondary); }
-  .toast-dismiss .ui-icon { @apply size-[17px]; }
   .toast-dismiss:hover { color: var(--ui-text-primary); background: var(--ui-surface-secondary); border-color: var(--ui-border-subtle); }
   .toast-info .toast-marker { color: var(--ui-status-info-foreground); background: var(--ui-status-info-background); border-color: var(--ui-status-info-border); }
   .toast-success .toast-marker { color: var(--ui-status-success-foreground); background: var(--ui-status-success-background); border-color: var(--ui-status-success-border); }
@@ -569,12 +605,27 @@
   .sparkline-fill.bad { fill: color-mix(in srgb, var(--ui-status-danger-foreground) 8%, transparent); }
 }
 
-:root[data-density="compact"] {
-  --control-height: 36px;
+
+
+/* State roles are unlayered so feature-specific surfaces cannot accidentally
+   recolor a disabled primary/danger control back into an available action. */
+:is(button, .buttonlike):focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
 }
-:root[data-density="compact"] .card-body { padding: 12px; }
-:root[data-density="compact"] .data-table td { height: 46px; }
-:root[data-density="compact"] .topbar { min-height: 66px; }
+:is(button, .buttonlike):is(:disabled, [aria-disabled="true"]),
+:is(input, select, textarea):disabled {
+  color: var(--ui-text-disabled);
+  background: var(--ui-disabled-background);
+  border-color: var(--ui-disabled-border);
+  -webkit-text-fill-color: var(--ui-text-disabled);
+  opacity: 1;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+:is(button, .buttonlike)[aria-busy="true"] { cursor: progress; }
+:is(button, .buttonlike)[aria-busy="true"] .ui-icon { flex-shrink: 0; }
 
 :root[data-sidebar="collapsed"] { --sidebar-width: 82px; }
 :root[data-sidebar="collapsed"] .sidebar { padding-inline: 10px; }
@@ -645,9 +696,11 @@
   .mobile-nav-more > summary:hover, .mobile-nav-more > summary:focus-visible { color: var(--ui-text-primary); background: var(--ui-surface-secondary); border-color: var(--ui-border-subtle); }
   .mobile-nav-more.active > summary { color: var(--ui-text-primary); background: var(--ui-surface-raised); border-color: var(--ui-border-subtle); }
   .mobile-nav-more.active > summary .nav-icon { color: var(--ui-action-primary); }
-  .mobile-nav-more-menu { @apply absolute bottom-[calc(100%+8px)] right-0 grid min-w-[190px] overflow-hidden rounded-lg p-1.5; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); box-shadow: var(--ui-shadow-popover); }
+  .mobile-nav-more-menu { @apply absolute bottom-[calc(100%+8px)] right-0 grid rounded-lg p-1.5; width: min(300px, calc(100vw - 16px)); max-height: calc(100dvh - 100px - env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); box-shadow: var(--ui-shadow-popover); }
   .mobile-nav-more-menu a { @apply min-h-11 flex-row justify-start gap-2 px-3 text-left text-[13px]; }
   .mobile-nav-more-menu a .nav-label { @apply text-left; }
+  .mobile-nav-group { min-width: 0; border-top: 1px solid var(--ui-border-subtle); margin-top: var(--space-1); padding-top: var(--space-1); }
+  .mobile-nav-group-title { padding: var(--space-1) var(--space-3); font-size: var(--font-11); font-weight: var(--weight-bold); color: var(--ui-text-tertiary); }
   .mobile-nav .nav-icon { @apply size-4; }
   .mobile-nav .nav-label { display: block; max-width: 100%; font-size: 12px; line-height: 1.1; white-space: normal; }
   .topbar { @apply sticky top-0 gap-2 px-0; }
@@ -659,6 +712,12 @@
   .connection-status-link { @apply inline-flex shrink-0; white-space: nowrap; }
   .feature-toolbar { @apply items-start; }
   .field-row { grid-template-columns: 1fr; }
+}
+
+/* Short or highly zoomed mobile viewports need the header in normal flow so
+   browser focus scrolling cannot hide a 44px control beneath sticky chrome. */
+@media (max-width: 760px) and (max-height: 480px) {
+  .topbar { position: static; }
 }
 
 @media (max-width: 520px) {
@@ -707,7 +766,7 @@
   .filter-drawer-form button:focus-visible, .browser-copy-url:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
 
 @media (pointer: coarse) {
-  :root, :root[data-density="compact"] { --control-height: 44px; }
+  :root { --control-height-dense: 44px; }
   button, .buttonlike, input, select, textarea, summary, .nav a, .secondary-nav a, .mobile-nav a, .sidebar-accordion > summary { min-height: 44px; }
 }
 

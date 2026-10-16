@@ -214,7 +214,7 @@ assert.match(functionSource(dashboard, 'bufferLiveEventDuringRefresh'), /MAX_REF
       validateAdditionalTunnel: () => null,
       desktop: { saveTunnel: async () => { saves += 1; if (fails) throw new Error('fixture save rejected'); return { ok: true }; } },
       onChange: async () => {}, requestDashboardRefresh: () => { refreshes += 1; },
-      setValidation() {}, setOpen() {}, setBusy() {}, setShowSecret() {}, setDraft() {}, toast() {}, messageOf: String
+      setValidation() {}, setOpen() {}, setBusy() {}, setShowSecret() {}, resetDraft() {}, setDraft() {}, toast() {}, messageOf: String
     };
     vm.runInNewContext(settingsReact.slice(start, end) + '\n globalThis.save = add;', context);
     await context.save();
@@ -399,31 +399,33 @@ for (const streamId of ['a', 'b']) {
     workspaceRequestRef: { current: 0 }, diffRequestRef: { current: 0 },
     taskIdRef: { current: 'task-a' }, filePathRef: { current: 'src/a.js' }, pendingDiffPathRef: { current: '' },
     bridge: {
-      get: async () => ({ changedFiles: ['src/a.js'] }),
+      get: async () => ({ work_id: 'task-a', changedFiles: ['src/a.js'] }),
       diff: () => new Promise((resolve, reject) => requests.push({ resolve, reject }))
     },
     currentRoutePath: () => route,
     readRequestedTaskId: () => 'task-a', readRequestedFilePath: () => 'src/a.js',
     changedTextFiles: workspace => workspace.changedFiles,
-    setWorkspace() {}, setWorkspaceError() {}, setFilePath() {},
+    taskId: task => task?.work_id || '',
+    setWorkspace() {}, setWorkspaceError() {}, setWorkspaceLoading() {}, setFilePath() {},
     setDiffFile: file => { displayed = file; },
     setViewerMessage() {}, setViewerTone() {}, replaceRouteParams() {},
     emptyViewerMessage: () => '', messageFor: String
   };
   vm.runInNewContext(callbackSource('loadDiff', '  }, [bridge]);') + '\n'
-    + callbackSource('refreshWorkspace', '  }, [bridge, loadDiff]);')
+    + callbackSource('showUnavailableFile', '  }, []);') + '\n'
+    + callbackSource('refreshWorkspace', '  }, [bridge, loadDiff, showUnavailableFile]);')
     + '\n globalThis.load = loadDiff; globalThis.refresh = refreshWorkspace;', context);
   const refresh = context.refresh('task-a');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests.length, 1, 'same-path refresh must load the selected diff');
-  requests.shift().resolve({ content: 'revision-two' });
+  requests.shift().resolve({ work_id: 'task-a', path: 'src/a.js', content: 'revision-two' });
   await refresh;
   assert.equal(displayed.content, 'revision-two');
   const stale = context.load('task-a', 'src/a.js');
   const latest = context.load('task-a', 'src/a.js');
-  requests[1].resolve({ content: 'latest-revision' });
+  requests[1].resolve({ work_id: 'task-a', path: 'src/a.js', content: 'latest-revision' });
   await latest;
-  requests[0].resolve({ content: 'older-revision' });
+  requests[0].resolve({ work_id: 'task-a', path: 'src/a.js', content: 'older-revision' });
   await stale;
   requests.length = 0;
   assert.equal(displayed.content, 'latest-revision', 'old in-flight diff must not overwrite a newer response');

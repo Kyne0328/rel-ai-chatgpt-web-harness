@@ -80,7 +80,14 @@ assert.doesNotMatch(preload, /removeAllListeners/);
 async function assertTunnelCredentialRendering() {
   const states = [];
   let stateIndex = 0;
+  let refIndex = 0;
+  const refs = [];
   const saves = [];
+  let rejectSave = false;
+  let structuredSaveFailure = false;
+  let discard = false;
+  let confirmations = 0;
+  let focusedField = '';
   const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) });
   const context = {
     h, React: { Fragment: 'Fragment' }, SettingsField: 'SettingsField', StatusPill: 'StatusPill',
@@ -89,11 +96,13 @@ async function assertTunnelCredentialRendering() {
       if (!(index in states)) states[index] = initial;
       return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }];
     },
-    useRef: value => ({ current: value }), useEffect: () => {},
+    useRef(value) { const index = refIndex++; return refs[index] ||= { current: value }; }, useEffect: () => {},
+    window: { requestAnimationFrame: callback => callback() },
+    document: { getElementById: id => ({ focus: () => { focusedField = id; } }) },
     tunnelRuntimeView: () => ({ label: 'Connected', tone: 'success', status: 'available' }),
     requestDashboardRefresh: () => {}, toast: () => {},
     messageOf: error => error.message,
-    confirmAction: async () => false
+    confirmAction: async () => { confirmations++; return discard; }
   };
   const definition = (name, next) => {
     const start = settingsReact.indexOf('function ' + name + '(');
@@ -110,10 +119,11 @@ async function assertTunnelCredentialRendering() {
   ].join('\n'), context);
   const props = {
     connections: [{ label: 'Fixture account', tunnelId: 'tunnel_fixture1234', apiKeyConfigured: true,
-      apiKey: 'synthetic-saved-key-must-not-display' }],
-    desktop: { saveTunnel: async args => { saves.push(args); return { ok: true }; } }
+      apiKey: 'synthetic-saved-key-must-not-display' },
+      { label: 'Second account', tunnelId: 'tunnel_second1234', apiKeyConfigured: true }],
+    desktop: { saveTunnel: async args => { saves.push(args); if (rejectSave) throw new Error('Synthetic save failure'); return structuredSaveFailure ? { ok: false, error: 'Synthetic structured save failure' } : { ok: true }; } }
   };
-  const render = () => { stateIndex = 0; return context.renderConnections(props); };
+  const render = () => { stateIndex = 0; refIndex = 0; return context.renderConnections(props); };
   const allNodes = value => !value || typeof value !== 'object' ? []
     : [value, ...(value.children || []).flatMap(allNodes)];
   const button = (tree, label) => allNodes(tree).find(node => node.type === 'button' && node.children.includes(label));
@@ -140,16 +150,321 @@ async function assertTunnelCredentialRendering() {
   button(tree, 'Hide').props.onClick();
   tree = render();
   assert.equal(keyInput(tree).props.type, 'password');
-  button(tree, 'Add ChatGPT tunnel').props.onClick();
+  assert.equal(button(tree, 'Save changes').props.type, 'submit', 'An edit must use a semantic Save submit action');
+  const submit = allNodes(tree).find(node => node.type === 'form').props.onSubmit;
+  let prevented = 0;
+  submit({ preventDefault: () => { prevented++; } });
+  submit({ preventDefault: () => { prevented++; } });
+  assert.equal(prevented, 2, 'Form submission must never navigate with credential values');
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(saves.length, 1);
+  assert.equal(saves.length, 1, 'Repeated form submission must save only once');
   assert.equal(saves[0].apiKey, 'synthetic-replacement-key');
   assert.equal(saves[0].originalTunnelId, 'tunnel_fixture1234');
   tree = render();
   assert.equal(keyInput(tree), undefined, 'A successful save must close the credential editor');
-  assert.doesNotMatch(JSON.stringify(states), /synthetic-replacement-key|synthetic-saved-key-must-not-display/, 'Saved replacement text must be cleared from renderer state');
+  assert.doesNotMatch(JSON.stringify([states, refs]), /synthetic-replacement-key|synthetic-saved-key-must-not-display/, 'Saved replacement text must be cleared from renderer state');
+
+  button(tree, 'Edit').props.onClick();
+  tree = render();
+  assert.equal(tree.props['data-unsaved-changes'], 'false', 'Opening an unchanged draft must not block navigation');
+  keyInput(tree).props.onChange({ currentTarget: { value: 'synthetic-unsaved-key' } });
+  tree = render();
+  assert.equal(tree.props['data-unsaved-changes'], 'true', 'The router and beforeunload guard must see a changed tunnel draft');
+  button(tree, 'Edit').props.onClick();
+  tree = render();
+  assert.equal(keyInput(tree).props.value, 'synthetic-unsaved-key', 'Editing the same tunnel must retain its draft');
+  allNodes(tree).filter(node => node.type === 'button' && node.children.includes('Edit'))[1].props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  tree = render();
+  assert.equal(confirmations, 1);
+  assert.equal(keyInput(tree).props.value, 'synthetic-unsaved-key', 'Declining edit-other must retain the secret draft');
+  discard = true;
+  allNodes(tree).filter(node => node.type === 'button' && node.children.includes('Edit'))[1].props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  tree = render();
+  assert.equal(allNodes(tree).find(node => node.props.id === 'additionalTunnelId').props.value, 'tunnel_second1234');
+  assert.equal(keyInput(tree).props.value, '');
+  assert.equal(tree.props['data-unsaved-changes'], 'false');
+  keyInput(tree).props.onChange({ currentTarget: { value: 'synthetic-failed-save-key' } });
+  tree = render();
+  rejectSave = true;
+  allNodes(tree).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  tree = render();
+  assert.equal(keyInput(tree).props.value, 'synthetic-failed-save-key', 'A rejected save must keep the draft for retry');
+  assert.equal(tree.props['data-unsaved-changes'], 'true');
+  rejectSave = false;
+  structuredSaveFailure = true;
+  allNodes(tree).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  tree = render();
+  assert.equal(keyInput(tree).props.value, 'synthetic-failed-save-key', 'A structured rejection without saved confirmation must retain the draft');
+  button(tree, 'Cancel and discard').props.onClick();
+  tree = render();
+  assert.equal(keyInput(tree), undefined);
+  assert.equal(tree.props['data-unsaved-changes'], 'false');
+  assert.doesNotMatch(JSON.stringify([states, refs]), /synthetic-failed-save-key|synthetic-unsaved-key/, 'Explicit discard clears draft secrets from memory');
+  button(tree, 'Add tunnel').props.onClick();
+  tree = render();
+  assert.ok(button(tree, 'Add ChatGPT tunnel'));
+  allNodes(tree).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+  assert.equal(focusedField, 'additionalTunnelId', 'Invalid submission must focus the owning field');
 }
 await assertTunnelCredentialRendering();
+
+// Exercise initial read failure/retry without a desktop window or real credentials.
+// The tiny hook runner keeps effect cleanup and callback identity so late reads
+// can be checked independently from the browser acceptance suite.
+function settingsDefinition(name) {
+  const start = settingsReact.indexOf('function ' + name + '(');
+  const next = settingsReact.indexOf('\nfunction ', start + 1);
+  assert.ok(start >= 0, 'Missing settings component: ' + name);
+  return settingsReact.slice(start, next < 0 ? settingsReact.length : next);
+}
+function settingsReadHarness(names, overrides = {}) {
+  const hooks = [];
+  const effects = [];
+  let cursor = 0;
+  let pendingEffects = [];
+  const same = (a, b) => a && b && a.length === b.length && a.every((value, index) => Object.is(value, b[index]));
+  const context = {
+    h: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }),
+    React: { Fragment: 'Fragment' }, Card: 'Card', ToggleRow: 'ToggleRow', StatusPill: 'StatusPill',
+    SettingsHeader: 'SettingsHeader', StartupSettings: 'StartupSettings', ApplicationUpdates: 'ApplicationUpdates',
+    BrowserSiteList: 'BrowserSiteList', DataRow: 'DataRow', DeveloperOptions: 'DeveloperOptions', QuitRow: 'QuitRow',
+    DEVELOPER_FEATURE_FLAGS: [], NOTIFICATION_CATEGORIES: [], NOTIFICATION_DEFAULTS: { enabled: true },
+    readDeveloperOptionsUnlocked: () => false,
+    readDeveloperFeatureEnabled: () => false,
+    messageOf: error => error.message || String(error), formatBytes: value => String(value || 0),
+    useState(initial) {
+      const index = cursor++;
+      if (!(index in hooks)) hooks[index] = typeof initial === 'function' ? initial() : initial;
+      return [hooks[index], value => { hooks[index] = typeof value === 'function' ? value(hooks[index]) : value; }];
+    },
+    useRef(initial) { const index = cursor++; return hooks[index] ||= { current: initial }; },
+    useCallback(callback, deps) {
+      const index = cursor++;
+      if (!same(hooks[index]?.deps, deps)) hooks[index] = { deps, callback };
+      return hooks[index].callback;
+    },
+    useEffect(effect, deps) {
+      const index = cursor++;
+      if (!same(effects[index]?.deps, deps)) pendingEffects.push(() => {
+        effects[index]?.cleanup?.();
+        effects[index] = { deps, cleanup: effect() };
+      });
+    },
+    useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+    subscribeRoute: () => () => {}, getRouteSnapshot: () => ({ search: '' }),
+    window: { relaiDesktop: {} }, URL, URLSearchParams, setTimeout, clearTimeout,
+    requestDashboardRefresh() {}, toast() {}, confirmAction: async () => false,
+    ...overrides
+  };
+  vm.runInNewContext(names.map(settingsDefinition).join('\n'), context);
+  return {
+    context,
+    render(name, props = {}) {
+      cursor = 0; pendingEffects = [];
+      const tree = context[name](props);
+      const pending = pendingEffects; pendingEffects = [];
+      pending.forEach(effect => effect());
+      return tree;
+    },
+    unmount() { effects.forEach(effect => effect?.cleanup?.()); },
+    hooks
+  };
+}
+const settingsNodes = value => !value || typeof value !== 'object' ? []
+  : [value, ...(value.children || []).flatMap(settingsNodes)];
+const settleSettingsReads = () => new Promise(resolve => setImmediate(resolve));
+
+for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'storage']) {
+  let reads = 0;
+  const readResult = async () => {
+    reads++;
+    if (reads === 1) throw new Error('Synthetic ' + kind + ' read failure');
+    if (kind === 'notifications') return { preferences: { enabled: true } };
+    if (kind === 'lifecycle') return { keepRunningOnClose: true };
+    if (kind === 'telemetry') return { ok: true, settings: { diagnosticsEnabled: false } };
+    if (kind === 'browser') return { ok: true, sites: [] };
+    return { ok: true, totalBytes: 123, activeTaskCount: 0, categories: {} };
+  };
+  const desktop = {
+    getNotificationPreferences: readResult, setNotificationPreferences: async () => ({}),
+    getLifecycleStatus: readResult, getLocalDataUsage: readResult,
+    browser: { listSavedSites: readResult, getState: async () => ({ sessions: [] }), clearSavedSite() {}, clearSavedData() {} }
+  };
+  const component = { notifications: 'DesktopNotificationsSettings', lifecycle: 'ApplicationPage', telemetry: 'TelemetrySettings', browser: 'BrowserDataSettings', storage: 'LocalDataSettings' }[kind];
+  const extra = kind === 'notifications' ? ['normalizeNotificationPreferences'] : kind === 'browser' ? ['isDevelopmentBrowserSite'] : [];
+  const harness = settingsReadHarness([component, 'SettingsReadError', ...extra], { window: { relaiDesktop: desktop }, fetchJson: readResult });
+  harness.render(component);
+  await settleSettingsReads();
+  let tree = harness.render(component);
+  const retry = settingsNodes(tree).find(node => node.type === harness.context.SettingsReadError);
+  assert.ok(retry, kind + ' must expose an inline retry after an initial failure');
+  assert.match(retry.props.message, /Synthetic.*read failure/);
+  assert.doesNotMatch(JSON.stringify(tree), /available only inside|available only in the installed/, kind + ' read failure must not masquerade as missing desktop capability');
+  retry.props.onRetry();
+  harness.render(component);
+  await settleSettingsReads();
+  tree = harness.render(component);
+  assert.equal(reads, 2, kind + ' retry must make one new read');
+  assert.equal(settingsNodes(tree).some(node => node.type === harness.context.SettingsReadError), false, kind + ' must recover after retry');
+  harness.unmount();
+}
+
+// Structured read errors also recover when no account status was loaded.
+{
+  let calls = 0;
+  const browser = {
+    goalLoginStart() {},
+    async goalLoginStatus() { return ++calls === 1 ? { ok: false, error: 'Synthetic sign-in read failure' } : { connections: [] }; }
+  };
+  const harness = settingsReadHarness(['GoalModeAccount']);
+  harness.render('GoalModeAccount', { browser, connectionsRevision: 0 });
+  await settleSettingsReads();
+  let tree = harness.render('GoalModeAccount', { browser, connectionsRevision: 0 });
+  const retry = settingsNodes(tree).find(node => node.type === 'button' && node.children.includes('Retry sign-in status'));
+  assert.ok(retry);
+  assert.equal(retry.props.disabled, false, 'Missing initial account status must not disable its recovery action');
+  retry.props.onClick();
+  await settleSettingsReads();
+  tree = harness.render('GoalModeAccount', { browser, connectionsRevision: 0 });
+  assert.equal(calls, 2);
+  assert.doesNotMatch(JSON.stringify(tree), /Synthetic sign-in read failure/);
+  harness.unmount();
+}
+
+// A read completing after unmount cannot restore stale settings.
+{
+  let resolveRead;
+  const browser = {
+    listSavedSites: () => new Promise(resolve => { resolveRead = resolve; }),
+    getState: async () => ({ sessions: [] }), clearSavedSite() {}, clearSavedData() {}
+  };
+  const harness = settingsReadHarness(['BrowserDataSettings', 'isDevelopmentBrowserSite'], { window: { relaiDesktop: { browser } } });
+  harness.render('BrowserDataSettings');
+  harness.unmount();
+  resolveRead({ sites: [{ origin: 'https://example.test', host: 'late-result' }] });
+  await settleSettingsReads();
+  assert.doesNotMatch(JSON.stringify(harness.hooks), /late-result/, 'Disposed browser-data reads must not update state');
+}
+
+
+// The spoken source-link name must retain its visible repository identity.
+{
+  const harness = settingsReadHarness(['AboutPage', 'validatedGitHubUrl', 'repositoryLabel', 'repositoryDocumentUrl', 'buildIdOf', 'runtimeCompatibilityNotice'], { AboutRow: 'AboutRow' });
+  for (const repository of ['Kyne0328/rel-ai-chatgpt-web-harness', 'fixture-owner/renamed-repository']) {
+    const url = 'https://github.com/' + repository;
+    const tree = harness.render('AboutPage', { metadata: { repositoryUrl: url, version: '1.0.0' } });
+    const link = settingsNodes(tree).find(node => node.type === 'a' && node.props.href === url);
+    assert.ok(link);
+    assert.equal(link.children.join(''), repository);
+    assert.ok(link.props['aria-label'].includes(repository), 'Accessible source-link name must contain the visible owner/repository text');
+    assert.match(link.props['aria-label'], /source code on GitHub/);
+  }
+  harness.unmount();
+}
+
+
+// Readiness is a named semantic group, not an unnamed generic container.
+{
+  const source = read('src/ui/features/workspaces/react.js');
+  const start = source.indexOf('function WorkspacesView(');
+  const end = source.indexOf('\nfunction DirectFilesystemAccess', start);
+  const context = {
+    h: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }),
+    React: { Fragment: 'Fragment' }, useMemo: callback => callback(), useCallback: callback => callback,
+    useState: value => [value, () => {}], useEffect() {}, useLayoutEffect() {},
+    getWorkspaceFilter: () => '', getRouteParams: () => new URLSearchParams(),
+    orderedWorkspaces: workspaces => workspaces, actionableFindings: () => [],
+    workspaceCardView: workspace => ({ ...workspace, ready: true }),
+    useWorkspaceAnalytics: () => ({ scopes: new Map(), status: 'ready' }),
+    DirectFilesystemAccess: 'DirectFilesystemAccess', WorkspaceCard: 'WorkspaceCard'
+  };
+  vm.runInNewContext(source.slice(start, end), context);
+  const tree = context.WorkspacesView({ data: { config: { workspaces: [{ alias: 'fixture' }] } } });
+  const summary = settingsNodes(tree).find(node => node.props['aria-label'] === 'Project readiness summary');
+  assert.equal(summary?.props.role, 'group', 'Project readiness must use a role that supports its accessible name');
+}
+
+// Project navigation always uses the card's current alias, including a rename.
+{
+  const source = read('src/ui/features/workspaces/react.js');
+  const start = source.indexOf('const WorkspaceCard = memo(');
+  const end = source.indexOf('\nfunction splitWorkspacePath', start);
+  const context = {
+    h: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }),
+    memo: value => value, useState: value => [value, () => {}],
+    repositorySummary: () => ({}), splitWorkspacePath: path => ({ prefix: '', tail: path }),
+    WorkspaceReadiness: 'readiness', WorkspaceAnalytics: 'analytics', WorkspaceAnalyticsState: 'analytics-state',
+    Icon: 'Icon', StatusPill: 'StatusPill', document: { documentElement: { dataset: { surface: 'web' } } },
+    routeHref: (route, params) => '#' + route + '?' + new URLSearchParams(params)
+  };
+  vm.runInNewContext(source.slice(start, end) + '\nglobalThis.renderCard = WorkspaceCard;', context);
+  for (const alias of ['fixture-project', 'renamed.project']) {
+    const tree = context.renderCard({ view: { alias, path: '/synthetic/project' }, workspace: { alias } });
+    const links = settingsNodes(tree).filter(node => node.type === 'a');
+    assert.equal(links.find(link => link.children.includes('View tasks'))?.props.href, '#tasks?workspace=' + alias);
+    assert.equal(links.find(link => link.children.includes('Activity'))?.props.href, '#activity?workspace=' + alias);
+    assert.ok(settingsNodes(tree).some(node => node.type === 'button' && node.children.includes('Edit project')));
+  }
+}
+
+
+
+// Closing a project overlay while a mutation is pending must not hide its result.
+{
+  const repairStart = workspacesModals.indexOf('function RepairProjectModalContent(');
+  const closeStart = workspacesModals.indexOf('  const requestClose = ', repairStart);
+  const closeEnd = workspacesModals.indexOf('  const browse = ', closeStart);
+  for (const busy of [true, false]) for (const dirty of [true, false]) {
+    let closed = 0;
+    let prompted = 0;
+    const context = { busy, dirty, onClose: () => { closed++; }, setConfirmDiscard: () => { prompted++; } };
+    vm.runInNewContext(workspacesModals.slice(closeStart, closeEnd) + '\nglobalThis.dismiss = requestClose;', context);
+    context.dismiss();
+    assert.equal(closed, !busy && !dirty ? 1 : 0);
+    assert.equal(prompted, !busy && dirty ? 1 : 0);
+  }
+}
+{
+  const start = workspacesModals.indexOf('export function DeleteProjectModal(');
+  const end = workspacesModals.indexOf('\nfunction SourceFolders', start);
+  const descriptorStart = workspacesModals.indexOf('function deleteConfirmation(');
+  const descriptorEnd = workspacesModals.indexOf('\nasync function deleteProject', descriptorStart);
+  for (const busy of [true, false]) {
+    let closed = 0;
+    let currentBusy = busy;
+    let forget = true;
+    let stateIndex = 0;
+    const deletions = [];
+    const context = {
+      h: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }),
+      ProjectModal: 'ProjectModal',
+      useState(_initial) {
+        const index = stateIndex++;
+        return index === 0 ? [currentBusy, value => { currentBusy = value; }] : [forget, value => { forget = value; }];
+      },
+      useRef: value => ({ current: value }),
+      deleteProject: async (alias, options) => { deletions.push({ alias, forgetLocalData: options.forgetLocalData }); }
+    };
+    vm.runInNewContext(workspacesModals.slice(start, end).replace(/^export /, '') + '\n' + workspacesModals.slice(descriptorStart, descriptorEnd), context);
+    const render = () => { stateIndex = 0; return context.DeleteProjectModal({ alias: 'fixture', onClose: () => { closed++; } }); };
+    let tree = render();
+    tree.props.onDismiss();
+    assert.equal(closed, busy ? 0 : 1, 'Escape/outside dismissal must wait for delete completion');
+    const checkbox = settingsNodes(tree).find(node => node.type === 'input');
+    assert.equal(checkbox.props.checked, true, 'Standalone deletion must retain the explicit forget-data choice');
+    assert.equal(checkbox.props.disabled, busy);
+    if (!busy) {
+      checkbox.props.onChange({ currentTarget: { checked: false } });
+      tree = render();
+      settingsNodes(tree).find(node => node.type === 'button' && node.props.className === 'danger').props.onClick();
+      assert.deepEqual(deletions, [{ alias: 'fixture', forgetLocalData: false }], 'The confirmed data-retention choice must reach the existing delete action');
+    }
+  }
+}
 
 assert.match(settingsReact, /'aria-invalid': validation\?\.field === 'tunnelId'/);
 assert.doesNotMatch(settingsReact, /if \(issue\) return toast\(/, 'connection validation must stay beside the owning field');

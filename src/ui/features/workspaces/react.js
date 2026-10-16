@@ -102,7 +102,7 @@ function WorkspacesView({ data = {} }) {
       directAccess,
       h(EmptyWorkspaceState, { onAdd: event => openForm('add', null, event.currentTarget) })
     ) : h(React.Fragment, null,
-      h('div', { className: 'workspace-status-summary', 'aria-label': 'Project readiness summary' },
+      h('div', { className: 'workspace-status-summary', role: 'group', 'aria-label': 'Project readiness summary' },
         h('span', null, h('strong', null, `${availableCount}/${workspaces.length}`), ' ready for ChatGPT'),
         h('span', { className: findings.length ? 'attention' : '' }, h('strong', null, findings.length), findings.length === 1 ? ' issue needs attention' : ' issues need attention')
       ),
@@ -222,6 +222,8 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
           ? h(WorkspaceAnalyticsState, { label: 'Analytics unavailable' })
           : null,
     h('footer', { className: 'workspace-actions workspace-primary-actions' },
+      h('a', { className: 'buttonlike secondary', href: routeHref('tasks', { workspace: view.alias }), 'aria-label': `View tasks for ${view.alias}` }, 'View tasks'),
+      h('a', { className: 'buttonlike secondary', href: routeHref('activity', { workspace: view.alias }), 'aria-label': `Activity for ${view.alias}` }, 'Activity'),
       document.documentElement.dataset.surface === 'desktop' ? h('button', {
         className: 'secondary', type: 'button', disabled: folderBusy, onClick: event => { void openFolder(event); }
       }, h(Icon, { name: 'folder', size: 14 }), h('span', null, folderBusy ? 'Opening…' : 'Project folder')) : null,
