@@ -187,7 +187,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. ChatGPT Web /goal monitoring is detected from recent user commands; goal:true remains an explicit optional override. goal_status reads it; goal_stop disables automatic continuation without cancelling the task. status lists receipts immediately. result retrieves operationId, waiting up to 5s for completion; waitMs:0 returns immediately. history pages authorized records. context restores continuity. stop with operationId stops one command. Task stop/cancel stops all. Keep the plan current. Finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
+    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. ChatGPT Web /goal monitoring follows recent user commands; goal:true optionally overrides detection. goal_status reads it; goal_stop disables auto-continuation without cancelling. status lists receipts immediately. result(operationId) waits up to 5s for completion; waitMs:0 returns immediately. history pages authorized records; context restores continuity. stop(operationId) stops one command; task stop/cancel stops all. Keep plans current; finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
@@ -199,11 +199,11 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_read', title: 'Read Local Workspace',
-    description: 'Reads exact local workspace files, ranges, directories, discovered skills, or execution output. Batch related paths or ranges in one call. Host-uploaded files stay host-owned; asResource:true returns one exact local file as a private resource_link for transfer or download.'
+    description: 'Reads exact local workspace files/ranges, directories, discovered skills, or execution output. Batch paths/ranges. Host-uploaded files stay host-owned; asResource:true returns one exact local file as a private resource_link for transfer or download.'
   },
   {
     name: 'relai_search', title: 'Search Repository',
-    description: 'Provides lexical or semantic discovery across repository content. Batch same-mode searches with queries[].',
+    description: 'Lexical or semantic repository search. Batch same-mode queries[].',
     annotations: annotations(true, false, true, false), behavior: { taskScope: 'optional' }
   },
   {

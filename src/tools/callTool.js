@@ -93,6 +93,7 @@ async function callToolObserved(name, args = {}, context = {}) {
   let taskOwnerVerified = false;
   let verifiedTaskSession = null;
   let workspaceScopeVerified = false;
+  let terminalOutputRead = false;
   try {
     if (!isToolCallable(name, config)) {
       throw new Error(`Unknown tool '${name}'. Available tools: ${getToolNames(config).join(', ')}. Removed direct operation names are not callable; restart or reconnect if discovery is stale.`);
@@ -266,6 +267,10 @@ async function callToolObserved(name, args = {}, context = {}) {
     });
     const duplicateTerminalCancellation = operationName === OP.WORK_CANCEL && knownTask?.status === 'cancelled';
     const terminalTaskReference = isTerminalTaskReference(knownTask, operationName, effectiveArgs);
+    terminalOutputRead = terminalTaskReference && operationName === OP.READ;
+    if (terminalOutputRead && taskProgressPatch !== null) {
+      throw taskError('INVALID_TASK_STATE', 'Retained output can be read after a task ends, but taskProgress cannot change a terminal task.');
+    }
     const resumedStatusRead = operationName === OP.WORK_STATUS
       && knownTask?.status === 'inactive'
       && Boolean(context?.conversationId)
@@ -342,7 +347,9 @@ async function callToolObserved(name, args = {}, context = {}) {
       ...activityResult.activity,
       ...taskAuditContext(context, finishActivity, requestedTaskId, operationName, valueOk, value),
       taskIntegrityEligible: workspaceScopeVerified,
-      taskResultFactsEligible: true,
+      // Retained output reads remain auditable without replacing the task's
+      // terminal timestamps or completion facts with this observation's time.
+      taskResultFactsEligible: !terminalOutputRead,
       tool: operationName,
       publicTool: name,
       ...(operationName === OP.WORK_BEGIN ? { deferBaseline: true } : {}),
@@ -460,7 +467,8 @@ async function callToolObserved(name, args = {}, context = {}) {
       || partialResult.mutationEffect === 'unknown' || partialResult.committed === true));
     if (physicalEffectKnown) enhanced.retryable = false;
     if (verifiedWorkspaceFailure && physicalEffectKnown) signalRepositoryIntelligenceMutation(config, operationName, effectiveArgs || {}, failedValue);
-    const resultFactsEligible = Boolean(handlerResultKnown || error?.handlerResultKnown === true || physicalEffectKnown);
+    const resultFactsEligible = !terminalOutputRead
+      && Boolean(handlerResultKnown || error?.handlerResultKnown === true || physicalEffectKnown);
     const failedDraft = failedWorkId && verifiedWorkspaceFailure && resultFactsEligible ? buildWorkflowEvidenceReceipt({
       tool: operationName,
       args: { ...(effectiveArgs || {}), action: resolvedAction || effectiveArgs?.action },

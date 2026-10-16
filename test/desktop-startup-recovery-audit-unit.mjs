@@ -119,20 +119,6 @@ assert.match(
   'isRetryableLocalStartupError must include EADDRINUSE'
 );
 
-// 3C. desktop-host openDashboardWindow does not launch server or route to recovery when unconfigured
-assert.match(
-  desktopHostSource,
-  /async function openDashboardWindow[\s\S]*?const isConfigured = hasExistingConfig\(\) && tunnelCredentials\.status\(\)\.apiKeyConfigured;[\s\S]*?if \(!isConfigured\) \{[\s\S]*?setupWindowManager\.create\(\);[\s\S]*?return \{ ok: false, reason: 'unconfigured' \};/,
-  'openDashboardWindow must check isConfigured and open setupWindow rather than dumping to recovery'
-);
-
-// 3D. desktop-host routeInitialWindow requires both config and credentials
-assert.match(
-  desktopHostSource,
-  /function routeInitialWindow[\s\S]*?const hasConfig = hasExistingConfig\(\) && tunnelCredentials\.status\(\)\.apiKeyConfigured;/,
-  'routeInitialWindow must check hasExistingConfig and apiKeyConfigured to avoid launching unconfigured desktop'
-);
-
 // A first-ever launch must surface the UI even if the process was invoked by a background/login path.
 const routeSource = desktopHostSource.slice(
   desktopHostSource.indexOf('  function routeInitialWindow(lifecycleStatus = {}) {'),
@@ -140,8 +126,7 @@ const routeSource = desktopHostSource.slice(
 );
 const configuredLaunches = [];
 const routeInitialWindow = runInNewContext(`${routeSource}\nrouteInitialWindow`, {
-  hasExistingConfig: () => true,
-  tunnelCredentials: { status: () => ({ apiKeyConfigured: true }) },
+  hasConfiguredDesktop: () => true,
   runtimeLogs: { append() {} },
   launchConfiguredDesktop: options => { configuredLaunches.push(options); },
   isManualUpdateInstall: () => false,
@@ -152,13 +137,6 @@ routeInitialWindow({ firstLaunch: true, openedAtLogin: true });
 routeInitialWindow({ firstLaunch: false, openedAtLogin: true });
 assert.equal(configuredLaunches[0]?.background, false, 'the first-ever configured launch must open the dashboard instead of staying hidden');
 assert.equal(configuredLaunches[1]?.background, true, 'later launch-at-login starts must continue running in the background');
-
-// 3E. desktop-host focusActiveWindow routes unconfigured requests to setup window
-assert.match(
-  desktopHostSource,
-  /function focusActiveWindow[\s\S]*?const isConfigured = hasExistingConfig\(\) && tunnelCredentials\.status\(\)\.apiKeyConfigured;[\s\S]*?if \(!isConfigured\) \{[\s\S]*?setupWindowManager\.create\(\);/,
-  'focusActiveWindow must check isConfigured and create setup window rather than dumping to recovery'
-);
 
 // Reopening a stopped service must recover regardless of the retained window.
 const focusSource = desktopHostSource.slice(
@@ -176,14 +154,79 @@ for (const surface of ['dashboard', 'recovery']) {
     recoveryWindowManager: { getWindow: () => surface === 'recovery' ? { isVisible: () => true } : null,
       show() { staleWindowShowCalls += 1; } },
     setupWindowManager: { getWindow: () => null, create() {} },
-    hasExistingConfig: () => true,
-    tunnelCredentials: { status: () => ({ apiKeyConfigured: true }) },
+    hasConfiguredDesktop: () => true,
     serviceRuntime: { isListening: () => false },
     openDashboardWindow: async () => { dashboardOpenCalls += 1; }
   });
   focus();
   assert.equal(dashboardOpenCalls, 1, `reopening a stopped ${surface} must use the service startup path`);
   assert.equal(staleWindowShowCalls, 0, `reopening a stopped ${surface} must not only reveal the stale window`);
+}
+
+// Desktop configuration gates must recognize the persisted local-only mode.
+const configuredSource = desktopHostSource.slice(
+  desktopHostSource.indexOf('  function hasConfiguredDesktop() {'),
+  desktopHostSource.indexOf('  function focusActiveWindow() {')
+);
+const openSource = desktopHostSource.slice(
+  desktopHostSource.indexOf("  async function openDashboardWindow(routeHash = '', windowOptions = {}) {"),
+  desktopHostSource.indexOf('  function openDashboardSettings() {')
+);
+const localOnlyState = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-only-routing-'));
+const previousLocalOnlyState = process.env.REL_AI_MCP_STATE_DIR;
+process.env.REL_AI_MCP_STATE_DIR = localOnlyState;
+const connectionProfile = await import(pathToFileURL(path.join(root, 'src', 'connectionProfile.js')).href);
+try {
+  for (const fixture of [
+    { localOnly: true, key: false, configured: true },
+    { localOnly: false, key: false, configured: false },
+    { localOnly: false, key: true, configured: true }
+  ]) {
+    connectionProfile.writeLaunchEnv({ REL_AI_MCP_PORT: '3333',
+      REL_AI_MCP_LOCAL_ONLY: fixture.localOnly ? '1' : '0',
+      REL_AI_MCP_TUNNEL_ID: fixture.localOnly ? '' : 'tunnel_12345678' }, { replace: true });
+    connectionProfile.writeConnectionProfile({ port: 3333,
+      tunnelId: fixture.localOnly ? '' : 'tunnel_12345678' }, { replace: true });
+    let setupCalls = 0;
+    let dashboardCalls = 0;
+    let launches = 0;
+    let focusOpens = 0;
+    const context = {
+      hasExistingConfig: launcherUtils.hasExistingConfig, readGuiConfig: launcherUtils.readGuiConfig,
+      tunnelCredentials: { status: () => ({ apiKeyConfigured: fixture.key }) },
+      runtimeLogs: { append() {} }, taskbarCompletionBadge: { clear() {} },
+      launchConfiguredDesktop: () => { launches += 1; },
+      isManualUpdateInstall: () => false, app: { getVersion: () => '1.1.4' },
+      setupWindowManager: { getWindow: () => null, create() { setupCalls += 1; } },
+      dashboardWindowManager: { getWindow: () => null },
+      serviceRuntime: { isListening: () => true },
+      recoveryWindowManager: { show() { throw new Error('unexpected recovery window'); } },
+      showDashboardWindow: async () => { dashboardCalls += 1; },
+      openDashboardWindow: async () => { focusOpens += 1; }
+    };
+    const route = runInNewContext(configuredSource + routeSource + '\nrouteInitialWindow', context);
+    route({});
+    assert.equal(launches, fixture.configured ? 1 : 0, 'startup must honor local-only configuration');
+    const open = runInNewContext(configuredSource + openSource + '\nopenDashboardWindow', context);
+    assert.equal((await open()).ok, fixture.configured, 'opening the dashboard must honor local-only configuration');
+    assert.equal(dashboardCalls, fixture.configured ? 1 : 0);
+    // Use a separate context because openSource declares openDashboardWindow.
+    const focus = runInNewContext(configuredSource + focusSource + '\nfocusActiveWindow', {
+      ...context, openDashboardWindow: async () => { focusOpens += 1; }
+    });
+    focus();
+    assert.equal(focusOpens, fixture.configured ? 1 : 0, 'focusing a stopped/closed dashboard must honor local-only configuration');
+    assert.equal(setupCalls, fixture.configured ? 0 : 3, 'tunnel mode still requires an API key on every entry point');
+  }
+  connectionProfile.clearConnectionState();
+  assert.equal(runInNewContext(configuredSource + '\nhasConfiguredDesktop()', {
+    hasExistingConfig: launcherUtils.hasExistingConfig, readGuiConfig: launcherUtils.readGuiConfig,
+    tunnelCredentials: { status: () => ({ apiKeyConfigured: true }) }
+  }), false, 'missing configuration cannot be replaced by a stored API key');
+} finally {
+  if (previousLocalOnlyState === undefined) delete process.env.REL_AI_MCP_STATE_DIR;
+  else process.env.REL_AI_MCP_STATE_DIR = previousLocalOnlyState;
+  fs.rmSync(localOnlyState, { recursive: true, force: true });
 }
 
 // 3F. desktop-host logout strips background and hidden flags on relaunch

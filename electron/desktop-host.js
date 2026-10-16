@@ -555,6 +555,10 @@ async function createDesktopHost(options = {}) {
       focusActiveWindow();
     });
     app.on('before-quit', event => {
+      if (appUpdater?.getStatus()?.installLaunchUncertain === true) {
+        event.preventDefault();
+        return;
+      }
       if (allowUpdaterQuit || shutdownCoordinator.isPrepared()) return;
       event.preventDefault();
       isQuitting = true;
@@ -738,6 +742,10 @@ async function createDesktopHost(options = {}) {
     return { ok: true };
   }
 
+  function hasConfiguredDesktop() {
+    return hasExistingConfig() && (!readGuiConfig().tunnelId || tunnelCredentials.status().apiKeyConfigured);
+  }
+
   function focusActiveWindow() {
     taskbarCompletionBadge.clear();
     const dashboardWindow = dashboardWindowManager.getWindow();
@@ -752,7 +760,7 @@ async function createDesktopHost(options = {}) {
       setupWindow.focus();
       return;
     }
-    const isConfigured = hasExistingConfig() && tunnelCredentials.status().apiKeyConfigured;
+    const isConfigured = hasConfiguredDesktop();
     if (!isConfigured) {
       setupWindowManager.create();
       return;
@@ -904,26 +912,48 @@ async function createDesktopHost(options = {}) {
     allowUpdaterQuit = true;
   }
 
-  async function recoverApplicationUpdate() {
-    if (process.platform === 'win32') {
-      await markUpdateInstallPhase(app, 'failed', {
-        message: 'The update could not be completed. Rel.AI recovered the current version.'
-      }).catch(() => {});
-    }
+  async function recoverApplicationUpdate(_error, { launchUncertain = false } = {}) {
+    // Revoke the shutdown allowance before yielding: electron-updater can emit an
+    // error just before its already-queued app.quit() callback runs.
     allowUpdaterQuit = false;
     isQuitting = false;
     updateInstallPrepared = false;
     shutdownCoordinator.reset();
-    desktopTray.setup();
-    if (!serviceRuntime.isListening()) await startServer();
-    if (dashboardWindowManager.getWindow()) {
-      await showDashboardWindow('', { forceReload: true });
-    } else {
-      await showDashboardWindow('', { forceReload: true }).catch(() => recoveryWindowManager.show());
+    if (process.platform === 'win32') {
+      await markUpdateInstallPhase(app, 'failed', {
+        message: launchUncertain
+          ? 'The installer outcome is uncertain. Verify that it has finished before reopening Rel.AI.'
+          : 'The update could not be completed. Rel.AI recovered the current version.'
+      }).catch(() => {});
     }
+    desktopTray.setup();
+    if (launchUncertain) {
+      setStatus({ error: 'The installer outcome is uncertain. Local work remains paused; quit Rel.AI and verify that the installer has finished before reopening.', errorCode: ERROR_CODES.UPDATE_FAILED });
+      recoveryWindowManager.show();
+      return;
+    }
+    appUpdater.start({ preserveState: true });
+    updateSupportPolicy.start();
+    desktopPower.start();
+    pulseWindowManager.start();
+    pulseWindowManager.update(currentStatus);
+    await Promise.all([
+      writeControllerRuntimeMarker(app),
+      desktopLifecycle.resumeAfterShutdown()
+    ]);
+    if (!serviceRuntime.isListening()) await startServer();
+    if (!serviceRuntime.isListening()) {
+      recoveryWindowManager.show();
+      throw new Error('Rel.AI could not restart the local service after the update was cancelled.');
+    }
+    await showDashboardWindow('', { forceReload: true }).catch(() => recoveryWindowManager.show());
   }
 
   function updateRuntimeAccess() {
+    if (appUpdater?.getStatus()?.installLaunchUncertain === true) {
+      return { blocked: true, errorCode: ERROR_CODES.UPDATE_BUSY,
+        message: 'The installer outcome is uncertain. Verify that it has finished before reopening Rel.AI.' };
+    }
     if (appUpdater?.getStatus()?.state === 'installing') {
       return {
         blocked: true,
@@ -1000,12 +1030,20 @@ async function createDesktopHost(options = {}) {
     ].map(({ tunnelId, label, enabled }) => ({ tunnelId, label, enabled }));
   }
 
+  function assertInstallerSettled() {
+    if (appUpdater?.getStatus()?.installLaunchUncertain === true) {
+      throw new Error('The installer outcome is uncertain. Verify that it has finished before reopening Rel.AI.');
+    }
+  }
+
   function startServer() {
+    assertInstallerSettled();
     syncServiceContext();
     return serviceRuntime.startServer();
   }
 
   function restartConnection() {
+    assertInstallerSettled();
     return tunnelRecoverySupervisor?.retryNow() || serviceRuntime.restartConnection();
   }
 
@@ -1028,7 +1066,7 @@ async function createDesktopHost(options = {}) {
   }
 
   async function openDashboardWindow(routeHash = '', windowOptions = {}) {
-    const isConfigured = hasExistingConfig() && tunnelCredentials.status().apiKeyConfigured;
+    const isConfigured = hasConfiguredDesktop();
     if (!isConfigured) {
       setupWindowManager.create();
       return { ok: false, reason: 'unconfigured' };
@@ -1063,7 +1101,7 @@ async function createDesktopHost(options = {}) {
   }
 
   function routeInitialWindow(lifecycleStatus = {}) {
-    const hasConfig = hasExistingConfig() && tunnelCredentials.status().apiKeyConfigured;
+    const hasConfig = hasConfiguredDesktop();
     if (hasConfig) {
       if (lifecycleStatus.updated === true && lifecycleStatus.previousVersion) {
         runtimeLogs.append(`Rel.AI MCP updated from ${lifecycleStatus.previousVersion} to ${lifecycleStatus.currentVersion}. Existing connection restored.`, { source: 'desktop-lifecycle' });
@@ -1121,6 +1159,7 @@ async function createDesktopHost(options = {}) {
   }
 
   async function relaunchApplication() {
+    assertInstallerSettled();
     const restartBlock = taskActivityBlockReason(desktopPower.getStatus(), 'restarting Rel.AI');
     if (restartBlock) throw new Error(restartBlock);
     isQuitting = true;
@@ -1131,6 +1170,7 @@ async function createDesktopHost(options = {}) {
   }
 
   async function logoutApplication({ clearData = false } = {}) {
+    assertInstallerSettled();
     const action = clearData ? 'logging out and clearing local data' : 'logging out';
     const block = taskActivityBlockReason(desktopPower.getStatus(), action);
     if (block) throw new Error(block);

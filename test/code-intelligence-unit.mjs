@@ -37,6 +37,25 @@ try {
   write('src/unrelated.js', 'export const label = \'unrelated\';\n');
   write('src/structural.js', "export function greet(name) {\n  return `hello ${name}`;\n}\n");
 
+
+  const unicodeEdits = [
+    { action: 'replace', symbol: 'unicodeReplace' },
+    { action: 'insert_before', symbol: 'unicodeBefore' },
+    { action: 'insert_after', symbol: 'unicodeAfter' }
+  ].map(({ action, symbol }) => {
+    const file = `src/${symbol}.js`;
+    const prefix = '// preceding π😀\r\n/* café 😀 */ export ';
+    const original = action === 'insert_after'
+      ? `function ${symbol}() {\r\n  return '漢字 😀'; }`
+      : `function ${symbol}() { return '漢字 😀'; }`;
+    const suffix = ' /* untouched 漢字 */\r\n';
+    const content = action === 'replace'
+      ? `function ${symbol}() { return 'updated'; }`
+      : '// inserted 🦊';
+    write(file, prefix + original + suffix);
+    return { action, symbol, file, prefix, original, suffix, content };
+  });
+
   assert.equal(isTestPath('test/math.test.js'), true);
   assert.equal(isTestPath('test/check.mjs'), true);
   assert.equal(isTestPath('src/math.js'), false);
@@ -69,6 +88,19 @@ try {
   assert.equal(structuralEdit.semanticTarget.action, 'replace');
   assert.equal(structuralEdit.semanticTarget.path, 'src/structural.js');
   assert.match(fs.readFileSync(path.join(root, 'src', 'structural.js'), 'utf8'), /return `hi \$\{name\}`/);
+
+
+  for (const fixture of unicodeEdits) {
+    const edited = await planEdit(workspace, {}, {
+      symbolEdit: { action: fixture.action, symbol: fixture.symbol, path: fixture.file, content: fixture.content }
+    });
+    assert.equal(edited.ok, true);
+    const replacement = fixture.action === 'replace' ? fixture.content
+      : fixture.action === 'insert_before' ? fixture.content + '\r\n' + fixture.original
+        : fixture.original + '\r\n' + fixture.content;
+    assert.equal(fs.readFileSync(path.join(root, fixture.file), 'utf8'), fixture.prefix + replacement + fixture.suffix,
+      `${fixture.action} must preserve UTF-8 text around UTF-16 symbol columns, including CRLF and non-BMP characters`);
+  }
 
   const references = await relaiCodeInspect(workspace, {}, { action: 'references', symbol: 'add' });
   assert.equal(references.index.cacheHit, false, 'structural edits must invalidate the repository index before the next query');

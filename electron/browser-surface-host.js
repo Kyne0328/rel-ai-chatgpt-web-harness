@@ -837,7 +837,9 @@ function createBrowserSurfaceHost(options = {}) {
       if (!goalConversationMatches(win.webContents, id)) throw new Error('Wrong ChatGPT conversation.');
       stage = 'preflight';
       const before = await read();
-      if (before.current_node !== expectedNode) return { ok: false, stale: true };
+      const expectedMessage = before.mapping?.[expectedNode]?.message;
+      if (before.current_node !== expectedNode || expectedMessage?.author?.role !== 'assistant'
+        || !expectedMessage.id) return { ok: false, stale: true };
       if (goalAssistantSettled(before)) {
         return { ok: true, alreadyFinished: true };
       }
@@ -855,6 +857,18 @@ function createBrowserSurfaceHost(options = {}) {
       // controller has already claimed this node and must never retry it.
       stage = 'stop_click';
       const debuggerApi = await attachedDebugger(win.webContents);
+      // Recheck and focus the exact control after debugger attachment.
+      if ((await win.webContents.executeJavaScript(goalStopExpression(), true))?.state !== 'stop_ready') {
+        throw new Error('ChatGPT Stop control changed before activation.');
+      }
+      // Readiness and debugger attachment can yield for several seconds. Make
+      // the exact turn read the last awaited preflight before native activation;
+      // an unchanged URL alone does not identify the running assistant turn.
+      const current = await read();
+      const currentMessage = current.mapping?.[current.current_node]?.message;
+      if (current.current_node !== expectedNode || currentMessage?.id !== expectedMessage.id
+        || currentMessage?.author?.role !== 'assistant') return { ok: false, stale: true };
+      if (goalAssistantSettled(current)) return { ok: true, alreadyFinished: true };
       throwIfAborted(signal);
       if (!goalConversationMatches(win.webContents, id)) throw new Error('Wrong ChatGPT conversation.');
       await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
@@ -871,7 +885,7 @@ function createBrowserSurfaceHost(options = {}) {
         if (stopped?.state === 'not_running') {
           const after = await read();
           const final = after.mapping?.[after.current_node]?.message;
-          if (after.current_node === expectedNode && final?.author?.role === 'assistant'
+          if (after.current_node === expectedNode && final?.id === expectedMessage.id && final?.author?.role === 'assistant'
             && (final?.end_turn === true || ['interrupted', 'cancelled', 'finished_successfully'].includes(final?.status))) {
             return { ok: true, stopped: true };
           }

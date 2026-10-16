@@ -223,6 +223,12 @@ function isTerminalTaskReference(session, toolName, args = {}) {
   if (!isTerminalTaskStatus(session?.status)) return false;
   const operation = String(toolName || '');
   if (TERMINAL_REFERENCE_OPERATIONS.has(operation)) return true;
+  // Retained output still belongs to the original work_id. Keep this narrow:
+  // owner/workspace admission and the spill reader verify access, and ordinary
+  // workspace reads must not revive or run inside a terminal task.
+  if (operation === OP.READ && typeof args.outputRef === 'string' && args.outputRef.trim()
+    && args.paths === undefined && args.ranges === undefined && args.skill === undefined
+    && args.root === undefined && args.asResource !== true) return true;
   return (operation === OP.UI || operation === OP.BROWSER) && String(args?.action || '').trim().toLowerCase() === 'stop';
 }
 

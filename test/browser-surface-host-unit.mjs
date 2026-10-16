@@ -495,11 +495,13 @@ function createHarness({
   const target = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
   let status = 'in_progress';
   let currentNode = 'a';
+  let assistantId = 'assistant-stalled';
+  let assistantRole = 'assistant';
   goalSession.authenticated = true;
   goalSession.fetch = async url => {
     if (String(url).endsWith('/api/auth/session')) return new Response(JSON.stringify({ user: { id: 'test' }, accessToken: 'fixture-secret' }));
     return new Response(JSON.stringify({ current_node: currentNode,
-      mapping: { a: { parent: null, message: { id: 'assistant-stalled', author: { role: 'assistant' },
+      mapping: { a: { parent: null, message: { id: assistantId, author: { role: assistantRole },
         end_turn: status === 'interrupted', status } },
       other: { parent: null, message: { id: 'assistant-other', author: { role: 'assistant' },
         end_turn: true, status: 'finished_successfully' } } } }));
@@ -533,6 +535,28 @@ function createHarness({
   assert.deepEqual(failed, { ok: false, notSent: true, stage: 'stop_button' });
   assert.equal(goalWindows[3].webContents.goalClickCount, 0, 'a missing Stop button cannot trigger a guessed action');
   assert.equal(goalWindows[3].shown, false, 'failed recovery must stay hidden for automatic retry');
+  for (const change of ['branch', 'message', 'role', 'settled']) {
+    currentNode = 'a';
+    status = 'in_progress';
+    assistantId = 'assistant-stalled';
+    assistantRole = 'assistant';
+    const index = goalWindows.length;
+    const attempt = host.goalProtocolRequest({ action: 'stop_stalled',
+      conversationId: target, expectedNodeId: 'a' });
+    const contents = goalWindows[index].webContents;
+    contents.goalBrowserScript = () => {
+      if (change === 'branch') currentNode = 'other';
+      if (change === 'message') assistantId = 'assistant-replaced';
+      if (change === 'role') assistantRole = 'user';
+      if (change === 'settled') status = 'interrupted';
+      return { state: 'stop_ready' };
+    };
+    const result = await attempt;
+    assert.deepEqual(result, change === 'settled'
+      ? { ok: true, alreadyFinished: true } : { ok: false, stale: true },
+    'recovery must revalidate ' + change + ' changes while waiting for the Stop control');
+    assert.equal(contents.goalClickCount, 0, 'changed identity must not reach native activation');
+  }
   await host.closeAll();
 }
 

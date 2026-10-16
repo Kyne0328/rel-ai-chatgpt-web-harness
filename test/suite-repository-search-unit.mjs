@@ -207,6 +207,24 @@ async function case_search_context_unit() {
   const workspace = { alias: 'repo', path: wsRoot };
   
   try {
+
+    const delimiterPaths = ['src/résumé space.js'];
+    if (process.platform !== 'win32') delimiterPaths.push('src/colon:7:name.js', 'src/line\nbreak.js', 'src/tab\tname.js');
+    const delimiterText = 'delimiterMarker: α😀\r\nsecond delimiterMarker\n';
+    for (const file of delimiterPaths) fs.writeFileSync(path.join(wsRoot, file), delimiterText);
+    const delimited = await relaiSearch(workspace, {}, {
+      pattern: 'delimiterMarker', fixed: true, mode: 'compact', maxResults: 100
+    });
+    const expectedDelimiterMatches = delimiterPaths.flatMap(file => [
+      { path: file, line: 1, text: 'delimiterMarker: α😀' },
+      { path: file, line: 2, text: 'second delimiterMarker' }
+    ]);
+    const byPathAndLine = (left, right) => left.path.localeCompare(right.path) || left.line - right.line;
+    assert.deepEqual(delimited.matches.sort(byPathAndLine), expectedDelimiterMatches.sort(byPathAndLine),
+      'Git search must preserve unquoted filenames and separate line numbers from colons and newlines in paths');
+    assert.equal(delimited.matchCount, expectedDelimiterMatches.length);
+    assert.equal(delimited.truncated, false);
+
     const automatic = await relaiSearch(workspace, {}, { pattern: 'alphaThing', fixed: true });
     assert.equal(automatic.mode, 'auto');
     assert.equal(automatic.effectiveMode, 'context');

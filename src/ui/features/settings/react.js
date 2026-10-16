@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
+import { patchComputerControl } from '../../store.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { openModal } from '../../components/modal.js';
@@ -1281,8 +1282,11 @@ function ComputerControlSettings({ initial = {} }) {
     const result = await postJson('/api/computer', { enabled: value }, { cache: 'no-store' }).catch(error => ({ ok: false, error: messageOf(error) }));
     setBusy(false);
     if (!result?.ok) { toast(result?.error || 'Could not save computer control settings.', { variant: 'error' }); return; }
-    setEnabled(result?.settings?.enabled === true);
-    toast(value ? 'Computer control is enabled.' : 'Computer control is disabled.', { variant: 'success' });
+    const settings = { enabled: result?.settings?.enabled === true };
+    patchComputerControl(settings);
+    setEnabled(settings.enabled);
+    requestDashboardRefresh();
+    toast(settings.enabled ? 'Computer control is enabled.' : 'Computer control is disabled.', { variant: 'success' });
   };
   return h(Card, { title: 'Computer control' }, h(ToggleRow, {
     label: 'Allow computer control', checked: enabled, disabled: busy, busy,

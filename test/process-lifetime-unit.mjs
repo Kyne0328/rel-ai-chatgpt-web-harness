@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { registerHooks } from 'node:module';
 import { installDeterministicHostMemory } from './helpers/deterministic-host-memory.mjs';
 import { callTool as rawCallTool } from '../src/tools.js';
 import { readConfig } from '../src/config.js';
@@ -155,10 +158,232 @@ try {
   const naturalDeadline = Date.now() + 5000;
   while (!naturalReleaseCalls.length && Date.now() < naturalDeadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(naturalReleaseCalls, [undefined], 'root exit releases the concurrency slot without memory settling credits');
+  {
+    // Portable mocked POSIX/cgroup coverage, not native Linux validation.
+    // Only these isolated modules receive platform and OS-adapter substitutions;
+    // lifecycle, persistence, capacity and tree-termination logic stay unchanged.
+    const managerUrl = new URL('../src/processManager.ts?containment-fixture', import.meta.url).href;
+    const processUrl = new URL('../src/process.ts?containment-fixture', import.meta.url).href;
+    const fixtureModules = new Set([managerUrl, processUrl]);
+    const childStub = 'data:text/javascript,' + encodeURIComponent([
+      'export function spawn(...args) { return globalThis.__relaiManagedContainmentFixture.spawn(...args); }',
+      'export function spawnSync() { throw new Error("Unexpected synchronous native spawn in containment fixture."); }',
+      'export function execFile() { throw new Error("Unexpected native executable probe in containment fixture."); }'
+    ].join('\n'));
+    const processFacade = 'data:text/javascript,' + encodeURIComponent([
+      `export { isProcessTreeAlive, terminateProcessTree } from ${JSON.stringify(processUrl)};`,
+      'export async function readProcessCreationIdentity(pid) { return globalThis.__relaiManagedContainmentFixture.identity(pid); }'
+    ].join('\n'));
+    const cgroupStub = 'data:text/javascript,' + encodeURIComponent([
+      'const fixture = () => globalThis.__relaiManagedContainmentFixture;',
+      'export function prepareLinuxMutationCgroup() { return fixture().enabled ? fixture().reference : null; }',
+      'export function validateLinuxMutationCgroup(ref) { return fixture().valid && ref?.nonce === fixture().reference.nonce && ref?.directory === fixture().reference.directory; }',
+      'export function linuxMutationCgroupCommand(ref, executable, args) { fixture().wrapped += 1; return { executable, args }; }',
+      'export function linuxMutationCgroupEmpty(ref) { return validateLinuxMutationCgroup(ref) && !fixture().populated; }',
+      'export async function settleLinuxMutationCgroup(ref) { if (!validateLinuxMutationCgroup(ref)) return { exited: false, forced: false }; fixture().stops += 1; fixture().populated = false; return { exited: true, forced: true }; }',
+      'export function cleanupLinuxMutationCgroup(ref) { return linuxMutationCgroupEmpty(ref); }'
+    ].join('\n'));
+    const hooks = registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (fixtureModules.has(context.parentURL) && specifier === './linuxMutationCgroup.js') return { url: cgroupStub, shortCircuit: true };
+        if (fixtureModules.has(context.parentURL) && specifier === 'node:child_process') return { url: childStub, shortCircuit: true };
+        if (context.parentURL === managerUrl && specifier === './process.ts') return { url: processFacade, shortCircuit: true };
+        return nextResolve(specifier, context);
+      },
+      load(url, context, nextLoad) {
+        const loaded = nextLoad(url, context);
+        if (!fixtureModules.has(url)) return loaded;
+        const source = typeof loaded.source === 'string' ? loaded.source : Buffer.from(loaded.source).toString('utf8');
+        assert.ok(source.includes('process.platform') && source.includes('process.kill('), 'fixture must intercept platform and signal adapters');
+        return { ...loaded, source: source.replaceAll('process.platform', "'linux'")
+          .replaceAll('process.kill(', 'globalThis.__relaiManagedContainmentFixture.kill(') };
+      }
+    });
+    const fixtureManager = await import(managerUrl);
+    hooks.deregister();
+    const fixtureConfig = { ...config, stateDir: path.join(root, 'containment-fixture-state') };
+    try {
+      for (const [index, ending] of ['unverified', 'empty', 'contained', 'startup-failure', 'graceful', 'pre-entry'].entries()) {
+        const fixture = { enabled: ['contained', 'pre-entry', 'graceful'].includes(ending), valid: true,
+          populated: ending !== 'pre-entry', wrapped: 0, stops: 0,
+          reference: { directory: '/fixture/managed-cgroup-' + index, nonce: String(index).repeat(32) } };
+        globalThis.__relaiManagedContainmentFixture = fixture;
+        const fixturePid = 2000000001 + index;
+        const launcher = Object.assign(new EventEmitter(), {
+          pid: fixturePid, exitCode: null, signalCode: null,
+          stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+          unref() {}, kill() { throw new Error('The completed launcher must not be signalled directly.'); }
+        });
+        let groupAlive = ending !== 'pre-entry';
+        let launcherAlive = true;
+        const startupAbort = new AbortController();
+        const signals = [];
+        let managed;
+        let record;
+        try {
+          fixture.spawn = (executable, argv) => {
+            assert.equal(executable, process.execPath, 'unexpected native executable must not run');
+            assert.equal(argv[0], '--managed-group-fixture', 'unexpected native command must not run');
+            if (fixture.enabled) {
+              assert.equal(fixture.wrapped, 1, 'contained launch must be wrapped before spawn');
+              const directory = path.join(fixtureConfig.stateDir, 'processes');
+              assert.equal(fs.readdirSync(directory).some(id => {
+                const file = path.join(directory, id, 'metadata.json');
+                return fs.existsSync(file) && JSON.parse(fs.readFileSync(file, 'utf8')).linuxCgroup?.nonce === fixture.reference.nonce;
+              }), true, 'native containment must be durable before spawn');
+            }
+            queueMicrotask(() => launcher.emit('spawn'));
+            return launcher;
+          };
+          fixture.kill = (pid, signal) => {
+            assert.equal(Math.abs(pid), fixturePid, 'unexpected native PID must never be probed or signalled');
+            if (pid === fixturePid && signal === 0) {
+              if (!launcherAlive) throw Object.assign(new Error('Fixture launcher exited.'), { code: 'ESRCH' });
+              return true;
+            }
+            assert.equal(pid, -fixturePid, 'group ownership must not turn into a signal to a recycled root PID');
+            if (!groupAlive) throw Object.assign(new Error('Fixture group exited.'), { code: 'ESRCH' });
+            if (signal !== 0) {
+              signals.push(signal);
+              groupAlive = false;
+              if (ending === 'graceful') {
+                assert.equal(signal, 'SIGTERM', 'live contained launchers retain graceful stop');
+                assert.equal(fixture.stops, 0, 'graceful termination precedes cgroup settlement');
+                launcherAlive = false;
+                launcher.exitCode = 0;
+                fixture.populated = false;
+                queueMicrotask(() => launcher.emit('close', 0, null));
+              }
+            }
+            return true;
+          };
+          fixture.identity = pid => {
+            assert.equal(pid, fixturePid, 'creation identity probes are synthetic and scoped');
+            return '';
+          };
+          const starting = fixtureManager.startManagedProcess(workspace, fixtureConfig, {
+            ...startArgs, argv: ['--managed-group-fixture'], reuseExisting: false,
+            purpose: 'Synthetic persistent launcher lifecycle.', startupWaitMs: ['startup-failure', 'pre-entry'].includes(ending) ? 2000 : 0
+          }, { internal: true, taskId: 'fixture-owner', signal: startupAbort.signal });
+          const outcome = starting.then(value => ({ value }), error => ({ error }));
+          if (['startup-failure', 'pre-entry'].includes(ending)) {
+            const deadline = Date.now() + 5000;
+            while (!record && Date.now() < deadline) {
+              record = fixtureManager.activeProcessesForWorkSession(fixtureConfig, 'app', 'fixture-owner')
+                .find(item => item.pid === fixturePid);
+              if (!record) await new Promise(resolve => setImmediate(resolve));
+            }
+            assert.ok(record, 'startup fixture must acquire its owned record');
+            managed = { processId: record.processId };
+          } else {
+            const started = await outcome;
+            if (started.error) throw started.error;
+            managed = started.value;
+            record = fixtureManager.activeProcessesForWorkSession(fixtureConfig, 'app', 'fixture-owner')
+              .find(item => item.processId === managed.processId);
+          }
+          const release = record.hostResourceRelease;
+          let releases = 0;
+          record.hostResourceRelease = () => { releases += 1; release(); };
+          if (ending === 'graceful') {
+            const stopped = await fixtureManager.stopManagedProcess(fixtureConfig, { processId: managed.processId, graceMs: 100 }, { internal: true });
+            assert.equal(stopped.terminationConfirmed, true);
+            assert.equal(stopped.status, 'stopped');
+            assert.deepEqual(signals, ['SIGTERM']);
+            assert.equal(releases, 1);
+            continue;
+          }
+          if (ending === 'pre-entry') {
+            // A live wrapper has not formed its group or joined the cgroup yet.
+            startupAbort.abort();
+            const interrupted = await outcome;
+            assert.equal(interrupted.error?.code, 'TASK_CANCELLED');
+            assert.equal(interrupted.error?.terminationConfirmed, false);
+            assert.equal(record.status, 'orphaned');
+            assert.equal(record.rootExitConfirmed, false);
+            assert.equal(releases, 0, 'pre-entry emptiness cannot release ownership');
+            assert.equal(fixture.stops, 0, 'cgroup settlement must wait for proven launcher exit');
+            assert.deepEqual(signals, []);
+            const restoredId = 'proc_' + 'p'.repeat(24);
+            const restoredDirectory = path.join(fixtureConfig.stateDir, 'processes', restoredId);
+            fs.mkdirSync(restoredDirectory);
+            fs.writeFileSync(path.join(restoredDirectory, 'stdout.log'), '');
+            fs.writeFileSync(path.join(restoredDirectory, 'stderr.log'), '');
+            fs.writeFileSync(path.join(restoredDirectory, 'metadata.json'), JSON.stringify({
+              ...JSON.parse(fs.readFileSync(path.join(fixtureConfig.stateDir, 'processes', managed.processId, 'metadata.json'), 'utf8')),
+              processId: restoredId, runtimeId: 'previous-runtime', status: 'starting',
+              pid: null, rootExitConfirmed: false, terminationConfirmed: null
+            }));
+            const recovered = fixtureManager.readManagedProcess(fixtureConfig, { processId: restoredId }, { internal: true });
+            assert.equal(recovered.status, 'orphaned');
+            assert.equal(recovered.terminationConfirmed, false, 'pid-null recovery must not accept a pre-entry empty cgroup');
+            await assert.rejects(() => fixtureManager.stopManagedProcess(fixtureConfig, { processId: restoredId }, { internal: true }),
+              error => error.code === 'PROCESS_IDENTITY_UNVERIFIED');
+            assert.equal(fixture.stops, 0);
+            // Later real root-exit proof enables native descendant cleanup.
+            fixture.populated = true;
+            groupAlive = true;
+          }
+          launcherAlive = false;
+          launcher.exitCode = 0;
+          launcher.emit('close', 0, null);
+          if (ending === 'startup-failure') {
+            assert.match((await outcome).error?.message || '', /exited during startup/);
+            assert.deepEqual(signals, [], 'internal startup cleanup must not bypass post-root identity checks');
+          }
+          const rootEnded = fixtureManager.readManagedProcess(fixtureConfig, { processId: managed.processId }, { internal: true });
+          assert.equal(rootEnded.rootExitConfirmed, true);
+          assert.equal(rootEnded.status, 'orphaned');
+          assert.equal(rootEnded.terminationConfirmed, false);
+          assert.equal(releases, 0, 'launcher exit must retain capacity while descendants remain');
+          if (ending === 'unverified') {
+            record.processCreationIdentity = '';
+            await assert.rejects(() => fixtureManager.stopManagedProcess(fixtureConfig, { processId: managed.processId, graceMs: 0 }, { internal: true }),
+              error => error.code === 'PROCESS_IDENTITY_UNVERIFIED',
+              'a launcher-free group must not be signalled without identity proof');
+            assert.equal(releases, 0);
+            assert.deepEqual(signals, [], 'runtime membership alone cannot exclude PGID reuse');
+          }
+          if (['contained', 'pre-entry'].includes(ending)) {
+            record.processCreationIdentity = '';
+            const stopped = await fixtureManager.stopManagedProcess(fixtureConfig, { processId: managed.processId, graceMs: 0 }, { internal: true });
+            assert.equal(stopped.status, 'stopped');
+            assert.equal(stopped.terminationConfirmed, true);
+            assert.equal(stopped.duplicate, false);
+            assert.equal(fixture.stops, 1, 'surviving descendants are stopped through their owned containment');
+            assert.deepEqual(signals, [], 'native containment must not fall back to the dead root PGID');
+          } else {
+            groupAlive = false;
+            const endedGroup = fixtureManager.readManagedProcess(fixtureConfig, { processId: managed.processId }, { internal: true });
+            assert.equal(endedGroup.status, 'exited');
+            assert.equal(endedGroup.terminationConfirmed, true);
+            assert.deepEqual(signals, [], 'observed group absence needs no termination signal');
+          }
+          assert.equal(releases, 1, 'confirmed exit releases capacity exactly once');
+          groupAlive = true;
+          fixture.populated = true;
+          const repeated = await fixtureManager.stopManagedProcess(fixtureConfig, { processId: managed.processId, graceMs: 0 }, { internal: true });
+          assert.equal(repeated.duplicate, true);
+          assert.deepEqual(signals, [], 'a confirmed exit must never signal a later group reusing the old ID');
+          assert.equal(fixture.stops, ['contained', 'pre-entry'].includes(ending) ? 1 : 0);
+        } finally {
+          groupAlive = false;
+          launcherAlive = false;
+          fixture.populated = false;
+          if (managed) await fixtureManager.stopManagedProcess(fixtureConfig, { processId: managed.processId, graceMs: 0 }, { internal: true }).catch(() => {});
+          for (const stream of [launcher.stdin, launcher.stdout, launcher.stderr]) stream.destroy();
+        }
+      }
+    } finally {
+      hooks.deregister();
+      delete globalThis.__relaiManagedContainmentFixture;
+    }
+  }
   const natural = await startManagedProcess(workspace, config, {
     ...startArgs, lifecycle: 'task', purpose: 'Natural root exit evidence.',
     argv: ['-e', 'setTimeout(() => process.exit(0), 2000)']
   }, { ...ownerContext, taskId: naturalTask.work_id });
+  const naturalOwnedRecord = activeProcessesForWorkSession(config, 'app', naturalTask.work_id).find(item => item.processId === natural.processId);
   let nativeCompletion;
   let completedNativeJob;
   if (process.platform === 'win32') {
@@ -201,7 +426,10 @@ try {
     assert.equal(legacyExit.status, 'orphaned');
     const rootCleanup = await cleanupTaskManagedProcesses(config, 'app', naturalTask.work_id, { ...ownerContext, taskId: naturalTask.work_id });
     assert.equal(rootCleanup.complete, false, 'legacy root death cannot prove detached descendants are gone');
-    assert.match(rootCleanup.leftovers[0].reason, /descendant/i);
+    assert.match(rootCleanup.leftovers[0].reason, /ownership.*not.*verified|descendant/i);
+  } else if (naturalOwnedRecord.linuxCgroup) {
+    assert.equal(rootExit.terminationConfirmed, true, 'an empty owned Linux cgroup confirms the whole lifetime');
+    assert.equal(rootExit.status, 'exited');
   } else {
     assert.equal(rootExit.terminationConfirmed, false, 'natural root exit alone must not imply descendant cleanup');
     assert.equal(rootExit.status, 'orphaned');

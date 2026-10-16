@@ -1239,7 +1239,9 @@ function appendLimited(current: string, next: string, maxBytes: number): string 
 
 function summarizeCommand(result: Partial<RunProcessResult> & Pick<RunProcessResult, 'exitCode'>): Record<string, unknown> {
   const summary = {
-    ok: result.exitCode === 0 && result.timedOut !== true && result.cancelled !== true,
+    ok: result.exitCode === 0 && result.executed !== false
+      && result.timedOut !== true && result.cancelled !== true
+      && result.terminationConfirmed !== false && result.terminationConfirmed !== null,
     ...executionOutcome(result),
     ...(result.stdout ? { stdout: result.stdout } : {}),
     ...(result.stderr ? { stderr: result.stderr } : {})

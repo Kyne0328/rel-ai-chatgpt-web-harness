@@ -10,6 +10,7 @@ import { normalizeExecutionInvocation, resolveCommandCwd, normalizeCommandEnv } 
 import { redactCommandForAudit } from './commandDisplay.ts';
 import { isProcessTreeAlive, readProcessCreationIdentity, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
 import { prepareWindowsProcessJob, restoreWindowsProcessJob, type WindowsProcessJob } from './windowsProcessJob.ts';
+import { prepareLinuxMutationCgroup, validateLinuxMutationCgroup, linuxMutationCgroupCommand, linuxMutationCgroupEmpty, settleLinuxMutationCgroup, cleanupLinuxMutationCgroup } from './linuxMutationCgroup.js';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
 import { createHttpPrincipal, principalFingerprint } from './mcp/principal.ts';
@@ -171,6 +172,7 @@ interface ManagedProcessRecord extends GenericRecord {
   stderrPath: string;
   environmentKeys: string[];
   child: ChildProcess | null;
+  linuxCgroup?: { directory: string; nonce: string } | null;
   windowsJob?: WindowsProcessJob | null;
   windowsJobDirectory?: string;
   windowsJobOwned?: boolean;
@@ -299,6 +301,10 @@ const MAX_WRAPPED_STARTUP_PROMPT_BYTES = 4096;
 const ACTIVE_STATUSES = Object.freeze({ has: isActiveProcessStatus });
 const TERMINAL_STATUSES = Object.freeze({ has: isTerminalProcessStatus });
 const processes = new Map<string, ManagedProcessRecord>();
+// Runtime-only record of groups launched by this manager, used to settle
+// observed group absence. It is not signalling authority after root exit;
+// a live or restored group still needs creation-identity verification.
+const ownedPosixProcessGroups = new WeakSet<ManagedProcessRecord>();
 const metadataScanAt = new Map<string, number>();
 const metadataPruneAt = new Map<string, number>();
 const metadataWriteQueues = new Map<string, Promise<boolean>>();
@@ -567,8 +573,14 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         record.windowsJobOwned = true;
       }
       if (startupSignal?.aborted) throw cancellationError('Managed process startup was cancelled before native launch.');
-      const processExecutable = record.windowsJob?.executable || invocation.processExecutable;
-      const processArgv = record.windowsJob?.args || invocation.processArgv;
+      record.linuxCgroup = prepareLinuxMutationCgroup();
+      const containedCommand = record.linuxCgroup
+        ? linuxMutationCgroupCommand(record.linuxCgroup, invocation.processExecutable, invocation.processArgv) : null;
+      // Persist containment before the launcher can enter it. Recovery never
+      // needs a surviving root PID to find this exact owned cgroup.
+      if (record.linuxCgroup) persistMetadata(config, record);
+      const processExecutable = record.windowsJob?.executable || containedCommand?.executable || invocation.processExecutable;
+      const processArgv = record.windowsJob?.args || containedCommand?.args || invocation.processArgv;
       if (record.pty) {
         const ptyProcess = await measurePerformancePhase('process.spawn', async () => {
           const nodePty = await loadNodePty();
@@ -584,6 +596,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         });
         record.ptyProcess = ptyProcess;
         record.pid = ptyProcess.pid || null;
+        if (process.platform !== 'win32' && record.pid) ownedPosixProcessGroups.add(record);
         record.windowsJob?.bind(record.pid);
         record.status = record.windowsJob ? 'starting' : 'running';
         record.ptyExitPromise = new Promise<PtyExitEvent>(resolve => { record.resolvePtyExit = resolve; });
@@ -616,6 +629,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         record.logSources.stdout = child.stdout || null;
         record.logSources.stderr = child.stderr || null;
         record.pid = child.pid || null;
+        if (process.platform !== 'win32' && record.pid) ownedPosixProcessGroups.add(record);
         record.windowsJob?.bind(record.pid);
         initialState = record.windowsJob ? observeWindowsJobStartup(record.windowsJob, startupSignal) : observeInitialProcessState(child, startupSignal);
         child.stdout?.on('data', chunk => appendLog(config, record, 'stdout', chunk));
@@ -639,6 +653,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         }));
       }
     } catch (error) {
+      if (record.linuxCgroup) cleanupLinuxMutationCgroup(record.linuxCgroup);
       releaseManagedProcessResource(record);
       fs.rmSync(directory, { recursive: true, force: true });
       throw error;
@@ -1157,8 +1172,9 @@ async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedPro
   const record = requireProcess(config, args.processId);
   assertProcessAccess(config, record, args, context, { requireSession: false });
   const duplicate = TERMINAL_STATUSES.has(record.status)
-    && ((record.lifecycle !== 'task' && !record.windowsJobOwned) || record.terminationConfirmed === true);
-  if (!duplicate && (record.runtimeId !== RUNTIME_ID || record.rootExitConfirmed || (!record.child && !record.ptyProcess))) {
+    && record.terminationConfirmed === true;
+  if (!duplicate && (record.runtimeId !== RUNTIME_ID || record.rootExitConfirmed
+    || record.child?.exitCode != null || record.child?.signalCode || (!record.child && !record.ptyProcess))) {
     const identity = await verifyRestoredProcessIdentity(config, record);
     if (identity === 'mismatch' || identity === 'unverified') throw restoredProcessIdentityError(record, identity);
   }
@@ -1771,7 +1787,7 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
 }
 
 function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord, fields: Partial<ManagedProcessRecord>): void {
-  if (TERMINAL_STATUSES.has(record.status) && record.endedAt) return;
+  if (TERMINAL_STATUSES.has(record.status) && record.endedAt && record.terminationConfirmed === true) return;
   if (record.windowsJobOwned) {
     const receipt = record.windowsJob?.receipt();
     if (Number.isSafeInteger(receipt?.rootPid) && Number(receipt?.rootPid) > 0) record.windowsRootPid = Number(receipt?.rootPid);
@@ -1780,7 +1796,14 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
     record.rootExitConfirmed = receipt?.rootExited === true || record.rootExitConfirmed;
     if (typeof receipt?.rootExitCode === 'number') fields = { ...fields, exitCode: receipt.rootExitCode };
     if (!confirmed) record.terminationError = 'Native Windows job completion was not confirmed; managed ownership is retained.';
-  } else record.rootExitConfirmed = true;
+  } else {
+    record.rootExitConfirmed = true;
+    if (record.linuxCgroup && !record.stopPromise && !record.terminationInProgress
+      && linuxMutationCgroupEmpty(record.linuxCgroup)) {
+      record.terminationConfirmed = true;
+      record.terminationError = '';
+    }
+  }
   if ((record.stopPromise || record.terminationInProgress) && record.terminationConfirmed !== true) {
     // The close event can race the tree terminator. Save root evidence, but
     // let the terminator decide whether descendants and capacity are gone.
@@ -1788,7 +1811,12 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
     if (fields.signal !== undefined) record.signal = fields.signal;
     return;
   }
-  if ((record.lifecycle === 'task' || record.windowsJobOwned) && record.terminationConfirmed !== true && record.pid) {
+  if (!record.linuxCgroup && record.lifecycle === 'persistent' && ownedPosixProcessGroups.has(record)
+    && record.terminationConfirmed !== true && !isProcessTreeAlive(record.pid)) {
+    record.terminationConfirmed = true;
+    record.terminationError = '';
+  }
+  if (record.terminationConfirmed !== true && record.pid) {
     clearInteractivePtyRetirement(record);
     clearScheduledPersist(record);
     resumeLogSources(record);
@@ -1796,7 +1824,9 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
       status: 'orphaned',
       endedAt: '',
       terminationConfirmed: false,
-      terminationError: 'The managed root exited; descendant cleanup has not been confirmed.'
+      terminationError: record.linuxCgroup
+        ? 'The managed root exited; owned descendants remain. Stop this processId to retry native containment cleanup.'
+        : 'The managed root exited; surviving descendant ownership is unverified. Preserve this processId and inspect the remaining workload before retrying cleanup.'
     });
     record.error = record.terminationError;
     record.child = null;
@@ -1811,6 +1841,7 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
   resumeLogSources(record);
   releaseManagedProcessResource(record);
   record.windowsJob?.cleanup();
+  if (record.linuxCgroup) cleanupLinuxMutationCgroup(record.linuxCgroup);
   Object.assign(record, fields, { endedAt: new Date().toISOString() });
   record.child = null;
   if (record.ptyProcess) void disposeNodePtyResources(record.ptyProcess);
@@ -1824,6 +1855,7 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
 function releaseManagedProcessResource(record: ManagedProcessRecord): void {
   const release = record?.hostResourceRelease;
   record.hostResourceRelease = null;
+  ownedPosixProcessGroups.delete(record);
   try { release?.(); } catch {}
 }
 
@@ -1971,6 +2003,7 @@ function requireProcess(config: ManagedProcessConfig, processId: unknown): Manag
     record = reconcileRestoredRecord(config, restored);
     processes.set(id, record);
   }
+  reconcileOwnedPersistentGroupExit(config, record);
   return record;
 }
 
@@ -2032,6 +2065,7 @@ function metadataRecord(record: ManagedProcessRecord): GenericRecord {
     error: record.error || '',
     pid: record.pid || null,
     processCreationIdentity: record.processCreationIdentity || '',
+    linuxCgroup: record.linuxCgroup || null,
     windowsJobDirectory: record.windowsJobDirectory || '',
     windowsJobOwned: record.windowsJobOwned === true,
     windowsRootPid: record.windowsRootPid || null,
@@ -2154,6 +2188,10 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       error: String(metadata.error || ''),
       pid: Number.isSafeInteger(Number(metadata.pid)) ? Number(metadata.pid) : null,
       processCreationIdentity: String(metadata.processCreationIdentity || ''),
+      linuxCgroup: metadata.linuxCgroup ? {
+        directory: String(asRecord(metadata.linuxCgroup).directory || ''),
+        nonce: String(asRecord(metadata.linuxCgroup).nonce || '')
+      } : null,
       windowsRootCreationIdentity: /^win32:\d{1,20}$/.test(String(metadata.windowsRootCreationIdentity || '')) ? String(metadata.windowsRootCreationIdentity) : '',
       windowsRootPid: Number.isSafeInteger(metadata.windowsRootPid) && Number(metadata.windowsRootPid) > 0 ? Number(metadata.windowsRootPid) : 0,
       windowsJobOwned: metadata.windowsJobOwned === true || Boolean(metadata.windowsJobDirectory),
@@ -2228,7 +2266,7 @@ async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProc
   const live = [];
   for (const record of restored) {
     const identity = await verifyRestoredProcessIdentity(config, record);
-    if (identity === 'verified' || (record.windowsJobOwned && record.terminationConfirmed !== true)) {
+    if (identity === 'verified' || ((record.windowsJobOwned || record.linuxCgroup) && record.terminationConfirmed !== true)) {
       live.push(record);
       continue;
     }
@@ -2262,6 +2300,21 @@ async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProc
 function reconcileRestoredRecord(config: ManagedProcessConfig, record: ManagedProcessRecord): ManagedProcessRecord {
   if (record.runtimeId === RUNTIME_ID && processes.has(record.processId)) return record;
   if (!isActiveProcessStatus(record.status) && record.status !== 'orphaned') return record;
+  if (record.linuxCgroup) {
+    record.rootExitConfirmed = linuxManagedRootExitConfirmed(record);
+    record.terminationConfirmed = record.terminationConfirmed === true
+      || (record.rootExitConfirmed && linuxMutationCgroupEmpty(record.linuxCgroup));
+    record.status = record.terminationConfirmed ? 'stopped' : 'orphaned';
+    record.endedAt = record.terminationConfirmed ? (record.endedAt || new Date().toISOString()) : '';
+    if (!record.terminationConfirmed) {
+      record.terminationError = 'Recovered Linux process containment or launcher exit remains unverified; retain this processId for explicit recovery.';
+      record.error = record.terminationError;
+    } else {
+      cleanupLinuxMutationCgroup(record.linuxCgroup);
+    }
+    try { persistMetadata(config, record); } catch {}
+    return record;
+  }
   if (record.windowsJobOwned) {
     record.terminationConfirmed = record.windowsJob?.outcome().exited === true;
     record.rootExitConfirmed ||= record.windowsJob?.receipt()?.rootExited === true;
@@ -2298,12 +2351,38 @@ async function verifyRestoredProcessIdentity(
   config: ManagedProcessConfig,
   record: ManagedProcessRecord
 ): Promise<'verified' | 'dead' | 'unverified' | 'mismatch'> {
-  if (record.runtimeId === RUNTIME_ID && !record.rootExitConfirmed && (record.child || record.ptyProcess)) {
+  if (record.linuxCgroup) {
+    if (!validateLinuxMutationCgroup(record.linuxCgroup)) {
+      record.restartIdentityVerified = false;
+      record.error = 'Owned Linux process containment could not be verified; no process was signalled.';
+      return 'unverified';
+    }
+    record.rootExitConfirmed = linuxManagedRootExitConfirmed(record);
+    if (!record.rootExitConfirmed) {
+      const liveChild = record.child && record.child.exitCode == null && !record.child.signalCode;
+      const liveOwnedHandle = record.runtimeId === RUNTIME_ID && (liveChild || record.ptyProcess);
+      const expected = record.processCreationIdentity;
+      const observed = !liveOwnedHandle && record.pid && expected ? await readProcessCreationIdentity(record.pid) : '';
+      if (!liveOwnedHandle && (!observed || observed !== expected)) {
+        record.restartIdentityVerified = false;
+        record.error = 'Linux launcher exit or creation identity could not be verified; containment may not yet have been entered. Preserve this processId for explicit recovery.';
+        return 'unverified';
+      }
+    }
+    record.restartIdentityVerified = true;
+    if (!record.rootExitConfirmed || !linuxMutationCgroupEmpty(record.linuxCgroup)) return 'verified';
+    record.terminationConfirmed = true;
+    releaseManagedProcessResource(record);
+    return 'dead';
+  }
+  const liveChild = record.child && record.child.exitCode == null && !record.child.signalCode;
+  if (record.runtimeId === RUNTIME_ID && !record.rootExitConfirmed && (liveChild || record.ptyProcess)) {
     record.restartIdentityVerified = true;
     return 'verified';
   }
   if (!record.pid || !isProcessTreeAlive(record.pid)) {
-    if (process.platform !== 'win32' || record.terminationConfirmed === true) releaseManagedProcessResource(record);
+    if (process.platform !== 'win32') record.terminationConfirmed = true;
+    if (record.terminationConfirmed === true) releaseManagedProcessResource(record);
     record.restartIdentityVerified = false;
     record.rootExitConfirmed = true;
     record.status = (record.lifecycle === 'task' || record.windowsJobOwned) && record.terminationConfirmed !== true ? 'orphaned' : 'stopped';
@@ -2352,8 +2431,23 @@ function restoredProcessIdentityError(record: ManagedProcessRecord, state: 'unve
   );
 }
 
+function reconcileOwnedPersistentGroupExit(config: ManagedProcessConfig, record: ManagedProcessRecord): void {
+  if (record.lifecycle !== 'persistent' || !record.rootExitConfirmed
+    || record.terminationConfirmed === true || record.stopPromise || record.terminationInProgress
+    || (record.linuxCgroup
+      ? !linuxMutationCgroupEmpty(record.linuxCgroup)
+      : !ownedPosixProcessGroups.has(record) || isProcessTreeAlive(record.pid))) return;
+  record.terminationConfirmed = true;
+  record.terminationError = '';
+  if (!record.persistenceFailureHandled) record.error = '';
+  finishRecord(config, record, { status: record.exitCode === 0 ? 'exited' : 'failed' });
+}
+
 function hydrateProcessMetadata(config: ManagedProcessConfig): void {
   const root = processRoot(config);
+  for (const record of processes.values()) {
+    if (path.dirname(path.dirname(record.stdoutPath)) === root) reconcileOwnedPersistentGroupExit(config, record);
+  }
   const now = Date.now();
   if (now - Number(metadataScanAt.get(root) || 0) < METADATA_RESCAN_INTERVAL_MS) return;
   metadataScanAt.set(root, now);
@@ -2581,14 +2675,51 @@ async function cleanupFailedStartup(config: ManagedProcessConfig, record: Manage
 function processNeedsTermination(record: ManagedProcessRecord): boolean {
   if (ACTIVE_STATUSES.has(record.status)) return true;
   if (record.status === 'orphaned') {
-    if (record.windowsJobOwned && record.terminationConfirmed !== true) return true;
+    if ((record.windowsJobOwned || record.linuxCgroup) && record.terminationConfirmed !== true) return true;
     if (record.runtimeId !== RUNTIME_ID && !record.restartIdentityVerified) return false;
     return isProcessTreeAlive(record.pid);
   }
   return false;
 }
 
+function linuxManagedRootExitConfirmed(record: ManagedProcessRecord): boolean {
+  if (record.rootExitConfirmed || record.child?.exitCode != null || record.child?.signalCode) return true;
+  if (!record.pid) return false;
+  // A missing group is insufficient before the launcher has formed its group.
+  // Only observed root exit or confirmed absence of the root PID closes entry.
+  try { process.kill(record.pid, 0); return false; }
+  catch (error) { return errorCode(error) === 'ESRCH'; }
+}
+
 async function terminateManagedRecord(record: ManagedProcessRecord, options: StopRecordOptions = {}): Promise<ProcessTreeTerminationResult> {
+  if (record.linuxCgroup) {
+    if (!validateLinuxMutationCgroup(record.linuxCgroup)) return {
+      exited: false, forced: false, error: 'The owned Linux cgroup cannot be verified; no process was signalled.'
+    };
+    let forced = false;
+    if (!linuxManagedRootExitConfirmed(record)) {
+      if (!record.pid) return {
+        exited: false, forced: false,
+        error: 'Linux launcher exit is unverified and its PID was not durably recorded; preserve this processId for explicit recovery.'
+      };
+      // Keep the existing SIGTERM/grace period for a verified live launcher.
+      // Empty containment alone is never proof: the wrapper may enter later.
+      const rootOutcome = await terminateManagedRoot(record, options);
+      forced = rootOutcome.forced;
+      if (!linuxManagedRootExitConfirmed(record)) return {
+        exited: false, forced,
+        error: rootOutcome.error || 'Linux launcher exit remains unconfirmed; containment may not yet have been entered.'
+      };
+    }
+    record.rootExitConfirmed = true;
+    const outcome = await settleLinuxMutationCgroup(record.linuxCgroup, Number(options.forceWaitMs) || DEFAULT_FORCE_WAIT_MS);
+    if (outcome.exited) cleanupLinuxMutationCgroup(record.linuxCgroup);
+    if (outcome.exited && record.ptyProcess) {
+      await waitForPtyExit(record.ptyExitPromise, 1000);
+      await disposeNodePtyResources(record.ptyProcess);
+    }
+    return { ...outcome, forced: outcome.forced || forced };
+  }
   if (record.windowsJobOwned) {
     if (!record.windowsJob) return { exited: false, forced: false, error: 'Native Windows job control identity is unavailable.' };
     const outcome = await record.windowsJob.stop('stop', Number(options.forceWaitMs) || DEFAULT_FORCE_WAIT_MS);
@@ -2597,6 +2728,22 @@ async function terminateManagedRecord(record: ManagedProcessRecord, options: Sto
       await disposeNodePtyResources(record.ptyProcess);
     }
     return outcome;
+  }
+  return terminateManagedRoot(record, options);
+}
+
+async function terminateManagedRoot(record: ManagedProcessRecord, options: StopRecordOptions): Promise<ProcessTreeTerminationResult> {
+  // All cleanup paths share this gate, including startup/persistence failure.
+  // A vanished launcher does not authorize signalling a possibly reused PGID.
+  if (record.pid && (record.rootExitConfirmed || record.child?.exitCode != null
+    || record.child?.signalCode || (!record.child && !record.ptyProcess))) {
+    if (process.platform !== 'win32' && !isProcessTreeAlive(record.pid)) return { exited: true, forced: false };
+    const expected = record.processCreationIdentity;
+    const observed = expected ? await readProcessCreationIdentity(record.pid) : '';
+    if (!observed || observed !== expected) return {
+      exited: false, forced: false,
+      error: 'The managed root exited and surviving process ownership could not be verified; no process was signalled.'
+    };
   }
   if (record.ptyProcess) {
     const ptyProcess = record.ptyProcess;

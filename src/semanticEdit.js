@@ -92,10 +92,23 @@ function byteRangeForSymbol(data, target) {
   const startColumn = positiveInteger(target.column, 'symbol start column');
   const endColumn = positiveInteger(target.endColumn, 'symbol end column');
   if (startLine > starts.length || endLine > starts.length) throw semanticError('SEMANTIC_SYMBOL_RANGE_INVALID', 'The indexed symbol range is outside the current file.');
-  const start = starts[startLine - 1] + startColumn - 1;
-  const end = starts[endLine - 1] + endColumn - 1;
+  const start = byteOffsetForColumn(startLine, startColumn);
+  const end = byteOffsetForColumn(endLine, endColumn);
   if (start < 0 || end < start || end > data.length) throw semanticError('SEMANTIC_SYMBOL_RANGE_INVALID', 'The indexed symbol byte range is invalid for the current file.');
   return { start, end };
+
+  function byteOffsetForColumn(line, column) {
+    const lineStart = starts[line - 1];
+    const lineEnd = line < starts.length ? starts[line] - 1 : data.length;
+    const text = data.subarray(lineStart, lineEnd).toString('utf8');
+    const offset = column - 1;
+    // web-tree-sitter reports UTF-16 columns, while Buffer slices use UTF-8 bytes.
+    if (offset > text.length || (offset > 0 && offset < text.length
+      && /[\uD800-\uDBFF]/.test(text[offset - 1]) && /[\uDC00-\uDFFF]/.test(text[offset]))) {
+      throw semanticError('SEMANTIC_SYMBOL_RANGE_INVALID', 'The indexed symbol column is invalid for the current line.');
+    }
+    return lineStart + Buffer.byteLength(text.slice(0, offset), 'utf8');
+  }
 }
 
 function semanticReplacement(action, oldText, content, newline) {

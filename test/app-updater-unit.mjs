@@ -440,8 +440,72 @@ assert.equal(preparationFailure.installRecovery(), 1);
 assert.deepEqual(preparationFailure.fake.installCalls, [], 'NSIS must not launch after failed in-app preparation');
 
 
+async function readyToInstall(harness) {
+  harness.updater.start();
+  harness.fake.emit('update-available', { version: '0.21.0' });
+  await harness.updater.downloadUpdate();
+  harness.fake.emit('update-downloaded', { version: '0.21.0' });
+}
+
+for (const failureMode of ['emitted', 'rejected', 'thrown']) {
+  let harness;
+  harness = createHarness({ commitCallback: () => harness.updater.stop() });
+  await readyToInstall(harness);
+  const installFailure = new Error('fixture installer launch failed');
+  harness.fake.quitAndInstall = () => {
+    harness.fake.installCalls.push(failureMode);
+    if (failureMode === 'emitted') { harness.fake.emit('error', installFailure); return; }
+    if (failureMode === 'rejected') return Promise.reject(installFailure);
+    throw installFailure;
+  };
+  const result = await harness.updater.installUpdate();
+  assert.equal(result.ok, false, failureMode);
+  assert.equal(result.retryable, false, 'a launch attempt cannot safely be repeated when installer state is uncertain');
+  assert.equal(harness.installRecovery(), 1, 'installer errors after shutdown must reach recovery exactly once');
+  assert.equal(harness.updater.getStatus().installLaunchUncertain, true);
+  assert.equal(harness.updater.getStatus().canInstall, false);
+  harness.fake.emit('error', installFailure);
+  await Promise.resolve();
+  assert.equal(harness.installRecovery(), 1, 'duplicate error delivery must not repeat recovery');
+  assert.equal((await harness.updater.installUpdate()).ok, false);
+  harness.updater.start({ preserveState: true });
+  assert.equal((await harness.updater.checkForUpdates()).ok, false, 'restarting observers must not clear the uncertain install lock');
+  assert.equal((await harness.updater.downloadUpdate()).ok, false);
+  assert.equal(harness.fake.installCalls.length, 1, 'an uncertain installer must never be launched twice');
+}
+
+let lateInstall;
+lateInstall = createHarness({ commitCallback: () => lateInstall.updater.stop() });
+await readyToInstall(lateInstall);
+const acceptedInstall = await lateInstall.updater.installUpdate();
+assert.equal(acceptedInstall.installing, true);
+assert.equal((await lateInstall.updater.installUpdate()).ok, false, 'in-flight installer requests must be single flight');
+lateInstall.fake.emit('error', new Error('fixture asynchronous NSIS failure'));
+assert.equal(lateInstall.updater.getStatus().installLaunchUncertain, true, 'an asynchronous error must revoke quit permission synchronously');
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(lateInstall.installRecovery(), 1);
+assert.equal(lateInstall.updater.getStatus().state, 'error');
+assert.equal(lateInstall.updater.getStatus().canCheck, false);
+assert.equal(lateInstall.fake.installCalls.length, 1);
+
+let recoverableCommit;
+let failCommit = true;
+recoverableCommit = createHarness({ commitCallback: () => {
+  recoverableCommit.updater.stop();
+  if (failCommit) throw new Error('fixture late shutdown failure');
+} });
+await readyToInstall(recoverableCommit);
+assert.equal((await recoverableCommit.updater.installUpdate()).ok, false);
+assert.equal(recoverableCommit.updater.getStatus().canInstall, true, 'failure before installer invocation must keep the verified update retryable');
+recoverableCommit.updater.start({ preserveState: true });
+assert.equal(recoverableCommit.updater.getStatus().state, 'downloaded', 'restoring observers must retain the downloaded artifact');
+assert.equal(recoverableCommit.fake.listenerCount('error'), 1, 'restoring observers must not retain a failed preparation observer');
+failCommit = false;
+assert.equal((await recoverableCommit.updater.installUpdate()).ok, true);
+assert.equal(recoverableCommit.fake.installCalls.length, 1);
+
 const desktopSource = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
-const commitSource = desktopSource.slice(desktopSource.indexOf('  async function commitApplicationUpdate()'), desktopSource.indexOf('  async function recoverApplicationUpdate()'));
+const commitSource = desktopSource.slice(desktopSource.indexOf('  async function commitApplicationUpdate()'), desktopSource.indexOf('  async function recoverApplicationUpdate('));
 const { runInNewContext } = await import('node:vm');
 for (const shutdown of [{ ok: false, clean: false, errors: [{ step: 'marker', message: 'fixture failure' }] }, undefined, { ok: true, clean: true }]) {
   const context = {
@@ -468,6 +532,94 @@ for (const shutdown of [{ ok: false, clean: false, errors: [{ step: 'marker', me
     assert.ok(composed.logs.some(entry => /clean final shutdown/.test(entry.message)), 'shutdown failure details must remain in update diagnostics');
   }
 }
+
+const recoverySource = desktopSource.slice(
+  desktopSource.indexOf('  async function recoverApplicationUpdate('),
+  desktopSource.indexOf('  function updateRuntimeAccess()')
+);
+for (const launchUncertain of [false, true]) {
+  const restored = [];
+  let listening = false;
+  let releaseMarker;
+  const markerPending = new Promise(resolve => { releaseMarker = resolve; });
+  const recoveryContext = {
+    process: { platform: 'win32' }, app: {},
+    allowUpdaterQuit: true, isQuitting: true, updateInstallPrepared: true,
+    shutdownCoordinator: { reset() { restored.push('coordinator'); } },
+    markUpdateInstallPhase: () => markerPending,
+    desktopTray: { setup() { restored.push('tray'); } },
+    appUpdater: { start(options) { assert.equal(options.preserveState, true); restored.push('updater'); } },
+    updateSupportPolicy: { start() { restored.push('support-policy'); } },
+    desktopPower: { start() { restored.push('power'); } },
+    pulseWindowManager: { start() { restored.push('pulse'); }, update() { restored.push('pulse-status'); } },
+    writeControllerRuntimeMarker: async () => { restored.push('runtime-marker'); },
+    desktopLifecycle: { resumeAfterShutdown: async () => { restored.push('lifecycle'); } },
+    serviceRuntime: { isListening: () => listening },
+    startServer: async () => { listening = true; restored.push('service'); },
+    showDashboardWindow: async () => { restored.push('dashboard'); },
+    recoveryWindowManager: { show() { restored.push('recovery-window'); } },
+    setStatus() { restored.push('status'); },
+    currentStatus: {}, ERROR_CODES: { UPDATE_FAILED: 'update_failed' }
+  };
+  const recover = runInNewContext(recoverySource + '\nrecoverApplicationUpdate', recoveryContext);
+  const pending = recover(undefined, { launchUncertain });
+  assert.equal(recoveryContext.allowUpdaterQuit, false, 'recovery must revoke updater quit before asynchronous marker writes');
+  assert.equal(recoveryContext.isQuitting, false);
+  assert.equal(recoveryContext.updateInstallPrepared, false);
+  releaseMarker();
+  await pending;
+  assert.deepEqual(restored, launchUncertain
+    ? ['coordinator', 'tray', 'status', 'recovery-window']
+    : ['coordinator', 'tray', 'updater', 'support-policy', 'power', 'pulse', 'pulse-status', 'runtime-marker', 'lifecycle', 'service', 'dashboard'],
+  'recovery must restore every stopped component, but must not restart work alongside an uncertain installer');
+}
+
+const eventSource = desktopSource.slice(
+  desktopSource.indexOf('  function bindApplicationEvents() {'),
+  desktopSource.indexOf('  function configuredProcessEnvironmentAllow() {')
+);
+const appEvents = new Map();
+let preventedQuits = 0;
+let ordinaryQuits = 0;
+let uncertainLaunch = true;
+const eventContext = {
+  eventsBound: false, process: { platform: 'win32' }, isQuitting: false, allowUpdaterQuit: true,
+  app: { on: (name, listener) => appEvents.set(name, listener) },
+  appUpdater: { getStatus: () => ({ installLaunchUncertain: uncertainLaunch }) },
+  shutdownCoordinator: { isPrepared: () => true },
+  quitApplication: async () => { ordinaryQuits += 1; }
+};
+runInNewContext(eventSource + '\nbindApplicationEvents()', eventContext);
+appEvents.get('before-quit')({ preventDefault() { preventedQuits += 1; } });
+assert.equal(preventedQuits, 1, 'an asynchronous installer error must veto the dependency queued quit even after clean shutdown');
+assert.equal(ordinaryQuits, 0, 'the quit veto must not fall through to ordinary app exit');
+uncertainLaunch = false;
+appEvents.get('before-quit')({ preventDefault() { preventedQuits += 1; } });
+assert.equal(preventedQuits, 1, 'successful installer shutdown must still be allowed');
+
+const guardedServiceSource = desktopSource.slice(
+  desktopSource.indexOf('  function assertInstallerSettled() {'),
+  desktopSource.indexOf('  function stopServer(')
+);
+let starts = 0;
+let restarts = 0;
+uncertainLaunch = true;
+const serviceContext = {
+  appUpdater: { getStatus: () => ({ installLaunchUncertain: uncertainLaunch }) },
+  syncServiceContext() {},
+  serviceRuntime: { startServer() { starts += 1; }, restartConnection() { restarts += 1; } },
+  tunnelRecoverySupervisor: null
+};
+const guardedService = runInNewContext(guardedServiceSource + '\n({ startServer, restartConnection })', serviceContext);
+assert.throws(() => guardedService.startServer(), /installer outcome is uncertain/i);
+assert.throws(() => guardedService.restartConnection(), /installer outcome is uncertain/i);
+assert.equal(starts, 0);
+assert.equal(restarts, 0);
+uncertainLaunch = false;
+guardedService.startServer();
+guardedService.restartConnection();
+assert.equal(starts, 1);
+assert.equal(restarts, 1);
 
 for (const candidate of ['bad-version', 'v0.21.0', '0.21.0-beta.1', '0.20.7', '0.19.9']) {
   const harness = createHarness();

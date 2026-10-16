@@ -13,8 +13,11 @@ export async function getExtensionsDashboard(refresh = false): Promise<Record<st
   return await extensionDashboard(readConfig(), { refresh }) as Record<string, unknown>;
 }
 
-export async function installDashboardExtension(id: string, sourceId = ''): Promise<Record<string, unknown>> {
-  return await installExtension(readConfig(), id, sourceId ? { sourceId } : {}) as Record<string, unknown>;
+export async function installDashboardExtension(id: string, sourceId = '', reviewFingerprint = ''): Promise<Record<string, unknown>> {
+  if (!sourceId || !/^[a-f0-9]{64}$/.test(reviewFingerprint)) {
+    throw new Error('The reviewed extension details are missing. Refresh the catalog and review the extension before installing.');
+  }
+  return await installExtension(readConfig(), id, { sourceId, expectedReviewFingerprint: reviewFingerprint }) as Record<string, unknown>;
 }
 
 export function removeDashboardExtension(id: string): Record<string, unknown> {

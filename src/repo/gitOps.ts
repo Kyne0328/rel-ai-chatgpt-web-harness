@@ -380,11 +380,7 @@ async function currentGitBranch(workspace: RepoWorkspace, config: RepoConfig, co
   return String(branch.stdout || "").trim();
 }
 
-function buildPrBodyFromDiff(diffText: unknown): string {
-  const changedFiles: string[] = [];
-  for (const line of String(diffText || "").split(/\r?\n/)) {
-    if (line.startsWith("+++ b/")) changedFiles.push(line.slice(6));
-  }
+function buildPrBodyFromFiles(changedFiles: string[]): string {
   const unique = [...new Set(changedFiles)];
   return [
     "## Summary",
@@ -823,24 +819,46 @@ async function relaiGitDraftPr(workspace: RepoWorkspace, config: RepoConfig, arg
   const base = String(args.base || await detectDefaultBaseBranch(workspace, config)).trim();
   const title = String(args.title || "").trim();
   const body = String(args.body || "").trim();
-  const diff = await runReadOnlyProcess("git", ["diff", `${base}...${head}`], { cwd: workspace.path, timeout: 60000, maxOutputBytes: 2 * 1024 * 1024 }, config);
+  const revisions = await runReadOnlyProcess("git", ["rev-parse", "--revs-only", "--end-of-options", `${base}^{commit}`, `${head}^{commit}`], {
+    cwd: workspace.path, timeout: 30000, maxOutputBytes: 4096
+  }, config);
+  const commits = String(revisions.stdout || "").trim().split(/\r?\n/);
+  if (!completeGitCommand(revisions) || revisions.stdoutTruncated || revisions.stdoutSpillTruncated
+    || commits.length !== 2 || commits.some(commit => !/^[a-f0-9]{40,64}$/i.test(commit))) {
+    return {
+      ok: false, workspace: workspace.alias, base, head,
+      title: title || `Merge ${head} into ${base}`, body,
+      changedFiles: [], changedFileCount: 0, emptyDiff: false, draftOnly: true, remoteChanged: false,
+      error: 'Could not resolve both pull request references to commits.',
+      revisions: summarizeCommand(revisions)
+    };
+  }
+  const [baseCommit, headCommit] = commits;
+  // Keep the patch and file list on the same snapshot even if either ref moves.
+  const revisionRange = `${baseCommit}...${headCommit}`;
+  const diff = await runReadOnlyProcess("git", ["diff", revisionRange], { cwd: workspace.path, timeout: 60000, maxOutputBytes: 2 * 1024 * 1024 }, config);
+  const fileList = await runReadOnlyProcess("git", ["diff", "--name-only", "-z", revisionRange], {
+    cwd: workspace.path, timeout: 60000, maxOutputBytes: 2 * 1024 * 1024, preserveOutputWhitespace: true
+  }, config);
   const diffText = diff.stdout || "";
-  const changedFiles = [...new Set(String(diffText).split(/\r?\n/).filter((line) => line.startsWith("+++ b/")).map((line) => line.slice(6)))];
-  const emptyDiff = diff.exitCode === 0 && changedFiles.length === 0 && !diffText.trim();
+  const filesComplete = completeGitCommand(fileList) && !fileList.stdoutTruncated;
+  const changedFiles = filesComplete ? [...new Set(String(fileList.stdout || "").split("\0").filter(Boolean))] : [];
+  const emptyDiff = completeGitCommand(diff) && filesComplete && changedFiles.length === 0 && !diffText.trim();
   return {
-    ok: diff.exitCode === 0 && !emptyDiff,
+    ok: completeGitCommand(diff) && filesComplete && !emptyDiff,
     workspace: workspace.alias,
     base,
     head,
     title: title || `Merge ${head} into ${base}`,
-    body: body || buildPrBodyFromDiff(diffText),
+    body: body || buildPrBodyFromFiles(changedFiles),
     changedFiles,
     changedFileCount: changedFiles.length,
     emptyDiff,
     draftOnly: true,
     remoteChanged: false,
     ...(emptyDiff ? { warning: `No diff between ${base} and ${head}; refusing to draft an empty pull request.` } : {}),
-    diff: summarizeCommand(diff)
+    diff: summarizeCommand(diff),
+    ...(!filesComplete ? { error: 'Could not read the complete changed-file list.', fileList: summarizeCommand(fileList) } : {})
   };
 }
 

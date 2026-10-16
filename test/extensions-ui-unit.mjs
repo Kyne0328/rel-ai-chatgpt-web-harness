@@ -19,6 +19,9 @@ assert.match(reactCode, /refresh[\s\S]*cache: 'no-store'[\s\S]*cacheTtlMs: EXTEN
 assert.match(reactCode, /invalidateCache\('\/api\/extensions'\)/, 'Extension mutations must invalidate the ordinary route cache before reloading installed state');
 assert.match(reactCode, /timeout: EXTENSIONS_LOAD_TIMEOUT_MS/, 'Extension catalog GET requests must use the dedicated longer timeout');
 
+assert.match(reactCode, /reviewFingerprint: entry\.reviewFingerprint/, 'Install requests must return the exact reviewed catalog fingerprint');
+assert.match(reactCode, /version \$\{entry\.version\} from \$\{entry\.sourceName/, 'The permission prompt must identify the reviewed version and source');
+
 // 2. CSS integration
 assert.match(reactCode, /import '\.\/styles\.css';/, 'Extensions React module must own its feature stylesheet');
 assert.match(stylesCode, /\.extensions-page/, 'styles.css must style extensions-page');

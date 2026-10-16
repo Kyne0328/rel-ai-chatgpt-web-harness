@@ -86,11 +86,13 @@ function createTaskActivityRuntime(options) {
   let status = normalizeActivityStatus(toolActivity.getToolActivity?.() || {});
   let keepAwakeEnabled = false;
 
-  const unsubscribe = toolActivity.onToolActivity(handleActivity);
+  let stopped = false;
+  let unsubscribe = toolActivity.onToolActivity(handleActivity);
   syncBlocker(status);
   emitStatus();
 
   function handleActivity(event = {}) {
+    if (stopped) return;
     if (event.phase === 'snapshot' && event.snapshot) {
       status = normalizeActivityStatus(event.snapshot);
       syncBlocker(status, event);
@@ -118,6 +120,7 @@ function createTaskActivityRuntime(options) {
   }
 
   function syncBlocker(activity = status, event = {}) {
+    if (stopped) return;
     const connectorCalls = Number(Object.hasOwn(event, 'activeConnectorCalls')
       ? event.activeConnectorCalls
       : activity.activeConnectorCalls || 0);
@@ -157,12 +160,26 @@ function createTaskActivityRuntime(options) {
     return { ok: true };
   }
 
+  function start() {
+    if (!stopped) return false;
+    status = normalizeActivityStatus(toolActivity.getToolActivity?.() || {});
+    stopped = false;
+    unsubscribe = toolActivity.onToolActivity(handleActivity);
+    syncBlocker(status);
+    emitStatus();
+    return true;
+  }
+
   function stop() {
+    if (stopped) return false;
+    stopped = true;
     unsubscribe();
     blocker.stop();
+    return true;
   }
 
   return {
+    start,
     getStatus: currentStatus,
     resetHistory,
     setKeepAwakeEnabled,

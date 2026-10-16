@@ -74,6 +74,8 @@ function createAppUpdater(options = {}) {
   let lastReleaseDiscoveryAt = 0;
   let retryingOperation = null;
   let installDeferred = false;
+  let installAttempt = null;
+  let installLaunchUncertain = false;
   let started = false;
   let lifecycleGeneration = 0;
   let status = normalizeStatus({
@@ -84,7 +86,7 @@ function createAppUpdater(options = {}) {
     installMode: platform === 'darwin' ? 'open_dmg' : 'restart'
   });
 
-  function start() {
+  function start({ preserveState = false } = {}) {
     if (started) return snapshot();
     started = true;
     lifecycleGeneration += 1;
@@ -123,7 +125,7 @@ function createAppUpdater(options = {}) {
         : AUTO_CHECK_DELAY_MS;
       scheduleReleaseDiscovery(discoveryDelay);
     });
-    emit({ state: 'idle' });
+    emit(preserveState || installAttempt ? {} : { state: 'idle' });
     return snapshot();
   }
 
@@ -142,7 +144,7 @@ function createAppUpdater(options = {}) {
   }
 
   function acceptsUpdaterEvent(generation = lifecycleGeneration) {
-    return isCurrentGeneration(generation)
+    return isCurrentGeneration(generation) && !installAttempt
       && (!retryingOperation || retryingOperation.generation === generation);
   }
 
@@ -192,6 +194,7 @@ function createAppUpdater(options = {}) {
   }
 
   async function downloadUpdate() {
+    if (installAttempt) return failure(codes.busy, updateBusyMessage(), false);
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
     const generation = lifecycleGeneration;
     if (!isCurrentGeneration(generation)) return { ok: true, skipped: true, status: snapshot() };
@@ -228,6 +231,7 @@ function createAppUpdater(options = {}) {
   }
 
   async function installUpdate(options = {}) {
+    if (installAttempt) return failure(codes.busy, updateBusyMessage(), false);
     if (!support.supported) return failure(codes.unsupported, support.reason, false);
     if (retryingOperation) return failure(codes.busy, updateBusyMessage(), false);
     if (status.state !== 'downloaded' || status.integrityVerified !== true) {
@@ -243,25 +247,56 @@ function createAppUpdater(options = {}) {
     }
     installDeferred = false;
     if (platform === 'darwin') return openMacUpdate();
+    const attempt = { launchInvoked: false, recovery: null, onError: null };
+    installAttempt = attempt;
+    // Shutdown removes normal discovery listeners. This observer owns installer
+    // failures until the process exits, including electron-updater's async errors.
+    attempt.onError = error => { void recoverInstallAttempt(attempt, error); };
+    autoUpdater.on('error', attempt.onError);
     emit({ state: 'installing', error: '', errorCode: '' });
     log(`Closing Rel.AI MCP to install ${status.availableVersion || 'update'}. The app will reopen automatically when the update is done.`);
     try {
       await onBeforeInstall();
+      if (attempt.recovery) return await attempt.recovery;
       await onInstallCommit();
+      if (attempt.recovery) return await attempt.recovery;
       await onInstallerLaunch();
-      autoUpdater.quitAndInstall(true, true);
+      if (attempt.recovery) return await attempt.recovery;
+      attempt.launchInvoked = true;
+      // BaseUpdater returns void and emits errors; some adapters also reject.
+      // Returning here acknowledges the request, not successful installation.
+      await autoUpdater.quitAndInstall(true, true);
+      if (attempt.recovery) return await attempt.recovery;
       return { ok: true, installing: true, status: snapshot() };
     } catch (error) {
+      return recoverInstallAttempt(attempt, error);
+    }
+  }
+
+  function recoverInstallAttempt(attempt, error) {
+    if (attempt.recovery) return attempt.recovery;
+    const launchUncertain = attempt.launchInvoked;
+    if (launchUncertain) installLaunchUncertain = true;
+    attempt.recovery = Promise.resolve().then(async () => {
       try {
-        await onInstallFailed(error);
+        await onInstallFailed(error, { launchUncertain });
       } catch (recoveryError) {
         log(`Update recovery failed: ${cleanText(recoveryError?.message || recoveryError, 400)}`, {
           level: 'warning',
           code: codes.failed
         });
       }
+      if (launchUncertain) {
+        const message = 'The installer outcome could not be confirmed. Local work is paused. Quit Rel.AI and verify that the installer has finished before reopening or trying another update.';
+        log(cleanText(error?.message || error, 600), { level: 'error', code: codes.failed });
+        emit({ state: 'error', errorCode: codes.failed, error: message, integrityVerified: false, progress: null });
+        return failure(codes.failed, message, false);
+      }
+      autoUpdater.removeListener?.('error', attempt.onError);
+      installAttempt = null;
       return handleInstallPreparationError(error);
-    }
+    });
+    return attempt.recovery;
   }
 
   async function openMacUpdate() {
@@ -318,7 +353,7 @@ function createAppUpdater(options = {}) {
   }
 
   async function discoverUpdate({ force = false } = {}) {
-    if (!support.supported || !started) return { ok: true, skipped: true, status: snapshot() };
+    if (!support.supported || !started || installAttempt) return { ok: true, skipped: true, status: snapshot() };
     if (['available', 'downloading', 'downloaded', 'installing'].includes(status.state)) {
       return { ok: true, skipped: true, status: snapshot() };
     }
@@ -424,7 +459,7 @@ function createAppUpdater(options = {}) {
     // The awaited check/download owns failures while it is running. electron-updater can
     // emit the same error before rejecting, so handling both paths would duplicate status
     // changes, logs, and user notifications.
-    if (retryingOperation) return;
+    if (retryingOperation || installAttempt) return;
     return handleError(error);
   }
 
@@ -445,7 +480,7 @@ function createAppUpdater(options = {}) {
   }
 
   function isBusy() {
-    return Boolean(retryingOperation) || ['checking', 'downloading', 'installing'].includes(status.state);
+    return Boolean(retryingOperation || installAttempt) || ['checking', 'downloading', 'installing'].includes(status.state);
   }
 
   function failure(errorCode, error, retryable) {
@@ -484,6 +519,8 @@ function createAppUpdater(options = {}) {
       ...current,
       progress: current.progress ? { ...current.progress } : null,
       updateChannel: updateChannel(),
+      installLaunchUncertain,
+      ...(installLaunchUncertain ? { canCheck: false, canDownload: false, canInstall: false } : {}),
       installDeferred,
       installBlockedReason,
       canDeferInstall: Boolean(installBlockedReason) && !installDeferred

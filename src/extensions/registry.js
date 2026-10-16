@@ -596,7 +596,8 @@ async function loadExtensionCatalogSources(config = {}, options = {}) {
       sourceName: descriptor.name,
       sourceOfficial: descriptor.official === true,
       sourceRepositoryUrl: descriptor.repositoryUrl,
-      sourceCatalogUrl: descriptor.catalogUrl
+      sourceCatalogUrl: descriptor.catalogUrl,
+      reviewFingerprint: extensionReviewFingerprint(descriptor, entry)
     }));
     entries.push(...sourceEntries);
     sources.push({
@@ -999,6 +1000,29 @@ function finalizeManagedCommandInstall(install) {
   }
 }
 
+function extensionReviewFingerprint(source, entry) {
+  // Fixed fields make the review independent of object ordering and derived UI state.
+  const reviewed = {
+    sourceId: source.id,
+    sourceCatalogUrl: source.catalogUrl,
+    sourceRepositoryUrl: source.repositoryUrl,
+    sourceName: source.name,
+    sourceOfficial: source.official === true,
+    id: entry.id,
+    name: entry.name,
+    version: entry.version,
+    description: entry.description,
+    kind: entry.kind,
+    manifestUrl: entry.manifestUrl,
+    repository: entry.repository,
+    publisher: entry.publisher,
+    permissions: [...entry.permissions].sort(),
+    autoInstall: entry.autoInstall === true,
+    featured: entry.featured === true
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(reviewed)).digest('hex');
+}
+
 async function installExtension(config, id, options = {}) {
   const lease = acquireExtensionOperation(config);
   try {
@@ -1015,6 +1039,12 @@ function assertExtensionRecovery(config, lease) {
 async function installExtensionUnderLease(config, id, options) {
   const extensionId = normalizeExtensionId(id);
   const { source, entry } = await resolveExtensionInstallSource(config, extensionId, options);
+  if (options.expectedReviewFingerprint !== undefined && (
+    !SHA256_PATTERN.test(String(options.expectedReviewFingerprint))
+    || options.expectedReviewFingerprint !== extensionReviewFingerprint(source, entry)
+  )) {
+    throw new Error('The extension details changed after review. Refresh the catalog and review the extension again before installing.');
+  }
   const target = path.join(extensionsRoot(config), extensionId);
   if (fs.existsSync(target)) {
     const installedMetadata = readExtensionInstallMetadata(target);

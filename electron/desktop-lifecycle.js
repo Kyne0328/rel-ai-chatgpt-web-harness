@@ -103,6 +103,15 @@ function createDesktopLifecycleManager(options = {}) {
     return snapshot();
   }
 
+  async function resumeAfterShutdown() {
+    // An aborted update resumes this process; do not count it as a new launch.
+    launchId ||= crypto.randomUUID();
+    if (!await writeState(persistedState(true))) {
+      throw Object.assign(new Error('Desktop recovery state could not be restored.'), { code: codes.state });
+    }
+    return snapshot();
+  }
+
   function getStatus() {
     status = { ...status, launchAtLogin: readLaunchAtLogin() };
     return snapshot();
@@ -289,6 +298,7 @@ function createDesktopLifecycleManager(options = {}) {
   return {
     start: () => serialize(start),
     markCleanShutdown: () => serialize(markCleanShutdown),
+    resumeAfterShutdown: () => serialize(resumeAfterShutdown),
     getStatus,
     acknowledgeConnectorRefresh: () => serialize(acknowledgeConnectorRefresh),
     setLaunchAtLogin,

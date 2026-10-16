@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { createPlaywrightBrowserDriver } from '../src/browser/playwrightBrowserDriver.ts';
 
 import {
   configureBrowserNativeBridge,
@@ -146,4 +148,98 @@ for (const failure of ['reject', 'negative-result']) {
 }
 
 
-console.log('Embedded browser native driver bridge and lifecycle events passed.');
+
+for (const eventOrder of ['before-result', 'after-result']) {
+  const fixture = createPlaywrightFixture(eventOrder);
+  const driver = createPlaywrightBrowserDriver(fixture.context, fixture.browser, { persistent: false, browserProduct: 'Fixture Chromium' });
+  const observed = [];
+  driver.onPageCreated((page, active) => observed.push({ page, active }));
+  const explicit = await driver.createPage();
+  if (eventOrder === 'after-result') fixture.context.emit('page', fixture.lastPage);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].page, explicit, 'explicit createPage and context events must share exact wrapper identity');
+  fixture.context.emit('page', fixture.lastPage);
+  assert.equal(observed.length, 1, 'duplicate context events must not re-register a page');
+
+  const popup = fixture.makePage('https://example.test/popup');
+  fixture.context.emit('page', popup);
+  assert.equal(observed.length, 2, 'Playwright popup events must reach the runtime registration callback');
+  assert.equal(observed[1].active, true);
+  assert.equal((await observed[1].page.describe()).url, 'https://example.test/popup');
+  let closed = 0;
+  observed[1].page.onClosed(() => { closed += 1; });
+  await popup.close();
+  assert.equal(closed, 1, 'popup close events must reach the same registered wrapper');
+
+  fixture.failClose = true;
+  await assert.rejects(() => driver.close(), /fixture context close failed/);
+  assert.equal(fixture.context.listenerCount('page'), 1, 'failed close must retain registration until cleanup succeeds');
+  fixture.context.emit('page', fixture.makePage('https://example.test/retained'));
+  assert.equal(observed.length, 3);
+  fixture.failClose = false;
+  await driver.close();
+  assert.equal(fixture.context.listenerCount('page'), 0);
+  assert.equal(fixture.context.listenerCount('close'), 0);
+  assert.equal(fixture.browser.listenerCount('disconnected'), 0);
+  fixture.context.emit('page', fixture.makePage());
+  assert.equal(observed.length, 3, 'closed fallback drivers must release popup callbacks');
+}
+
+{
+  const fixture = createPlaywrightFixture('before-result');
+  const driver = createPlaywrightBrowserDriver(fixture.context, undefined, { persistent: true, browserProduct: 'Persistent Fixture' });
+  const early = fixture.makePage('https://example.test/early');
+  const alreadyClosed = fixture.makePage('https://example.test/closed');
+  fixture.context.emit('page', early);
+  fixture.context.emit('page', alreadyClosed);
+  await alreadyClosed.close();
+  const observed = [];
+  driver.onPageCreated(page => observed.push(page));
+  assert.equal(observed.length, 1, 'pages opened before callback registration must be delivered unless already closed');
+  assert.equal((await observed[0].describe()).url, 'https://example.test/early');
+  let disconnected = 0;
+  driver.onDisconnected(() => { disconnected += 1; });
+  fixture.context.emit('close');
+  assert.equal(disconnected, 1, 'persistent contexts must report disconnect even without a Browser object');
+  assert.equal(fixture.context.listenerCount('page'), 0);
+  driver.onPageCreated(page => observed.push(page));
+  fixture.context.emit('page', fixture.makePage());
+  assert.equal(observed.length, 1, 'disconnected fallback drivers must not restore registration listeners');
+}
+
+function createPlaywrightFixture(eventOrder) {
+  const context = new EventEmitter();
+  const browser = new EventEmitter();
+  const fixture = {
+    context,
+    browser,
+    failClose: false,
+    lastPage: null,
+    makePage(url = 'about:blank') {
+      const page = new EventEmitter();
+      let closed = false;
+      Object.assign(page, {
+        url: () => url,
+        title: async () => 'Fixture page',
+        frames: () => [],
+        mainFrame: () => null,
+        isClosed: () => closed,
+        close: async () => { closed = true; page.emit('close'); }
+      });
+      return page;
+    }
+  };
+  context.newPage = async () => {
+    fixture.lastPage = fixture.makePage();
+    if (eventOrder === 'before-result') context.emit('page', fixture.lastPage);
+    return fixture.lastPage;
+  };
+  context.close = async () => {
+    if (fixture.failClose) throw new Error('fixture context close failed');
+    context.emit('close');
+  };
+  browser.close = async () => {};
+  return fixture;
+}
+
+console.log('Embedded and Playwright browser driver lifecycle events passed.');

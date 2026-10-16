@@ -27,7 +27,7 @@ async function relaiSearchOne(workspace, config, args = {}, context = {}) {
   if (!pattern.trim()) throw new Error("relai_search requires a non-empty pattern.");
   if (pattern.length > 1000) throw new Error("relai_search pattern must be 1000 characters or fewer.");
   const maxResults = clampNumber(args.maxResults, 1, 1000, DEFAULT_MAX_RESULTS);
-  const gitArgs = ["grep", "-n", "-I", "--untracked", "--no-color", args.fixed === true ? "-F" : "-E"];
+  const gitArgs = ["grep", "-n", "-z", "-I", "--untracked", "--no-color", args.fixed === true ? "-F" : "-E"];
   if (args.ignoreCase === true) gitArgs.push("-i");
   gitArgs.push("-e", pattern);
   const glob = String(args.glob || "").trim();
@@ -364,11 +364,13 @@ function runGitGrep(workspace, gitArgs, maxResults, signal) {
     function consumeChunk(text, flush = false) {
       if (settled || terminating) return;
       pending += text;
-      let newlineIndex = pending.indexOf("\n");
-      while (!settled && !terminating && newlineIndex >= 0) {
+      while (!settled && !terminating) {
+        const pathEnd = pending.indexOf("\0");
+        const lineEnd = pathEnd < 0 ? -1 : pending.indexOf("\0", pathEnd + 1);
+        const newlineIndex = lineEnd < 0 ? -1 : pending.indexOf("\n", lineEnd + 1);
+        if (newlineIndex < 0) break;
         consumeLine(pending.slice(0, newlineIndex));
         pending = pending.slice(newlineIndex + 1);
-        newlineIndex = pending.indexOf("\n");
       }
       if (!settled && flush && pending) {
         consumeLine(pending);
@@ -461,8 +463,8 @@ function searchAbortError(signal) {
 }
 
 function parseGitGrepLine(line) {
-  const first = line.indexOf(":");
-  const second = line.indexOf(":", first + 1);
+  const first = line.indexOf("\0");
+  const second = line.indexOf("\0", first + 1);
   if (first <= 0 || second <= first) return null;
   const relativePath = line.slice(0, first);
   const lineNumber = Number(line.slice(first + 1, second));

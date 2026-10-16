@@ -7,7 +7,7 @@ function buildWorkflowEvidenceReceipt({ tool = '', args = {}, result = {}, audit
   if (!kind) return null;
   const command = normalizeCommand(args.command || result.commandSummary || result.command || '');
   const cwd = normalizeCwd(args.cwd || result.cwd || '.');
-  const outcome = result.ok === false || result.commandSucceeded === false
+  const outcome = result.ok === false || result.commandSucceeded === false || (kind === 'check' && hasUnsettledExecution(result))
     ? 'failed'
     : kind === 'check' ? 'passed' : 'observed';
   const target = safeTarget(args, result);
@@ -35,6 +35,7 @@ function buildWorkflowEvidenceReceipt({ tool = '', args = {}, result = {}, audit
 
 function checkEvidenceReusable(receipt, current = {}) {
   return Boolean(receipt && receipt.kind === 'check' && receipt.outcome === 'passed'
+    && !hasUnsettledExecution(receipt.metadata)
     && String(receipt.commandId || '') === String(current.commandId || '')
     && normalizeCommand(receipt.command) === normalizeCommand(current.command)
     && normalizeCwd(receipt.cwd) === normalizeCwd(current.cwd)
@@ -42,6 +43,11 @@ function checkEvidenceReusable(receipt, current = {}) {
     && String(receipt.repositoryFingerprint) === String(current.repositoryFingerprint || '')
     && generationMatches(receipt.mutationGeneration, current.mutationGeneration)
     && generationMatches(receipt.workspaceGeneration, current.workspaceGeneration));
+}
+
+function hasUnsettledExecution(result = {}) {
+  return result?.executed === false || result?.timedOut === true || result?.cancelled === true
+    || result?.terminationConfirmed === false || result?.terminationConfirmed === null;
 }
 
 function generationMatches(stored, current) {
@@ -118,6 +124,9 @@ function safeIso(value) { const parsed = Date.parse(value || ''); return Number.
 function nonNegativeInt(value) { const number = Number(value); return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0; }
 function compactMetadata(result = {}, tool = '') {
   const output = {};
+  for (const key of ['executed', 'timedOut', 'cancelled', 'terminationConfirmed']) {
+    if (typeof result[key] === 'boolean' || (key === 'terminationConfirmed' && result[key] === null)) output[key] = result[key];
+  }
   if (Number.isFinite(Number(result.exitCode))) output.exitCode = Number(result.exitCode);
   if (Number.isFinite(Number(result.durationMs))) output.durationMs = Math.max(0, Number(result.durationMs));
   if (result.validationStatus) output.validationStatus = String(result.validationStatus).slice(0, 40);

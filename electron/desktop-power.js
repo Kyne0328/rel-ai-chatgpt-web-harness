@@ -35,7 +35,9 @@ function createDesktopPowerIntegration(options = {}) {
   }
 
   function start() {
-    if (stopped || resumeBound) return false;
+    if (resumeBound) return false;
+    activityRuntime.start();
+    stopped = false;
     powerMonitor.on('resume', handleResume);
     resumeBound = true;
     return true;

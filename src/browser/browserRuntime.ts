@@ -207,7 +207,10 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
           if (!closingSessions.has(sessionId)) removeSession(acquired);
         });
         driver.onPageCreated?.((page, active) => {
-          if (acquired.tabs.size >= MAX_ACTIVE_BROWSER_TABS_PER_SESSION) {
+          if ([...acquired.tabs.values()].some(tab => tab.page === page)) return;
+          if (sessions.get(sessionId) !== acquired || closingSessions.has(sessionId) || shutdownPromise
+            || taskCleanups.has(acquired.attribution.taskId)
+            || acquired.tabs.size >= MAX_ACTIVE_BROWSER_TABS_PER_SESSION) {
             void page.close().catch(() => {});
             return;
           }
@@ -485,10 +488,24 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       throw taskError('BROWSER_TAB_LIMIT', `Rel.AI supports at most ${MAX_ACTIVE_BROWSER_TABS_PER_SESSION} tabs in one local browser session.`);
     }
     const page = await withAbortResource(record.driver.createPage(signal), signal, page => page.close(), browserCancellationError);
+    if (sessions.get(record.sessionId) !== record || closingSessions.has(record.sessionId) || shutdownPromise
+      || taskCleanups.has(record.attribution.taskId)) {
+      await page.close();
+      throw taskError('BROWSER_SESSION_CLOSING', 'The local browser session closed while opening a tab.');
+    }
+    if (![...record.tabs.values()].some(tab => tab.page === page) && record.tabs.size >= MAX_ACTIVE_BROWSER_TABS_PER_SESSION) {
+      await page.close();
+      throw taskError('BROWSER_TAB_LIMIT', `Rel.AI supports at most ${MAX_ACTIVE_BROWSER_TABS_PER_SESSION} tabs in one local browser session.`);
+    }
     return registerTab(record, page, true);
   }
 
   function registerTab(record: BrowserSessionRecord, page: BrowserPageDriver, active: boolean): BrowserTabRecord {
+    const existing = [...record.tabs.values()].find(tab => tab.page === page);
+    if (existing) {
+      if (active) record.activeTabId = existing.tabId;
+      return existing;
+    }
     const tab: BrowserTabRecord = {
       tabId: `tab_${crypto.randomBytes(24).toString('base64url')}`,
       page,

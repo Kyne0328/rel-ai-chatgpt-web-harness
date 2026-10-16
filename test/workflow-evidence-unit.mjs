@@ -40,6 +40,25 @@ assert.equal(checkEvidenceReusable(receipt, {
   mutationGeneration: 3, workspaceGeneration: 9
 }), false, 'workspace mutation generation changes must invalidate a prior pass');
 
+const reuseTarget = {
+  commandId: 'npm:front-end:test', command: 'npm test', cwd: 'front-end', repositoryFingerprint: 'fingerprint-a'
+};
+for (const evidence of [
+  { terminationConfirmed: false }, { terminationConfirmed: null },
+  { executed: false }, { timedOut: true }, { cancelled: true }
+]) {
+  const uncertain = buildWorkflowEvidenceReceipt({
+    tool: OP.VALIDATE_CHECKS, args: { command: 'npm test', cwd: 'front-end' },
+    result: { ok: true, exitCode: 0, ...evidence }, auditEntry,
+    repositoryFingerprint: 'fingerprint-a', commandId: 'npm:front-end:test'
+  });
+  assert.notEqual(uncertain.outcome, 'passed', 'explicit unsettled execution must not create passing evidence');
+  for (const [key, value] of Object.entries(evidence)) assert.equal(uncertain.metadata[key], value);
+  assert.equal(checkEvidenceReusable(uncertain, reuseTarget), false);
+  assert.equal(checkEvidenceReusable({ ...receipt, metadata: { ...receipt.metadata, ...evidence } }, reuseTarget), false,
+    'an older receipt labelled passed must still honor its explicit uncertainty');
+}
+
 const failures = [
   buildWorkflowEvidenceReceipt({ tool: OP.EXEC, args: { command: 'npm test', cwd: 'front-end' }, result: { ok: false, exitCode: 1, errorCode: 'EXIT_1' }, auditEntry, repositoryFingerprint: 'x', commandId: 'npm:front-end:test' }),
   buildWorkflowEvidenceReceipt({ tool: OP.EXEC, args: { command: 'npm test', cwd: 'front-end' }, result: { ok: false, exitCode: 1, errorCode: 'EXIT_1' }, auditEntry: { ...auditEntry, taskMutationGeneration: 4 }, repositoryFingerprint: 'y', commandId: 'npm:front-end:test' })

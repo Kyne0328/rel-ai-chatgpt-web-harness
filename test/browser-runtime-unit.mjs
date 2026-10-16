@@ -70,6 +70,15 @@ const handoff = await runtime.handoff(workspace, { sessionId, tabId: firstTabId,
 assert.equal(handoff.status, 'user_input_required');
 assert.equal(handoff.handoff?.reason, 'mfa');
 assert.deepEqual(fake.state.controlChanges.at(-1), { owner: 'user', reason: 'mfa' });
+const popup = await fake.state.drivers.at(-1).createPage();
+const popupTabs = await runtime.listTabs(workspace, { sessionId, work_id: context.taskId }, context);
+assert.equal(popupTabs.count, 2, 'website-created pages must appear while the user owns the browser');
+const popupTabId = popupTabs.tabs.find(tab => tab.tabId !== firstTabId).tabId;
+await assert.rejects(
+  () => runtime.snapshot(workspace, { sessionId, tabId: popupTabId, work_id: context.taskId }, context),
+  error => error?.code === 'BROWSER_USER_CONTROL_ACTIVE',
+  'new popup tabs must inherit the session handoff boundary'
+);
 for (const blocked of [
   () => runtime.snapshot(workspace, { sessionId, tabId: firstTabId, work_id: context.taskId }, context),
   () => runtime.screenshot(workspace, { sessionId, tabId: firstTabId, work_id: context.taskId }, context),
@@ -81,6 +90,8 @@ const resumed = await runtime.resume(workspace, { sessionId, work_id: context.ta
 assert.equal(resumed.status, 'ready');
 assert.equal(resumed.handoff, null);
 assert.deepEqual(fake.state.controlChanges.at(-1), { owner: 'ai', reason: '' });
+await runtime.closeTab(workspace, { sessionId, tabId: popupTabId, work_id: context.taskId }, context);
+assert.equal(popup.isClosed, true);
 
 const expiringHandoff = await runtime.handoff(workspace, { sessionId, tabId: firstTabId, reason: 'sign_in', work_id: context.taskId }, context);
 assert.ok(Date.parse(expiringHandoff.handoff?.expiresAt || '') - Date.parse(expiringHandoff.handoff?.startedAt || '') === BROWSER_HANDOFF_TTL_MS,
@@ -124,6 +135,12 @@ for (let index = 0; index < 7; index += 1) {
     work_id: context.taskId
   }, context));
 }
+assert.equal((await runtime.listTabs(workspace, { sessionId, work_id: context.taskId }, context)).count, 8);
+const fullDriver = fake.state.drivers.at(-1);
+fullDriver.emitPage(fullDriver.pages[0]);
+assert.equal(fullDriver.pages[0].isClosed, false, 'duplicate registration at capacity must not close a tracked page');
+const overflowPopup = await fullDriver.createPage();
+assert.equal(overflowPopup.isClosed, true, 'website popups must obey the same tab limit');
 assert.equal((await runtime.listTabs(workspace, { sessionId, work_id: context.taskId }, context)).count, 8);
 await assert.rejects(
   () => runtime.openTab(workspace, { sessionId, url: 'https://intranet.example.test/overflow', work_id: context.taskId }, context),
@@ -385,14 +402,19 @@ function createFakeBrowserHarness() {
       throw new Error('simulated launch failure');
     }
     let disconnected = null;
+    let pageCreated = null;
     let pageCounter = 0;
     const pages = [];
     const driver = {
       browserProduct: 'Fake Local Chromium',
+      pages,
+      onPageCreated(listener) { pageCreated = listener; },
+      emitPage(page, active = true) { pageCreated?.(page, active); },
       async createPage() {
         pageCounter += 1;
         let url = 'about:blank';
         let closed = null;
+        let isClosed = false;
         let crashed = null;
         const page = {
           async describe() { return { url, title: `Tab ${pageCounter}` }; },
@@ -408,12 +430,14 @@ function createFakeBrowserHarness() {
           async screenshot() {
             return { url, image: { mimeType: 'image/png', data: 'ZmFrZQ==', bytes: 4, width: 800, height: 600 } };
           },
-          async close() { closed?.(); },
+          get isClosed() { return isClosed; },
+          async close() { isClosed = true; closed?.(); },
           onClosed(listener) { closed = listener; },
           onCrashed(listener) { crashed = listener; },
           crash() { crashed?.(); }
         };
         pages.push(page);
+        pageCreated?.(page, true);
         return page;
       },
       async close() {

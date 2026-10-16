@@ -40,6 +40,15 @@ export function patchLocalConnection(patch = {}) {
   return _state;
 }
 
+export function patchComputerControl(settings = {}) {
+  _state = {
+    ..._state,
+    config: { ...(_state.config || {}), computerControl: { ...(_state.config?.computerControl || {}), ...settings } }
+  };
+  commit();
+  return _state;
+}
+
 export function applyLiveEvent(type, payload = {}) {
   const domain = domainForEvent(type);
   if (!domain) return { accepted: false, state: _state, domain: '' };

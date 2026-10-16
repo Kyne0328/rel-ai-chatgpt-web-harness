@@ -5,12 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gzipSync } from 'node:zlib';
+import { Readable } from 'node:stream';
+import { handleApiExtensionsAction } from '../src/http/dashboardExtensions.ts';
 import sevenZip from '7zip-bin';
 import { discoverSkillInventory } from '../src/skillDiscovery.js';
 import { makeDefaultConfig, invalidateConfigCache, writeConfig } from '../src/config.js';
 import {
   addDashboardExtensionSource,
   getExtensionsDashboard,
+  installDashboardExtension,
   removeDashboardExtensionSource
 } from '../src/core/extensions.ts';
 import {
@@ -408,8 +411,10 @@ try {
 
 const originalFetch = globalThis.fetch;
 const extraResponses = new Map();
+const fetchRequests = [];
 globalThis.fetch = async url => {
   const href = String(url);
+  fetchRequests.push(href);
   if (href === catalogUrl) return responseJson(catalog);
   if (href === manifestUrl) return responseJson(manifest);
   if (href === skillUrl) return new Response(skill, { status: 200 });
@@ -431,6 +436,36 @@ globalThis.fetch = async url => {
 };
 
 try {
+  const reviewed = (await extensionDashboard(config, { catalogUrl })).catalog.find(item => item.id === manifest.id);
+  assert.match(reviewed.reviewFingerprint, /^[a-f0-9]{64}$/);
+  const reviewedEntry = catalog.extensions.find(item => item.id === manifest.id);
+  for (const change of [
+    { version: '1.0.1' },
+    { permissions: ['workspace.read', 'workspace.write'] },
+    { autoInstall: true },
+    { manifestUrl: 'https://changed.test/relai-extension.json' },
+    { publisher: 'Different publisher' }
+  ]) {
+    const before = { ...reviewedEntry };
+    Object.assign(reviewedEntry, change);
+    const requestCount = fetchRequests.length;
+    try {
+      await assert.rejects(
+        () => installExtension(config, manifest.id, { catalogUrl, expectedReviewFingerprint: reviewed.reviewFingerprint }),
+        /changed after review.*Refresh the catalog/i,
+        `review must bind catalog metadata: ${Object.keys(change)[0]}`
+      );
+      assert.deepEqual(fetchRequests.slice(requestCount), [catalogUrl], 'drift must be rejected before downloading a manifest or artifact');
+      assert.equal(listInstalledExtensions(config).length, 0, 'rejected review must not install a package');
+    } finally {
+      Object.assign(reviewedEntry, before);
+    }
+  }
+  await assert.rejects(
+    () => installExtension(config, manifest.id, { catalogUrl, sourceId: 'different-source', expectedReviewFingerprint: reviewed.reviewFingerprint }),
+    /changed after review/i,
+    'review must bind the exact source as well as extension metadata'
+  );
   const installed = await installExtension(config, manifest.id, { catalogUrl });
   assert.equal(installed.ready, true);
   assert.equal(listInstalledExtensions(config).find(item => item.id === manifest.id)?.version, '1.0.0');
@@ -668,7 +703,41 @@ try {
     const persistedAfterAdd = JSON.parse(fs.readFileSync(coreConfigPath, 'utf8'));
     assert.deepEqual(persistedAfterAdd.extensions.sources, [{ repositoryUrl: customRepositoryUrl, catalogUrl: customCatalogUrl }]);
     const coreDashboard = await getExtensionsDashboard(true);
-    assert.equal(coreDashboard.catalog.some(item => item.id === customManifest.id), true);
+    const coreEntry = coreDashboard.catalog.find(item => item.id === customManifest.id);
+    assert.ok(coreEntry);
+    const beforeMissingReview = fetchRequests.length;
+    for (const [sourceId, fingerprint] of [
+      [coreEntry.sourceId, undefined],
+      ['', coreEntry.reviewFingerprint],
+      [coreEntry.sourceId, 'invalid']
+    ]) {
+      await assert.rejects(() => installDashboardExtension(customManifest.id, sourceId, fingerprint), /reviewed extension details are missing.*Refresh/i);
+    }
+    for (const action of ['install', 'update']) {
+      const missingReview = await dashboardExtensionAction({ action, id: coreEntry.id, sourceId: coreEntry.sourceId, confirmPermissions: true });
+      assert.equal(missingReview.ok, false);
+      assert.match(missingReview.error, /reviewed extension details are missing.*Refresh/i);
+      const unconfirmed = await dashboardExtensionAction({ action, id: coreEntry.id, sourceId: coreEntry.sourceId, reviewFingerprint: coreEntry.reviewFingerprint });
+      assert.equal(unconfirmed.ok, false);
+      assert.match(unconfirmed.error, /Review the extension permissions/i);
+    }
+    assert.equal(fetchRequests.length, beforeMissingReview, 'dashboard installs without an exact review must fail before network access');
+    const reviewedInstall = await installDashboardExtension(customManifest.id, coreEntry.sourceId, coreEntry.reviewFingerprint);
+    assert.equal(reviewedInstall.version, customManifest.version, 'an unchanged reviewed catalog entry must install successfully');
+    const reviewedUpdate = await dashboardExtensionAction({ action: 'update', id: coreEntry.id, sourceId: coreEntry.sourceId, reviewFingerprint: coreEntry.reviewFingerprint, confirmPermissions: true });
+    assert.equal(reviewedUpdate.ok, true, 'the dashboard HTTP boundary must forward a valid review fingerprint');
+    const oldVersion = customManifest.version;
+    customManifest.version = '1.0.1';
+    customCatalog.extensions[0].version = '1.0.1';
+    try {
+      const staleReview = await dashboardExtensionAction({ action: 'update', id: coreEntry.id, sourceId: coreEntry.sourceId, reviewFingerprint: coreEntry.reviewFingerprint, confirmPermissions: true });
+      assert.equal(staleReview.ok, false);
+      assert.match(staleReview.error, /changed after review.*Refresh/i);
+      assert.equal((await getExtensionsDashboard()).installed.find(item => item.id === customManifest.id).version, oldVersion, 'a stale update approval must preserve the installed version');
+    } finally {
+      customManifest.version = oldVersion;
+      customCatalog.extensions[0].version = oldVersion;
+    }
     const removedSource = removeDashboardExtensionSource(addedSource.source.id);
     assert.equal(removedSource.removed, true);
     const persistedAfterRemove = JSON.parse(fs.readFileSync(coreConfigPath, 'utf8'));
@@ -686,6 +755,15 @@ try {
 }
 
 console.log('Extension registry contracts passed.');
+
+async function dashboardExtensionAction(payload) {
+  const req = Readable.from([Buffer.from(JSON.stringify(payload))]);
+  req.headers = {};
+  let result;
+  const res = { writeHead() {}, end(body) { result = JSON.parse(body); } };
+  await handleApiExtensionsAction({ req, res, options: { maxBodyBytes: 16 * 1024 } });
+  return result;
+}
 
 function catalogEntry(extension, url, featured = false) {
   return {

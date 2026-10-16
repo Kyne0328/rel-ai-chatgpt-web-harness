@@ -145,7 +145,7 @@ export function completeDashboardOnboarding(payload: JsonRecord): JsonRecord {
 }
 
 export async function updateDashboardWorkspace(payload: JsonRecord): Promise<JsonRecord> {
-  const current = readConfig();
+  let current = readConfig();
   const action = String(payload.action || 'upsert').toLowerCase();
   if (action === 'project_access') {
     return configEditor.updateProjectAccess(current, {
@@ -154,21 +154,22 @@ export async function updateDashboardWorkspace(payload: JsonRecord): Promise<Jso
   }
   const workspaceConfig = asJsonRecord(payload.workspaceConfig);
   const originalAlias = String(payload.originalAlias || workspaceConfig.originalAlias || payload.alias || payload.workspace || '').trim();
-  const previousWorkspace = current.workspaces?.[originalAlias]
+  const previousWorkspaceConfig = current.workspaces?.[originalAlias];
+  const previousWorkspace = previousWorkspaceConfig
     ? { alias: originalAlias, ...current.workspaces[originalAlias] }
     : null;
   const deleting = previousWorkspace && ['delete', 'clear'].includes(action);
-  if (deleting) {
-    if (payload.confirmDelete !== true && payload.confirmClear !== true) {
-      throw new Error('Workspace removal requires confirmDelete=true (or confirmClear=true).');
-    }
-    const policyActive = Math.max(0, Number(resolvePolicy(previousWorkspace, current).activeTaskCount || 0));
-    const liveActive = getToolActivity().tasks.filter((task: JsonRecord) => String(task.workspace || '').trim() === originalAlias).length;
-    const active = Math.max(policyActive, liveActive);
-    if (active > 0) {
-      throw new Error(`Cannot delete project '${originalAlias}' while ${active} Rel.AI ${active === 1 ? 'task is' : 'tasks are'} still active in it.`);
-    }
-    if (payload.forgetLocalData !== false) await clearDashboardWorkspaceLocalData(current, originalAlias);
+  const alias = String(payload.alias || payload.workspace || '').trim();
+  const renaming = previousWorkspace && action === 'upsert' && alias !== originalAlias;
+  if (deleting && payload.confirmDelete !== true && payload.confirmClear !== true) {
+    throw new Error('Workspace removal requires confirmDelete=true (or confirmClear=true).');
+  }
+  if (deleting || renaming) assertDashboardWorkspaceIdle(previousWorkspace, current, renaming ? 'rename' : 'delete');
+  if (deleting && payload.forgetLocalData !== false) {
+    await clearDashboardWorkspaceLocalData(current, originalAlias);
+    // Cleanup yields to other settings/workspace mutations. Apply only this
+    // removal to their latest persisted configuration, never the old snapshot.
+    current = checkedDashboardWorkspaceRemovalConfig(current, originalAlias);
   }
   const result = configEditor.updateWorkspace(current, payload);
   if (previousWorkspace && ['upsert', 'delete', 'clear'].includes(action)) {
@@ -180,8 +181,33 @@ export async function updateDashboardWorkspace(payload: JsonRecord): Promise<Jso
   return result;
 }
 
+function assertDashboardWorkspaceIdle(workspace: JsonRecord, config: JsonRecord, action: 'rename' | 'delete'): void {
+  const alias = String(workspace.alias || '').trim();
+  const policy = resolvePolicy(workspace, config);
+  const policyActive = Math.max(policy.sessionActive === true ? 1 : 0, Number(policy.activeTaskCount || 0));
+  const liveActive = getToolActivity().tasks.filter((task: JsonRecord) => String(task.workspace || '').trim() === alias).length;
+  const active = Math.max(policyActive, liveActive);
+  if (active > 0) {
+    throw new Error(`Cannot ${action} project '${alias}' while ${active} Rel.AI ${active === 1 ? 'task is' : 'tasks are'} still active in it.`);
+  }
+}
+
+function checkedDashboardWorkspaceRemovalConfig(config: JsonRecord, workspace: string): JsonRecord {
+  const latest = readConfig();
+  const latestWorkspace = asJsonRecord(latest.workspaces)[workspace];
+  const previousWorkspace = asJsonRecord(config.workspaces)[workspace];
+  if (JSON.stringify(latestWorkspace) !== JSON.stringify(previousWorkspace)) {
+    throw new Error(`Project '${workspace}' changed while its local data cleanup was running. Review the project before deleting it again.`);
+  }
+  assertDashboardWorkspaceIdle({ alias: workspace, ...asJsonRecord(latestWorkspace) }, latest, 'delete');
+  return latest;
+}
+
 async function clearDashboardWorkspaceLocalData(config: JsonRecord, workspace: string): Promise<void> {
-  const history = await clearWorkspaceTaskHistory(config, workspace);
+  const history = await clearWorkspaceTaskHistory(config, workspace, () => {
+    checkedDashboardWorkspaceRemovalConfig(config, workspace);
+  });
+  checkedDashboardWorkspaceRemovalConfig(config, workspace);
   withStateDatabase(config, db => {
     db.prepare('DELETE FROM session_policies WHERE workspace=?').run(workspace);
 

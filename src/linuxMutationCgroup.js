@@ -93,6 +93,6 @@ function linuxMutationCgroupCommand(reference, executable, args) {
 }
 
 export {
-  prepareLinuxMutationCgroup, linuxMutationCgroupCommand, linuxMutationCgroupEmpty,
+  prepareLinuxMutationCgroup, validateLinuxMutationCgroup, linuxMutationCgroupCommand, linuxMutationCgroupEmpty,
   settleLinuxMutationCgroup, cleanupLinuxMutationCgroup
 };

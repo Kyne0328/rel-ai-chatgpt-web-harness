@@ -400,3 +400,241 @@ async function case_session_event_order_unit() {
   console.log('Session event ordering tests passed.');
 }
 await case_session_event_order_unit();
+
+
+async function case_task_inspector_lifecycle_unit() {
+  const { default: assert } = await import('node:assert/strict');
+  const { readFileSync } = await import('node:fs');
+  const { default: vm } = await import('node:vm');
+  const model = await import('../src/ui/features/sessions/model.js');
+  const identity = await import('../src/ui/task-identity.js');
+  const source = readFileSync(new URL('../src/ui/features/sessions/react.js', import.meta.url), 'utf8')
+    .replace(/^import[\s\S]*?;\n/gm, '')
+    .replace(/^export /gm, '');
+
+  // Run the actual page/inspector callbacks with deterministic hook state and
+  // effect cleanup. Child elements remain inspectable without a browser build.
+  function harness(task = '') {
+    const componentSlots = new Map();
+    let slots = [];
+    const requests = [];
+    const controls = [];
+    let params = new URLSearchParams(task ? { task } : {});
+    let cursor = 0;
+    let dirty = false;
+    let effects = [];
+    let refreshes = 0;
+    const sameDeps = (before, after) => Array.isArray(before) && Array.isArray(after)
+      && before.length === after.length && before.every((value, index) => Object.is(value, after[index]));
+    const memo = (create, deps) => {
+      const index = cursor++;
+      if (!slots[index] || !sameDeps(slots[index].deps, deps)) slots[index] = { value: create(), deps };
+      return slots[index].value;
+    };
+    const context = {
+      ...model, ...identity, URLSearchParams, encodeURIComponent,
+      React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
+      memo: component => component,
+      useState: initial => {
+        const index = cursor++;
+        if (!slots[index]) slots[index] = { value: typeof initial === 'function' ? initial() : initial };
+        const slot = slots[index];
+        return [slot.value, update => {
+          const next = typeof update === 'function' ? update(slot.value) : update;
+          if (!Object.is(next, slot.value)) {
+            slot.value = next;
+            dirty = true;
+          }
+        }];
+      },
+      useRef: initial => {
+        const index = cursor++;
+        if (!slots[index]) slots[index] = { value: { current: initial } };
+        return slots[index].value;
+      },
+      useMemo: memo,
+      useCallback: (callback, deps) => memo(() => callback, deps),
+      useEffect: (effect, deps) => {
+        const index = cursor++;
+        if (!slots[index] || !sameDeps(slots[index].deps, deps)) {
+          const previous = slots[index];
+          slots[index] = { deps };
+          effects.push(() => {
+            previous?.cleanup?.();
+            slots[index].cleanup = effect();
+          });
+        }
+      },
+      window: { matchMedia: () => ({ matches: false }) },
+      getWorkspaceFilter: () => params.get('workspace') || '',
+      getRouteParams: () => new URLSearchParams(params),
+      replaceRouteParams: patch => {
+        for (const [key, value] of Object.entries(patch)) {
+          if (value) params.set(key, value); else params.delete(key);
+        }
+      },
+      flushSync: callback => callback(),
+      fetchJson: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject })),
+      postJson: (url, payload) => new Promise(resolve => controls.push({ url, payload, resolve })),
+      requestDashboardRefresh: () => { refreshes += 1; },
+      toast() {},
+      confirmAction: async () => true,
+      routeHref: () => '#activity',
+      orderWorkspacesAlphabetically: rows => rows
+    };
+    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector };', context);
+    return {
+      requests, controls,
+      refreshes: () => refreshes,
+      navigate: next => { params = new URLSearchParams(next ? { task: next } : {}); },
+      render(name, props) {
+        if (!componentSlots.has(name)) componentSlots.set(name, []);
+        slots = componentSlots.get(name);
+        let tree;
+        let renders = 0;
+        do {
+          assert.ok(++renders < 25, 'task lifecycle effects must settle without a render loop');
+          cursor = 0;
+          dirty = false;
+          effects = [];
+          tree = context.components[name](props);
+          const committed = effects;
+          effects = [];
+          for (const effect of committed) effect();
+        } while (dirty);
+        return tree;
+      },
+      dispose() {
+        for (const component of componentSlots.values()) for (const slot of component) slot?.cleanup?.();
+      }
+    };
+  }
+  function find(tree, predicate) {
+    if (!tree || typeof tree !== 'object') return null;
+    if (predicate(tree)) return tree;
+    for (const child of tree.children || []) {
+      const found = find(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+  const inspector = tree => find(tree, node => node.type?.name === 'SessionInspector');
+  const stopGoal = tree => find(tree, node => Object.hasOwn(node.props, 'data-stop-goal'));
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const recent = Array.from({ length: 100 }, (_, index) => ({
+    id: 'recent-' + index, title: 'Recent task ' + index, workspace: 'app',
+    status: 'completed', historyUpdatedAtMs: 1000 - index
+  }));
+  const data = { tasks: recent, config: { workspaces: [] } };
+  const retained = { id: 'retained-old', title: 'Retained task outside bootstrap', workspace: 'app', status: 'completed' };
+
+  {
+    const app = harness(retained.id);
+    app.render('SessionsPage', { data });
+    assert.equal(app.requests.length, 1, 'an off-page deep link must fetch its task without loading older history pages');
+    assert.equal(new URL(app.requests[0].url, 'http://localhost').searchParams.get('task'), retained.id);
+    app.requests[0].resolve({ ok: true, session: retained, trace: { entries: [] } });
+    await settle();
+    const tree = app.render('SessionsPage', { data });
+    assert.equal(inspector(tree)?.props.session.id, retained.id, 'hydrated detail must render even without a list summary');
+    assert.equal(inspector(tree)?.props.session.title, retained.title);
+    assert.equal(app.requests.length, 1, 'hydrating an off-page task must not restart its fetch');
+    app.dispose();
+  }
+
+  {
+    const app = harness('older-a');
+    app.render('SessionsPage', { data });
+    app.navigate('older-b');
+    app.render('SessionsPage', { data });
+    assert.equal(app.requests.length, 2, 'switching between off-page deep links must select and fetch the newer task');
+    app.requests[1].resolve({ ok: true, session: { ...retained, id: 'older-b', title: 'Latest selection' } });
+    await settle();
+    app.requests[0].resolve({ ok: true, session: { ...retained, id: 'older-a', title: 'Stale response' } });
+    await settle();
+    const tree = app.render('SessionsPage', { data });
+    assert.equal(inspector(tree)?.props.session.id, 'older-b', 'a late hydration response must not replace the newer selection');
+    assert.equal(inspector(tree)?.props.session.title, 'Latest selection');
+    app.dispose();
+  }
+
+  {
+    const app = harness();
+    const active = { ...retained, id: 'restartable-goal', status: 'planning', goalMode: { goalActive: true, state: 'monitoring' } };
+    const props = session => ({ session, activeTab: 'overview' });
+    let tree = app.render('SessionInspector', props(active));
+    assert.ok(stopGoal(tree), 'an active goal must expose Stop Goal');
+    stopGoal(tree).props.onClick();
+    tree = app.render('SessionInspector', props(active));
+    assert.equal(stopGoal(tree)?.props.disabled, true, 'goal controls must be disabled while the stop request is pending');
+    assert.equal(app.controls[0].payload.action, 'goal_stop');
+    assert.equal(app.controls[0].payload.work_id, active.id);
+    app.controls[0].resolve({ ok: true, goalActive: false });
+    await settle();
+    tree = app.render('SessionInspector', props({ ...active, goalMode: { goalActive: false, state: 'stopped' } }));
+    assert.equal(stopGoal(tree), null, 'the stopped canonical goal must hide Stop Goal');
+    assert.equal(app.refreshes(), 1, 'a successful stop must request authoritative task state');
+    tree = app.render('SessionInspector', props({ ...active, goalMode: { goalActive: true, state: 'monitoring' } }));
+    assert.ok(stopGoal(tree), 'reactivating a goal on the same task must restore Stop Goal');
+    assert.equal(stopGoal(tree).props.disabled, false);
+    stopGoal(tree).props.onClick();
+    assert.equal(app.controls.length, 2, 'the reactivated goal must remain stoppable without navigating away');
+    app.controls[1].resolve({ ok: false, error: 'Fixture stop failure' });
+    await settle();
+    tree = app.render('SessionInspector', props(active));
+    assert.equal(stopGoal(tree)?.props.disabled, false, 'a failed stop must leave the active goal available for retry');
+    app.dispose();
+  }
+
+  {
+    const active = { ...retained, status: 'planning', goalMode: { goalActive: true, state: 'monitoring' } };
+    const stopped = { ...active, goalMode: { goalActive: false, state: 'stopped' } };
+    const app = harness(active.id);
+    app.render('SessionsPage', { data });
+    app.requests[0].resolve({ ok: true, session: stopped });
+    await settle();
+    let page = app.render('SessionsPage', { data });
+    let detail = app.render('SessionInspector', inspector(page).props);
+    assert.equal(stopGoal(detail), null);
+
+    const externallyUpdatedData = { ...data, tasks: [...recent] };
+    app.render('SessionsPage', { data: externallyUpdatedData });
+    assert.equal(app.requests.length, 2, 'external activation must refresh off-page detail before any local control');
+    assert.equal(app.requests[1].options.cache, 'no-store', 'external off-page changes must not reuse the historical detail cache');
+    app.requests[1].resolve({ ok: true, session: active });
+    await settle();
+    page = app.render('SessionsPage', { data: externallyUpdatedData });
+    detail = app.render('SessionInspector', inspector(page).props);
+    assert.ok(stopGoal(detail), 'external activation must expose Stop Goal without navigating away');
+    stopGoal(detail).props.onClick();
+    app.controls[0].resolve({ ok: true, goalActive: false, state: 'stopped' });
+    await settle();
+
+    // The aggregate list intentionally remains unchanged and omits this task.
+    app.render('SessionsPage', { data: externallyUpdatedData });
+    assert.equal(app.requests.length, 3, 'successful off-page control must reload selected detail without a changed summary');
+    assert.equal(app.requests[2].options.cache, 'no-store', 'post-control hydration must bypass pre-mutation cached detail');
+    app.requests[2].resolve({ ok: true, session: stopped });
+    await settle();
+    page = app.render('SessionsPage', { data: externallyUpdatedData });
+    detail = app.render('SessionInspector', inspector(page).props);
+    assert.equal(stopGoal(detail), null, 'the off-page inspector must reflect authoritative stop success');
+
+    const refreshedData = { ...data, tasks: [...recent] };
+    app.render('SessionsPage', { data: refreshedData });
+    assert.equal(app.requests.length, 4, 'a dashboard task refresh must also reconcile selected off-page detail');
+    app.requests[3].resolve({ ok: true, session: { ...active, goalMode: { goalActive: true, state: 'monitoring' } } });
+    await settle();
+    page = app.render('SessionsPage', { data: refreshedData });
+    detail = app.render('SessionInspector', inspector(page).props);
+    assert.ok(stopGoal(detail), 'same-ID reactivation must restore Stop Goal in the off-page inspector');
+    stopGoal(detail).props.onClick();
+    assert.equal(app.controls.length, 2, 'reactivated off-page goals must remain stoppable');
+    app.controls[1].resolve({ ok: false, error: 'Fixture stop failure' });
+    await settle();
+    app.dispose();
+  }
+
+  console.log('Task deep-link hydration and goal-control lifecycle tests passed.');
+}
+await case_task_inspector_lifecycle_unit();

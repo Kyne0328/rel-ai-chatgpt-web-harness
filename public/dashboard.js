@@ -25,6 +25,7 @@ let _lastEventAt = null;
 let _dashboardClock = null;
 let _liveState = 'connecting';
 let _refreshPromise = null;
+let _refreshLocalChangePending = false;
 let _liveReadyTarget = null;
 let _liveReadyVersion = 0;
 let _refreshLiveEvents = null;
@@ -151,7 +152,10 @@ function applyDesktopStatus(status) {
 }
 
 async function doRefresh(options = {}) {
-  if (_refreshPromise) return _refreshPromise;
+  if (_refreshPromise) {
+    if (options.source === 'local-change') _refreshLocalChangePending = true;
+    return _refreshPromise;
+  }
   const readyVersion = _liveReadyVersion;
   _refreshLiveEvents = [];
   _refreshLiveEventOverflow = false;
@@ -159,15 +163,17 @@ async function doRefresh(options = {}) {
   try {
     return await _refreshPromise;
   } finally {
-    // Only a ready notification received during this request may schedule a
-    // trailing fetch. A stale/failed response alone must not create a retry loop.
-    const needsCatchUp = _refreshLiveEventOverflow
+    // A mutation or ready notification received during this request may need
+    // a trailing fetch. A stale/failed response alone must not create a retry loop.
+    const localChangePending = _refreshLocalChangePending;
+    const needsCatchUp = localChangePending || _refreshLiveEventOverflow
       || (_liveReadyVersion !== readyVersion && _liveReadyTarget
         && liveCatchUpRequired(getStore().live, _liveReadyTarget));
     _refreshPromise = null;
+    _refreshLocalChangePending = false;
     _refreshLiveEvents = null;
     _refreshLiveEventOverflow = false;
-    if (needsCatchUp) queueMicrotask(() => { void doRefresh({ source: 'live-refresh-overflow', quietFailure: true }); });
+    if (needsCatchUp) queueMicrotask(() => { void doRefresh({ source: localChangePending ? 'local-change' : 'live-refresh-overflow', quietFailure: true }); });
   }
 }
 

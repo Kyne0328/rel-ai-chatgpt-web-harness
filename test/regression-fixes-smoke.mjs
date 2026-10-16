@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { availablePort } from './helpers/available-port.mjs';
 
@@ -99,8 +100,38 @@ function read(rel) {
   const sessionsReact = read('src/ui/features/sessions/react.js');
   assert.match(dashboard, /invalidateCache\(DASHBOARD_DATA_URL\)/);
   assert.match(dashboard, /fetchJson\(DASHBOARD_DATA_URL, \{ cache: 'no-store' \}\)/);
-  assert.match(dashboard, /let _refreshPromise = null/);
-  assert.match(dashboard, /finally \{[\s\S]{0,400}_refreshPromise = null;/);
+  // Exercise single-flight cleanup on success and rejection instead of limiting
+  // how many source characters may precede the release in the finally block.
+  const refreshStart = dashboard.indexOf('async function doRefresh(');
+  const refreshEnd = dashboard.indexOf('\nasync function performRefresh(', refreshStart);
+  assert.ok(refreshStart >= 0 && refreshEnd > refreshStart, 'dashboard refresh coordinator must be present');
+  for (const rejected of [false, true]) {
+    const requests = [];
+    const refresh = vm.runInNewContext([
+      'let _refreshPromise = null, _refreshLocalChangePending = false;',
+      'let _refreshLiveEvents = null, _refreshLiveEventOverflow = false;',
+      'let _liveReadyVersion = 0, _liveReadyTarget = null;',
+      dashboard.slice(refreshStart, refreshEnd),
+      'doRefresh;'
+    ].join('\n'), {
+      performRefresh: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
+      queueMicrotask: () => assert.fail('a settled refresh without an invalidation must not schedule another fetch'),
+      getStore: () => ({ live: {} }),
+      liveCatchUpRequired: () => false
+    });
+    const first = refresh();
+    const overlapping = refresh();
+    assert.equal(requests.length, 1, 'overlapping refreshes must share one pending fetch');
+    if (rejected) requests[0].reject(new Error('Fixture refresh rejection'));
+    else requests[0].resolve({ ok: true });
+    const settled = await Promise.allSettled([first, overlapping]);
+    assert.ok(settled.every(result => result.status === (rejected ? 'rejected' : 'fulfilled')),
+      'all overlapping callers must receive the fetch outcome');
+    const later = refresh();
+    assert.equal(requests.length, 2, 'settlement must release the in-flight request so a later refresh can run');
+    requests[1].resolve({ ok: true });
+    await later;
+  }
   assert.match(dashboardRuntime, /onToolActivity\(\(activity: JsonRecord\) => taskEvents\.push\(activity\)\)/);
   assert.match(dashboardRuntime, /sendDomain\(DASHBOARD_LIVE_EVENTS\.TASK_UPDATED, 'task'/);
   assert.match(dashboardRuntime, /mcpConnectionManager\.onChange\(\(snapshot: JsonRecord\) => sendConnection\(snapshot\)\)/);

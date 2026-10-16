@@ -95,15 +95,18 @@ function SessionsPage({ data = {} }) {
   const selectedIdRef = useRef('');
   selectedIdRef.current = selectedId;
   const [hydrated, setHydrated] = useState(null);
+  const [detailRefresh, setDetailRefresh] = useState(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('overview');
   const [olderExpanded, setOlderExpanded] = useState(false);
   const hydrationRequest = useRef(0);
   const selectedSummary = selectedId ? sessionById.get(selectedId) : null;
   const selectedSummaryHasTrace = Array.isArray(selectedSummary?.trace?.entries);
+  const offPageTaskSource = selectedSummary ? null : data.tasks;
   const selectedHydrationCacheTtl = selectedSummary && isOngoingSession(selectedSummary) ? 1000 : 60_000;
-  const selectedDetail = selectedSummary
-    ? mergeSessionDetail(hydrated?.id === selectedId ? hydrated.session : {}, selectedSummary, data)
+  const selectedHydratedSession = hydrated?.id === selectedId ? hydrated.session : null;
+  const selectedDetail = selectedSummary || selectedHydratedSession
+    ? mergeSessionDetail(selectedHydratedSession || {}, selectedSummary || {}, data)
     : null;
 
   const selectSession = useCallback(id => {
@@ -113,31 +116,43 @@ function SessionsPage({ data = {} }) {
     if (getRouteParams().get('task') !== id) replaceRouteParams({ task: id });
     if (selectedIdRef.current !== id) {
       setHydrated(null);
+      setDetailRefresh(null);
       setActiveTab('overview');
       setOlderExpanded(false);
     }
     setSelectedId(id);
   }, []);
 
-  useEffect(() => {
-    if (requestedId && sessionById.has(requestedId)) selectSession(requestedId);
-  }, [requestedId, sessionById, selectSession]);
+  const refreshSelectedSession = useCallback(id => {
+    if (selectedIdRef.current === id) setDetailRefresh({ id });
+  }, []);
 
   useEffect(() => {
-    if (!selectedId || selectedSummary) return;
+    // A retained task can be older than the initial history page. Resolve its
+    // deep link directly instead of requiring a summary in the loaded list.
+    if (requestedId) selectSession(requestedId);
+  }, [requestedId, selectSession]);
+
+  useEffect(() => {
+    if (!selectedId || selectedSummary || requestedId) return;
     setSelectedId('');
     setHydrated(null);
-  }, [selectedId, selectedSummary]);
+  }, [requestedId, selectedId, selectedSummary]);
 
   useEffect(() => {
-    if (!selectedId || !selectedSummary) return undefined;
+    if (!selectedId) return undefined;
     const request = ++hydrationRequest.current;
-    if (selectedSummaryHasTrace) {
+    const forceRefresh = detailRefresh?.id === selectedId;
+    if (selectedSummaryHasTrace && !forceRefresh) {
       setHydrated({ id: selectedId, session: selectedSummary });
       return undefined;
     }
     let cancelled = false;
-    void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}`, { cacheTtlMs: selectedHydrationCacheTtl })
+    void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}`, {
+      cacheTtlMs: selectedHydrationCacheTtl,
+      // Off-page detail has no live summary to supersede a cached response.
+      ...(forceRefresh || !selectedSummary ? { cache: 'no-store' } : {})
+    })
       .then(response => {
         if (cancelled || request !== hydrationRequest.current || response?.ok === false || !response?.session) return;
         setHydrated(previous => {
@@ -164,7 +179,7 @@ function SessionsPage({ data = {} }) {
       cancelled = true;
       hydrationRequest.current += 1;
     };
-  }, [selectedHydrationCacheTtl, selectedId, selectedSummary, selectedSummaryHasTrace]);
+  }, [detailRefresh, offPageTaskSource, selectedHydrationCacheTtl, selectedId, selectedSummary, selectedSummaryHasTrace]);
 
   useEffect(() => {
     if (!selectedId || hydrated?.id !== selectedId) return;
@@ -355,7 +370,8 @@ function SessionsPage({ data = {} }) {
                 setOlderExpanded,
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
                 activityLoading,
-                loadOlderActivity
+                loadOlderActivity,
+                onControlComplete: refreshSelectedSession
               })
             : h('div', { className: 'inspector-empty' },
                 h('strong', null, 'Select a task'),
@@ -483,7 +499,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) {
+function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity, onControlComplete }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -508,9 +524,8 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     ? (semantic.currentActivity || operationValue || 'Task is open.')
     : (session.summary || session.endReason || sessionDescription(session, false, operationValue, semantic));
   const [controlKey, setControlKey] = useState('');
-  const [stoppedGoalId, setStoppedGoalId] = useState('');
-  useEffect(() => { setControlKey(''); setStoppedGoalId(''); }, [id]);
-  const activeGoal = session.goalMode?.goalActive === true && stoppedGoalId !== id;
+  useEffect(() => { setControlKey(''); }, [id]);
+  const activeGoal = session.goalMode?.goalActive === true;
   const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
   const controlTask = useCallback(async (action, operationId = '') => {
     const key = operationId ? `stop:${operationId}` : action;
@@ -535,7 +550,6 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         toast(result.error || 'The task action could not be completed.', { variant: 'error' });
         return;
       }
-      if (action === 'goal_stop') setStoppedGoalId(id);
       toast(action === 'goal_stop'
         ? 'Goal stopped. The task is unchanged.'
         : action === 'cancel'
@@ -544,12 +558,14 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
           ? `Stop requested for ${result.stoppedOperationCount} running action${result.stoppedOperationCount === 1 ? '' : 's'}.`
           : 'No matching running action needed to be stopped.', { variant: 'success' });
       requestDashboardRefresh();
+      // Off-page tasks may remain absent from the refreshed summary list.
+      onControlComplete?.(id);
     } catch (error) {
       toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
     } finally {
       setControlKey('');
     }
-  }, [id]);
+  }, [id, onControlComplete]);
 
   return h('div', { className: 'detail-stack session-detail' },
     h('header', { className: 'task-detail-header' },

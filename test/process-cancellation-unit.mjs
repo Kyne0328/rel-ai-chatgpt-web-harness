@@ -161,6 +161,15 @@ try {
 
   assert.equal(summarizeCommand({ exitCode: 0, timedOut: true }).ok, false);
   assert.equal(summarizeCommand({ exitCode: 0, cancelled: true }).ok, false);
+  for (const terminationConfirmed of [false, null]) {
+    const uncertain = summarizeCommand({ executed: true, exitCode: 0, rootExitConfirmed: true, terminationConfirmed });
+    assert.equal(uncertain.ok, false, 'root exit zero must not certify an unconfirmed process tree');
+    assert.equal(uncertain.exitCode, 0, 'preserve the observed root exit code');
+    assert.equal(uncertain.terminationConfirmed, terminationConfirmed, 'preserve explicit termination uncertainty');
+  }
+  assert.equal(summarizeCommand({ exitCode: 0, executed: false }).ok, false);
+  assert.equal(summarizeCommand({ exitCode: 0, terminationConfirmed: true }).ok, true);
+  assert.equal(summarizeCommand({ exitCode: 0 }).ok, true, 'legacy outcomes without termination metadata remain compatible');
 
   const gracefulController = new AbortController();
   const gracefulPromise = runProcess(process.execPath, [gracefulScript, gracefulReady], {

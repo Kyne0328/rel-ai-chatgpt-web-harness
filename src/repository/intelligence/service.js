@@ -280,13 +280,20 @@ async function multiSourceCodeInspect(singleIndexedQuery, workspace, config, arg
   const action = String(args.action || '').toLowerCase();
   const selected = selectSourcesForInspect(workspace, sources, args);
   const results = [];
+  let missingSeedError = null;
   for (const source of selected) {
     const scopedArgs = argsForSource(workspace, args, source);
     if (action === 'impact' && !scopedArgs.symbol && Array.isArray(args.paths) && !scopedArgs.paths.length) continue;
-    const result = await singleIndexedQuery('codeInspect', sourceWorkspace(workspace, source), config, scopedArgs, options);
-    results.push({ source, result: qualifyInspectResult(result, source, action === 'audit' ? 'architecture' : action) });
+    try {
+      const result = await singleIndexedQuery('codeInspect', sourceWorkspace(workspace, source), config, scopedArgs, options);
+      results.push({ source, result: qualifyInspectResult(result, source, action === 'audit' ? 'architecture' : action) });
+    } catch (error) {
+      if ((action !== 'impact' && action !== 'trace') || !scopedArgs.symbol || error?.code !== 'IMPACT_SEED_NOT_FOUND') throw error;
+      missingSeedError ||= error;
+    }
   }
   if (!results.length) {
+    if (missingSeedError) throw missingSeedError;
     const error = new Error('No requested path belongs to an attached source folder.');
     error.code = 'SOURCE_PATH_NOT_FOUND';
     throw error;

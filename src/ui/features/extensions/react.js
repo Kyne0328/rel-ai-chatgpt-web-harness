@@ -74,6 +74,10 @@ function createExtensionsRoute() {
 
     const runInstall = async (entry, action = 'install') => {
       if (!entry?.id || busy) return;
+      if (!entry.sourceId || !entry.reviewFingerprint) {
+        toast('Refresh the catalog and review the extension before installing.', { variant: 'error' });
+        return;
+      }
       const permissions = permissionSummary(entry.permissions);
       const cliSetup = entry.autoInstall
         ? ' If a required command is missing and the manifest includes a managed artifact for this computer, Rel.AI downloads and verifies that tool. Otherwise, the extension installs as Setup needed until the command is available.'
@@ -82,7 +86,7 @@ function createExtensionsRoute() {
           : '';
       const confirmed = await confirmAction({
         title: action === 'update' ? `Update ${entry.name}` : `Install ${entry.name}`,
-        message: `${action === 'update' ? 'Update' : 'Install'} this extension from the Rel.AI extension catalog?`,
+        message: `${action === 'update' ? 'Update to' : 'Install'} version ${entry.version} from ${entry.sourceName || 'the Rel.AI extension catalog'}?`,
         detail: permissions.length
           ? `This extension requests these permissions: ${permissions}. Rel.AI still applies its normal authorization rules and permission prompts to local actions.${cliSetup}`
           : `This extension requests no additional permissions. Rel.AI still applies its normal authorization rules to local actions.${cliSetup}`,
@@ -90,7 +94,7 @@ function createExtensionsRoute() {
       });
       if (!confirmed) return;
       setBusy(`${action}:${entry.id}`);
-      const result = await postJson('/api/extensions', { action, id: entry.id, sourceId: entry.sourceId || '', confirmPermissions: true }, { cache: 'no-store', timeout: 15 * 60 * 1000 });
+      const result = await postJson('/api/extensions', { action, id: entry.id, sourceId: entry.sourceId, reviewFingerprint: entry.reviewFingerprint, confirmPermissions: true }, { cache: 'no-store', timeout: 15 * 60 * 1000 });
       setBusy('');
       if (!result?.ok) {
         toast(result?.error || `Could not ${action} the extension.`, { variant: 'error' });

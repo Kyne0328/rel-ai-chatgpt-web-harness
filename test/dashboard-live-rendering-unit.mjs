@@ -224,6 +224,75 @@ assert.match(functionSource(dashboard, 'bufferLiveEventDuringRefresh'), /MAX_REF
   }
 }
 
+
+{
+  const { getSnapshot, init, patchComputerControl } = await import('../src/ui/store.js');
+  for (const enabled of [true, false]) {
+    const workspaces = [{ alias: 'fixture', path: '/fixture' }];
+    init({ config: { computerControl: { enabled: !enabled }, workspaces } });
+    let refreshes = 0;
+    let fails = false;
+    const context = {
+      h: (type, props, ...children) => ({ type, props: props || {}, children }),
+      Card: 'card', ToggleRow: 'toggle',
+      useState: value => [value, () => {}], useEffect() {},
+      postJson: async () => fails ? { ok: false, error: 'Save rejected' } : { ok: true, settings: { enabled } },
+      patchComputerControl,
+      requestDashboardRefresh: () => { refreshes += 1; },
+      toast() {}, messageOf: String
+    };
+    vm.runInNewContext(functionSource(settingsReact, 'ComputerControlSettings') + '\nglobalThis.render = ComputerControlSettings;', context);
+    context.render({ initial: getSnapshot().config.computerControl }).children[0].props.onChange(enabled);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(getSnapshot().config.computerControl.enabled, enabled, 'a saved computer-control setting must update canonical state before route remount');
+    assert.equal(getSnapshot().config.workspaces, workspaces, 'settings saves must preserve unrelated canonical configuration');
+    assert.equal(context.render({ initial: getSnapshot().config.computerControl }).children[0].props.checked, enabled, 'remount must immediately show the saved setting');
+    assert.equal(refreshes, 1, 'successful computer-control saves must request authoritative refresh');
+
+    fails = true;
+    context.render({ initial: getSnapshot().config.computerControl }).children[0].props.onChange(!enabled);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(getSnapshot().config.computerControl.enabled, enabled, 'a failed save must not change canonical permission state');
+    assert.equal(refreshes, 1, 'failed saves must not request a mutation refresh');
+  }
+}
+
+{
+  const h = dashboardRefreshHarness();
+  const first = h.context.refresh();
+  const duplicate = h.context.refresh();
+  const mutation = h.context.refresh({ source: 'local-change' });
+  const secondMutation = h.context.refresh({ source: 'local-change' });
+  assert.equal(h.requests.length, 1, 'concurrent refreshes must retain a single in-flight fetch');
+  h.requests.shift()({ config: { computerControl: { enabled: false } } });
+  await Promise.all([first, duplicate, mutation, secondMutation]);
+  assert.equal(h.queued.length, 1, 'mutations during an older fetch must coalesce into one trailing refresh');
+  h.queued.shift()();
+  const trailing = h.context.refresh();
+  h.requests.shift()({ config: { computerControl: { enabled: true } } });
+  await trailing;
+  assert.equal(h.state().config.computerControl.enabled, true, 'the post-mutation snapshot must become canonical');
+  assert.equal(h.queued.length, 0, 'a completed mutation catch-up must not refresh forever');
+}
+for (const failed of [false, true]) {
+  const h = dashboardRefreshHarness();
+  const first = h.context.refresh();
+  void h.context.refresh({ source: 'local-change' });
+  h.requests.shift()({ ok: true });
+  await first;
+  h.queued.shift()();
+  const second = h.context.refresh();
+  void h.context.refresh({ source: 'local-change' });
+  h.requests.shift()({ ok: true });
+  await second;
+  assert.equal(h.queued.length, 1, 'a mutation during a trailing fetch must receive its own later snapshot');
+  h.queued.shift()();
+  const third = h.context.refresh();
+  h.requests.shift()(failed ? { ok: false, error: 'offline' } : { ok: true });
+  await third;
+  assert.equal(h.queued.length, 0, 'a settled trailing fetch must not retry without a new invalidation, including on failure');
+}
+
 function dashboardRefreshHarness() {
   let state = { live: { streamId: 'a', revisions: { tasks: 1 } } };
   const requests = [];
@@ -244,6 +313,7 @@ function dashboardRefreshHarness() {
   };
   vm.runInNewContext(`
     let _refreshPromise = null, _refreshLiveEvents = null, _refreshLiveEventOverflow = false;
+    let _refreshLocalChangePending = false;
     let _liveReadyTarget = null, _liveReadyVersion = 0;
     let _liveState = 'live', _lastEventAt = null, _routerReady = true;
     let _hiddenViewDirty = false, _hiddenCatchUpRequired = false;

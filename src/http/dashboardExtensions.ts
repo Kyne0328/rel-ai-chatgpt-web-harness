@@ -38,7 +38,8 @@ async function handleApiExtensionsAction(ctx: HttpRouteContext): Promise<void> {
     if (action === 'install' || action === 'update') {
       if (payload.confirmPermissions !== true) throw new Error('Review the extension permissions before installation.');
       const sourceId = String(payload.sourceId || '').trim();
-      const extension = await installDashboardExtension(id, sourceId);
+      const reviewFingerprint = typeof payload.reviewFingerprint === 'string' ? payload.reviewFingerprint : '';
+      const extension = await installDashboardExtension(id, sourceId, reviewFingerprint);
       sendJson(ctx.res, 200, { ok: true, action, extension });
       return;
     }

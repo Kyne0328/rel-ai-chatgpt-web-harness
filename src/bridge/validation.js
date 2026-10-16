@@ -248,7 +248,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
           const receipt = buildWorkflowEvidenceReceipt({
             tool: OP.VALIDATE_CHECKS,
             args: { command, cwd: unit.cwd || '.' },
-            result: { ok: true, exitCode: summary.exitCode, durationMs: summary.durationMs, validationStatus: 'passed' },
+            result: { ...summary, validationStatus: 'passed' },
             auditEntry: {
               ts: new Date().toISOString(),
               taskMutationGeneration: evidenceAuthority?.mutationGeneration || 0,
@@ -307,6 +307,7 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     });
   }
   const ok = !interrupted && !timedOut && !cancelled && !scopeChanged && results.length === checks.length && results.every(item => item.ok);
+  const unconfirmedTermination = results.some(item => item.terminationConfirmed === false || item.terminationConfirmed === null);
   const failedCheck = results.find(item => !item.ok)?.command || '';
   const validationStatus = cancelled ? 'cancelled' : scopeChanged ? 'stale' : ok ? 'passed' : 'failed';
   publishValidationProgress({
@@ -326,6 +327,8 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
       : 'Validation passed for the current repository state.')
     : cancelled
       ? 'Validation was cancelled; partial results are preserved as evidence.'
+      : unconfirmedTermination
+        ? 'Validation is inconclusive because process-tree termination could not be confirmed. Recover the owned process before rerunning checks.'
       : admissionFailure
         ? `${executedUnits ? 'Some validation checks' : 'Validation checks'} did not start because host resource admission was blocked. ${admissionFailure.resourceReason || ''} Wait for an execution slot to become available, then retry validation.`
       : scopeChanged

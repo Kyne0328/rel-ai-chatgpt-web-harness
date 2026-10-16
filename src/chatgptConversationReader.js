@@ -5,6 +5,9 @@ import { JSONParser } from '@streamparser/json';
 const MAX_TRANSFER_BYTES = 256 * 1024 * 1024; // Wire safety bound, not RAM buffering.
 const MAX_NODES = 100_000;
 const MAX_COMMAND_CHARS = 4096;
+// Work responses include plans and bootstrap context. Their receipt budget is
+// separate from command text; only extracted IDs survive projection.
+const MAX_RECEIPT_CHARS = 1024 * 1024;
 const PATHS = [
   '$.current_node', '$.mapping.*.parent', '$.mapping.*.message.id',
   '$.mapping.*.message.author.role', '$.mapping.*.message.create_time',
@@ -15,7 +18,7 @@ const PATHS = [
 // Opaque host session IDs cannot identify a Web chat. Retain only exact work
 // IDs from bounded JSON tool receipts so discovery can prove the association.
 function receiptWorkIds(text) {
-  if (typeof text !== 'string' || text.length > MAX_COMMAND_CHARS) return [];
+  if (typeof text !== 'string' || text.length > MAX_RECEIPT_CHARS) return [];
   let receipt;
   try { receipt = JSON.parse(text); } catch { return []; }
   const ids = new Set();
@@ -24,7 +27,7 @@ function receiptWorkIds(text) {
     if (typeof value.work_id === 'string' && value.work_id.length <= 128) ids.add(value.work_id);
     visit(value.structuredContent, depth + 1);
     for (const part of Array.isArray(value.content) ? value.content.slice(0, 8) : []) {
-      if (part?.type === 'text' && typeof part.text === 'string' && part.text.length <= MAX_COMMAND_CHARS) {
+      if (part?.type === 'text' && typeof part.text === 'string' && part.text.length <= MAX_RECEIPT_CHARS) {
         try { visit(JSON.parse(part.text), depth + 1); } catch {}
       }
     }

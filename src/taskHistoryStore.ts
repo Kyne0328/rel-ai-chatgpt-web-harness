@@ -994,11 +994,18 @@ function recordTaskHistoryPersistenceSuccess(): void {
   taskHistoryPersistenceState = { lastError: '', lastFailureAt: null, retryCount: 0 };
 }
 
-async function clearWorkspaceTaskHistory(config: TaskHistoryConfig, workspaceValue: unknown): Promise<{ removed: number; taskIds: string[] }> {
+async function clearWorkspaceTaskHistory(
+  config: TaskHistoryConfig,
+  workspaceValue: unknown,
+  beforeDelete?: () => void
+): Promise<{ removed: number; taskIds: string[] }> {
   const workspace = String(workspaceValue || '').trim();
   if (!workspace) return { removed: 0, taskIds: [] };
   const flushed = await flushTaskHistoryPersistence();
   if (!flushed.ok) throw new Error('Task history could not be flushed before project data cleanup.');
+  // Revalidate after the final await, before removing pending or stored history.
+  // The synchronous guard and deletion share one event-loop turn.
+  beforeDelete?.();
   const directory = getTaskHistoryDir(config);
   for (const [key, pending] of [...pendingSessions.entries()]) {
     if (pending.directory === directory && String(pending.session?.workspace || '').trim() === workspace) pendingSessions.delete(key);

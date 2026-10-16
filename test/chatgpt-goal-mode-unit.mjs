@@ -239,6 +239,63 @@ test('a recovered read returns to ordinary monitoring without an overdue retry l
   });
 });
 
+test('transportless runtimes leave desktop goal progress and retry deadlines untouched', async t => {
+  await withMonitoredGoal(t, async f => {
+    const now = Date.now();
+    t.mock.timers.reset();
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
+    f.patchGoal({ tunnelId: 'tunnel_accountA12345', state: 'verifying', retryCount: 2,
+      nextAttemptAt: now + 5_000, pendingNode: 'a', pendingOutcome: 'uncertain',
+      pendingPrompt: 'Original unverified continuation' });
+    const readRecord = () => withStateDatabase(f.config, db => db.prepare(
+      'SELECT value FROM state_meta WHERE key=?').get('chatgpt_goal:' + f.work_id).value,
+    { readonly: true });
+    const original = readRecord();
+    configureGoalBrowserTransport(null);
+    try {
+      startGoalMonitor(f.config);
+      t.mock.timers.tick(30_000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(readRecord(), original, 'a secondary runtime must not consume another transport\'s retry');
+      await pollGoal(f.config, f.work_id, { env: {} });
+      await pollGoal(f.config, f.work_id, { credentials, fetch: async () => {
+        assert.fail('process credentials cannot access a native account-scoped goal');
+      } });
+      assert.equal(readRecord(), original, 'unavailable transport is not an authentication failure');
+      configureGoalBrowserTransport(async () => ({ ok: false, status: 401 }));
+      t.mock.timers.tick(30_000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(f.status().authRequired, true, 'an actual owner-transport authentication failure remains actionable');
+      assert.equal(f.status().retryCount, 3);
+      assert.equal(JSON.parse(readRecord()).pendingPrompt, 'Original unverified continuation');
+    } finally { stopGoalMonitor(); configureGoalBrowserTransport(null); }
+  });
+});
+
+test('transportless runtimes leave queued desktop goal detection for its native owner', async t => {
+  await withMonitoredGoal(t, async f => {
+    const context = { connector: true, conversationId: ID,
+      principal: { clientId: 'secure-tunnel:tunnel_accountA12345' } };
+    const begin = beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.begin',
+      createTask: true, scopeId: 'transportless-lookup', input: { title: 'Transport owner lookup' } });
+    begin({ ok: true });
+    const task = { work_id: begin.taskId, objective: 'Detect goal on the native owner' };
+    configureGoalBrowserTransport(null);
+    queueGoalDetection(f.config, task, context, { env: {} });
+    await new Promise(resolve => setImmediate(resolve));
+    await checkGoalDetection(f.config, task.work_id, { credentials, fetch: async () => {
+      assert.fail('unrelated credentials cannot run native-account discovery');
+    } });
+    assert.equal(goalStatus(f.config, task, context).state, 'checking');
+    assert.equal(goalStatus(f.config, task, context).attempts, 0);
+    await checkGoalDetection(f.config, task.work_id, {
+      nativeTransport: async () => ({ ok: false, status: 401 })
+    });
+    assert.equal(goalStatus(f.config, task, context).state, 'needs_auth');
+    stopGoal(f.config, task, context);
+  });
+});
+
 test('a scoped goal routes every browser read and Send through its authenticated tunnel', async t => {
   await withMonitoredGoal(t, async f => {
     const tunnelId = 'tunnel_accountA12345';
@@ -346,6 +403,44 @@ test('uncertain submissions reconcile their exact receipt without another Send',
     assert.equal(sends, 1);
     assert.equal(f.status().continuationCount, 1);
     assert.equal(f.status().state, 'monitoring');
+  });
+});
+
+test('stopped uncertain goals reject rebinding and reconcile on their original conversation', async t => {
+  await withMonitoredGoal(t, async f => {
+    const transport = f.deps.nativeTransport;
+    let prompt;
+    const deps = { nativeTransport: async payload => {
+      if (payload.action === 'continue') {
+        prompt = payload.prompt;
+        return { ok: false, uncertain: true, stage: 'readback' };
+      }
+      return transport(payload);
+    } };
+    await pollGoal(f.config, f.work_id, deps);
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    const readRecord = () => withStateDatabase(f.config, db => db.prepare(
+      'SELECT value FROM state_meta WHERE key=?').get('chatgpt_goal:' + f.work_id).value,
+    { readonly: true });
+    const stopped = readRecord();
+    assert.throws(() => activateGoal(f.config, { work_id: f.work_id, objective: 'Complete monitor fixture',
+      conversationUrl: 'https://chatgpt.com/c/' + OTHER }, f.context), /receipt is unresolved/);
+    assert.equal(readRecord(), stopped, 'a rejected rebind preserves the original conversation and uncertain receipt');
+    activateGoal(f.config, { work_id: f.work_id, objective: 'Complete monitor fixture' }, f.context);
+    f.tree.mapping.sent = { parent: 'a', message: { id: 'receipt',
+      author: { role: 'user' }, content: { parts: [prompt] } } };
+    f.tree.current_node = 'sent';
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().continuationCount, 1, 'the original receipt remains reconcilable after restart');
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    activateGoal(f.config, { work_id: f.work_id, objective: 'Complete monitor fixture',
+      conversationUrl: 'https://chatgpt.com/c/' + OTHER }, f.context);
+    const rebound = JSON.parse(readRecord());
+    assert.equal(rebound.conversationId, OTHER);
+    assert.equal(rebound.pendingNode, '', 'resolved receipt identity must not cross conversations');
+    assert.equal(rebound.pendingPrompt, '');
+    assert.equal(rebound.observedNode, '');
+    assert.equal(rebound.stableSince, 0);
   });
 });
 
@@ -479,6 +574,50 @@ test('explicit goal links a natural-language request through its exact work rece
     'a later user message must not hide the initiating receipt');
 });
 
+test('explicit goal discovery reads a large work receipt without retaining its body', async () => {
+  const workId = 'large-explicit-receipt';
+  const tree = conversationWithReceipt(ID, workId, 'Test Goal Mode');
+  const receipt = {
+    ok: true, work_id: workId, bootstrap: { context: 'private context '.repeat(1000) }
+  };
+  const deps = { credentials, startedAt: Date.now(), conversationCorrelation: ID,
+    workId, explicitGoal: true, requireWorkReceipt: true,
+    fetch: async () => new Response(JSON.stringify(tree)) };
+  for (const body of [receipt, { structuredContent: receipt },
+    { content: [{ type: 'text', text: JSON.stringify(receipt) }] }]) {
+    tree.mapping.receipt.message.content.parts = [JSON.stringify(body)];
+    assert.equal((await findRecentGoalCommand(deps)).state, 'matched');
+    const projected = await getConversation(ID, deps);
+    assert.deepEqual(projected.mapping.receipt.message.content.workIds, [workId]);
+    assert.equal(JSON.stringify(projected).includes('private context'), false);
+  }
+  tree.mapping.receipt.message.content.parts = [JSON.stringify({
+    ...receipt, bootstrap: { context: 'x'.repeat(2 * 1024 * 1024) }
+  })];
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent',
+    'receipt parsing must retain a finite input budget');
+});
+
+test('explicit goal discovery dates an exact receipt by the tool response after a long initiating turn', async () => {
+  const startedAt = Date.now();
+  const workId = 'delayed-explicit-receipt';
+  const tree = conversationWithReceipt(ID, workId, 'Test Goal Mode');
+  tree.mapping.u.message.create_time = (startedAt - 5 * 60_000) / 1000;
+  tree.mapping.receipt.message.create_time = startedAt / 1000;
+  const deps = { credentials, startedAt, conversationCorrelation: ID,
+    workId, explicitGoal: true, requireWorkReceipt: true,
+    fetch: async () => new Response(JSON.stringify(tree)) };
+  assert.equal((await findRecentGoalCommand(deps)).state, 'matched',
+    'thinking or tool setup before work.begin must not age out its exact receipt');
+  tree.mapping.u.message.create_time = startedAt / 1000;
+  tree.mapping.receipt.message.create_time = (startedAt - 60 * 60_000) / 1000;
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent',
+    'a fresh user timestamp cannot make a stale tool receipt current');
+  tree.mapping.receipt.message.create_time = (startedAt + 60_000) / 1000;
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent',
+    'a later receipt cannot claim to be the initiating receipt');
+});
+
 test('explicit goal discovery rejects unrelated, stale, off-branch and model-authored receipts', async () => {
   const workId = 'explicit-receipt-owner';
   const lookup = (tree, options = {}) => ({
@@ -526,8 +665,10 @@ test('explicit goal discovery refuses ambiguous matches and rechecks cached rece
 test('explicit goal monitor resolves a natural-language work receipt without a conversation URL', async t => {
   await withMonitoredGoal(t, async f => {
     f.tree.mapping.u.message.content.parts = ['I want you to do a test goal mode now'];
+    f.tree.mapping.u.message.create_time -= 300;
     f.tree.mapping.receipt = { parent: 'u', message: {
-      author: { role: 'tool' }, content: { workIds: [f.work_id] }
+      author: { role: 'tool' }, create_time: Date.now() / 1000,
+      content: { workIds: [f.work_id] }
     } };
     f.tree.mapping.a.parent = 'receipt';
     f.patchGoal({ conversationId: '', conversationCorrelation: 'opaque-host-session' });
@@ -536,6 +677,8 @@ test('explicit goal monitor resolves a natural-language work receipt without a c
     await pollGoal(f.config, f.work_id, { nativeTransport: transport });
     assert.equal(f.status().conversationId, ID);
     assert.equal(f.status().retryCount, 0, JSON.stringify(f.status()));
+    assert.equal(f.status().continuationCount, 1);
+    assert.match(f.calls.find(call => call.action === 'continue').prompt, new RegExp(f.work_id));
   });
 });
 

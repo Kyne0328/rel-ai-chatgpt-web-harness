@@ -12,6 +12,7 @@ import { flushTaskHistoryPersistence, withTaskHistoryPersistenceBarrier } from '
 import { resetTaskHistoryCaches } from '../src/taskHistoryStorage.ts';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { isTerminalTaskReference } from '../src/tools/task.js';
+import { createOutputSpillWriter } from '../src/outputSpill.js';
 import { createToolActivityTracker, resetToolActivity } from '../src/toolActivity.js';
 
 let now = 1000;
@@ -85,6 +86,13 @@ const previousConfig = process.env.REL_AI_MCP_CONFIG;
 assert.equal(isTerminalTaskReference({ status: 'cancelled' }, OP.PROCESS_STOP), true);
 assert.equal(isTerminalTaskReference({ status: 'completed' }, OP.UI, { action: 'stop' }), true);
 assert.equal(isTerminalTaskReference({ status: 'cancelled' }, OP.UI, { action: 'snapshot' }), false);
+assert.equal(isTerminalTaskReference({ status: 'completed' }, OP.READ, { outputRef: 'spill_fixture' }), true);
+assert.equal(isTerminalTaskReference({ status: 'cancelled' }, OP.READ, { outputRef: 'spill_fixture', byteOffset: 0 }), true);
+for (const args of [{}, { outputRef: '' }, { outputRef: ' ' }, { paths: ['package.json'] },
+  { outputRef: 'spill_fixture', paths: ['package.json'] }, { outputRef: 'spill_fixture', skill: 'fixture' },
+  { outputRef: 'spill_fixture', ranges: [] }, { outputRef: 'spill_fixture', root: '.' }]) {
+  assert.equal(isTerminalTaskReference({ status: 'completed' }, OP.READ, args), false);
+}
 fs.mkdirSync(workspace, { recursive: true });
 fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({ name: 'cancel-fixture' }));
 fs.writeFileSync(configPath, JSON.stringify({
@@ -107,6 +115,12 @@ try {
   const context = { publicHttpOnly: true, requestId: 'cancel-test' };
   const started = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'Cancelable task' }, context);
   assert.equal(started.status, 'planning');
+  await callTool('relai_work', { action: 'plan', workspace: 'app', work_id: started.work_id,
+    steps: [{ id: 'retain-output', title: 'Retain task output', status: 'in_progress' }] }, context);
+  const outputWriter = createOutputSpillWriter({ stateDir }, started.work_id);
+  outputWriter.start(Buffer.from('retained cancellation output'));
+  const retainedOutput = await outputWriter.finish();
+  assert.ok(retainedOutput.outputRef);
   const managed = await callTool('relai_process', {
     action: 'start',
     workspace: 'app',
@@ -175,6 +189,41 @@ try {
     workspace: 'app', work_id: started.work_id, reason: 'Retry'
   }, context);
   assert.equal(duplicate.duplicate, true);
+  const completedTask = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'Retained completed output' }, context);
+  await callTool('relai_work', { action: 'plan', workspace: 'app', work_id: completedTask.work_id,
+    steps: [{ id: 'retain-output', title: 'Retain task output', status: 'completed' }] }, context);
+  const completedWriter = createOutputSpillWriter({ stateDir }, completedTask.work_id);
+  completedWriter.start(Buffer.from('retained completion output'));
+  const completedOutput = await completedWriter.finish();
+  await callTool('relai_work', { action: 'finish', workspace: 'app', work_id: completedTask.work_id,
+    summary: 'Retained output fixture complete.' }, context);
+  for (const [workId, outputRef, expectedStatus, expectedContent] of [
+    [started.work_id, retainedOutput.outputRef, 'cancelled', 'retained cancellation output'],
+    [completedTask.work_id, completedOutput.outputRef, 'completed', 'retained completion output']
+  ]) {
+    const beforeRead = readTaskHistorySession(fallbackConfig, workId);
+    const retained = await callTool('relai_read', { workspace: 'app', work_id: workId, outputRef,
+      byteOffset: 0, maxBytes: 1024, guidanceMode: 'none' }, context);
+    assert.equal(retained.items[0].content, expectedContent);
+    await flushTaskHistoryPersistence();
+    const afterRead = readTaskHistorySession(fallbackConfig, workId);
+    assert.equal(afterRead.status, expectedStatus, 'reading retained output must not revive terminal work');
+    for (const field of ['endedAt', 'completedAt', 'cancelledAt', 'durationMs', 'plan']) {
+      assert.deepEqual(afterRead[field], beforeRead[field], `retained output reads must preserve ${field}`);
+    }
+    await assert.rejects(() => callTool('relai_read', { workspace: 'app', work_id: workId, outputRef,
+      taskProgress: { id: 'retain-output', status: 'pending' }
+    }, context), error => error.code === 'INVALID_TASK_STATE');
+    await flushTaskHistoryPersistence();
+    const afterRejectedProgress = readTaskHistorySession(fallbackConfig, workId);
+    for (const field of ['status', 'endedAt', 'completedAt', 'cancelledAt', 'durationMs', 'plan']) {
+      assert.deepEqual(afterRejectedProgress[field], beforeRead[field], `rejected terminal progress must preserve ${field}`);
+    }
+    await assert.rejects(() => callTool('relai_read', { workspace: 'app', work_id: workId, outputRef },
+      { ...context, principal: 'different-owner' }), error => error.code === 'TASK_NOT_FOUND');
+    await assert.rejects(() => callTool('relai_read', { workspace: 'app', work_id: workId, paths: ['package.json'] }, context),
+      error => error.code === 'INVALID_TASK_STATE');
+  }
   await assert.rejects(
     () => callTool('relai_read', { workspace: 'app', work_id: started.work_id, paths: ['package.json'] }, context),
     error => error?.code === 'INVALID_TASK_STATE'

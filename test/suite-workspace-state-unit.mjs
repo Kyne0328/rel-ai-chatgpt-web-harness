@@ -1261,6 +1261,31 @@ async function case_workspace_multi_source_runtime_unit() {
     assert.ok(symbol.definitions.some(item => item.path === 'source:2/src/secondary.js'),
       'structural symbol lookup must retain the secondary source identity');
   
+
+    for (const action of ['impact', 'trace']) {
+      for (const [symbolName, expectedPath] of [
+        ['primaryMarker', 'src/primary.js'],
+        ['secondaryMarker', 'source:2/src/secondary.js']
+      ]) {
+        const result = await repositoryIntelligence.codeInspect(workspace, config, {
+          action, symbol: symbolName, maxResults: 20
+        }, { watch: false });
+        assert.equal(result.ok, true);
+        assert.ok(result.definitions.some(item => item.path === expectedPath),
+          `${action} must find a symbol when another attached source has no matching seed`);
+        const impacted = action === 'impact' ? result.impactedPaths : result.indirectImpact;
+        assert.ok(impacted.some(item => item.path === expectedPath));
+      }
+      await assert.rejects(repositoryIntelligence.codeInspect(workspace, config, {
+        action, symbol: 'missingAcrossAllSources'
+      }, { watch: false }), error => error.code === 'IMPACT_SEED_NOT_FOUND',
+      'a symbol missing from every source must remain an actionable error');
+      await assert.rejects(repositoryIntelligence.codeInspect(workspace, config, {
+        action, symbol: 'invalid symbol'
+      }, { watch: false }), /symbol must be a simple code identifier/,
+      'multi-source aggregation must not suppress unrelated query errors');
+    }
+
     const architecture = await repositoryIntelligence.architecture(workspace, config, { maxResults: 20 }, { watch: false });
     assert.equal(architecture.architecture.strategy, 'multi-source-bounded-file-graph');
     assert.ok(architecture.entryPoints.every(item => !path.isAbsolute(item.path)), 'multi-source architecture must return virtual repository paths, not host paths');

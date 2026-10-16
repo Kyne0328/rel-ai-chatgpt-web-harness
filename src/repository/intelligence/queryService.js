@@ -434,7 +434,11 @@ function impactAnalysis(workspace, db, symbol, definitions, references, args, ma
     if (db.prepare('SELECT 1 AS present FROM files WHERE path=?').get(safe.relativePath)) seeds.add(safe.relativePath);
   }
   if (!seeds.size) for (const reference of references.items) if (!reference.test) seeds.add(reference.path);
-  if (!seeds.size) throw new Error('impact requires a recognized structural symbol definition or at least one indexed path.');
+  if (!seeds.size) {
+    const error = new Error('impact requires a recognized structural symbol definition or at least one indexed path.');
+    error.code = 'IMPACT_SEED_NOT_FOUND';
+    throw error;
+  }
 
   const impacted = new Map([...seeds].map(path => [path, { path, depth: 0, reason: 'seed' }]));
   let frontier = fileRowsByPaths(db, [...seeds]);

@@ -80,20 +80,7 @@ async function launchLocalBrowserDriver(options: LaunchBrowserDriverOptions): Pr
         ignoreHTTPSErrors: options.ignoreHTTPSErrors === true
       });
     }
-    const currentBrowser = browser;
-    const currentContext = context;
-    return Object.freeze({
-      browserProduct: runtime.product,
-      createPage: async () => wrapPage(await currentContext.newPage()),
-      close: async () => {
-        const failures: unknown[] = [];
-        await currentContext.close().catch(error => failures.push(error));
-        if (!persistent) await currentBrowser?.close().catch(error => failures.push(error));
-        if (failures.length) throw new Error(failures.map(errorMessage).join('; '));
-      },
-      onDisconnected: (listener: () => void) => currentBrowser?.once('disconnected', listener),
-      setControl: async () => {}
-    });
+    return createPlaywrightBrowserDriver(context, browser, { persistent, browserProduct: runtime.product });
   } catch (error) {
     await context?.close().catch(() => {});
     if (!persistent) await browser?.close().catch(() => {});
@@ -107,6 +94,75 @@ async function launchLocalBrowserDriver(options: LaunchBrowserDriverOptions): Pr
     }
     throw error;
   }
+}
+
+function createPlaywrightBrowserDriver(
+  context: BrowserContext,
+  browser: Browser | undefined,
+  options: Readonly<{ persistent: boolean; browserProduct: string }>
+): LocalBrowserDriver {
+  const pages = new WeakMap<Page, BrowserPageDriver>();
+  const observedPages = new WeakSet<Page>();
+  const pendingPages = new Map<Page, BrowserPageDriver>();
+  let pageCreated: ((page: BrowserPageDriver, active: boolean) => void) | undefined;
+  let disconnected: (() => void) | undefined;
+  let disposed = false;
+  const pageDriver = (page: Page): BrowserPageDriver => {
+    let driver = pages.get(page);
+    if (!driver) {
+      driver = wrapPage(page);
+      pages.set(page, driver);
+    }
+    return driver;
+  };
+  const onPage = (page: Page): void => {
+    if (disposed || page.isClosed() || observedPages.has(page)) return;
+    observedPages.add(page);
+    const driver = pageDriver(page);
+    if (pageCreated) pageCreated(driver, true);
+    else pendingPages.set(page, driver);
+  };
+  const releaseListeners = (): void => {
+    if (disposed) return;
+    disposed = true;
+    context.off('page', onPage);
+    context.off('close', onDisconnected);
+    browser?.off('disconnected', onDisconnected);
+    pendingPages.clear();
+    pageCreated = undefined;
+    disconnected = undefined;
+  };
+  const onDisconnected = (): void => {
+    const listener = disconnected;
+    releaseListeners();
+    listener?.();
+  };
+  context.on('page', onPage);
+  context.once('close', onDisconnected);
+  browser?.once('disconnected', onDisconnected);
+  return Object.freeze({
+    browserProduct: options.browserProduct,
+    // Context page events can precede newPage's result. Both paths must share
+    // the exact same wrapper so runtime registration can deduplicate them.
+    createPage: async () => pageDriver(await context.newPage()),
+    onPageCreated: (listener: (page: BrowserPageDriver, active: boolean) => void) => {
+      if (disposed) return;
+      pageCreated = listener;
+      for (const [page, driver] of pendingPages) {
+        if (!page.isClosed()) listener(driver, true);
+      }
+      pendingPages.clear();
+    },
+    close: async () => {
+      const failures: unknown[] = [];
+      await context.close().catch(error => failures.push(error));
+      if (!options.persistent) await browser?.close().catch(error => failures.push(error));
+      if (failures.length) throw new Error(failures.map(errorMessage).join('; '));
+      releaseListeners();
+    },
+    onDisconnected: (listener: () => void) => { if (!disposed) disconnected = listener; },
+    setControl: async () => {}
+  });
 }
 
 function wrapPage(page: Page): BrowserPageDriver {
@@ -213,7 +269,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || 'unknown error');
 }
 
-export { launchLocalBrowserDriver };
+export { createPlaywrightBrowserDriver, launchLocalBrowserDriver };
 export type {
   BrowserDownloadHandle,
   BrowserPageDriver,

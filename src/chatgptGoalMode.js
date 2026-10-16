@@ -31,10 +31,20 @@ let lastDetectionCleanupAt = 0;
 function goalKey(workId) { return PREFIX + workId; }
 function detectionKey(workId) { return DETECTION_PREFIX + workId; }
 
+function canMonitorGoal(record, deps = {}) {
+  // Durable records are shared by desktop, CLI and HTTP runtimes. Only the
+  // runtime with the matching transport may observe or mutate their progress.
+  if (typeof deps.nativeTransport === 'function'
+    || (!deps.fetch && !deps.credentials && hasGoalBrowserTransport())) return true;
+  // A tunnel belongs to a particular native account. Process-wide credentials
+  // cannot substitute for that account, even when another runtime has them.
+  return !record?.tunnelId && Boolean(deps.credentials || chatgptCredentials(deps.env || process.env));
+}
+
 function scheduleGoalRetry(config, goal) {
   clearTimeout(retryTimers.get(goal?.workId));
   retryTimers.delete(goal?.workId);
-  if (monitorConfig !== config || !goal?.active || !goal.nextAttemptAt) return;
+  if (monitorConfig !== config || !goal?.active || !goal.nextAttemptAt || !canMonitorGoal(goal)) return;
   const task = statusForTask(config, goal);
   if ((!goal.pendingNode || ['accepted', 'not_sent'].includes(goal.pendingOutcome))
     && !continuationTaskUnchanged(task || {}, task)) return;
@@ -100,7 +110,7 @@ function queueGoalDetection(config, task, context = {}, deps = {}) {
 async function checkGoalDetection(config, workId, deps = {}) {
   if (activeDetections.has(workId)) return;
   const record = loadDetection(config, workId);
-  if (record?.state !== 'checking' || Date.now() < record.nextAttemptAt) return;
+  if (record?.state !== 'checking' || Date.now() < record.nextAttemptAt || !canMonitorGoal(record, deps)) return;
   const controller = new AbortController();
   activeDetections.set(workId, controller);
   try {
@@ -289,8 +299,12 @@ function activateGoal(config, args, context) {
   const existing = loadGoal(config, workId);
   if (existing && existing.owner !== owner) throw new Error('Goal Mode owner mismatch.');
   const conversationId = args.conversationUrl ? parseConversationUrl(args.conversationUrl) : existing?.conversationId || '';
-  if (existing && existing.active && existing.conversationId && conversationId && existing.conversationId !== conversationId) {
+  const switchingConversation = Boolean(existing?.conversationId && conversationId && existing.conversationId !== conversationId);
+  if (switchingConversation && existing.active) {
     throw new Error('An active goal cannot silently switch conversations; stop it first.');
+  }
+  if (switchingConversation && existing.pendingNode && !['accepted', 'not_sent'].includes(pendingOutcome(existing))) {
+    throw new Error('Cannot switch conversations while a previous continuation receipt is unresolved; resume the original conversation to reconcile it.');
   }
   const goal = saveGoal(config, {
     ...(existing || {}), workId, owner, workspace: String(task.workspace || ''),
@@ -298,9 +312,12 @@ function activateGoal(config, args, context) {
     objective, conversationId, active: true, state: 'linking',
     tunnelId: existing?.tunnelId || principalTunnelId(context.principal),
     conversationCorrelation: existing?.conversationCorrelation || String(context?.conversationId || task.correlation?.conversationId || ''),
-    observedNode: existing?.observedNode || '', stableSince: existing?.stableSince || 0,
-    pendingNode: existing?.pendingOutcome === 'not_sent' ? '' : existing?.pendingNode || '',
-    pendingOutcome: pendingOutcome(existing || {}),
+    observedNode: switchingConversation ? '' : existing?.observedNode || '',
+    stableSince: switchingConversation ? 0 : existing?.stableSince || 0,
+    pendingNode: switchingConversation || existing?.pendingOutcome === 'not_sent' ? '' : existing?.pendingNode || '',
+    pendingOutcome: switchingConversation ? 'not_sent' : pendingOutcome(existing || {}),
+    ...(switchingConversation ? { pendingPrompt: '', pendingTaskCalls: 0,
+      unfinishedTurnId: '', unfinishedTaskCalls: 0, unfinishedProgressAt: 0 } : {}),
     retryCount: existing?.active ? Number(existing.retryCount || 0) : 0,
     nextAttemptAt: existing?.active ? Number(existing.nextAttemptAt || 0) : 0,
     error: '', challenge: null, updatedAt: Date.now()
@@ -557,7 +574,7 @@ async function pollGoal(config, workId, deps = {}) {
   activePolls.set(workId, controller);
   try {
     let goal = loadGoal(config, workId);
-    if (!goal?.active) return;
+    if (!goal?.active || !canMonitorGoal(goal, deps)) return;
     deps = coordinatedGoalDeps(config, goal, deps);
     if (goal.pendingNode && !goal.pendingOutcome) goal = saveGoal(config, { ...goal, pendingOutcome: pendingOutcome(goal) });
     const task = statusForTask(config, goal);
@@ -585,11 +602,6 @@ async function pollGoal(config, workId, deps = {}) {
     // Consume the deadline once this retry can run. A successful observation
     // may need to wait for branch settlement instead of sending immediately.
     if (goal.nextAttemptAt) goal = saveGoal(config, { ...goal, nextAttemptAt: 0 });
-    if (!chatgptCredentials(deps.env || process.env) && !deps.nativeTransport && !hasGoalBrowserTransport()) {
-      retryGoal(config, goal, Object.assign(new Error('Sign in to ChatGPT from the Rel.AI Browser page.'), { status: 401 }),
-        { notSent: !goal.pendingNode || goal.pendingOutcome === 'accepted' });
-      return;
-    }
     if (!goal.conversationId) {
       const id = await findGoalConversation(goal.objective, { ...deps, startedAt: goal.createdAt, signal: controller.signal,
         conversationCorrelation: verifiedCorrelation(config, goal), workId, requireWorkReceipt: true, explicitGoal: true });

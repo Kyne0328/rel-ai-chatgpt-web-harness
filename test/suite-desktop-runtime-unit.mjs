@@ -91,6 +91,18 @@ async function case_desktop_lifecycle_unit() {
   assert.equal((await first.setPreferences({ updateChannel: 'nightly' })).ok, false, 'app preferences must reject unknown update channels');
   const cleanStatus = await first.markCleanShutdown();
   assert.equal((await first.markCleanShutdown()).lastCleanExitAt, cleanStatus.lastCleanExitAt);
+  const resumed = await first.resumeAfterShutdown();
+  assert.equal(resumed.launchCount, firstStatus.launchCount, 'aborted update recovery must not count as another process launch');
+  assert.equal(resumed.launchedAt, firstStatus.launchedAt, 'recovery preserves the running process launch identity');
+  assert.equal(resumed.keepAwake, true, 'recovery preserves desktop preferences');
+  const resumedState = JSON.parse(fs.readFileSync(path.join(stateDir, 'desktop-lifecycle.json'), 'utf8'));
+  assert.equal(resumedState.running, true, 'recovery must replace the clean shutdown marker with a running marker');
+  assert.ok(resumedState.launchId, 'recovered process remains eligible to record its eventual clean shutdown');
+  await first.resumeAfterShutdown();
+  assert.equal(first.getStatus().launchCount, firstStatus.launchCount, 'repeated recovery must be idempotent');
+  await first.markCleanShutdown();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateDir, 'desktop-lifecycle.json'), 'utf8')).running, false);
+
   
   const second = createDesktopLifecycleManager({ app, platform: 'win32', env: {}, now, connectorRevision: 'surface-a', onLog: (message, options) => logs.push({ message, options }) });
   const secondStatus = await second.start();
@@ -1792,10 +1804,13 @@ async function case_logout_connection_clear_failure() {
   const hostSource = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
   const begin = hostSource.indexOf('  async function logoutApplication(');
   const end = hostSource.indexOf('  async function quitApplication()', begin);
+  const guard = hostSource.slice(hostSource.indexOf('  function assertInstallerSettled() {'), hostSource.indexOf('  function startServer() {'));
   for (const cleared of [false, true]) {
     const calls = { exits: 0, relaunches: 0, resets: 0, tray: 0, recovery: 0, networkStarts: 0 };
     const status = { serverRunning: false, tunnelStatus: 'stopped' };
+    let installerUncertain = true;
     const context = {
+      appUpdater: { getStatus: () => ({ installLaunchUncertain: installerUncertain }) },
       isQuitting: false,
       desktopPower: { getStatus: () => ({}) },
       taskActivityBlockReason: () => '',
@@ -1810,7 +1825,11 @@ async function case_logout_connection_clear_failure() {
       process: { argv: ['fixture-node', 'fixture-app'] },
       app: { relaunch: () => { calls.relaunches += 1; }, exit: () => { calls.exits += 1; } }
     };
-    const logout = runInNewContext(hostSource.slice(begin, end) + '\nlogoutApplication', context);
+    const logout = runInNewContext(guard + hostSource.slice(begin, end) + '\nlogoutApplication', context);
+    await assert.rejects(() => logout(), /installer outcome is uncertain/i, 'logout must not race a potentially running installer');
+    assert.equal(context.isQuitting, false, 'uncertain launch must block logout before shutdown starts');
+    assert.ok(Object.values(calls).every(value => value === 0), 'blocked logout must not restart or mutate desktop state');
+    installerUncertain = false;
     if (cleared) assert.equal((await logout()).ok, true);
     else await assert.rejects(() => logout(), /Logout did not finish.*could not be cleared/);
     assert.equal(calls.relaunches, cleared ? 1 : 0);

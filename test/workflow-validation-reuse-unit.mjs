@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { registerHooks } from 'node:module';
 import { createValidationFingerprint } from '../src/bridge/validationPlan.js';
 import { relaiVerify } from '../src/bridge/validation.js';
-import { recordTaskHistoryEvent, recordWorkflowEvidence } from '../src/taskHistoryStore.ts';
+import { recordTaskHistoryEvent, recordWorkflowEvidence, readRecentWorkflowEvidence, flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-reuse-'));
 const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-state-'));
@@ -75,6 +76,48 @@ try {
   execFileSync('git', ['commit', '-m', 'source update'], { cwd: root, stdio: 'ignore' });
   const cleanCommitB = await createValidationFingerprint(workspace, config, { paths: ['front-end/package.json'], repositoryWide: true });
   assert.notEqual(cleanCommitA.fingerprint, cleanCommitB.fingerprint, 'different clean repository HEADs must not share validation evidence');
+
+  // Inject execution facts only; use the real validation planner, summary,
+  // evidence store and reuse path without launching an uncertain process.
+  const validationUrl = new URL('../src/bridge/validation.js?termination-fixture', import.meta.url).href;
+  const processUrl = new URL('../src/process.js', import.meta.url).href;
+  const processStub = 'data:text/javascript,' + encodeURIComponent(
+    'export { summarizeCommand } from ' + JSON.stringify(processUrl) + ';' +
+    'export async function runProcess() { const f = globalThis.__relaiValidationTerminationFixture; f.calls += 1; return f.result; }'
+  );
+  const fixture = { calls: 0, result: { executed: true, exitCode: 0, rootExitConfirmed: true,
+    terminationConfirmed: false, stdout: '', stderr: '', timedOut: false } };
+  globalThis.__relaiValidationTerminationFixture = fixture;
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL === validationUrl && specifier === '../process.js') return { url: processStub, shortCircuit: true };
+      return nextResolve(specifier, context);
+    }
+  });
+  try {
+    const { relaiVerify: verifyFixture } = await import(validationUrl);
+    hooks.deregister();
+    recordTaskHistoryEvent(config, { taskId: 'task-uncertain', taskHistoryEligible: true, taskIdentityVersion: 2,
+      taskIdExplicit: true, tool: 'work.begin', workspace: 'repo', ok: true, ts: new Date().toISOString() });
+    const uncertain = await verifyFixture(workspace, config, { checks: ['npm:front-end:test'], complete: false }, { taskId: 'task-uncertain' });
+    assert.equal(uncertain.ok, false);
+    assert.notEqual(uncertain.validationStatus, 'passed');
+    assert.equal(uncertain.results[0].exitCode, 0);
+    assert.equal(uncertain.results[0].terminationConfirmed, false);
+    assert.match(uncertain.nextAction, /termination.*confirmed/i);
+    await flushTaskHistoryPersistence();
+    assert.equal(readRecentWorkflowEvidence(config, 'task-uncertain', 100).some(item => item.outcome === 'passed'), false,
+      'complete:false must not persist a reusable pass from uncertain termination');
+    fixture.result = { ...fixture.result, terminationConfirmed: true };
+    const settled = await verifyFixture(workspace, config, { checks: ['npm:front-end:test'], complete: false }, { taskId: 'task-uncertain' });
+    assert.equal(settled.ok, true);
+    assert.equal(settled.executedUnits, 1);
+    assert.equal(settled.reusedUnits, 0, 'the earlier uncertain result must not suppress the next check');
+    assert.equal(fixture.calls, 2);
+  } finally {
+    hooks.deregister();
+    delete globalThis.__relaiValidationTerminationFixture;
+  }
 
   execFileSync('git', ['switch', '-c', 'validation-branch'], { cwd: root, stdio: 'ignore' });
   const branchFingerprint = await createValidationFingerprint(workspace, config, { paths: ['front-end/package.json'], repositoryWide: true });

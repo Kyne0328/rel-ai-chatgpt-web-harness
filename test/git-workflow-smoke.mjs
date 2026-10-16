@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { simpleGit } from 'simple-git';
 
 import { relaiApplyPatch, relaiDiff, relaiGitCommit, relaiGitDraftPr, relaiGitPush, relaiRestorePaths, workspaceWrite } from '../src/localRepoBridge.js';
@@ -248,6 +249,64 @@ assert.equal(draftPr.deprecated, undefined);
 assert.ok(draftPr.changedFiles.includes('ui.txt'));
 assert.match(draftPr.title, /feature\/ui-cleanup/);
 assert.match(draftPr.body, /ui\.txt/);
+
+
+// PR file summaries must include changes without textual +++ headers.
+const draftTypesPath = path.join(root, 'draft-types');
+fs.mkdirSync(draftTypesPath);
+git(['init'], { cwd: draftTypesPath, stdio: 'ignore' });
+git(['config', 'user.email', 'relai@example.test'], { cwd: draftTypesPath });
+git(['config', 'user.name', 'RelAI Git Smoke'], { cwd: draftTypesPath });
+git(['config', 'diff.renames', 'true'], { cwd: draftTypesPath });
+git(['config', 'core.quotePath', 'true'], { cwd: draftTypesPath });
+fs.writeFileSync(path.join(draftTypesPath, 'deleted file.txt'), 'delete this file\n');
+fs.writeFileSync(path.join(draftTypesPath, 'rename from.txt'), 'preserved renamed content\n');
+fs.writeFileSync(path.join(draftTypesPath, 'asset.bin'), Buffer.from([0, 1, 2, 3]));
+fs.writeFileSync(path.join(draftTypesPath, 'café notes.txt'), 'before\n');
+git(['add', '.'], { cwd: draftTypesPath });
+git(['commit', '-m', 'draft fixture base'], { cwd: draftTypesPath, stdio: 'ignore' });
+const draftBase = git(['rev-parse', 'HEAD'], { cwd: draftTypesPath }).toString('utf8').trim();
+fs.unlinkSync(path.join(draftTypesPath, 'deleted file.txt'));
+fs.renameSync(path.join(draftTypesPath, 'rename from.txt'), path.join(draftTypesPath, 'rename to.txt'));
+fs.writeFileSync(path.join(draftTypesPath, 'asset.bin'), Buffer.from([0, 4, 5, 6]));
+fs.writeFileSync(path.join(draftTypesPath, 'café notes.txt'), 'after\n');
+git(['add', '-A'], { cwd: draftTypesPath });
+git(['commit', '-m', 'draft fixture changes'], { cwd: draftTypesPath, stdio: 'ignore' });
+const movingDraftRef = 'refs/heads/draft-moving';
+git(['update-ref', movingDraftRef, 'HEAD'], { cwd: draftTypesPath });
+const originalSpawn = childProcess.spawn;
+let movedDraftRef = false;
+let variedPr;
+childProcess.spawn = function (command, args, options) {
+  const requestFlag = process.platform === 'win32' ? args?.indexOf('-RequestPath') : -1;
+  const request = requestFlag >= 0 ? JSON.parse(fs.readFileSync(args[requestFlag + 1], 'utf8')) : null;
+  const probeArgs = request?.args || args;
+  const cwd = request?.cwd || options?.cwd;
+  if (!movedDraftRef && cwd === draftTypesPath && probeArgs?.includes('diff') && probeArgs.includes('--name-only')) {
+    // Advance only this fixture's branch after the patch observation. Both
+    // outputs must still describe the commits selected when drafting began.
+    git(['update-ref', movingDraftRef, draftBase], { cwd: draftTypesPath });
+    movedDraftRef = true;
+  }
+  return originalSpawn.call(this, command, args, options);
+};
+syncBuiltinESMExports();
+try {
+  variedPr = await relaiGitDraftPr({ ...workspace, alias: 'draft-types', path: draftTypesPath }, config, {
+    base: draftBase, head: movingDraftRef
+  });
+} finally {
+  childProcess.spawn = originalSpawn;
+  syncBuiltinESMExports();
+}
+assert.equal(movedDraftRef, true, 'the branch must move between the two draft observations');
+assert.equal(git(['rev-parse', movingDraftRef], { cwd: draftTypesPath }).toString('utf8').trim(), draftBase);
+const expectedDraftFiles = ['asset.bin', 'café notes.txt', 'deleted file.txt', 'rename to.txt'];
+assert.equal(variedPr.ok, true);
+assert.equal(variedPr.emptyDiff, false);
+assert.deepEqual([...variedPr.changedFiles].sort(), [...expectedDraftFiles].sort());
+assert.equal(variedPr.changedFileCount, expectedDraftFiles.length);
+for (const file of expectedDraftFiles) assert.ok(variedPr.body.includes(file), `PR body must include ${file}`);
 
 const emptyPr = await relaiGitDraftPr(workspace, config, { base: 'main', head: 'main' });
 assert.equal(emptyPr.ok, false);

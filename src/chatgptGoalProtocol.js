@@ -337,7 +337,10 @@ function goalCommandEvidence(conversation) {
     if (node.message?.author?.role === 'user') user = node.message;
     if (node.message?.author?.role !== 'tool' || !user) continue;
     for (const workId of node.message?.content?.workIds || []) {
-      receipts.push({ workId, timestamp: Number(user.create_time) * 1_000,
+      // Work may start after a long reasoning/setup phase in the same turn.
+      // Date its proof by the tool response; older responses without a timestamp
+      // retain the conservative initiating-user fallback.
+      receipts.push({ workId, timestamp: Number(node.message.create_time ?? user.create_time) * 1_000,
         messageId: String(user.id || '').trim() });
     }
   }
