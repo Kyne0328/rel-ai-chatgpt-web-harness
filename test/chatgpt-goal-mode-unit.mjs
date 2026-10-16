@@ -18,6 +18,10 @@ function response(payload) {
   return { ok: true, json: async () => payload, text: async () => typeof payload === 'string' ? payload : JSON.stringify(payload) };
 }
 
+function emptyProjectCatalogue(url) {
+  return url.includes('/gizmos/snorlax/sidebar') ? response({ items: [], cursor: null }) : null;
+}
+
 function conversation(id, goalText = '/goal Fix the current project') {
   return {
     conversation_id: id, current_node: 'a',
@@ -531,11 +535,109 @@ test('automatic detection cannot claim a slash goal from another correlated chat
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('Project Goal Mode discovers an opaque-host conversation without a URL from its sidebar preview', async () => {
+  const workId = 'project-preview-receipt';
+  const projectId = 'g-p-6a68897d433881919527e08c99703cba';
+  const requests = [];
+  const fetch = async url => {
+    requests.push(url);
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: [{
+      gizmo: { gizmo: { id: projectId }, conversations: {
+        items: [{ id: ID, update_time: new Date().toISOString() }]
+      } }
+    }], cursor: null });
+    if (url.endsWith('/conversation/' + ID)) return response(conversationWithReceipt(ID, workId, 'do a goal mode test'));
+    throw new Error('Unexpected ChatGPT request: ' + url);
+  };
+  const match = await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now(),
+    conversationCorrelation: 'v1/opaque-host-conversation', workId, explicitGoal: true, requireWorkReceipt: true });
+  assert.equal(match.state, 'matched');
+  assert.equal(match.conversationId, ID);
+  assert.equal(requests.filter(url => url.endsWith('/conversation/' + ID)).length, 1);
+  assert.equal(requests.some(url => url.includes('/gizmos/' + projectId + '/conversations')), false,
+    'a sidebar preview should avoid an unnecessary per-project catalogue read');
+});
+
+test('Project Goal Mode finds a receipt through Project and sidebar cursor pages', async () => {
+  const workId = 'project-pagination-receipt';
+  const projectId = 'g-p-6a68897d433881919527e08c99703cba';
+  const requests = [];
+  const fetch = async url => {
+    requests.push(url);
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) {
+      if (url.includes('cursor=sidebar-next')) return response({ items: [{
+        gizmo: { gizmo: { id: projectId }, conversations: { items: [] } }
+      }], cursor: null });
+      return response({ items: [], cursor: 'sidebar-next' });
+    }
+    if (url.includes('/gizmos/' + projectId + '/conversations?')) {
+      if (url.includes('cursor=project-next')) return response({
+        items: [{ id: ID, update_time: new Date().toISOString() }], cursor: null
+      });
+      return response({ items: [{ id: OTHER, update_time: new Date().toISOString() }], cursor: 'project-next' });
+    }
+    if (url.endsWith('/conversation/' + ID)) return response(conversationWithReceipt(ID, workId, 'run the test'));
+    if (url.endsWith('/conversation/' + OTHER)) return response(conversation(OTHER, 'Unrelated'));
+    throw new Error('Unexpected ChatGPT request: ' + url);
+  };
+  const match = await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now(),
+    conversationCorrelation: 'v1/another-opaque-session', workId, explicitGoal: true, requireWorkReceipt: true });
+  assert.equal(match.conversationId, ID);
+  assert.ok(requests.some(url => url.includes('cursor=sidebar-next')));
+  assert.ok(requests.some(url => url.includes('cursor=project-next')));
+});
+
+test('live Goal Mode monitor links and continues a Project chat without supplying its URL', async t => {
+  await withMonitoredGoal(t, async f => {
+    const projectId = 'g-p-6a68897d433881919527e08c99703cba';
+    f.tree.mapping.u.message.content.parts = ['do a goal mode test'];
+    f.tree.mapping.receipt = { parent: 'u', message: {
+      author: { role: 'tool' }, create_time: Date.now() / 1000,
+      content: { workIds: [f.work_id] }
+    } };
+    f.tree.mapping.a.parent = 'receipt';
+    f.patchGoal({ conversationId: '', conversationCorrelation: 'v1/opaque-host-project-session' });
+    const transport = async payload => {
+      if (payload.path?.includes('/backend-api/conversations?')) return { ok: true, data: { items: [] } };
+      if (payload.path?.includes('/gizmos/snorlax/sidebar')) return { ok: true, data: { items: [{
+        gizmo: { gizmo: { id: projectId }, conversations: { items: [
+          { id: ID, update_time: new Date().toISOString() }
+        ] } }
+      }], cursor: null } };
+      return f.deps.nativeTransport(payload);
+    };
+    await pollGoal(f.config, f.work_id, { nativeTransport: transport });
+    assert.equal(f.status().conversationId, ID);
+    assert.equal(f.status().retryCount, 0);
+    assert.equal(f.status().continuationCount, 1);
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 1);
+  });
+});
+
+test('Project Goal Mode refuses missing or off-branch work receipts', async () => {
+  const projectId = 'g-p-6a68897d433881919527e08c99703cba';
+  const workId = 'project-branch-receipt';
+  const tree = conversationWithReceipt(ID, workId, 'start goal');
+  tree.mapping.a.parent = 'u';
+  const fetch = async url => {
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: [{
+      gizmo: { gizmo: { id: projectId }, conversations: { items: [{ id: ID }] } }
+    }], cursor: null });
+    if (url.includes('/gizmos/' + projectId + '/conversations')) return response({ items: [], cursor: null });
+    return response(tree);
+  };
+  assert.equal((await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now(),
+    conversationCorrelation: 'v1/untrusted-host', workId, explicitGoal: true, requireWorkReceipt: true })).state, 'absent');
+});
+
 test('opaque host correlations require an exact tool receipt after the goal command on its active branch', async () => {
   const workId = 'receipt-owner';
   const fetchTree = tree => ({ credentials, startedAt: Date.now(), conversationCorrelation: 'opaque-session',
     workId, requireWorkReceipt: true, fetch: async url => url.includes('/conversations?')
-      ? response({ items: [{ id: ID }] }) : response(tree) });
+      ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || response(tree) });
   assert.equal((await findRecentGoalCommand(fetchTree(conversationWithReceipt(ID, workId)))).state, 'matched');
   for (const mutate of [
     tree => { tree.mapping.receipt.message.author.role = 'assistant'; },
@@ -557,7 +659,7 @@ test('explicit goal links a natural-language request through its exact work rece
     credentials, startedAt: Date.now(), conversationCorrelation: 'opaque-session',
     workId, requireWorkReceipt: true, explicitGoal: true, ...options,
     fetch: async url => url.includes('/conversations?')
-      ? response({ items: [{ id: ID }] }) : response(conversationTree)
+      ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || response(conversationTree)
   });
   assert.equal((await findRecentGoalCommand(lookup(tree))).conversationId, ID);
   assert.equal((await findRecentGoalCommand(lookup(tree, { explicitGoal: false }))).state, 'absent',
@@ -650,7 +752,7 @@ test('explicit goal discovery refuses ambiguous matches and rechecks cached rece
   };
   const fetch = async url => url.includes('/conversations?')
     ? response({ items: [{ id: ID }, { id: OTHER }] })
-    : response(trees[url.endsWith(ID) ? ID : OTHER]);
+    : emptyProjectCatalogue(url) || response(trees[url.endsWith(ID) ? ID : OTHER]);
   const deps = { credentials, fetch, startedAt: Date.now(), conversationCorrelation: 'opaque-session',
     workId, explicitGoal: true, requireWorkReceipt: true };
   assert.equal((await findRecentGoalCommand(deps)).state, 'ambiguous');
@@ -799,7 +901,7 @@ test('protocol conversation reads stream only branch metadata, even above the ol
     'split command text must not silently become bare /goal');
   const splitMatch = await findRecentGoalCommand({ startedAt: Date.now(), credentials,
     fetch: async url => url.includes('/conversations?')
-      ? response({ items: [{ id: ID }] }) : new Response(JSON.stringify(split)) });
+      ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || new Response(JSON.stringify(split)) });
   assert.equal(splitMatch.state, 'absent');
   const malformed = new Response('{"current_node":"a","mapping":');
   await assert.rejects(() => getConversation(ID, { credentials,
@@ -1046,6 +1148,7 @@ test('goal discovery links a unique recent slash command even when the objective
   const fetch = async url => {
     seen.push(url);
     if (url.includes('/backend-api/conversations?')) return response({ items: [{ id: ID }, { id: OTHER }] });
+    if (emptyProjectCatalogue(url)) return emptyProjectCatalogue(url);
     return response(conversation(url.endsWith(ID) ? ID : OTHER,
       url.endsWith(ID) ? '/goal start now. Do everything possible until the firmware is finished' : 'Ordinary conversation'));
   };
@@ -1054,18 +1157,18 @@ test('goal discovery links a unique recent slash command even when the objective
   assert.deepEqual(await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now() }),
     { state: 'matched', conversationId: ID, messageId: 'user-1' });
   const ambiguous = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }, { id: OTHER }] })
-    : response(conversation(ID));
+    : emptyProjectCatalogue(url) || response(conversation(ID));
   assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: ambiguous, startedAt: Date.now() }), null);
   const bareCommand = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] })
-    : response(conversation(ID, '/goal'));
+    : emptyProjectCatalogue(url) || response(conversation(ID, '/goal'));
   assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: bareCommand, startedAt: Date.now() }), ID);
   for (const control of ['/goal stop', '/goal status', '/goal cancel']) {
     const stopCommand = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] })
-      : response(conversation(ID, control));
+      : emptyProjectCatalogue(url) || response(conversation(ID, control));
     assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: stopCommand, startedAt: Date.now() }), null);
   }
   const old = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] })
-    : response({ ...conversation(ID), mapping: { ...conversation(ID).mapping,
+    : emptyProjectCatalogue(url) || response({ ...conversation(ID), mapping: { ...conversation(ID).mapping,
       u: { parent: 'root', message: { id: 'old', author: { role: 'user' }, create_time: 1, content: { parts: ['/goal Fix the current project'] } } } } });
   assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: old, startedAt: Date.now() }), null);
   const laterOrdinary = conversation(ID, '/goal Build firmware');
@@ -1075,7 +1178,7 @@ test('goal discovery links a unique recent slash command even when the objective
     author: { role: 'assistant' }, end_turn: true, status: 'finished_successfully' } };
   laterOrdinary.current_node = 'nextAssistant';
   assert.deepEqual(await findRecentGoalCommand({ credentials,
-    fetch: async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] }) : response(laterOrdinary),
+    fetch: async url => url.includes('/conversations?') ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || response(laterOrdinary),
     startedAt: Date.now() }), { state: 'absent' }, 'an older /goal must not activate an unrelated later task');
 });
 
@@ -1176,7 +1279,7 @@ test('auto detection is bounded, fails closed on ambiguity and does not invent a
     const normalTask = { ...task, work_id: 'ordinary-work' };
     queueGoalDetection(config, normalTask, context, { ...deps,
       fetch: async url => url.includes('/conversations?')
-        ? response({ items: [{ id: ID }] }) : response(conversation(ID, 'Please analyze this repository')) });
+        ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || response(conversation(ID, 'Please analyze this repository')) });
     for (let i = 0; i < 30 && goalStatus(config, { work_id: normalTask.work_id }, context).state === 'checking'
       && goalStatus(config, { work_id: normalTask.work_id }, context).state === 'checking'; i++) {
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -1192,7 +1295,7 @@ test('auto detection is bounded, fails closed on ambiguity and does not invent a
     }, { transaction: true });
     await checkGoalDetection(config, normalTask.work_id, { ...deps,
       fetch: async url => url.includes('/conversations?')
-        ? response({ items: [{ id: ID }] }) : response(conversation(ID, 'No /goal request')) });
+        ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || response(conversation(ID, 'No /goal request')) });
     assert.equal(goalStatus(config, { work_id: normalTask.work_id }, context).state, 'not_requested');
     assert.equal(goalStatus(config, { work_id: normalTask.work_id }, context).goalActive, false);
   } finally {

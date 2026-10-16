@@ -911,7 +911,7 @@ function createBrowserSurfaceHost(options = {}) {
     const method = String(payload.method || 'GET').toUpperCase();
     const requestedPath = String(payload.path || '');
     const target = new URL(requestedPath, 'https://chatgpt.com');
-    const readPath = /^\/backend-api\/conversations$|^\/backend-api\/conversation\/[0-9a-f-]{36}$/i;
+    const readPath = /^\/backend-api\/(?:conversations|conversation\/[0-9a-f-]{36}|gizmos\/snorlax\/sidebar|gizmos\/g-p-[0-9a-f]{32}\/conversations)$/i;
     const writePath = /^\/backend-api\/(?:f\/conversation(?:\/prepare)?|sentinel\/chat-requirements\/(?:prepare|finalize))$/;
     if (target.origin !== 'https://chatgpt.com' || target.hash ||
       !((method === 'GET' && readPath.test(target.pathname)) ||

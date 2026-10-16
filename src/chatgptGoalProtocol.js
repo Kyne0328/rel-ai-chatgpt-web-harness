@@ -193,6 +193,57 @@ async function listConversations(deps = {}) {
   return Array.isArray(result.items) ? result.items : [];
 }
 
+// Project chats have a separate catalogue. The sidebar supplies recent chat
+// previews, avoiding a per-project request in the common case.
+const PROJECT_ID = /^g-p-[0-9a-f]{32}$/i;
+const MAX_SIDEBAR_PAGES = 4;
+const MAX_PROJECTS = 80;
+const MAX_PROJECT_CHAT_PAGES = 2;
+
+async function listGoalProjects(deps = {}) {
+  const projects = [];
+  const previews = [];
+  const seen = new Set();
+  let cursor = '';
+  for (let page = 0; page < MAX_SIDEBAR_PAGES; page++) {
+    const path = '/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=5'
+      + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+    const result = await requestChatgpt(path, { signal: deps.signal }, deps);
+    if (!Array.isArray(result?.items)) throw new Error('ChatGPT Project listing has an unsupported response.');
+    for (const item of result.items) {
+      const record = item?.gizmo || item;
+      const id = String(record?.gizmo?.id || record?.id || '');
+      if (!PROJECT_ID.test(id) || projects.includes(id)) continue;
+      projects.push(id);
+      const recentChats = record?.conversations?.items;
+      if (Array.isArray(recentChats)) for (const conversation of recentChats) {
+        if (UUID.test(String(conversation?.id || ''))) previews.push({
+          id: conversation.id, update_time: conversation.update_time
+        });
+      }
+      if (projects.length >= MAX_PROJECTS) return { projects, previews, complete: false };
+    }
+    const next = result.cursor;
+    if (!next) return { projects, previews, complete: true };
+    if (typeof next !== 'string' || next.length > 2048 || seen.has(next)) {
+      throw new Error('ChatGPT Project listing has an invalid pagination cursor.');
+    }
+    seen.add(next);
+    cursor = next;
+  }
+  return { projects, previews, complete: false };
+}
+
+async function listProjectChats(projectId, cursor, deps = {}) {
+  if (!PROJECT_ID.test(projectId) || (cursor !== '0' && (typeof cursor !== 'string' || cursor.length > 2048))) {
+    throw new Error('Invalid ChatGPT Project conversation lookup.');
+  }
+  const result = await requestChatgpt('/backend-api/gizmos/' + projectId
+    + '/conversations?cursor=' + encodeURIComponent(cursor), { signal: deps.signal }, deps);
+  if (!Array.isArray(result?.items)) throw new Error('ChatGPT Project conversations have an unsupported response.');
+  return { items: result.items, cursor: result.cursor || null };
+}
+
 async function getConversation(id, deps = {}) {
   return requestChatgpt('/backend-api/conversation/' + assertConversationId(id),
     { signal: deps.signal, projectConversation: true }, deps);
@@ -278,38 +329,83 @@ function turnState(conversation) {
 async function findRecentGoalCommand(deps = {}) {
   const startedAt = Number(deps.startedAt || 0);
   const candidates = [];
+  const inspected = new Set();
   let correlatedId = '';
   try { correlatedId = parseConversationUrl(deps.conversationCorrelation); } catch {}
-  const summaries = correlatedId ? [{ id: correlatedId }]
-    : (await discoveryRead('catalog', listConversations, deps)).value;
-  for (const summary of summaries) {
-    const id = String(summary.id || '');
-    if (!UUID.test(id)) continue;
-    const updated = typeof summary.update_time === 'number' ? summary.update_time * 1_000 : Date.parse(summary.update_time || '');
-    if (!correlatedId && Number.isFinite(updated) && updated < startedAt - 120_000) continue;
-    let evidence;
-    let cached = false;
-    if (correlatedId) evidence = goalCommandEvidence(await getConversation(id, deps));
-    else {
-      const result = await discoveryRead(id, async shared => goalCommandEvidence(await getConversation(id, shared)), deps);
-      evidence = result.value;
-      cached = result.cached;
+
+  const inspect = async summaries => {
+    for (const summary of summaries) {
+      const id = String(summary?.id || '');
+      if (!UUID.test(id) || inspected.has(id)) continue;
+      const updated = typeof summary.update_time === 'number' ? summary.update_time * 1_000 : Date.parse(summary.update_time || '');
+      if (!correlatedId && Number.isFinite(updated) && updated < startedAt - 120_000) continue;
+      inspected.add(id);
+      let evidence;
+      let cached = false;
+      if (correlatedId) evidence = goalCommandEvidence(await getConversation(id, deps));
+      else {
+        const result = await discoveryRead(id, async shared => goalCommandEvidence(await getConversation(id, shared)), deps);
+        evidence = result.value;
+        cached = result.cached;
+      }
+      const match = goalEvidenceForWork(evidence, deps, correlatedId);
+      // Only the initiating turn near work creation qualifies; later user turns
+      // cannot displace a verified explicit-goal receipt on the active branch.
+      if (!match || !recentGoalEvidence(match, startedAt)) continue;
+      const messageId = match.messageId;
+      if (cached) {
+        // A cached match cannot authorize linking without a fresh receipt read.
+        const fresh = goalEvidenceForWork(goalCommandEvidence(await getConversation(id, deps)), deps, correlatedId);
+        if (!fresh || fresh.messageId !== messageId || !recentGoalEvidence(fresh, startedAt)) continue;
+      }
+      candidates.push({ conversationId: id, messageId });
+      if (candidates.length > 1) return { state: 'ambiguous' };
     }
-    const match = goalEvidenceForWork(evidence, deps, correlatedId);
-    // Only the initiating turn near work creation qualifies; later user turns
-    // cannot displace a verified explicit-goal receipt on the active branch.
-    if (!match || !recentGoalEvidence(match, startedAt)) continue;
-    const messageId = match.messageId;
-    if (cached) {
-      // Cached catalog evidence reduces scans, but cannot authorize linking.
-      // Reverify the exact branch and receipt in a fresh, uncached read.
-      const fresh = goalEvidenceForWork(goalCommandEvidence(await getConversation(id, deps)), deps, correlatedId);
-      if (!fresh || fresh.messageId !== messageId || !recentGoalEvidence(fresh, startedAt)) continue;
-    }
-    candidates.push({ conversationId: id, messageId });
-    if (candidates.length > 1) return { state: 'ambiguous' };
+    return null;
+  };
+  const result = correlatedId
+    ? await inspect([{ id: correlatedId }])
+    : await inspect((await discoveryRead('catalog', listConversations, deps)).value);
+  if (result) return result;
+  if (correlatedId || candidates.length) {
+    return candidates.length ? { state: 'matched', ...candidates[0] } : { state: 'absent' };
   }
-  return candidates.length ? { state: 'matched', ...candidates[0] } : { state: 'absent' };
+
+  const catalogue = (await discoveryRead('project-catalog', listGoalProjects, deps)).value;
+  const previewResult = await inspect(catalogue.previews);
+  if (previewResult) return previewResult;
+  if (candidates.length) return { state: 'matched', ...candidates[0] };
+  // Normal work.begin calls also probe for a literal /goal. Do not walk every
+  // Project's history when its recent previews contain no such command.
+  // Explicit Goal Mode may need the deeper lookup for a missing preview.
+  if (!deps.explicitGoal) {
+    if (catalogue.complete) return { state: 'absent' };
+    throw Object.assign(new Error('ChatGPT Project discovery is incomplete; retrying without guessing.'),
+      { deferred: true, retryAt: Date.now() + DISCOVERY_CACHE_MS });
+  }
+
+  let complete = catalogue.complete;
+  for (const projectId of catalogue.projects) {
+    let cursor = '0';
+    const seenCursors = new Set();
+    for (let page = 0; page < MAX_PROJECT_CHAT_PAGES; page++) {
+      const key = 'project:' + projectId + ':' + cursor;
+      const listing = (await discoveryRead(key, shared => listProjectChats(projectId, cursor, shared), deps)).value;
+      const found = await inspect(listing.items);
+      if (found) return found;
+      if (candidates.length) return { state: 'matched', ...candidates[0] };
+      if (!listing.cursor) { cursor = ''; break; }
+      if (typeof listing.cursor !== 'string' || listing.cursor.length > 2048 || seenCursors.has(listing.cursor)) {
+        throw new Error('ChatGPT Project conversation cursor is invalid.');
+      }
+      seenCursors.add(listing.cursor);
+      cursor = listing.cursor;
+    }
+    if (cursor) complete = false;
+  }
+  if (!complete) throw Object.assign(new Error('ChatGPT Project conversation discovery is incomplete; retrying without guessing.'),
+    { deferred: true, retryAt: Date.now() + DISCOVERY_CACHE_MS });
+  return { state: 'absent' };
 }
 
 function recentGoalEvidence(evidence, startedAt) {

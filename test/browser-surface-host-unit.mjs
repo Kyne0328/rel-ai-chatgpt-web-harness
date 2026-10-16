@@ -435,6 +435,17 @@ function createHarness({
   const fetched = await host.goalProtocolRequest({ method: 'GET', path: '/backend-api/conversations?offset=0&limit=1' });
   assert.equal(fetched.ok, true);
   assert.deepEqual(fetched.data.items, []);
+  const projectId = 'g-p-6a68897d433881919527e08c99703cba';
+  assert.equal((await host.goalProtocolRequest({ method: 'GET',
+    path: '/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=5' })).ok, true);
+  assert.equal((await host.goalProtocolRequest({ method: 'GET',
+    path: '/backend-api/gizmos/' + projectId + '/conversations?cursor=0' })).ok, true);
+  await assert.rejects(() => host.goalProtocolRequest({ method: 'POST',
+    path: '/backend-api/gizmos/' + projectId + '/conversations?cursor=0' }), /Unsupported Goal Mode protocol endpoint/);
+  await assert.rejects(() => host.goalProtocolRequest({ method: 'GET',
+    path: '/backend-api/gizmos/g-p-invalid/conversations?cursor=0' }), /Unsupported Goal Mode protocol endpoint/);
+  await assert.rejects(() => host.goalProtocolRequest({ method: 'GET',
+    path: '/backend-api/gizmos/' + projectId + '/files' }), /Unsupported Goal Mode protocol endpoint/);
   const originalFetch = goalSession.fetch;
   const longPayload = 'x'.repeat(34 * 1024 * 1024);
   goalSession.fetch = async (url, options) => String(url).includes('/backend-api/conversation/')
