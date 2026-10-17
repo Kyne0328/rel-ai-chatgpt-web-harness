@@ -55,7 +55,7 @@ export function createUsageRoute(useDashboardSlices) {
         setStatus('Loading analytics…');
         try {
           const bounds = analyticsBounds(range, { customStart: start, customEnd: end });
-          const result = await loadAnalyticsData({ desktop: window.relaiDesktop, bounds, workspace });
+          const result = await loadAnalyticsData({ desktop: window.relaiDesktop, bounds, workspace, fresh: refreshToken > 0 });
           if (!active) return;
           setAnalytics(result);
           setLoadState({ status: 'ready', message: '' });

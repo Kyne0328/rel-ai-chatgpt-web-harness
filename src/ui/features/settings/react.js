@@ -34,9 +34,11 @@ const NOTIFICATION_CATEGORIES = Object.freeze([
   ['applicationUpdates', 'App updates', 'Notify you when a Rel.AI update is available.']
 ]);
 
-export function createSettingsRoute(useDashboardStore) {
+const SETTINGS_STORE_KEYS = Object.freeze(['config', 'connection', 'connectionState', 'mcpConnection', 'desktopStatus', 'application', 'runtime', 'repositoryRuntime', 'runtimeCompatibility']);
+
+export function createSettingsRoute(useDashboardSlices) {
   return function SettingsRoute() {
-    return h(SettingsView, { data: useDashboardStore() });
+    return h(SettingsView, { data: useDashboardSlices(SETTINGS_STORE_KEYS) });
   };
 }
 
@@ -46,7 +48,7 @@ export function SettingsView({ data = {}, subPage = '' }) {
   const content = {
     connection: h(ConnectionPage, { data }),
     preferences: h(PreferencesPage),
-    privacy: h(PrivacyDataPage, { computerControl: data.config?.computerControl }),
+    privacy: h(PrivacyDataPage, { computerControl: data.config?.computerControl, projectAccess: data.config?.projectAccess }),
     application: h(ApplicationPage),
     about: h(AboutPage, {
       metadata: data.application || {},
@@ -888,13 +890,44 @@ function PulsePreference() {
   }));
 }
 
-function PrivacyDataPage({ computerControl }) {
+function PrivacyDataPage({ computerControl, projectAccess }) {
   return h(React.Fragment, null,
     h(SettingsHeader, { title: 'Privacy & data' }),
+    h(FileAccessSettings, { initial: projectAccess }),
     h(ComputerControlSettings, { initial: computerControl }),
     h(BrowserDataSettings),
     h(TelemetrySettings),
     h(LocalDataSettings)
+  );
+}
+
+function FileAccessSettings({ initial = {} }) {
+  const [enabled, setEnabled] = useState(initial?.directFilesystem === true);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setEnabled(initial?.directFilesystem === true), [initial?.directFilesystem]);
+  const update = async value => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await postJson('/api/workspaces', { action: 'project_access', directFilesystem: value });
+      if (!result?.ok) throw new Error(result?.error || 'Could not save file access.');
+      const saved = result.config?.projectAccess?.directFilesystem === true;
+      setEnabled(saved);
+      requestDashboardRefresh();
+    } catch (error) {
+      toast(messageOf(error), { variant: 'error' });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return h(Card, { title: 'File access' },
+    h(ToggleRow, {
+      label: 'Access outside projects',
+      help: 'Allow ChatGPT to work with ordinary local files outside configured projects. Sensitive paths remain protected.',
+      checked: enabled, busy, disabled: busy,
+      enabledLabel: 'On', disabledLabel: 'Off',
+      onChange: value => { void update(value); }
+    })
   );
 }
 

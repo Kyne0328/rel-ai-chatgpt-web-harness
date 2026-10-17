@@ -371,7 +371,7 @@ for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'stora
 {
   const source = read('src/ui/features/workspaces/react.js');
   const start = source.indexOf('function WorkspacesView(');
-  const end = source.indexOf('\nfunction DirectFilesystemAccess', start);
+  const end = source.indexOf('\nfunction ProjectFileAccessStatus', start);
   const context = {
     h: (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) }),
     React: { Fragment: 'Fragment' }, useMemo: callback => callback(), useCallback: callback => callback,
@@ -380,12 +380,15 @@ for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'stora
     orderedWorkspaces: workspaces => workspaces, actionableFindings: () => [],
     workspaceCardView: workspace => ({ ...workspace, ready: true }),
     useWorkspaceAnalytics: () => ({ scopes: new Map(), status: 'ready' }),
-    DirectFilesystemAccess: 'DirectFilesystemAccess', WorkspaceCard: 'WorkspaceCard'
+    ProjectFileAccessStatus: 'ProjectFileAccessStatus', WorkspaceCard: 'WorkspaceCard'
   };
   vm.runInNewContext(source.slice(start, end), context);
   const tree = context.WorkspacesView({ data: { config: { workspaces: [{ alias: 'fixture' }] } } });
   const summary = settingsNodes(tree).find(node => node.props['aria-label'] === 'Project readiness summary');
   assert.equal(summary?.props.role, 'group', 'Project readiness must use a role that supports its accessible name');
+  const access = settingsNodes(tree).find(node => node.type === 'ProjectFileAccessStatus');
+  assert.equal(access?.props.enabled, false, 'Projects must only display the authoritative file-access setting');
+  assert.equal(settingsNodes(tree).some(node => node.props.role === 'switch'), false, 'Projects must not offer a second file-access switch');
 }
 
 // Project navigation always uses the card's current alias, including a rename.

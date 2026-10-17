@@ -15,6 +15,7 @@ let dashboardSessionsPromise = null;
 let coreDesktopOperationsPromise = null;
 let desktopManagerPromise = null;
 let browserDriverPromise = null;
+let browserBridgePromise = null;
 let loadedToolActivity = null;
 let unsubscribeActivity = null;
 
@@ -111,7 +112,7 @@ async function startService(payload = {}) {
       loadHttpModule(),
       loadToolActivity(),
       loadDesktopManager(),
-      loadBrowserDriver()
+      loadBrowserBridge()
     ]);
     server = httpModule.startHttpServer({
       host,
@@ -388,15 +389,21 @@ function loadDesktopManager() {
   return desktopManagerPromise;
 }
 
-function loadBrowserDriver() {
-  if (!browserDriverPromise) {
-    browserDriverPromise = importResourceModule('src/browser/browserDriver.ts').then(async browserDriver => {
-      browserDriver.configureBrowserNativeBridge((payload, options) => callNative('browserOperation', payload, options));
-      const protocol = await importResourceModule('src/chatgptGoalProtocol.js');
+function loadBrowserBridge() {
+  if (!browserBridgePromise) {
+    browserBridgePromise = Promise.all([
+      importResourceModule('src/browser/nativeBridge.ts'),
+      importResourceModule('src/chatgptGoalProtocol.js')
+    ]).then(([browserBridge, protocol]) => {
+      browserBridge.configureBrowserNativeBridge((payload, options) => callNative('browserOperation', payload, options));
       protocol.configureGoalBrowserTransport((payload, options) => callNative('goalProtocol', payload, options));
-      return browserDriver;
     });
   }
+  return browserBridgePromise;
+}
+
+function loadBrowserDriver() {
+  browserDriverPromise ||= importResourceModule('src/browser/browserDriver.ts');
   return browserDriverPromise;
 }
 

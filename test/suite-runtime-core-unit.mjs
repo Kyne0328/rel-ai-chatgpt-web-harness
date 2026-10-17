@@ -2273,6 +2273,10 @@ async function case_usage_ui_contract_unit() {
   const [firstLoad, secondLoad] = await Promise.all([loadAnalyticsData(sharedOptions), loadAnalyticsData(sharedOptions)]);
   assert.deepEqual(monthReads, ['2026-08'], 'overlapping consumers must issue one read per month');
   assert.deepEqual(firstLoad.current, secondLoad.current, 'shared reads must still produce the same analytics result for both consumers');
+  await loadAnalyticsData(sharedOptions);
+  assert.deepEqual(monthReads, ['2026-08'], 'revisiting analytics shortly after a successful load must reuse the completed month');
+  await loadAnalyticsData({ ...sharedOptions, fresh: true });
+  assert.deepEqual(monthReads, ['2026-08', '2026-08'], 'explicit refresh must bypass the recently completed month');
 
   console.log('Local analytics UI and privacy contracts passed.');
 }

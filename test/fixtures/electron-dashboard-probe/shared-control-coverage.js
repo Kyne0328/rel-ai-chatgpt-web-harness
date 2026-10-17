@@ -211,6 +211,8 @@ export async function exerciseSharedControlCoverage({ win, waitFor, waitForCaptu
         overlay.left >= 0 && overlay.right <= overlay.viewportWidth && overlay.top >= 0 && overlay.bottom <= overlay.viewportHeight, overlay);
       key('Escape');
       await waitFor(win, `!document.querySelector('.modal-panel')`);
+      // Radix restores focus after dialog teardown; verify the outcome, not the interim frame.
+      await waitFor(win, `document.activeElement === window.__sharedCoverageProjectOpener`).catch(() => {});
       overlay.focusRestored = await evaluate(`document.activeElement === window.__sharedCoverageProjectOpener`);
       check(theme + ': clean Project Escape restores opener focus', overlay.focusRestored, overlay);
       report.overlays.push(overlay);

@@ -3,7 +3,7 @@ import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
-import { postJson, requestDashboardRefresh } from '../../api.js';
+import { postJson } from '../../api.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref } from '../../router.js';
 import { analyticsRangeScope } from '../usage/range-model.js';
 import { loadAnalyticsModels } from '../usage/data.js';
@@ -83,7 +83,7 @@ function WorkspacesView({ data = {} }) {
   const openRepair = useCallback((workspace, opener) => setModal({ kind: 'repair', workspace, opener }), []);
   const openDelete = useCallback((alias, opener) => setModal({ kind: 'delete', alias, opener }), []);
   const closeModal = useCallback(() => setModal(null), []);
-  const directAccess = h(DirectFilesystemAccess, { initial: data.config?.projectAccess });
+  const fileAccess = h(ProjectFileAccessStatus, { enabled: data.config?.projectAccess?.directFilesystem === true });
 
   return h('div', { className: 'section', 'data-workspaces-react': '' },
     h('div', { className: 'feature-toolbar workspace-toolbar' },
@@ -98,10 +98,8 @@ function WorkspacesView({ data = {} }) {
         h('button', { className: 'primary', type: 'button', onClick: event => openForm('add', null, event.currentTarget) }, 'Add project')
       )
     ),
-    !workspaces.length ? h(React.Fragment, null,
-      directAccess,
-      h(EmptyWorkspaceState, { onAdd: event => openForm('add', null, event.currentTarget) })
-    ) : h(React.Fragment, null,
+    fileAccess,
+    !workspaces.length ? h(EmptyWorkspaceState, { onAdd: event => openForm('add', null, event.currentTarget) }) : h(React.Fragment, null,
       h('div', { className: 'workspace-status-summary', role: 'group', 'aria-label': 'Project readiness summary' },
         h('span', null, h('strong', null, `${availableCount}/${workspaces.length}`), ' ready for ChatGPT'),
         h('span', { className: findings.length ? 'attention' : '' }, h('strong', null, findings.length), findings.length === 1 ? ' issue needs attention' : ' issues need attention')
@@ -117,8 +115,7 @@ function WorkspacesView({ data = {} }) {
           onRepair: openRepair
         }))
       ),
-      findings.length ? h(HealthFindings, { findings, workspaces: allWorkspaces, onRepair: openRepair, onDelete: openDelete }) : null,
-      directAccess
+      findings.length ? h(HealthFindings, { findings, workspaces: allWorkspaces, onRepair: openRepair, onDelete: openDelete }) : null
     ),
     modal?.kind === 'form' ? h(ProjectFormModal, {
       configuredWorkspaces: allWorkspaces,
@@ -141,41 +138,13 @@ function WorkspacesView({ data = {} }) {
   );
 }
 
-function DirectFilesystemAccess({ initial = {} }) {
-  const [enabled, setEnabled] = useState(initial?.directFilesystem === true);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => setEnabled(initial?.directFilesystem === true), [initial?.directFilesystem]);
-  const update = async value => {
-    if (busy) return;
-    setBusy(true);
-    const result = await postJson('/api/workspaces', {
-      action: 'project_access',
-      directFilesystem: value
-    }).catch(error => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-    setBusy(false);
-    if (!result?.ok) {
-      toast(result?.error || 'Could not save direct filesystem access.', { variant: 'error' });
-      return;
-    }
-    const saved = result.config?.projectAccess?.directFilesystem === true;
-    setEnabled(saved);
-    requestDashboardRefresh();
-    toast(saved ? 'Direct filesystem access enabled.' : 'Direct filesystem access disabled.', { variant: 'success' });
-  };
-  return h('section', { className: 'workspace-direct-access', 'aria-labelledby': 'workspaceDirectAccessTitle' },
+function ProjectFileAccessStatus({ enabled }) {
+  return h('section', { className: 'workspace-direct-access', 'aria-label': 'File access' },
     h('div', { className: 'workspace-direct-access-copy' },
-      h('strong', { id: 'workspaceDirectAccessTitle' }, 'Access outside projects'),
-      h('p', null, 'When on, ChatGPT can work with ordinary local files outside configured projects. Sensitive-path protections still apply.')
+      h('strong', null, 'File access'),
+      h('p', null, `Access outside projects: ${enabled ? 'On' : 'Off'}`)
     ),
-    h('button', {
-      className: 'workspace-direct-access-switch',
-      type: 'button',
-      role: 'switch',
-      'aria-checked': String(enabled),
-      'aria-labelledby': 'workspaceDirectAccessTitle',
-      disabled: busy,
-      onClick: () => { void update(!enabled); }
-    }, busy ? 'Saving…' : enabled ? 'On' : 'Off')
+    h('a', { className: 'buttonlike secondary compact-button', href: '#settings/privacy' }, 'Manage')
   );
 }
 

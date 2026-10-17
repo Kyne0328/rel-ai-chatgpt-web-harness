@@ -104,12 +104,6 @@ function UpdateStatusPill() {
   });
 }
 
-function useDashboardStore() {
-  const store = useContext(DashboardStoreContext);
-  if (!store) throw new Error('React dashboard components must render inside the dashboard store provider.');
-  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-}
-
 function useDashboardSlices(keys) {
   const store = useContext(DashboardStoreContext);
   const cache = useRef({ source: null, value: null });
@@ -141,7 +135,7 @@ registerReactSection('extensions', createLazyRoute(() => import('../features/ext
 registerReactSection('processes', createLazyRoute(() => import('../features/processes/react.js'), 'createProcessesRoute', useDashboardSlices, 'processes'));
 registerReactSection('tools', createLazyRoute(() => import('../features/tools/react.js'), 'createToolsRoute', undefined, 'tools'));
 registerReactSection('usage', createLazyRoute(() => import('../features/usage/react.js'), 'createUsageRoute', useDashboardSlices, 'usage'));
-registerReactSection('settings', createLazyRoute(() => import('../features/settings/react.js'), 'createSettingsRoute', useDashboardStore, 'settings'));
+registerReactSection('settings', createLazyRoute(() => import('../features/settings/react.js'), 'createSettingsRoute', useDashboardSlices, 'settings'));
 registerReactSection('diagnostics', createLazyRoute(() => import('../features/settings/diagnostics-react.js'), 'createDiagnosticsRoute', useDashboardSlices, 'diagnostics'));
 
 function createLazyRoute(load, factoryName, storeHook, section) {

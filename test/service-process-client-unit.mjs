@@ -365,7 +365,8 @@ async function verifyServiceNativeRequestLifecycle() {
     'src/httpServer.ts': { startHttpServer: options => { serverOptions = options; return server; } },
     'src/toolActivity.js': { getToolActivity: () => ({}), onToolActivity: () => () => {} },
     'src/desktopManager.ts': { configureDesktopNativeBridge() {} },
-    'src/browser/browserDriver.ts': { configureBrowserNativeBridge: operation => { browserOperation = operation; } },
+    'src/browser/nativeBridge.ts': { configureBrowserNativeBridge: operation => { browserOperation = operation; } },
+    'src/browser/browserDriver.ts': { dispatchBrowserNativeEvent() {} },
     'src/chatgptGoalProtocol.js': { configureGoalBrowserTransport: transport => { goalOperation = transport; } },
     'src/core/desktop-operations.ts': { resumeDesktopGoalsForAccount: tunnelId => { resumedAccounts.push(tunnelId); return { ok: true }; } }
   };

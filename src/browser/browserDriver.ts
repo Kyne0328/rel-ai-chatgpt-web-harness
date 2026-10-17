@@ -11,11 +11,8 @@ import {
   type LocalBrowserDriver
 } from './playwrightBrowserDriver.ts';
 import type { StructuredInteractionArgs } from './playwrightPrimitives.ts';
+import { configureBrowserNativeBridge, getBrowserNativeBridge, type NativeBrowserBridge } from './nativeBridge.ts';
 
-type NativeBrowserBridge = (
-  payload: Record<string, unknown>,
-  options?: Readonly<{ signal?: AbortSignal }>
-) => Promise<Record<string, unknown> | void> | Record<string, unknown> | void;
 type NativeBrowserEvent = Readonly<Record<string, unknown> & {
   resource?: unknown;
   type?: unknown;
@@ -30,15 +27,9 @@ type NativePageListeners = {
 };
 
 const DOWNLOAD_TEMP_ROOT = path.resolve(os.tmpdir(), 'relai-browser-downloads');
-let nativeBrowserBridge: NativeBrowserBridge | null = null;
 const sessionDisconnectListeners = new Map<string, () => void>();
 const sessionPageCreatedListeners = new Map<string, (page: BrowserPageDriver, active: boolean) => void>();
 const pageListeners = new Map<string, NativePageListeners>();
-
-function configureBrowserNativeBridge(bridge: NativeBrowserBridge | null): void {
-  if (bridge !== null && typeof bridge !== 'function') throw new TypeError('Browser native bridge must be a function or null.');
-  nativeBrowserBridge = bridge;
-}
 
 function dispatchBrowserNativeEvent(event: NativeBrowserEvent = {}): void {
   if (String(event.resource || '') !== 'browser') return;
@@ -59,7 +50,8 @@ function dispatchBrowserNativeEvent(event: NativeBrowserEvent = {}): void {
 
   if (type === 'page_opened' && nativeSessionId && nativePageId) {
     const listener = sessionPageCreatedListeners.get(nativeSessionId);
-    if (listener && nativeBrowserBridge) listener(createNativePageProxy(nativeBrowserBridge, nativeSessionId, nativePageId), event.active !== false);
+    const bridge = getBrowserNativeBridge();
+    if (listener && bridge) listener(createNativePageProxy(bridge, nativeSessionId, nativePageId), event.active !== false);
     return;
   }
 
@@ -76,12 +68,13 @@ function dispatchBrowserNativeEvent(event: NativeBrowserEvent = {}): void {
 }
 
 async function clearBrowserProfileSession(profileDirectory: string): Promise<void> {
-  if (!nativeBrowserBridge) return;
-  await nativeBrowserBridge({ action: 'clear_profile', profileDirectory });
+  const bridge = getBrowserNativeBridge();
+  if (!bridge) return;
+  await bridge({ action: 'clear_profile', profileDirectory });
 }
 
 async function launchBrowserDriver(options: LaunchBrowserDriverOptions): Promise<LocalBrowserDriver> {
-  const bridge = nativeBrowserBridge;
+  const bridge = getBrowserNativeBridge();
   if (!bridge) return launchLocalBrowserDriver(options);
 
   const started = objectValue(await bridge({
