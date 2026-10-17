@@ -53,6 +53,7 @@
       "pulse-state.js",
       "browser-surface-host.js",
       "chatgpt-goal-composer.js",
+      "chatgpt-goal-helper.js",
       "preload.cjs",
       "launcher-utils.js",
       "secure-tunnel-runtime.js",

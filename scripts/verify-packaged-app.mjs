@@ -117,7 +117,7 @@ assertPackagedSevenZipExecutable(resourcesRoot, platform, targetArch);
 
 const asarPath = path.join(resourcesRoot, 'app.asar');
 const asarEntries = new Set(listPackage(asarPath).map(entry => entry.replaceAll('\\', '/').replace(/^\//, '')));
-for (const relativePath of ['preload.cjs', 'startup-background.js', 'secure-tunnel-runtime.js', 'tunnel-credentials.js', 'service-process.js', 'service-process-client.js', 'runtime-log-snapshot.js', 'service-activity-projection.js', 'renderer/app.css', 'renderer/color-tokens.css', 'renderer/status.html', 'renderer/wizard.html']) {
+for (const relativePath of ['preload.cjs', 'chatgpt-goal-helper.js', 'startup-background.js', 'secure-tunnel-runtime.js', 'tunnel-credentials.js', 'service-process.js', 'service-process-client.js', 'runtime-log-snapshot.js', 'service-activity-projection.js', 'renderer/app.css', 'renderer/color-tokens.css', 'renderer/status.html', 'renderer/wizard.html']) {
   assert.ok(asarEntries.has(relativePath), `Packaged ASAR is missing: ${relativePath}`);
 }
 
