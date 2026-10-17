@@ -12,6 +12,8 @@ const EPHEMERAL_ROOT_NAME = 'rel-ai-mcp-ephemeral';
 const EPHEMERAL_ENV_KEY = 'REL_AI_EPHEMERAL_DIR';
 const EPHEMERAL_TTL_MS = 24 * 60 * 60 * 1000;
 const METADATA_FILE = '.relai-ephemeral.json';
+const CLEANUP_MAX_ENTRIES = 20000;
+const CLEANUP_MAX_MS = 2000;
 
 type EphemeralConfig = Record<string, any>;
 type EphemeralWorkspace = { alias: string; path: string };
@@ -72,31 +74,56 @@ function withTaskEphemeralEnvironment(
   return { ...env, [EPHEMERAL_ENV_KEY]: directory };
 }
 
+type ScratchCleanupResult = {
+  removed: boolean;
+  removedFiles: number;
+  removedBytes: number;
+  retainedReason?: string;
+};
+
 function cleanupTaskEphemeralDirectory(
   config: EphemeralConfig,
   taskId: unknown,
   workspacePath = ''
-): { removed: boolean; removedFiles: number; removedBytes: number; error?: string } {
+): ScratchCleanupResult {
   const directory = taskEphemeralDirectory(config, taskId, workspacePath);
-  const usage = directoryUsage(directory);
+  return removeTaskScratchDirectory(directory);
+}
+
+function removeTaskScratchDirectory(directory: string): ScratchCleanupResult {
+  let removalStarted = false;
   try {
-    fs.rmSync(directory, {
-      recursive: true,
-      force: true,
-      maxRetries: process.platform === 'win32' ? 8 : 2,
-      retryDelay: 75
-    });
-    removeEmptyParents(directory);
-    return { removed: true, removedFiles: usage.files, removedBytes: usage.bytes };
+    try { fs.lstatSync(directory); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return { removed: true, removedFiles: 0, removedBytes: 0 };
+      }
+      throw error;
+    }
+    // Node's Windows lstat does not prove the absence of every reparse tag.
+    // In particular, Electron's recursive native removal may follow junctions.
+    // Retain these trees until a separate, proven no-follow remover is available.
+    if (process.platform === 'win32') {
+      throw new Error('automatic directory cleanup is disabled on Windows because reparse-point safety cannot be verified; retained files continue to use disk space');
+    }
+    const inventory = inspectScratchDirectory(directory);
+    for (const [target, observation] of inventory.identities) {
+      if (Date.now() > inventory.deadline) throw new Error('scratch identity recheck exceeded its observation budget');
+      if (scratchIdentity(fs.lstatSync(target), observation.ancestor) !== observation.identity) {
+        throw new Error('scratch identity changed during cleanup observation');
+      }
+    }
+    // This screens a private, stable POSIX tree; it is not an atomic defense
+    // against concurrent ancestor replacement or same-device bind mounts.
+    removalStarted = true;
+    fs.rmSync(directory, { recursive: true, force: false, maxRetries: 0 });
+    return { removed: true, removedFiles: inventory.files, removedBytes: inventory.bytes };
   } catch (error) {
-    // Explicit task cleanup has established that scratch is no longer needed.
-    // Only this durable fact makes a later age-based retry safe.
-    try { writeMetadata(directory, { ...readMetadata(directory), cleanupEligible: true }); } catch {}
+    // A refused or incomplete observation never grants a future cleanup retry.
+    // Do not write through this potentially redirected directory to mark it eligible.
     return {
-      removed: false,
-      removedFiles: 0,
-      removedBytes: 0,
-      error: error instanceof Error ? error.message : String(error)
+      removed: false, removedFiles: 0, removedBytes: 0,
+      retainedReason: `${removalStarted ? 'Task scratch cleanup incomplete; remaining files retained' : 'Task scratch retained'}: ${error instanceof Error ? error.message : String(error)}.`
     };
   }
 }
@@ -151,34 +178,37 @@ async function cleanupTaskWorkspaceEphemeralFiles(
 }
 
 function pruneStaleEphemeralDirectories(namespaceRoot: string, currentDirectory: string): void {
+  // Retention must also cover legacy directories previously marked retryable.
+  if (process.platform === 'win32') return;
   let entries: fs.Dirent[];
-  try { entries = fs.readdirSync(namespaceRoot, { withFileTypes: true }); }
+  try {
+    const stat = fs.lstatSync(namespaceRoot);
+    if (!stat.isDirectory() || stat.isSymbolicLink()
+      || path.resolve(fs.realpathSync(namespaceRoot)) !== path.resolve(namespaceRoot)) return;
+    entries = fs.readdirSync(namespaceRoot, { withFileTypes: true });
+  }
   catch { return; }
   const cutoff = Date.now() - EPHEMERAL_TTL_MS;
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[a-f0-9]{32}$/.test(entry.name)) continue;
     const directory = path.join(namespaceRoot, entry.name);
     if (path.resolve(directory) === path.resolve(currentDirectory)) continue;
     let timestamp = 0;
     try {
+      const metadataStat = fs.lstatSync(path.join(directory, METADATA_FILE));
+      if (!metadataStat.isFile() || metadataStat.isSymbolicLink()) continue;
       const metadata = readMetadata(directory);
       // Age is not evidence that a long-running child stopped using scratch.
       // Legacy and active directories remain retained until explicit cleanup.
-      if (metadata?.cleanupEligible !== true) continue;
+      if (metadata?.cleanupEligible !== true || typeof metadata.taskId !== 'string' || !metadata.taskId.trim()) continue;
+      if (crypto.createHash('sha256').update(metadata.taskId.trim()).digest('hex').slice(0, 32) !== entry.name) continue;
       timestamp = Date.parse(String(metadata?.updatedAt || ''));
       if (!Number.isFinite(timestamp)) timestamp = fs.statSync(directory).mtimeMs;
     } catch {
       continue;
     }
     if (timestamp >= cutoff) continue;
-    try {
-      fs.rmSync(directory, {
-        recursive: true,
-        force: true,
-        maxRetries: process.platform === 'win32' ? 4 : 1,
-        retryDelay: 50
-      });
-    } catch {}
+    removeTaskScratchDirectory(directory);
   }
 }
 
@@ -223,34 +253,66 @@ function writeMetadata(directory: string, value: Record<string, unknown>): void 
   }
 }
 
-function directoryUsage(directory: string): { files: number; bytes: number } {
-  let files = 0;
-  let bytes = 0;
-  const pending = [directory];
-  while (pending.length) {
-    const current = pending.pop();
-    if (!current) continue;
-    let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); }
-    catch { continue; }
-    for (const entry of entries) {
-      const target = path.join(current, entry.name);
-      if (entry.isDirectory()) pending.push(target);
-      else if (entry.isFile()) {
-        files += 1;
-        try { bytes += fs.statSync(target).size; } catch {}
-      }
-    }
+function scratchIdentity(stat: fs.Stats, ancestor = false): string {
+  if (stat.isSymbolicLink() || (!stat.isDirectory() && !stat.isFile())
+    || !Number.isSafeInteger(stat.dev) || !Number.isSafeInteger(stat.ino) || stat.ino <= 0) {
+    throw new Error('a link, unsupported entry, or unverified filesystem identity was found');
   }
-  return { files, bytes };
+  return (ancestor ? [stat.dev, stat.ino, stat.mode] : [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs]).join(':');
 }
 
-function removeEmptyParents(directory: string): void {
-  const namespaceRoot = path.dirname(directory);
-  const root = path.dirname(namespaceRoot);
-  for (const target of [namespaceRoot, root]) {
-    try { fs.rmdirSync(target); } catch {}
+function inspectScratchDirectory(directory: string): {
+  files: number; bytes: number; identities: Map<string, { identity: string; ancestor: boolean }>; deadline: number;
+} {
+  const deadline = Date.now() + CLEANUP_MAX_MS;
+  const identities = new Map<string, { identity: string; ancestor: boolean }>();
+  const ancestors: string[] = [];
+  for (let target = path.resolve(directory);; target = path.dirname(target)) {
+    ancestors.push(target);
+    if (path.dirname(target) === target) break;
   }
+  for (const target of ancestors.reverse()) {
+    const stat = fs.lstatSync(target);
+    const identity = scratchIdentity(stat, true);
+    if (!stat.isDirectory()) throw new Error('a scratch ancestor is not a directory');
+    identities.set(target, { identity, ancestor: true });
+  }
+  const rootDevice = fs.lstatSync(directory).dev;
+  let files = 0;
+  let bytes = 0;
+  let visited = 0;
+  const pending = [directory];
+  while (pending.length) {
+    if (++visited > CLEANUP_MAX_ENTRIES || Date.now() > deadline) {
+      throw new Error('scratch inventory was incomplete because its observation budget was exceeded');
+    }
+    const current = pending.pop()!;
+    const stat = fs.lstatSync(current);
+    const identity = scratchIdentity(stat);
+    if (stat.dev !== rootDevice || path.resolve(fs.realpathSync(current)) !== path.resolve(current)) {
+      throw new Error('scratch crosses a filesystem or redirected path');
+    }
+    identities.set(current, { identity, ancestor: false });
+    if (stat.isDirectory()) {
+      const handle = fs.opendirSync(current);
+      try {
+        let entry: fs.Dirent | null;
+        while ((entry = handle.readSync()) !== null) {
+          if (visited + pending.length >= CLEANUP_MAX_ENTRIES || Date.now() > deadline) {
+            throw new Error('scratch inventory was incomplete because its observation budget was exceeded');
+          }
+          if (entry.name === '.' || entry.name === '..' || path.basename(entry.name) !== entry.name) {
+            throw new Error('scratch inventory contained an invalid child name');
+          }
+          pending.push(path.join(current, entry.name));
+        }
+      } finally { handle.closeSync(); }
+    } else {
+      files += 1;
+      bytes += stat.size;
+    }
+  }
+  return { files, bytes, identities, deadline };
 }
 
 function isPathInside(parent: string, candidate: string): boolean {

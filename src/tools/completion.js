@@ -329,7 +329,7 @@ function completionScratchNote(cleanup) {
   const preserved = Array.isArray(cleanup.workspace?.skippedPaths) ? cleanup.workspace.skippedPaths.length : 0;
   const warnings = [
     cleanup.workspace?.error,
-    cleanup.directory?.removed === false ? cleanup.directory?.error || 'task scratch directory could not be removed' : ''
+    cleanup.directory?.removed === false ? cleanup.directory?.retainedReason || cleanup.directory?.error || 'task scratch directory could not be removed' : ''
   ].filter(Boolean);
   if (!removed && !preserved && !warnings.length) return '';
   const notes = [];

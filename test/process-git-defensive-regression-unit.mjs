@@ -9,7 +9,7 @@ import { beginGitIndexTransaction } from '../src/repo/gitIndexTransaction.ts';
 import { executeToolCall } from '../src/tools/execution.js';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
 import { buildUntrackedDiff } from '../src/bridge/reviewDiff.js';
-import { withTaskEphemeralEnvironment } from '../src/taskEphemeral.ts';
+import { cleanupTaskEphemeralDirectory, taskEphemeralDirectory, withTaskEphemeralEnvironment } from '../src/taskEphemeral.ts';
 import { GIT_EXECUTABLE } from './helpers/git-executable.mjs';
 
 const complete = { executed: true, exitCode: 0, timedOut: false, stdout: 'file with spaces.txt\0', stdoutTruncated: false };
@@ -20,6 +20,83 @@ for (const change of [{ executed: false }, { exitCode: 1 }, { timedOut: true }, 
   { outputFinalizationTimedOut: true }, { stdout: 'missing-nul' }]) {
   assert.throws(() => completeStagedPaths({ ...complete, ...change }), /Mandatory staged-file observation/);
 }
+
+// Filesystem observations are simulated; these regressions never create a link
+// or invoke native recursive removal on a link-bearing fixture.
+{
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  const originals = Object.fromEntries(['lstatSync', 'opendirSync', 'realpathSync', 'rmSync'].map(name => [name, fs[name]]));
+  const fixtureConfig = { stateDir: path.join(os.tmpdir(), 'relai-cleanup-observation-fixture') };
+  const target = taskEphemeralDirectory(fixtureConfig, 'cleanup-observation');
+  const child = path.join(target, 'child');
+  const directoryStat = { dev: 1, ino: 1, mode: 16832, size: 0, mtimeMs: 1, ctimeMs: 1,
+    isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
+  const fileStat = { ...directoryStat, ino: 2, mode: 33152, size: 7,
+    isDirectory: () => false, isFile: () => true };
+  try {
+    for (const scenario of ['windows', 'missing-root', 'root-link', 'ancestor-link', 'child-link', 'unknown-type', 'unsafe-identity', 'unavailable-inode', 'device-crossing', 'redirected', 'ancestor-activity', 'unreadable', 'budget', 'identity-change', 'remove-failure', 'ordinary']) {
+      const removals = [];
+      let childReads = 0;
+      let ancestorReads = 0;
+      Object.defineProperty(process, 'platform', { ...platformDescriptor, value: scenario === 'windows' ? 'win32' : 'linux' });
+      fs.lstatSync = candidate => {
+        const value = String(candidate);
+        if (scenario === 'missing-root' && value === target) throw Object.assign(new Error('fixture absent'), { code: 'ENOENT' });
+        if (scenario === 'unavailable-inode') return { ...directoryStat, ino: 0 };
+        if (scenario === 'ancestor-activity' && value !== target && value !== child) return { ...directoryStat, mtimeMs: ++ancestorReads };
+        const link = (scenario === 'root-link' && value === target)
+          || (scenario === 'ancestor-link' && value === path.dirname(target))
+          || (scenario === 'child-link' && value === child);
+        if (link) return { ...directoryStat, isSymbolicLink: () => true };
+        if (scenario === 'unsafe-identity') return { ...directoryStat, ino: Number.MAX_SAFE_INTEGER + 1 };
+        if (value !== child) return directoryStat;
+        childReads += 1;
+        if (scenario === 'device-crossing') return { ...fileStat, dev: 2 };
+        if (scenario === 'unknown-type') return { ...fileStat, isFile: () => false };
+        if (scenario === 'identity-change' && childReads > 1) return { ...fileStat, ino: 3 };
+        return fileStat;
+      };
+      fs.realpathSync = candidate => path.resolve(scenario === 'redirected' && String(candidate) === child ? path.join(target, 'elsewhere') : String(candidate));
+      fs.opendirSync = candidate => {
+        assert.equal(String(candidate), target, 'never descend into a simulated link');
+        if (scenario === 'unreadable') throw Object.assign(new Error('fixture inventory denied'), { code: 'EACCES' });
+        let read = 0;
+        return {
+          readSync: () => read++ < (scenario === 'budget' ? 20001 : 1) ? { name: scenario === 'budget' ? 'entry-' + read : 'child' } : null,
+          closeSync() {}
+        };
+      };
+      fs.rmSync = (...args) => { removals.push(args); if (scenario === 'remove-failure') throw new Error('fixture native removal failed'); };
+      syncBuiltinESMExports();
+      const result = cleanupTaskEphemeralDirectory(fixtureConfig, 'cleanup-observation');
+      if (scenario === 'ordinary' || scenario === 'ancestor-activity') {
+        assert.equal(result.removed, true);
+        assert.equal(result.removedFiles, 1);
+        assert.equal(result.removedBytes, 7);
+        assert.equal(removals.length, 1);
+        assert.equal(removals[0][0], target);
+      } else if (scenario === 'missing-root') {
+        assert.equal(result.removed, true);
+        assert.equal(result.removedFiles, 0);
+        assert.equal(removals.length, 0, 'absent scratch needs no deletion');
+      } else if (scenario === 'remove-failure') {
+        assert.equal(result.removed, false);
+        assert.equal(removals.length, 1);
+        assert.match(result.retainedReason, /cleanup incomplete; remaining files retained/);
+      } else {
+        assert.equal(result.removed, false, scenario);
+        assert.equal(removals.length, 0, scenario + ' must not reach recursive removal');
+        assert.match(result.retainedReason, /Task scratch retained:/);
+        if (scenario === 'windows') assert.match(result.retainedReason, /Windows.*reparse-point.*disk space/);
+      }
+    }
+  } finally {
+    Object.defineProperty(process, 'platform', platformDescriptor);
+    Object.assign(fs, originals);
+    syncBuiltinESMExports();
+  }
+}
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-git-index-regression-'));
 const workspace = { alias: 'index-regression', path: path.join(root, 'repo') };
 fs.mkdirSync(workspace.path);
@@ -167,6 +244,42 @@ try {
   fs.writeFileSync(path.join(scratch, 'still-needed.txt'), 'fixture');
   withTaskEphemeralEnvironment(config, 'other-task', workspace);
   assert.equal(fs.existsSync(path.join(scratch, 'still-needed.txt')), true, 'age does not retire active scratch');
+
+  // Legacy retry eligibility must not bypass Windows retention or a no-follow
+  // refusal. The link observation is mocked over an ordinary owned file.
+  fs.writeFileSync(metadata, JSON.stringify({ ...old, cleanupEligible: true, updatedAt: '2000-01-01T00:00:00.000Z' }));
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const originalLstat = fs.lstatSync;
+  const originalRemove = fs.rmSync;
+  let staleRemovalCalls = 0;
+  try {
+    fs.rmSync = function(candidate, ...args) {
+      if (String(candidate) === scratch) { staleRemovalCalls += 1; return; }
+      return originalRemove.call(this, candidate, ...args);
+    };
+    Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' });
+    syncBuiltinESMExports();
+    withTaskEphemeralEnvironment(config, 'windows-retains-stale', workspace);
+    assert.equal(staleRemovalCalls, 0, 'Windows never retries legacy eligible scratch deletion');
+    Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'linux' });
+    fs.lstatSync = function(candidate, ...args) {
+      const stat = originalLstat.call(this, candidate, ...args);
+      if (String(candidate) === path.join(scratch, 'still-needed.txt')) {
+        stat.isSymbolicLink = () => true;
+      }
+      return stat;
+    };
+    syncBuiltinESMExports();
+    withTaskEphemeralEnvironment(config, 'posix-retains-stale-link', workspace);
+    assert.equal(staleRemovalCalls, 0, 'stale pruning shares the fail-closed link observation gate');
+    assert.equal(fs.existsSync(path.join(scratch, 'still-needed.txt')), true);
+  } finally {
+    Object.defineProperty(process, 'platform', originalPlatform);
+    fs.lstatSync = originalLstat;
+    fs.rmSync = originalRemove;
+    syncBuiltinESMExports();
+  }
+
   fs.rmSync(path.dirname(scratch), { recursive: true, force: true });
   console.log('Complete staged evidence, isolated index rollback, scoped staging, external writer preservation, bounded diff I/O and active scratch retention passed.');
 } finally {

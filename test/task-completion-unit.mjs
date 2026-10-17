@@ -202,6 +202,7 @@ try {
   assert.equal(fs.existsSync(path.join(workspace, scratchPath)), true);
   assert.equal(fs.existsSync(path.join(scratchDirectory, 'outside.tmp')), true);
   assert.deepEqual(readTaskIntegrity(readConfig(), scratchTask, 'app').ephemeralWorkspaceFiles.map(item => item.path), [scratchPath]);
+  const scratchHasRedirectedAncestor = path.resolve(fs.realpathSync(scratchDirectory)) !== path.resolve(scratchDirectory);
   const scratchCompletion = await callTool('relai_work', {
     action: 'finish', workspace: 'app', work_id: scratchTask,
     summary: 'Disposable task artifacts were cleaned safely.'
@@ -209,7 +210,14 @@ try {
   assert.equal(scratchCompletion.completionKnown, true);
   assert.deepEqual(scratchCompletion.changedFiles || [], [], 'unchanged scratch must not be reported as deliverable task output');
   assert.equal(fs.existsSync(path.join(workspace, scratchPath)), false, 'unchanged untracked task scratch must be removed at finish');
-  assert.equal(fs.existsSync(scratchDirectory), false, 'task-owned external scratch directory must be removed at finish');
+  if (process.platform === 'win32') {
+    assert.equal(fs.existsSync(path.join(scratchDirectory, 'outside.tmp')), true, 'Windows scratch must be retained until reparse-safe cleanup is available');
+    assert.match(scratchCompletion.message, /Task scratch retained:.*Windows.*reparse-point.*disk space/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(scratchDirectory, '.relai-ephemeral.json'), 'utf8')).cleanupEligible, false, 'retention must not schedule an age-based retry');
+  } else {
+    assert.equal(fs.existsSync(scratchDirectory), scratchHasRedirectedAncestor, 'ordinary direct scratch is removed; redirected ancestors are retained');
+    if (scratchHasRedirectedAncestor) assert.match(scratchCompletion.message, /Task scratch retained:/);
+  }
   assert.match(scratchCompletion.message, /1 proven-ephemeral workspace file removed/);
 
   resetToolActivity();
