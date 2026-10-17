@@ -616,6 +616,103 @@ test('live Goal Mode monitor links and continues a Project chat without supplyin
   });
 });
 
+test('Project Goal Mode makes forward progress beyond the account read budget', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const workId = 'project-budget-progress';
+  const ids = Array.from({ length: 42 }, (_, i) => ({
+    project: 'g-p-' + String(i + 1).padStart(32, '0'),
+    chat: 'aaaaaaaa-bbbb-4ccc-8ddd-' + String(i + 1).padStart(12, '0')
+  }));
+  const target = ids.at(-1);
+  const targetTree = conversationWithReceipt(target.chat, workId, 'start Project Goal Mode');
+  let readCount = 0;
+  const fetch = async url => {
+    readCount++;
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: ids.map(({ project }) => ({
+      gizmo: { gizmo: { id: project }, conversations: { items: [] } }
+    })), cursor: null });
+    const project = ids.find(item => url.includes('/gizmos/' + item.project + '/conversations?'));
+    if (project) return response({ items: [{ id: project.chat, update_time: new Date().toISOString() }], cursor: null });
+    const chat = ids.find(item => url.endsWith('/conversation/' + item.chat));
+    if (chat) return response(chat === target
+      ? targetTree : conversation(chat.chat, 'Unrelated conversation'));
+    throw new Error('Unexpected request ' + url);
+  };
+  const deps = { credentials, fetch, workId, explicitGoal: true,
+    requireWorkReceipt: true, conversationCorrelation: 'v1/opaque-goal', startedAt: Date.now() };
+  let match = null;
+  for (let attempt = 0; attempt < 8 && !match; attempt++) {
+    try { match = await findRecentGoalCommand(deps); }
+    catch (error) {
+      assert.equal(error.deferred, true, 'limited reads must defer without exhausting retries');
+      t.mock.timers.tick(61_000);
+    }
+  }
+  assert.equal(match?.conversationId, target.chat,
+    'subsequent attempts must resume after previous projects, not repeat the first read window');
+  assert.ok(readCount > 30);
+});
+
+test('Project discovery advances past bounded sidebar pagination', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const workId = 'project-sidebar-deep';
+  const project = 'g-p-' + 'f'.repeat(32);
+  const target = conversationWithReceipt(ID, workId, 'Goal Mode inside a Project');
+  const fetch = async url => {
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) {
+      const cursor = new URL(url).searchParams.get('cursor');
+      const page = cursor ? Number(cursor.slice(8)) : 0;
+      return response({ items: [{
+        gizmo: { gizmo: { id: page === 4 ? project : 'g-p-' + String(page + 1).padStart(32, '0') },
+          conversations: { items: [] } }
+      }], cursor: page < 4 ? 'sidebar-' + (page + 1) : null });
+    }
+    if (url.includes('/gizmos/' + project + '/conversations?')) return response({ items: [{ id: ID }], cursor: null });
+    if (url.includes('/gizmos/')) return response({ items: [], cursor: null });
+    if (url.endsWith('/conversation/' + ID)) return response(target);
+    throw new Error('Unexpected request ' + url);
+  };
+  const deps = { credentials, fetch, workId, explicitGoal: true, requireWorkReceipt: true,
+    startedAt: Date.now(), conversationCorrelation: 'v1/sidebar-deep' };
+  let match;
+  for (let retry = 0; retry < 8 && !match; retry++) {
+    try { match = await findRecentGoalCommand(deps); }
+    catch (error) { assert.equal(error.deferred, true); t.mock.timers.tick(61_000); }
+  }
+  assert.equal(match?.conversationId, ID);
+});
+
+test('Project discovery resumes beyond two Project conversation pages', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const workId = 'project-conversation-deep';
+  const project = 'g-p-' + 'e'.repeat(32);
+  const target = conversationWithReceipt(ID, workId, 'Goal Mode in long Project chat history');
+  const fetch = async url => {
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: [{
+      gizmo: { gizmo: { id: project }, conversations: { items: [] } }
+    }], cursor: null });
+    if (url.includes('/gizmos/' + project + '/conversations?')) {
+      const cursor = new URL(url).searchParams.get('cursor');
+      return response(cursor === 'page-2'
+        ? { items: [{ id: ID }], cursor: null }
+        : { items: [], cursor: cursor === '0' ? 'page-1' : 'page-2' });
+    }
+    if (url.endsWith('/conversation/' + ID)) return response(target);
+    throw new Error('Unexpected request ' + url);
+  };
+  const deps = { credentials, fetch, workId, explicitGoal: true, requireWorkReceipt: true,
+    startedAt: Date.now(), conversationCorrelation: 'v1/project-deep' };
+  let match;
+  for (let retry = 0; retry < 8 && !match; retry++) {
+    try { match = await findRecentGoalCommand(deps); }
+    catch (error) { assert.equal(error.deferred, true); t.mock.timers.tick(61_000); }
+  }
+  assert.equal(match?.conversationId, ID);
+});
+
 test('Project Goal Mode refuses missing or off-branch work receipts', async () => {
   const projectId = 'g-p-6a68897d433881919527e08c99703cba';
   const workId = 'project-branch-receipt';

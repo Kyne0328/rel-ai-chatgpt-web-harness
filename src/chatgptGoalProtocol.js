@@ -91,7 +91,7 @@ function accountScope(deps) {
   let accounts = accountScopes.get(transport);
   if (!accounts) { accounts = new Map(); accountScopes.set(transport, accounts); }
   const key = deps.tunnelId || deps.credentials || 'local';
-  if (!accounts.has(key)) accounts.set(key, { reads: [], cooldownUntil: 0, rateLimits: 0, discovery: new Map() });
+  if (!accounts.has(key)) accounts.set(key, { reads: [], cooldownUntil: 0, rateLimits: 0, discovery: new Map(), goalScans: new Map() });
   const scope = accounts.get(key);
   scope.cooldownUntil = Math.max(scope.cooldownUntil, Number(deps.cooldownUntil || 0));
   scope.rateLimits = Math.max(scope.rateLimits, Number(deps.rateLimitCount || 0));
@@ -200,11 +200,11 @@ const MAX_SIDEBAR_PAGES = 4;
 const MAX_PROJECTS = 80;
 const MAX_PROJECT_CHAT_PAGES = 2;
 
-async function listGoalProjects(deps = {}) {
+async function listGoalProjects(deps = {}, initialCursor = '') {
   const projects = [];
   const previews = [];
-  const seen = new Set();
-  let cursor = '';
+  const seen = new Set(initialCursor ? [initialCursor] : []);
+  let cursor = initialCursor;
   for (let page = 0; page < MAX_SIDEBAR_PAGES; page++) {
     const path = '/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=5'
       + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
@@ -221,17 +221,17 @@ async function listGoalProjects(deps = {}) {
           id: conversation.id, update_time: conversation.update_time
         });
       }
-      if (projects.length >= MAX_PROJECTS) return { projects, previews, complete: false };
     }
     const next = result.cursor;
-    if (!next) return { projects, previews, complete: true };
+    if (!next) return { projects, previews, complete: true, cursor: '' };
     if (typeof next !== 'string' || next.length > 2048 || seen.has(next)) {
       throw new Error('ChatGPT Project listing has an invalid pagination cursor.');
     }
     seen.add(next);
     cursor = next;
+    if (projects.length >= MAX_PROJECTS) break;
   }
-  return { projects, previews, complete: false };
+  return { projects, previews, complete: false, cursor };
 }
 
 async function listProjectChats(projectId, cursor, deps = {}) {
@@ -328,17 +328,36 @@ function turnState(conversation) {
 
 async function findRecentGoalCommand(deps = {}) {
   const startedAt = Number(deps.startedAt || 0);
-  const candidates = [];
-  const inspected = new Set();
   let correlatedId = '';
   try { correlatedId = parseConversationUrl(deps.conversationCorrelation); } catch {}
 
-  const inspect = async summaries => {
-    for (const summary of summaries) {
+  // The authenticated account has a finite per-minute read budget. Preserve
+  // a work-specific cursor across deferred polls instead of rescanning the
+  // first Projects every minute. Never share scans across accounts or work IDs.
+  const scope = !correlatedId && deps.explicitGoal && deps.workId ? accountScope(deps) : null;
+  const scanKey = scope ? String(deps.workId) : '';
+  let scan = scope?.goalScans.get(scanKey);
+  if (scope && (!scan || scan.startedAt !== startedAt)) {
+    scan = { startedAt, ordinary: null, ordinaryAt: 0, catalogue: null, previewAt: 0,
+      sidebarCursor: '', projectAt: 0, cursor: '0', pages: 0, page: null, pageAt: 0, candidates: [] };
+    scope.goalScans.set(scanKey, scan);
+    while (scope.goalScans.size > 16) scope.goalScans.delete(scope.goalScans.keys().next().value);
+  }
+  const candidates = scan ? [...scan.candidates] : [];
+  const resumedCandidate = candidates.length > 0;
+  const inspected = new Set();
+
+  const inspect = async (summaries, from = 0, advance = () => {}) => {
+    for (let i = from; i < summaries.length; i++) {
+      const summary = summaries[i];
       const id = String(summary?.id || '');
-      if (!UUID.test(id) || inspected.has(id)) continue;
-      const updated = typeof summary.update_time === 'number' ? summary.update_time * 1_000 : Date.parse(summary.update_time || '');
-      if (!correlatedId && Number.isFinite(updated) && updated < startedAt - 120_000) continue;
+      const updated = typeof summary?.update_time === 'number'
+        ? summary.update_time * 1_000 : Date.parse(summary?.update_time || '');
+      if (!UUID.test(id) || inspected.has(id) ||
+        (!correlatedId && Number.isFinite(updated) && updated < startedAt - 120_000)) {
+        advance(i + 1);
+        continue;
+      }
       inspected.add(id);
       let evidence;
       let cached = false;
@@ -349,35 +368,65 @@ async function findRecentGoalCommand(deps = {}) {
         cached = result.cached;
       }
       const match = goalEvidenceForWork(evidence, deps, correlatedId);
-      // Only the initiating turn near work creation qualifies; later user turns
-      // cannot displace a verified explicit-goal receipt on the active branch.
-      if (!match || !recentGoalEvidence(match, startedAt)) continue;
-      const messageId = match.messageId;
-      if (cached) {
-        // A cached match cannot authorize linking without a fresh receipt read.
-        const fresh = goalEvidenceForWork(goalCommandEvidence(await getConversation(id, deps)), deps, correlatedId);
-        if (!fresh || fresh.messageId !== messageId || !recentGoalEvidence(fresh, startedAt)) continue;
+      if (match && recentGoalEvidence(match, startedAt)) {
+        const messageId = match.messageId;
+        if (cached) {
+          // A cached match never authorizes linking without a fresh receipt read.
+          const fresh = goalEvidenceForWork(goalCommandEvidence(await getConversation(id, deps)), deps, correlatedId);
+          if (fresh && fresh.messageId === messageId && recentGoalEvidence(fresh, startedAt)
+            && !candidates.some(candidate => candidate.conversationId === id)) {
+            candidates.push({ conversationId: id, messageId });
+          }
+        } else if (!candidates.some(candidate => candidate.conversationId === id)) {
+          candidates.push({ conversationId: id, messageId });
+        }
       }
-      candidates.push({ conversationId: id, messageId });
-      if (candidates.length > 1) return { state: 'ambiguous' };
+      if (scan) scan.candidates = [...candidates];
+      advance(i + 1);
+      if (candidates.length > 1) {
+        if (scope) scope.goalScans.delete(scanKey);
+        return { state: 'ambiguous' };
+      }
     }
     return null;
   };
-  const result = correlatedId
-    ? await inspect([{ id: correlatedId }])
-    : await inspect((await discoveryRead('catalog', listConversations, deps)).value);
-  if (result) return result;
-  if (correlatedId || candidates.length) {
-    return candidates.length ? { state: 'matched', ...candidates[0] } : { state: 'absent' };
-  }
+  const matched = async () => {
+    if (!candidates.length) return null;
+    if (candidates.length > 1) {
+      if (scope) scope.goalScans.delete(scanKey);
+      return { state: 'ambiguous' };
+    }
+    if (resumedCandidate) {
+      // A remembered match must be checked again against the active branch.
+      const candidate = candidates[0];
+      const fresh = goalEvidenceForWork(goalCommandEvidence(await getConversation(candidate.conversationId, deps)), deps, correlatedId);
+      if (!fresh || fresh.messageId !== candidate.messageId || !recentGoalEvidence(fresh, startedAt)) {
+        candidates.length = 0;
+        if (scan) scan.candidates = [];
+        return null;
+      }
+    }
+    if (scope) scope.goalScans.delete(scanKey);
+    return { state: 'matched', ...candidates[0] };
+  };
+  const ordinary = correlatedId ? [{ id: correlatedId }]
+    : scan?.ordinary || (await discoveryRead('catalog', listConversations, deps)).value;
+  if (scan && !scan.ordinary) scan.ordinary = ordinary.map(item => ({ id: item.id, update_time: item.update_time }));
+  const normalResult = await inspect(ordinary, scan?.ordinaryAt || 0, at => { if (scan) scan.ordinaryAt = at; });
+  if (normalResult) return normalResult;
+  if (correlatedId) return (await matched()) || { state: 'absent' };
+  const ordinaryMatch = await matched();
+  if (ordinaryMatch) return ordinaryMatch;
 
-  const catalogue = (await discoveryRead('project-catalog', listGoalProjects, deps)).value;
-  const previewResult = await inspect(catalogue.previews);
+  const sidebarCursor = scan?.sidebarCursor || '';
+  const catalogue = scan?.catalogue || (await discoveryRead('project-catalog:' + sidebarCursor,
+    shared => listGoalProjects(shared, sidebarCursor), deps)).value;
+  if (scan && !scan.catalogue) scan.catalogue = catalogue;
+  const previewResult = await inspect(catalogue.previews, scan?.previewAt || 0, at => { if (scan) scan.previewAt = at; });
   if (previewResult) return previewResult;
-  if (candidates.length) return { state: 'matched', ...candidates[0] };
-  // Normal work.begin calls also probe for a literal /goal. Do not walk every
-  // Project's history when its recent previews contain no such command.
-  // Explicit Goal Mode may need the deeper lookup for a missing preview.
+  const previewMatch = await matched();
+  if (previewMatch) return previewMatch;
+  // Automatic /goal detection only inspects the sidebar, not full histories.
   if (!deps.explicitGoal) {
     if (catalogue.complete) return { state: 'absent' };
     throw Object.assign(new Error('ChatGPT Project discovery is incomplete; retrying without guessing.'),
@@ -385,26 +434,52 @@ async function findRecentGoalCommand(deps = {}) {
   }
 
   let complete = catalogue.complete;
-  for (const projectId of catalogue.projects) {
-    let cursor = '0';
+  for (let projectAt = scan?.projectAt || 0; projectAt < catalogue.projects.length; projectAt++) {
+    const projectId = catalogue.projects[projectAt];
+    let cursor = scan?.cursor || '0';
+    let pageIndex = scan?.pages || 0;
     const seenCursors = new Set();
-    for (let page = 0; page < MAX_PROJECT_CHAT_PAGES; page++) {
+    for (; pageIndex < MAX_PROJECT_CHAT_PAGES; pageIndex++) {
       const key = 'project:' + projectId + ':' + cursor;
-      const listing = (await discoveryRead(key, shared => listProjectChats(projectId, cursor, shared), deps)).value;
-      const found = await inspect(listing.items);
+      const listing = scan?.page || (await discoveryRead(key, shared => listProjectChats(projectId, cursor, shared), deps)).value;
+      if (scan && !scan.page) scan.page = {
+        items: listing.items.map(item => ({ id: item.id, update_time: item.update_time })),
+        cursor: listing.cursor
+      };
+      const found = await inspect(listing.items, scan?.pageAt || 0, at => { if (scan) scan.pageAt = at; });
       if (found) return found;
-      if (candidates.length) return { state: 'matched', ...candidates[0] };
+      const projectMatch = await matched();
+      if (projectMatch) return projectMatch;
+      if (scan) { scan.page = null; scan.pageAt = 0; }
       if (!listing.cursor) { cursor = ''; break; }
       if (typeof listing.cursor !== 'string' || listing.cursor.length > 2048 || seenCursors.has(listing.cursor)) {
         throw new Error('ChatGPT Project conversation cursor is invalid.');
       }
       seenCursors.add(listing.cursor);
       cursor = listing.cursor;
+      if (scan) { scan.cursor = cursor; scan.pages = pageIndex + 1; }
     }
-    if (cursor) complete = false;
+    if (cursor) {
+      // Resume this Project's next page on the following poll instead of
+      // retrying its first two pages forever.
+      if (scan) { scan.projectAt = projectAt; scan.cursor = cursor; scan.pages = 0; }
+      throw Object.assign(new Error('ChatGPT Project conversation discovery is continuing.'),
+        { deferred: true, retryAt: Date.now() + 20_000 });
+    }
+    if (scan) { scan.projectAt = projectAt + 1; scan.cursor = '0'; scan.pages = 0; scan.page = null; scan.pageAt = 0; }
   }
-  if (!complete) throw Object.assign(new Error('ChatGPT Project conversation discovery is incomplete; retrying without guessing.'),
-    { deferred: true, retryAt: Date.now() + DISCOVERY_CACHE_MS });
+  if (!complete) {
+    // The sidebar is also paginated. Preserve the next cursor and advance to
+    // the next bounded batch rather than refetching the first four pages.
+    if (!scan || !catalogue.cursor) throw new Error('ChatGPT Project listing cannot advance its pagination.');
+    scan.sidebarCursor = catalogue.cursor;
+    scan.catalogue = null;
+    scan.previewAt = 0;
+    scan.projectAt = 0;
+    throw Object.assign(new Error('ChatGPT Project conversation discovery is continuing.'),
+      { deferred: true, retryAt: Date.now() + 20_000 });
+  }
+  if (scope) scope.goalScans.delete(scanKey);
   return { state: 'absent' };
 }
 
