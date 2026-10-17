@@ -9,7 +9,8 @@ import { hasAgentCancellationHandle } from '../executionControl.js';
 import { isClearlyReadOnlyExec } from '../executionClassification.js';
 import { resolveWorkspace } from '../config.js';
 import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
-import { addSpanEvent, runSpan, setSpanAttributes } from '../telemetry.js';
+import { addSpanEvent, runSpan, setSpanAttributes, safeTelemetryErrorCode } from '../telemetry.js';
+import { failureCategoryFromCode } from '../analyticsFailureCategory.ts';
 import { assertTaskWorkspaceRoot, claimTaskChangedFiles, ensureTaskBaseline, captureNativeMutationPaths } from '../taskIntegrity.ts';
 import { getCurrentTaskAbortSignal, runWithToolActivity, updateCurrentToolActivity } from '../toolActivity.js';
 import { bindWorkspaceOperationIdentity, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock, runWorkspaceOperation } from '../workspaceOperationQueue.js';
@@ -218,8 +219,16 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             safelySettled = watchdog.hasOwnedQuarantine()
               && !hasUnconfirmedTermination(handled) && handled?.mutationUnknown !== true
               && (!workspace || !hasDurableMutationOwnership(config, workspace));
+            const failedCode = handled?.ok === false
+              ? safeTelemetryErrorCode(handled?.errorCode || handled?.error?.code)
+              : '';
             setSpanAttributes({
               'relai.tool.ok': handled?.ok !== false,
+              'relai.tool.outcome': handled?.ok === false ? 'failed_result' : 'success',
+              ...(failedCode ? {
+                'relai.error.code': failedCode,
+                'relai.error.category': failureCategoryFromCode(failedCode, name)
+              } : {}),
               'relai.tool.long_running': definition?.behavior?.longRunning === true,
               ...performanceTimingAttributes()
             });

@@ -144,4 +144,10 @@ export interface TelemetryStatus {
   diagnosticsLastAttemptAt: string;
   diagnosticsLastSuccessAt: string;
   diagnosticsLastFailureAt: string;
+  diagnosticsPendingFailureReports: number;
+  diagnosticsFailureStorageDrops: number;
+  diagnosticsBatchesAttempted: number;
+  diagnosticsBatchesDelivered: number;
+  diagnosticsBatchesFailed: number;
+  diagnosticsReplayedFailureReports: number;
 }

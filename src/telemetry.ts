@@ -6,6 +6,8 @@ import { readJsonFile, writeJsonAtomic } from './durableState.ts';
 import { packageMetadata as pkg } from './packageMetadata.js';
 import { getStateDir } from './stateLayout.js';
 import { redactCommandSecrets } from './commandDisplay.js';
+import { failureCategoryFromCode } from './analyticsFailureCategory.ts';
+import { acknowledgeDiagnosticFailures, clearQueuedDiagnosticFailures, queuedDiagnosticFailures, retainFailedDiagnosticBatch } from './diagnosticRetrySpool.ts';
 import type { TelemetryConfig, TelemetryStatus } from './telemetry.types.ts';
 
 const REDACTED_ATTRIBUTE = '[redacted]';
@@ -31,6 +33,13 @@ let usageLastFailureAt = '';
 let diagnosticsLastAttemptAt = '';
 let diagnosticsLastSuccessAt = '';
 let diagnosticsLastFailureAt = '';
+let diagnosticReplayTimer: ReturnType<typeof setTimeout> | null = null;
+const diagnosticReplayInFlight = new Set<string>();
+let diagnosticFailureStorageDrops = 0;
+let diagnosticsBatchesAttempted = 0;
+let diagnosticsBatchesDelivered = 0;
+let diagnosticsBatchesFailed = 0;
+let diagnosticsReplayedFailureReports = 0;
 
 type SafeAttributeScalar = string | number | boolean;
 type SafeAttributeValue = SafeAttributeScalar | SafeAttributeScalar[];
@@ -88,6 +97,9 @@ function initializeTelemetry(config: TelemetryConfig = {}): boolean {
   const diagnosticsEndpoint = configuredDiagnosticsEndpoint(config);
   if (usageEndpoint && !usageReportingStarted) startUsageReporter(config, usageEndpoint);
 
+  if (!telemetryEnabled(config)) {
+    try { clearQueuedDiagnosticFailures(config); } catch { diagnosticFailureStorageDrops += 1; }
+  }
   const needsDiagnostics = telemetryEnabled(config) && Boolean(diagnosticsEndpoint) && !diagnosticsProvider;
   if (!needsDiagnostics) return usageReportingStarted || Boolean(diagnosticsProvider);
   if (initializationPromise) return true;
@@ -236,9 +248,30 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
           return;
         }
         diagnosticsLastAttemptAt = new Date().toISOString();
+        diagnosticsBatchesAttempted += 1;
+        const exportConsentGeneration = diagnosticsConsentGeneration;
+        const replayIds = allowedSpans.map(span => span.attributes?.['relai.telemetry.replay_id'])
+          .filter((id): id is string => typeof id === 'string');
         baseExporter.export(allowedSpans, result => {
-          if (result?.code === 0) diagnosticsLastSuccessAt = new Date().toISOString();
-          else diagnosticsLastFailureAt = new Date().toISOString();
+          const success = result?.code === 0;
+          if (success) {
+            diagnosticsLastSuccessAt = new Date().toISOString();
+            diagnosticsBatchesDelivered += 1;
+            diagnosticsReplayedFailureReports += replayIds.length;
+          } else {
+            diagnosticsLastFailureAt = new Date().toISOString();
+            diagnosticsBatchesFailed += 1;
+          }
+          if (telemetryEnabled(config) && exportConsentGeneration === diagnosticsConsentGeneration) {
+            try {
+              if (success) acknowledgeDiagnosticFailures(config, replayIds);
+              else retainFailedDiagnosticBatch(config, allowedSpans.map(span => ({
+                name: span.name, attributes: span.attributes, status: span.status
+              })));
+              if (!success && queuedDiagnosticFailures(config).length) scheduleDiagnosticReplay(config, 60_000);
+            } catch { diagnosticFailureStorageDrops += 1; }
+          }
+          for (const id of replayIds) diagnosticReplayInFlight.delete(id);
           resultCallback(result);
         });
       },
@@ -250,6 +283,12 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
         [conventions.ATTR_SERVICE_VERSION]: pkg.version,
         [conventions.ATTR_SERVICE_NAME]: 'rel-ai-mcp',
         'service.instance.id': String(process.pid),
+        'os.type': process.platform,
+        'host.arch': process.arch,
+        ...(maintainerIdentity ? {
+          'relai.diagnostic.installation': crypto.createHash('sha256')
+            .update('relai-diagnostic-cohort-v1:').update(maintainerIdentity.ingestToken).digest('hex').slice(0, 24)
+        } : {}),
         'relai.telemetry.mode': 'diagnostics'
       }),
       sampler: new sdk.ParentBasedSampler({ root: new sdk.TraceIdRatioBasedSampler(sampleRatio) }),
@@ -266,8 +305,51 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
     diagnosticsProvider.register();
     initializedDiagnosticsEndpoint = diagnosticsEndpoint;
     initializedSampleRatio = sampleRatio;
+    scheduleDiagnosticReplay(config, 1_000);
   }
   return true;
+}
+
+function scheduleDiagnosticReplay(config: TelemetryConfig, delayMs: number): void {
+  if (diagnosticReplayTimer || !telemetryEnabled(config)) return;
+  diagnosticReplayTimer = setTimeout(() => {
+    diagnosticReplayTimer = null;
+    replayQueuedDiagnostics(config);
+  }, delayMs);
+  diagnosticReplayTimer.unref?.();
+}
+
+function replayQueuedDiagnostics(config: TelemetryConfig): number {
+  if (!telemetryEnabled(config) || !runtimeApi || !diagnosticsProvider || telemetrySampleRatio(config) <= 0) return 0;
+  let started = 0;
+  try {
+    const tracer = runtimeApi.trace.getTracer('rel-ai-mcp', pkg.version);
+    // Previously sampled failures must remain reportable after a temporary outage
+    // even when the ordinary trace sampling ratio is below 100%.
+    const sampledParent = runtimeApi.trace.setSpanContext(runtimeApi.context.active(), {
+      traceId: crypto.randomBytes(16).toString('hex'),
+      spanId: crypto.randomBytes(8).toString('hex'),
+      traceFlags: runtimeApi.TraceFlags.SAMPLED
+    });
+    for (const record of queuedDiagnosticFailures(config)) {
+      if (diagnosticReplayInFlight.has(record.id)) continue;
+      diagnosticReplayInFlight.add(record.id);
+      const span = tracer.startSpan('relai.telemetry.failure_replay', {
+        attributes: sanitizeAttributes({
+          'relai.telemetry.replay_id': record.id,
+          'relai.failure.observed_at': record.observedAt,
+          'relai.tool.name': record.tool,
+          'relai.tool.outcome': record.outcome,
+          'relai.error.code': record.code,
+          'relai.error.category': record.category
+        }) as OpenTelemetryApi.Attributes
+      }, sampledParent);
+      span.end();
+      if (span.isRecording()) started += 1;
+      else diagnosticReplayInFlight.delete(record.id);
+    }
+  } catch { diagnosticFailureStorageDrops += 1; }
+  return started;
 }
 
 function usageIdentity(config: TelemetryConfig = {}): {
@@ -316,6 +398,10 @@ async function setTelemetryDiagnosticsEnabled(config: TelemetryConfig, enabled: 
   runtimeDiagnosticsEnabledOverride = enabled === true;
   if (!runtimeDiagnosticsEnabledOverride) {
     diagnosticsConsentGeneration += 1;
+    if (diagnosticReplayTimer) clearTimeout(diagnosticReplayTimer);
+    diagnosticReplayTimer = null;
+    diagnosticReplayInFlight.clear();
+    clearQueuedDiagnosticFailures(config);
     return;
   }
   initializeTelemetry(config);
@@ -326,7 +412,7 @@ function sanitizeAttributes(attributes: Record<string, unknown> = {}): SafeAttri
   const safe: SafeAttributes = {};
   for (const [key, value] of Object.entries(attributes || {})) {
     if (value == null) continue;
-    if (/token|secret|password|authorization|api[_-]?key|file\.content|command\.env|approval/i.test(key)) {
+    if (!(key.startsWith('relai.timing.') && typeof value === 'number') && /token|secret|password|authorization|api[_-]?key|file\.content|command\.env|approval/i.test(key)) {
       safe[key] = REDACTED_ATTRIBUTE;
       continue;
     }
@@ -393,12 +479,21 @@ async function runSpan<T>(
   try {
     return await api.context.with(api.trace.setSpan(parentContext, span), operation);
   } catch (error) {
+    const code = safeTelemetryErrorCode(error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined);
     span.setAttribute('relai.error.type', safeExceptionType(error));
+    span.setAttribute('relai.error.code', code);
+    span.setAttribute('relai.error.category', failureCategoryFromCode(code, name));
+    span.setAttribute('relai.tool.outcome', 'exception');
     span.setStatus({ code: api.SpanStatusCode.ERROR });
     throw error;
   } finally {
     span.end();
   }
+}
+
+function safeTelemetryErrorCode(value: unknown): string {
+  const code = typeof value === 'string' ? value.trim() : '';
+  return /^[A-Z][A-Z0-9_]{1,79}$/.test(code) ? code : 'UNCLASSIFIED_ERROR';
 }
 
 function safeExceptionType(error: unknown): string {
@@ -424,6 +519,9 @@ async function shutdownTelemetry(): Promise<void> {
   if (initializationPromise) await initializationPromise.catch(() => false);
   if (usageRequestPromise) await usageRequestPromise.catch(() => false);
   const currentDiagnostics = diagnosticsProvider;
+  if (diagnosticReplayTimer) clearTimeout(diagnosticReplayTimer);
+  diagnosticReplayTimer = null;
+  diagnosticReplayInFlight.clear();
   diagnosticsProvider = null;
   runtimeApi = null;
   initializationPromise = null;
@@ -464,7 +562,13 @@ function telemetryStatus(config: TelemetryConfig = {}): TelemetryStatus {
     usageLastFailureAt,
     diagnosticsLastAttemptAt,
     diagnosticsLastSuccessAt,
-    diagnosticsLastFailureAt
+    diagnosticsLastFailureAt,
+    diagnosticsPendingFailureReports: diagnosticsEnabled ? queuedDiagnosticFailures(config).length : 0,
+    diagnosticsFailureStorageDrops: diagnosticFailureStorageDrops,
+    diagnosticsBatchesAttempted,
+    diagnosticsBatchesDelivered,
+    diagnosticsBatchesFailed,
+    diagnosticsReplayedFailureReports
   };
 }
 
@@ -478,6 +582,8 @@ export {
   telemetryStatus,
   sanitizeAttributes,
   summarizeCommandForTelemetry,
+  safeTelemetryErrorCode,
+  replayQueuedDiagnostics,
   telemetrySampleRatio,
   traceContextEnvironment
 };

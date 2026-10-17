@@ -250,6 +250,17 @@ try {
   assert.equal(forwarded?.url, 'https://axiom.example/v1/traces');
   assert.equal(forwarded?.headers.get('authorization'), 'Bearer test-axiom-token', 'the Worker must replace the client credential with the Axiom credential');
   assert.equal(forwarded?.headers.get('x-relai-installation-id'), null, 'installation identity must not be forwarded to Axiom');
+  for (const [upstreamCode, expectedCode] of [[400, 400], [413, 413], [429, 429], [401, 503], [503, 502]]) {
+    globalThis.fetch = async () => new Response('PRIVATE_UPSTREAM_ERROR', {
+      status: upstreamCode, headers: { 'retry-after': '12' }
+    });
+    const result = await telemetryWorker.fetch(new Request(traceUrl, {
+      method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${ingestToken}`, 'x-relai-installation-id': valid.installationId }, body: '{}'
+    }), telemetryEnv);
+    assert.equal(result.status, expectedCode, `upstream ${upstreamCode} must map to ${expectedCode}`);
+    assert.equal((await result.text()).includes('PRIVATE_UPSTREAM_ERROR'), false, 'upstream error bodies must remain private');
+    assert.equal(result.headers.get('retry-after'), [429, 503].includes(expectedCode) ? '12' : null);
+  }
 } finally {
   globalThis.fetch = originalFetch;
 }
@@ -273,8 +284,8 @@ try {
     headers: { 'content-type': 'application/json', authorization: `Bearer ${ingestToken}`, 'x-relai-installation-id': valid.installationId },
     body: '{}'
   }), telemetryEnv);
-  assert.equal(failedTrace.status, 500, 'asynchronous upstream failures must reach the Worker error boundary');
-  assert.deepEqual(await failedTrace.json(), { ok: false, error: 'Internal telemetry service error.' });
+  assert.equal(failedTrace.status, 502, 'an unreachable Axiom service should have a bounded safe gateway failure');
+  assert.equal(await failedTrace.text(), 'Diagnostic backend is temporarily unreachable.');
 } finally {
   console.error = originalConsoleError;
   globalThis.fetch = originalFetch;

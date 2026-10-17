@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -7,9 +8,10 @@ import { once } from 'node:events';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { context as traceContext, propagation, trace } from '@opentelemetry/api';
 import { runMcpRequestSpan } from '../src/core/mcp-runtime.ts';
+import { queuedDiagnosticFailures, retainFailedDiagnosticBatch, acknowledgeDiagnosticFailures, clearQueuedDiagnosticFailures } from '../src/diagnosticRetrySpool.ts';
 import { normalizeConfig } from '../src/config.js';
 
-import { initializeTelemetry, runSpan, sanitizeAttributes, setTelemetryDiagnosticsEnabled, shutdownTelemetry, summarizeCommandForTelemetry, telemetrySampleRatio, telemetryStatus } from '../src/telemetry.js';
+import { initializeTelemetry, runSpan, sanitizeAttributes, setTelemetryDiagnosticsEnabled, shutdownTelemetry, summarizeCommandForTelemetry, safeTelemetryErrorCode, replayQueuedDiagnostics, telemetrySampleRatio, telemetryStatus } from '../src/telemetry.js';
 
 const packageVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-tool-task-'));
@@ -38,7 +40,34 @@ try {
   assert.equal(attributes['command.env.PASSWORD'], '[redacted]');
   assert.equal(attributes['relai.process.command'], 'npm run test -- --watch');
   assert.equal(attributes['safe.number'], 2);
+  assert.equal(sanitizeAttributes({ 'relai.timing.mcp.authorization_ms': 0.42 })['relai.timing.mcp.authorization_ms'], 0.42,
+    'sanitized telemetry must retain numeric authorization phase timing');
+  assert.equal(safeTelemetryErrorCode('EXEC_TIMEOUT'), 'EXEC_TIMEOUT');
+  assert.equal(safeTelemetryErrorCode('secret/path/private'), 'UNCLASSIFIED_ERROR');
   assert.equal(summarizeCommandForTelemetry('git status --short'), 'git status --short');
+  const spoolConfig = { stateDir: path.join(root, 'spool') };
+  const untrustedMessage = 'C:\\private\\project\\file.js TOKEN_DO_NOT_EXPORT';
+  const failures = Array.from({ length: 70 }, () => ({
+    name: 'relai.tool.call', status: { code: 2 },
+    attributes: {
+      'relai.tool.name': 'relai_exec',
+      'relai.tool.outcome': 'exception',
+      'relai.error.code': 'EXEC_TIMEOUT',
+      'relai.error.category': 'timeout',
+      'relai.error.message': untrustedMessage,
+      'relai.process.command': untrustedMessage
+    }
+  }));
+  assert.equal(retainFailedDiagnosticBatch(spoolConfig, failures), 70);
+  const retained = queuedDiagnosticFailures(spoolConfig);
+  assert.equal(retained.length, 64, 'failed diagnostic retry storage must be bounded');
+  assert.equal(retained[0].code, 'EXEC_TIMEOUT');
+  assert.equal(fs.readFileSync(path.join(spoolConfig.stateDir, 'diagnostic-failure-retry.json'), 'utf8').includes(untrustedMessage), false,
+    'retry storage must never retain freeform messages or command text');
+  acknowledgeDiagnosticFailures(spoolConfig, retained.slice(0, 63).map(record => record.id));
+  assert.equal(queuedDiagnosticFailures(spoolConfig).length, 1, 'acknowledgements must remove only delivered failure summaries');
+  clearQueuedDiagnosticFailures(spoolConfig);
+  assert.equal(queuedDiagnosticFailures(spoolConfig).length, 0, 'opt-out must clear the durable failure queue');
   assert.equal(
     summarizeCommandForTelemetry('npm run deploy -- --token super-secret --password=also-secret --region apac'),
     'npm run deploy -- --token [REDACTED] --password [REDACTED] --region apac'
@@ -218,8 +247,17 @@ try {
     assert.equal(diagnosticRequest?.installationId, upgradedIdentityState.installationId, 'maintainer diagnostics must identify the installation without adding it to the trace payload');
     assert.equal(diagnosticPayload.includes(Buffer.from(secret)), false, 'OTLP payloads must never include raw exception messages');
     assert.equal(diagnosticPayload.includes(Buffer.from(privatePath)), false, 'OTLP payloads must never include raw local paths from exceptions');
+    const cohort = createHash('sha256').update('relai-diagnostic-cohort-v1:').update(upgradedIdentityState.ingestToken).digest('hex').slice(0, 24);
+    assert.equal(diagnosticPayload.includes(Buffer.from(cohort)), true, 'official traces must include a stable, privacy-bounded cohort identifier');
+    assert.equal(diagnosticPayload.includes(Buffer.from(upgradedIdentityState.ingestToken)), false, 'official traces must never include the ingest credential');
+    assert.equal(diagnosticPayload.includes(Buffer.from('UNCLASSIFIED_ERROR')), true, 'exception spans must include a sanitized error code');
 
     const diagnosticsConfig = { stateDir: root, telemetry: { diagnosticsEnabled: true, sampleRatio: 1 } };
+    retainFailedDiagnosticBatch(diagnosticsConfig, failures.slice(0, 1));
+    replayQueuedDiagnostics(diagnosticsConfig);
+    await diagnosticProvider.forceFlush();
+    assert.equal(queuedDiagnosticFailures(diagnosticsConfig).length, 0, 'confirmed export must acknowledge retained errors');
+    retainFailedDiagnosticBatch(diagnosticsConfig, failures.slice(0, 1));
     await runSpan(diagnosticsConfig, 'relai.test.queued_before_opt_out', {}, async () => true);
     let releaseActive;
     let markActiveStarted;
@@ -233,6 +271,7 @@ try {
     await activeStarted;
     const racingSpan = runSpan(diagnosticsConfig, 'relai.test.pending_at_opt_out', {}, async () => 'race operation completed');
     await setTelemetryDiagnosticsEnabled(diagnosticsConfig, false);
+    assert.equal(queuedDiagnosticFailures(diagnosticsConfig).length, 0, 'opt-out must purge retained failures');
     await runMcpRequestSpan(mcpContext, { metadata }, async () => {
       assert.equal(trace.getSpan(traceContext.active()), undefined, 'diagnostics opt-out must suppress forwarded MCP spans');
     });

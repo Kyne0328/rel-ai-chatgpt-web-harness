@@ -350,8 +350,29 @@ async function handleTraces(request, env) {
   const encoding = request.headers.get('content-encoding');
   if (encoding) headers.set('content-encoding', encoding);
 
-  const upstream = await fetch(axiomTraceUrl(env), { method: 'POST', headers, body });
-  if (!upstream.ok) return text('Diagnostic backend rejected the trace batch.', 502);
+  let upstream;
+  try {
+    upstream = await fetch(axiomTraceUrl(env), {
+      method: 'POST', headers, body, signal: AbortSignal.timeout(10_000)
+    });
+  } catch {
+    return text('Diagnostic backend is temporarily unreachable.', 502);
+  }
+  if (!upstream.ok) {
+    // Preserve retry semantics without exposing Axiom response bodies or credentials.
+    const status = upstream.status === 429 ? 429
+      : upstream.status === 413 ? 413
+        : [400, 415, 422].includes(upstream.status) ? 400
+          : [401, 403].includes(upstream.status) ? 503 : 502;
+    const retryAfter = upstream.headers.get('retry-after');
+    const headers = retryAfter && /^(?:[1-9][0-9]{0,3}|0)$/.test(retryAfter.trim()) && [429, 503].includes(status)
+      ? { 'retry-after': retryAfter.trim() } : {};
+    return text(status === 429 ? 'Diagnostic backend is rate limited.'
+      : status === 413 ? 'Trace payload too large.'
+        : status === 400 ? 'Diagnostic backend rejected the trace format.'
+          : status === 503 ? 'Diagnostic backend authentication is unavailable.'
+            : 'Diagnostic backend is temporarily unavailable.', status, headers);
+  }
 
   return new Response(upstream.body, {
     status: upstream.status,

@@ -15,6 +15,12 @@ function telemetrySettings(config = readConfig()): Record<string, unknown> {
     diagnosticsLastAttemptAt: status.diagnosticsLastAttemptAt,
     diagnosticsLastSuccessAt: status.diagnosticsLastSuccessAt,
     diagnosticsLastFailureAt: status.diagnosticsLastFailureAt,
+    diagnosticsPendingFailureReports: status.diagnosticsPendingFailureReports,
+    diagnosticsFailureStorageDrops: status.diagnosticsFailureStorageDrops,
+    diagnosticsBatchesAttempted: status.diagnosticsBatchesAttempted,
+    diagnosticsBatchesDelivered: status.diagnosticsBatchesDelivered,
+    diagnosticsBatchesFailed: status.diagnosticsBatchesFailed,
+    diagnosticsReplayedFailureReports: status.diagnosticsReplayedFailureReports,
     endpointConfigured: status.endpointConfigured === true,
     sampleRatio: status.sampleRatio
   };
