@@ -805,6 +805,44 @@ test('Project Goal Mode makes forward progress beyond the account read budget', 
   assert.ok(readCount > 30);
 });
 
+test('Project goal searches later sidebar previews before unrelated deep Project histories', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const workId = 'sidebar-preview-priority';
+  const calls = [];
+  const targetTree = conversationWithReceipt(ID, workId, 'Start goal without URL');
+  const fetch = async url => {
+    calls.push(url);
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) {
+      const cursor = new URL(url).searchParams.get('cursor');
+      const page = cursor ? Number(cursor.slice(5)) : 0;
+      return response({ items: [{ gizmo: {
+        gizmo: { id: 'g-p-' + String(page + 1).padStart(32, '0') },
+        conversations: { items: page === 4 ? [{ id: ID, update_time: new Date().toISOString() }] : [] }
+      } }], cursor: page < 4 ? 'page-' + (page + 1) : null });
+    }
+    if (url.endsWith('/conversation/' + ID)) return response(targetTree);
+    if (url.includes('/gizmos/') && url.includes('/conversations?')) {
+      // Old Projects have long histories. No deep history should be required
+      // before visiting the fifth sidebar page with a recent matching chat.
+      const cursor = new URL(url).searchParams.get('cursor');
+      return response({ items: [], cursor: 'more-' + (cursor === '0' ? 1 : Number(cursor.slice(5)) + 1) });
+    }
+    throw new Error('Unexpected Goal Mode request: ' + url);
+  };
+  const deps = { credentials, fetch, workId, explicitGoal: true, requireWorkReceipt: true,
+    conversationCorrelation: 'v1/sidebar-target-later', startedAt: Date.now() };
+  let found = null;
+  for (let attempt = 0; attempt < 2 && !found; attempt++) {
+    try { found = await findRecentGoalCommand(deps); }
+    catch (error) { assert.equal(error.deferred, true); t.mock.timers.tick(21_000); }
+  }
+  assert.equal(found?.conversationId, ID,
+    'a fresh chat in the next sidebar batch must not wait behind old Project histories');
+  assert.equal(calls.some(url => url.includes('/gizmos/g-p-') && url.includes('/conversations?')), false,
+    'recent sidebar previews should be checked before historical fallback');
+});
+
 test('Project discovery advances past bounded sidebar pagination', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const workId = 'project-sidebar-deep';

@@ -343,7 +343,7 @@ async function findRecentGoalCommand(deps = {}) {
   let scan = scope?.goalScans.get(scanKey);
   if (scope && (!scan || scan.startedAt !== startedAt || scan.explicitGoal !== Boolean(deps.explicitGoal))) {
     scan = { startedAt, explicitGoal: Boolean(deps.explicitGoal), ordinary: null, ordinaryAt: 0, catalogue: null, previewAt: 0,
-      sidebarCursor: '', projectAt: 0, cursor: '0', pages: 0, page: null, pageAt: 0, candidates: [] };
+      sidebarCursor: '', projects: [], projectAt: 0, cursor: '0', pages: 0, page: null, pageAt: 0, candidates: [] };
     scope.goalScans.set(scanKey, scan);
     while (scope.goalScans.size > 16) scope.goalScans.delete(scope.goalScans.keys().next().value);
   }
@@ -444,9 +444,26 @@ async function findRecentGoalCommand(deps = {}) {
       { deferred: true, retryAt: Date.now() + DISCOVERY_CACHE_MS });
   }
 
+  if (scan) {
+    // Inspect all recent Project previews before reading older histories.
+    // Otherwise a deep Project at the front can starve a newly active chat
+    // on a later sidebar page for many read-budget windows.
+    const seen = new Set(scan.projects);
+    for (const id of catalogue.projects) if (!seen.has(id)) { scan.projects.push(id); seen.add(id); }
+    if (!catalogue.complete) {
+      if (!catalogue.cursor) throw new Error('ChatGPT Project listing cannot advance its pagination.');
+      scan.sidebarCursor = catalogue.cursor;
+      scan.catalogue = null;
+      scan.previewAt = 0;
+      throw Object.assign(new Error('ChatGPT Project discovery is continuing through recent conversations.'),
+        { deferred: true, retryAt: Date.now() + 20_000 });
+    }
+  }
+
   let complete = catalogue.complete;
-  for (let projectAt = scan?.projectAt || 0; projectAt < catalogue.projects.length; projectAt++) {
-    const projectId = catalogue.projects[projectAt];
+  const projectIds = scan?.projects || catalogue.projects;
+  for (let projectAt = scan?.projectAt || 0; projectAt < projectIds.length; projectAt++) {
+    const projectId = projectIds[projectAt];
     let cursor = scan?.cursor || '0';
     let pageIndex = scan?.pages || 0;
     const seenCursors = new Set();
