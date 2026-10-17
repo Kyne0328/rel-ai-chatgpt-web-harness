@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { electronPlatformSpec, normalizeElectronArch, normalizeElectronPlatform } from './electron-platform.mjs';
 import { resolvePackagedDirectory } from './packaged-directory.mjs';
 import { assertPackagedRuntimeParity } from './packaged-runtime-parity.mjs';
+import { BUNDLE_INVENTORY_NAME, verifyBundleInventory } from './dashboard-bundle-inventory.mjs';
 import { buildIdFromFingerprint, normalizeBuildProvenance } from '../src/buildProvenance.js';
 import { assertPackagedSevenZipExecutable } from './packaged-seven-zip.mjs';
 
@@ -123,6 +124,7 @@ for (const relativePath of ['preload.cjs', 'startup-background.js', 'secure-tunn
 const rootPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const electronPackage = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
 const runtimeParity = assertPackagedRuntimeParity({ sourceRoot: root, resourcesRoot, rootPackage, electronPackage, platform });
+verifyBundleInventory(path.join(resourcesRoot, 'public'), JSON.parse(fs.readFileSync(path.join(resourcesRoot, 'public', BUNDLE_INVENTORY_NAME), 'utf8')));
 const packagedPackage = JSON.parse(fs.readFileSync(path.join(resourcesRoot, 'package.json'), 'utf8')); 
 assert.equal(packagedPackage.name, rootPackage.name, 'Packaged package metadata has the wrong product name.');
 assert.equal(packagedPackage.version, rootPackage.version, 'Packaged package metadata has the wrong version.');

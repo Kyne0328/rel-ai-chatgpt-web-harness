@@ -95,8 +95,8 @@ async function case_workflow_check_execution_unit() {
     const backend = path.join(root, 'back-end');
     fs.mkdirSync(frontend, { recursive: true });
     fs.mkdirSync(backend, { recursive: true });
-    fs.writeFileSync(path.join(frontend, 'package.json'), JSON.stringify({ scripts: { test: `node -e "require('fs').writeFileSync('frontend-marker.txt','ok')"` } }));
-    fs.writeFileSync(path.join(backend, 'package.json'), JSON.stringify({ scripts: { test: `node -e "require('fs').writeFileSync('backend-marker.txt','wrong')"` } }));
+    fs.writeFileSync(path.join(frontend, 'package.json'), JSON.stringify({ scripts: { test: `node -e "console.log(process.cwd())"` } }));
+    fs.writeFileSync(path.join(backend, 'package.json'), JSON.stringify({ scripts: { test: `node -e "throw new Error('unselected backend check executed')"` } }));
     const normalized = normalizeVerifyChecks({ checks: ['npm:front-end:test'] }, root, 'quick');
     assert.equal(normalized.checkUnits.length, 1);
     assert.equal(normalized.checkUnits[0].cwd, 'front-end');
@@ -108,9 +108,11 @@ async function case_workflow_check_execution_unit() {
       timeoutMs: 30000
     });
     assert.equal(result.ok, true);
-    assert.equal(fs.existsSync(path.join(frontend, 'frontend-marker.txt')), true);
-    assert.equal(fs.existsSync(path.join(root, 'frontend-marker.txt')), false);
-    assert.equal(fs.existsSync(path.join(backend, 'backend-marker.txt')), false);
+    assert.equal(result.validationStatus, 'passed');
+    assert.equal(result.results.length, 1, 'only the selected frontend check runs');
+    assert.equal(result.executedUnits, 1);
+    assert.equal(result.results[0].cwd, 'front-end');
+    assert.equal(result.results[0].stdout.trim(), frontend, 'the check must actually execute in the selected package cwd');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

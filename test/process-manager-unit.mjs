@@ -416,6 +416,8 @@ try {
   assert.equal(fs.existsSync(shutdownDirectory), false,
     'managed process shutdown must not return while a late metadata write can recreate removed state');
 
+  await verifyUnresolvedShutdownAccounting();
+
   console.log('Managed process identity, ownership, persistence, bounded output, restart, cancellation, shutdown durability, and idempotent stop tests passed.');
 } finally {
   await stopAllManagedProcesses(config).catch(() => {});
@@ -428,6 +430,87 @@ try {
     await waitForChildExit(mismatchedChild, 3000).catch(() => false);
   }
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+}
+
+
+async function verifyUnresolvedShutdownAccounting() {
+  const { createRelaiCoreRuntime } = await import('../src/core/runtime.ts');
+  const isolatedState = path.join(root, 'unresolved-state');
+  const isolatedConfig = {
+    version: 3, stateDir: isolatedState, auditLogPath: path.join(isolatedState, 'audit.jsonl'),
+    workspaces: { app: { path: workspaceRoot, commands: {}, testCommands: {} } }
+  };
+  const unresolvedId = `proc_${'u'.repeat(24)}`;
+  const confirmedId = `proc_${'d'.repeat(24)}`;
+  const syntheticPid = 987654321;
+  const originalKill = process.kill;
+  const observedSignals = [];
+  process.kill = (pid, signal) => {
+    if (Math.abs(pid) !== syntheticPid) return originalKill(pid, signal);
+    observedSignals.push(signal);
+    assert.equal(signal, 0, 'unverified synthetic identities must never receive a termination signal');
+    return true;
+  };
+  try {
+    for (const [processId, confirmed] of [[unresolvedId, false], [confirmedId, true]]) {
+      const directory = path.join(isolatedState, 'processes', processId);
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, 'stdout.log'), '');
+      fs.writeFileSync(path.join(directory, 'stderr.log'), '');
+      fs.writeFileSync(path.join(directory, 'metadata.json'), JSON.stringify({
+        schemaVersion: 4, runtimeId: 'previous-runtime', processId, workspaceId: 'app',
+        workspacePath: workspaceRoot, lifecycle: 'persistent', kind: 'service',
+        purpose: 'Synthetic shutdown accounting fixture.', commandSummary: 'synthetic fixture', cwd: '.',
+        status: confirmed ? 'stopped' : 'running', startedAt: new Date().toISOString(),
+        endedAt: confirmed ? new Date().toISOString() : '', pid: confirmed ? null : syntheticPid,
+        terminationConfirmed: confirmed ? true : null, processCreationIdentity: '',
+        stdoutBytes: 0, stderrBytes: 0, stdoutStartOffset: 0, stderrStartOffset: 0,
+        environmentKeys: [], maxLogBytes: 65536
+      }));
+      readManagedProcess(isolatedConfig, { processId });
+    }
+    const summary = await stopAllManagedProcesses(isolatedConfig);
+    assert.equal(summary.complete, false);
+    assert.equal(summary.attempted, 1, 'confirmed terminal records must not be retried');
+    assert.equal(summary.stopped, 0);
+    assert.equal(summary.orphaned, 1);
+    assert.equal(summary.unresolved, 1);
+    assert.equal(summary.rejected, 1, 'identity refusal must remain represented as a rejected stop');
+    assert.deepEqual(summary.leftovers.map(record => record.processId), [unresolvedId]);
+    assert.match(summary.leftovers[0].reason, /cannot prove|identity|unverified/i);
+    assert.equal(readManagedProcess(isolatedConfig, { processId: unresolvedId }).status, 'orphaned');
+
+    const runtime = createRelaiCoreRuntime({ config: isolatedConfig });
+    runtime.start();
+    const shutdown = await runtime.shutdown();
+    assert.equal(shutdown.clean, false, 'core shutdown must not certify unresolved process recovery as clean');
+    assert.equal(shutdown.managedProcesses.complete, false);
+    assert.equal(shutdown.managedProcesses.unresolved, 1);
+    assert.ok(observedSignals.length > 0);
+    assert.ok(observedSignals.every(signal => signal === 0));
+
+    const failedState = path.join(root, 'failed-persistence-state');
+    const failedConfig = { ...isolatedConfig, stateDir: failedState };
+    const failedId = `proc_${'f'.repeat(24)}`;
+    const failedDirectory = path.join(failedState, 'processes', failedId);
+    fs.mkdirSync(failedDirectory, { recursive: true });
+    const terminalMetadata = JSON.parse(fs.readFileSync(path.join(isolatedState, 'processes', confirmedId, 'metadata.json'), 'utf8'));
+    fs.writeFileSync(path.join(failedDirectory, 'metadata.json'), JSON.stringify({ ...terminalMetadata, processId: failedId }));
+    readManagedProcess(failedConfig, { processId: failedId });
+    // Replace only the fixture's directory with a file, making every attempted
+    // metadata write fail without relying on platform-specific file permissions.
+    fs.rmSync(failedDirectory, { recursive: true, force: true });
+    fs.writeFileSync(failedDirectory, 'synthetic storage failure');
+    const failedPersistence = await stopAllManagedProcesses(failedConfig);
+    assert.equal(failedPersistence.attempted, 0, 'confirmed terminal fixture needs no process stop');
+    assert.equal(failedPersistence.complete, false, 'a consumed persistence rejection must prevent clean shutdown');
+    assert.equal(failedPersistence.unresolved, 1);
+    assert.match(failedPersistence.leftovers[0].reason, /persistence/i);
+    const repeatedFailure = await stopAllManagedProcesses(failedConfig);
+    assert.equal(repeatedFailure.complete, false, 'a retained persistence failure cannot disappear on a later flush');
+  } finally {
+    process.kill = originalKill;
+  }
 }
 
 async function waitForProcess(processId, context, predicate, options = {}, timeoutMs = 5000) {

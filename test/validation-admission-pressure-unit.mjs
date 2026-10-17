@@ -11,10 +11,11 @@ const restoreMemory = installForcedLowHostMemory();
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-pressure-'));
 const repo = path.join(root, 'repo');
 fs.mkdirSync(repo);
-const marker = path.join(repo, 'must-not-start.txt');
+// Execution evidence stays outside the checkout so it does not invalidate validation inputs.
+const marker = path.join(root, 'must-not-start.txt');
 fs.writeFileSync(path.join(repo, 'tracked.txt'), 'content\n');
 fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({
-  scripts: { check: 'node -e "require(\'node:fs\').writeFileSync(\'must-not-start.txt\',\'started\')"' }
+  scripts: { check: 'node -e "require(\'node:fs\').writeFileSync(\'../must-not-start.txt\',\'started\')"' }
 }));
 childProcess.execFileSync(GIT_EXECUTABLE, ['init', '-q'], { cwd: repo });
 childProcess.execFileSync(GIT_EXECUTABLE, ['add', '.'], { cwd: repo });
@@ -41,6 +42,9 @@ try {
   const allowed = await relaiVerify(workspace, config, { checks: ['npm run check'], complete: false });
   assert.equal(allowed.ok, true, JSON.stringify(allowed));
   assert.equal(allowed.results[0].executed, true);
+  assert.equal(allowed.executedUnits, 1);
+  assert.equal(allowed.completedUnits, 1);
+  assert.equal(allowed.validated, true);
   assert.equal(fs.readFileSync(marker, 'utf8'), 'started', 'package commands execute under very low reported RAM');
   fs.rmSync(marker);
   for (let i = 0; i < hostResourceDiagnosticSnapshot().lanes.heavy.limit; i++) blockers.push(await acquireHostResource('heavy', 'occupied-slot'));

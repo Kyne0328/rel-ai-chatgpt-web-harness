@@ -46,6 +46,17 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
   const pathsRef = useRef(null);
   const emptySourceRef = useRef(null);
   const aliasEdited = useRef(Boolean(isEdit || initialAlias.trim()));
+  const savePendingRef = useRef(false);
+  const folderRequestRef = useRef(0);
+  const setSaving = value => {
+    savePendingRef.current = value;
+    if (value) folderRequestRef.current += 1;
+    setBusy(value);
+  };
+  useEffect(() => {
+    savePendingRef.current = false;
+    return () => { savePendingRef.current = true; folderRequestRef.current += 1; };
+  }, []);
   const paths = useMemo(() => parseSourcePaths(pathsText), [pathsText]);
   const dirty = alias !== initialAlias || pathsText !== initialPathsText;
 
@@ -88,12 +99,12 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
   const clearDirty = () => { if (formRef.current) markUnsaved(formRef.current, false); };
   const finishClose = () => { clearDirty(); onClose?.(); };
   const requestClose = () => {
-    if (busy) return;
+    if (savePendingRef.current) return;
     if (dirty) setConfirmState('discard');
     else onClose?.();
   };
   const requestNavigate = href => {
-    if (!href) return;
+    if (!href || savePendingRef.current) return;
     if (dirty) {
       setPendingNavigation(href);
       setConfirmState('navigate');
@@ -107,7 +118,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     setConfirmState('');
     if (!accepted) { setPendingNavigation(''); return; }
     if (state === 'delete') {
-      void deleteProject(originalAlias, { forgetLocalData, setBusy, onSuccess: finishClose });
+      if (!savePendingRef.current) void deleteProject(originalAlias, { forgetLocalData, setBusy: setSaving, onSuccess: finishClose });
       return;
     }
     clearDirty();
@@ -116,12 +127,16 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     setPendingNavigation('');
   };
 
-  const setSourcePaths = values => setPathsText(normalizeSourcePaths(values).join('\n'));
+  const updatePathsText = value => { if (!savePendingRef.current) setPathsText(value); };
+  const setSourcePaths = values => updatePathsText(normalizeSourcePaths(values).join('\n'));
   const browse = async replaceIndex => {
+    if (savePendingRef.current || pickerBusy) return;
+    const generation = folderRequestRef.current;
     const key = Number.isInteger(replaceIndex) ? `replace-${replaceIndex}` : 'add';
     setPickerBusy(key);
     const result = await postJson('/api/pick-folder', {}, { timeout: 0 });
     setPickerBusy('');
+    if (savePendingRef.current || generation !== folderRequestRef.current) return;
     if (result?.unsupported) {
       setManualMode(true);
       toast('Folder browsing is unavailable here — enter one folder path per line instead.', { variant: 'info' });
@@ -148,6 +163,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
 
   const submit = async event => {
     event.preventDefault();
+    if (savePendingRef.current) return;
     setSubmitted(true);
     setServerError('');
     if (!paths.length || hasDuplicateSourcePaths(paths)) {
@@ -157,7 +173,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     if (!alias.trim() || !isValidWorkspaceAlias(alias.trim())) { aliasRef.current?.focus(); return; }
     if (conflict) return;
     const cleanAlias = alias.trim();
-    setBusy(true);
+    setSaving(true);
     const result = await postJson('/api/workspaces', {
       action: 'upsert',
       mode: isEdit ? 'update' : 'create',
@@ -167,7 +183,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
       sourcePaths: paths,
       enforceUniquePath: true
     });
-    setBusy(false);
+    setSaving(false);
     if (!result?.ok) {
       const message = result?.error || 'unknown error';
       setServerError(message);
@@ -203,16 +219,16 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
       h('div', { className: 'ws-project-name-field' },
         h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }),
         h('input', {
-          id: 'workspaceAliasInput', name: 'alias', type: 'text', value: alias, placeholder: 'Project name', autoComplete: 'off', ref: aliasRef,
+          id: 'workspaceAliasInput', name: 'alias', type: 'text', value: alias, placeholder: 'Project name', autoComplete: 'off', ref: aliasRef, disabled: busy,
           'aria-describedby': 'workspaceAliasHelp workspaceAliasError workspaceConflictError', 'aria-invalid': Boolean(aliasError),
-          onChange: event => { aliasEdited.current = Boolean(event.target.value.trim()); setAlias(event.target.value); setServerError(''); }
+          onChange: event => { if (savePendingRef.current) return; aliasEdited.current = Boolean(event.target.value.trim()); setAlias(event.target.value); setServerError(''); }
         })
       ),
       h('div', { className: 'ws-form-help', id: 'workspaceAliasHelp' }, 'This is the project name ChatGPT uses when selecting a folder.'),
       aliasError ? h('div', { className: 'ws-form-conflict', id: 'workspaceAliasError', role: 'alert' }, aliasError) : null,
       conflict || serverError ? h('div', { className: 'ws-form-conflict', id: 'workspaceConflictError', role: 'alert', tabIndex: -1 }, conflict || serverError) : null
     ),
-    h(SourceFolders, { paths, pathsText, setPathsText, setSourcePaths, manualMode, pickerBusy, browse, sourceError, pathStatus, pathsRef, emptySourceRef }),
+    h(SourceFolders, { paths, pathsText, setPathsText: updatePathsText, setSourcePaths, manualMode, pickerBusy, browse, sourceError, pathStatus, pathsRef, emptySourceRef, busy, savePendingRef, folderRequestRef }),
     isEdit ? h(ProjectDetails, { workspace, alias: originalAlias, onNavigate: requestNavigate }) : null,
     h('footer', { className: 'modal-footer' },
       isEdit ? h('div', { className: 'modal-danger-zone' },
@@ -246,6 +262,17 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
   const formRef = useRef(null);
   const pathRef = useRef(null);
   const browseRef = useRef(null);
+  const savePendingRef = useRef(false);
+  const folderRequestRef = useRef(0);
+  const setSaving = value => {
+    savePendingRef.current = value;
+    if (value) folderRequestRef.current += 1;
+    setBusy(value);
+  };
+  useEffect(() => {
+    savePendingRef.current = false;
+    return () => { savePendingRef.current = true; folderRequestRef.current += 1; };
+  }, []);
   const dirty = path !== initialPath;
   const duplicate = duplicateWorkspaceForPath(configuredWorkspaces, path, workspace.alias);
 
@@ -268,14 +295,17 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
 
   const clearDirty = () => { if (formRef.current) markUnsaved(formRef.current, false); };
   const requestClose = () => {
-    if (busy) return;
+    if (savePendingRef.current) return;
     if (dirty) setConfirmDiscard(true);
     else onClose?.();
   };
   const browse = async () => {
+    if (savePendingRef.current || pickerBusy) return;
+    const generation = folderRequestRef.current;
     setPickerBusy(true);
     const result = await postJson('/api/pick-folder', {}, { timeout: 0 });
     setPickerBusy(false);
+    if (savePendingRef.current || generation !== folderRequestRef.current) return;
     if (result?.unsupported) {
       setManualMode(true);
       toast('Folder browsing is unavailable here — enter the folder path instead.', { variant: 'info' });
@@ -289,22 +319,25 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
     if (typeof window.relaiDesktop?.getPathForFile !== 'function') return;
     event.preventDefault();
     setDropActive(false);
+    if (savePendingRef.current) return;
+    const generation = folderRequestRef.current;
     const dropped = await resolveDroppedFolders(event.dataTransfer);
-    if (!dropped.length) return;
+    if (savePendingRef.current || generation !== folderRequestRef.current || !dropped.length) return;
     setPath(dropped[0]);
     if (dropped.length > 1) toast('Using the first dropped folder for this repair.', { variant: 'info' });
   };
   const submit = async event => {
     event.preventDefault();
+    if (savePendingRef.current) return;
     const clean = path.trim();
     if (!clean) { toast('Choose the replacement source folder.', { variant: 'error' }); (manualMode ? pathRef.current : browseRef.current)?.focus(); return; }
     if (duplicate) return;
-    setBusy(true);
+    setSaving(true);
     setServerError('');
     const result = await postJson('/api/workspaces', {
       action: 'upsert', mode: 'update', originalAlias: workspace.alias, alias: workspace.alias, path: clean, enforceUniquePath: true
     });
-    setBusy(false);
+    setSaving(false);
     if (!result?.ok) {
       const message = result?.error || 'unknown error';
       setServerError(message);
@@ -332,8 +365,8 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
       h('h3', { className: 'ws-source-heading', id: 'workspaceRepairSourceHeading' }, 'Replacement source folder'),
       h('div', {
         className: `ws-source-folder-box${dropActive ? ' is-drop-active' : ''}`,
-        onDragEnter: event => { if (typeof window.relaiDesktop?.getPathForFile === 'function') { event.preventDefault(); setDropActive(true); } },
-        onDragOver: event => { if (typeof window.relaiDesktop?.getPathForFile === 'function') { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } },
+        onDragEnter: event => { if (!savePendingRef.current && typeof window.relaiDesktop?.getPathForFile === 'function') { event.preventDefault(); setDropActive(true); } },
+        onDragOver: event => { if (typeof window.relaiDesktop?.getPathForFile === 'function') { event.preventDefault(); event.dataTransfer.dropEffect = savePendingRef.current ? 'none' : 'copy'; } },
         onDragLeave: event => { if (!event.currentTarget.contains(event.relatedTarget)) setDropActive(false); },
         onDrop: event => { void onRepairDrop(event); }
       },
@@ -343,7 +376,7 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
           h('button', { type: 'button', className: 'ws-source-folder-change', disabled: pickerBusy || busy, ref: browseRef, onClick: () => { void browse(); } }, pickerBusy ? 'Opening…' : 'Change')
         ) : h('div', { className: 'ws-source-manual ws-source-manual-only' },
           h('label', { htmlFor: 'workspaceRepairPathInput' }, 'Folder path'),
-          h('input', { className: 'ws-form-path', id: 'workspaceRepairPathInput', name: 'path', value: path, placeholder: 'Absolute path to the project', autoComplete: 'off', ref: pathRef, 'aria-invalid': Boolean(conflict), 'aria-describedby': 'workspaceRepairStatus workspaceRepairConflict', onChange: event => { setPath(event.target.value); setServerError(''); } }),
+          h('input', { className: 'ws-form-path', id: 'workspaceRepairPathInput', name: 'path', value: path, placeholder: 'Absolute path to the project', autoComplete: 'off', ref: pathRef, disabled: busy, 'aria-invalid': Boolean(conflict), 'aria-describedby': 'workspaceRepairStatus workspaceRepairConflict', onChange: event => { if (savePendingRef.current) return; setPath(event.target.value); setServerError(''); } }),
           h('span', { className: 'ws-form-help' }, 'Enter the absolute path to the replacement source folder.')
         )
       ),
@@ -374,15 +407,17 @@ export function DeleteProjectModal({ alias = '', onClose, opener = null }) {
   );
 }
 
-function SourceFolders({ browse, emptySourceRef, manualMode, pathStatus, paths, pathsRef, pathsText, pickerBusy, setPathsText, setSourcePaths, sourceError }) {
+function SourceFolders({ browse, emptySourceRef, manualMode, pathStatus, paths, pathsRef, pathsText, pickerBusy, setPathsText, setSourcePaths, sourceError, busy, savePendingRef, folderRequestRef }) {
   const [dropActive, setDropActive] = useState(false);
   const canDropFolders = typeof window.relaiDesktop?.getPathForFile === 'function';
   const onDrop = async event => {
     if (!canDropFolders) return;
     event.preventDefault();
     setDropActive(false);
+    if (savePendingRef.current) return;
+    const generation = folderRequestRef.current;
     const dropped = await resolveDroppedFolders(event.dataTransfer);
-    if (!dropped.length) return;
+    if (savePendingRef.current || generation !== folderRequestRef.current || !dropped.length) return;
     const next = normalizeSourcePaths([...paths, ...dropped]);
     const added = next.length - paths.length;
     setSourcePaths(next);
@@ -392,8 +427,8 @@ function SourceFolders({ browse, emptySourceRef, manualMode, pathStatus, paths, 
     h('h3', { className: 'ws-source-heading', id: 'wsSourceFolderHeading' }, 'Source folders'),
     h('div', {
       className: `ws-source-folder-box${dropActive ? ' is-drop-active' : ''}`,
-      onDragEnter: event => { if (canDropFolders) { event.preventDefault(); setDropActive(true); } },
-      onDragOver: event => { if (canDropFolders) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } },
+      onDragEnter: event => { if (canDropFolders && !savePendingRef.current) { event.preventDefault(); setDropActive(true); } },
+      onDragOver: event => { if (canDropFolders) { event.preventDefault(); event.dataTransfer.dropEffect = savePendingRef.current ? 'none' : 'copy'; } },
       onDragLeave: event => { if (!event.currentTarget.contains(event.relatedTarget)) setDropActive(false); },
       onDrop: event => { void onDrop(event); }
     },
@@ -402,15 +437,15 @@ function SourceFolders({ browse, emptySourceRef, manualMode, pathStatus, paths, 
           h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }),
           h('span', { className: 'ws-source-folder-copy' }, h('span', { className: 'ws-source-folder-title' }, h('strong', null, folderDisplayName(value)), index === 0 ? h('small', { className: 'ws-source-primary' }, 'Primary') : null), h('small', null, value)),
           h('span', { className: 'ws-source-folder-actions' },
-            h('button', { type: 'button', className: 'ws-source-folder-change', disabled: Boolean(pickerBusy), 'aria-label': `Change source folder ${value}`, onClick: () => { void browse(index); } }, pickerBusy === `replace-${index}` ? 'Opening…' : 'Change'),
-            h('button', { type: 'button', className: 'ws-source-folder-remove', disabled: Boolean(pickerBusy), 'aria-label': `Remove source folder ${value}`, onClick: () => setSourcePaths(paths.filter((_, itemIndex) => itemIndex !== index)) }, 'Remove')
+            h('button', { type: 'button', className: 'ws-source-folder-change', disabled: busy || Boolean(pickerBusy), 'aria-label': `Change source folder ${value}`, onClick: () => { void browse(index); } }, pickerBusy === `replace-${index}` ? 'Opening…' : 'Change'),
+            h('button', { type: 'button', className: 'ws-source-folder-remove', disabled: busy || Boolean(pickerBusy), 'aria-label': `Remove source folder ${value}`, onClick: () => setSourcePaths(paths.filter((_, itemIndex) => itemIndex !== index)) }, 'Remove')
           )
         ))) : null,
-        paths.length ? h('button', { type: 'button', className: 'ws-source-folder-add', disabled: Boolean(pickerBusy), onClick: () => { void browse(); } }, pickerBusy === 'add' ? 'Opening folder picker…' : '+ Add source folder')
-          : h('button', { type: 'button', className: 'ws-source-folder-empty', disabled: Boolean(pickerBusy), ref: emptySourceRef, 'aria-describedby': 'workspaceSourceError', 'aria-invalid': Boolean(sourceError), onClick: () => { void browse(); } }, h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }), h('span', null, pickerBusy === 'add' ? 'Opening folder picker…' : 'Choose a source folder'))
+        paths.length ? h('button', { type: 'button', className: 'ws-source-folder-add', disabled: busy || Boolean(pickerBusy), onClick: () => { void browse(); } }, pickerBusy === 'add' ? 'Opening folder picker…' : '+ Add source folder')
+          : h('button', { type: 'button', className: 'ws-source-folder-empty', disabled: busy || Boolean(pickerBusy), ref: emptySourceRef, 'aria-describedby': 'workspaceSourceError', 'aria-invalid': Boolean(sourceError), onClick: () => { void browse(); } }, h(Icon, { name: 'folder', className: 'ws-folder-icon', size: 16 }), h('span', null, pickerBusy === 'add' ? 'Opening folder picker…' : 'Choose a source folder'))
       ) : h('div', { className: 'ws-source-manual ws-source-manual-only' },
         h('label', { htmlFor: 'workspacePathsInput' }, 'Folder paths'),
-        h('textarea', { className: 'ws-form-path', id: 'workspacePathsInput', name: 'paths', rows: 4, value: pathsText, placeholder: 'One absolute folder path per line', autoComplete: 'off', ref: pathsRef, 'aria-describedby': 'workspacePathsHelp workspaceSourceError', 'aria-invalid': Boolean(sourceError), onChange: event => setPathsText(event.target.value) }),
+        h('textarea', { className: 'ws-form-path', id: 'workspacePathsInput', name: 'paths', rows: 4, value: pathsText, placeholder: 'One absolute folder path per line', autoComplete: 'off', ref: pathsRef, disabled: busy, 'aria-describedby': 'workspacePathsHelp workspaceSourceError', 'aria-invalid': Boolean(sourceError), onChange: event => setPathsText(event.target.value) }),
         h('span', { className: 'ws-form-help', id: 'workspacePathsHelp' }, 'Enter one absolute source-folder path per line.')
       ),
       canDropFolders ? h('div', { className: 'ws-source-drop-hint', 'aria-hidden': 'true' }, h(Icon, { name: 'folder', size: 14 }), 'Drop folders here') : null
@@ -591,7 +626,8 @@ async function deleteProject(alias, { forgetLocalData = true, onSuccess, setBusy
   if (!result?.ok) { toast(`Could not delete project from Rel.AI: ${result?.error || 'unknown error'}`, { variant: 'error' }); return false; }
   toast(`Project deleted from Rel.AI: ${alias}`, { variant: 'success' });
   onSuccess?.();
+  invalidateCache();
   if (getWorkspaceFilter() === alias) setWorkspaceFilter('');
-  else requestDashboardRefresh();
+  requestDashboardRefresh();
   return true;
 }

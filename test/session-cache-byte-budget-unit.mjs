@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict';
 import { cacheStats, setCachedRead, getCachedRead, invalidateAll, invalidateAlias, invalidatePath } from '../src/sessionCache.js';
 
+// Full stat signatures reject timestamp-preserving replacements for both caches.
+const { getCachedReadEntry, getCachedFileMetadata, setCachedFileMetadata } = await import('../src/sessionCache.js');
+const originalStat = { mtimeMs: 10, ctimeMs: 20, size: 3, dev: 1, ino: 100 };
+const oldMetadata = { sha256: 'old-hash', bytes: 3, totalLines: 1 };
+for (const changed of [
+  { ...originalStat, size: 35 },
+  { ...originalStat, ctimeMs: 21 },
+  { ...originalStat, ino: 101 },
+  { ...originalStat, dev: 2 }
+]) {
+  setCachedRead('freshness', '/file', originalStat, 'old', oldMetadata);
+  setCachedFileMetadata('freshness', '/file', originalStat, oldMetadata);
+  assert.equal(getCachedReadEntry('freshness', '/file', { ...originalStat })?.content, 'old');
+  assert.equal(getCachedFileMetadata('freshness', '/file', { ...originalStat })?.sha256, 'old-hash');
+  assert.equal(getCachedReadEntry('freshness', '/file', changed), null);
+  assert.equal(getCachedFileMetadata('freshness', '/file', changed), null);
+}
+
 invalidateAll();
 const size = 512 * 1024;
 for (let i = 0; i < 80; i += 1) {

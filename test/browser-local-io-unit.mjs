@@ -135,6 +135,20 @@ try {
   assert.ok(fake.state.downloadCancelCount >= 1);
   assert.ok(fake.state.downloadDeleteCount >= 1);
 
+  fake.state.downloadMode = 'success';
+  const streamAbort = new AbortController();
+  fake.state.onCreateReadStream = () => streamAbort.abort(new Error('cancel as stream creation returns'));
+  const deletedBeforeStreamAbort = fake.state.downloadDeleteCount;
+  await assert.rejects(runtime.download(workspace, {
+    sessionId, path: 'reports/pre-aborted-stream.txt', interaction: 'click',
+    target: { by: 'text', value: 'Download report' }, work_id: task.taskId
+  }, task, { signal: streamAbort.signal }), error => error?.code === 'BROWSER_OPERATION_CANCELLED');
+  fake.state.onCreateReadStream = null;
+  assert.equal(fake.state.lastDownloadStream.destroyed, true, 'an eagerly created stream must be cleaned when cancellation wins before wrapper registration');
+  assert.ok(fake.state.downloadDeleteCount > deletedBeforeStreamAbort, 'the native download handle must still be deleted');
+  assert.equal(fs.existsSync(path.join(primary, 'reports', 'pre-aborted-stream.txt')), false);
+  assert.deepEqual(findTransferTemps(primary), []);
+
   fake.state.downloadMode = 'crash';
   await assert.rejects(
     () => runtime.download(workspace, {
@@ -257,7 +271,9 @@ function createFakeBrowserHarness() {
     downloadBytes: Buffer.from('download'),
     beginDownloadCount: 0,
     downloadCancelCount: 0,
-    downloadDeleteCount: 0
+    downloadDeleteCount: 0,
+    onCreateReadStream: null,
+    lastDownloadStream: null
   };
 
   async function launch(options = {}) {
@@ -307,7 +323,11 @@ function createFakeBrowserHarness() {
             }
             return {
               suggestedFilename: '../unsafe/server-report.txt',
-              async createReadStream() { return stream; },
+              async createReadStream() {
+                state.lastDownloadStream = stream;
+                state.onCreateReadStream?.();
+                return stream;
+              },
               async cancel() {
                 state.downloadCancelCount += 1;
                 stream.destroy(new Error('download cancelled'));

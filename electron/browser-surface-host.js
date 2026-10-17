@@ -201,6 +201,10 @@ function createBrowserSurfaceHost(options = {}) {
     throwIfAborted(options.signal);
     const record = requireSession(payload.nativeSessionId);
     const page = requirePage(record, payload.nativePageId);
+    if (page.recovering || page.crashed) {
+      if (action === 'describe') return { ...describePage(record, page), recovering: page.recovering === true };
+      throw browserError('BROWSER_TAB_RECOVERING', 'The embedded browser tab is recovering. Wait for recovery before retrying.');
+    }
     if (!READ_ONLY_ACTIONS.has(action)) assertAiControl(record, action);
     if (action !== 'describe') activate(record, page);
     await syncPageRuntime(record, page);
@@ -1371,31 +1375,54 @@ function createBrowserSurfaceHost(options = {}) {
       if (mouse?.type === 'mouseWheel') forwardWheelToDashboard(page, mouse);
     });
     wc.on('render-process-gone', (_event, details) => {
-      if (page.closing) return;
+      if (page.closing || record.closePromise) return;
       page.crashed = true;
-      onEvent({
-        resource: 'browser',
-        type: 'page_crashed',
-        nativeSessionId: record.nativeSessionId,
-        nativePageId: page.nativePageId,
-        reason: String(details?.reason || 'crashed')
-      });
-      publishState();
-      const recoverUrl = publicPageUrl(page.webContents.getURL?.() || '');
-      if (!recoverUrl || recoverUrl === 'about:blank') {
+      const recoverUrl = publicPageUrl(wc.getURL?.() || '');
+      const now = Date.now();
+      if (!page.crashWindowStartedAt || now - page.crashWindowStartedAt > 60_000) {
+        page.crashWindowStartedAt = now;
+        page.crashRecoveryAttempts = 0;
+      }
+      const terminal = page.recovering || !recoverUrl || recoverUrl === 'about:blank' || ++page.crashRecoveryAttempts > 2;
+      if (terminal) {
+        onError(browserError('BROWSER_TAB_CRASHED', 'The embedded browser tab could not recover from its renderer crash.'));
         void destroyPage(record, page, { emit: true, type: 'page_crashed' }).catch(onError);
         return;
       }
-      try {
-        page.crashed = false;
-        page.closing = false;
-        void page.webContents.reload?.();
-      } catch (error) {
-        void destroyPage(record, page, { emit: true, type: 'page_crashed' }).catch(() => {});
-        onError(error instanceof Error ? error : new Error(String(error)));
-      }
+      // Recovery retains the native page and tool-side tab identity. A crash is
+      // terminal only after the native page has actually been removed.
+      page.recovering = true;
+      const controller = new AbortController();
+      page.recoveryController = controller;
+      onEvent({ resource: 'browser', type: 'page_recovering',
+        nativeSessionId: record.nativeSessionId, nativePageId: page.nativePageId,
+        reason: String(details?.reason || 'crashed') });
+      publishState();
+      void (async () => {
+        try {
+          await withTimeout(withAbort(wc.loadURL(recoverUrl), controller.signal, () => wc.stop?.()),
+            15_000, 'Embedded browser crash recovery timed out.');
+          if (page.closing || record.closePromise || record.pages.get(page.nativePageId) !== page || controller.signal.aborted) return;
+          await withTimeout(withAbort(syncPageRuntime(record, page), controller.signal),
+            15_000, 'Embedded browser crash recovery synchronization timed out.');
+          if (page.closing || record.closePromise || record.pages.get(page.nativePageId) !== page || controller.signal.aborted) return;
+          page.recovering = false;
+          page.crashed = false;
+          page.loadFailed = false;
+          onEvent({ resource: 'browser', type: 'page_recovered',
+            nativeSessionId: record.nativeSessionId, nativePageId: page.nativePageId });
+          publishState();
+        } catch (error) {
+          if (page.closing || controller.signal.aborted || record.pages.get(page.nativePageId) !== page) return;
+          onError(browserError('BROWSER_TAB_CRASHED', `Embedded browser crash recovery failed: ${error?.message || error}`));
+          await destroyPage(record, page, { emit: true, type: 'page_crashed' }).catch(onError);
+        } finally {
+          if (page.recoveryController === controller) page.recoveryController = null;
+        }
+      })();
     });
     wc.once('destroyed', () => {
+      page.recoveryController?.abort();
       if (page.closing) return;
       record.pages.delete(page.nativePageId);
       if (record.activePageId === page.nativePageId) record.activePageId = record.pages.keys().next().value || '';
@@ -1563,6 +1590,7 @@ function createBrowserSurfaceHost(options = {}) {
   function destroyPage(record, page, options = {}) {
     if (page.closePromise) return page.closePromise;
     page.closing = true;
+    page.recoveryController?.abort();
     page.closePromise = Promise.resolve().then(async () => {
       if (attached?.page === page) detachAttached();
       const pending = record.pendingDownloads.get(page.webContents.id) || [];

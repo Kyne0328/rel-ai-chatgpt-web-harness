@@ -106,21 +106,28 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
   } catch (error) {
     const rollbackErrors = [];
     try {
-      if (current?.tunnelId && current?.port) saveLauncherConfig(current);
+      const restored = saveLauncherConfig(current, { allowLocalOnly: current.tunnelId === '' });
+      const persisted = readGuiConfig();
+      if (persisted.port !== restored.port || persisted.tunnelId !== restored.tunnelId || persisted.token !== restored.token) {
+        throw new Error('Previous connection settings did not persist.', { cause: error });
+      }
     } catch (rollbackError) { rollbackErrors.push(rollbackError); }
     if (replacementApiKey) {
       try {
         if (previousApiKey) setTunnelApiKey(previousApiKey);
         else clearTunnelApiKey();
+        if (String(getTunnelApiKey() || '') !== previousApiKey) throw new Error('Previous tunnel credential was not restored.', { cause: error });
       } catch (rollbackError) { rollbackErrors.push(rollbackError); }
     }
     if (notificationChange) {
       try { setNotificationsEnabled(previousNotifications); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
     }
-    if (connectionChanged) {
+    if (connectionChanged && rollbackErrors.length === 0) {
       try {
-        if (canReconnectWithoutLocalRestart) await restartConnection();
-        else await restartDesktop();
+        const restoredStatus = canReconnectWithoutLocalRestart ? await restartConnection() : await restartDesktop();
+        if (!restoredStatus?.serverRunning || restoredStatus.tunnelStatus === 'failed') {
+          throw new Error(restoredStatus?.error || 'The restored local service did not restart.', { cause: error });
+        }
       } catch (rollbackError) {
         rollbackErrors.push(rollbackError);
       }

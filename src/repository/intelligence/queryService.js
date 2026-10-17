@@ -145,10 +145,11 @@ async function executeSemanticSearchQuery(workspace, config, args = {}, index = 
       privacy: 'All parsing, graph indexing, and ranking run locally. No source text is sent to an external service.',
       fingerprint: index.fingerprint,
       cacheHit: index.cacheHit,
+      index,
       retrieval: retrievalStatus(zoekt, fallback),
       results: bounded.results,
       resultCount: Math.max(related.matchCount, diffused.files.length),
-      truncated: related.truncated || diffused.truncated || bounded.truncated
+      truncated: index.truncated === true || related.truncated || diffused.truncated || bounded.truncated
     };
   } finally {
     if (closeDatabase) db.close();

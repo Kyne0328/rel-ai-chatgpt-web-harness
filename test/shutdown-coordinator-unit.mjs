@@ -77,6 +77,25 @@ assert.equal(boundedResult.clean, false);
 assert.equal(boundedResult.errors[0]?.step, 'service');
 assert.match(boundedResult.errors[0]?.message || '', /did not finish within/i);
 
+
+{
+  const updaterStopped = deferred();
+  const updaterStarted = deferred();
+  const sequence = [];
+  const guarded = createShutdownCoordinator({
+    stopUpdater: async () => { updaterStarted.resolve(); await updaterStopped.promise; sequence.push('updater'); },
+    stopService: async () => { sequence.push('service'); return { cleanup: { clean: true } }; }
+  });
+  const stopping = guarded.prepare('logout-clear');
+  await updaterStarted.promise;
+  assert.deepEqual(sequence, [], 'shutdown must not pass the updater write barrier early');
+  updaterStopped.resolve();
+  assert.equal((await stopping).clean, true);
+  assert.deepEqual(sequence, ['updater', 'service']);
+  const rejected = createShutdownCoordinator({ stopUpdater: async () => { throw new Error('cache write did not settle'); } });
+  assert.equal((await rejected.prepare('logout-clear')).clean, false, 'failed updater quiescence must block destructive cleanup');
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise(done => { resolve = done; });

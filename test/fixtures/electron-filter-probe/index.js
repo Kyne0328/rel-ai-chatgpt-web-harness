@@ -93,6 +93,55 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(`document.querySelector('#__activity-filter-bar .filter-clear-button')?.click()`);
     await waitFor(win, `document.querySelectorAll('#__activity-filter-bar .filter-chip').length === 0 && !location.hash.includes('?')`);
 
+
+    const activitySearch = await win.webContents.executeJavaScript(`(async () => {
+      const wait = async predicate => {
+        const deadline = Date.now() + 3000;
+        while (!predicate()) {
+          if (Date.now() >= deadline) throw new Error('Activity search state did not settle');
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        }
+      };
+      const input = () => document.querySelector('#__activity-filter-bar .filter-search-input');
+      const clear = () => document.querySelector('#__activity-filter-bar .filter-clear-button')?.click();
+      const type = value => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input(), value);
+        input().dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const settled = () => new Promise(resolve => setTimeout(resolve, 220));
+      location.hash = '#activity?search=needle';
+      await wait(() => input()?.value === 'needle');
+      clear();
+      await settled();
+      const initialCleared = input().value === '' && !location.hash.includes('search=')
+        && !document.querySelector('#__activity-filter-bar [aria-label^="Remove Search filter"]');
+      location.hash = '#activity?search=needle';
+      await wait(() => input()?.value === 'needle');
+      type('pending-clear'); clear(); await settled();
+      const pendingCleared = input().value === '' && !location.hash.includes('search=');
+      location.hash = '#activity?search=needle';
+      await wait(() => input()?.value === 'needle');
+      type('pending-remove');
+      type('');
+      await settled();
+      const inputCleared = input().value === '' && !location.hash.includes('search=');
+      location.hash = '#activity?search=first';
+      await wait(() => input()?.value === 'first');
+      type('retired');
+      location.hash = '#activity?search=second';
+      await wait(() => input()?.value === 'second');
+      await settled();
+      const routeRestored = input().value === 'second' && location.hash.includes('search=second');
+      type('departed');
+      location.hash = '#tools';
+      await wait(() => document.querySelector('#toolsToolbar'));
+      await settled();
+      const departureRetired = location.hash === '#tools';
+      location.hash = '#activity';
+      await wait(() => input()?.value === '');
+      return { initialCleared, pendingCleared, inputCleared, routeRestored, departureRetired };
+    })()`);
+
     const escapeFocus = await win.webContents.executeJavaScript(`(async () => {
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       const trigger = document.querySelector('#__activity-filter-bar .filter-open-button');
@@ -540,7 +589,7 @@ app.whenReady().then(async () => {
       debuggerAttached = false;
     }
 
-    fs.writeFileSync(outputPath, JSON.stringify({ persistedRecovery, shared, activityApplied, taskChip, escapeFocus, mobileDrawer, diagnostics, tools, settings, workspaces, connection, usage, browserTabs, responsive, zoom200At420, forcedColors, failures }, null, 2));
+    fs.writeFileSync(outputPath, JSON.stringify({ persistedRecovery, shared, activityApplied, activitySearch, taskChip, escapeFocus, mobileDrawer, diagnostics, tools, settings, workspaces, connection, usage, browserTabs, responsive, zoom200At420, forcedColors, failures }, null, 2));
   } catch (error) {
     fs.writeFileSync(outputPath, JSON.stringify({ error: error?.stack || String(error), failures }, null, 2));
     process.exitCode = 1;

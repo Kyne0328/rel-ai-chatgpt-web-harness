@@ -6,7 +6,7 @@ import { readTaskHistorySessionRecord } from './taskHistoryStore.ts';
 import { isTerminalTaskStatus } from './taskState.js';
 import { principalFingerprint } from './mcp/principal.ts';
 import { principalTunnelId } from './mcp/tunnelIdentity.js';
-import { chatgptCredentials, hasGoalBrowserTransport, getConversation, findRecentGoalCommand, findGoalConversation, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
+import { clearGoalDiscovery, chatgptCredentials, hasGoalBrowserTransport, getConversation, findRecentGoalCommand, findGoalConversation, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
 import { goalMessageExists } from './chatgptConversationReader.js';
 
 const PREFIX = 'chatgpt_goal:';
@@ -27,6 +27,56 @@ const retryTimers = new Map();
 let monitorConfig = null;
 let timer = null;
 let lastDetectionCleanupAt = 0;
+
+// A persistence error may also break the error-state save. Background launches
+// therefore have a final, storage-independent boundary and bounded short retries.
+const backgroundGoals = new Map();
+const MAX_BACKGROUND_GOALS = 128;
+
+function clearBackgroundGoal(workId) {
+  for (const kind of ['poll', 'detection']) {
+    const key = kind + ':' + workId;
+    clearTimeout(backgroundGoals.get(key)?.timer);
+    backgroundGoals.delete(key);
+  }
+}
+
+function runGoalBackground(config, workId, kind, deps = {}) {
+  const key = kind + ':' + workId;
+  const previous = backgroundGoals.get(key);
+  if (previous?.running || previous?.timer) return;
+  const pending = previous || { attempts: 0, timer: null, running: false };
+  pending.running = true;
+  backgroundGoals.set(key, pending);
+  while (backgroundGoals.size > MAX_BACKGROUND_GOALS) {
+    const oldest = backgroundGoals.keys().next().value;
+    clearTimeout(backgroundGoals.get(oldest)?.timer);
+    backgroundGoals.delete(oldest);
+  }
+  // The promise chain itself is terminal: its rejection handler does not read
+  // or write SQLite, and never resends a persisted uncertain continuation.
+  void Promise.resolve().then(() => kind === 'detection'
+    ? checkGoalDetection(config, workId, deps) : pollGoal(config, workId, deps)).then(() => {
+    if (backgroundGoals.get(key) === pending) backgroundGoals.delete(key);
+  }, error => {
+    if (backgroundGoals.get(key) !== pending) return; // Stop/shutdown won.
+    pending.running = false;
+    pending.attempts = Math.min(pending.attempts + 1, MAX_RETRIES + 1);
+    pending.diagnostic = String(error?.code || error?.name || 'GoalBackgroundError').slice(0, 80);
+    try {
+      if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] goal background deferred:', kind, pending.diagnostic);
+      if (pending.attempts > MAX_RETRIES) return; // Ordinary monitoring may retry later.
+      pending.timer = setTimeout(() => {
+        pending.timer = null;
+        if (backgroundGoals.get(key) === pending) runGoalBackground(config, workId, kind, deps);
+      }, RETRY_DELAYS_MS[pending.attempts - 1]);
+      pending.timer.unref?.();
+    } catch {
+      // Even diagnostic/timer failure cannot escape a discarded background promise.
+      backgroundGoals.delete(key);
+    }
+  });
+}
 
 function goalKey(workId) { return PREFIX + workId; }
 function detectionKey(workId) { return DETECTION_PREFIX + workId; }
@@ -52,7 +102,7 @@ function scheduleGoalRetry(config, goal) {
   // cadence. An overdue retry waiting for task settlement must not busy-loop.
   const wake = setTimeout(() => {
     retryTimers.delete(goal.workId);
-    void pollGoal(config, goal.workId);
+    runGoalBackground(config, goal.workId, 'poll');
   }, Math.max(1_000, goal.nextAttemptAt - Date.now()));
   wake.unref?.();
   retryTimers.set(goal.workId, wake);
@@ -66,6 +116,7 @@ function loadDetection(config, workId) {
 }
 
 function saveDetection(config, value) {
+  if (value.state !== 'checking') clearGoalDiscovery(value.workId, { tunnelId: value.tunnelId });
   return withStateDatabase(config, db => {
     const key = detectionKey(value.workId);
     const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
@@ -94,13 +145,13 @@ function queueGoalDetection(config, task, context = {}, deps = {}) {
       .run(detectionKey(workId), JSON.stringify(detection)).changes === 1, { transaction: true });
   try {
     const inserted = register();
-    if (inserted) setImmediate(() => { void checkGoalDetection(config, workId, deps); });
+    if (inserted) setImmediate(() => { runGoalBackground(config, workId, 'detection', deps); });
     return inserted ? { state: 'checking' } : null;
   } catch {
     // Automatic detection must not fail an otherwise valid relai_work begin
     // when the local state database is momentarily busy.
     const retry = setTimeout(() => {
-      try { if (register()) void checkGoalDetection(config, workId, deps); } catch {}
+      try { if (register()) runGoalBackground(config, workId, 'detection', deps); } catch {}
     }, 500);
     retry.unref?.();
     return null;
@@ -235,6 +286,7 @@ function loadGoal(config, workId) {
 }
 
 function saveGoal(config, goal, options = {}) {
+  if (!goal.active) clearGoalDiscovery(goal.workId, { tunnelId: goal.tunnelId });
   return withStateDatabase(config, db => {
     const key = goalKey(goal.workId);
     const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
@@ -338,6 +390,7 @@ function goalStatus(config, args, context) {
 }
 
 function stopGoalRecord(config, goal) {
+  clearBackgroundGoal(goal.workId);
   activePolls.get(goal.workId)?.abort();
   const stopped = saveGoal(config, { ...goal, active: false, state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now() });
   scheduleGoalRetry(config, stopped);
@@ -362,9 +415,10 @@ function resumeAuthenticatedGoals(config, tunnelId) {
       return true;
     }, { transaction: true });
     if (reset) {
+      clearGoalDiscovery(pending.workId, { tunnelId });
       resumedDetections.push(pending.workId);
       if (monitorConfig && getStateDir(monitorConfig) === getStateDir(config)) {
-        setImmediate(() => { if (monitorConfig) void checkGoalDetection(monitorConfig, pending.workId); });
+        setImmediate(() => { if (monitorConfig) runGoalBackground(monitorConfig, pending.workId, 'detection'); });
       }
     }
   }
@@ -389,7 +443,7 @@ function resumeAuthenticatedGoals(config, tunnelId) {
     scheduleGoalRetry(config, updated);
     resumed.push(goal.workId);
     if (monitorConfig && getStateDir(monitorConfig) === getStateDir(config)) {
-      setImmediate(() => { if (monitorConfig) void pollGoal(monitorConfig, goal.workId); });
+      setImmediate(() => { if (monitorConfig) runGoalBackground(monitorConfig, goal.workId, 'poll'); });
     }
   }
   return { ok: true, resumedWorkIds: resumed, resumedDetectionWorkIds: resumedDetections };
@@ -405,8 +459,10 @@ function stopGoal(config, args, context) {
     if (!row || JSON.parse(row.value).owner !== owner) throw new Error('Goal Mode record not found for this authorized task.');
     const record = { ...JSON.parse(row.value), active: false, state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now() };
     db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify(record), key);
+    clearGoalDiscovery(workId, { tunnelId: record.tunnelId });
     return goal ? publicGoal(record) : { ok: true, work_id: workId, goalActive: false, state: 'stopped' };
   }, { transaction: true });
+  clearBackgroundGoal(workId);
   activePolls.get(workId)?.abort();
   activeDetections.get(workId)?.abort();
   scheduleGoalRetry(config, { workId, active: false });
@@ -692,10 +748,10 @@ function startGoalMonitor(config) {
     try {
       for (const pending of pendingGoalDetections(config).filter(item =>
         item.state === 'checking' && Date.now() >= item.nextAttemptAt).slice(0, 3)) {
-        void checkGoalDetection(config, pending.workId);
+        runGoalBackground(config, pending.workId, 'detection');
       }
       for (const goal of listGoals(config)) {
-        if (goal.active) void pollGoal(config, goal.workId);
+        if (goal.active) runGoalBackground(config, goal.workId, 'poll');
       }
     } catch (error) {
       if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] goal monitor:', error);
@@ -708,6 +764,8 @@ function stopGoalMonitor() {
   if (timer) clearInterval(timer);
   timer = null;
   monitorConfig = null;
+  for (const pending of backgroundGoals.values()) clearTimeout(pending.timer);
+  backgroundGoals.clear();
   for (const wake of retryTimers.values()) clearTimeout(wake);
   retryTimers.clear();
   for (const controller of activePolls.values()) controller.abort();

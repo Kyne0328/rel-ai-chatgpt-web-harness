@@ -82,6 +82,78 @@ const unavailableStatus = await unavailable.refresh();
 assert.equal(unavailableStatus.state, 'unavailable');
 assert.equal(unavailableStatus.canContinue, true);
 
+
+function deferred() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
+for (const boundary of ['fetch', 'body']) {
+  const pending = deferred();
+  const bodyStarted = deferred();
+  const writes = [];
+  const statuses = [];
+  let signal;
+  const lifecycle = createUpdateSupportPolicy({
+    app, now: () => afterDeadline,
+    fetchImpl: async (_url, options) => {
+      signal = options.signal;
+      if (boundary === 'fetch') return pending.promise;
+      return { ok: true, json: () => { bodyStarted.resolve(); return pending.promise; } };
+    },
+    writeCacheImpl: async (...args) => { writes.push(args); },
+    onStatusChange: value => statuses.push(value)
+  });
+  const refreshing = lifecycle.refresh();
+  if (boundary === 'body') await bodyStarted.promise;
+  await lifecycle.stop();
+  assert.equal(signal.aborted, true);
+  pending.resolve(boundary === 'fetch' ? { ok: true, json: async () => remotePolicy } : remotePolicy);
+  await refreshing;
+  assert.deepEqual(writes, [], boundary + ': a stopped request cannot persist');
+  assert.deepEqual(statuses, [], boundary + ': a stopped request cannot publish');
+}
+{
+  const oldResponse = deferred();
+  const currentPublished = deferred();
+  const writes = [];
+  let requests = 0;
+  const lifecycle = createUpdateSupportPolicy({
+    app, now: () => afterDeadline,
+    fetchImpl: async () => ++requests === 1 ? oldResponse.promise : { ok: true, json: async () => ({ ...remotePolicy, message: 'latest' }) },
+    writeCacheImpl: async (_path, value) => writes.push(value.message),
+    onStatusChange: status => { if (status.message === 'latest') currentPublished.resolve(); },
+    setTimer: () => ({ unref() {} }), clearTimer() {}
+  });
+  const previous = lifecycle.refresh();
+  await lifecycle.stop();
+  lifecycle.start();
+  await currentPublished.promise;
+  oldResponse.resolve({ ok: true, json: async () => ({ ...remotePolicy, message: 'stale' }) });
+  await previous;
+  assert.deepEqual(writes, ['latest']);
+  assert.equal(lifecycle.getStatus().message, 'latest');
+  await lifecycle.stop();
+}
+{
+  const writeStarted = deferred();
+  const finishWrite = deferred();
+  const statuses = [];
+  const lifecycle = createUpdateSupportPolicy({
+    app, now: () => afterDeadline,
+    fetchImpl: async () => ({ ok: true, json: async () => remotePolicy }),
+    writeCacheImpl: async () => { writeStarted.resolve(); await finishWrite.promise; },
+    onStatusChange: status => statuses.push(status)
+  });
+  const refreshing = lifecycle.refresh();
+  await writeStarted.promise;
+  let quiescent = false;
+  const stopped = lifecycle.stop().then(() => { quiescent = true; });
+  await Promise.resolve();
+  assert.equal(quiescent, false, 'deletion barrier must await an already-started cache write');
+  finishWrite.resolve();
+  await stopped;
+  await refreshing;
+  assert.equal(quiescent, true);
+  assert.deepEqual(statuses, [], 'completed stale writes cannot publish after stop');
+}
+
 fs.rmSync(root, { recursive: true, force: true });
 fs.rmSync(emptyRoot, { recursive: true, force: true });
 console.log('Remote update support policy tests passed.');

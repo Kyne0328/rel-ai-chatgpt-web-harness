@@ -1811,6 +1811,7 @@ async function case_logout_connection_clear_failure() {
     let installerUncertain = true;
     const context = {
       appUpdater: { getStatus: () => ({ installLaunchUncertain: installerUncertain }) },
+      pendingLogout: null,
       isQuitting: false,
       desktopPower: { getStatus: () => ({}) },
       taskActivityBlockReason: () => '',
@@ -1843,6 +1844,98 @@ async function case_logout_connection_clear_failure() {
   }
 }
 await case_logout_connection_clear_failure();
+
+async function case_logout_data_failure_recovery() {
+  const assert = (await import('node:assert/strict')).default;
+  const fs = (await import('node:fs')).default;
+  const { runInNewContext } = await import('node:vm');
+  const localSource = fs.readFileSync(new URL('../electron/desktop-local-data.js', import.meta.url), 'utf8');
+  const start = localSource.indexOf('  async function clearAll(plan) {');
+  const finish = localSource.indexOf('  return { getUsage', start);
+  for (const failAt of [0, 1]) {
+    let attempts = 0;
+    const clear = runInNewContext(localSource.slice(start, finish) + '\nclearAll', {
+      fs: { promises: { rm: async () => { if (attempts++ === failAt) throw new Error('fixture locked'); } } }
+    });
+    const result = await clear({ ok: true, roots: ['mock-root-a', 'mock-root-b'] });
+    assert.equal(result.ok, false);
+    assert.equal(result.clearedRoots, failAt);
+    assert.equal(result.remainingRoots, 2 - failAt);
+    assert.match(result.error, /Some files may already be removed/);
+  }
+  const source = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
+  const begin = source.indexOf('  async function logoutApplication(');
+  const end = source.indexOf('  async function quitApplication()', begin);
+  for (const failure of ['unclean', 'shutdown-throw', 'first-root', 'partial-root', 'credentials', 'relaunch', 'missing-config', 'corrupt-connections']) {
+    const calls = [];
+    let failing = true;
+    const clearPlan = { ok: true, roots: ['mock-root-a', 'mock-root-b'] };
+    const context = {
+      pendingLogout: null, isQuitting: false, currentStatus: {}, lastServiceContextKey: '',
+      normalizeDesktopStatus: status => status,
+      pulseWindowManager: { update() {} },
+      desktopNotifications: { handleDesktopStatusChange() {} },
+      runtimeLogs: { recordStatusTransition() {} },
+      pushStatus: () => calls.push('publish'),
+      updateRuntimeAccess: () => ({}),
+      readGuiConfig: () => { calls.push('config-read'); if (failure === 'missing-config') throw new Error('fixture config removed'); return { tunnelId: '' }; },
+      serviceProcessClient: { updateContext: () => calls.push('service-context') },
+      assertInstallerSettled() {}, taskActivityBlockReason: () => '',
+      desktopPower: { getStatus: () => ({}) },
+      desktopLifecycle: { getStatus: () => ({}) },
+      desktopLocalData: {
+        prepareClearAll: () => { calls.push('plan'); return clearPlan; },
+        clearAll: async plan => {
+          assert.equal(plan, clearPlan);
+          calls.push('clear');
+          if (failing && failure !== 'relaunch') throw new Error(failure === 'partial-root' ? 'cleared one location; fixture locked' : 'fixture locked');
+          return { ok: true };
+        }
+      },
+      shutdownCoordinator: {
+        prepare: async () => {
+          calls.push('shutdown');
+          if (failing && failure === 'shutdown-throw') throw new Error('shutdown threw');
+          return { clean: !(failing && failure === 'unclean') };
+        },
+        reset: () => calls.push('reset')
+      },
+      tunnelCredentials: { clear: () => { calls.push('credentials'); if (failing) throw new Error('credential store failed'); } },
+      tunnelConnections: { clear() {}, list: () => { calls.push('connections-read'); if (failure === 'corrupt-connections') throw new Error('fixture connections corrupt'); return []; } }, connection: { clearConnectionState: () => ({ ok: true }) },
+      desktopTray: { setup: () => calls.push('tray') },
+      recoveryWindowManager: { show: () => calls.push('recovery') },
+      process: { argv: ['fixture', 'fixture-app'] },
+      app: { relaunch: () => { if (failing && failure === 'relaunch') throw new Error('fixture relaunch unavailable'); calls.push('relaunch'); }, exit: () => calls.push('exit') }
+    };
+    const publication = source.slice(source.indexOf('  function setStatus('), source.indexOf('  function replaceCurrentStatus('));
+    const serviceContext = source.slice(source.indexOf('  function syncServiceContext()'), source.indexOf('  function assertInstallerSettled()'));
+    const logout = runInNewContext(publication + serviceContext + source.slice(begin, end) + '\nlogoutApplication', context);
+    await assert.rejects(() => logout({ clearData: failure !== 'credentials' }), /Logout did not finish/);
+    assert.equal(context.isQuitting, false);
+    assert.equal(context.currentStatus.logoutPending, true);
+    assert.ok(context.pendingLogout);
+    assert.ok(calls.includes('reset') && calls.includes('tray') && calls.includes('recovery') && calls.includes('publish'));
+    assert.equal(calls.includes('config-read') || calls.includes('connections-read') || calls.includes('service-context'), false, 'logout recovery must publish without reading deleted/corrupt configuration or waking the stopped service');
+    assert.equal(calls.includes('relaunch') || calls.includes('exit'), false);
+    if (failure === 'unclean' || failure === 'shutdown-throw') assert.equal(calls.includes('clear'), false);
+    const starts = source.slice(source.indexOf('  function startServer() {'), source.indexOf('  function stopServer('));
+    Object.assign(context, { logoutApplication: logout, syncServiceContext: () => calls.push('network'),
+      serviceRuntime: { startServer: () => calls.push('network'), restartConnection: () => calls.push('network') },
+      tunnelRecoverySupervisor: { retryNow: () => calls.push('network') } });
+    const actions = runInNewContext(starts + '\n({ startServer, restartConnection })', context);
+    assert.throws(() => actions.startServer(), /Connections remain paused/);
+    failing = false;
+    const result = await actions.restartConnection();
+    assert.equal(result.ok, true);
+    assert.equal(calls.includes('network'), false, 'retry logout must never reconnect the service');
+    assert.equal(calls.filter(call => call === 'plan').length, failure === 'credentials' ? 0 : 1);
+  }
+  const renderer = fs.readFileSync(new URL('../electron/renderer/status.js', import.meta.url), 'utf8');
+  const view = runInNewContext(renderer.slice(renderer.indexOf('function connectionView('), renderer.indexOf('function taskPresentation(')) + '\nconnectionView');
+  assert.equal(view({ logoutPending: true, serverRunning: true, tunnelStatus: 'running' }).title, 'Logout could not finish.');
+}
+await case_logout_data_failure_recovery();
+
 
 async function case_uniform_tunnel_management() {
   const assert = (await import('node:assert/strict')).default;

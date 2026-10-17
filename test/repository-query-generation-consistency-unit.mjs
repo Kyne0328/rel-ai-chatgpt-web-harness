@@ -68,6 +68,19 @@ try {
   assert.equal(repositoryQueryWorkerStats().liveWorkerCount, 1,
     'one semantic query must create only one query worker instead of eagerly warming the full pool');
 
+  const partialWorkspace = { ...workspace, alias: 'query-partial', path: path.join(root, 'partial') };
+  fs.mkdirSync(partialWorkspace.path);
+  for (const name of ['one', 'two', 'three']) fs.writeFileSync(path.join(partialWorkspace.path, name + '.txt'), 'bounded common ' + name);
+  const partial = await repositoryIntelligence.semanticSearch(partialWorkspace, config,
+    { query: 'bounded common', maxFiles: 1, maxResults: 10 }, { watch: false });
+  assert.equal(partial.index.truncated, true);
+  assert.equal(partial.index.freshness, 'partial');
+  assert.equal(partial.results.length, 1, 'a stable bounded snapshot must be answerable');
+  const expanded = await repositoryIntelligence.semanticSearch(partialWorkspace, config,
+    { query: 'bounded common', maxFiles: 10, maxResults: 10 }, { watch: false });
+  assert.equal(expanded.index.truncated, false);
+  assert.equal(expanded.results.length, 3, 'increasing the scan limit must expand coverage');
+
   await Promise.all(['alpha one', 'alpha two', 'alpha three', 'alpha four'].map(query =>
     repositoryIntelligence.semanticSearch(workspace, config, { query, maxResults: 5 }, { watch: false })));
   assert.ok(repositoryQueryWorkerStats().liveWorkerCount <= QUERY_WORKER_GLOBAL_COUNT,

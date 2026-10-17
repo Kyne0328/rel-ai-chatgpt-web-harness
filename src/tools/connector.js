@@ -15,6 +15,8 @@ import {
   pruneEmpty
 } from './connectorHelpers.js';
 
+const ENV_ARRAY_FIELDS = new Set(['keys', 'missingKeys', 'extraKeys', 'malformedLines', 'templateMalformedLines']);
+
 const RESULT_IDENTITY_FIELDS = new Set(['workspace', 'action', 'sessionId', 'tabId', 'processId', 'observationId', 'semanticObservationId', 'targetId']);
 
 function serializeConnectorResult({ publicName, action, operationName, value, args = {}, workId = '' }) {
@@ -207,6 +209,21 @@ function compactForConnector(name, value, args = {}) {
         operation: value.operation,
         path: value.path,
         changed: value.changed,
+        ...(String(value.operation || '').startsWith('env-') ? {
+          dryRun: value.dryRun,
+          keys: value.keys,
+          keyCount: value.keyCount,
+          malformedLines: value.malformedLines,
+          sha256: value.sha256,
+          valuesReturned: value.valuesReturned,
+          templatePath: value.templatePath,
+          missingKeys: value.missingKeys,
+          extraKeys: value.extraKeys,
+          templateMalformedLines: value.templateMalformedLines,
+          key: value.key,
+          presentBefore: value.presentBefore,
+          presentAfter: value.presentAfter
+        } : {}),
         changedFiles: value.changedFiles,
         mutationEffect: value.mutationEffect,
         possibleChangedFiles: value.possibleChangedFiles,
@@ -223,12 +240,14 @@ function compactForConnector(name, value, args = {}) {
         preflightAtomic: value.preflightAtomic,
         rollbackAtomic: value.rollbackAtomic,
         rollback: value.rollback,
+        checks: value.checks?.ok === false ? compactForConnector(OP.VALIDATE_CHECKS, value.checks) : undefined,
+        verify: value.verify?.ok === false ? compactForConnector(OP.VALIDATE_CHECKS, value.verify) : undefined,
         validationStatus: value.validationStatus,
         summary: value.summary,
         error: value.error,
         next: value.next,
         ...(args.returnDiff === true ? { diff: value.diff } : {})
-      });
+      }, ENV_ARRAY_FIELDS);
     case OP.EXEC:
       return pruneEmpty({
         ok: value.ok,

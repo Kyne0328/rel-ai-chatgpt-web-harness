@@ -415,7 +415,7 @@ async function case_generated_assets_check_unit() {
   
   function copyGeneratedAssets(from, to) {
     fs.mkdirSync(to, { recursive: true });
-    for (const name of ['dashboard-app.js', 'dashboard-react.js', 'dashboard.css', 'dashboard-generated-manifest.json']) {
+    for (const name of ['dashboard-app.js', 'dashboard-react.js', 'dashboard.css', 'dashboard-bundle-dependencies.json', 'dashboard-generated-manifest.json']) {
       fs.copyFileSync(path.join(from, name), path.join(to, name));
     }
     for (const name of ['dashboard-chunks', 'dashboard-assets']) {
@@ -901,7 +901,50 @@ async function case_packaging_audit_policy_unit() {
   assert.equal(isTransientPackagingAuditFailure({ stderr: 'npm warn audit network timeout at: https://registry.npmjs.org/-/npm/v1/security/advisories/bulk' }), true);
   assert.equal(isTransientPackagingAuditFailure({ stdout: JSON.stringify(highReport) }), false, 'real audit findings must not be classified as registry outages');
   
-  console.log('Packaging audit blocks confirmed high/critical findings and distinguishes advisory-service outages.');
+  for (const report of [undefined, {}, { error: { code: 'ENEEDAUTH' } },
+    { ...cleanReport, metadata: { vulnerabilities: { ...cleanReport.metadata.vulnerabilities, high: '0' } } },
+    { ...cleanReport, metadata: { vulnerabilities: { ...cleanReport.metadata.vulnerabilities, high: -1 } } },
+    { ...cleanReport, vulnerabilities: { concealed: { severity: 'high' } } }]) {
+    assert.throws(() => evaluatePackagingAudit({ report }), error => error.outcome === 'unavailable',
+      'missing or inconsistent evidence must never satisfy a blocking gate');
+  }
+  const { default: fs } = await import('node:fs');
+  const { default: os } = await import('node:os');
+  const { default: path } = await import('node:path');
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-advisory-outcomes-'));
+  const fixture = path.join(temp, 'npm-fixture.cjs');
+  try {
+    fs.writeFileSync(fixture, `process.stdout.write(process.env.AUDIT_FIXTURE_REPORT || ''); process.exitCode = Number(process.env.AUDIT_FIXTURE_EXIT || '0');`);
+    const cases = [
+      [JSON.stringify(cleanReport), 0, 'passed', 0],
+      [JSON.stringify(highReport), 1, 'failed', 1],
+      [JSON.stringify({ ...highReport, vulnerabilities: { ETIMEDOUT: { severity: 'high' } } }), 1, 'failed', 1],
+      [JSON.stringify(highReport), 7, 'unavailable', 2],
+      [JSON.stringify(moderateOnly), 0, 'passed', 0],
+      [JSON.stringify({ error: { code: 'ENEEDAUTH', summary: 'Authentication required' } }), 1, 'unavailable', 2],
+      ['not JSON', 1, 'unavailable', 2],
+      [JSON.stringify(cleanReport), 1, 'unavailable', 2],
+      [JSON.stringify({ error: { code: 'E429', summary: '429 Too Many Requests' } }), 1, 'unavailable', 2],
+      [JSON.stringify({ error: { code: 'ETIMEDOUT', summary: 'network timeout' } }), 1, 'unavailable', 2]
+    ];
+    for (const script of ['audit-packaging.mjs', 'audit-production.mjs']) {
+      for (const [report, status, outcome, expectedExit] of cases) {
+        const result = spawnSync(process.execPath, [fileURLToPath(new URL(`../scripts/${script}`, import.meta.url))], {
+          env: { ...process.env, npm_execpath: fixture, AUDIT_FIXTURE_REPORT: report, AUDIT_FIXTURE_EXIT: String(status) },
+          encoding: 'utf8', timeout: 15_000, windowsHide: true
+        });
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, expectedExit, `${script}: ${result.stdout}\n${result.stderr}`);
+        const outcomes = result.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
+        assert.ok(outcomes.length > 0 && outcomes.every(result => result.outcome === outcome));
+      }
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+  console.log('Packaging and production advisory gates distinguish passed, failed, and unavailable subprocess outcomes.');
 }
 await case_packaging_audit_policy_unit();
 
@@ -950,6 +993,67 @@ async function case_release_distribution_unit() {
   verifyReleaseWorkflowPreflight();
   verifyArtifactResolution();
   verifyNativeSbomCoverage();
+  // The assembled graph must retain distinct versions and reconnect original
+  // npm references to version-qualified identities across independent installs.
+  const { mergeSbomGraph, assertShippedInventory, assembleShippedSbom } = await import('../scripts/generate-sbom.mjs');
+  const npmRoot = { type: 'application', name: 'fixture', version: '1.0.0', 'bom-ref': 'root' };
+  const merged = { metadata: { component: npmRoot }, components: [], dependencies: [] };
+  const graph = (version, rootRef) => ({
+    metadata: { component: { ...npmRoot, 'bom-ref': rootRef } },
+    components: [{ name: 'shared', version, purl: `pkg:npm/shared@${version}`, 'bom-ref': 'local-shared' }],
+    dependencies: [{ ref: rootRef, dependsOn: ['local-shared'] }, { ref: 'local-shared', dependsOn: [] }]
+  });
+  mergeSbomGraph(merged, graph('1.0.0', 'root'));
+  mergeSbomGraph(merged, graph('2.0.0', 'desktop'), { rootReference: 'desktop' });
+  assert.deepEqual(merged.components.filter(component => component.name === 'shared').map(component => component.version).sort(), ['1.0.0', '2.0.0']);
+  assert.ok(merged.dependencies.find(entry => entry.ref === 'desktop').dependsOn.includes('pkg:npm/shared@2.0.0'));
+  const broken = graph('1.0.0', 'broken');
+  broken.dependencies[0].dependsOn.push('not-in-inventory');
+  assert.throws(() => mergeSbomGraph(structuredClone(merged), broken), /dependency target is absent/);
+
+  const { BUNDLE_INVENTORY_NAME, dashboardBundleInventory, verifyBundleInventory } = await import('../scripts/dashboard-bundle-inventory.mjs');
+  const bundleFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-bundle-inventory-'));
+  try {
+    const source = 'export const bundled = true;\n';
+    fs.writeFileSync(path.join(bundleFixture, 'app.js'), source);
+    const inventory = { schemaVersion: 1, components: [{ name: 'fixture' }], dependencies: [],
+      outputs: { 'app.js': crypto.createHash('sha256').update(source).digest('hex') } };
+    assert.equal(verifyBundleInventory(bundleFixture, inventory), inventory);
+    fs.writeFileSync(path.join(bundleFixture, 'app.js'), source.replace('true', 'false'));
+    assert.throws(() => verifyBundleInventory(bundleFixture, inventory), /does not match shipped asset/);
+    assert.throws(() => verifyBundleInventory(bundleFixture, {}), /missing or malformed/);
+    // A late Vite pass rewrites imports and removes empty CSS-only chunks.
+    // Final inventory must follow the actual output set and disk bytes.
+    inventory.outputs['removed-empty-entry.js'] = '0'.repeat(64);
+    const finalBundle = {
+      'app.js': { type: 'chunk', fileName: 'app.js' },
+      [BUNDLE_INVENTORY_NAME]: { type: 'asset', source: JSON.stringify(inventory) }
+    };
+    dashboardBundleInventory().writeBundle({ dir: bundleFixture }, finalBundle);
+    const finalized = JSON.parse(fs.readFileSync(path.join(bundleFixture, BUNDLE_INVENTORY_NAME), 'utf8'));
+    assert.deepEqual(Object.keys(finalized.outputs), ['app.js']);
+    assert.doesNotThrow(() => verifyBundleInventory(bundleFixture, finalized));
+  } finally { fs.rmSync(bundleFixture, { recursive: true, force: true }); }
+
+  const assembled = assembleShippedSbom();
+  const rootLock = JSON.parse(read('package-lock.json'));
+  const electronLock = JSON.parse(read('electron/package-lock.json'));
+  const bundleInventory = JSON.parse(read('public/dashboard-bundle-dependencies.json'));
+  const nativeComponents = nativeReleaseComponents(
+    JSON.parse(read('vendor/tunnel-client/manifest.json')),
+    JSON.parse(read('vendor/zoekt/manifest.json')),
+    JSON.parse(read('src/windows-process-job-host.manifest.json'))
+  );
+  const inventoryInputs = { rootLock, electronLock, bundleInventory, nativeComponents };
+  assert.doesNotThrow(() => assertShippedInventory(assembled, inventoryInputs));
+  for (const missing of ['electron', 'electron-updater', 'react', 'react-dom']) {
+    const incomplete = structuredClone(assembled);
+    incomplete.components = incomplete.components.filter(component => component.name !== missing);
+    assert.throws(() => assertShippedInventory(incomplete, inventoryInputs), /dangling dependency|missing shipped/);
+  }
+  assert.ok(!assembled.components.some(component => component.name === 'electron-builder'),
+    'build-only tools must not be misrepresented as shipped runtime');
+
   await verifyInstalledReleaseSafety();
   
   console.log('Release and distribution regression tests passed.');

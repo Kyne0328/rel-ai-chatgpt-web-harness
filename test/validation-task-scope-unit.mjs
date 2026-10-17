@@ -75,7 +75,7 @@ try {
   assert.deepEqual(plan.changedFiles, ['src/task-owned.js']);
   assert.equal(plan.validationScope.includes('src/task-owned.js'), true);
   assert.equal(plan.validationScope.includes('package.json'), true, 'validation configuration must stay inside the task fingerprint');
-  assert.equal(plan.validationScope.some(file => file.startsWith('ambient/')), false, 'ambient dirty files must stay outside the task fingerprint');
+  assert.equal(plan.validationScope.some(file => file.startsWith('ambient/')), false, 'ambient paths must not broaden task-owned check selection');
   assert.equal(plan.recommended, 'focused');
   assert.equal(repositoryIntelligence.status({ alias: 'app', path: workspacePath }, readConfig()).watching, false,
     'validation impact analysis must not start a live repository watcher');
@@ -91,9 +91,10 @@ try {
     action: 'finish',
     workspace: 'app',
     work_id: task.work_id,
-    summary: 'Task-scoped validation remains current after an unrelated concurrent change.'
+    summary: 'Focused checks remain task-selected; arbitrary check evidence becomes stale after a concurrent repository input changes.'
   }, context);
-  assert.equal(completion.ok, true, 'unrelated task mutations must not invalidate task-scoped validation');
+  assert.equal(completion.ok, true, 'manual finish remains available after independent task mutations');
+  assert.equal(completion.validationStatus, 'stale', 'mutation ownership cannot prove that arbitrary check inputs are unchanged');
   await callTool('relai_work', {
     action: 'cancel', workspace: 'app', work_id: unrelated.work_id, reason: 'Concurrent scope coverage complete.'
   }, context);
@@ -132,4 +133,4 @@ try {
   });
 }
 
-console.log('Task-owned validation scope ignores unrelated dirty baseline files.');
+console.log('Task-owned validation selection stays focused while repository input evidence stays conservative.');

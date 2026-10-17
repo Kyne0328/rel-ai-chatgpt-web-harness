@@ -15,6 +15,7 @@ import {
   evictIdleRepositoryWorkers
 } from '../src/repository/intelligence/indexer.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
+import { writeTextFileSafe } from '../src/safety.js';
 import { intelligenceRuntimeFingerprint } from '../src/repository/intelligence/producer.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-repository-worker-'));
@@ -196,6 +197,93 @@ try {
 } finally {
   await repositoryIntelligence.shutdown();
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+await verifyNativeAtomicWatcher();
+
+async function verifyNativeAtomicWatcher() {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-native-watcher-'));
+  const workspace = { alias: 'native-watcher', path: path.join(fixture, 'workspace'), context: {} };
+  const config = { stateDir: path.join(fixture, 'state') };
+  fs.mkdirSync(path.join(workspace.path, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(workspace.path, 'src', 'alpha.js'), 'export const beforeAtomicSave = 1;\n');
+  const originalWatch = fs.watch;
+  let watcher;
+  const events = [];
+  fs.watch = (...args) => {
+    const callback = args[2];
+    args[2] = (...event) => { events.push(event.map(String)); callback(...event); };
+    watcher = originalWatch(...args);
+    return watcher;
+  };
+  try {
+    await repositoryIntelligence.ensure(workspace, config);
+  } finally {
+    fs.watch = originalWatch;
+  }
+  const indexed = () => {
+    const db = openIndexDatabase(repositoryIndexPath(config, workspace), { readonly: true });
+    try {
+      return { paths: db.prepare('SELECT path FROM files ORDER BY path').all().map(row => row.path),
+        names: db.prepare('SELECT name FROM symbols ORDER BY name').all().map(row => row.name) };
+    } finally { db.close(); }
+  };
+  const refreshAfter = async (mutate, expected, mode = 'incremental') => {
+    events.length = 0;
+    mutate();
+    const deadline = Date.now() + 5000;
+    let metadata;
+    do {
+      if (repositoryIntelligence.status(workspace, config).dirty) {
+        metadata = await repositoryIntelligence.ensure(workspace, config);
+        if (mode) assert.equal(metadata.scanMode, mode, `native watcher transition must use the expected observation scope: ${JSON.stringify(events)}`);
+        if (expected(indexed()) && !metadata.pendingRefresh) return metadata;
+      }
+      await new Promise(resolve => setTimeout(resolve, 5));
+    } while (Date.now() < deadline);
+    assert.fail('Native watcher did not publish the expected file and symbol state.');
+  };
+  try {
+    assert.equal(repositoryIntelligence.status(workspace, config).watching, true);
+    const saved = await refreshAfter(
+      () => writeTextFileSafe(workspace.path, 'src/alpha.js', 'export const afterAtomicSave = 2;\n'),
+      state => state.names.includes('afterAtomicSave') && !state.names.includes('beforeAtomicSave')
+    );
+    assert.equal(saved.changedPathCount, 1);
+    assert.deepEqual(indexed().paths, ['src/alpha.js'], 'temporary safe-writer files must not enter the index');
+    await refreshAfter(
+      () => writeTextFileSafe(workspace.path, 'src/added.js', 'export const addedBySafeWriter = 3;\n'),
+      state => state.names.includes('addedBySafeWriter')
+    );
+    await refreshAfter(
+      () => fs.renameSync(path.join(workspace.path, 'src', 'added.js'), path.join(workspace.path, 'src', 'renamed.js')),
+      state => state.paths.includes('src/renamed.js') && !state.paths.includes('src/added.js')
+    );
+    await refreshAfter(
+      () => fs.rmSync(path.join(workspace.path, 'src', 'renamed.js')),
+      state => !state.paths.includes('src/renamed.js') && !state.names.includes('addedBySafeWriter'),
+      // Some native backends deliver a separate parent-directory event after
+      // the exact deletion was consumed; that uncertain event stays full-scan.
+      null
+    );
+    await refreshAfter(
+      () => fs.renameSync(path.join(workspace.path, 'src'), path.join(workspace.path, 'moved')),
+      state => state.paths.includes('moved/alpha.js') && !state.paths.includes('src/alpha.js'),
+      'full'
+    );
+    await refreshAfter(
+      () => fs.writeFileSync(path.join(workspace.path, '.relaiignore'), 'moved/\n'),
+      state => !state.paths.includes('moved/alpha.js'),
+      'full'
+    );
+    watcher.emit('error', new Error('injected watcher failure'));
+    assert.equal(repositoryIntelligence.status(workspace, config).watching, false);
+    const recovered = await repositoryIntelligence.ensure(workspace, config, { watch: false });
+    assert.equal(recovered.scanMode, 'full', 'watcher failure must retain conservative reconciliation');
+  } finally {
+    await repositoryIntelligence.dispose(workspace, config);
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
 }
 
 async function waitForZoektCurrent() {

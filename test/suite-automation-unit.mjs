@@ -187,6 +187,31 @@ async function case_computer_manager_unit() {
   assert.deepEqual(calls, [['click', 'display-side', { x: 300, y: 380 }]], 'semantic activation must use the current revalidated target center through the existing input adapter');
   assert.equal(semanticObserveCalls, 3, 'activate must re-observe before clicking so stale semantic geometry is not trusted');
   
+
+  for (const source of ['uia', 'ocr']) {
+    for (const failure of ['occluded', 'identity changed', 'window moved', 'unavailable']) {
+      calls.length = 0;
+      let verifications = 0;
+      const guardedContext = { ...semanticContextA,
+        semanticAdapter: { ...semanticAdapter, activate: async () => ({
+          available: true, handled: false, target: { ...semanticTarget, source }
+        }) },
+        computerAdapter: { ...adapter, assertAppInputTarget: failure === 'unavailable' ? undefined : async (_app, target) => {
+          verifications += 1;
+          assert.equal(_app, APP);
+          assert.equal(target.provenance.windowId, '1001');
+          assert.deepEqual(target.points, [{ x: 300, y: 380 }]);
+          throw new Error(failure);
+        } }
+      };
+      await assert.rejects(() => runComputerAction(workspace, enabledConfig, {
+        action: 'activate', app: APP, semanticObservationId: semanticObservation.semanticObservationId, targetId: 'e1'
+      }, guardedContext), error => error.code === 'COMPUTER_INPUT_TARGET_UNVERIFIED');
+      assert.equal(verifications, failure === 'unavailable' ? 0 : 1);
+      assert.deepEqual(calls, [], source + ': denied point ownership must never dispatch pointer input');
+    }
+  }
+
   const hybridSemanticObservation = await runComputerAction(workspace, enabledConfig, {
     action: 'observe', app: APP, perception: 'hybrid'
   }, semanticContextA);

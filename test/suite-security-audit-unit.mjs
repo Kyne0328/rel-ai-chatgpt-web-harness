@@ -22,10 +22,22 @@ async function case_audit_production_unit() {
     calls.push(process.argv.slice(2));
     fs.writeFileSync(process.env.REL_AI_AUDIT_TEST_CALLS, JSON.stringify(calls));
     const mode = process.env.REL_AI_AUDIT_TEST_MODE;
-    const transient = mode === 'unavailable' || (mode === 'recover' && calls.length === 1);
+    const transient = mode === 'unavailable' || (mode === 'recover' && calls.length === 1)
+      || (mode === 'electron-unavailable' && process.argv.includes('electron'));
+    const report = { vulnerabilities: {}, metadata: { vulnerabilities: {
+      info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0
+    } } };
     if (transient) { process.stderr.write('ECONNRESET temporary registry failure\\n'); process.exitCode = 1; }
-    else if (mode === 'vulnerability') { process.stdout.write('1 high severity vulnerability\\n'); process.exitCode = 1; }
-    else process.stdout.write('found 0 vulnerabilities\\n');
+    else if (mode === 'malformed') process.stdout.write('found 0 vulnerabilities\\n');
+    else {
+      if (mode === 'vulnerability') {
+        report.vulnerabilities['fixture-package'] = { severity: 'high' };
+        report.metadata.vulnerabilities.high = 1;
+        report.metadata.vulnerabilities.total = 1;
+        process.exitCode = 1;
+      }
+      process.stdout.write(JSON.stringify(report) + '\\n');
+    }
   `);
   function run(mode) {
     fs.rmSync(callsPath, { force: true });
@@ -34,20 +46,41 @@ async function case_audit_production_unit() {
       env: { ...process.env, npm_execpath: fakeNpm,
         REL_AI_AUDIT_TEST_MODE: mode, REL_AI_AUDIT_TEST_CALLS: callsPath }
     });
-    return { ...result, calls: JSON.parse(fs.readFileSync(callsPath, 'utf8')) };
+    assert.equal(result.error, undefined, `audit CLI must complete: ${result.error?.message}`);
+    return { ...result, calls: JSON.parse(fs.readFileSync(callsPath, 'utf8')),
+      outcomes: result.stdout.trim().split('\n').map(line => JSON.parse(line)) };
   }
   try {
     const recovered = run('recover');
     assert.equal(recovered.status, 0, recovered.stderr);
     assert.equal(recovered.calls.length, 3, 'retry root, then continue to Electron');
     assert.ok(recovered.calls.at(-1).includes('electron'));
+    assert.ok(recovered.calls.every(call => call.includes('--json')), 'fixture reports must match the requested JSON protocol');
+    assert.deepEqual(recovered.outcomes, [
+      { outcome: 'passed', label: 'root dependencies' },
+      { outcome: 'passed', label: 'Electron dependencies' }
+    ]);
     const unavailable = run('unavailable');
-    assert.equal(unavailable.status, 0, unavailable.stderr);
-    assert.equal(unavailable.calls.length, 4, 'exhaust both targets without abandoning top-level await');
-    assert.match(unavailable.stderr, /continuing without a live advisory check/);
+    assert.equal(unavailable.status, 2, unavailable.stderr);
+    assert.equal(unavailable.calls.length, 2, 'exhaust root retries and stop before Electron without claiming success');
+    assert.deepEqual(unavailable.outcomes, [{ outcome: 'unavailable', label: 'root dependencies', reason: 'Advisory service unavailable after retries.' }]);
+    assert.match(unavailable.stderr, /retrying \(2\/2\)/);
+    const electronUnavailable = run('electron-unavailable');
+    assert.equal(electronUnavailable.status, 2, electronUnavailable.stderr);
+    assert.equal(electronUnavailable.calls.length, 3, 'a passed root check must not hide an unavailable Electron check');
+    assert.deepEqual(electronUnavailable.outcomes, [
+      { outcome: 'passed', label: 'root dependencies' },
+      { outcome: 'unavailable', label: 'Electron dependencies', reason: 'Advisory service unavailable after retries.' }
+    ]);
     const vulnerable = run('vulnerability');
     assert.equal(vulnerable.status, 1);
     assert.equal(vulnerable.calls.length, 1, 'findings must fail immediately instead of retrying');
+    assert.equal(vulnerable.outcomes[0].outcome, 'failed');
+    assert.match(vulnerable.outcomes[0].reason, /1 high/);
+    const malformed = run('malformed');
+    assert.equal(malformed.status, 2, 'a plain-text success summary is not usable JSON advisory evidence');
+    assert.equal(malformed.calls.length, 1, 'malformed reports without a transient failure must not retry');
+    assert.equal(malformed.outcomes[0].outcome, 'unavailable');
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

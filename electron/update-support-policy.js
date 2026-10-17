@@ -74,6 +74,7 @@ function createUpdateSupportPolicy(options = {}) {
     now = () => Date.now(),
     setTimer = setTimeout,
     clearTimer = clearTimeout,
+    writeCacheImpl = writeCache,
     onStatusChange = () => {},
     onLog = () => {}
   } = options;
@@ -84,6 +85,10 @@ function createUpdateSupportPolicy(options = {}) {
   const cachePath = path.join(safeUserDataPath(app), 'update-support-policy.json');
   let timer = null;
   let started = false;
+  let stopped = false;
+  let generation = 0;
+  let cacheWrite = Promise.resolve();
+  const activeRefreshes = new Set();
   let status = withSource(assessmentFromCache(), 'cache');
 
   function assessmentFromCache() {
@@ -104,6 +109,7 @@ function createUpdateSupportPolicy(options = {}) {
 
   function start() {
     if (started) return snapshot();
+    stopped = false;
     started = true;
     emit(status);
     void refresh();
@@ -112,38 +118,65 @@ function createUpdateSupportPolicy(options = {}) {
 
   function stop() {
     started = false;
+    stopped = true;
+    generation += 1;
     if (timer) clearTimer(timer);
     timer = null;
+    for (const entry of activeRefreshes) entry.controller.abort();
+    // Atomic writes already in progress must settle before destructive cleanup.
+    return Promise.allSettled([...activeRefreshes].map(entry => entry.promise)).then(() => undefined);
   }
 
-  async function refresh() {
-    let next;
-    try {
-      const response = await fetchImpl(policyUrl, {
-        method: 'GET',
-        headers: { accept: 'application/json' },
-        cache: 'no-store'
-      });
-      if (!response?.ok) throw new Error('Support policy request returned HTTP ' + String(response?.status || 0) + '.');
-      const policy = normalizeSupportPolicy(await response.json());
-      if (!policy) throw new Error('Support policy response failed validation.');
-      const assessment = assessSupportPolicy(app.getVersion(), policy, now);
-      if (assessment.state === 'unavailable') throw new Error('Support policy is expired or cannot be evaluated.');
-      const fetchedAt = isoNow(now);
-      await writeCache(cachePath, policy, fetchedAt);
-      next = { ...assessment, source: 'remote', checkedAt: fetchedAt, policyFetchedAt: fetchedAt, policyUrl };
-    } catch (error) {
-      const cached = await assessmentFromCacheAsync();
-      next = cached.state === 'unavailable'
-        ? { ...cached, source: 'none', checkedAt: isoNow(now), policyUrl }
-        : { ...cached, source: 'cache', checkedAt: isoNow(now), policyUrl };
-      onLog('Support policy refresh failed: ' + cleanText(error?.message || error, 500), { source: 'updater', level: 'warning' });
+  function refresh() {
+    if (stopped) return Promise.resolve(snapshot());
+    const owner = ++generation;
+    for (const entry of activeRefreshes) entry.controller.abort();
+    const controller = new AbortController();
+    const entry = { controller, promise: null };
+    const ownsLifecycle = () => !stopped && owner === generation && !controller.signal.aborted;
+    entry.promise = runRefresh().finally(() => activeRefreshes.delete(entry));
+    activeRefreshes.add(entry);
+    return entry.promise;
+
+    async function runRefresh() {
+      let next;
+      try {
+        const response = await cancellable(fetchImpl(policyUrl, {
+          method: 'GET',
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+          signal: controller.signal
+        }), controller.signal);
+        if (!ownsLifecycle()) return snapshot();
+        if (!response?.ok) throw new Error('Support policy request returned HTTP ' + String(response?.status || 0) + '.');
+        const policy = normalizeSupportPolicy(await cancellable(response.json(), controller.signal));
+        if (!ownsLifecycle()) return snapshot();
+        if (!policy) throw new Error('Support policy response failed validation.');
+        const assessment = assessSupportPolicy(app.getVersion(), policy, now);
+        if (assessment.state === 'unavailable') throw new Error('Support policy is expired or cannot be evaluated.');
+        const fetchedAt = isoNow(now);
+        const write = cacheWrite.catch(() => {}).then(async () => {
+          if (ownsLifecycle()) await writeCacheImpl(cachePath, policy, fetchedAt);
+        });
+        cacheWrite = write;
+        await write;
+        if (!ownsLifecycle()) return snapshot();
+        next = { ...assessment, source: 'remote', checkedAt: fetchedAt, policyFetchedAt: fetchedAt, policyUrl };
+      } catch (error) {
+        if (!ownsLifecycle()) return snapshot();
+        const cached = await assessmentFromCacheAsync();
+        if (!ownsLifecycle()) return snapshot();
+        next = cached.state === 'unavailable'
+          ? { ...cached, source: 'none', checkedAt: isoNow(now), policyUrl }
+          : { ...cached, source: 'cache', checkedAt: isoNow(now), policyUrl };
+        onLog('Support policy refresh failed: ' + cleanText(error?.message || error, 500), { source: 'updater', level: 'warning' });
+      }
+      if (!ownsLifecycle()) return snapshot();
+      emit(next);
+      schedule();
+      return snapshot();
     }
-    emit(next);
-    schedule();
-    return snapshot();
   }
-
   function schedule() {
     if (!started) return;
     if (timer) clearTimer(timer);
@@ -167,6 +200,18 @@ function createUpdateSupportPolicy(options = {}) {
   }
 
   return { start, stop, refresh, getStatus: snapshot };
+}
+
+function cancellable(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason || new Error('Support policy refresh stopped.'));
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(promise).then(
+      value => { signal.removeEventListener('abort', abort); resolve(value); },
+      error => { signal.removeEventListener('abort', abort); reject(error); }
+    );
+  });
 }
 
 function normalizePolicyStatus(value = {}, currentVersion = '') {

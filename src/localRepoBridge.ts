@@ -354,14 +354,21 @@ function readRangeKey(value: unknown): string {
 async function readSingleItemAsync(workspace: BridgeWorkspace, config: BridgeConfig, requested: BridgeValue, sessionActive: boolean, maxBytes: number, args: BridgeArgs, options: BridgeRecord): Promise<BridgeRecord> {
   try {
     const safe = resolveWorkspaceSourcePath(workspace, requested, { operation: "read" });
-    const stat = await fs.promises.stat(safe.absolutePath);
-    if (!stat.isFile()) {
-      return stat.isDirectory()
-        ? { item: readDirectory(workspace, safe, args) }
-        : { skipped: { path: String(requested), reason: "not a file or directory" } };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const stat = await fs.promises.stat(safe.absolutePath);
+      if (!stat.isFile()) {
+        return stat.isDirectory()
+          ? { item: readDirectory(workspace, safe, args) }
+          : { skipped: { path: String(requested), reason: "not a file or directory" } };
+      }
+      const content = await readTextContentAsync(workspace, safe, stat, sessionActive, options, maxBytes);
+      const after = await fs.promises.stat(safe.absolutePath);
+      if (sessionCache.sameFileStat(stat, after)) {
+        return readFileResult(workspace, safe, stat, sessionActive, maxBytes, options, content);
+      }
+      sessionCache.invalidatePath(workspace.alias, safe.absolutePath);
     }
-    const content = await readTextContentAsync(workspace, safe, stat, sessionActive, options, maxBytes);
-    return readFileResult(workspace, safe, stat, sessionActive, maxBytes, options, content);
+    throw new Error("File changed while reading; retry for a consistent snapshot.");
   } catch (error) {
     return { skipped: { path: String(requested), reason: error instanceof Error ? error.message : String(error) } };
   }
@@ -395,7 +402,7 @@ function readFileResult(workspace: BridgeWorkspace, safe: BridgeRecord, stat: fs
 
 function cachedReadContent(workspace: BridgeWorkspace, safe: BridgeRecord, stat: fs.Stats, sessionActive: boolean): BridgeRecord | null {
   if (!sessionActive) return null;
-  const cached = sessionCache.getCachedReadEntry(workspace.alias, safe.absolutePath, stat.mtimeMs);
+  const cached = sessionCache.getCachedReadEntry(workspace.alias, safe.absolutePath, stat);
   if (cached === null) return null;
   return {
     data: null,
@@ -410,7 +417,7 @@ function finalizeReadContent(workspace: BridgeWorkspace, safe: BridgeRecord, sta
   const text = data.toString("utf8");
   const sha256 = sha256Buffer(data);
   if (sessionActive) {
-    sessionCache.setCachedRead(workspace.alias, safe.absolutePath, stat.mtimeMs, text, { sha256, bytes: data.length });
+    sessionCache.setCachedRead(workspace.alias, safe.absolutePath, stat, text, { sha256, bytes: data.length });
   }
   return { data, text, cacheHit: false, sha256 };
 }
@@ -419,10 +426,10 @@ async function readTextContentAsync(workspace: BridgeWorkspace, safe: BridgeReco
   const cached = cachedReadContent(workspace, safe, stat, sessionActive);
   if (cached) return cached;
   if (options.guidanceMode !== 'full' && stat.size >= LARGE_RANGE_STREAM_THRESHOLD) {
-    const cachedMetadata = sessionCache.getCachedFileMetadata(workspace.alias, safe.absolutePath, stat.mtimeMs, stat.size);
+    const cachedMetadata = sessionCache.getCachedFileMetadata(workspace.alias, safe.absolutePath, stat);
     const ranged = await readLargeTextRangeAsync(safe.absolutePath, stat, options.lineRange || { startLine: 1 }, maxBytes, cachedMetadata);
     if (ranged.metadata) {
-      sessionCache.setCachedFileMetadata(workspace.alias, safe.absolutePath, stat.mtimeMs, ranged.metadata);
+      sessionCache.setCachedFileMetadata(workspace.alias, safe.absolutePath, stat, ranged.metadata);
     }
     if (!options.lineRange && ranged.selection) ranged.selection.lineRange = null;
     return ranged;

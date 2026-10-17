@@ -36,6 +36,18 @@ assert.equal(repositoryFreshness(dirty, 7), 'stale');
 assert.equal(repositoryIndexChanged(dirty, 7), true,
   'pending source mutations must invalidate a query even before a new generation commits');
 
+const partial = {
+  dirty: false,
+  metadata: { generation: 7, freshness: 'partial', truncated: true, needsReconcile: true }
+};
+assert.equal(repositoryFreshness(partial, 7), 'partial',
+  'coverage-only reconciliation remains partial when the generation is consistent');
+assert.equal(repositoryFreshness({ ...partial, dirty: true }, 7), 'stale',
+  'source mutations must outrank the partial coverage label');
+assert.equal(repositoryFreshness({ ...partial, metadata: { ...partial.metadata, freshness: 'runtime-stale' } }, 7), 'stale',
+  'explicit stale evidence must outrank the partial coverage label');
+assert.equal(repositoryFreshness(partial, 6), 'cached-unverified',
+  'partial coverage must not hide a mismatched requested generation');
 assert.equal(repositoryFreshness({
   dirty: false,
   metadata: { generation: 7, freshness: 'current', truncated: true, needsReconcile: true }

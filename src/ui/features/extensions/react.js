@@ -24,34 +24,61 @@ function createExtensionsRoute() {
     const [searchQuery, setSearchQuery] = useState('');
     const [filterKind, setFilterKind] = useState('all');
     const [filterStatus, setFilterStatus] = useState('all');
+    const requestRef = useRef(0);
+    const mountedRef = useRef(true);
+    const busyRef = useRef('');
 
-    const load = async ({ refresh = false } = {}) => {
-      const url = `/api/extensions${refresh ? '?refresh=1' : ''}`;
-      const result = await fetchJson(url, refresh
-        ? { cache: 'no-store', timeout: EXTENSIONS_LOAD_TIMEOUT_MS }
-        : { cacheTtlMs: EXTENSIONS_CACHE_TTL_MS, timeout: EXTENSIONS_LOAD_TIMEOUT_MS });
-      if (!result?.ok) {
-        setError(result?.error || 'Extensions could not be loaded.');
-        return null;
-      }
-      setData(result);
-      setError('');
-      return result;
+    const beginOperation = operation => {
+      if (!mountedRef.current || busyRef.current) return false;
+      busyRef.current = operation;
+      requestRef.current += 1;
+      setBusy(operation);
+      return true;
+    };
+    const finishOperation = () => {
+      busyRef.current = '';
+      if (mountedRef.current) setBusy('');
     };
 
-    useEffect(() => { void load(); }, []);
+    const load = async ({ refresh = false } = {}) => {
+      if (!mountedRef.current) return null;
+      const request = ++requestRef.current;
+      const isCurrent = () => mountedRef.current && request === requestRef.current;
+      const url = `/api/extensions${refresh ? '?refresh=1' : ''}`;
+      // Retire both cached snapshots and older requests that could repopulate them.
+      if (refresh) invalidateCache('/api/extensions');
+      try {
+        const result = await fetchJson(url, refresh
+          ? { cache: 'no-store', timeout: EXTENSIONS_LOAD_TIMEOUT_MS }
+          : { cacheTtlMs: EXTENSIONS_CACHE_TTL_MS, timeout: EXTENSIONS_LOAD_TIMEOUT_MS });
+        if (!isCurrent()) return null;
+        if (!result?.ok) {
+          setError(result?.error || 'Extensions could not be loaded.');
+          return null;
+        }
+        setData(result);
+        setError('');
+        return result;
+      } catch (requestError) {
+        if (isCurrent()) setError(requestError instanceof Error ? requestError.message : 'Extensions could not be loaded.');
+        return null;
+      }
+    };
+
+    useEffect(() => {
+      mountedRef.current = true;
+      void load();
+      return () => { mountedRef.current = false; requestRef.current += 1; };
+    }, []);
 
     const refreshCatalog = async () => {
-      if (busy) return;
-      setBusy('refresh');
+      if (!beginOperation('refresh')) return;
       try {
         const result = await load({ refresh: true });
         if (result?.catalogError) toast(result.catalogError, { variant: 'error' });
         else if (result) toast('Extension catalog refreshed.', { variant: 'info' });
-      } catch (requestError) {
-        setError(requestError instanceof Error ? requestError.message : 'Extensions could not be loaded.');
       } finally {
-        setBusy('');
+        finishOperation();
       }
     };
 
@@ -74,7 +101,7 @@ function createExtensionsRoute() {
     }, [data?.installed, data?.catalog, data?.sources?.length]);
 
     const runInstall = async (entry, action = 'install') => {
-      if (!entry?.id || busy) return;
+      if (!entry?.id || busyRef.current || !mountedRef.current) return;
       if (!entry.sourceId || !entry.reviewFingerprint) {
         toast('Refresh the catalog and review the extension before installing.', { variant: 'error' });
         return;
@@ -93,10 +120,9 @@ function createExtensionsRoute() {
           : `This extension requests no additional permissions. Rel.AI still applies its normal authorization rules to local actions.${cliSetup}`,
         confirmLabel: action === 'update' ? 'Update extension' : 'Install extension'
       });
-      if (!confirmed) return;
-      setBusy(`${action}:${entry.id}`);
+      if (!confirmed || !beginOperation(`${action}:${entry.id}`)) return;
+      try {
       const result = await postJson('/api/extensions', { action, id: entry.id, sourceId: entry.sourceId, reviewFingerprint: entry.reviewFingerprint, confirmPermissions: true }, { cache: 'no-store', timeout: 15 * 60 * 1000 });
-      setBusy('');
       if (!result?.ok) {
         toast(result?.error || `Could not ${action} the extension.`, { variant: 'error' });
         return;
@@ -112,14 +138,16 @@ function createExtensionsRoute() {
       }
       invalidateCache('/api/extensions');
       await load();
-      if (inspectedExtension?.id === entry.id) {
+      if (mountedRef.current && inspectedExtension?.id === entry.id) {
         setInspectedExtension(null);
+      }
+      } finally {
+        finishOperation();
       }
     };
 
     const runAddSource = async url => {
-      if (busy) return { ok: false, error: 'Another extension action is still running.' };
-      setBusy('add-source');
+      if (!beginOperation('add-source')) return { ok: false, error: 'Another extension action is still running.' };
       try {
         const result = await postJson('/api/extensions', { action: 'add_source', url }, { cache: 'no-store', timeout: 60 * 1000 });
         if (!result?.ok) {
@@ -132,12 +160,12 @@ function createExtensionsRoute() {
         await load({ refresh: true });
         return result;
       } finally {
-        setBusy('');
+        finishOperation();
       }
     };
 
     const runRemoveSource = async source => {
-      if (!source?.id || source.official || busy) return null;
+      if (!source?.id || source.official || busyRef.current || !mountedRef.current) return null;
       const installedCount = Number(source.installedCount || 0);
       const confirmed = await confirmAction({
         title: `Remove ${source.name}`,
@@ -148,8 +176,7 @@ function createExtensionsRoute() {
         confirmLabel: 'Remove source',
         danger: true
       });
-      if (!confirmed) return null;
-      setBusy(`remove-source:${source.id}`);
+      if (!confirmed || !beginOperation(`remove-source:${source.id}`)) return null;
       try {
         const result = await postJson('/api/extensions', { action: 'remove_source', sourceId: source.id, confirmRemoveSource: true }, { cache: 'no-store' });
         if (!result?.ok) {
@@ -162,12 +189,12 @@ function createExtensionsRoute() {
         await load({ refresh: true });
         return result;
       } finally {
-        setBusy('');
+        finishOperation();
       }
     };
 
     const runRemove = async extension => {
-      if (!extension?.id || busy) return;
+      if (!extension?.id || busyRef.current || !mountedRef.current) return;
       const confirmed = await confirmAction({
         title: `Remove ${extension.name}`,
         message: 'Remove this extension from Rel.AI?',
@@ -175,10 +202,9 @@ function createExtensionsRoute() {
         confirmLabel: 'Remove extension',
         danger: true
       });
-      if (!confirmed) return;
-      setBusy(`remove:${extension.id}`);
+      if (!confirmed || !beginOperation(`remove:${extension.id}`)) return;
+      try {
       const result = await postJson('/api/extensions', { action: 'remove', id: extension.id, confirmRemove: true }, { cache: 'no-store' });
-      setBusy('');
       if (!result?.ok) {
         toast(result?.error || 'Could not remove the extension.', { variant: 'error' });
         return;
@@ -186,8 +212,11 @@ function createExtensionsRoute() {
       toast(`${extension.name} removed.`, { variant: 'success' });
       invalidateCache('/api/extensions');
       await load();
-      if (inspectedExtension?.id === extension.id) {
+      if (mountedRef.current && inspectedExtension?.id === extension.id) {
         setInspectedExtension(null);
+      }
+      } finally {
+        finishOperation();
       }
     };
 
@@ -238,7 +267,7 @@ function createExtensionsRoute() {
       error ? h('div', { className: 'connection-notice bad', role: 'alert' },
         h('strong', null, 'Extensions could not be loaded'),
         h('p', null, error),
-        h('button', { className: 'secondary compact-button', type: 'button', onClick: () => void load() }, 'Try again')
+        h('button', { className: 'secondary compact-button', type: 'button', disabled: Boolean(busy), onClick: () => void refreshCatalog() }, 'Try again')
       ) : null,
 
       !data && !error ? h(ExtensionsLoadingSkeleton) : null,
@@ -1025,7 +1054,7 @@ function SourcesPanel({ data, busy, onAddSource, onRemoveSource }) {
               if (sourceError) setSourceError('');
             }
           }),
-          h('button', { type: 'submit', className: 'primary', disabled: adding }, adding ? 'Adding…' : 'Add source')
+          h('button', { type: 'submit', className: 'primary', disabled: Boolean(busy) }, adding ? 'Adding…' : 'Add source')
         ),
         h('p', { id: 'extension-source-help', className: 'extensions-source-help' },
           'GitHub repository URLs use publisher-catalog.json from the main branch. For another host, paste the direct HTTPS publisher-catalog.json URL.'

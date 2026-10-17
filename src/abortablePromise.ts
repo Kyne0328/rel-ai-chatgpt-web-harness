@@ -16,14 +16,12 @@ function withAbortResource<T>(
   errorFactory: AbortErrorFactory
 ): Promise<T> {
   if (!signal) return promise;
-  throwIfAborted(signal, errorFactory);
   return new Promise<T>((resolve, reject) => {
     let aborted = false;
     const onAbort = () => {
       aborted = true;
       reject(errorFactory(signal));
     };
-    signal.addEventListener('abort', onAbort, { once: true });
     promise.then(
       value => {
         signal.removeEventListener('abort', onAbort);
@@ -44,6 +42,10 @@ function withAbortResource<T>(
         if (!aborted) reject(error);
       }
     );
+    // The source has already started. Own its eventual outcome even when
+    // cancellation won before this wrapper was called.
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
   });
 }
 

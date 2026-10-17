@@ -110,16 +110,24 @@ function groupMatchesByFile(matches) {
 async function readContextFile(workspace, group, options, byteBudget, workflowContext = {}) {
   try {
     const safe = resolveWorkspaceSourcePath(workspace, group.path, { operation: "read" });
-    const stat = await fs.promises.stat(safe.absolutePath);
-    if (!stat.isFile()) return { skipped: { path: group.path, reason: "not a file" } };
-    const cached = sessionCache.getCachedReadEntry(workspace.alias, safe.absolutePath, stat.mtimeMs);
-    const data = cached ? null : await fs.promises.readFile(safe.absolutePath);
+    let stat;
+    let cached;
+    let data;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      stat = await fs.promises.stat(safe.absolutePath);
+      if (!stat.isFile()) return { skipped: { path: group.path, reason: "not a file" } };
+      cached = sessionCache.getCachedReadEntry(workspace.alias, safe.absolutePath, stat);
+      data = cached ? null : await fs.promises.readFile(safe.absolutePath);
+      if (sessionCache.sameFileStat(stat, await fs.promises.stat(safe.absolutePath))) break;
+      sessionCache.invalidatePath(workspace.alias, safe.absolutePath);
+      if (attempt === 1) throw new Error("File changed while reading search context; retry for a consistent snapshot.");
+    }
     if (data && looksBinary(data)) return { skipped: { path: group.path, reason: "binary-looking file" } };
     const text = cached ? cached.content : data.toString("utf8");
     const lines = splitLines(text);
     const matchLines = uniqueSortedLines(group.matches, lines.length);
     const sha256 = cached?.sha256 || crypto.createHash("sha256").update(data || text).digest("hex");
-    if (!cached) sessionCache.setCachedRead(workspace.alias, safe.absolutePath, stat.mtimeMs, text, { sha256, bytes: data.length });
+    if (!cached) sessionCache.setCachedRead(workspace.alias, safe.absolutePath, stat, text, { sha256, bytes: data.length });
     const allRanges = buildRanges(matchLines, lines.length, options).filter(range => !rangeAlreadyRead(group.path, sha256, range, workflowContext));
     const selectedRanges = allRanges.slice(0, options.maxRangesPerFile);
     const ranges = [];

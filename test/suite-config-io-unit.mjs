@@ -277,6 +277,30 @@ async function case_env_operations_unit() {
     assert.throws(() => runEnvOperation(workspace, config, { envAction: 'set', path: '.env', key: 'GOOD', value: 'a\nb' }), /single-line/);
     assert.throws(() => runEnvOperation(workspace, config, { envAction: 'list', path: 'credentials/token.txt' }), /blocked sensitive path/);
   
+    const { serializeConnectorResult } = await import('../src/tools/connector.js');
+    const { validateToolOutput } = await import('../src/tools/outputValidation.js');
+    const { OPERATION_IDS: OP } = await import('../src/tools/operationIds.js');
+    const assertContract = async result => {
+      const args = { envAction: result.operation.slice(4), path: '.env' };
+      await validateToolOutput(config, 'relai_edit', args, result);
+      const compact = serializeConnectorResult({ publicName: 'relai_edit', operationName: OP.EDIT, value: result, args });
+      await validateToolOutput(config, 'relai_edit', args, compact);
+      for (const field of ['keys', 'keyCount', 'malformedLines', 'sha256', 'valuesReturned', 'missingKeys', 'extraKeys', 'templateMalformedLines', 'presentBefore', 'presentAfter', 'dryRun']) {
+        if (Object.hasOwn(result, field)) assert.deepEqual(compact[field], result[field], `${result.operation} must retain ${field}`);
+      }
+      assert.doesNotMatch(JSON.stringify(compact), /top-secret|replacement|hidden|duplicate/);
+      return compact;
+    };
+    for (const result of [listed, compared, setResult, removed, dryRun]) await assertContract(result);
+    const refreshed = await assertContract(runEnvOperation(workspace, config, { envAction: 'list' }));
+    assert.notEqual(refreshed.sha256, listed.sha256, 'the safe list result must return the current stale-write recovery hash');
+    fs.writeFileSync(envPath, '');
+    fs.writeFileSync(path.join(root, '.env.example'), '');
+    const empty = await assertContract(runEnvOperation(workspace, config, { envAction: 'compare' }));
+    for (const field of ['keys', 'missingKeys', 'extraKeys', 'malformedLines', 'templateMalformedLines']) assert.deepEqual(empty[field], []);
+    await assert.rejects(() => validateToolOutput(config, 'relai_edit', { envAction: 'list' }, { ...listed, value: 'synthetic-secret' }), /Output validation/);
+    await assert.rejects(() => validateToolOutput(config, 'relai_edit', { envAction: 'list' }, { ...listed, valuesReturned: true }), /Output validation/);
+
     console.log('Targeted environment operations passed without value disclosure.');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

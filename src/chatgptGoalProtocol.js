@@ -98,6 +98,10 @@ function accountScope(deps) {
   return scope;
 }
 
+function clearGoalDiscovery(workId, deps = {}) {
+  accountScope(deps).goalScans.delete(String(workId || ''));
+}
+
 function retryAfterMilliseconds(value) {
   if (value == null || value === '') return 0;
   const seconds = Number(value);
@@ -334,11 +338,11 @@ async function findRecentGoalCommand(deps = {}) {
   // The authenticated account has a finite per-minute read budget. Preserve
   // a work-specific cursor across deferred polls instead of rescanning the
   // first Projects every minute. Never share scans across accounts or work IDs.
-  const scope = !correlatedId && deps.explicitGoal && deps.workId ? accountScope(deps) : null;
+  const scope = !correlatedId && deps.workId ? accountScope(deps) : null;
   const scanKey = scope ? String(deps.workId) : '';
   let scan = scope?.goalScans.get(scanKey);
-  if (scope && (!scan || scan.startedAt !== startedAt)) {
-    scan = { startedAt, ordinary: null, ordinaryAt: 0, catalogue: null, previewAt: 0,
+  if (scope && (!scan || scan.startedAt !== startedAt || scan.explicitGoal !== Boolean(deps.explicitGoal))) {
+    scan = { startedAt, explicitGoal: Boolean(deps.explicitGoal), ordinary: null, ordinaryAt: 0, catalogue: null, previewAt: 0,
       sidebarCursor: '', projectAt: 0, cursor: '0', pages: 0, page: null, pageAt: 0, candidates: [] };
     scope.goalScans.set(scanKey, scan);
     while (scope.goalScans.size > 16) scope.goalScans.delete(scope.goalScans.keys().next().value);
@@ -428,8 +432,15 @@ async function findRecentGoalCommand(deps = {}) {
   if (previewMatch) return previewMatch;
   // Automatic /goal detection only inspects the sidebar, not full histories.
   if (!deps.explicitGoal) {
-    if (catalogue.complete) return { state: 'absent' };
-    throw Object.assign(new Error('ChatGPT Project discovery is incomplete; retrying without guessing.'),
+    if (catalogue.complete) {
+      if (scope) scope.goalScans.delete(scanKey);
+      return { state: 'absent' };
+    }
+    if (!scan || !catalogue.cursor) throw new Error('ChatGPT Project listing cannot advance its pagination.');
+    scan.sidebarCursor = catalogue.cursor;
+    scan.catalogue = null;
+    scan.previewAt = 0;
+    throw Object.assign(new Error('ChatGPT Project discovery is incomplete; continuing the sidebar scan.'),
       { deferred: true, retryAt: Date.now() + DISCOVERY_CACHE_MS });
   }
 
@@ -666,4 +677,4 @@ async function sendContinue(id, parentMessageId, deps = {}) {
   }
 }
 
-export { configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };
+export { clearGoalDiscovery, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };

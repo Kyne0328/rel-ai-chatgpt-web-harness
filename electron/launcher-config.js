@@ -16,8 +16,8 @@ function normalizeWizardConfig(config = {}, { allowLocalOnly = false } = {}) {
   return { port, tunnelId, token };
 }
 
-/** @param {LauncherConfigInput} [config] @returns {LauncherConfig} */
-function saveLauncherConfig(config = {}) {
+/** @param {LauncherConfigInput} [config] @param {{ allowLocalOnly?: boolean }} [options] @returns {LauncherConfig} */
+function saveLauncherConfig(config = {}, { allowLocalOnly } = {}) {
   let current = {};
   try { current = readGuiConfig(); } catch {}
   const normalized = normalizeWizardConfig({
@@ -25,7 +25,7 @@ function saveLauncherConfig(config = {}) {
     port: config.port ?? current.port ?? 3333,
     token: config.token ?? current.token ?? '',
     tunnelId: config.tunnelId ?? current.tunnelId ?? ''
-  }, { allowLocalOnly: current.tunnelId === '' });
+  }, { allowLocalOnly: allowLocalOnly ?? current.tunnelId === '' });
   configModule.ensureConfig();
   connection.writeLaunchEnv({
     REL_AI_MCP_PORT: String(normalized.port),

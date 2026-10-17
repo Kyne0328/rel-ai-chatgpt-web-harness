@@ -117,10 +117,17 @@ function createDesktopLocalDataManager(options = {}) {
     if (!plan?.ok || !Array.isArray(plan.roots) || plan.roots.length === 0) {
       return { ok: false, error: 'Rel.AI local-data clear plan is unavailable.' };
     }
+    let clearedRoots = 0;
     for (const root of plan.roots) {
-      await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 75 });
+      try {
+        await fs.promises.rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 75 });
+        clearedRoots += 1;
+      } catch (error) {
+        return { ok: false, clearedRoots, remainingRoots: plan.roots.length - clearedRoots,
+          error: `Local data clearing stopped after ${clearedRoots} of ${plan.roots.length} locations. Some files may already be removed. ${error?.message || error}` };
+      }
     }
-    return { ok: true, clearedRoots: plan.roots.length };
+    return { ok: true, clearedRoots };
   }
 
   return { getUsage, clearTemporary, openDataFolder, prepareClearAll, clearAll };

@@ -45,3 +45,31 @@ assert.equal(uncoded.executed, true);
 assert.equal(uncoded.timeline.phase, 'reconciling');
 assert.equal(uncoded.terminationCertainty, 'confirmed');
 console.log('Action inference, structured validation and safe scope recovery checks passed.');
+
+
+// Embedded edit validation retains diagnostics without obscuring the mutation receipt.
+const { serializeConnectorResult } = await import('../src/tools/connector.js');
+const { validateToolOutput } = await import('../src/tools/outputValidation.js');
+for (const outcome of [
+  { ok: false, exitCode: 1, executed: true, stderr: 'fixture failed', stderrOutputRef: 'spill_fixture', terminationConfirmed: true },
+  { ok: false, exitCode: null, cancelled: true, executed: true, terminationConfirmed: true },
+  { ok: false, exitCode: null, executed: false, admissionBlocked: true, errorCode: 'RESOURCE_BLOCKED', retryable: true },
+  { ok: false, exitCode: 0, executed: true, terminationConfirmed: false }
+]) {
+  const checks = { ok: false, workspace: 'fixture', validationStatus: outcome.cancelled ? 'cancelled' : 'failed',
+    checks: ['fixture check'], failedCheck: 'fixture check', results: [{ command: 'fixture check', ...outcome }],
+    nextAction: 'Inspect the fixture result.', ...outcome };
+  const value = { ok: false, workspace: 'fixture', path: 'app.js', changedFiles: ['app.js'], mutationEffect: 'applied',
+    checks, validationStatus: checks.validationStatus, error: 'Post-edit validation failed.' };
+  const compact = serializeConnectorResult({ publicName: 'relai_edit', operationName: OP.EDIT, value });
+  await validateToolOutput({}, 'relai_edit', {}, compact);
+  assert.equal(compact.mutationEffect, 'applied');
+  assert.deepEqual(compact.changedFiles, ['app.js']);
+  assert.equal(compact.checks.failedCheck, 'fixture check');
+  assert.equal(compact.checks.validationStatus, checks.validationStatus);
+  assert.equal(compact.checks.results[0].terminationConfirmed, outcome.terminationConfirmed);
+  if (outcome.stderr) assert.equal(compact.checks.results[0].stderr, outcome.stderr);
+  if (outcome.stderrOutputRef) assert.equal(compact.checks.results[0].stderrOutputRef, outcome.stderrOutputRef);
+  if (outcome.admissionBlocked) assert.equal(compact.checks.admissionBlocked, true);
+}
+console.log('Embedded edit validation diagnostics contract passed.');

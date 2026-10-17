@@ -13,7 +13,7 @@ import { classifyWorkflowRisk } from '../workflow/risk.js';
 import { discoverRepositoryTopology, packageForPath } from '../workflow/topology.js';
 
 const PLAN_TTL_MS = 30 * 60 * 1000;
-const FINGERPRINT_VERSION = 3;
+const FINGERPRINT_VERSION = 4;
 const VALIDATION_CONFIG_PATHS = Object.freeze([
   'package.json',
   'package-lock.json',
@@ -73,7 +73,7 @@ async function createValidationPlan(workspace, config, args = {}) {
   const affectedTests = normalizePaths(impact.affectedTests || []);
   const impactedPaths = normalizePaths(impact.impactedPaths || []).slice(0, 200);
   const classification = classifyWorkflowRisk({ changedFiles, packageIds, affectedTests, impactedPaths });
-  const requestedScope = normalizePaths([...changedFiles, ...affectedTests, ...impactedPaths]).slice(0, 1000);
+  const requestedScope = normalizePaths([...changedFiles, ...affectedTests, ...impactedPaths]);
   const fingerprint = await createValidationFingerprint(workspace, config, { status, paths: requestedScope, signal });
   const payload = {
     version: 2,
@@ -100,17 +100,30 @@ async function createValidationFingerprint(workspace, config, options = {}) {
   const signal = options.signal;
   signal?.throwIfAborted?.();
   const explicitPaths = Array.isArray(options.paths);
-  const status = options.status || await workspaceGitStatus(workspace, config, { maxBytes: 256 * 1024, signal });
-  const repositoryWide = options.repositoryWide === true;
+  let status = options.status || await workspaceGitStatus(workspace, config, { maxBytes: 256 * 1024, signal });
+  // Only a confirmed non-repository gets the complete filesystem fallback.
+  // Timeouts, denied Git reads, and truncated observations must fail closed.
+  let filesystem = null;
+  if (status?.ok !== true) {
+    if (!await isNonGitWorkspace(workspace, config, signal)) {
+      throw new Error('Validation fingerprint is incomplete because repository status is unavailable. Retry after a complete repository observation.');
+    }
+    filesystem = await nonGitWorkspaceSnapshot(workspace, config, signal);
+    status = { ok: true, nonGit: true, repositoryHead: '', branch: '', changedFiles: filesystem.paths, statusEntries: [] };
+  }
+  // Mutation ownership selects checks and review paths, but does not establish
+  // their input boundary. Until a check has a proven complete dependency scope,
+  // include repository HEAD and every dirty input at every freshness boundary.
+  const repositoryWide = filesystem !== null || options.repositoryWide !== false;
+  const repositoryChangedFiles = repositoryWide ? await repositoryDirtyPaths(workspace, config, status, signal) : [];
   const changedFiles = explicitPaths
     ? normalizePaths(options.paths)
-    : normalizePaths(status?.changedFiles || []);
-  const repositoryChangedFiles = normalizePaths(status?.changedFiles || []);
+    : repositoryWide ? repositoryChangedFiles : normalizePaths(status?.changedFiles || []);
   const scopePaths = normalizePaths([
     ...changedFiles,
     ...validationConfigPaths(workspace.path, changedFiles)
-  ]).slice(0, 1000);
-  const fingerprintCache = new Map();
+  ]);
+  const fingerprintCache = new Map(filesystem?.entries || []);
   const fingerprint = async file => {
     signal?.throwIfAborted?.();
     if (!fingerprintCache.has(file)) {
@@ -141,6 +154,8 @@ async function createValidationFingerprint(workspace, config, options = {}) {
     scopePaths,
     relevantFiles,
     repository: {
+      kind: filesystem ? 'filesystem' : 'git',
+      excludedRuntimePaths: validationRuntimePaths(workspace.path, config).map(entry => ({ path: path.relative(workspace.path, entry.path).replaceAll('\\', '/'), subtree: entry.subtree })),
       head: repositoryHead,
       branch: String(status?.branch || ''),
       unborn: status?.unborn === true,
@@ -155,6 +170,112 @@ async function createValidationFingerprint(workspace, config, options = {}) {
     changedFiles,
     scopePaths
   };
+}
+
+async function isNonGitWorkspace(workspace, config, signal) {
+  const result = await runReadOnlyProcess('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd: workspace.path, timeout: 5000, maxOutputBytes: 4096,
+    env: { LC_ALL: 'C', LANG: 'C' }, signal
+  }, config);
+  signal?.throwIfAborted?.();
+  return result.exitCode === 128 && !result.timedOut && !result.cancelled
+    && result.terminationConfirmed !== false && !result.stdoutTruncated && !result.stderrTruncated
+    && !result.stdoutSpillTruncated && !result.stderrSpillTruncated && !result.outputFinalizationTimedOut
+    && /not a git repository/i.test(String(result.stderr || ''));
+}
+
+function validationRuntimePaths(workspaceRoot, config) {
+  const root = path.resolve(workspaceRoot);
+  const state = path.resolve(getStateDir(config));
+  const fromState = path.relative(state, root);
+  if (!fromState || (fromState !== '..' && !fromState.startsWith('..' + path.sep) && !path.isAbsolute(fromState))) {
+    throw new Error('Validation fingerprint is incomplete: runtime state cannot occupy the workspace or an ancestor.');
+  }
+  const runtimePaths = [{ path: state, subtree: true }, ...(config.auditLogPath ? [{ path: path.resolve(config.auditLogPath), subtree: false }] : [])];
+  return runtimePaths.filter(entry => {
+    const relative = path.relative(root, entry.path);
+    return relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+  });
+}
+
+function isRuntimeInputPath(absolute, excluded, directory = false) {
+  return excluded.some(entry => {
+    const relative = path.relative(entry.path, absolute);
+    if (!relative) return entry.subtree || !directory;
+    return entry.subtree && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+  });
+}
+
+async function nonGitWorkspaceSnapshot(workspace, config, signal) {
+  const root = path.resolve(workspace.path);
+  const excluded = validationRuntimePaths(root, config);
+  const snapshotSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000);
+  const entries = new Map();
+  const pending = [''];
+  let entryCount = 0;
+  const budget = { remainingBytes: 128 * 1024 * 1024 };
+  while (pending.length) {
+    snapshotSignal.throwIfAborted();
+    const directory = pending.pop();
+    const children = await fs.promises.readdir(path.join(root, directory), { withFileTypes: true });
+    for (const child of children) {
+      snapshotSignal.throwIfAborted();
+      const relative = directory ? path.posix.join(directory, child.name) : child.name;
+      if (normalizePath(relative) !== relative) throw new Error('Validation fingerprint is incomplete: non-Git workspace contains an unsupported non-canonical input path.');
+      const absolute = path.resolve(root, relative);
+      if (isRuntimeInputPath(absolute, excluded, child.isDirectory())) continue;
+      if (++entryCount > 10000) throw new Error('Validation fingerprint is incomplete: non-Git workspace exceeds the 10000-entry snapshot budget.');
+      if (child.isDirectory()) {
+        const runtimeAncestor = excluded.some(entry => {
+          const childPath = path.relative(absolute, entry.path);
+          return childPath && childPath !== '..' && !childPath.startsWith('..' + path.sep) && !path.isAbsolute(childPath);
+        });
+        if (!runtimeAncestor) entries.set(relative, { path: relative, type: 'directory' });
+        pending.push(relative);
+        continue;
+      }
+      if (!child.isFile()) throw new Error('Validation fingerprint is incomplete: non-Git workspace contains a symbolic link or unsupported file type.');
+      const entry = await fingerprintPath(root, relative, snapshotSignal, budget);
+      if (entry.type !== 'file') throw new Error('Validation fingerprint is incomplete: a non-Git input changed during the snapshot.');
+      entries.set(relative, entry);
+    }
+  }
+  return { paths: [...entries.keys()].sort(), entries };
+}
+
+async function repositoryDirtyPaths(workspace, config, status, signal) {
+  let rawPaths = status.changedFiles || [];
+  if (rawPaths.some(file => typeof file !== 'string' || normalizePath(file) !== file)) {
+    throw new Error('Validation fingerprint is incomplete: repository status contains an unsupported non-canonical input path.');
+  }
+  const excluded = validationRuntimePaths(workspace.path, config);
+  const isRuntimePath = file => isRuntimeInputPath(path.resolve(workspace.path, file), excluded, file.endsWith('/'));
+  // Configuration cannot hide tracked dependencies. Only known untracked
+  // runtime artifacts are omitted from the Git-observable input inventory.
+  const untrackedPaths = new Set((status.statusEntries || []).filter(entry => entry.untracked).map(entry => entry.path));
+  rawPaths = rawPaths.filter(file => !untrackedPaths.has(file) || !isRuntimePath(file));
+  const opaqueRoots = (status.statusEntries || []).filter(entry => entry.opaqueDirectory).map(entry => entry.path).filter(file => !isRuntimePath(file));
+  if (!opaqueRoots.length) return normalizePaths(rawPaths);
+  // Normal porcelain collapses new directories. Resolve their complete ignored-
+  // aware file inventory before hashing; a stable directory name is not content.
+  const listed = await runReadOnlyProcess('git', ['ls-files', '--others', '--exclude-standard', '-z', '--',
+    ...opaqueRoots.map(root => `:(literal)${root}`)], {
+    cwd: workspace.path, timeout: 30_000, maxOutputBytes: 16 * 1024 * 1024,
+    preserveOutputWhitespace: true, signal
+  }, config);
+  signal?.throwIfAborted?.();
+  const output = String(listed.stdout || '');
+  if (listed.exitCode !== 0 || listed.timedOut || listed.cancelled || listed.terminationConfirmed === false
+    || listed.stdoutTruncated || listed.stdoutSpillTruncated || listed.outputFinalizationTimedOut
+    || (output && !output.endsWith('\0')) || output.includes('\uFFFD')) {
+    throw new Error('Validation fingerprint is incomplete because the untracked file inventory did not settle completely.');
+  }
+  const inventory = output.split('\0').filter(Boolean);
+  if (inventory.some(file => normalizePath(file) !== file)) {
+    throw new Error('Validation fingerprint is incomplete: untracked inventory contains an unsupported non-canonical input path.');
+  }
+  const roots = new Set(opaqueRoots);
+  return normalizePaths([...rawPaths.filter(file => !roots.has(file)), ...inventory.filter(file => !isRuntimePath(file))]);
 }
 
 async function readRepositoryHead(workspace, config, signal) {
@@ -192,29 +313,35 @@ function validationConfigPaths(root, scopePaths = []) {
   return normalizePaths(candidates);
 }
 
-async function fingerprintPath(root, relativePath, signal) {
+async function fingerprintPath(root, relativePath, signal, budget = null) {
   signal?.throwIfAborted?.();
   const normalized = normalizePath(relativePath);
   const absolute = path.resolve(root, normalized);
   const relative = path.relative(root, absolute);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) return { path: normalized, type: 'outside' };
+  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Validation fingerprint input is outside the workspace.');
   let stat;
   try {
     stat = await fs.promises.lstat(absolute);
   } catch (error) {
     signal?.throwIfAborted?.();
-    return { path: normalized, type: error?.code === 'ENOENT' ? 'missing' : 'unreadable', code: String(error?.code || '') };
+    if (error?.code === 'ENOENT') return { path: normalized, type: 'missing' };
+    throw new Error(`Validation fingerprint could not read input metadata: ${normalized}`, { cause: error });
   }
   signal?.throwIfAborted?.();
   if (stat.isSymbolicLink()) {
     return { path: normalized, type: 'symlink', target: await fs.promises.readlink(absolute) };
   }
-  if (stat.isDirectory()) return { path: normalized, type: 'directory' };
+  if (stat.isDirectory()) throw new Error(`Validation fingerprint is incomplete for directory input: ${normalized}`);
   if (!stat.isFile()) return { path: normalized, type: 'other', size: stat.size };
+  if (budget && stat.size > budget.remainingBytes) throw new Error('Validation fingerprint is incomplete: non-Git workspace exceeds the 128 MiB snapshot budget.');
   const hash = crypto.createHash('sha256');
   const stream = fs.createReadStream(absolute, signal ? { signal } : undefined);
   for await (const chunk of stream) {
     signal?.throwIfAborted?.();
+    if (budget) {
+      budget.remainingBytes -= chunk.length;
+      if (budget.remainingBytes < 0) throw new Error('Validation fingerprint is incomplete: non-Git workspace exceeds the 128 MiB snapshot budget.');
+    }
     hash.update(chunk);
   }
   signal?.throwIfAborted?.();

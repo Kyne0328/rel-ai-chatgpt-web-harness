@@ -6,7 +6,8 @@ import path from 'node:path';
 import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
 import { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
-import { withStateDatabase } from '../src/stateDatabase.ts';
+import { withStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
+import { DatabaseSync } from 'node:sqlite';
 import { beginConnectorToolCall, getToolActivity, resetToolActivity, runWithToolActivity, requestCurrentTaskCancellation, onToolActivity } from '../src/toolActivity.js';
 import { recordTaskActivityEvent, clearTaskHistory } from '../src/taskHistoryStore.ts';
 
@@ -240,6 +241,156 @@ test('a recovered read returns to ordinary monitoring without an overdue retry l
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(reads, 3, 'the ordinary monitor must still observe the conversation');
     } finally { stopGoalMonitor(); configureGoalBrowserTransport(null); }
+  });
+});
+
+for (const trigger of ['interval', 'retry']) {
+  test('Goal background ' + trigger + ' survives a locked observation save and retries after unlock', async t => {
+    await withMonitoredGoal(t, async f => {
+      const now = Date.now();
+      t.mock.timers.reset();
+      t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
+      f.patchGoal({ observedNode: 'earlier-node', stableSince: 0,
+        ...(trigger === 'retry' ? { nextAttemptAt: now + 5_000 } : {}) });
+      const writer = new DatabaseSync(stateDatabasePath(f.config));
+      let locked = false;
+      let reads = 0;
+      configureGoalBrowserTransport(async () => {
+        reads += 1;
+        if (reads === 1) { writer.exec('BEGIN IMMEDIATE'); locked = true; }
+        return { ok: true, data: structuredClone(f.tree) };
+      });
+      try {
+        startGoalMonitor(f.config);
+        t.mock.timers.tick(trigger === 'retry' ? 5_000 : 30_000);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(reads, 1);
+        assert.equal(f.status().continuationCount, 0);
+        const saved = JSON.parse(writer.prepare('SELECT value FROM state_meta WHERE key=?')
+          .get('chatgpt_goal:' + f.work_id).value);
+        assert.equal(saved.observedNode, 'earlier-node', 'failed observation and error saves must preserve durable state');
+        writer.exec('ROLLBACK'); locked = false;
+        t.mock.timers.tick(5_000);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(reads, 2, 'a memory-only retry must run before the ordinary monitor cadence');
+        assert.equal(f.status().state, 'monitoring');
+        assert.equal(f.status().continuationCount, 0);
+      } finally {
+        if (locked) writer.exec('ROLLBACK');
+        writer.close();
+        stopGoalMonitor();
+        configureGoalBrowserTransport(null);
+      }
+    });
+  });
+}
+
+test('Goal background retry reconciles an accepted send when receipt persistence was locked', async t => {
+  await withMonitoredGoal(t, async f => {
+    const now = Date.now();
+    t.mock.timers.reset();
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
+    const writer = new DatabaseSync(stateDatabasePath(f.config));
+    let locked = false;
+    let sends = 0;
+    configureGoalBrowserTransport(async payload => {
+      if (payload.action === 'continue') {
+        sends += 1;
+        writer.exec('BEGIN IMMEDIATE'); locked = true;
+        const saved = JSON.parse(writer.prepare('SELECT value FROM state_meta WHERE key=?')
+          .get('chatgpt_goal:' + f.work_id).value);
+        f.tree.mapping.continuation = { parent: 'a', message: { id: 'continuation-receipt',
+          author: { role: 'user' }, content: { parts: [saved.pendingPrompt] } } };
+        f.tree.current_node = 'continuation';
+        return { ok: true, accepted: true };
+      }
+      return { ok: true, data: structuredClone(f.tree) };
+    });
+    try {
+      startGoalMonitor(f.config);
+      t.mock.timers.tick(30_000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(sends, 1);
+      assert.equal(f.status().continuationCount, 0);
+      writer.exec('ROLLBACK'); locked = false;
+      t.mock.timers.tick(5_000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(sends, 1, 'uncertain durable claim must be reconciled without resending');
+      assert.equal(f.status().continuationCount, 1);
+      t.mock.timers.tick(30_000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(sends, 1);
+    } finally {
+      if (locked) writer.exec('ROLLBACK');
+      writer.close();
+      stopGoalMonitor();
+      configureGoalBrowserTransport(null);
+    }
+  });
+});
+
+test('automatic detection recovers from locked success and error saves without an unhandled rejection', async t => {
+  await withMonitoredGoal(t, async f => {
+    const now = Date.now();
+    t.mock.timers.reset();
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
+    const writer = new DatabaseSync(stateDatabasePath(f.config));
+    const workId = 'locked-automatic-detection';
+    let locked = false;
+    let reads = 0;
+    const deps = { task: { status: 'running' }, nativeTransport: async () => {
+      if (++reads === 1) { writer.exec('BEGIN IMMEDIATE'); locked = true; }
+      return { ok: true, data: conversationWithReceipt(ID, workId) };
+    } };
+    const context = { connector: true, conversationId: ID, principal: 'monitor-fixture' };
+    try {
+      queueGoalDetection(f.config, { work_id: workId, title: 'Locked detection' }, context, deps);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(reads, 1);
+      assert.equal(goalStatus(f.config, { work_id: workId }, context).state, 'checking');
+      writer.exec('ROLLBACK'); locked = false;
+      t.mock.timers.tick(5_000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(reads, 2);
+      assert.equal(goalStatus(f.config, { work_id: workId }, context).state, 'monitoring');
+    } finally {
+      if (locked) writer.exec('ROLLBACK');
+      writer.close();
+      stopGoalMonitor();
+    }
+  });
+});
+
+test('Stop cancels a storage-independent Goal retry before another account read', async t => {
+  await withMonitoredGoal(t, async f => {
+    const now = Date.now();
+    t.mock.timers.reset();
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
+    f.patchGoal({ observedNode: 'earlier-node', stableSince: 0 });
+    const writer = new DatabaseSync(stateDatabasePath(f.config));
+    let locked = false;
+    let reads = 0;
+    configureGoalBrowserTransport(async () => {
+      reads += 1;
+      writer.exec('BEGIN IMMEDIATE'); locked = true;
+      return { ok: true, data: f.tree };
+    });
+    try {
+      startGoalMonitor(f.config);
+      t.mock.timers.tick(30_000);
+      await new Promise(resolve => setImmediate(resolve));
+      writer.exec('ROLLBACK'); locked = false;
+      stopGoal(f.config, { work_id: f.work_id }, f.context);
+      t.mock.timers.tick(60_000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(reads, 1);
+      assert.equal(f.status().state, 'stopped');
+    } finally {
+      if (locked) writer.exec('ROLLBACK');
+      writer.close();
+      stopGoalMonitor();
+      configureGoalBrowserTransport(null);
+    }
   });
 });
 
@@ -682,6 +833,35 @@ test('Project discovery advances past bounded sidebar pagination', async t => {
     catch (error) { assert.equal(error.deferred, true); t.mock.timers.tick(61_000); }
   }
   assert.equal(match?.conversationId, ID);
+});
+
+test('automatic Goal discovery advances sidebar pages after cache expiry without reading full histories', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const workId = 'automatic-sidebar-deep';
+  const pages = [];
+  const target = conversationWithReceipt(ID, workId);
+  const fetch = async url => {
+    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
+    if (url.includes('/gizmos/snorlax/sidebar')) {
+      const cursor = new URL(url).searchParams.get('cursor');
+      const page = cursor ? Number(cursor.slice(8)) : 0;
+      pages.push(page);
+      return response({ items: [{ gizmo: {
+        gizmo: { id: 'g-p-' + String(page + 1).padStart(32, '0') },
+        conversations: { items: page === 4 ? [{ id: ID }] : [] }
+      } }], cursor: page < 4 ? 'sidebar-' + (page + 1) : null });
+    }
+    if (url.endsWith('/conversation/' + ID)) return response(target);
+    assert.fail('Automatic detection must not read full Project histories: ' + url);
+  };
+  const deps = { credentials, fetch, workId, requireWorkReceipt: true,
+    startedAt: Date.now(), conversationCorrelation: 'v1/automatic-sidebar' };
+  await assert.rejects(findRecentGoalCommand(deps), error => error.deferred === true);
+  t.mock.timers.tick(121_000);
+  const match = await findRecentGoalCommand(deps);
+  assert.equal(match.state, 'matched');
+  assert.equal(match.conversationId, ID);
+  assert.deepEqual(pages, [0, 1, 2, 3, 4]);
 });
 
 test('Project discovery resumes beyond two Project conversation pages', async t => {

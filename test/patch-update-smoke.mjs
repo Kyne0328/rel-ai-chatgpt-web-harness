@@ -136,6 +136,38 @@ rename to public-config.txt
   assert.equal(deleted.ok, true);
   assert.equal(fs.existsSync(path.join(workspacePath, 'obsolete.txt')), false);
 
+  const repeatPath = path.join(workspacePath, 'repeated.js');
+  const repeated = 'function first() {\n  return 1;\n}\nfunction second() {\n  return 1;\n}\n';
+  const updateRepeated = body => relaiApplyPatch(workspace, config, {
+    patch: `*** Begin Patch\n*** Update File: repeated.js\n${body}\n*** End Patch\n`, returnDiff: false
+  });
+  fs.writeFileSync(repeatPath, repeated);
+  assert.equal((await updateRepeated('@@ function second() {\n-  return 1;\n+  return 2;')).ok, true);
+  assert.equal(fs.readFileSync(repeatPath, 'utf8'), repeated.replace('function second() {\n  return 1;', 'function second() {\n  return 2;'));
+  for (const body of [
+    '@@\n-  return 1;\n+  return 2;',
+    '@@ function missing() {\n-  return 1;\n+  return 2;',
+    '@@\n+// ambiguous insertion'
+  ]) {
+    fs.writeFileSync(repeatPath, repeated);
+    await assert.rejects(() => updateRepeated(body), /ambiguous|does not match/);
+    assert.equal(fs.readFileSync(repeatPath, 'utf8'), repeated, 'rejected placement must not mutate any bytes');
+  }
+  fs.writeFileSync(repeatPath, 'repeat\nmiddle\nrepeat\n');
+  assert.equal((await updateRepeated('@@\n-repeat\n+last\n*** End of File')).ok, true);
+  assert.equal(fs.readFileSync(repeatPath, 'utf8'), 'repeat\nmiddle\nlast\n');
+  assert.equal((await updateRepeated('@@\n+appended\n*** End of File')).ok, true);
+  assert.equal(fs.readFileSync(repeatPath, 'utf8'), 'repeat\nmiddle\nlast\nappended\n');
+  fs.writeFileSync(repeatPath, repeated);
+  assert.equal((await updateRepeated('@@ function second() {\n+  // second body')).ok, true);
+  assert.equal(fs.readFileSync(repeatPath, 'utf8'), repeated.replace('function second() {\n', 'function second() {\n  // second body\n'));
+  fs.writeFileSync(repeatPath, 'class First {\n  value = 1;\n}\nclass Second {\n  value = 1;\n}\n');
+  assert.equal((await updateRepeated('@@ class Second {\n-  value = 1;\n+  value = 2;')).ok, true);
+  assert.equal(fs.readFileSync(repeatPath, 'utf8'), 'class First {\n  value = 1;\n}\nclass Second {\n  value = 2;\n}\n');
+  fs.writeFileSync(repeatPath, 'section\nvalue\nsection\nvalue\n');
+  await assert.rejects(() => updateRepeated('@@ section\n-value\n+new'), /anchor is ambiguous/);
+  assert.equal(fs.readFileSync(repeatPath, 'utf8'), 'section\nvalue\nsection\nvalue\n');
+
   console.log('Patch update smoke test passed.');
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });

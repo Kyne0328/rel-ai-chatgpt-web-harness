@@ -98,7 +98,10 @@ export function createUsageRoute(useDashboardSlices) {
       if (range === 'custom') replaceRouteParams({ [key]: value });
     };
     const options = analytics ? workspaceOptions(analytics.models) : [];
-    const selectedWorkspace = options.some(option => option.workspace === workspace) ? workspace : '';
+    if (workspace && !options.some(option => option.workspace === workspace)) {
+      options.push({ workspace, label: `${workspace} (no data in this period)` });
+    }
+    const selectedWorkspace = workspace;
 
     return h('div', { className: 'settings-content system-content', 'data-usage-react': 'true' },
       h('section', { className: 'usage-page', 'data-usage-page': true },
@@ -141,7 +144,7 @@ function AnalyticsToolbar({ end, loading, onDateChange, onRangeChange, onRefresh
         h('span', null, 'Project'),
         h('select', { 'data-usage-workspace': true, value: selectedWorkspace, onChange: event => onWorkspaceChange(event.target.value) },
           h('option', { value: '' }, 'All projects'),
-          options.map(option => h('option', { key: option.workspace, value: option.workspace }, option.workspace))
+          options.map(option => h('option', { key: option.workspace, value: option.workspace }, option.label || option.workspace))
         )
       ),
       h('div', { className: 'usage-range-control' },

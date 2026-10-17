@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { mock } from 'node:test';
-import { configureBrowserNativeBridge } from '../src/browser/browserDriver.ts';
+import { configureBrowserNativeBridge, dispatchBrowserNativeEvent } from '../src/browser/browserDriver.ts';
 import { createBrowserRuntime } from '../src/browser/browserRuntime.ts';
 import * as browserProfiles from '../src/browser/browserProfile.ts';
 
@@ -160,7 +160,8 @@ function createHarness({
   goalLoginProfileDirectory = '',
   getGoalConnections = null,
   goalComposerState = 'ready',
-  goalRedirectUrl = ''
+  goalRedirectUrl = '',
+  onBrowserEvent = () => {}
 } = {}) {
   const sessions = [];
   const goalWindows = [];
@@ -241,9 +242,77 @@ function createHarness({
     forgetPersistentSite,
     goalLoginProfileDirectory,
     getGoalConnections,
-    onEvent: event => events.push(event)
+    onEvent: event => { events.push(event); onBrowserEvent(event); }
   });
   return { host, sessions, pathSessions, views, webContents, childViews, routes, sent, events, dashboardInputEvents, goalWindows };
+}
+
+
+for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-during-recovery']) {
+  const waiting = new Map();
+  const waitForEvent = type => new Promise(resolve => { waiting.set(type, resolve); });
+  const { host, webContents, events } = createHarness({
+    onBrowserEvent: event => {
+      dispatchBrowserNativeEvent(event);
+      waiting.get(event.type)?.(event);
+      waiting.delete(event.type);
+    }
+  });
+  const runtime = createBrowserRuntime();
+  const workspace = { alias: 'crash-fixture' };
+  const context = { principal: { clientId: 'native-crash-fixture', subject: 'fixture', authMode: 'test' } };
+  configureBrowserNativeBridge((payload, options) => host.run(payload, options));
+  try {
+    const started = await runtime.start(workspace, { profile: 'ephemeral', url: 'https://crash.fixture.invalid/' }, context);
+    const args = { sessionId: started.sessionId, tabId: started.activeTabId };
+    const contents = webContents[0];
+    const originalLoad = contents.loadURL.bind(contents);
+    let release;
+    const heldLoad = new Promise(resolve => { release = resolve; });
+    contents.loadURL = async url => {
+      await heldLoad;
+      if (scenario === 'reload-failure') throw new Error('fixture reload failed');
+      return originalLoad(url);
+    };
+    const terminal = scenario === 'reload-failure' ? waitForEvent('page_crashed') : null;
+    const recovered = scenario === 'recover' || scenario === 'repeat-crash' ? waitForEvent('page_recovered') : null;
+    contents.emit('render-process-gone', {}, { reason: 'crashed' });
+    assert.equal(events.at(-1).type, 'page_recovering');
+    const during = await runtime.listTabs(workspace, { sessionId: started.sessionId }, context);
+    assert.equal(during.tabs[0].tabId, started.activeTabId, 'recovering renderer retains its tool tab handle');
+    await assert.rejects(() => runtime.snapshot(workspace, args, context), error => error.code === 'BROWSER_TAB_RECOVERING');
+    if (scenario === 'close-during-recovery') {
+      await runtime.closeTab(workspace, args, context);
+      release();
+      await Promise.resolve();
+      assert.equal((await runtime.listTabs(workspace, { sessionId: started.sessionId }, context)).tabs.length, 0);
+      assert.equal(events.some(event => event.type === 'page_recovered'), false, 'late recovery must not resurrect a closed tab');
+    } else {
+      release();
+      if (terminal) {
+        await terminal;
+        assert.equal((await runtime.listTabs(workspace, { sessionId: started.sessionId }, context)).tabs.length, 0);
+      } else {
+        await recovered;
+        assert.equal((await runtime.listTabs(workspace, { sessionId: started.sessionId }, context)).tabs[0].tabId, started.activeTabId);
+        assert.equal((await runtime.snapshot(workspace, args, context)).ok, true, 'recovered original handle remains usable for read-only operations');
+        if (scenario === 'repeat-crash') {
+          const second = waitForEvent('page_recovered');
+          contents.emit('render-process-gone', {}, { reason: 'crashed' });
+          await second;
+          const removed = waitForEvent('page_crashed');
+          contents.emit('render-process-gone', {}, { reason: 'crashed' });
+          await removed;
+          assert.equal((await runtime.listTabs(workspace, { sessionId: started.sessionId }, context)).tabs.length, 0,
+            'repeated renderer crashes terminate within the bounded recovery budget');
+        }
+      }
+    }
+  } finally {
+    await runtime.shutdown();
+    await host.closeAll();
+    configureBrowserNativeBridge(null);
+  }
 }
 
 {

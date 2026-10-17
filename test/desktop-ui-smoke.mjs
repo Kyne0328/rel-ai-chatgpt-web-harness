@@ -424,11 +424,19 @@ for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'stora
   for (const busy of [true, false]) for (const dirty of [true, false]) {
     let closed = 0;
     let prompted = 0;
-    const context = { busy, dirty, onClose: () => { closed++; }, setConfirmDiscard: () => { prompted++; } };
+    const context = { busy, dirty, savePendingRef: { current: busy }, onClose: () => { closed++; }, setConfirmDiscard: () => { prompted++; } };
     vm.runInNewContext(workspacesModals.slice(closeStart, closeEnd) + '\nglobalThis.dismiss = requestClose;', context);
     context.dismiss();
     assert.equal(closed, !busy && !dirty ? 1 : 0);
     assert.equal(prompted, !busy && dirty ? 1 : 0);
+    if (!busy) {
+      closed = 0;
+      prompted = 0;
+      context.savePendingRef.current = true;
+      context.dismiss();
+      assert.equal(closed, 0, 'The same rendered callback must block dismissal immediately when saving starts');
+      assert.equal(prompted, 0, 'A pending save must not open discard confirmation before React rerenders');
+    }
   }
 }
 {

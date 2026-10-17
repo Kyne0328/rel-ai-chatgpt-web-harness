@@ -482,4 +482,256 @@ for (const streamId of ['a', 'b']) {
   assert.doesNotMatch(summary.description, /File and command actions are available/);
 }
 
+
+// Pending form work must not consume edits or async folder results after submit.
+{
+  const model = await import('../src/ui/features/workspaces/model.js');
+  const input = await import('../src/ui/workspace-input.js');
+  const flatten = node => !node || typeof node !== 'object' ? [] : Array.isArray(node)
+    ? node.flatMap(flatten) : [node, ...flatten(node.children)];
+  const requests = [];
+  const preflights = [];
+  let slots = new Map(), cursor = 0, activeSlots, closed = 0, refreshed = 0, invalidated = 0, routeWorkspace = 'fixture';
+  const context = {
+    ...model, ...input,
+    React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
+    Icon: 'icon', OverlayFrame: 'overlay', AlertDialog: {}, Dialog: {},
+    document: { documentElement: { dataset: {} } }, window: { relaiDesktop: { getPathForFile: file => file.name } },
+    useMemo: fn => fn(), useEffect() {}, markUnsaved() {}, toast() {}, navigate() {}, timeAgo: () => '',
+    workSessionStateView: () => ({}), routeHref: () => '#tasks',
+    getWorkspaceFilter: () => routeWorkspace, setWorkspaceFilter: value => { routeWorkspace = value; },
+    invalidateCache: () => { invalidated++; }, requestDashboardRefresh: () => { refreshed++; },
+    postJson: (url, body) => new Promise(resolve => requests.push({ url, body, resolve })),
+    fetchJson: url => new Promise(resolve => preflights.push({ url, resolve }))
+  };
+  context.useState = initial => {
+    const slot = cursor++, state = activeSlots;
+    if (!(slot in state)) state[slot] = typeof initial === 'function' ? initial() : initial;
+    return [state[slot], value => { state[slot] = typeof value === 'function' ? value(state[slot]) : value; }];
+  };
+  context.useRef = initial => context.useState(() => ({ current: initial }))[0];
+  vm.runInNewContext(workspaceModals.replace(/^import[\s\S]*?;\r?$/gm, '').replace(/^export /gm, '')
+    + '\nglobalThis.components = { ProjectFormModal, RepairProjectModalContent, SourceFolders, deleteProject };', context);
+  const render = (name, props) => {
+    const fn = context.components[name];
+    if (!slots.has(fn)) slots.set(fn, []);
+    activeSlots = slots.get(fn); cursor = 0;
+    return fn(props);
+  };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  for (const mode of ['add', 'edit', 'repair']) {
+    slots = new Map(); requests.length = 0; preflights.length = 0;
+    const name = mode === 'repair' ? 'RepairProjectModalContent' : 'ProjectFormModal';
+    const props = { mode, workspace: { alias: 'fixture', path: '/fixture' }, onClose: () => { closed++; } };
+    const tree = () => render(name, props);
+    const field = () => flatten(tree()).find(node => node.type === 'input' && node.props.name === (mode === 'repair' ? 'path' : 'alias'));
+    const form = () => flatten(tree()).find(node => node.type === 'form');
+    const sources = () => flatten(tree()).find(node => node.type === context.components.SourceFolders);
+    const browse = mode === 'repair'
+      ? null : sources().props.browse;
+    const picker = browse?.();
+    field().props.onChange({ target: { value: mode === 'repair' ? '/changed' : 'changed' } });
+    const before = field().props.value;
+    const submit = form().props.onSubmit;
+    const saving = submit({ preventDefault() {} });
+    await submit({ preventDefault() {} });
+    assert.equal(requests.filter(item => item.url === '/api/workspaces').length, 1, mode + ': repeated submit must not issue a second mutation');
+    assert.equal(field().props.disabled, true, mode + ': pending save disables the editable input');
+    field().props.onChange({ target: { value: 'discarded-later-edit' } });
+    assert.equal(field().props.value, before, mode + ': pending save rejects programmatic input as well');
+    if (mode !== 'repair') {
+      const source = sources();
+      source.props.setPathsText('/later');
+      source.props.setSourcePaths(['/later']);
+      const folders = render('SourceFolders', source.props);
+      assert.equal(flatten(folders).find(node => node.type === 'textarea').props.disabled, true);
+      assert.equal(sources().props.pathsText, '/fixture');
+      const drop = flatten(folders).find(node => node.props.onDrop);
+      drop.props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: '/dropped' }] } });
+      assert.equal(preflights.length, 0, 'drop during save must be ignored before path lookup');
+    } else {
+      flatten(tree()).find(node => node.props.onDrop).props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: '/dropped' }] } });
+      assert.equal(preflights.length, 0);
+    }
+    const closedBefore = closed;
+    requests.find(item => item.url === '/api/workspaces').resolve({ ok: false, error: 'fixture rejection' });
+    await saving;
+    assert.equal(closed, closedBefore, 'failed save keeps the dialog and draft');
+    assert.equal(field().props.disabled, false);
+    assert.equal(field().props.value, before);
+    if (picker) {
+      requests.find(item => item.url === '/api/pick-folder').resolve({ ok: true, path: '/late-picker' });
+      await picker;
+      assert.equal(sources().props.pathsText, '/fixture', 'picker started before save stays retired after a failed save');
+    }
+    requests.length = 0;
+    const retry = form().props.onSubmit({ preventDefault() {} });
+    requests[0].resolve({ ok: true });
+    await retry;
+    assert.equal(closed, closedBefore + 1, 'successful retry closes exactly once');
+  }
+
+  // Drop validation begun before a save cannot modify the unlocked draft later.
+  for (const mode of ['add', 'repair']) {
+    slots = new Map(); requests.length = 0; preflights.length = 0;
+    const name = mode === 'repair' ? 'RepairProjectModalContent' : 'ProjectFormModal';
+    const props = { workspace: { alias: 'fixture', path: '/fixture' }, onClose() {} };
+    const tree = () => render(name, props);
+    const folderTree = mode === 'repair' ? tree()
+      : render('SourceFolders', flatten(tree()).find(node => node.type === context.components.SourceFolders).props);
+    flatten(folderTree).find(node => node.props.onDrop).props.onDrop({ preventDefault() {}, dataTransfer: { files: [{ name: '/late-drop' }] } });
+    assert.equal(preflights.length, 1);
+    const saving = flatten(tree()).find(node => node.type === 'form').props.onSubmit({ preventDefault() {} });
+    requests[0].resolve({ ok: false, error: 'fixture rejection' });
+    await saving;
+    preflights[0].resolve({ ok: true, isDirectory: true, path: '/late-drop' });
+    await flush();
+    const pathValue = mode === 'repair'
+      ? flatten(tree()).find(node => node.type === 'input' && node.props.name === 'path').props.value
+      : flatten(tree()).find(node => node.type === context.components.SourceFolders).props.pathsText;
+    assert.equal(pathValue, '/fixture', 'drop completion must not enter a different draft generation');
+  }
+
+  for (const selected of [false, true]) for (const forgetLocalData of [false, true]) for (const ok of [false, true]) {
+    requests.length = 0; refreshed = 0; invalidated = 0;
+    routeWorkspace = selected ? 'fixture' : 'other';
+    const deletion = context.components.deleteProject('fixture', { forgetLocalData, setBusy() {}, onSuccess() {} });
+    assert.equal(requests[0].body.forgetLocalData, forgetLocalData);
+    requests[0].resolve({ ok, error: 'fixture rejection' });
+    assert.equal(await deletion, ok);
+    assert.equal(refreshed, ok ? 1 : 0, 'every successful deletion refreshes canonical configuration');
+    assert.equal(invalidated, ok ? 1 : 0);
+    assert.equal(routeWorkspace, ok && selected ? '' : selected ? 'fixture' : 'other');
+  }
+  requests.length = 0; routeWorkspace = 'fixture'; refreshed = 0;
+  const deletion = context.components.deleteProject('fixture', { setBusy() {} });
+  routeWorkspace = 'new-selection';
+  requests[0].resolve({ ok: true });
+  await deletion;
+  assert.equal(routeWorkspace, 'new-selection', 'delete completion must preserve a newer project selection');
+  assert.equal(refreshed, 1);
+}
+
+// Exercise real Activity callbacks with deterministic pending debounce work.
+{
+  const { activityFilterTransition, filterActivityEntries } = await import('../src/ui/features/activity/model.js');
+  let filters = { search: 'needle', timeRange: '1h', workspace: '', tool: '', status: '', task: '' };
+  let draft = filters.search, route = { ...filters }, timerId = 0;
+  const timers = new Map();
+  const context = {
+    useCallback: fn => fn, activityFilterTransition,
+    searchDraftRef: { current: draft }, searchTimerRef: { current: 0 }, tableWrapRef: { current: null },
+    EMPTY_FILTERS: { search: '', timeRange: '1h', workspace: '', tool: '', status: '', task: '' },
+    window: { clearTimeout: id => timers.delete(id), setTimeout: fn => { timers.set(++timerId, fn); return timerId; } },
+    setSearchDraft: value => { draft = value; }, setFilterState: fn => { filters = fn(filters); },
+    setRequestedEventId() {}, setUnseenLiveCount() {},
+    activityRouteParams: value => value,
+    replaceRouteParams: value => { route = value; }, navigate: (_section, value) => { route = value; }
+  };
+  const start = activity.indexOf('  const syncRoute = useCallback(');
+  const end = activity.indexOf('  const openFilters = useCallback(', start);
+  vm.runInNewContext(activity.slice(start, end) + '\nglobalThis.actions = { onSearch, clearFilters, removeFilter, applyFilters };', context);
+  const runTimers = () => { const callbacks = [...timers.values()]; timers.clear(); callbacks.forEach(fn => fn()); };
+  context.actions.clearFilters();
+  assert.equal(draft, ''); assert.equal(route.search, '');
+  context.actions.onSearch('late');
+  context.actions.clearFilters();
+  runTimers();
+  assert.equal(draft, ''); assert.equal(filters.search, ''); assert.equal(route.search, '');
+  context.actions.onSearch('late-chip');
+  context.actions.removeFilter('search');
+  runTimers();
+  assert.equal(draft, ''); assert.equal(filters.search, '');
+  context.actions.onSearch('preserved');
+  context.actions.applyFilters({ status: 'failed', timeRange: '24h', workspace: '', tool: '', task: '' });
+  runTimers();
+  assert.equal(draft, 'preserved'); assert.equal(filters.search, 'preserved'); assert.equal(route.status, 'failed');
+  context.actions.onSearch('newest');
+  context.actions.removeFilter('status');
+  runTimers();
+  assert.equal(filters.search, 'newest'); assert.equal(filters.status, '');
+
+  const hashStart = activity.indexOf('    const onHashChange = () => {');
+  const hashEnd = activity.indexOf('    const onVisibilityChange', hashStart);
+  context.readRouteState = () => ({ filters: { ...filters, search: 'history' }, eventId: '' });
+  context.setSelectedEventId = () => {};
+  context.setFilterState = value => { filters = typeof value === 'function' ? value(filters) : value; };
+  vm.runInNewContext(activity.slice(hashStart, hashEnd) + '\nglobalThis.hashChange = onHashChange;', context);
+  context.actions.onSearch('obsolete');
+  context.hashChange();
+  runTimers();
+  assert.equal(draft, 'history'); assert.equal(filters.search, 'history');
+  const entries = [{ title: 'history event', timestamp: new Date().toISOString() }, { title: 'unrelated', timestamp: new Date().toISOString() }];
+  assert.equal(filterActivityEntries(entries, filters, Date.now()).length, 1, 'restored draft and effective list filter must agree');
+  const uiContext = { h: (type, props, ...children) => ({ type, props, children }), Icon: 'icon' };
+  vm.runInNewContext(functionSource(activity, 'hasActiveFilters') + '\n' + functionSource(activity, 'ActivityFilterBar') + '\nglobalThis.render = ActivityFilterBar;', uiContext);
+  const tree = uiContext.render({ filterState: filters, searchDraft: draft, filters: [], summary: '', paused: false });
+  const nodes = node => typeof node !== 'object' || !node ? [] : [node, ...(node.children || []).flatMap(nodes)];
+  assert.equal(nodes(tree).find(node => node.type === 'input').props.value, 'history', 'input uses the controlled draft after route restoration');
+}
+
+
+{
+  const rangeModel = await import('../src/ui/features/usage/range-model.js');
+  const nodes = node => !node || typeof node !== 'object' ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.children)];
+  let slots = [], cursor = 0, effects = [], routeWorkspace = 'historical-project';
+  let models = [rangeModel.normalizeUsageSnapshot({ month: '2026-10', totals: { requests: 9, toolCalls: 9, successes: 9, failures: 0, executionMs: 9, activeDays: 1 },
+    workspaces: [{ workspace: 'other', toolCalls: 9, successes: 9, failures: 0, executionMs: 9 }],
+    series: [{ hour: '2026-10-17T03', toolCalls: 9 }],
+    workspaceSeries: [{ hour: '2026-10-17T03', workspace: 'other', toolCalls: 9 }] })];
+  const requested = [];
+  const context = {
+    h: (type, props, ...children) => ({ type, props: props || {}, children }),
+    Icon: 'icon', AnalyticsToolbar: 'toolbar', UsageContent: 'content', USAGE_STORE_KEYS: [],
+    window: { addEventListener() {}, removeEventListener() {} },
+    getRouteParams: () => new URLSearchParams(), getWorkspaceFilter: () => routeWorkspace,
+    replaceRouteParams: patch => { if ('workspace' in patch) routeWorkspace = patch.workspace || ''; },
+    customDateDefaults: () => ({ start: '2026-10-01', end: '2026-10-17' }),
+    ...rangeModel, analyticsBounds: range => rangeModel.analyticsBounds(range, { now: '2026-10-17T04:00:00Z' }),
+    useMemo: fn => fn(), useEffect: fn => effects.push(fn), messageOf: String,
+    loadAnalyticsData: async ({ bounds, workspace }) => {
+      requested.push(workspace);
+      return { models, bounds, current: rangeModel.analyticsRangeScope(models, bounds, { workspace }), previous: rangeModel.analyticsRangeScope([], bounds, { workspace }) };
+    }
+  };
+  context.useState = initial => {
+    const index = cursor++;
+    if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial;
+    return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }];
+  };
+  vm.runInNewContext(functionSource(usageReact, 'createUsageRoute') + '\nglobalThis.route = createUsageRoute(() => {});', context);
+  const render = () => { cursor = 0; effects = []; return context.route(); };
+  const load = async () => { render(); effects[0](); await new Promise(resolve => setImmediate(resolve)); return render(); };
+  let tree = await load();
+  let toolbar = nodes(tree).find(node => node.type === 'toolbar').props;
+  const content = nodes(tree).find(node => node.type === 'content').props;
+  assert.equal(requested.at(-1), 'historical-project');
+  assert.equal(toolbar.selectedWorkspace, routeWorkspace);
+  assert.match(toolbar.options.find(option => option.workspace === routeWorkspace).label, /no data in this period/);
+  assert.equal(content.current.toolCalls, 0);
+  assert.equal(content.current.kind, 'workspace');
+  assert.equal(content.current.label, routeWorkspace);
+  assert.equal(rangeModel.analyticsRangeScope(models, content.bounds).toolCalls, 9, 'fixture must have aggregate activity outside the requested scope');
+  toolbar.onWorkspaceChange('other');
+  tree = await load();
+  toolbar = nodes(tree).find(node => node.type === 'toolbar').props;
+  assert.equal(nodes(tree).find(node => node.type === 'content').props.current.toolCalls, 9);
+  models = [rangeModel.normalizeUsageSnapshot({ month: '2026-09', totals: { requests: 0, toolCalls: 0, successes: 0, failures: 0, executionMs: 0, activeDays: 0 }, workspaces: [], series: [] })];
+  toolbar.onRangeChange('7d');
+  tree = await load();
+  toolbar = nodes(tree).find(node => node.type === 'toolbar').props;
+  assert.equal(toolbar.selectedWorkspace, 'other', 'period changes must not disguise a project filter as All projects');
+  assert.equal(routeWorkspace, 'other');
+  assert.match(toolbar.options.find(option => option.workspace === 'other').label, /no data in this period/);
+  assert.equal(nodes(tree).find(node => node.type === 'content').props.current.toolCalls, 0);
+  context.rangeButtonLabel = (_key, label) => label;
+  vm.runInNewContext(functionSource(usageReact, 'AnalyticsToolbar') + '\nglobalThis.toolbar = AnalyticsToolbar;', context);
+  const selector = nodes(context.toolbar({ ...toolbar, end: '', start: '' })).find(node => node.type === 'select' && node.props['data-usage-workspace']);
+  assert.equal(selector.props.value, 'other');
+  assert.match(nodes(selector).find(node => node.type === 'option' && node.props.value === 'other').children.join(''), /other.*no data in this period/);
+  toolbar.onWorkspaceChange('');
+  await load();
+  assert.equal(routeWorkspace, ''); assert.equal(requested.at(-1), '');
+}
+
 console.log('Dashboard live rendering contracts passed.');

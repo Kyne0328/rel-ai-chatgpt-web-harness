@@ -350,27 +350,41 @@ function applyOpenAIPatchUpdate(oldText, operation, relativePath) {
 
 function parsePatchHunks(lines, relativePath) {
   const hunks = [];
-  let current = [];
+  const emptyHunk = () => ({ anchors: [], lines: [], endOfFile: false });
+  let current = emptyHunk();
   for (const line of lines) {
-    if (line === "*** End of File") continue;
-    if (line.startsWith("@@")) {
-      if (current.length > 0) {
-        hunks.push(current);
-        current = [];
-      }
+    if (line === "*** End of File") {
+      if (!current.lines.length || current.endOfFile) throw new Error(`OpenAI patch has a misplaced end-of-file marker for ${relativePath}.`);
+      current.endOfFile = true;
       continue;
     }
+    if (line.startsWith("@@")) {
+      if (current.lines.length > 0) {
+        hunks.push(current);
+        current = emptyHunk();
+      }
+      if (line !== '@@' && !line.startsWith('@@ ')) throw new Error(`OpenAI patch has an unsupported anchor for ${relativePath}: ${line}`);
+      const anchor = line.slice(2).trim();
+      if (/^-\d+(?:,\d+)? \+\d+/.test(anchor)) throw new Error(`OpenAI patch requires named anchors, not unified-diff line numbers, for ${relativePath}.`);
+      if (anchor) current.anchors.push(anchor);
+      continue;
+    }
+    if (current.endOfFile) {
+      if (line.trim() === '') continue;
+      throw new Error(`OpenAI patch contains content after its end-of-file marker for ${relativePath}.`);
+    }
     if (/^[ +-]/.test(line)) {
-      current.push(line);
+      current.lines.push(line);
       continue;
     }
     if (line.trim() === "") {
-      current.push(" ");
+      current.lines.push(" ");
       continue;
     }
     throw new Error(`OpenAI patch update for ${relativePath} contains an unsupported line: ${line}`);
   }
-  if (current.length > 0) hunks.push(current);
+  if (current.lines.length > 0) hunks.push(current);
+  else if (current.anchors.length) throw new Error(`OpenAI patch has an anchor without a hunk for ${relativePath}.`);
   if (hunks.length === 0) throw new Error(`OpenAI patch update for ${relativePath} did not contain any hunks.`);
   return hunks;
 }
@@ -386,14 +400,26 @@ function applyHunksToLines(oldLines, hunks, relativePath) {
 }
 
 function applyHunkToLines(oldLines, hunk, relativePath, cursor, output) {
-  const matchLines = hunk.filter((line) => !line.startsWith("+")).map((line) => line.slice(1));
-  const start = findHunkStart(oldLines, matchLines, cursor);
+  let searchFrom = cursor;
+  for (const anchor of hunk.anchors) {
+    const matches = [];
+    for (let index = searchFrom; index < oldLines.length; index += 1) {
+      if (oldLines[index].trim() === anchor) matches.push(index);
+    }
+    if (matches.length !== 1) throw new Error(`OpenAI patch anchor ${matches.length ? 'is ambiguous' : 'does not match'} for ${relativePath}: ${anchor}`);
+    searchFrom = matches[0] + 1;
+  }
+  const matchLines = hunk.lines.filter((line) => !line.startsWith("+")).map((line) => line.slice(1));
+  if (!matchLines.length && !hunk.endOfFile && !hunk.anchors.length && oldLines.length) {
+    throw new Error(`OpenAI patch addition-only hunk is ambiguous for ${relativePath}. Supply an anchor, context, or an end-of-file marker.`);
+  }
+  const start = findHunkStart(oldLines, matchLines, searchFrom, hunk.endOfFile, relativePath);
   if (start === -1) {
     throw new Error(`OpenAI patch context mismatch for ${relativePath}. Re-read the file and regenerate the patch with current text.`);
   }
   output.push(...oldLines.slice(cursor, start));
   let lineIndex = start;
-  for (const line of hunk) {
+  for (const line of hunk.lines) {
     const prefix = line[0];
     const content = line.slice(1);
     if (prefix === " ") {
@@ -423,19 +449,20 @@ function joinPatchLines(lines, endsWithNewline) {
   return endsWithNewline ? `${body}\n` : body;
 }
 
-function findHunkStart(lines, matchLines, fromIndex) {
-  if (matchLines.length === 0) return fromIndex;
-  for (let index = fromIndex; index <= lines.length - matchLines.length; index += 1) {
-    let matched = true;
-    for (let offset = 0; offset < matchLines.length; offset += 1) {
-      if (lines[index + offset] !== matchLines[offset]) {
-        matched = false;
-        break;
-      }
+function findHunkStart(lines, matchLines, fromIndex, endOfFile, relativePath) {
+  const last = lines.length - matchLines.length;
+  const first = endOfFile ? last : fromIndex;
+  if (first < fromIndex) return -1;
+  if (matchLines.length === 0) return first;
+  let found = -1;
+  for (let index = first; index <= last; index += 1) {
+    if (matchLines.every((line, offset) => lines[index + offset] === line)) {
+      if (found !== -1) throw new Error(`OpenAI patch context is ambiguous for ${relativePath}. Supply a named anchor or more context.`);
+      found = index;
     }
-    if (matched) return index;
+    if (endOfFile) break;
   }
-  return -1;
+  return found;
 }
 
 function normalizeUnifiedDiffText(input) {

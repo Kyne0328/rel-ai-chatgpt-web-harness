@@ -65,6 +65,23 @@ try {
   assert.equal(completion.ok, true, 'passed embedded checks must allow completion without rerunning validation');
   assert.equal(completion.validationStatus, 'passed');
 
+  fs.writeFileSync(path.join(workspacePath, 'package.json'), JSON.stringify({ scripts: { check: 'node --check src/failing.js' } }));
+  const failingTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const failingEdit = await callTool('relai_edit', { workspace: 'app', work_id: failingTask.work_id,
+    path: 'src/failing.js', content: 'const = invalid;\n', runChecks: true }, context);
+  assert.equal(failingEdit.ok, false);
+  assert.equal(failingEdit.mutationEffect, 'applied');
+  assert.deepEqual(failingEdit.changedFiles, ['src/failing.js']);
+  assert.equal(failingEdit.validationStatus, 'failed');
+  assert.match(failingEdit.error, /Post-edit validation failed/);
+  assert.ok(failingEdit.checks.failedCheck);
+  assert.equal(failingEdit.checks.results.some(result => result.exitCode !== 0 && /SyntaxError/.test(result.stderr)), true,
+    'the failed embedded check must keep its actionable diagnostics in the compact response');
+  assert.equal(fs.readFileSync(path.join(workspacePath, 'src/failing.js'), 'utf8'), 'const = invalid;\n',
+    'failed validation must not obscure or repeat the completed mutation');
+  await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: failingTask.work_id,
+    reason: 'Failed embedded-check fixture completed.' }, context);
+
 } finally {
   await repositoryIntelligence.shutdown();
   await flushLocalAnalytics();

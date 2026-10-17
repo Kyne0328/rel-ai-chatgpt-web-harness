@@ -59,7 +59,10 @@ try {
     { stateDir: mutatingState },
     { path: 'app.js', oldText: 'value = 1', newText: 'value = 2', runChecks: true, returnDiff: true }
   );
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, false, 'a successful command that changes repository inputs cannot certify its final state');
+  assert.equal(result.checks.validationStatus, 'stale');
+  assert.equal(result.checks.results.every(check => check.ok), true, 'command exit facts stay successful even though the aggregate evidence is stale');
+  assert.equal(result.mutationEffect, 'applied');
   assert.equal(result.execution.mode, 'serial');
   assert.match(String(result.diff.diff || ''), /generated\.txt/,
     'returned diff must include files created or changed by validation');

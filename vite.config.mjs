@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
+import { dashboardBundleInventory } from './scripts/dashboard-bundle-inventory.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const outputRoot = path.join(root, 'public');
@@ -20,7 +21,8 @@ export default defineConfig({
     dashboardDevAliases(),
     react(),
     tailwindcss(),
-    cleanDashboardChunks()
+    cleanDashboardChunks(),
+    dashboardBundleInventory()
   ],
   server: {
     host: '127.0.0.1',

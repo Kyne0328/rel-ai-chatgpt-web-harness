@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { runNpm } from './npm-cli.mjs';
+import { BUNDLE_INVENTORY_NAME, RENDERER_REFERENCE, verifyBundleInventory } from './dashboard-bundle-inventory.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.join(root, 'dist', 'sbom.cdx.json');
@@ -155,30 +156,132 @@ function normalizeManifestArch(value) {
   return arch || 'x64';
 }
 
-function generateSbom() {
-  const result = runNpm(['sbom', '--sbom-format', 'cyclonedx', '--omit', 'dev', '--package-lock-only'], {
-    cwd: root,
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024
-  });
-  if (result.status !== 0) {
-    process.stderr.write(result.stderr || 'npm sbom failed.\n');
-    process.exitCode = result.status || 1;
-    return;
+function mergeSbomGraph(document, addition, { rootReference } = {}) {
+  const rootComponent = addition.metadata?.component;
+  if (!rootComponent?.['bom-ref'] || !Array.isArray(addition.components) || !Array.isArray(addition.dependencies)) {
+    throw new Error('SBOM input is missing component or dependency evidence.');
   }
-
-  const document = JSON.parse(result.stdout);
-  const tunnelManifest = JSON.parse(fs.readFileSync(path.join(root, 'vendor', 'tunnel-client', 'manifest.json'), 'utf8'));
-  const zoektManifest = JSON.parse(fs.readFileSync(path.join(root, 'vendor', 'zoekt', 'manifest.json'), 'utf8'));
-  const windowsProcessJobManifest = JSON.parse(fs.readFileSync(path.join(root, 'src', 'windows-process-job-host.manifest.json'), 'utf8'));
-  const nativeComponents = nativeReleaseComponents(tunnelManifest, zoektManifest, windowsProcessJobManifest);
-  appendNativeReleaseComponents(document, nativeComponents);
-
-  fs.mkdirSync(path.dirname(output), { recursive: true });
-  fs.writeFileSync(output, `${JSON.stringify(document, null, 2)}\n`);
-  console.log(`Generated ${path.relative(root, output)} with ${nativeComponents.length} pinned native release components.`);
+  const references = new Map();
+  const components = new Map((document.components || []).map(component => [component['bom-ref'], component]));
+  const all = [rootComponent, ...addition.components];
+  for (const component of all) {
+    const reference = component === rootComponent && rootReference
+      ? rootReference : component.purl || component['bom-ref'];
+    if (!reference || (component.purl && !component.version)) throw new Error('SBOM component lacks version-qualified identity.');
+    references.set(component['bom-ref'], reference);
+    if (reference !== document.metadata?.component?.['bom-ref']) components.set(reference, { ...component, 'bom-ref': reference });
+  }
+  document.components = [...components.values()];
+  const dependencies = new Map((document.dependencies || []).map(entry => [entry.ref, new Set(entry.dependsOn || [])]));
+  for (const entry of addition.dependencies) {
+    const ref = references.get(entry.ref);
+    if (!ref) throw new Error(`SBOM dependency owner is absent: ${entry.ref}`);
+    const targets = dependencies.get(ref) || new Set();
+    for (const target of entry.dependsOn || []) {
+      if (!references.has(target)) throw new Error(`SBOM dependency target is absent: ${target}`);
+      targets.add(references.get(target));
+    }
+    dependencies.set(ref, targets);
+  }
+  const parent = document.metadata?.component?.['bom-ref'];
+  const child = references.get(rootComponent['bom-ref']);
+  if (parent !== child) {
+    const targets = dependencies.get(parent) || new Set();
+    targets.add(child);
+    dependencies.set(parent, targets);
+  }
+  document.dependencies = [...dependencies].map(([ref, targets]) => ({ ref, dependsOn: [...targets].sort() }));
+  return document;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) generateSbom();
+function assertShippedInventory(document, { rootLock, electronLock, bundleInventory, nativeComponents }) {
+  const components = document.components || [];
+  const byReference = new Map(components.map(component => [component['bom-ref'], component]));
+  const rootReference = document.metadata?.component?.['bom-ref'];
+  if (!rootReference || byReference.size !== components.length) throw new Error('SBOM references are absent or duplicated.');
+  byReference.set(rootReference, document.metadata.component);
+  for (const dependency of document.dependencies || []) {
+    if (!byReference.has(dependency.ref) || (dependency.dependsOn || []).some(ref => !byReference.has(ref))) {
+      throw new Error(`SBOM has a dangling dependency reference: ${dependency.ref}`);
+    }
+  }
+  for (const [name, lock] of [['electron', electronLock], ['electron-updater', electronLock], ['react', rootLock], ['react-dom', rootLock]]) {
+    const version = lock.packages?.[`node_modules/${name}`]?.version;
+    if (!version || !components.some(component => component.name === name && component.version === version)) {
+      throw new Error(`SBOM is missing shipped ${name}@${version || 'unresolved'}.`);
+    }
+  }
+  for (const component of [...bundleInventory.components, ...nativeComponents]) {
+    if (!byReference.has(component['bom-ref'])) throw new Error(`SBOM is missing shipped component: ${component['bom-ref']}`);
+  }
+  return { components: components.length, dependencies: document.dependencies.length };
+}
 
-export { appendNativeReleaseComponents, nativeReleaseComponents, normalizeManifestArch, platformArtifacts, zoektArtifacts };
+function npmRuntimeGraph(cwd) {
+  const result = runNpm(['sbom', '--sbom-format', 'cyclonedx', '--omit', 'dev', '--package-lock-only', '--offline'], {
+    cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024
+  });
+  if (result.error || result.signal || result.status !== 0) {
+    throw new Error(`npm sbom failed: ${result.error?.message || result.stderr || result.signal || result.status}`);
+  }
+  return JSON.parse(result.stdout);
+}
+
+function assembleShippedSbom() {
+  const declaredVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).packageManager.split('@').at(-1);
+  const version = runNpm(['--version'], { cwd: root, encoding: 'utf8' });
+  if (version.status !== 0 || version.stdout.trim() !== declaredVersion) {
+    throw new Error(`Generate the shipped SBOM through declared npm ${declaredVersion}; resolved ${version.stdout?.trim() || 'unavailable'}.`);
+  }
+  const readJson = relative => JSON.parse(fs.readFileSync(path.join(root, relative), 'utf8'));
+  const rootLock = readJson('package-lock.json');
+  const electronLock = readJson('electron/package-lock.json');
+  const publicRoot = path.join(root, 'public');
+  const bundleInventory = verifyBundleInventory(publicRoot, readJson(`public/${BUNDLE_INVENTORY_NAME}`));
+  const rootGraph = npmRuntimeGraph(root);
+  const document = { ...rootGraph, components: [], dependencies: [] };
+  const rootReference = rootGraph.metadata.component.purl || rootGraph.metadata.component['bom-ref'];
+  document.metadata = { ...rootGraph.metadata, component: { ...rootGraph.metadata.component, 'bom-ref': rootReference } };
+  mergeSbomGraph(document, rootGraph);
+  mergeSbomGraph(document, npmRuntimeGraph(path.join(root, 'electron')), { rootReference: 'rel.ai:desktop-package' });
+  mergeSbomGraph(document, {
+    metadata: { component: { type: 'application', name: 'Rel.AI dashboard renderer', 'bom-ref': RENDERER_REFERENCE } },
+    components: bundleInventory.components, dependencies: bundleInventory.dependencies
+  });
+  const electronVersion = electronLock.packages?.['node_modules/electron']?.version;
+  if (!electronVersion) throw new Error('Electron distribution version is unresolved.');
+  const electronReference = `pkg:generic/electron@${electronVersion}`;
+  const electronComponent = {
+    type: 'application', name: 'electron', version: electronVersion, purl: electronReference, 'bom-ref': electronReference,
+    licenses: [{ license: { id: 'MIT' } }],
+    externalReferences: [{ type: 'vcs', url: 'https://github.com/electron/electron' }],
+    properties: [{ name: 'rel.ai.shippedAs', value: 'Electron desktop runtime distribution' }]
+  };
+  const nativeComponents = nativeReleaseComponents(
+    readJson('vendor/tunnel-client/manifest.json'), readJson('vendor/zoekt/manifest.json'),
+    readJson('src/windows-process-job-host.manifest.json')
+  );
+  appendNativeReleaseComponents(document, [...nativeComponents, electronComponent]);
+  assertShippedInventory(document, { rootLock, electronLock, bundleInventory, nativeComponents });
+  return document;
+}
+
+function generateSbom() {
+  const document = assembleShippedSbom();
+  if (process.argv.includes('--check')) {
+    console.log(`Verified shipped SBOM: ${document.components.length} components with desktop runtime, updater, renderer, and native inventory.`);
+    return;
+  }
+  fs.mkdirSync(path.dirname(output), { recursive: true });
+  fs.writeFileSync(output, `${JSON.stringify(document, null, 2)}\n`);
+  console.log(`Generated ${path.relative(root, output)} with ${document.components.length} shipped components.`);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try { generateSbom(); } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+}
+
+export { appendNativeReleaseComponents, assembleShippedSbom, assertShippedInventory, mergeSbomGraph, nativeReleaseComponents, normalizeManifestArch, platformArtifacts, zoektArtifacts };

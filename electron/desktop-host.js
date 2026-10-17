@@ -99,6 +99,7 @@ async function createDesktopHost(options = {}) {
   let appUpdater = null;
   let updateSupportPolicy = null;
   let isQuitting = false;
+  let pendingLogout = null;
   let allowUpdaterQuit = false;
   let updateInstallPrepared = false;
   let lastServiceContextKey = '';
@@ -362,9 +363,9 @@ async function createDesktopHost(options = {}) {
   });
   const shutdownCoordinator = createShutdownCoordinator({
     stopService: () => stopServer({ silent: true, terminateUtility: true }),
-    stopUpdater: () => {
+    stopUpdater: async () => {
       appUpdater?.stop();
-      updateSupportPolicy?.stop();
+      await updateSupportPolicy?.stop();
     },
     stopActivity: () => desktopPower.stop(),
     async closeWindows() {
@@ -737,6 +738,7 @@ async function createDesktopHost(options = {}) {
   }
 
   function openRecoverySetup() {
+    if (pendingLogout) throw new Error('Finish logout with Retry logout, or quit Rel.AI.');
     recoveryWindowManager.hide();
     setupWindowManager.create({ recovery: true });
     return { ok: true };
@@ -1013,6 +1015,9 @@ async function createDesktopHost(options = {}) {
   }
 
   function syncServiceContext() {
+    // Logout can remove connection files before a later cleanup step fails.
+    // Recovery stays local and must not reread partial state or wake the service.
+    if (pendingLogout) return false;
     const { taskActivity: _taskActivity, ...status } = currentStatus;
     const context = { status, runtimeAccess: updateRuntimeAccess(), tunnelConnections: configuredGoalConnections() };
     const key = JSON.stringify(context);
@@ -1038,12 +1043,14 @@ async function createDesktopHost(options = {}) {
 
   function startServer() {
     assertInstallerSettled();
+    if (pendingLogout) throw new Error('Finish logout with Retry logout, or quit Rel.AI. Connections remain paused.');
     syncServiceContext();
     return serviceRuntime.startServer();
   }
 
   function restartConnection() {
     assertInstallerSettled();
+    if (pendingLogout) return logoutApplication({ clearData: pendingLogout.clearData });
     return tunnelRecoverySupervisor?.retryNow() || serviceRuntime.restartConnection();
   }
 
@@ -1160,6 +1167,7 @@ async function createDesktopHost(options = {}) {
 
   async function relaunchApplication() {
     assertInstallerSettled();
+    if (pendingLogout) throw new Error('Finish logout with Retry logout, or quit Rel.AI.');
     const restartBlock = taskActivityBlockReason(desktopPower.getStatus(), 'restarting Rel.AI');
     if (restartBlock) throw new Error(restartBlock);
     isQuitting = true;
@@ -1171,40 +1179,52 @@ async function createDesktopHost(options = {}) {
 
   async function logoutApplication({ clearData = false } = {}) {
     assertInstallerSettled();
+    if (isQuitting && pendingLogout) throw new Error('Logout is already in progress.');
     const action = clearData ? 'logging out and clearing local data' : 'logging out';
     const block = taskActivityBlockReason(desktopPower.getStatus(), action);
     if (block) throw new Error(block);
 
-    const clearPlan = clearData ? desktopLocalData.prepareClearAll() : null;
+    if (pendingLogout) clearData = pendingLogout.clearData;
+    const clearPlan = pendingLogout?.clearPlan || (clearData ? desktopLocalData.prepareClearAll() : null);
     if (clearPlan?.ok === false) throw new Error(clearPlan.error || 'Rel.AI local data cannot be cleared safely.');
     if (clearData && desktopLifecycle.getStatus().launchAtLogin?.enabled === true) {
       const launchResult = desktopLifecycle.setLaunchAtLogin(false);
       if (launchResult?.ok === false) throw new Error(launchResult.error || 'Launch at sign-in could not be disabled before clearing local data.');
     }
 
+    pendingLogout = { clearData, clearPlan };
     isQuitting = true;
-    const shutdown = await shutdownCoordinator.prepare(clearData ? 'logout_clear_data' : 'logout');
-    if (clearData) {
-      const cleared = await desktopLocalData.clearAll(clearPlan);
-      if (!cleared?.ok) throw new Error(cleared?.error || 'Rel.AI local data could not be cleared.');
-    } else {
-      tunnelCredentials.clear();
-      tunnelConnections.clear();
-      const cleared = connection.clearConnectionState();
-      if (cleared?.ok !== true) {
-        const error = new Error(`Logout did not finish. ${cleared?.error || 'Some saved connection data could not be cleared. Try again.'}`);
-        isQuitting = false;
-        shutdownCoordinator.reset();
-        desktopTray.setup();
-        setStatus({ error: error.message, errorCode: 'connection_state_clear_failed' });
-        recoveryWindowManager.show();
-        throw error;
+    let shutdown;
+    try {
+      shutdown = await shutdownCoordinator.prepare(clearData ? 'logout_clear_data' : 'logout');
+      if (shutdown?.clean !== true) throw new Error('Shutdown could not confirm that local work stopped safely. No saved data was cleared.');
+      if (clearData) {
+        const cleared = await desktopLocalData.clearAll(clearPlan);
+        if (!cleared?.ok) throw new Error(cleared?.error || 'Rel.AI local data could not be cleared.');
+      } else {
+        await tunnelCredentials.clear();
+        await tunnelConnections.clear();
+        const cleared = await connection.clearConnectionState();
+        if (cleared?.ok !== true) throw new Error(cleared?.error || 'Some saved connection data could not be cleared. Try again.');
       }
+      const cleanArgs = process.argv.slice(1).filter(arg => arg !== '--background' && arg !== '--hidden');
+      app.relaunch({ args: cleanArgs });
+      app.exit(0);
+      pendingLogout = null;
+      return { ok: true, clearData, clean: true };
+    } catch (cause) {
+      const error = new Error(`Logout did not finish. ${cause?.message || cause} Use Retry logout, or quit Rel.AI. Connections remain paused.`, { cause });
+      isQuitting = false;
+      shutdownCoordinator.reset();
+      desktopTray.setup();
+      setStatus({
+        error: error.message,
+        errorCode: shutdown?.clean !== true ? 'logout_shutdown_failed' : clearData ? 'local_data_clear_failed' : 'connection_state_clear_failed',
+        logoutPending: true
+      });
+      recoveryWindowManager.show();
+      throw error;
     }
-    const cleanArgs = process.argv.slice(1).filter(arg => arg !== '--background' && arg !== '--hidden');
-    app.relaunch({ args: cleanArgs });
-    app.exit(0);
-    return { ok: true, clearData, clean: shutdown.clean !== false };
   }
 
   async function quitApplication() {

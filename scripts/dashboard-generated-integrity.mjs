@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const MANIFEST_NAME = 'dashboard-generated-manifest.json';
-const GENERATED_FILES = Object.freeze(['dashboard-app.js', 'dashboard-react.js', 'dashboard.css']);
+const GENERATED_FILES = Object.freeze(['dashboard-app.js', 'dashboard-react.js', 'dashboard.css', 'dashboard-bundle-dependencies.json']);
 const GENERATED_DIRECTORIES = Object.freeze(['dashboard-chunks', 'dashboard-assets']);
 const SOURCE_EXTENSIONS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.css', '.json']);
 
@@ -16,6 +16,7 @@ function collectDashboardSourceFiles(root) {
   const uiRoot = path.join(sourceRoot, 'ui');
   const absoluteFiles = new Set([
     path.join(root, 'vite.config.mjs'),
+    path.join(root, 'scripts', 'dashboard-bundle-inventory.mjs'),
     path.join(root, 'package-lock.json'),
     path.join(root, 'public', 'dashboard.js'),
     ...listFiles(uiRoot).filter(isSourceFile)

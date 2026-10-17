@@ -378,6 +378,20 @@ async function executeInputAction(
       'semantic target center',
       size
     );
+    // Semantic identity does not prove ownership of a global pointer point.
+    // Obtain fresh app-bound geometry and fail closed if final hit-testing fails.
+    if (typeof adapter.assertAppInputTarget !== 'function') throw appInputTargetUnverified();
+    const capture = await captureAppImage(adapter, app, current.displayId, appTarget, args, signal);
+    signal?.throwIfAborted?.();
+    try {
+      await adapter.assertAppInputTarget(app, {
+        provenance: capture.provenance, width: capture.width, height: capture.height,
+        points: [point], requiresFocus: false
+      });
+    } catch {
+      signal?.throwIfAborted?.();
+      throw appInputTargetUnverified();
+    }
     signal?.throwIfAborted?.();
     await adapter.click(current.displayId, point);
     touchComputerLock();

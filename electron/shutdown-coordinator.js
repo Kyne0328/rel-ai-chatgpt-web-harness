@@ -20,7 +20,7 @@ function createShutdownCoordinator(options = {}) {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       const errors = [];
-      runStep(stopUpdater, 'updater', errors);
+      await runStepAsync(stopUpdater, 'updater', errors, stepTimeoutMs);
       runStep(stopActivity, 'activity runtime', errors);
       await runStepAsync(closeWindows, 'windows', errors, stepTimeoutMs);
 

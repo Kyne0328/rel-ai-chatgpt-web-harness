@@ -24,6 +24,11 @@ function requestWindowFit() {
 }
 
 function connectionView(status) {
+  if (status.logoutPending) return {
+    key: 'failed', badge: 'Logout incomplete', eyebrow: 'Logout recovery',
+    title: 'Logout could not finish.',
+    description: 'Connections remain paused. Retry logout, or quit Rel.AI from the tray.'
+  };
   if (status.serverRunning && status.tunnelStatus === 'running') {
     return {
       key: 'ready', badge: 'Ready', eyebrow: 'Connection ready',
@@ -81,6 +86,7 @@ function taskPresentation(status) {
 }
 
 function heroView(status) {
+  if (status.logoutPending) return connectionView(status);
   const activity = status.taskActivity || {};
   const presentation = taskPresentation(status);
   const taskCount = Math.max(1, Number(presentation.taskCount || 0));
@@ -304,8 +310,9 @@ function renderError(view) {
   document.getElementById('errorMessage').textContent = actionError || cleanupWarning
     || currentStatus.error || 'The Secure MCP Tunnel did not become ready.';
   for (const id of ['retryBtn', 'restartAppBtn', 'errorSettingsBtn']) {
-    document.getElementById(id).hidden = !connectionFailed;
+    document.getElementById(id).hidden = !connectionFailed || (currentStatus.logoutPending && id !== 'retryBtn');
   }
+  if (!document.getElementById('retryBtn').dataset.pending) document.getElementById('retryBtn').textContent = currentStatus.logoutPending ? 'Retry logout' : 'Restart connection';
 }
 
 function setActionError(value) {
@@ -318,8 +325,10 @@ function renderControls() {
   const toggle = document.getElementById('serverToggleBtn');
   if (!toggle.dataset.pending) toggle.textContent = currentStatus.serverRunning ? 'Stop Rel.AI' : 'Start Rel.AI';
   toggle.className = currentStatus.serverRunning ? 'danger compact-control' : 'primary compact-control';
+  toggle.hidden = currentStatus.logoutPending === true;
+  document.getElementById('settingsBtn').hidden = currentStatus.logoutPending === true;
   const dashboard = document.getElementById('dashboardBtn');
-  dashboard.disabled = Boolean(dashboard.dataset.pending) || !currentStatus.serverRunning;
+  dashboard.disabled = Boolean(dashboard.dataset.pending) || !currentStatus.serverRunning || currentStatus.logoutPending === true;
   document.getElementById('appVersion').textContent = currentStatus.version ? `v${currentStatus.version}` : '—';
 }
 
@@ -629,7 +638,7 @@ function bindEvents() {
       : window.electronAPI.startServer()));
   });
   document.getElementById('retryBtn').addEventListener('click', () => {
-    runAsync(withBusy(document.getElementById('retryBtn'), 'Retrying connection…', () => window.electronAPI.restartConnection()));
+    runAsync(withBusy(document.getElementById('retryBtn'), currentStatus.logoutPending ? 'Retrying logout…' : 'Retrying connection…', () => window.electronAPI.restartConnection()));
   });
   document.getElementById('restartAppBtn').addEventListener('click', () => {
     runAsync(withBusy(document.getElementById('restartAppBtn'), 'Restarting Rel.AI…', () => window.electronAPI.relaunchApp()));

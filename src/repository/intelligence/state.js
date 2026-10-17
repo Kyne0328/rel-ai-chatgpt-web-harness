@@ -25,11 +25,13 @@ function repositoryIndexChanged(status = {}, expectedGeneration = 0) {
 function repositoryFreshness(status = {}, generation = null) {
   const snapshot = repositoryIndexSnapshot(status);
   const metadata = snapshot.metadata || {};
-  if (metadata.freshness === 'partial' || metadata.truncated === true) return 'partial';
-  if (snapshot.dirty || metadata.needsReconcile === true || ['stale', 'runtime-stale'].includes(metadata.freshness)) return 'stale';
+  if (snapshot.dirty || ['stale', 'runtime-stale'].includes(metadata.freshness)) return 'stale';
   const verifiedGeneration = Number(metadata.generation || 0);
   const requestedGeneration = Number(generation?.id || generation || 0);
-  if (verifiedGeneration > 0 && (!requestedGeneration || verifiedGeneration === requestedGeneration)) return 'current';
+  if (verifiedGeneration > 0 && requestedGeneration > 0 && verifiedGeneration !== requestedGeneration) return 'cached-unverified';
+  if (metadata.freshness === 'partial' || metadata.truncated === true) return 'partial';
+  if (metadata.needsReconcile === true) return 'stale';
+  if (verifiedGeneration > 0) return 'current';
   return 'cached-unverified';
 }
 

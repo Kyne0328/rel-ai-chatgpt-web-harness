@@ -34,7 +34,7 @@ async function ensureRepositoryIndex(workspace, config = {}, options = {}) {
   const now = Date.now();
   const fallbackReconcileDue = !state.watcher && now - state.lastFullScanAt >= FALLBACK_RECONCILE_INTERVAL_MS;
   const zoektOnly = normalizeMode(options.mode) === 'zoekt';
-  if (state.metadata && !state.dirty && !fallbackReconcileDue && options.force !== true && !zoektOnly) {
+  if (state.metadata && !state.dirty && !state.metadata.needsReconcile && !fallbackReconcileDue && options.force !== true && !zoektOnly) {
     return decorateMetadata(state, { ...state.metadata, cacheHit: true, checkedAt: new Date().toISOString() });
   }
 
@@ -291,7 +291,11 @@ async function runCoalescedIndexing(workspace, config, databaseFile, state, opti
       const changedDuringBuild = state.changeRevision !== revisionAtStart;
       const needsReconcile = metadata?.needsReconcile === true;
       if (needsReconcile) state.fullScanRequired = true;
-      state.dirty = changedDuringBuild || needsReconcile;
+      // Coverage limits do not imply concurrent source changes. Keep bounded
+      // snapshots queryable, but still reconcile them when the scan budget grows.
+      const partialCoverageOnly = metadata?.truncated === true
+        && metadata?.freshness === 'partial' && metadata?.sourceReadFailureCount === 0;
+      state.dirty = changedDuringBuild || (needsReconcile && !partialCoverageOnly);
       if (!changedDuringBuild) break;
       mode = 'refresh';
     }
@@ -530,7 +534,11 @@ function ensureWorkspaceWatcher(workspace, config, state) {
       }
       state.changeRevision += 1;
       state.dirty = true;
-      if (!normalized || eventType === 'rename' || isCollectionPolicyPath(normalized)) {
+      // A rename event also describes an ordinary atomic file save. Let the
+      // worker's canonical observer distinguish files from directories/missing
+      // indexed descendants and promote ambiguous transitions to a full scan.
+      if (!normalized || !['change', 'rename'].includes(eventType) || isCollectionPolicyPath(normalized)
+          || (eventType === 'rename' && watchPathIsDirectory(root, normalized))) {
         clearPendingRefreshPaths(state);
         state.fullScanRequired = true;
         return;

@@ -68,6 +68,8 @@ export function createActivityRoute(useDashboardSlices) {
 function ActivityView({ data = {} }) {
   const initialRoute = useMemo(readRouteState, []);
   const [filterState, setFilterState] = useState(initialRoute.filters);
+  const [searchDraft, setSearchDraft] = useState(initialRoute.filters.search);
+  const searchDraftRef = useRef(initialRoute.filters.search);
   const [requestedEventId, setRequestedEventId] = useState(initialRoute.eventId);
   const [allEntries, setAllEntries] = useState(() => replaceActivityHistory(data.auditTail?.entries || []));
   const [paused, setPaused] = useState(false);
@@ -350,6 +352,9 @@ function ActivityView({ data = {} }) {
     };
     const onHashChange = () => {
       const route = readRouteState();
+      window.clearTimeout(searchTimerRef.current);
+      searchDraftRef.current = route.filters.search;
+      setSearchDraft(route.filters.search);
       setFilterState(route.filters);
       setRequestedEventId(route.eventId);
       if (route.eventId) setSelectedEventId(route.eventId);
@@ -406,9 +411,10 @@ function ActivityView({ data = {} }) {
   }, []);
 
   const applyFilters = useCallback(draft => {
+    window.clearTimeout(searchTimerRef.current);
     setFilterState(current => {
       const transition = activityFilterTransition(current, draft);
-      const next = transition.filterState;
+      const next = { ...transition.filterState, search: searchDraftRef.current };
       if (transition.workspaceChanged) navigate('activity', activityRouteParams(next));
       else syncRoute(next);
       return next;
@@ -417,8 +423,13 @@ function ActivityView({ data = {} }) {
   }, [resetListScroll, syncRoute]);
 
   const removeFilter = useCallback(key => {
+    window.clearTimeout(searchTimerRef.current);
+    if (key === 'search') {
+      searchDraftRef.current = '';
+      setSearchDraft('');
+    }
     setFilterState(current => {
-      const next = { ...current };
+      const next = { ...current, search: searchDraftRef.current };
       if (key === 'timeRange') next.timeRange = '1h';
       else next[key] = '';
       if (key === 'workspace') navigate('activity', activityRouteParams(next));
@@ -429,6 +440,9 @@ function ActivityView({ data = {} }) {
   }, [resetListScroll, syncRoute]);
 
   const clearFilters = useCallback(() => {
+    window.clearTimeout(searchTimerRef.current);
+    searchDraftRef.current = '';
+    setSearchDraft('');
     setFilterState(current => {
       const next = { ...EMPTY_FILTERS };
       if (current.workspace) navigate('activity', activityRouteParams(next));
@@ -439,6 +453,8 @@ function ActivityView({ data = {} }) {
   }, [resetListScroll, syncRoute]);
 
   const onSearch = useCallback(value => {
+    searchDraftRef.current = value;
+    setSearchDraft(value);
     window.clearTimeout(searchTimerRef.current);
     searchTimerRef.current = window.setTimeout(() => {
       setFilterState(current => {
@@ -519,6 +535,7 @@ function ActivityView({ data = {} }) {
     h('div', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, liveAnnouncement),
     h(ActivityFilterBar, {
       filterState,
+      searchDraft,
       filters: activeFilters,
       summary,
       paused,
@@ -604,6 +621,7 @@ function ActivityView({ data = {} }) {
 
 const ActivityFilterBar = memo(function ActivityFilterBar({
   filterState,
+  searchDraft,
   filters,
   summary,
   paused,
@@ -622,9 +640,9 @@ const ActivityFilterBar = memo(function ActivityFilterBar({
             type: 'search',
             className: 'filter-search-input',
             placeholder: 'Search activity',
-            defaultValue: filterState.search,
+            value: searchDraft,
             autoComplete: 'off',
-            onInput: event => onSearch(event.currentTarget.value)
+            onChange: event => onSearch(event.currentTarget.value)
           })
         ),
         h('button', {
@@ -655,7 +673,7 @@ const ActivityFilterBar = memo(function ActivityFilterBar({
         }, h('span', null, `${filter.label}: ${filter.value}`), h(Icon, { name: 'close', size: 12 })))
       ) : null,
       h('span', { className: 'filter-summary sr-only', role: 'status', 'aria-live': 'polite' }, summary),
-      hasActiveFilters(filterState) ? h('div', { className: 'filter-bar-footer activity-filter-footer' },
+      hasActiveFilters(filterState) || searchDraft ? h('div', { className: 'filter-bar-footer activity-filter-footer' },
         h('button', {
           type: 'button',
           className: 'secondary filter-clear-button',

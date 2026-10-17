@@ -1205,6 +1205,7 @@ async function case_extension_source_cache_unit() {
     const context = {
       React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
       useState: initial => [stateIndex++ === 0 ? 'sources' : stateIndex === 2 ? before : initial, () => {}],
+      useRef: initial => ({ current: initial }),
       useMemo: compute => compute(),
       useEffect: () => {},
       fetchJson,

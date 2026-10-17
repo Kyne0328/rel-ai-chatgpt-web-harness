@@ -1138,13 +1138,21 @@ async function case_validation_plan_unit() {
     const loaded = readValidationPlan(config, plan.planId, workspace);
     assert.equal(loaded.signature, plan.signature);
   
+    const beforeAmbientChange = await relaiVerify(workspace, config, { planId: plan.planId, planLevel: 'quick' });
+    assert.equal(beforeAmbientChange.ok, true, 'writing runtime-owned plan state must not invalidate its input fingerprint');
     fs.writeFileSync(path.join(root, 'ambient', 'file-0.txt'), 'external change\n');
-    const afterUnrelatedChange = await relaiVerify(workspace, config, { planId: plan.planId, planLevel: 'quick' });
-    assert.equal(afterUnrelatedChange.ok, true, 'unrelated workspace changes must not stale a task-scoped validation plan');
+    await assert.rejects(() => relaiVerify(workspace, config, { planId: plan.planId, planLevel: 'quick' }),
+      /stale because relevant workspace content changed/i, 'unowned inputs must invalidate evidence without changing focused check selection');
+    const refreshedPlan = await createValidationPlan(workspace, config, { changedFiles: ['src/app.js'] });
+    assert.deepEqual(refreshedPlan.checks.quick, plan.checks.quick);
+    assert.deepEqual(refreshedPlan.changedFiles, ['src/app.js']);
+    const afterRefresh = await relaiVerify(workspace, config, { planId: refreshedPlan.planId, planLevel: 'quick' });
+    assert.equal(afterRefresh.ok, true);
+    assert.equal(afterRefresh.validationStatus, 'passed');
   
     fs.writeFileSync(path.join(root, 'src', 'app.js'), 'module.exports = () => 3;\n');
     await assert.rejects(
-      () => relaiVerify(workspace, config, { planId: plan.planId, planLevel: 'quick' }),
+      () => relaiVerify(workspace, config, { planId: refreshedPlan.planId, planLevel: 'quick' }),
       /stale because relevant workspace content changed/i
     );
   

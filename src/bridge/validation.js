@@ -287,7 +287,6 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
   });
   const execution = await runPlan(sequence(planStages, { stopOnFailure }), { signal });
   recordExecutionPlanMetrics('validation', execution.metrics);
-  if (currentTaskId) recordWorkflowEvidenceBatch(config, currentTaskId, evidenceReceipts.filter(Boolean), { defer: true });
   const results = visibleResults();
   const reusedChecks = reusedCheckIds.filter(Boolean);
 
@@ -307,6 +306,9 @@ async function relaiVerify(workspace, config, args = {}, context = {}) {
     });
   }
   const ok = !interrupted && !timedOut && !cancelled && !scopeChanged && results.length === checks.length && results.every(item => item.ok);
+  if (currentTaskId && !scopeChanged && !interrupted && !timedOut && !cancelled) {
+    recordWorkflowEvidenceBatch(config, currentTaskId, evidenceReceipts.filter(Boolean), { defer: true });
+  }
   const unconfirmedTermination = results.some(item => item.terminationConfirmed === false || item.terminationConfirmed === null);
   const failedCheck = results.find(item => !item.ok)?.command || '';
   const validationStatus = cancelled ? 'cancelled' : scopeChanged ? 'stale' : ok ? 'passed' : 'failed';

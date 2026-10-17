@@ -77,6 +77,41 @@ try {
     workspace: 'repo',
     bootstrap: 'none'
   }, { publicHttpOnly: true, requestId: 1, transportType: 'test' });
+  const freshnessPath = path.join(wsRoot, 'freshness.txt');
+  const readFreshness = async () => (await callTool('relai_read', {
+    work_id: task.work_id, paths: ['freshness.txt'], guidanceMode: 'none'
+  }, { publicHttpOnly: true, transportType: 'test' })).items[0];
+  fs.writeFileSync(freshnessPath, 'old');
+  const fixedMtime = new Date('2020-01-01T00:00:00Z');
+  fs.utimesSync(freshnessPath, fixedMtime, fixedMtime);
+  assert.equal((await readFreshness()).content, 'old');
+  for (const content of ['new content with a different length', 'NEW CONTENT WITH A DIFFERENT LENGTH']) {
+    const replacement = path.join(wsRoot, 'freshness-next.txt');
+    fs.writeFileSync(replacement, content);
+    fs.utimesSync(replacement, fixedMtime, fixedMtime);
+    fs.renameSync(replacement, freshnessPath);
+    const item = await readFreshness();
+    assert.equal(item.content, content);
+    assert.equal(item.bytes, Buffer.byteLength(content));
+    assert.equal(item.sha256, crypto.createHash('sha256').update(content).digest('hex'));
+  }
+  sessionCache.invalidatePath('repo', freshnessPath);
+  const originalReadFile = fs.promises.readFile;
+  let race = true;
+  fs.promises.readFile = async function(file, ...args) {
+    if (file === freshnessPath && race) {
+      race = false;
+      fs.writeFileSync(freshnessPath, 'changed during read');
+    }
+    return originalReadFile.call(this, file, ...args);
+  };
+  try {
+    const item = await readFreshness();
+    assert.equal(item.content, 'changed during read');
+    assert.equal(item.bytes, Buffer.byteLength(item.content));
+    assert.equal(item.sha256, crypto.createHash('sha256').update(item.content).digest('hex'));
+  } finally { fs.promises.readFile = originalReadFile; }
+
   const tasklessRead = await callTool('relai_read', {
     workspace: 'repo',
     paths: ['large-lines.txt'],
@@ -209,6 +244,21 @@ try {
   assert.equal(sessionCache.cacheStats().metadataEntries, metadataEntriesAfterFirstRange, 'later bounded ranges should reuse the existing metadata cache entry');
   assert.equal(cachedRange.items[0].sha256, rangedItem.sha256);
   assert.deepEqual(cachedRange.items[0].lineRange, { startLine: 7000, endLine: 7001, totalLines: largeLines.length });
+
+  const largePath = path.join(wsRoot, 'large-lines.txt');
+  const largeStat = fs.statSync(largePath);
+  const replacementLargeText = largeText.replaceAll('line-', 'LINE-');
+  const replacementLargePath = path.join(wsRoot, 'large-lines-next.txt');
+  fs.writeFileSync(replacementLargePath, replacementLargeText);
+  fs.utimesSync(replacementLargePath, largeStat.atime, largeStat.mtime);
+  fs.renameSync(replacementLargePath, largePath);
+  const freshRange = await callTool('relai_read', {
+    work_id: task.work_id, paths: ['large-lines.txt'], startLine: 7000, endLine: 7001,
+    maxBytes: 16 * 1024, guidanceMode: 'none'
+  }, { publicHttpOnly: true, transportType: 'test' });
+  assert.match(freshRange.items[0].content, /^LINE-07000/);
+  assert.equal(freshRange.items[0].sha256, crypto.createHash('sha256').update(replacementLargeText).digest('hex'));
+  assert.equal(freshRange.items[0].bytes, Buffer.byteLength(replacementLargeText));
 
   const aggregate = await callTool('relai_read', {
     work_id: task.work_id,

@@ -7,6 +7,8 @@ import path from 'node:path';
 import { flushAuditWrites } from '../src/audit.js';
 import { callTool as rawCallTool } from '../src/tools.js';
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
+import { readConfig } from '../src/config.js';
+import { readRecentWorkflowEvidence, flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
 import { resetToolActivity } from '../src/toolActivity.js';
 
 const callTool = (name, args, context = {}) => rawCallTool(name, args, { principal: 'local:trusted', ...context });
@@ -228,6 +230,54 @@ try {
   assert.equal(scopedCompletion.work_id, undefined, 'task-scoped validation keeps attribution internally without echoing work_id');
   assert.equal(unrelatedEditCompleted, true);
 
+  // A check can consume a dependency the validating task never edited. Hold
+  // it after the read, mutate that input, and release it without timing guesses.
+  const dependencyPath = path.join(workspacePath, 'src', 'dependency.txt');
+  const runsPath = path.join(root, 'dependency-runs');
+  fs.writeFileSync(path.join(workspacePath, 'dependency-gate.mjs'), `
+import fs from 'node:fs';
+const valid = fs.readFileSync('src/dependency.txt', 'utf8') === 'good';
+const started = ${JSON.stringify(validationStartedPath)};
+const release = ${JSON.stringify(validationReleasePath)};
+fs.appendFileSync(${JSON.stringify(runsPath)}, 'run\\n');
+fs.writeFileSync(started, 'ready');
+const timeout = setTimeout(() => { clearInterval(poll); process.exit(2); }, 10_000);
+const poll = setInterval(() => {
+  if (!fs.existsSync(release)) return;
+  clearTimeout(timeout);
+  clearInterval(poll);
+  process.exit(valid ? 0 : 1);
+}, 25);
+`);
+  fs.writeFileSync(path.join(workspacePath, 'package.json'), JSON.stringify({ type: 'module', scripts: { check: 'node dependency-gate.mjs' } }));
+  for (const planned of [false, true]) {
+    fs.writeFileSync(dependencyPath, 'good');
+    fs.writeFileSync(runsPath, '');
+    fs.rmSync(validationStartedPath, { force: true });
+    fs.rmSync(validationReleasePath, { force: true });
+    const dependencyTask = await startTask(`Dependency freshness ${planned ? 'planned' : 'explicit'}`);
+    await callTool('relai_edit', { workspace: 'app', work_id: dependencyTask,
+      path: 'src/owned-input.js', content: `export const planned = ${planned};\n` }, context);
+    const started = waitForFile(validationStartedPath);
+    const pending = callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: dependencyTask,
+      ...(planned ? {} : { checks: ['node dependency-gate.mjs'] }), complete: planned,
+      summary: 'Do not certify inputs changed during validation.' }, context);
+    await started;
+    fs.writeFileSync(dependencyPath, 'bad');
+    fs.writeFileSync(validationReleasePath, 'release');
+    const result = await pending;
+    assert.equal(result.ok, false, 'a consumed dependency outside task ownership must invalidate the apparent pass');
+    assert.equal(result.completionKnown === true, false, 'stale or failed checks must not atomically close the task');
+    assert.equal(result.validationStatus, planned ? 'failed' : 'stale');
+    assert.equal(fs.readFileSync(runsPath, 'utf8').trim().split('\n').length, planned ? 2 : 1,
+      'atomic completion retries the changed inputs once; ordinary validation reports stale immediately');
+    await flushTaskHistoryPersistence();
+    assert.equal(readRecentWorkflowEvidence(readConfig(), dependencyTask, 100).some(item => item.outcome === 'passed'), false,
+      'an in-flight stale pass must not produce reusable evidence');
+    await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: dependencyTask,
+      reason: 'Dependency freshness fixture completed.' }, context);
+  }
+
   await callTool('relai_work', {
     action: 'cancel',
     workspace: 'app',
@@ -243,7 +293,7 @@ try {
   removeTempRootAfterHandlesClose();
 }
 
-console.log('Atomic validation resolves relevant races internally and ignores unrelated concurrent task changes.');
+console.log('Atomic validation preserves concurrent edits and rejects stale out-of-owner dependency evidence.');
 // Nested raw tool calls can leave Windows piped stdio referenced after app resources close.
 // Teardown above is complete, so exit explicitly to keep this isolated integration test deterministic.
 process.exit(0);

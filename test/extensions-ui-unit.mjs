@@ -206,4 +206,132 @@ const loading = render(context.components.ExtensionsLoadingSkeleton);
 assert.equal(loading.props.role, 'status');
 assert.equal(loading.props['aria-label'], 'Loading extensions');
 
+
+// 8. Only the current consumer/request owns catalog publication; mutations retain
+// their synchronous lock until the authoritative post-mutation reload settles.
+{
+  const pending = [];
+  const posts = [];
+  const effects = [];
+  let mounted = false;
+  context.useEffect = effect => { if (!mounted) effects.push(effect); };
+  context.fetchJson = url => new Promise((resolve, reject) => pending.push({ url, resolve, reject }));
+  context.postJson = async (_url, body) => { posts.push(body); return { ok: true, extension: { ready: true } }; };
+  context.confirmAction = async () => true;
+  context.invalidateCache = () => {};
+  context.toast = () => {};
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const snapshot = version => ({ ok: true, installed: [], catalog: [{ id: 'fixture', version }], sources: [] });
+  const panel = () => flatten(route()).find(node => node.type?.name === 'InstalledPanel');
+  const refresh = () => button(route(), 'Refresh catalog').props.onClick();
+  const mount = () => {
+    slots = []; mounted = false; effects.length = 0;
+    route(); mounted = true;
+    return effects[0]();
+  };
+
+  let unmount = mount();
+  assert.equal(pending.length, 1);
+  refresh();
+  assert.equal(pending.length, 2, 'explicit refresh may supersede a pending initial catalog request');
+  pending[1].resolve(snapshot('new'));
+  await flush();
+  pending[0].resolve(snapshot('old'));
+  await flush();
+  assert.equal(panel().props.data.catalog[0].version, 'new', 'late initial data cannot replace refreshed data');
+  pending.length = 0;
+  unmount();
+
+  unmount = mount();
+  refresh();
+  pending[1].resolve(snapshot('success'));
+  await flush();
+  pending[0].reject(new Error('retired request failure'));
+  await flush();
+  assert.equal(panel().props.data.catalog[0].version, 'success');
+  assert.equal(flatten(route()).some(node => node.props.role === 'alert'), false, 'a retired rejection cannot publish an error');
+  pending.length = 0;
+  const firstRefresh = button(route(), 'Refresh catalog').props.onClick;
+  firstRefresh();
+  firstRefresh();
+  assert.equal(pending.length, 1, 'rapid repeated refresh dispatches share a synchronous operation lock');
+  pending.shift().resolve(snapshot('rapid'));
+  await flush();
+
+  const entry = { id: 'fixture', name: 'Fixture', version: '2', sourceId: 'source', reviewFingerprint: 'review', permissions: [] };
+  const install = panel().props.runInstall(entry);
+  await flush();
+  assert.equal(posts.length, 1);
+  assert.equal(pending.length, 1, 'install success starts an authoritative reload');
+  assert.equal(button(route(), 'Refresh catalog').props.disabled, true, 'mutation remains busy through reload');
+  await panel().props.runRemove(entry);
+  refresh();
+  assert.equal(posts.length, 1, 'a second mutation cannot start during post-mutation reload');
+  assert.equal(pending.length, 1);
+  pending.shift().resolve(snapshot('installed'));
+  await install;
+  assert.equal(button(route(), 'Refresh catalog').props.disabled, false);
+
+  refresh();
+  const departed = pending.shift();
+  unmount();
+  unmount = mount();
+  pending.shift().resolve(snapshot('remounted'));
+  await flush();
+  departed.resolve(snapshot('departed'));
+  await flush();
+  assert.equal(panel().props.data.catalog[0].version, 'remounted', 'a departed consumer cannot replace a remount');
+  unmount();
+}
+
+// 9. The shared fetch cache must retire the superseded request too, so a
+// remount cannot resurrect data that the current route correctly ignored.
+{
+  const pending = [];
+  const effects = [];
+  let mounted = false;
+  const apiContext = {
+    AbortController, setTimeout, clearTimeout,
+    fetch: url => new Promise(resolve => pending.push({
+      url,
+      resolve: data => resolve({ ok: true, status: 200, text: async () => JSON.stringify(data) })
+    }))
+  };
+  vm.runInNewContext(
+    fs.readFileSync(path.join(root, 'src/ui/api.js'), 'utf8').replace(/^export /gm, '')
+      + '\nglobalThis.api = { fetchJson, invalidateCache };',
+    apiContext
+  );
+  context.fetchJson = apiContext.api.fetchJson;
+  context.invalidateCache = apiContext.api.invalidateCache;
+  context.useEffect = effect => { if (!mounted) effects.push(effect); };
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const snapshot = version => ({ ok: true, installed: [], catalog: [{ id: 'fixture', version }], sources: [] });
+  const panel = () => flatten(route()).find(node => node.type?.name === 'InstalledPanel');
+  const mount = () => {
+    slots = []; mounted = false; effects.length = 0;
+    route(); mounted = true;
+    return effects[0]();
+  };
+
+  let unmount = mount();
+  assert.equal(pending.length, 1);
+  button(route(), 'Refresh catalog').props.onClick();
+  assert.equal(pending.length, 2);
+  pending[1].resolve(snapshot('refreshed'));
+  await flush();
+  pending[0].resolve(snapshot('superseded'));
+  await flush();
+  assert.equal(panel().props.data.catalog[0].version, 'refreshed');
+  unmount();
+
+  unmount = mount();
+  assert.equal(pending.length, 3, 'remount fetches again instead of reusing a superseded response from the shared cache');
+  pending[2].resolve(snapshot('current'));
+  await flush();
+  assert.equal(panel().props.data.catalog[0].version, 'current');
+  unmount();
+  context.invalidateCache('/api/extensions');
+}
+
 console.log('Extensions UI and design intelligence unit tests passed.');

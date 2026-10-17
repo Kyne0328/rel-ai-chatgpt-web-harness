@@ -2613,21 +2613,67 @@ async function cleanupTaskManagedProcesses(
   return result;
 }
 
-async function stopAllManagedProcesses(config: ManagedProcessConfig): Promise<{ stopped: number; attempted: number; orphaned: number }> {
+interface ManagedProcessShutdownResult {
+  stopped: number;
+  attempted: number;
+  orphaned: number;
+  unresolved: number;
+  rejected: number;
+  complete: boolean;
+  leftovers: { processId: string; status: string; reason: string }[];
+}
+
+async function stopAllManagedProcesses(config: ManagedProcessConfig): Promise<ManagedProcessShutdownResult> {
   hydrateProcessMetadata(config);
-  await Promise.all([...processes.values()]
-    .filter(record => record.status === 'orphaned' && record.runtimeId !== RUNTIME_ID)
-    .map(record => verifyRestoredProcessIdentity(config, record).catch(() => 'unverified')));
-  const active = [...processes.values()].filter(processNeedsTermination);
-  const results = await Promise.all(active.map(item => stopManagedProcess(config, {
-    processId: item.processId,
-    graceMs: 1000
-  }, { internal: true }).catch(() => null)));
-  await Promise.all([...processes.values()].map(item => flushManagedProcessPersistence(config, item)));
+  const root = processRoot(config);
+  // The registry may also hold records belonging to another isolated runtime.
+  const records = [...processes.values()].filter(record =>
+    path.dirname(path.dirname(record.stdoutPath)) === root);
+  const outcomes = await Promise.all(records.map(async record => {
+    const attempted = !(TERMINAL_STATUSES.has(record.status) && record.terminationConfirmed === true);
+    const errors: string[] = [];
+    let rejected = false;
+    if (attempted) {
+      try {
+        // Keep identity verification inside the stop path. An unverified record
+        // must be reported as unresolved, never omitted or signalled blindly.
+        await stopManagedProcess(config, { processId: record.processId, graceMs: 1000 }, { internal: true });
+      } catch (error) {
+        rejected = true;
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    try {
+      await flushManagedProcessPersistence(config, record);
+    } catch (error) {
+      errors.push(`Persistence: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // Persistence failures are retained on the record; its queue deliberately
+    // consumes write rejections so a fulfilled flush alone is not success.
+    if (record.persistenceFailureHandled) {
+      errors.push(record.error || 'Managed process persistence remains incomplete.');
+    }
+    const terminated = TERMINAL_STATUSES.has(record.status) && record.terminationConfirmed === true;
+    if (!terminated && errors.length === 0) {
+      errors.push(record.terminationError || record.error || 'Managed process termination remains unconfirmed.');
+    }
+    return {
+      attempted, rejected, stopped: attempted && terminated,
+      leftover: errors.length > 0
+        ? { processId: record.processId, status: record.status, reason: errors.join('; ') }
+        : null
+    };
+  }));
+  const leftovers = outcomes.flatMap(outcome => outcome.leftover ? [outcome.leftover] : [])
+    .sort((left, right) => left.processId.localeCompare(right.processId));
   return {
-    stopped: results.filter(item => item && TERMINAL_STATUSES.has(item.status)).length,
-    attempted: active.length,
-    orphaned: results.filter(item => item?.status === 'orphaned').length
+    stopped: outcomes.filter(outcome => outcome.stopped).length,
+    attempted: outcomes.filter(outcome => outcome.attempted).length,
+    orphaned: leftovers.filter(record => record.status === 'orphaned').length,
+    unresolved: leftovers.length,
+    rejected: outcomes.filter(outcome => outcome.rejected).length,
+    complete: leftovers.length === 0,
+    leftovers
   };
 }
 

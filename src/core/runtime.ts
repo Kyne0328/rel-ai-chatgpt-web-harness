@@ -119,7 +119,7 @@ async function shutdownCoreRuntime(
 
     const managedProcessesPromise = options.stopManagedProcessesOnShutdown
       ? processManagerModule.stopAllManagedProcesses(config)
-      : Promise.resolve({ attempted: 0, stopped: 0, orphaned: 0, skipped: true });
+      : Promise.resolve({ attempted: 0, stopped: 0, orphaned: 0, unresolved: 0, complete: true, skipped: true });
     const repositoryIntelligencePromise = repositoryIntelligenceModule.repositoryIntelligence.shutdown()
       .then(() => ({ closed: true }));
     // Stop producers first: process/browser shutdown may enqueue final audit and
@@ -186,7 +186,9 @@ async function shutdownCoreRuntime(
     if (maintenance[1]?.status === 'rejected') errors.push({ step: 'knowledgeMaintenance', error: errorMessage(maintenance[1].reason) });
 
     return {
-      clean: errors.length === 0 && Number(managedProcesses.orphaned || 0) === 0 && repositoryIntelligence.closed !== false,
+      clean: errors.length === 0 && managedProcesses.complete === true
+        && Number(managedProcesses.unresolved || 0) === 0
+        && Number(managedProcesses.orphaned || 0) === 0 && repositoryIntelligence.closed !== false,
       fallbackResults,
       managedProcesses,
       repositoryIntelligence,
@@ -205,7 +207,7 @@ async function shutdownCoreRuntime(
 function emptyShutdownResult(reason: string): CoreShutdownResult {
   return {
     clean: true,
-    managedProcesses: { attempted: 0, stopped: 0, orphaned: 0, skipped: true },
+    managedProcesses: { attempted: 0, stopped: 0, orphaned: 0, unresolved: 0, complete: true, skipped: true },
     repositoryIntelligence: { closed: true, skipped: true },
     errors: [],
     reason

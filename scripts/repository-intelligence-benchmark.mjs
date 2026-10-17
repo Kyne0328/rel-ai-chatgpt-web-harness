@@ -4,6 +4,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { repositoryIntelligence } from '../src/repository/intelligence/service.js';
+import { writeTextFileSafe } from '../src/safety.js';
 
 const fileCount = integerArg('--files', 100000, 1, 500000);
 const mutationCount = Math.min(fileCount, integerArg('--mutations', 100, 1, 10000));
@@ -17,6 +18,7 @@ const maxIncrementalMs = optionalPositiveNumberArg('--max-incremental-ms');
 const maxRestartReuseMs = optionalPositiveNumberArg('--max-restart-reuse-ms');
 const maxPeakRssGrowthMb = optionalPositiveNumberArg('--max-peak-rss-growth-mb');
 const json = process.argv.includes('--json');
+const nativeWatcher = process.argv.includes('--watcher');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-repository-index-benchmark-'));
 const workspaceRoot = path.join(root, 'workspace');
 const stateDir = path.join(root, 'state');
@@ -28,15 +30,24 @@ try {
   const before = process.memoryUsage().rss;
   const fullStarted = performance.now();
   const fullMeasurement = await measurePeakRss(() => repositoryIntelligence.ensure(
-    workspace, config, { force: true, watch: false, maxFiles: scanFileLimit }
+    workspace, config, { force: true, watch: nativeWatcher, maxFiles: scanFileLimit }
   ));
   const full = fullMeasurement.value;
   const fullBuildMs = performance.now() - fullStarted;
   const afterFull = process.memoryUsage().rss;
 
-  const changedPaths = mutateFixture(workspaceRoot, mutationCount);
-  repositoryIntelligence.noteMutation(workspace, config, changedPaths);
+  if (nativeWatcher && !repositoryIntelligence.status(workspace, config).watching) {
+    throw new Error('Native watcher benchmark requires an active watcher.');
+  }
   const incrementalStarted = performance.now();
+  const changedPaths = mutateFixture(workspaceRoot, mutationCount);
+  if (nativeWatcher) {
+    const deadline = performance.now() + 5000;
+    while (!repositoryIntelligence.status(workspace, config).dirty) {
+      if (performance.now() >= deadline) throw new Error('Native watcher did not observe the safe-writer mutation.');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  } else repositoryIntelligence.noteMutation(workspace, config, changedPaths);
   const incrementalMeasurement = await measurePeakRss(() => repositoryIntelligence.ensure(
     workspace, config, { watch: false, maxFiles: scanFileLimit }
   ));
@@ -83,7 +94,9 @@ try {
     peakIncrementalRssBytes: incrementalMeasurement.peakRssBytes,
     peakIncrementalRssGrowthBytes: Math.max(0, incrementalMeasurement.peakRssBytes - afterFull),
     workerIsolated: full.workerIsolated === true && incremental.workerIsolated === true,
-    watcherDisabled: true,
+    watcherDisabled: !nativeWatcher,
+    mutationPath: nativeWatcher ? 'native-watcher-safe-writer' : 'explicit-engine-notification',
+    ...(nativeWatcher ? { watcherAtomicRefreshMs: rounded(incrementalRefreshMs) } : {}),
     fullScanMode: full.scanMode,
     incrementalScanMode: incremental.scanMode,
     restartCacheHit: restarted.cacheHit === true,
@@ -110,7 +123,7 @@ try {
     console.log(`  Incremental refresh: ${report.incrementalRefreshMs} ms for ${mutationCount} files (${report.incrementalFilesPerSecond} files/s)`);
     console.log(`  Restart reuse:       ${report.restartReuseMs} ms (cache hit=${report.restartCacheHit})`);
     console.log(`  Worker isolated:     ${report.workerIsolated}`);
-    console.log('  Watcher:             disabled (engine benchmark)');
+    console.log(`  Watcher:             ${nativeWatcher ? 'active (safe-writer benchmark)' : 'disabled (engine benchmark)'}`);
     if (maxFullMs != null) console.log(`  Full-build budget:   ${maxFullMs} ms (${fullBuildMs <= maxFullMs ? 'pass' : 'fail'})`);
     if (maxIncrementalMs != null) console.log(`  Incremental budget:  ${maxIncrementalMs} ms (${incrementalRefreshMs <= maxIncrementalMs ? 'pass' : 'fail'})`);
     if (maxRestartReuseMs != null) console.log(`  Restart-reuse budget:${maxRestartReuseMs} ms (${restartReuseMs <= maxRestartReuseMs ? 'pass' : 'fail'})`);
@@ -146,7 +159,8 @@ function mutateFixture(workspaceRoot, count) {
   const changed = [];
   for (let index = 0; index < count; index += 1) {
     const relativePath = fixturePath(index);
-    fs.writeFileSync(path.join(workspaceRoot, ...relativePath.split('/')), fixtureSource(index, 2), 'utf8');
+    if (nativeWatcher) writeTextFileSafe(workspaceRoot, relativePath, fixtureSource(index, 2));
+    else fs.writeFileSync(path.join(workspaceRoot, ...relativePath.split('/')), fixtureSource(index, 2), 'utf8');
     changed.push(relativePath);
   }
   return changed;

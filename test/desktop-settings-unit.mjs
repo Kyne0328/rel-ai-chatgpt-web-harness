@@ -106,6 +106,37 @@ try {
     /active Rel\.AI task/
   );
   await assert.rejects(() => saveDesktopSettings({}, { setTunnelApiKey() {} }), /restartDesktop is required/);
+
+  for (const change of [
+    { tunnelId: 'tunnel_localreplacement123', tunnelApiKey: 'sk-runtime-new-local-123456' },
+    { port: 4445 },
+  ]) {
+    saveLauncherConfig({ port: 3333, token: 'local-only-token', tunnelId: '' }, { allowLocalOnly: true });
+    storedApiKey = '';
+    let attempts = 0;
+    await assert.rejects(() => saveDesktopSettings(change, {
+      ...runtimeActions,
+      restartDesktop: async () => ++attempts === 1 ? { serverRunning: false, error: 'fixture restart failed' } : { serverRunning: true }
+    }), /fixture restart failed.*Previous connection settings were restored/);
+    assert.deepEqual(readGuiConfig(), { port: 3333, token: 'local-only-token', tunnelId: '' });
+    assert.equal(storedApiKey, '', 'rollback restores the absent local-only credential');
+    assert.equal(readDesktopSettings({ tunnelApiKeyConfigured: Boolean(storedApiKey) }).tunnelApiKeyConfigured, false);
+    const { readLaunchEnv } = await import('../src/connectionProfile.js');
+    assert.equal(readLaunchEnv().REL_AI_MCP_LOCAL_ONLY, '1');
+    assert.equal(attempts, 2);
+  }
+  await assert.rejects(() => saveDesktopSettings({ port: 4445 }, {
+    ...runtimeActions, restartDesktop: async () => ({ serverRunning: false, error: 'fixture remains offline' })
+  }), /could not fully restore/);
+  let unsafeRollbackStarts = 0;
+  await assert.rejects(() => saveDesktopSettings({ tunnelApiKey: 'sk-runtime-new-local-123456' }, {
+    ...runtimeActions,
+    clearTunnelApiKey: () => { throw new Error('fixture credential restoration failed'); },
+    restartDesktop: async () => { unsafeRollbackStarts += 1; return { serverRunning: false, error: 'fixture offline' }; }
+  }), /could not fully restore/);
+  assert.equal(unsafeRollbackStarts, 1, 'failed credential restoration must not reconnect inconsistent settings');
+  assert.deepEqual(readGuiConfig(), { port: 3333, token: 'local-only-token', tunnelId: '' });
+
 } finally {
   if (previousStateDir === undefined) delete process.env.REL_AI_MCP_STATE_DIR;
   else process.env.REL_AI_MCP_STATE_DIR = previousStateDir;

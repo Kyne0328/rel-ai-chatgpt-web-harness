@@ -329,12 +329,20 @@ async function runPostActions(workspace: PlannerWorkspace, config: PlannerConfig
 
 
 function attachPost(result: PlannerResult, post: PlannerRecord): PlannerResult {
-  if (post.checks) result.checks = post.checks;
+  if (post.checks) {
+    result.checks = post.checks;
+    result.validationStatus = post.checks.validationStatus
+      || (post.checks.cancelled ? 'cancelled' : post.checks.ok === true ? 'passed' : 'failed');
+  }
   if (post.diff) result.diff = post.diff;
   if (post.execution) result.execution = post.execution;
   // A failed post-check makes the whole call not-ok so callers do not treat a
   // broken build as a clean edit.
-  if (post.checks?.ok === false) result.ok = false;
+  if (post.checks?.ok === false) {
+    result.ok = false;
+    result.error ||= post.checks.error || `Post-edit validation ${result.validationStatus}${post.checks.failedCheck ? `: ${post.checks.failedCheck}` : '.'}`;
+    result.next ||= post.checks.nextAction || 'Review the recorded edit effects and validation diagnostics before retrying.';
+  }
   return result;
 }
 

@@ -75,6 +75,7 @@ try {
   assert.equal(result.activityApplied.freezeExcluded, true);
   assert.equal(result.activityApplied.freezeLabel, 'Freeze live activity');
   assert.equal(result.activityApplied.freezeIconOnly, true);
+  assert.deepEqual(result.activitySearch, { initialCleared: true, pendingCleared: true, inputCleared: true, routeRestored: true, departureRetired: true }, 'Activity input, chips, URL and pending work must agree after clear and navigation');
   assert.match(result.taskChip, /Remove Task filter/);
   assert.deepEqual(result.escapeFocus, { closed: true, focusReturned: true });
   assert.equal(result.mobileDrawer.viewport <= 420, true);
