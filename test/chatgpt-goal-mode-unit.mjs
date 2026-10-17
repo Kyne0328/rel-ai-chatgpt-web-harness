@@ -4,8 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
-import { activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
+import { updateGoal as updateGoalOptions, activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
+import { parseGoalCommand } from '../src/goalCommands.js';
+import { buildGoalEvidence } from '../src/chatgptGoalEvidence.js';
+import { goalMessageExists } from '../src/chatgptConversationReader.js';
+import { normalizeGoalRecord, loadGoal, saveGoal, updateGoal, claimContinuation, recordLoopMilestone } from '../src/chatgptGoalState.js';
 import { withStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { beginConnectorToolCall, getToolActivity, resetToolActivity, runWithToolActivity, requestCurrentTaskCancellation, onToolActivity } from '../src/toolActivity.js';
@@ -108,6 +112,238 @@ test('monitor continues an interrupted turn without pressing Stop again', async 
     await pollGoal(f.config, f.work_id, f.deps);
     assert.equal(f.calls.filter(call => call.action === 'continue').length, 1,
       'the same claimed branch must never receive another send');
+  });
+});
+
+
+test('continuing progress is allowed beyond eight sends and old elapsed-time bounds', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ continuationCount: 8, sentTaskCalls: 0,
+      createdAt: Date.now() - 10 * 3600000,
+      bounds: { maxContinuations: 8, maxDurationMs: 3600000 } });
+    for (let iteration = 0; iteration < 4; iteration++) {
+      const progress = beginConnectorToolCall({ tool: 'relai_read', internalOperation: 'read',
+        taskId: f.work_id, scopeId: 'goal-monitor-fixture' });
+      progress({ ok: true });
+      const node = 'iteration-' + iteration;
+      f.tree.mapping[node] = { parent: 'u', message: { id: node, author: { role: 'assistant' },
+        content: { parts: ['Next actionable step remains.'] }, end_turn: true, status: 'finished_successfully' } };
+      f.tree.current_node = node;
+      f.patchGoal({ observedNode: node, stableSince: Date.now() - 100000 });
+      await pollGoal(f.config, f.work_id, f.deps);
+      assert.equal(f.status().goalActive, true);
+      assert.equal(f.status().continuationCount, 9 + iteration);
+    }
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 4);
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 4);
+    assert.equal(f.status().state, 'stopped', 'removing caps must never silently resume an explicit Stop');
+  });
+});
+
+
+function adaptiveDecision({ goal, evidence }, action = 'continue') {
+  return { action, reason: 'Use the observed task evidence', nextPrompt: action === 'continue'
+    ? 'Inspect the remaining fixture failure and verify the focused repair.' : '',
+  expectedRevision: goal.revision, evidenceFingerprint: evidence.fingerprint, evidenceRefs: [] };
+}
+
+test('Stop during adaptive evaluation aborts the decision before any continuation', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ strategy: 'adaptive', lastCommandId: 'user-1' });
+    const entered = Promise.withResolvers();
+    const release = Promise.withResolvers();
+    let signal;
+    const poll = pollGoal(f.config, f.work_id, { ...f.deps, evaluateGoalDecision: async input => {
+      signal = input.signal; entered.resolve(); await release.promise; return adaptiveDecision(input);
+    } });
+    await entered.promise;
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    assert.equal(signal.aborted, true);
+    release.resolve();
+    await poll;
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
+    assert.equal(f.status().state, 'stopped');
+    assert.equal(f.status().continuationCount, 0);
+  });
+});
+
+test('adaptive decisions cannot apply after the goal revision or conversation branch changes', async t => {
+  for (const change of ['revision', 'branch']) await withMonitoredGoal(t, async f => {
+    f.patchGoal({ strategy: 'adaptive', lastCommandId: 'user-1' });
+    await pollGoal(f.config, f.work_id, { ...f.deps, evaluateGoalDecision: async input => {
+      if (change === 'revision') updateGoal(f.config, f.work_id,
+        current => ({ ...current, objective: 'Newer authorized scope' }));
+      else {
+        f.tree.mapping.newer = { parent: 'a', message: { id: 'newer-user', author: { role: 'user' },
+          content: { parts: ['Wait for my next instruction'] } } };
+        f.tree.current_node = 'newer';
+      }
+      return adaptiveDecision(input);
+    } });
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0, change);
+    assert.equal(f.status().continuationCount, 0);
+    if (change === 'revision') assert.equal(loadGoal(f.config, f.work_id).objective, 'Newer authorized scope');
+  });
+});
+
+test('adaptive achievement claims cannot finish an unsupported Goal or an ongoing Loop', async t => {
+  for (const mode of ['goal', 'loop']) await withMonitoredGoal(t, async f => {
+    f.patchGoal({ mode, strategy: 'adaptive', lastCommandId: 'user-1' });
+    f.tree.mapping.a.message.content.parts = ['Done, everything passed.'];
+    await pollGoal(f.config, f.work_id, { ...f.deps,
+      evaluateGoalDecision: async input => adaptiveDecision(input, 'achieved') });
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
+    assert.notEqual(f.task().status, 'completed');
+    assert.notEqual(f.status().objectiveAchieved, true);
+    assert.equal(f.status().state, mode === 'goal' ? 'needs_user' : 'waiting');
+    assert.equal(f.status().goalActive, mode === 'loop');
+  });
+});
+
+
+test('a supported finite Goal reaches guarded finalization without ending its work session', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ strategy: 'adaptive', lastCommandId: 'user-1' });
+    const read = beginConnectorToolCall({ tool: 'relai_read', internalOperation: 'read',
+      taskId: f.work_id, scopeId: 'goal-monitor-fixture' });
+    read.update({ plan: { revision: 1,
+      steps: [{ id: 'inspect', title: 'Inspect the requested fixture', status: 'completed' }] } });
+    read({ ok: true });
+    await pollGoal(f.config, f.work_id, { ...f.deps, evaluateGoalDecision: async input => {
+      assert.equal(input.evidence.completion.eligible, true);
+      assert.equal(input.evidence.validation.required, false,
+        'read-only work need not invent a code-testing requirement');
+      return adaptiveDecision(input, 'achieved');
+    } });
+    assert.equal(f.status().objectiveAchieved, true);
+    assert.equal(f.status().state, 'needs_finalization');
+    assert.equal(f.status().goalActive, false);
+    assert.notEqual(f.task().status, 'completed', 'the normal guarded finish action still owns task completion');
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
+  });
+});
+
+test('adaptive uncertain sends reconcile the exact persisted prompt without another evaluation or send', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ strategy: 'adaptive', lastCommandId: 'user-1' });
+    let evaluations = 0;
+    let sends = 0;
+    const transport = f.deps.nativeTransport;
+    const deps = { evaluateGoalDecision: async input => { evaluations++; return adaptiveDecision(input); },
+      nativeTransport: async payload => {
+        if (payload.action === 'continue') { sends++; return { ok: false, uncertain: true, stage: 'readback' }; }
+        return transport(payload);
+      } };
+    await pollGoal(f.config, f.work_id, deps);
+    const pending = loadGoal(f.config, f.work_id);
+    assert.equal(pending.pendingOutcome, 'uncertain');
+    assert.match(pending.pendingPrompt, /remaining fixture failure/);
+    assert.equal(pending.continuationCount, 0);
+    f.tree.mapping.accepted = { parent: 'a', message: { id: 'accepted-adaptive-user',
+      author: { role: 'user' }, content: { parts: [pending.pendingPrompt] } } };
+    f.tree.current_node = 'accepted';
+    t.mock.timers.tick(5000);
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().continuationCount, 1);
+    assert.equal(sends, 1);
+    assert.equal(evaluations, 1);
+  });
+});
+
+
+test('a scope update before stalled recovery sends nothing and clears only the proven-unsent claim', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.unfinished();
+    let reads = 0;
+    f.onRead(() => {
+      if (++reads === 2) updateGoalOptions(f.config,
+        { work_id: f.work_id, objective: 'Newer authorized scope' }, f.context);
+    });
+    await pollGoal(f.config, f.work_id, f.deps);
+    const saved = loadGoal(f.config, f.work_id);
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
+    assert.equal(saved.objective, 'Newer authorized scope');
+    assert.equal(saved.pendingNode, '');
+    assert.equal(saved.pendingOutcome, 'not_sent',
+      'a send that never reached transport must not become permanent uncertainty');
+    assert.equal(saved.continuationCount, 0);
+    f.tree.mapping.a.message.status = 'interrupted';
+    await pollGoal(f.config, f.work_id, f.deps);
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 1,
+      'the updated run can continue once the proven-unsent claim is cleared');
+    assert.equal(f.status().continuationCount, 1);
+  });
+});
+
+test('a conversation read cannot apply old-chat controls after another process relinks the goal', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.tree.mapping.u.message.content.parts = ['/goal stop'];
+    let changed = false;
+    f.onRead(() => {
+      if (changed) return;
+      changed = true;
+      updateGoal(f.config, f.work_id, current => ({ ...current, active: false, state: 'stopped' }));
+      updateGoal(f.config, f.work_id, current => ({ ...current, active: true, state: 'monitoring',
+        conversationId: OTHER, objective: 'New conversation objective', lastCommandId: 'new-chat-user' }), { reactivate: true });
+    });
+    await pollGoal(f.config, f.work_id, f.deps);
+    const saved = loadGoal(f.config, f.work_id);
+    assert.equal(saved.conversationId, OTHER);
+    assert.equal(saved.active, true, 'old-chat Stop must not stop the newly linked run');
+    assert.equal(saved.lastCommandId, 'new-chat-user');
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
+  });
+});
+
+
+test('the initiating Loop command overrides a legacy goal flag and a newer Stop still wins', async t => {
+  for (const stopped of [false, true]) await withMonitoredGoal(t, async f => {
+    Object.assign(f.tree, conversationWithReceipt(ID, f.work_id, '/loop Review only the fixture queue'));
+    f.tree.mapping.receipt.message.content = { workIds: [f.work_id] }; // Native reads are already projected.
+    if (stopped) {
+      f.tree.mapping.stop = { parent: 'a', message: { id: 'newer-stop', author: { role: 'user' },
+        create_time: Date.now() / 1000, content: { parts: ['/loop stop'] } } };
+      f.tree.current_node = 'stop';
+    }
+    let evaluations = 0;
+    await pollGoal(f.config, f.work_id, { ...f.deps, evaluateGoalDecision: async input => {
+      evaluations++;
+      assert.equal(input.goal.mode, 'loop');
+      assert.equal(input.goal.brief, 'Review only the fixture queue');
+      return adaptiveDecision(input, 'wait');
+    } });
+    assert.equal(f.status().mode, 'loop');
+    assert.equal(f.status().strategy, 'adaptive');
+    assert.equal(f.status().state, stopped ? 'stopped' : 'waiting');
+    assert.equal(f.status().goalActive, !stopped);
+    assert.equal(evaluations, stopped ? 0 : 1);
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
+  });
+});
+
+
+test('a later objective command needs an exact current work receipt before changing scope', async t => {
+  for (const receipt of ['absent', 'other-work', 'matching']) await withMonitoredGoal(t, async f => {
+    f.patchGoal({ lastCommandId: 'user-1', commandResolutionPending: false });
+    f.tree.mapping.nextUser = { parent: 'a', message: { id: 'scope-user', author: { role: 'user' },
+      create_time: Date.now() / 1000, content: { parts: ['/goal Inspect the explicitly linked next fixture'] } } };
+    f.tree.mapping.nextReceipt = { parent: 'nextUser', message: { id: 'scope-receipt',
+      author: { role: 'tool' }, create_time: Date.now() / 1000,
+      content: { workIds: receipt === 'matching' ? [f.work_id] : ['another-work'] } } };
+    f.tree.mapping.nextAssistant = { parent: receipt === 'absent' ? 'nextUser' : 'nextReceipt',
+      message: { id: 'scope-assistant', author: { role: 'assistant' }, end_turn: true,
+        status: 'finished_successfully', content: { parts: ['Ready to inspect.'] } } };
+    f.tree.current_node = 'nextAssistant';
+    f.patchGoal({ observedNode: 'nextAssistant', stableSince: Date.now() - 100000 });
+    await pollGoal(f.config, f.work_id, { ...f.deps,
+      evaluateGoalDecision: async input => adaptiveDecision(input, 'wait') });
+    const saved = loadGoal(f.config, f.work_id);
+    assert.equal(saved.objective, receipt === 'matching' ? 'Inspect the explicitly linked next fixture' : 'Complete monitor fixture');
+    assert.equal(saved.active, receipt === 'matching');
+    assert.equal(saved.state, receipt === 'matching' ? 'waiting' : 'needs_user');
+    assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
   });
 });
 
@@ -1187,6 +1423,184 @@ test('Goal Mode reuses relai_work and is opt-in on begin', () => {
   assert.ok(branches.some(branch => branch.properties?.action?.const === 'goal_stop'));
 });
 
+
+test('chat-first Goal and Loop commands keep starts distinct from lifecycle controls', () => {
+  const message = text => ({ author: { role: 'user' }, content: { parts: [text] } });
+  for (const [mode, objective] of [['goal', 'Finish the validated repair'], ['loop', 'Review the queue']]) {
+    const start = parseGoalCommand(message('/' + mode + ' ' + objective));
+    assert.equal(start.mode, mode);
+    assert.equal(start.action, 'start');
+    assert.equal(start.strategy, 'adaptive');
+    assert.equal(start.objective, objective);
+    if (mode === 'loop') assert.equal(start.brief, objective);
+    assert.equal(parseGoalCommand(message('/' + mode)).objective, '');
+    for (const action of ['status', 'pause', 'resume', 'stop']) {
+      assert.deepEqual(parseGoalCommand(message('/' + mode + ' ' + action)), { mode, action });
+      assert.equal(parseGoalCommand(message('/' + mode + ' ' + action + ' another task')), null,
+        'a malformed control must not silently start a different objective');
+    }
+    assert.deepEqual(parseGoalCommand(message('/' + mode + ' cancel')), { mode, action: 'stop' });
+  }
+});
+
+test('chat commands require bounded user-authored command text, never quoted or embedded instructions', () => {
+  const message = (text, role = 'user') => ({ author: { role }, content: { parts: [text] } });
+  for (const role of ['assistant', 'tool', 'system']) {
+    assert.equal(parseGoalCommand(message('/loop Continue indefinitely', role)), null);
+  }
+  for (const text of [
+    'Please explain /goal stop', '> /goal start', '    /loop start',
+    '```text\n/goal start\n```', '/goalkeeper build', '/looping build',
+    '/goal status extra', '/loop resume extra', '/goal ' + 'x'.repeat(4096)
+  ]) assert.equal(parseGoalCommand(message(text)), null, text.slice(0, 80));
+  assert.equal(parseGoalCommand({ author: { role: 'user' }, content: { parts: Array(9).fill('/goal') } }), null);
+  assert.equal(parseGoalCommand({ author: { role: 'user' }, content: { parts: [{ text: '/goal start' }] } }), null);
+  assert.equal(parseGoalCommand(message('   /goal Safe objective')).objective, 'Safe objective');
+});
+
+
+test('durable Goal migration preserves Stop, spent work and unresolved receipts without lifetime caps', () => {
+  const legacy = { workId: 'legacy-goal', owner: 'fixture', active: false, state: 'stopped',
+    continuationCount: 12, pendingNode: 'prior-node', pendingOutcome: 'uncertain',
+    pendingPrompt: 'Exact prior prompt', futureField: { retained: true },
+    bounds: { maxContinuations: 8, maxDurationMs: 3600000, maxNoProgress: 4 } };
+  const migrated = normalizeGoalRecord(legacy);
+  assert.equal(migrated.active, false);
+  assert.equal(migrated.state, 'stopped');
+  assert.equal(migrated.continuationCount, 12);
+  assert.equal(migrated.pendingNode, legacy.pendingNode);
+  assert.equal(migrated.pendingPrompt, legacy.pendingPrompt);
+  assert.equal(migrated.pendingOutcome, 'uncertain');
+  assert.deepEqual(migrated.futureField, { retained: true });
+  assert.equal(migrated.strategy, 'fixed', 'legacy records retain their explicit fallback policy');
+  assert.equal(migrated.bounds.maxContinuations, undefined);
+  assert.equal(migrated.bounds.maxDurationMs, undefined);
+  assert.equal(migrated.bounds.maxNoProgress, 4);
+  assert.equal(normalizeGoalRecord({ ...legacy, state: 'sending', pendingOutcome: undefined }).pendingOutcome, 'uncertain');
+  assert.equal(normalizeGoalRecord({ ...legacy, state: 'monitoring', pendingOutcome: undefined }).pendingOutcome, 'accepted');
+});
+
+test('durable revisions reject stale decisions and cannot revive Stop or replenish spent counts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-goal-revision-'));
+  const config = { stateDir: dir };
+  try {
+    const initial = saveGoal(config, { workId: 'revision-goal', owner: 'fixture', active: true,
+      state: 'monitoring', mode: 'goal', strategy: 'adaptive', observedNode: 'a',
+      continuationCount: 9, objective: 'Complete the fixture' });
+    const stopped = updateGoal(config, initial.workId, current => ({ ...current, active: false, state: 'stopped' }));
+    assert.ok(stopped.revision > initial.revision);
+    const stale = saveGoal(config, { ...initial, active: true, state: 'monitoring', continuationCount: 0 });
+    assert.equal(stale.state, 'stopped');
+    assert.equal(stale.revision, stopped.revision);
+    assert.equal(claimContinuation(config, initial.workId, 'a', 1,
+      { expectedRevision: initial.revision, prompt: 'Stale decision' }), null);
+    assert.equal(updateGoal(config, initial.workId, current => ({ ...current, active: true, state: 'monitoring' })).active, false);
+    const resumed = updateGoal(config, initial.workId, current => ({ ...current, active: true,
+      state: 'monitoring', continuationCount: 0 }), { reactivate: true });
+    assert.equal(resumed.active, true);
+    assert.equal(resumed.continuationCount, 9);
+    const claim = claimContinuation(config, initial.workId, 'a', 3,
+      { expectedRevision: resumed.revision, prompt: 'Continue exactly this task' });
+    assert.equal(claim.pendingOutcome, 'uncertain');
+    assert.equal(claim.pendingPrompt, 'Continue exactly this task');
+    assert.equal(claim.continuationCount, 9, 'a claimed send is not an accepted send');
+    assert.equal(claimContinuation(config, initial.workId, 'a', 3,
+      { expectedRevision: claim.revision, prompt: 'Duplicate' }), null);
+    const advanced = updateGoal(config, initial.workId, current => ({ ...current, observedNode: 'b' }));
+    assert.equal(claimContinuation(config, initial.workId, 'b', 4,
+      { expectedRevision: advanced.revision, prompt: 'Do not replay uncertainty' }), null);
+    assert.equal(loadGoal(config, initial.workId).pendingPrompt, 'Continue exactly this task',
+      'a fresh state read retains the original uncertain intent across restart');
+    updateGoal(config, initial.workId, current => ({ ...current, active: false,
+      state: 'stopped', objective: 'Newer authorized objective' }));
+    const receipt = current => ({ ...current, pendingOutcome: 'accepted' });
+    const acceptedAfterStop = updateGoal(config, initial.workId, receipt, { recordReceipt: true });
+    assert.equal(acceptedAfterStop.state, 'stopped');
+    assert.equal(acceptedAfterStop.active, false);
+    assert.equal(acceptedAfterStop.continuationCount, 10);
+    assert.equal(acceptedAfterStop.objective, 'Newer authorized objective');
+    assert.equal(updateGoal(config, initial.workId, receipt, { recordReceipt: true }).continuationCount, 10,
+      'duplicate late acceptance must not double count');
+    const loop = saveGoal(config, { workId: 'loop-milestone', owner: 'fixture', active: true,
+      state: 'monitoring', mode: 'loop', objective: 'Keep checking the fixture', brief: 'Original brief' });
+    assert.equal(recordLoopMilestone(config, loop.workId, { operationId: 'iteration-1', summary: 'One item' }).iterationCount, 1);
+    assert.equal(recordLoopMilestone(config, loop.workId, { operationId: 'iteration-1', summary: 'Duplicate' }).iterationCount, 1);
+    updateGoal(config, loop.workId, current => ({ ...current, active: false, state: 'stopped' }));
+    assert.equal(recordLoopMilestone(config, loop.workId, { operationId: 'iteration-2' }), null);
+    assert.equal(loadGoal(config, loop.workId).iterationCount, 1);
+    assert.equal(loadGoal(config, loop.workId).brief, 'Original brief');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('completion evidence treats assistant success prose and task labels as unverified claims', () => {
+  const tree = conversation(ID);
+  tree.mapping.a.message.content.parts = ['Done. All tests passed and the repair is verified.'];
+  const goal = { workId: 'evidence-work', objective: 'Verify the repair', revision: 2, requiresValidation: true };
+  const task = { id: goal.workId, status: 'planning', validation: 'passed',
+    plan: { steps: [{ id: 'repair', title: 'Repair and verify', status: 'completed' }] } };
+  const before = JSON.stringify({ goal, task, tree });
+  const evidence = buildGoalEvidence({ goal, task, conversation: tree, snapshot: turnState(tree) });
+  assert.equal(evidence.completion.eligible, false);
+  assert.equal(evidence.validation.current, false);
+  assert.equal(evidence.claims.length, 1);
+  assert.equal(evidence.claims[0].verified, false);
+  assert.match(evidence.completion.gaps.join(' '), /receipt|validation/i);
+  assert.equal(JSON.stringify({ goal, task, tree }), before, 'evidence projection must not rewrite authoritative input');
+  tree.mapping.a.message.content.parts = ['Absolutely complete, all verification succeeded.'];
+  const repeated = buildGoalEvidence({ goal: { ...goal, revision: 3 }, task: { ...task, calls: 999 },
+    conversation: tree, snapshot: turnState(tree), previousFingerprint: evidence.fingerprint });
+  assert.equal(repeated.fingerprint, evidence.fingerprint, 'new wording and status-call counts do not prove progress');
+  assert.equal(repeated.progressed, false);
+});
+
+test('completion evidence requires current validation, authoritative receipts and supported criteria', () => {
+  const goal = { workId: 'evidence-work', objective: 'Repair the fixture', revision: 2 };
+  const task = { id: goal.workId, status: 'planning', changedFiles: ['src/fixture.js'],
+    plan: { steps: [{ id: 'repair', title: 'Repair and verify', status: 'completed' }] },
+    events: [{ eventId: 'read-receipt', taskId: goal.workId, tool: { name: 'relai_read' }, status: 'succeeded',
+      mutationGeneration: 1, workspaceGeneration: 2,
+      metadata: { internalOperation: 'read', reads: [{ path: 'src/fixture.js', sha256: 'b'.repeat(64) }] } }] };
+  const integrity = { mutationGeneration: 1, latestValidatedMutationGeneration: 1,
+    workspaceGeneration: 2, validatedWorkspaceGeneration: 2, validationResult: 'passed',
+    validationAt: '2026-10-17T11:00:00Z', validationFingerprint: 'a'.repeat(64) };
+  const supported = buildGoalEvidence({ goal, task, integrity });
+  assert.equal(supported.validation.current, true);
+  assert.equal(supported.completion.eligible, true);
+  const artifact = supported.artifacts[0];
+  assert.equal(artifact.verified, true);
+  const criteria = [{ text: 'The repaired artifact was read back', evidenceRefs: [artifact.id] }];
+  assert.equal(buildGoalEvidence({ goal: { ...goal, successCriteria: criteria }, task, integrity }).completion.eligible, true);
+  assert.equal(buildGoalEvidence({ goal: { ...goal, successCriteria: [{ text: 'Browser works', evidenceRefs: ['invented'] }] },
+    task, integrity }).completion.eligible, false);
+  for (const changed of [
+    { mutationGeneration: 2 }, { workspaceGeneration: 3 }, { validationFingerprint: '' },
+    { conflictingExternalMutations: ['other-task'] }
+  ]) assert.equal(buildGoalEvidence({ goal, task, integrity: { ...integrity, ...changed } }).completion.eligible, false);
+  for (const mutate of [
+    value => { value.events[0].taskId = 'different-work'; },
+    value => { value.events[0].status = 'running'; },
+    value => { value.events[0].metadata.terminationConfirmed = false; },
+    value => { value.plan.steps[0].status = 'skipped'; }
+  ]) {
+    const changed = structuredClone(task); mutate(changed);
+    assert.equal(buildGoalEvidence({ goal, task: changed, integrity }).completion.eligible, false);
+  }
+  const staleArtifact = structuredClone(task);
+  staleArtifact.events[0].mutationGeneration = 0;
+  const stale = buildGoalEvidence({ goal, task: staleArtifact, integrity });
+  assert.equal(stale.artifacts[0].verified, false, 'a pre-mutation artifact read is not current verification');
+  assert.equal(buildGoalEvidence({ goal: { ...goal, successCriteria: [
+    { text: 'Current repaired artifact', evidenceRefs: [stale.artifacts[0].id] }
+  ] }, task: staleArtifact, integrity }).completion.eligible, false);
+  const controlsOnly = structuredClone(task);
+  controlsOnly.events[0].metadata.internalOperation = 'work.status';
+  assert.equal(buildGoalEvidence({ goal, task: controlsOnly, integrity }).completion.eligible, false,
+    'control bookkeeping cannot substitute for substantive work');
+  assert.equal(buildGoalEvidence({ goal: { ...goal, mode: 'loop' }, task, integrity }).completion.eligible, false,
+    'an iteration milestone cannot satisfy an ongoing Loop stop condition');
+});
+
 test('conversation URL validation is bound to chatgpt.com', () => {
   assert.equal(parseConversationUrl('https://chatgpt.com/c/' + ID), ID);
   assert.equal(parseConversationUrl('https://chatgpt.com/g/g-p-rel-ai-mcp/c/' + ID), ID);
@@ -1218,6 +1632,16 @@ test('protocol conversation reads stream only branch metadata, even above the ol
     fetch: async url => url.includes('/conversations?')
       ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || new Response(JSON.stringify(split)) });
   assert.equal(splitMatch.state, 'absent');
+  const longPrompt = ('Continue goal exact-work: ' + 'Retain complete brief. '.repeat(220)).trim();
+  const sent = conversation(ID);
+  sent.mapping.sent = { parent: 'a', message: { id: 'long-continuation', author: { role: 'user' },
+    content: { parts: [longPrompt] } } };
+  sent.current_node = 'sent';
+  const sentProjection = await getConversation(ID, { credentials,
+    fetch: async () => new Response(JSON.stringify(sent)) });
+  assert.ok(longPrompt.length > 4096 && longPrompt.length < 8192);
+  assert.equal(goalMessageExists(sentProjection, longPrompt, 'a'), true,
+    'a supported long continuation must remain reconcilable without replaying Send');
   const malformed = new Response('{"current_node":"a","mapping":');
   await assert.rejects(() => getConversation(ID, { credentials,
     fetch: async () => malformed }), /token|json|parsing|ended/i);
@@ -1469,8 +1893,13 @@ test('goal discovery links a unique recent slash command even when the objective
   };
   assert.equal(await findGoalConversation('Build offline HG6245D firmware', { credentials, fetch, startedAt: Date.now() }), ID);
   assert.ok(seen.some(url => url.endsWith(ID)));
-  assert.deepEqual(await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now() }),
-    { state: 'matched', conversationId: ID, messageId: 'user-1' });
+  const matched = await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now() });
+  assert.equal(matched.state, 'matched');
+  assert.equal(matched.conversationId, ID);
+  assert.equal(matched.messageId, 'user-1');
+  assert.equal(matched.command?.mode, 'goal');
+  assert.equal(matched.command?.action, 'start');
+  assert.equal(matched.command?.objective, 'start now. Do everything possible until the firmware is finished');
   const ambiguous = async url => url.includes('/conversations?') ? response({ items: [{ id: ID }, { id: OTHER }] })
     : emptyProjectCatalogue(url) || response(conversation(ID));
   assert.equal(await findGoalConversation('Fix the current project', { credentials, fetch: ambiguous, startedAt: Date.now() }), null);

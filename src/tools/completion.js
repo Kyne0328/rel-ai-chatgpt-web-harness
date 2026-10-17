@@ -3,7 +3,7 @@ import { resolveWorkspace } from '../config.js';
 import { clearSessionPolicy, resolvePolicy } from '../policyResolver.js';
 import { readTaskHistorySession, readTaskHistorySessionRecord } from '../taskHistoryStore.ts';
 import { recordTaskValidationAffinity } from '../knowledgeStore.js';
-import { readTaskIntegrity, taskOwnedChangedFiles } from '../taskIntegrity.ts';
+import { readTaskIntegrity, readWorkspaceIntegrity, taskOwnedChangedFiles } from '../taskIntegrity.ts';
 import { cleanupTaskEphemeralDirectory, cleanupTaskWorkspaceEphemeralFiles } from '../taskEphemeral.ts';
 import { workspaceDirtyPaths } from '../repo/gitOps.js';
 import { createValidationFingerprint } from '../bridge/validationPlan.js';
@@ -11,6 +11,8 @@ import { sanitizeCompletionSummary } from '../taskObservability.js';
 import { getCurrentTaskAbortSignal, getCurrentToolActivityContext, getToolActivity, requestCurrentTaskCompletion, taskError, normalizeTaskId } from '../toolActivity.js';
 import { runWorkspaceMutationBoundary } from '../workspaceOperationQueue.js';
 import { assertFallbackCompletionAvailable } from '../mcp/fallbackExecutions.js';
+import { loadGoal, recordLoopMilestone, recordGoalCompletionRequest, updateGoal } from '../chatgptGoalState.js';
+import { isTerminalTaskStatus } from '../taskState.js';
 
 const WORK_FINISH_SOURCE = 'relai_work:finish';
 const VALIDATE_CHECKS_SOURCE = 'relai_validate:checks';
@@ -42,7 +44,15 @@ async function completeTask(config, args = {}, handlerContext = {}) {
 
   const summary = normalizeCompletionSummary(args.summary);
   assertFallbackCompletionAvailable(requestedTaskId, { config, excludeOperationId: handlerContext.fallbackOperationId });
-  if (!workspace) return finalizeProjectlessTask(summary);
+  if (!workspace) {
+    const goal = await refreshedCompletionGoal(config, null, requestedTaskId, signal);
+    if (requiresLoopIteration(goal) || requiresGoalEvidence(goal)) return monitoredCompletionResult(config, requestedTaskId, {
+      summary, validationStatus: 'not_required', validationAt: '', validationFingerprint: '',
+      changedFiles: [], completionSource: WORK_FINISH_SOURCE
+    }, handlerContext, goal);
+    assertCompletionGoalUnchanged(config, requestedTaskId, goal);
+    return finalizeProjectlessTask(summary);
+  }
   const authority = readCompletionIntegrity(config, requestedTaskId, workspace.alias);
   const validation = await factualValidationState(config, workspace, authority, { signal });
   return finalizeValidatedTask(config, workspace, {
@@ -100,6 +110,35 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
   const authority = options.completionSource === VALIDATE_CHECKS_SOURCE
     ? readTaskIntegrity(config, taskId, workspace.alias)
     : readCompletionIntegrity(config, taskId, workspace.alias);
+  const goal = await refreshedCompletionGoal(config, workspace, taskId, options.signal);
+  if (requiresLoopIteration(goal) || requiresGoalEvidence(goal)) {
+    let validationStatus = String(options.validationStatus || 'not_run');
+    if (options.completionSource === VALIDATE_CHECKS_SOURCE) {
+      const checked = options.currentValidationResult;
+      const fingerprint = String(checked?.validationFingerprint || '');
+      const scope = checked?.validationScope;
+      const current = fingerprint && Array.isArray(scope)
+        ? await createValidationFingerprint(workspace, config, { paths: scope, signal: options.signal })
+        : null;
+      if (checked?.ok !== true || checked?.validationStatus !== 'passed'
+        || !current || current.fingerprint !== fingerprint) {
+        return { ok: false, workspace: workspace.alias, work_id: taskId, completionKnown: false,
+          iterationCompleted: false, mode: goal.mode, summary, validationStatus: 'stale',
+          nextAction: 'Validation changed before the completion boundary. Revalidate current content; the work remains open.' };
+      }
+    } else {
+      validationStatus = (await factualValidationState(config, workspace, authority, { signal: options.signal })).status;
+    }
+    options.signal?.throwIfAborted?.();
+    return monitoredCompletionResult(config, taskId, {
+      summary, validationStatus, validationLevel: String(options.validationLevel || ''),
+      validationAt: String(options.validationAt || ''),
+      validationFingerprint: String(options.validationFingerprint || ''),
+      changedFiles: Array.isArray(options.changedFiles) ? options.changedFiles : taskOwnedChangedFiles(config, taskId, workspace.alias),
+      completionSource: String(options.completionSource || WORK_FINISH_SOURCE), workspace: workspace.alias
+    }, options.processContext || {}, goal);
+  }
+  assertCompletionGoalUnchanged(config, taskId, goal);
   const processCleanup = await cleanupTaskManagedProcesses(config, workspace.alias, taskId, {
     ...options.processContext, taskId, workspace: workspace.alias
   });
@@ -113,6 +152,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
       nextAction: 'Inspect processCleanup.leftovers and recover only the exact owned process IDs. If cleanup cannot be verified, preserve the evidence and cancel the work session instead of claiming completion.'
     };
   }
+  assertCompletionGoalUnchanged(config, taskId, goal);
   const scratchCleanup = await cleanupTaskScratch(config, workspace, taskId, authority, options.signal);
   const changedFiles = Array.isArray(options.changedFiles)
     ? unique(options.changedFiles.map(String).filter(Boolean))
@@ -154,6 +194,11 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     }
   }
   options.signal?.throwIfAborted?.();
+  const finalGoal = await refreshedCompletionGoal(config, workspace, taskId, options.signal);
+  assertCompletionGoalUnchanged(config, taskId, goal);
+  if (requiresLoopIteration(finalGoal) || requiresGoalEvidence(finalGoal)) {
+    throw taskError('GOAL_STATE_CHANGED', 'Goal/Loop completion evidence changed during finalization. The work remains open.');
+  }
   const completion = requestCurrentTaskCompletion({
     summary,
     validationStatus,
@@ -211,7 +256,8 @@ async function finalizeValidationResult(config, workspace, validationResult, sum
     ...validationResult,
     ...completion,
     policy: resolvePolicy(workspace, config),
-    nextAction: completion.completionKnown !== true ? completion.nextAction : completion.validationStatus === 'passed'
+    nextAction: completion.iterationCompleted ? completion.nextAction
+      : completion.completionKnown !== true ? completion.nextAction : completion.validationStatus === 'passed'
       ? 'Validation passed and explicit task completion was accepted. Do not call another Rel.AI tool for this completed task.'
       : `Work-session completion was accepted, but validation freshness is ${completion.validationStatus} after process cleanup. Use a new work session to revalidate the resulting files.`
   };
@@ -257,6 +303,90 @@ async function finalizeDuplicateCompletion(config, workspace, context, previous,
       ? 'Duplicate task completion request accepted; the task was already completing.'
       : 'Task was already completed. The original completion result is returned idempotently.') + completionProcessNote(processCleanup)
   };
+}
+
+function requiresLoopIteration(goal) {
+  return goal?.mode === 'loop' && goal.state !== 'stopped';
+}
+
+function assertCompletionGoalUnchanged(config, taskId, observedGoal) {
+  const latest = loadGoal(config, taskId);
+  if ((latest?.revision ?? null) !== (observedGoal?.revision ?? null)) {
+    throw taskError('GOAL_STATE_CHANGED', 'Goal/Loop changed during finalization. Inspect the exact work_id before retrying.');
+  }
+}
+
+// Achievement is a receipt tied to semantic task and repository state, not a
+// permanent Boolean. A later mutation or plan change requires fresh evaluation.
+async function refreshedCompletionGoal(config, workspace, taskId, signal) {
+  const goal = loadGoal(config, taskId);
+  if (!goal || goal.mode !== 'goal' || goal.strategy !== 'adaptive'
+    || goal.state === 'stopped' || goal.objectiveAchieved !== true) return goal;
+  const accepted = goal.achievementEvidence;
+  const authority = workspace ? readCompletionIntegrity(config, taskId, workspace.alias) : null;
+  const validation = workspace
+    ? await factualValidationState(config, workspace, authority, { signal })
+    : { status: 'not_required', fingerprint: '' };
+  signal?.throwIfAborted?.();
+  assertCompletionGoalUnchanged(config, taskId, goal);
+  const task = getToolActivity().tasks.find(item => String(item.id || item.taskId || '') === taskId)
+    || readTaskHistorySession(config, taskId, { reconcileInactive: false });
+  const currentAuthority = workspace ? readCompletionIntegrity(config, taskId, workspace.alias) : null;
+  const workspaceGeneration = workspace ? readWorkspaceIntegrity(config, workspace.alias).generation : null;
+  const stale = !accepted
+    || accepted.planRevision !== Number(task?.plan?.revision || 0)
+    || accepted.mutationGeneration !== (currentAuthority ? Number(currentAuthority.mutationGeneration || 0) : null)
+    || accepted.workspaceGeneration !== workspaceGeneration
+    || (accepted.requiresValidation !== false && validation.status !== 'passed')
+    || Boolean(accepted.repositoryFingerprint && (accepted.repositoryFingerprint !== validation.fingerprint
+      || ['stale', 'failed'].includes(validation.status)));
+  if (!stale) return goal;
+  const invalidated = updateGoal(config, taskId, current => ({ ...current, objectiveAchieved: false,
+    achievementEvidence: null, active: false, state: 'needs_user',
+    error: 'Completion evidence changed. Review the task and explicitly resume for fresh evaluation.',
+    updatedAt: Date.now() }), { expectedRevision: goal.revision });
+  if (!invalidated || invalidated.revision !== goal.revision + 1 || invalidated.objectiveAchieved) {
+    throw taskError('GOAL_STATE_CHANGED', 'Goal changed while invalidating stale completion evidence. The work remains open.');
+  }
+  return invalidated;
+}
+
+function requiresGoalEvidence(goal) {
+  return goal?.mode === 'goal' && goal.strategy === 'adaptive'
+    && goal.objectiveAchieved !== true && goal.state !== 'stopped';
+}
+
+function monitoredCompletionResult(config, taskId, evidence, handlerContext = {}, observedGoal) {
+  const context = requireMatchingTaskContext(taskId);
+  const current = getToolActivity().tasks.find(task => String(task.id || task.taskId || '') === taskId);
+  if (!current || isTerminalTaskStatus(current.status) || current.cancellationRequestedAt) {
+    throw taskError('INVALID_TASK_STATE', 'Cannot record Goal/Loop progress on a closed or cancelling task.');
+  }
+  if (observedGoal.mode === 'loop' && !observedGoal.active) return {
+    ok: true, work_id: taskId, ...evidence, completionKnown: false, iterationCompleted: false,
+    completionPending: true, mode: 'loop', state: observedGoal.state,
+    message: 'The Loop is paused; this finish request does not end or resume it.',
+    nextAction: 'Inspect goal_status and resolve its blocker. Resume explicitly to continue, or stop monitoring before final task closure.'
+  };
+  const milestone = { ...evidence,
+    changedFiles: Array.isArray(evidence.changedFiles) ? evidence.changedFiles.slice(0, 200) : [],
+    operationId: String(handlerContext.fallbackOperationId || context.operationId || '') };
+  const goal = observedGoal.mode === 'loop'
+    ? recordLoopMilestone(config, taskId, milestone, { expectedRevision: observedGoal.revision })
+    : recordGoalCompletionRequest(config, taskId, milestone, { expectedRevision: observedGoal.revision });
+  if (!goal) return { ok: false, work_id: taskId, completionKnown: false,
+    iterationCompleted: false, mode: observedGoal.mode, errorCode: 'GOAL_STATE_CHANGED',
+    nextAction: 'The Goal/Loop changed while recording progress. Inspect the exact work_id before continuing.' };
+  if (goal.mode === 'goal') return { ok: true, work_id: taskId, ...evidence, completionKnown: false,
+    completionPending: true, mode: 'goal',
+    message: 'Completion requested; the task remains open until the objective has supported evidence.',
+    nextAction: goal.active
+      ? 'Check goal_status for evidence evaluation. Finish normally only after objectiveAchieved and needs_finalization are reported.'
+      : 'The Goal is paused. Inspect goal_status, resolve the blocker and explicitly resume before completion can be evaluated.' };
+  return { ok: true, work_id: taskId, ...evidence, completionKnown: false,
+    iterationCompleted: true, iterationCount: goal.iterationCount, mode: 'loop',
+    endReason: 'loop_iteration', message: 'Loop iteration recorded; the same work session remains open.',
+    nextAction: 'Refine the next plan within the original Loop brief and continue this work_id. Pause for real blockers or required user decisions.' };
 }
 
 function readCompletionIntegrity(config, taskId, workspace) {

@@ -329,7 +329,7 @@ function nativeRequestTimeoutMs(method, payload) {
   const requested = Number(payload?.timeoutMs);
   // Stop recovery includes navigation, authenticated reads, control readiness,
   // and stop readback. Its bounded stages can also exceed a normal read's budget.
-  if (method === 'goalProtocol') return ['continue', 'stop_stalled'].includes(payload?.action) ? 120_000 : 40_000;
+  if (method === 'goalProtocol') return ['continue', 'stop_stalled', 'evaluate'].includes(payload?.action) ? 120_000 : 40_000;
   if (method === 'browserOperation' && Number.isFinite(requested)) {
     return Math.max(5_000, Math.min(35_000, Math.floor(requested) + 5_000));
   }

@@ -187,7 +187,7 @@ for (const removed of removedDirectNames) {
 }
 
 const publicSchemaByName = new Map(publicSchemas.map(schema => [schema.name, schema]));
-assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'result', 'history', 'stop', 'finish', 'cancel', 'goal_status', 'goal_stop']);
+assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'result', 'history', 'stop', 'finish', 'cancel', 'goal_status', 'goal_stop', 'goal_pause', 'goal_resume', 'goal_update']);
 const processSchema = schemaByName.get('relai_process');
 assert.deepEqual(processSchema.inputSchema.properties.action.enum, ['start', 'read', 'write', 'stop', 'list']);
 assert.ok(processSchema.inputSchema.properties.kind.enum.includes('service'));
@@ -213,8 +213,15 @@ await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'direct'
 await valid('relai_work', { action: 'begin' });
 await valid('relai_work', { action: 'begin', goal: true, objective: 'Verify the requested goal',
   conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d' });
-for (const action of ['goal_status', 'goal_stop']) {
+await valid('relai_work', { action: 'begin', mode: 'loop', strategy: 'adaptive', brief: 'Improve only the approved scope' });
+await valid('relai_work', { action: 'goal_update', work_id: 'work', mode: 'goal',
+  objective: 'Finish the approved objective', successCriteria: ['Observed result verified'] });
+await invalid('relai_work', { action: 'begin', mode: 'unknown' });
+await invalid('relai_work', { action: 'begin', strategy: 'unknown' });
+await invalid('relai_work', { action: 'begin', maxContinuations: 8 });
+for (const action of ['goal_status', 'goal_stop', 'goal_pause', 'goal_resume', 'goal_update']) {
   await valid('relai_work', { action, work_id: 'work' });
+  await valid('relai_work', { action, work_id: 'work', mode: 'loop' });
   await invalid('relai_work', { action });
 }
 await valid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ id: 'inspect', title: 'Inspect implementation', status: 'in_progress' }] });

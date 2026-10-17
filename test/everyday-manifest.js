@@ -3,6 +3,8 @@
 export const EVERYDAY_TEST_FILES = [
   // Goal monitor globals and its isolated MCP child require separate processes.
   "chatgpt-goal-mode-unit.mjs",
+  // Isolated native-browser account transport and evaluator cancellation fixtures.
+  "chatgpt-goal-evaluator-unit.mjs",
   "chatgpt-goal-workflow-smoke.mjs",
   "test-output-tail-unit.mjs",
   "windows-process-job-artifact-unit.mjs",

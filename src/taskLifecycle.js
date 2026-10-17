@@ -89,7 +89,8 @@ function reduceTaskLifecycleAuditEvent(session, event = {}, options = {}) {
   const timestamp = timestampMs(event.ts || event.timestamp) || eventTimestampMs(previousEvent || {}) || Date.now();
   const ended = timestamp + Math.max(0, Number(event.ms || event.durationMs || 0));
   const resultFactsEligible = event.taskResultFactsEligible !== false && event.metadata?.taskResultFactsEligible !== false;
-  const completion = resultFactsEligible && event.ok !== false && (event.completionKnown === true || event.tool === OP.WORK_FINISH);
+  const completion = resultFactsEligible && event.ok !== false && (event.completionKnown === true
+    || (event.tool === OP.WORK_FINISH && event.completionKnown !== false));
   const cancellationStatus = String(event.taskCancellationStatus || '').trim().toLowerCase();
   const cancellationPending = resultFactsEligible && event.ok !== false && event.tool === OP.WORK_CANCEL && cancellationStatus === 'cancelling';
   const cancellation = resultFactsEligible && event.ok !== false && event.tool === OP.WORK_CANCEL && !cancellationPending;

@@ -7,6 +7,8 @@ import { layoutSnapshotExpression, normalizeBrowserSnapshotDetail } from '../src
 import { goalComposerExpression, goalStopExpression, goalMessageExists, goalAssistantSettled } from './chatgpt-goal-composer.js';
 import { readConversationProjection } from '../src/chatgptConversationReader.js';
 import { parseConversationUrl } from '../src/chatgptGoalProtocol.js';
+import { buildGoalEvaluatorPrompt } from '../src/chatgptGoalEvaluator.js';
+import { runGoalHelperBrowser } from './chatgpt-goal-helper.js';
 
 const MAX_SNAPSHOT_CHARS = 64 * 1024;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
@@ -43,7 +45,8 @@ function createBrowserSurfaceHost(options = {}) {
     onStateChange = () => {},
     onError = () => {},
     goalLoginProfileDirectory = '',
-    getGoalConnections = null
+    getGoalConnections = null,
+    assertGoalCurrent = null
   } = options;
   if (typeof WebContentsView !== 'function') throw new TypeError('Embedded browser requires Electron WebContentsView.');
   if (!session || typeof session.fromPartition !== 'function' || typeof session.fromPath !== 'function') {
@@ -643,7 +646,25 @@ function createBrowserSurfaceHost(options = {}) {
   // Account credentials never cross the native IPC boundary or enter task logs.
   // One signed-in ChatGPT page per continuation. Hidden during normal operation;
   // Failed attempts stay hidden. The service owns retries and receipt reconciliation.
+  function assertGoalMutation(payload) {
+    // Production injects a synchronous read of the authoritative durable state.
+    // Recheck at the final native key event, not only across service IPC.
+    if (!assertGoalCurrent && payload.expectedGoalRevision === undefined) return;
+    if (typeof assertGoalCurrent !== 'function' || !payload.workId
+      || !Number.isSafeInteger(payload.expectedGoalRevision) || payload.expectedGoalRevision < 0
+      || !payload.conversationId
+      || payload.action === 'evaluate' && (payload.packet?.expectedRevision !== payload.expectedGoalRevision
+        || payload.packet?.evidence?.workId !== payload.workId)) {
+      throw Object.assign(new Error('Goal browser submission requires a current revision fence.'), {
+        code: 'GOAL_REVISION_STALE', stale: true, notSent: true
+      });
+    }
+    assertGoalCurrent({ workId: payload.workId, expectedGoalRevision: payload.expectedGoalRevision,
+      conversationId: payload.conversationId, tunnelId: payload.tunnelId || '' });
+  }
+
   async function goalBrowserContinue(payload = {}, options = {}) {
+    assertGoalMutation(payload);
     const account = goalAccount(String(payload.tunnelId || ''));
     const rateLimit = goalReadAdmission(account);
     if (rateLimit) return rateLimit;
@@ -652,7 +673,7 @@ function createBrowserSurfaceHost(options = {}) {
     const parentMessageId = String(payload.parentMessageId || '');
     const prompt = String(payload.prompt || '');
     if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)
-      || !expectedNode || !parentMessageId || !prompt || prompt.length > 2048) {
+      || !expectedNode || !parentMessageId || !prompt || prompt.length > 8192) {
       throw new Error('Goal Mode continuation requires a valid conversation and exact parent.');
     }
     if (!goalProfileDirectory || typeof BrowserWindow !== 'function') {
@@ -759,6 +780,7 @@ function createBrowserSurfaceHost(options = {}) {
       if ((await fetchChat())?.current_node !== expectedNode) return { ok: false, stale: true, notSent: true };
       if (!stillOnChat()) return { ok: false, notSent: true, stage: 'navigation', reason: 'conversation_unavailable' };
       throwIfAborted(signal);
+      assertGoalMutation(payload);
       stage = 'submit';
       clicked = true; // Every outcome after this point is potentially committed.
       // Like codex-chatgpt-web, activate the focused form button by keyboard.
@@ -875,6 +897,7 @@ function createBrowserSurfaceHost(options = {}) {
       if (goalAssistantSettled(current)) return { ok: true, alreadyFinished: true };
       throwIfAborted(signal);
       if (!goalConversationMatches(win.webContents, id)) throw new Error('Wrong ChatGPT conversation.');
+      assertGoalMutation(payload);
       await debuggerApi.sendCommand('Input.dispatchKeyEvent', {
         type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r'
       });
@@ -908,7 +931,46 @@ function createBrowserSurfaceHost(options = {}) {
     }
   }
 
+  async function goalBrowserEvaluate(payload = {}, options = {}) {
+    throwIfAborted(options.signal);
+    assertGoalMutation(payload);
+    const account = goalAccount(String(payload.tunnelId || ''));
+    const admission = goalReadAdmission(account);
+    if (admission) return admission;
+    if (goalContinuationInFlight) return { ok: false, busy: true, notSent: true };
+    if (typeof BrowserWindow !== 'function') return { ok: false, unavailable: true, notSent: true };
+    const prompt = buildGoalEvaluatorPrompt(payload.packet);
+    const browserSession = session.fromPath(account.directory);
+    // Reuse existing account verification and profile. No credentials cross IPC.
+    const auth = await readGoalProtocolAuth(account, browserSession);
+    if (!auth.ok) { rememberGoalReadLimit(account, auth); return auth; }
+    throwIfAborted(options.signal);
+    goalAccount(account.tunnelId); // The account may have been disabled while verifying.
+    if (goalContinuationInFlight) return { ok: false, busy: true, notSent: true };
+    const afterAuth = goalReadAdmission(account);
+    if (afterAuth) return afterAuth;
+    const win = new BrowserWindow({ width: 1100, height: 800, show: false,
+      webPreferences: { session: browserSession, nodeIntegration: false, contextIsolation: true,
+        sandbox: true, webSecurity: true, backgroundThrottling: false } });
+    goalContinuationInFlight = true;
+    goalContinuationWindows.add(win);
+    goalWindowAccounts.set(win, account.tunnelId);
+    win.once('closed', () => { goalContinuationWindows.delete(win); goalWindowAccounts.delete(win); });
+    try {
+      const result = await runGoalHelperBrowser(win, prompt, {
+        signal: options.signal, attachedDebugger,
+        assertAvailable: () => { goalAccount(account.tunnelId); assertGoalMutation(payload); }
+      });
+      if (result.status === 429) rememberGoalReadLimit(account, result);
+      return result;
+    } finally {
+      goalContinuationInFlight = false;
+      if (!win.isDestroyed?.()) win.close();
+    }
+  }
+
   async function goalProtocolRequest(payload = {}, options = {}) {
+    if (payload.action === 'evaluate') return goalBrowserEvaluate(payload, options);
     if (payload.action === 'stop_stalled') return goalBrowserStopStalled(payload, options);
     if (payload.action === 'continue') return goalBrowserContinue(payload, options);
     const account = goalAccount(String(payload.tunnelId || ''));

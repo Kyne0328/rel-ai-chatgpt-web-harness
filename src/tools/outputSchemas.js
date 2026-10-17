@@ -274,6 +274,9 @@ const FIELD_SCHEMAS = Object.freeze({
   validationScope: STRING_ARRAY,
   validationAt: STRING_NULL,
   completionKnown: BOOLEAN,
+  completionPending: BOOLEAN,
+  iterationCompleted: BOOLEAN,
+  iterationCount: NUMBER,
   completionSource: STRING,
   endReason: STRING,
   terminalReason: STRING,
@@ -526,7 +529,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.VALIDATE_DIAGNOSTICS]: ['ok', 'workspace', 'work_id', 'commands', 'results', 'diagnostics', 'diagnosticCount', 'completedUnits', 'totalUnits', 'execution', 'cancelled', 'timedOut', 'truncated', 'message'],
   [OP.CHANGES_TIDY_PLAN]: ['ok', 'workspace', 'work_id', 'operation', 'mode', 'planId', 'expiresAt', 'ttlSeconds', 'candidateCount', 'skippedCount', 'candidates', 'skipped', 'reason', 'message', 'next'],
   [OP.CHANGES_TIDY_RUN]: ['ok', 'workspace', 'work_id', 'operation', 'planId', 'changed', 'changedFiles', 'mutationEffect', 'possibleChangedFiles', 'appliedCount', 'applied', 'refused', 'message'],
-  [OP.VALIDATE_CHECKS]: ['admissionBlocked', 'queueTimedOut', 'timedOut', 'errorCode', 'blockedResource', 'resourceReason', 'retryable', 'resourcePressure', 'processCleanup', 'nextAction', 'ok', 'workspace', 'work_id', 'duplicate', 'level', 'checks', 'commands', 'results', 'skippedChecks', 'completedUnits', 'executedUnits', 'reusedUnits', 'reusedChecks', 'totalUnits', 'execution', 'failedCheck', 'cancelled', 'summary', 'validated', 'validationStatus', 'validationLevel', 'validationLevelReason', 'validationFingerprint', 'validationScope', 'validationAt', 'completionKnown', 'completionSource', 'endReason', 'planId', 'planSelection', 'planCreatedAt', 'fullOutput', 'changedFiles', 'residualChangedFiles', 'residualState', 'aliasNormalizations', 'policy', 'message', 'nextAction'],
+  [OP.VALIDATE_CHECKS]: ['state', 'admissionBlocked', 'queueTimedOut', 'timedOut', 'errorCode', 'blockedResource', 'resourceReason', 'retryable', 'resourcePressure', 'processCleanup', 'nextAction', 'ok', 'workspace', 'work_id', 'duplicate', 'level', 'checks', 'commands', 'results', 'skippedChecks', 'completedUnits', 'executedUnits', 'reusedUnits', 'reusedChecks', 'totalUnits', 'execution', 'failedCheck', 'cancelled', 'summary', 'validated', 'validationStatus', 'validationLevel', 'validationLevelReason', 'validationFingerprint', 'validationScope', 'validationAt', 'completionKnown', 'completionPending', 'iterationCompleted', 'iterationCount', 'mode', 'completionSource', 'endReason', 'planId', 'planSelection', 'planCreatedAt', 'fullOutput', 'changedFiles', 'residualChangedFiles', 'residualState', 'aliasNormalizations', 'policy', 'message', 'nextAction'],
   [OP.VALIDATE_HTTP]: ['ok', 'workspace', 'work_id', 'route', 'reachable', 'statusCode', 'finalUrl', 'responseBytes', 'title', 'error'],
   [OP.CHANGES_DIFF]: ['ok', 'workspace', 'work_id', 'staged', 'redactSensitive', 'path', 'reviewScope', 'reviewedScope', 'scopeGranularity', 'mixedOwnershipPaths', 'mixedOwnershipWarning', 'scopeUncertain', 'scopeWarning', 'validationMutationEvidence', 'reviewHash', 'reviewedFiles', 'excludedWorkspaceFiles', 'excludedWorkspaceFilesComplete', 'status', 'branch', 'aheadBehind', 'statusEntries', 'sessionChangedFiles', 'baselineChangedFiles', 'untrackedSessionFiles', 'untrackedBaselineFiles', 'baselineSource', 'diff', 'sensitiveReview', 'sensitiveValuesReturned', 'exitCode', 'stderr'],
   [OP.CHANGES_CHECKPOINT]: ['ok', 'workspace', 'work_id', 'checkpointId', 'payloadSha256', 'createdAt', 'replayed', 'staged', 'redactSensitive', 'path', 'reviewScope', 'reviewedScope', 'scopeGranularity', 'mixedOwnershipPaths', 'mixedOwnershipWarning', 'scopeUncertain', 'scopeWarning', 'validationMutationEvidence', 'reviewHash', 'reviewedFiles', 'excludedWorkspaceFiles', 'excludedWorkspaceFilesComplete', 'status', 'branch', 'aheadBehind', 'statusEntries', 'sessionChangedFiles', 'baselineChangedFiles', 'untrackedSessionFiles', 'untrackedBaselineFiles', 'baselineSource', 'diff', 'sensitiveReview', 'sensitiveValuesReturned', 'exitCode', 'stderr'],
@@ -541,7 +544,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.PUBLISH_DRAFT_PR]: ['ok', 'workspace', 'work_id', 'base', 'head', 'title', 'body', 'changedFiles', 'changedFileCount', 'emptyDiff', 'draftOnly', 'remoteChanged', 'warning', 'diff'],
   [OP.EDIT]: ['keys', 'keyCount', 'malformedLines', 'valuesReturned', 'templatePath', 'missingKeys', 'extraKeys', 'templateMalformedLines', 'key', 'presentBefore', 'presentAfter', 'ok', 'workspace', 'work_id', 'dryRun', 'operationId', 'operation', 'path', 'changed', 'changedFiles', 'mutationEffect', 'possibleChangedFiles', 'plannedChangedFiles', 'oldSha256', 'newSha256', 'shaMismatch', 'replacements', 'verified', 'bytes', 'sha256', 'fileId', 'fileName', 'mimeType', 'plannerPath', 'plannerReason', 'semantic', 'semanticTarget', 'result', 'writeId', 'chunks', 'cleared', 'staged', 'editCount', 'appliedCount', 'preflightAtomic', 'rollbackAtomic', 'batchInputBytes', 'replacementCount', 'snapshotBytes', 'resultDetailsCompacted', 'rollback', 'transaction', 'cleanupPending', 'preflight', 'results', 'touchedPaths', 'patchBytes', 'sourceFormat', 'converted', 'verify', 'apply', 'check', 'diagnostics', 'checks', 'diff', 'execution', 'summary', 'validationStatus', 'error', 'next'],
   [OP.WORK_CANCEL]: ['processCleanup', 'nextAction', 'ok', 'workspace', 'work_id', 'status', 'duplicate', 'endReason', 'terminalReason', 'endedAt', 'cancelledAt', 'progress'],
-  [OP.WORK_FINISH]: ['processCleanup', 'nextAction', 'ok', 'workspace', 'work_id', 'duplicate', 'completionKnown', 'endReason', 'completionSource', 'summary', 'validationStatus', 'validationLevel', 'validationAt', 'validationFingerprint', 'changedFiles', 'residualChangedFiles', 'residualState', 'message']
+  [OP.WORK_FINISH]: ['state', 'processCleanup', 'nextAction', 'ok', 'workspace', 'work_id', 'duplicate', 'completionKnown', 'completionPending', 'iterationCompleted', 'iterationCount', 'mode', 'endReason', 'completionSource', 'summary', 'validationStatus', 'validationLevel', 'validationAt', 'validationFingerprint', 'changedFiles', 'residualChangedFiles', 'residualState', 'message']
 });
 
 const SUCCESS_REQUIRED_FIELDS = Object.freeze({
@@ -564,7 +567,7 @@ const FALLBACK_RUNNING_SUCCESS_TOOLS = new Set([OP.PROCESS_START]);
 const NON_EXCEPTION_FAILURE_TOOLS = new Set([OP.VALIDATE_DIAGNOSTICS, OP.VALIDATE_CHECKS]);
 const COMPACT_RESULT_FIELDS = Object.freeze([
   'ok', 'truncated', 'originalBytes', 'workspace', 'work_id', 'processId', 'status', 'duplicate',
-  'mode', 'check', 'exitCode', 'durationMs', 'diagnosticCount', 'validationStatus', 'completionKnown',
+  'mode', 'check', 'exitCode', 'durationMs', 'diagnosticCount', 'validationStatus', 'completionKnown', 'completionPending', 'iterationCompleted', 'iterationCount',
   'message', 'error', 'errorCode', 'warning', 'level', 'summary', 'nextAction', 'stdout', 'stderr', 'results', 'timeline', 'outputFinalizationTimedOut', 'outputFinalizationError', 'mutationOwnershipPersistenceError', 'rootExitConfirmed', 'responseBudget'
 ]);
 

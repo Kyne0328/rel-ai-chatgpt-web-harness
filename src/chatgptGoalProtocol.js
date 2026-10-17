@@ -2,6 +2,7 @@
 // Credentials are read from the process environment; never persist them with goal records.
 import { randomUUID } from 'node:crypto';
 import { readConversationProjection } from './chatgptConversationReader.js';
+import { parseGoalCommand } from './goalCommands.js';
 
 const ORIGIN = 'https://chatgpt.com';
 let goalBrowserTransport = null;
@@ -379,10 +380,10 @@ async function findRecentGoalCommand(deps = {}) {
           const fresh = goalEvidenceForWork(goalCommandEvidence(await getConversation(id, deps)), deps, correlatedId);
           if (fresh && fresh.messageId === messageId && recentGoalEvidence(fresh, startedAt)
             && !candidates.some(candidate => candidate.conversationId === id)) {
-            candidates.push({ conversationId: id, messageId });
+            candidates.push({ conversationId: id, messageId, command: fresh.command || null });
           }
         } else if (!candidates.some(candidate => candidate.conversationId === id)) {
-          candidates.push({ conversationId: id, messageId });
+          candidates.push({ conversationId: id, messageId, command: match.command || null });
         }
       }
       if (scan) scan.candidates = [...candidates];
@@ -409,6 +410,7 @@ async function findRecentGoalCommand(deps = {}) {
         if (scan) scan.candidates = [];
         return null;
       }
+      candidate.command = fresh.command || null;
     }
     if (scope) scope.goalScans.delete(scanKey);
     return { state: 'matched', ...candidates[0] };
@@ -526,10 +528,23 @@ function goalEvidenceForWork(evidence, deps, correlatedId) {
   return evidence;
 }
 
+function latestGoalCommand(conversation) {
+  const latest = activeMessages(conversation).filter(node => node.message?.author?.role === 'user').at(-1);
+  const command = parseGoalCommand(latest?.message);
+  return command ? { ...command, messageId: String(latest.message.id || '').trim(),
+    timestamp: Number(latest.message.create_time) * 1_000 } : null;
+}
+
+function initiatingGoalCommand(conversation, workId, startedAt) {
+  const receipt = goalCommandEvidence(conversation).receipts.find(item =>
+    item.workId === workId && item.command?.action === 'start' && recentGoalEvidence(item, startedAt));
+  return receipt ? { ...receipt.command, messageId: receipt.messageId, timestamp: receipt.timestamp } : null;
+}
+
 function goalCommandEvidence(conversation) {
   const messages = activeMessages(conversation);
   const command = messages.filter(n => n.message?.author?.role === 'user').at(-1);
-  const text = messageText(command?.message).trim();
+  const parsed = latestGoalCommand(conversation);
   const receipts = [];
   let user = null;
   for (const node of messages) {
@@ -540,11 +555,12 @@ function goalCommandEvidence(conversation) {
       // Date its proof by the tool response; older responses without a timestamp
       // retain the conservative initiating-user fallback.
       receipts.push({ workId, timestamp: Number(node.message.create_time ?? user.create_time) * 1_000,
-        messageId: String(user.id || '').trim() });
+        messageId: String(user.id || '').trim(), command: parseGoalCommand(user) });
     }
   }
   return {
-    requested: /^\/goal(?:\s|$)/i.test(text) && !/^\/goal\s+(?:stop|cancel|status)(?:\s|$)/i.test(text),
+    requested: parsed?.action === 'start',
+    command: parsed,
     timestamp: Number(command?.message?.create_time) * 1_000,
     messageId: String(command?.message?.id || '').trim(),
     workIds: [...new Set(messages.slice(messages.indexOf(command) + 1)
@@ -560,12 +576,22 @@ async function findGoalConversation(objective, deps = {}) {
   return match.state === 'matched' ? match.conversationId : null;
 }
 
+function assertGoalCurrent(deps) {
+  try { deps.signal?.throwIfAborted(); deps.assertCurrent?.(); }
+  catch (error) {
+    throw Object.assign(error instanceof Error ? error : new Error('Goal state changed before submission.'),
+      { notSent: true });
+  }
+}
+
 async function stopStalledTurn(id, expectedNodeId, deps = {}) {
   assertConversationId(id);
   if (!expectedNodeId) throw new Error('A confirmed stalled assistant node is required.');
   const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
   if (!native) throw new Error('Stalled ChatGPT turn requires the signed-in desktop browser to stop it safely.');
+  assertGoalCurrent(deps);
   const result = await native({ action: 'stop_stalled', conversationId: id, expectedNodeId,
+    ...(deps.workId ? { workId: deps.workId, expectedGoalRevision: deps.expectedGoalRevision } : {}),
     ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}) }, { signal: deps.signal });
   if (result?.status === 429) throw rememberRateLimit(Object.assign(
     protocolFailure('/backend-api/conversation/' + id, 429, result.retryAfterMs),
@@ -585,14 +611,19 @@ async function sendContinue(id, parentMessageId, deps = {}) {
   assertConversationId(id);
   if (!parentMessageId) throw new Error('A confirmed parent message is required.');
   if (!deps.workId || !deps.objective) throw new Error('Goal continuation requires the exact work ID and objective.');
-  const prompt = goalContinuationPrompt(deps.workId, deps.objective);
+  const prompt = deps.prompt === undefined ? goalContinuationPrompt(deps.workId, deps.objective) : deps.prompt;
+  if (typeof prompt !== 'string' || !prompt.trim() || prompt.length > 8192) {
+    throw Object.assign(new Error('Goal continuation prompt must be 1-8192 characters.'), { notSent: true });
+  }
   const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
   if (native) {
     const scope = accountScope(deps);
     if (scope.cooldownUntil > Date.now()) throw Object.assign(rateLimitError(scope.cooldownUntil), { notSent: true });
     let result;
     try {
+      assertGoalCurrent(deps);
       result = await native({ action: 'continue', conversationId: id, parentMessageId, expectedNodeId: deps.nodeId, prompt,
+        ...(deps.expectedGoalRevision !== undefined ? { workId: deps.workId, expectedGoalRevision: deps.expectedGoalRevision } : {}),
         ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}) }, { signal: deps.signal });
     } catch (error) {
       if (error?.code === 'GOAL_ACCOUNT_UNAVAILABLE') error.notSent = true;
@@ -628,6 +659,7 @@ async function sendContinue(id, parentMessageId, deps = {}) {
     const messageId = randomUUID();
     // The chat-requirements token must be available before conversation preparation.
     // Never attempt to solve proof-of-work, Turnstile, or other interactive challenges.
+    assertGoalCurrent(deps);
     const requirementPrepare = await requestChatgpt('/backend-api/sentinel/chat-requirements/prepare', {
       method: 'POST', body: {}, signal: deps.signal
     }, deps);
@@ -636,6 +668,7 @@ async function sendContinue(id, parentMessageId, deps = {}) {
     if (typeof requirementPrepare?.prepare_token !== 'string' || !requirementPrepare.prepare_token) {
       throw new Error('ChatGPT chat requirements preparation did not return a prepare token.');
     }
+    assertGoalCurrent(deps);
     const requirement = await requestChatgpt('/backend-api/sentinel/chat-requirements/finalize', {
       method: 'POST', body: { prepare_token: requirementPrepare.prepare_token }, signal: deps.signal
     }, deps);
@@ -644,6 +677,7 @@ async function sendContinue(id, parentMessageId, deps = {}) {
     if (typeof requirement?.token !== 'string' || !requirement.token) {
       throw new Error('ChatGPT requirements finalization returned no token; Goal Mode paused.');
     }
+    assertGoalCurrent(deps);
     const prep = await requestChatgpt('/backend-api/f/conversation/prepare', {
       method: 'POST',
       headers: { 'openai-sentinel-chat-requirements-token': requirement.token },
@@ -655,6 +689,7 @@ async function sendContinue(id, parentMessageId, deps = {}) {
     }, deps);
     const conduit = prep?.conduit_token || prep?.token;
     if (!conduit || typeof conduit !== 'string') throw new Error('ChatGPT preparation did not provide a conduit token.');
+    assertGoalCurrent(deps);
     submitted = true;
     const response = await requestChatgpt('/backend-api/f/conversation', {
       method: 'POST', raw: true, signal: deps.signal,
@@ -694,4 +729,21 @@ async function sendContinue(id, parentMessageId, deps = {}) {
   }
 }
 
-export { clearGoalDiscovery, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };
+async function evaluateGoalHelper(packet, deps = {}) {
+  const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
+  if (!native) throw Object.assign(new Error('Adaptive Goal/Loop evaluation requires the signed-in desktop helper.'),
+    { code: 'GOAL_EVALUATOR_UNAVAILABLE' });
+  const scope = accountScope(deps);
+  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil);
+  assertGoalCurrent(deps);
+  const result = await native({ action: 'evaluate', packet,
+    workId: packet?.evidence?.workId, expectedGoalRevision: packet?.expectedRevision,
+    conversationId: deps.conversationId,
+    ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}) }, { signal: deps.signal });
+  if (result?.status === 429) throw rememberRateLimit(Object.assign(
+    protocolFailure('/backend-api/conversation/evaluate', 429, result.retryAfterMs),
+    { deferred: true, notSent: result.notSent === true }), deps);
+  return result;
+}
+
+export { latestGoalCommand, initiatingGoalCommand, evaluateGoalHelper, clearGoalDiscovery, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };

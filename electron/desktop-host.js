@@ -72,12 +72,13 @@ async function createDesktopHost(options = {}) {
   registerLocalScheme(protocol);
   configureApplicationIdentity(app);
 
-  const [connection, configModule, errorContracts, processEnvironment, browserProfiles] = await Promise.all([
+  const [connection, configModule, errorContracts, processEnvironment, browserProfiles, goalState] = await Promise.all([
     importResourceModule('src/connectionProfile.js'),
     importResourceModule('src/config.js'),
     importResourceModule('src/contracts/errors.ts'),
     importResourceModule('src/processEnvironment.js'),
-    importResourceModule('src/browser/browserProfile.ts')
+    importResourceModule('src/browser/browserProfile.ts'),
+    importResourceModule('src/chatgptGoalState.js')
   ]);
   const { ERROR_CODES } = errorContracts;
   let processModulePromise = null;
@@ -213,6 +214,17 @@ async function createDesktopHost(options = {}) {
     openDashboard: route => showDashboardWindow(route),
     goalLoginProfileDirectory: path.join(app.getPath('userData'), 'goal-chatgpt-profile'),
     getGoalConnections: configuredGoalConnections,
+    assertGoalCurrent: fence => {
+      const current = goalState.loadGoal(browserProfileConfig(), fence.workId);
+      if (!current?.active || current.revision !== fence.expectedGoalRevision
+        || current.conversationId !== fence.conversationId
+        || String(current.tunnelId || '') !== String(fence.tunnelId || '')
+        || ['stopped', 'paused', 'blocked', 'needs_user', 'needs_finalization'].includes(current.state)) {
+        throw Object.assign(new Error('Goal changed before browser submission.'), {
+          code: 'GOAL_REVISION_STALE', stale: true, notSent: true
+        });
+      }
+    },
     clearPersistentData: () => browserProfiles.clearPersistentBrowserProfiles(browserProfileConfig()),
     listPersistentProfiles: () => browserProfiles.persistentBrowserProfileDirectories(browserProfileConfig()),
     readPersistentSites: profileDirectory => browserProfiles.readPersistentBrowserSites(profileDirectory),

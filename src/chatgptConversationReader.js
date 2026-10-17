@@ -5,6 +5,7 @@ import { JSONParser } from '@streamparser/json';
 const MAX_TRANSFER_BYTES = 256 * 1024 * 1024; // Wire safety bound, not RAM buffering.
 const MAX_NODES = 100_000;
 const MAX_COMMAND_CHARS = 4096;
+const MAX_CONTINUATION_CHARS = 8192;
 // Work responses include plans and bootstrap context. Their receipt budget is
 // separate from command text; only extracted IDs survive projection.
 const MAX_RECEIPT_CHARS = 1024 * 1024;
@@ -97,15 +98,17 @@ function conversationProjection() {
       ])].slice(0, 8);
       // The command can span multiple content parts. Preserve the complete
       // command or nothing: a partial '/goal' must not pass as a bare command.
-      if (typeof value !== 'string' || key >= 8 || value.length > MAX_COMMAND_CHARS) {
+      const textLimit = /^Continue goal /i.test(key === 0 ? value : parts[0] || '')
+        ? MAX_CONTINUATION_CHARS : MAX_COMMAND_CHARS;
+      if (typeof value !== 'string' || key >= 8 || value.length > textLimit) {
         if (key === 0 || parts.length) { parts.length = 0; message.content.commandInvalid = true; }
         return;
       }
       if (message.content.commandInvalid) return;
-      if (key === 0 && (/^\s*\/goal(?:\s|$)/i.test(value) || /^Continue goal /i.test(value))) {
+      if (key === 0 && (/^\s*\/(?:goal|loop)(?:\s|$)/i.test(value) || /^Continue goal /i.test(value))) {
         parts[0] = value;
       } else if (key > 0 && parts.length && key === parts.length
-        && parts.join('\n').length + value.length + 1 <= MAX_COMMAND_CHARS) {
+        && parts.join('\n').length + value.length + 1 <= textLimit) {
         parts[key] = value;
       } else if (parts.length) {
         parts.length = 0;

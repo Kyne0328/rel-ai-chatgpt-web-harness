@@ -104,7 +104,7 @@ function enrichChecksAudit(extra, value) {
   if (Array.isArray(value?.validationScope)) extra.validationScope = value.validationScope.slice(0, 1000);
   assignDefined(extra, "aliasNormalizations", value?.aliasNormalizations);
   if (value?.policy) extra.policySessionActive = value.policy.sessionActive;
-  if (value?.completionKnown === true) enrichCompletionAudit(extra, value);
+  if (typeof value?.completionKnown === 'boolean') enrichCompletionAudit(extra, value);
 }
 
 function enrichCompletionAudit(extra, value) {

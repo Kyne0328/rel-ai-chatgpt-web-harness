@@ -97,7 +97,7 @@ const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
 ]);
 const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   ...READ_ONLY_TOOLS, OP.PROCESS_STOP, OP.CHANGES_RESTORE,
-  OP.WORK_PLAN, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH, OP.GOAL_STATUS, OP.GOAL_STOP
+  OP.WORK_PLAN, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH, OP.GOAL_STATUS, OP.GOAL_STOP, OP.GOAL_PAUSE, OP.GOAL_RESUME, OP.GOAL_UPDATE
 ]);
 const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
@@ -122,7 +122,7 @@ const PERSISTENT_PROCESS_TOOLS: ReadonlySet<string> = new Set([
 const ALWAYS_IMMEDIATE_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_BEGIN, OP.WORK_PLAN, OP.SNAPSHOT, OP.READ, OP.SEARCH_TEXT,
   OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH,
-  OP.GOAL_STATUS, OP.GOAL_STOP
+  OP.GOAL_STATUS, OP.GOAL_STOP, OP.GOAL_PAUSE, OP.GOAL_RESUME, OP.GOAL_UPDATE
 ]);
 
 const DEFAULT_BEHAVIOR: Readonly<ToolBehavior> = Object.freeze({
@@ -187,7 +187,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. ChatGPT Web /goal monitoring follows recent user commands; goal:true optionally overrides detection. goal_status reads it; goal_stop disables auto-continuation without cancelling. status lists receipts immediately. result(operationId) waits up to 5s for completion; waitMs:0 returns immediately. history pages authorized records; context restores continuity. stop(operationId) stops one command; task stop/cancel stops all. Keep plans current; finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
+    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. Chat-first /goal and /loop use adaptive monitoring; mode selects explicitly, goal:true preserves legacy fixed behavior. goal_status/pause/resume/stop control exact work_id; goal_update changes its authorized objective or brief. No total continuation limit. status lists receipts immediately. result(operationId) waits up to 5s for completion; waitMs:0 returns immediately. history pages authorized records; context restores continuity. stop(operationId) stops one command; task stop/cancel stops all. Keep plans current; finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },

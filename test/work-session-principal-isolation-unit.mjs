@@ -107,6 +107,81 @@ try {
   }, projectlessCancelOwner);
   assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, projectlessCancel.work_id)?.workspace || '', '', 'cancel must not bind a projectless goal merely because a workspace argument was supplied');
 
+
+  // Loop completion is an iteration milestone; its original work and brief stay live.
+  const loopOwner = { ...sameOwner, conversationId: 'loop-milestone-regression' };
+  const loop = await callTool('relai_work', {
+    action: 'begin', title: 'Review queue', objective: 'Review only the authorized queue',
+    goal: true, mode: 'loop', strategy: 'fixed', brief: 'Review only the authorized queue',
+    conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d',
+    steps: [{ id: 'iteration', title: 'Review the next queue item', status: 'in_progress' }]
+  }, loopOwner);
+  assert.ok(loop.work_id);
+  await callTool('relai_work', { action: 'plan', work_id: loop.work_id,
+    steps: [{ id: 'iteration', title: 'Review the next queue item', status: 'completed' }]
+  }, loopOwner);
+  assert.notEqual(readTaskHistorySession({ stateDir, auditLogPath }, loop.work_id)?.status, 'completed',
+    'a completed iteration plan must not auto-finalize active Loop work');
+  const milestone = await callTool('relai_work', { action: 'finish', work_id: loop.work_id,
+    summary: 'One queue item was reviewed; the loop brief remains active.' }, loopOwner);
+  assert.equal(milestone.iterationCompleted, true);
+  assert.equal(milestone.completionKnown, false);
+  assert.equal(milestone.mode, 'loop');
+  assert.equal(milestone.iterationCount, 1);
+  assert.notEqual(readTaskHistorySession({ stateDir, auditLogPath }, loop.work_id)?.status, 'completed');
+  const loopStatus = await callTool('relai_work', { action: 'goal_status', work_id: loop.work_id }, loopOwner);
+  assert.equal(loopStatus.mode, 'loop');
+  assert.equal(loopStatus.goalActive, true);
+  await assert.rejects(callTool('relai_work', { action: 'goal_pause', work_id: loop.work_id }, otherOwner));
+  const pausedLoop = await callTool('relai_work', { action: 'goal_pause', work_id: loop.work_id }, loopOwner);
+  assert.equal(pausedLoop.goalActive, false);
+  assert.equal(pausedLoop.state, 'paused');
+  const resumedLoop = await callTool('relai_work', { action: 'goal_resume', work_id: loop.work_id }, loopOwner);
+  assert.equal(resumedLoop.goalActive, true);
+  await callTool('relai_work', { action: 'cancel', work_id: loop.work_id, reason: 'Fixture cleanup' }, loopOwner);
+  await assert.rejects(callTool('relai_work', { action: 'goal_resume', work_id: loop.work_id }, loopOwner),
+    'an explicit resume must not reopen a cancelled task');
+  assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, loop.work_id)?.status, 'cancelled');
+
+
+  const adaptiveOwner = { ...sameOwner, conversationId: 'adaptive-finish-regression' };
+  const adaptive = await callTool('relai_work', { action: 'begin', title: 'Finite evidence-backed goal',
+    objective: 'Complete the fixture with supporting evidence', goal: true, mode: 'goal', strategy: 'adaptive',
+    conversationUrl: 'https://chatgpt.com/c/ca32ef5a-77b0-49f0-983d-b39c12c45ff2',
+    steps: [{ id: 'verify', title: 'Verify the fixture', status: 'in_progress' }]
+  }, adaptiveOwner);
+  await callTool('relai_work', { action: 'plan', work_id: adaptive.work_id,
+    steps: [{ id: 'verify', title: 'Verify the fixture', status: 'completed' }]
+  }, adaptiveOwner);
+  assert.notEqual(readTaskHistorySession({ stateDir, auditLogPath }, adaptive.work_id)?.status, 'completed',
+    'plan labels alone must not complete an adaptive Goal');
+  const premature = await callTool('relai_work', { action: 'finish', work_id: adaptive.work_id,
+    summary: 'Claimed done before the evaluator verifies the outcome.' }, adaptiveOwner);
+  assert.equal(premature.completionKnown, false);
+  assert.equal(premature.completionPending, true);
+  await callTool('relai_work', { action: 'goal_pause', work_id: adaptive.work_id }, adaptiveOwner);
+  const pausedFinish = await callTool('relai_work', { action: 'finish', work_id: adaptive.work_id,
+    summary: 'A paused Goal still requires supported completion.' }, adaptiveOwner);
+  assert.equal(pausedFinish.completionKnown, false);
+  assert.equal((await callTool('relai_work', { action: 'goal_status', work_id: adaptive.work_id }, adaptiveOwner)).goalActive, false);
+  const { updateGoal: updateDurableGoal } = await import('../src/chatgptGoalState.js');
+  // The controller owns this receipt; this fixture isolates finish's guarded handoff.
+  const achievementEvidence = { planRevision: readTaskHistorySession({ stateDir, auditLogPath }, adaptive.work_id).plan.revision,
+    mutationGeneration: null, workspaceGeneration: null, repositoryFingerprint: '', requiresValidation: false };
+  updateDurableGoal({ stateDir }, adaptive.work_id, current => ({ ...current,
+    objectiveAchieved: true, state: 'needs_finalization',
+    achievementEvidence: { ...achievementEvidence, planRevision: achievementEvidence.planRevision - 1 } }));
+  const staleFinish = await callTool('relai_work', { action: 'finish', work_id: adaptive.work_id,
+    summary: 'A stale plan verdict cannot complete newer work.' }, adaptiveOwner);
+  assert.equal(staleFinish.completionKnown, false);
+  assert.equal(staleFinish.completionPending, true);
+  updateDurableGoal({ stateDir }, adaptive.work_id, current => ({ ...current,
+    objectiveAchieved: true, state: 'needs_finalization', achievementEvidence }));
+  const supportedFinish = await callTool('relai_work', { action: 'finish', work_id: adaptive.work_id,
+    summary: 'The controller has accepted supporting evidence.' }, adaptiveOwner);
+  assert.equal(supportedFinish.completionKnown, true);
+  assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, adaptive.work_id)?.status, 'completed');
+
   const { bindWorkspaceOperationIdentity, runWorkspaceOperation } = await import('../src/workspaceOperationQueue.js');
   // Match real public admission: bind the physical workspace before taking a
   // direct internal queue lock. An alias-only lock cannot establish root identity.

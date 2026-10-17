@@ -577,7 +577,7 @@ function hasExplicitCompletionEvidence(session: TaskRecord = emptySession('')): 
   if (session.completionKnown === true || String(session.endReason || '') === 'explicit_completion') return true;
   return (Array.isArray(session.events) ? session.events : []).some((event: HistoryEvent) => {
     if (event?.completionKnown === true || String(event?.endReason || '') === 'explicit_completion') return true;
-    return event?.tool === OP.WORK_FINISH && event?.ok !== false && !['failed', 'cancelled'].includes(String(event?.status || '').toLowerCase());
+    return event?.tool === OP.WORK_FINISH && event?.completionKnown !== false && event?.ok !== false && !['failed', 'cancelled'].includes(String(event?.status || '').toLowerCase());
   });
 }
 

@@ -132,6 +132,21 @@ Then move into an implementation request:
 Use Rel.AI MCP with workspace "myapp". Implement this change, run the relevant checks, review what changed, and do not commit or push unless I ask.
 ```
 
+### Goal and Loop from chat
+
+Start either mode in the same ChatGPT conversation:
+
+- `/goal Finish the repair and verify the affected tests` works toward a finite, evidence-backed outcome.
+- `/loop Review the queue and handle the next eligible item` keeps working within that brief until you stop it. Finishing an iteration records a milestone instead of ending the loop.
+- `/goal status` or `/loop status` reports the current state.
+- `/goal pause`, `/goal resume`, and `/goal stop` control the linked run. The same controls work with `/loop`.
+
+New chat commands use adaptive evaluation. Existing fixed-continuation records remain compatible. There is no lifetime continuation-count or elapsed-time cap; the continuation count is a status counter. Both modes still wait or pause for missing permissions, authentication, rate limits, unresolved sends, repeated helper failures, or no meaningful progress. Stop takes precedence over an in-flight evaluation, and resuming preserves accepted-send and iteration counts and uncertain-send receipts. Rel.AI must be running with the correct authenticated conversation linked.
+
+Commands must be user-authored at the start of a message. Quoted examples, assistant text, tool output, and another conversation do not authorize a run. An assistant saying “done” or “tests passed” is not verification evidence.
+
+The automated Goal/Loop tests use isolated state and browser/helper fixtures. A passing local suite does not establish live ChatGPT account acceptance; live prompts, authentication changes, and service restarts are separate checks.
+
 ## How Rel.AI works
 
 ```text

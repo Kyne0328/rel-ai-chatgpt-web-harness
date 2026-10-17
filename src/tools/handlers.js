@@ -11,7 +11,7 @@ import { workspaceHistory } from './history.ts';
 import { relaiStatus } from './status.js';
 import { completeTask } from './completion.js';
 import { cancelTask, stopTaskOperations } from './cancellation.js';
-import { activateGoal, queueGoalDetection, goalStatus, stopGoal } from '../chatgptGoalMode.js';
+import { activateGoal, queueGoalDetection, goalStatus, stopGoal, pauseGoal, resumeGoal, updateGoal } from '../chatgptGoalMode.js';
 import { relaiSearch } from '../bridge/search.js';
 import { relaiCodeInspect } from '../bridge/codeIntelligence.js';
 import { relaiExec } from '../bridge/exec.js';
@@ -42,6 +42,11 @@ function resolveOptionalWorkspace(config, args = {}) {
 }
 
 const startTaskHandler = async (config, args = {}, context = {}) => {
+  const goalOptions = ['mode', 'strategy', 'successCriteria', 'brief'].some(key => args[key] !== undefined);
+  if (goalOptions && args.goal !== true && !args.mode) {
+    throw new Error('Goal/Loop configuration requires an explicit mode or goal:true.');
+  }
+  if (args.goal === false && goalOptions) throw new Error('goal:false cannot enable Goal/Loop configuration.');
   const workspace = resolveOptionalWorkspace(config, args);
   const task = startTask(workspace, args);
   const recovered = context?.requestTaskContext?.session;
@@ -51,9 +56,10 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   const initialSteps = Array.isArray(args.steps) && args.steps.length ? args.steps : defaultTaskSteps(args);
   const progress = hasPlan ? null : applyTaskProgressPatch(task.work_id, { steps: initialSteps });
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
-  if (args.goal === true) {
+  if (args.goal === true || args.mode) {
     activateGoal(config,
-      { work_id: task.work_id, objective: args.objective || current?.objective || args.title, conversationUrl: args.conversationUrl },
+      { ...args, work_id: task.work_id, objective: args.objective || current?.objective || args.title,
+        ...(args.mode && !args.strategy ? { strategy: 'adaptive' } : {}) },
       { ...context, requestTaskContext: { session: current || { ...task, status: 'planning', workspace: workspace?.alias || '', objective: args.objective || args.title } } });
   } else {
     queueGoalDetection(config, task, context);
@@ -153,15 +159,16 @@ const taskPlanHandler = async (config, args, context) => {
   const workspace = String(context?.requestTaskContext?.session?.workspace || '').trim();
   const result = applyTaskProgressPatch(taskId, { steps: args.steps });
   const plan = result?.plan || { revision: 0, steps: [] };
-  // The model's explicit plan update is the trusted completion evidence.
-  // Only Goal Mode plans that have no actionable steps remaining are closed;
-  // finish uses the SAME validated cleanup/integrity path as relai_work finish.
+  // Legacy fixed Goal Mode retains its explicit plan-close behavior.
+  // Adaptive goals require evidence evaluation; Loop plans finish iterations,
+  // never the user's ongoing brief.
   if (plan.steps.length && plan.steps.some(step => step.status === 'completed')
     && plan.steps.every(step => ['completed', 'blocked', 'skipped'].includes(step.status))) {
     let goal = null;
     try { goal = goalStatus(config, { work_id: taskId }, context); } catch {}
     const current = getToolActivity().tasks.find(item => String(item.id || item.taskId) === taskId);
-    if (goal?.goalActive && Number(current?.activeCalls || 0) === 1) {
+    if (goal?.goalActive && goal.mode !== 'loop' && goal.strategy !== 'adaptive'
+      && Number(current?.activeCalls || 0) === 1) {
       const blocked = plan.steps.filter(step => step.status === 'blocked').map(step => step.title);
       const summary = blocked.length
         ? `Completed feasible plan steps; externally blocked: ${blocked.join('; ').slice(0, 650)}`
@@ -185,6 +192,9 @@ const HANDLERS = Object.freeze({
   startTask: startTaskHandler,
   goalStatus,
   goalStop: stopGoal,
+  goalPause: pauseGoal,
+  goalResume: resumeGoal,
+  goalUpdate: updateGoal,
   taskContext: taskContextHandler,
   taskPlan: taskPlanHandler,
   repoSnapshot: inWorkspace(async (workspace, config, args, context) => {
