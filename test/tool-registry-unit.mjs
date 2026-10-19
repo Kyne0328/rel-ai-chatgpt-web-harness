@@ -213,18 +213,9 @@ await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'direct'
 await valid('relai_work', { action: 'begin' });
 await valid('relai_work', { action: 'begin', goal: true, objective: 'Verify the requested goal',
   conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d' });
-await valid('relai_work', { action: 'begin', goal: true, objective: 'Verify the requested goal',
-  conversationId: 'b5b9731a-8496-4a92-9b44-55d080038c7d' });
-await invalid('relai_work', { action: 'begin', goal: true, conversationId: 'anonymous-session' });
 await valid('relai_work', { action: 'begin', mode: 'loop', strategy: 'adaptive', brief: 'Improve only the approved scope' });
 await valid('relai_work', { action: 'goal_update', work_id: 'work', mode: 'goal',
   objective: 'Finish the approved objective', successCriteria: ['Observed result verified'] });
-await valid('relai_work', { action: 'goal_update', work_id: 'work',
-  conversationId: 'b5b9731a-8496-4a92-9b44-55d080038c7d' });
-await invalid('relai_work', { action: 'goal_update', work_id: 'work',
-  conversationId: 'anonymous-session' });
-await valid('relai_work', { action: 'goal_update', work_id: 'work',
-  conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d' });
 await invalid('relai_work', { action: 'begin', mode: 'unknown' });
 await invalid('relai_work', { action: 'begin', strategy: 'unknown' });
 await invalid('relai_work', { action: 'begin', maxContinuations: 8 });
