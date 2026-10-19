@@ -377,13 +377,35 @@ function updateGoal(config, args, context) {
   const goal = requireOwnedGoal(config, { ...args, mode: undefined }, context);
   const objective = String(args.objective ?? goal.objective).trim();
   if (!objective || objective.length > 500) throw new Error('Goal objective must be 1-500 characters.');
-  const configuration = goalConfiguration(args, goal);
-  const updated = mutateGoal(config, goal.workId, current => ({ ...current, ...configuration, objective,
-    commandResolutionPending: false,
-    lastDecision: null, lastEvidenceFingerprint: '', helperFailureCount: 0, noProgressCount: 0, objectiveAchieved: false,
-    nextAttemptAt: 0, updatedAt: Date.now()
+  const supplied = suppliedGoalConversation(args);
+  const requestedId = supplied.directId || supplied.urlId;
+  if (requestedId && goal.conversationId && goal.conversationId !== requestedId) {
+    throw new Error('An existing Goal cannot switch to a different ChatGPT conversation.');
+  }
+  if (requestedId && goal.pendingNode && !['accepted', 'not_sent'].includes(pendingOutcome(goal))) {
+    throw new Error('Cannot change a Goal conversation while a previous send receipt is unresolved.');
+  }
+  const scopeChanged = ['mode', 'strategy', 'successCriteria', 'brief', 'objective']
+    .some(key => args[key] !== undefined);
+  const configuration = scopeChanged ? goalConfiguration(args, goal) : {};
+  const updated = mutateGoal(config, goal.workId, current => ({
+    ...current, ...configuration, objective,
+    ...(scopeChanged ? {
+      commandResolutionPending: false,
+      lastDecision: null, lastEvidenceFingerprint: '', helperFailureCount: 0, noProgressCount: 0,
+      objectiveAchieved: false, nextAttemptAt: 0
+    } : {}),
+    ...(requestedId && !current.conversationId ? {
+      requestedConversationId: requestedId, requestedConversationAt: Date.now(),
+      state: current.active ? 'linking' : current.state,
+      nextAttemptAt: 0, retryCount: 0, error: ''
+    } : {}),
+    updatedAt: Date.now()
   }), { reactivate: true });
   invalidateGoalPoll(goal.workId);
+  if (requestedId && updated?.active && monitorConfig && getStateDir(monitorConfig) === getStateDir(config)) {
+    setImmediate(() => { if (monitorConfig) runGoalBackground(monitorConfig, goal.workId, 'poll'); });
+  }
   return publicGoal(updated);
 }
 
@@ -560,6 +582,15 @@ async function selectGoalContinuation(config, goal, task, conversation, snapshot
       + '\nBounded next step from the read-only helper: ' + prompt } : null;
 }
 
+function suppliedGoalConversation(args = {}) {
+  const directId = args.conversationId === undefined ? '' : parseConversationUrl(args.conversationId);
+  const urlId = args.conversationUrl === undefined ? '' : parseConversationUrl(args.conversationUrl);
+  if (directId && urlId && directId !== urlId) {
+    throw new Error('Supplied ChatGPT conversation ID and URL must match.');
+  }
+  return { directId, urlId };
+}
+
 function activateGoal(config, args, context) {
   const workId = String(args.work_id || '').trim();
   const task = context?.requestTaskContext?.session;
@@ -570,7 +601,13 @@ function activateGoal(config, args, context) {
   const owner = ownerFingerprint(context);
   const existing = loadGoal(config, workId);
   if (existing && existing.owner !== owner) throw new Error('Goal Mode owner mismatch.');
-  const conversationId = args.conversationUrl ? parseConversationUrl(args.conversationUrl) : existing?.conversationId || '';
+  const supplied = suppliedGoalConversation(args);
+  const conversationId = supplied.directId && !existing?.conversationId
+    ? '' : supplied.urlId || existing?.conversationId || '';
+  if (supplied.directId && existing?.conversationId && existing.conversationId !== supplied.directId) {
+    throw new Error('An existing Goal cannot switch to a different ChatGPT conversation.');
+  }
+  const requestedConversationId = conversationId ? '' : supplied.directId || existing?.requestedConversationId || '';
   const switchingConversation = Boolean(existing?.conversationId && conversationId && existing.conversationId !== conversationId);
   if (switchingConversation && existing.active) {
     throw new Error('An active goal cannot silently switch conversations; stop it first.');
@@ -581,7 +618,10 @@ function activateGoal(config, args, context) {
   const goal = saveGoal(config, {
     ...(existing || {}), ...goalConfiguration(args, existing), workId, owner, workspace: String(task.workspace || ''),
     createdAt: existing?.createdAt || Date.now(),
-    objective, conversationId, active: true, state: 'linking', objectiveAchieved: false,
+    objective, conversationId, requestedConversationId,
+    requestedConversationAt: requestedConversationId
+      ? (supplied.directId ? Date.now() : existing?.requestedConversationAt || Date.now()) : 0,
+    active: true, state: 'linking', objectiveAchieved: false,
     lastCommandId: existing?.lastCommandId || '', commandResolutionPending: existing ? existing.commandResolutionPending === true : true,
     tunnelId: existing?.tunnelId || principalTunnelId(context.principal),
     conversationCorrelation: existing?.conversationCorrelation || String(context?.conversationId || task.correlation?.conversationId || ''),
@@ -932,15 +972,30 @@ async function pollGoal(config, workId, deps = {}) {
     // may need to wait for branch settlement instead of sending immediately.
     if (goal.nextAttemptAt) goal = saveGoal(config, { ...goal, nextAttemptAt: 0 });
     if (!goal.conversationId) {
-      const id = await findGoalConversation(goal.objective, { ...deps, startedAt: goal.createdAt, signal: controller.signal,
-        conversationCorrelation: verifiedCorrelation(config, goal), workId, requireWorkReceipt: true, explicitGoal: true });
-      if (controller.signal.aborted) return;
-      if (!id) {
-        retryGoal(config, goal, Object.assign(new Error('No verified ChatGPT conversation is linked to this work session.'),
-          { retryAt: Date.now() + DISCOVERY_RETRY_MS }), { notSent: true });
+      const requestedId = goal.requestedConversationId || '';
+      // A supplied UUID is a lookup hint, never proof that this work owns the
+      // chat. Read that exact conversation and verify its active-branch work
+      // receipt instead of searching every Project in the account.
+      if (requestedId && Date.now() - Number(goal.requestedConversationAt || goal.createdAt) > 120_000) {
+        saveGoal(config, { ...goal, active: false, state: 'needs_user', nextAttemptAt: 0,
+          error: 'The supplied ChatGPT conversation has no verified receipt for this work ID.',
+          updatedAt: Date.now() });
         return;
       }
-      goal = saveGoal(config, { ...goal, conversationId: id, state: 'monitoring', updatedAt: Date.now() });
+      const id = await findGoalConversation(goal.objective, { ...deps, startedAt: goal.createdAt, signal: controller.signal,
+        conversationCorrelation: requestedId || verifiedCorrelation(config, goal),
+        workId, requireWorkReceipt: true, explicitGoal: true });
+      if (controller.signal.aborted) return;
+      if (!id) {
+        retryGoal(config, goal, Object.assign(new Error(requestedId
+          ? 'Waiting for the exact work receipt in the supplied ChatGPT conversation.'
+          : 'No verified ChatGPT conversation is linked to this work session.'),
+        { deferred: Boolean(requestedId), retryAt: Date.now() + (requestedId ? 5_000 : DISCOVERY_RETRY_MS) }),
+        { notSent: true });
+        return;
+      }
+      goal = saveGoal(config, { ...goal, conversationId: id, requestedConversationId: '',
+        requestedConversationAt: 0, state: 'monitoring', error: '', retryCount: 0, updatedAt: Date.now() });
     }
     const observationRevision = goal.revision;
     const observationConversationId = goal.conversationId;
