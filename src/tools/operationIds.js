@@ -20,6 +20,7 @@ const OPERATION_IDS = Object.freeze({
   INSPECT: 'inspect',
   EDIT: 'edit',
   EXEC: 'exec',
+  COMPOSE: 'compose',
   PROCESS_START: 'process.start',
   PROCESS_READ: 'process.read',
   PROCESS_WRITE: 'process.write',

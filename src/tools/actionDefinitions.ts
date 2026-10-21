@@ -91,6 +91,7 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_STATUS, OP.WORK_RESULT, OP.WORK_HISTORY, OP.PUBLISH_DRAFT_PR
 ]);
 const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
+  OP.COMPOSE,
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.PROCESS_STOP, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
   OP.VALIDATE_DIAGNOSTICS, OP.CHANGES_TIDY_RUN, OP.VALIDATE_CHECKS, OP.CHANGES_RESTORE,
   OP.EDIT
@@ -100,6 +101,7 @@ const IDEMPOTENT_TOOLS: ReadonlySet<string> = new Set([
   OP.WORK_PLAN, OP.WORK_STOP, OP.WORK_CANCEL, OP.WORK_FINISH, OP.GOAL_STATUS, OP.GOAL_STOP, OP.GOAL_PAUSE, OP.GOAL_RESUME, OP.GOAL_UPDATE
 ]);
 const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
+  OP.COMPOSE,
   OP.EXEC, OP.PROCESS_START, OP.PROCESS_WRITE, OP.UI, OP.BROWSER, OP.DESKTOP, OP.COMPUTER,
   OP.VALIDATE_DIAGNOSTICS, OP.VALIDATE_CHECKS, OP.PUBLISH_PUSH
 ]);
@@ -107,6 +109,7 @@ const OPEN_WORLD_TOOLS: ReadonlySet<string> = new Set([
 // complete directly; longer calls continue through Rel.AI's principal- and workspace-scoped
 // background fallback so ChatGPT Web can keep working without polling.
 const BACKGROUND_FALLBACK_ELIGIBLE_TOOLS: ReadonlySet<string> = new Set([
+  OP.COMPOSE,
   OP.WORK_CONTEXT,
   OP.SEARCH_SEMANTIC,
   OP.INSPECT,
@@ -185,9 +188,16 @@ function getOperationDefinitions(): readonly CatalogToolDefinition[] {
 
 const PUBLIC_TOOL_VALUES = [
   {
+    name: 'relai_compose', title: 'Compose Tools',
+    description: 'JavaScript: await tools.<name>(args). ALL_TOOLS has schemas; text(value)/image(childImage) emit. Await all calls and dependent mutations. Scope, permissions, queues and receipts persist. Lifecycle controls and complete:true stay direct. No recursion/direct host access. Failure keeps effects; inspect calls/compositionOutputRef. LIMITS has budgets.',
+    annotations: annotations(false, true, false, true),
+    behavior: { taskScope: 'optional', executionClass: EXECUTION_CLASS.BACKGROUND_FALLBACK_ELIGIBLE, longRunning: true },
+    dashboard: { category: 'Workflow', capabilities: ['workflow'] }
+  },
+  {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Every durable Rel.AI goal starts with a non-empty plan on begin. Chat-first /goal and /loop use adaptive monitoring; mode selects explicitly, goal:true preserves legacy fixed behavior. goal_status/pause/resume/stop control exact work_id; goal_update changes its authorized objective or brief. No total continuation limit. status lists receipts immediately. result(operationId) waits up to 5s for completion; waitMs:0 returns immediately. history pages authorized records; context restores continuity. stop(operationId) stops one command; task stop/cancel stops all. Keep plans current; finish after operations settle. Projectless one-shot utility/control work runs directly without a durable task.',
+    description: 'Durable project tasks: begin with non-empty steps and carry work_id. /goal and /loop use adaptive monitoring; goal:true retains fixed mode. No total continuation limit. Keep plans current. status/history/context recover facts; result(operationId) waits up to 5s, waitMs:0 returns immediately. stop(operationId) stops one command; task stop/cancel stops all. Finish after operations settle. Projectless utilities run taskless.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },
@@ -199,7 +209,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_read', title: 'Read Local Workspace',
-    description: 'Reads exact local workspace files/ranges, directories, discovered skills, or execution output. Batch paths/ranges. Host-uploaded files stay host-owned; asResource:true returns one exact local file as a private resource_link for transfer or download.'
+    description: 'Batch-read local files/ranges, directories, skills or execution output. Host uploads stay host-owned. asResource:true returns one private resource_link for transfer or download.'
   },
   {
     name: 'relai_search', title: 'Search Repository',
@@ -218,12 +228,12 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_exec', title: 'Run Command',
-    description: 'Runs one-shot workspace commands via direct executable + argv or a command string. Durable work runs until exit/cancel and receives REL_AI_EPHEMERAL_DIR for task-owned scratch outside Git; exact new in-project scratch files can be declared with ephemeralPaths. Taskless work keeps a safety timeout.',
+    description: 'One-shot workspace commands via direct executable + argv or command string. Durable work runs until exit/cancel. REL_AI_EPHEMERAL_DIR is task scratch outside Git; ephemeralPaths declares exact new project scratch files. Taskless work has a safety timeout.',
     dashboard: { capabilities: ['execute'] }
   },
   {
     name: 'relai_process', title: 'Manage Process',
-    description: 'Services, watchers and interactive programs with stable IDs. Start: direct executable + argv or command string. Default persistent survives finish/cancel. lifecycle:task needs work_id bound to this workspace; finish/cancel cleans only owned processes. Shared services survive; uncertain cleanup is reported. One-shot work: relai_exec/relai_validate.',
+    description: 'Services/watchers. Start: direct executable + argv or command string. Persistent survives finish/cancel; lifecycle:task requires work_id and cleans only owned processes. Uncertain cleanup is reported. One-shot: relai_exec/relai_validate.',
     annotations: annotations(false, true, false, true),
     dashboard: { capabilities: ['execute'] }, behavior: { executionClass: 'persistent_process', taskScope: 'optional' }
   },
@@ -234,7 +244,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_browser', title: 'Use Local Browser',
-    description: 'Local browser for localhost/LAN/intranet/VPN, machine-authenticated sessions, and workspace file transfer. Persistent profile reuses sign-ins. profile:ephemeral is private. handoff lets the user enter passwords, MFA, CAPTCHA, or private input. resume returns control. Use semantic snapshots for content, layout for geometry/overflow, screenshots for pixels. Public web stays host-owned.',
+    description: 'Local browser: localhost/LAN/intranet/VPN, machine-authenticated sessions, workspace file transfer. profile:ephemeral is private. handoff gives passwords/MFA/CAPTCHA to the user; resume returns control. Snapshots show content; layout shows geometry. Public web stays host-owned.',
     annotations: annotations(false, true, false, true), dashboard: { capabilities: ['execute'] }
   },
   {
@@ -244,7 +254,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_computer', title: 'Control Computer',
-    description: 'Local desktop fallback after structured tools and relai_browser. Requires Computer control and per-app approval. Windows uses UI Automation, then OCR or pixels when needed. Pixels/OCR require verified app-window capture and fail closed if unavailable. activate revalidates targets; set_value uses UIA ValuePattern. observe, waits and batch support bounded actions. Browsers are view-only; use relai_browser. Terminals/IDEs are click-only; use relai_desktop to type. One session drives input.',
+    description: 'Desktop fallback after structured tools and relai_browser. Requires Computer control and per-app approval. Windows uses UIA, then verified app-window OCR/pixels; unavailable capture fails closed. Revalidate stale targets. Browsers are view-only; use relai_browser. Terminals/IDEs are click-only; use relai_desktop to type. One session drives input.',
     annotations: annotations(false, true, false, true), dashboard: { capabilities: ['execute'] }
   },
   {

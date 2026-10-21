@@ -54,6 +54,7 @@ function titleForTool(tool, details = {}) {
     [OP.SEARCH_SEMANTIC]: 'Search code semantically',
     [OP.EDIT]: path ? `Update ${displayPath(path)}` : 'Apply repository changes',
     [OP.EXEC]: 'Run repository command',
+    [OP.COMPOSE]: 'Compose Rel.AI tools',
     [OP.PROCESS_START]: 'Start managed process',
     [OP.PROCESS_READ]: 'Inspect managed process',
     [OP.PROCESS_WRITE]: 'Send managed process input',
@@ -748,7 +749,7 @@ function sanitizeStructuredValue(value, depth = 0) {
   if (typeof value !== 'object') return undefined;
   const output = {};
   for (const [key, item] of Object.entries(value)) {
-    if (['stdoutOutputRef', 'stderrOutputRef'].includes(key) && typeof item === 'string' && /^spill_[A-Za-z0-9_-]{20,80}$/.test(item)) {
+    if (['stdoutOutputRef', 'stderrOutputRef', 'compositionOutputRef'].includes(key) && typeof item === 'string' && /^spill_[A-Za-z0-9_-]{20,80}$/.test(item)) {
       output[key] = item;
       continue;
     }

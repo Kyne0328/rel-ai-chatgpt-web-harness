@@ -29,8 +29,8 @@ for (const localOwned of ['files/repos', 'Git', 'CLI/processes', 'LAN/intranet',
 }
 
 const read = descriptions.get('relai_read');
-assert.match(read, /local workspace files/i);
-assert.match(read, /Host-uploaded files stay host-owned/i);
+assert.match(read, /local (?:workspace )?files/i);
+assert.match(read, /Host(?:-uploaded files| uploads) stay host-owned/i);
 assert.match(read, /asResource:true.*resource_link.*transfer or download/i);
 
 const edit = descriptions.get('relai_edit');
@@ -60,9 +60,10 @@ assert.match(desktop, /Structured local OS actions/i);
 assert.match(desktop, /relai_computer is the UI fallback/i);
 
 const computer = descriptions.get('relai_computer');
-assert.match(computer, /Local desktop fallback after structured tools and relai_browser/i, 'Computer control must follow structured and browser tools in routing');
+assert.match(computer, /(?:Local )?desktop fallback after structured tools and relai_browser/i, 'Computer control must follow structured and browser tools in routing');
 assert.match(computer, /Requires Computer control and per-app approval/i);
-assert.match(computer, /Pixels\/OCR require verified app-window capture and fail closed if unavailable/i, 'Public routing must retain the app-only pixel privacy boundary');
+assert.match(computer, /verified app-window/i, 'Public routing must retain application-scoped pixel provenance');
+assert.match(computer, /(?:pixels|OCR).*fails? closed/i, 'Unavailable pixel capture must fail closed');
 assert.match(computer, /Browsers are view-only; use relai_browser/i);
 assert.match(computer, /Terminals\/IDEs are click-only; use relai_desktop to type/i);
 assert.match(computer, /One session drives input/i);

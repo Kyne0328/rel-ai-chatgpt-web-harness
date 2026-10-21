@@ -120,6 +120,7 @@ const UI_OMIT = Object.freeze({
 // exposure of that operation. Public action lookup is derived below rather than
 // maintained as an independent source of truth.
 const PUBLIC_BINDINGS_BY_OPERATION = Object.freeze({
+  [OP.COMPOSE]: [expose('relai_compose', 'default', { capability: READ })],
   [OP.WORK_BEGIN]: [expose('relai_work', 'begin', { capability: READ })],
   [OP.WORK_CONTEXT]: [expose('relai_work', 'context', { capability: READ })],
   [OP.WORK_PLAN]: [expose('relai_work', 'plan', { capability: READ })],

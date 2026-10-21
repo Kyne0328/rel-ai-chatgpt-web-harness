@@ -16,6 +16,7 @@ import {
 
 const config = { workspaces: {} };
 const requiredTools = [
+  'relai_compose',
   'relai_work', 'relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect', 'relai_edit',
   'relai_exec', 'relai_process', 'relai_ui', 'relai_browser', 'relai_desktop', 'relai_computer', 'relai_validate', 'relai_changes', 'relai_publish'
 ];
@@ -124,8 +125,8 @@ for (const schema of publicSchemas) {
   assert.ok(String(schema.description || '').trim().length > 0, `${schema.name} must have a concise connector description`);
 }
 const publicWork = publicSchemas.find(item => item.name === 'relai_work');
-assert.match(publicWork?.description || '', /durable Rel\.AI goal starts with a non-empty plan/i, 'relai_work discovery must state the canonical plan-backed task invariant');
-assert.match(publicWork?.description || '', /projectless one-shot utility\/control work runs directly without a durable task/i, 'relai_work discovery must distinguish taskless Direct utility work from durable tasks');
+assert.match(publicWork?.description || '', /non-empty (?:plan|steps)/i, 'relai_work discovery must state the canonical plan-backed task invariant');
+assert.match(publicWork?.description || '', /projectless.*(?:taskless|without a durable task)/i, 'relai_work discovery must distinguish taskless Direct utility work from durable tasks');
 assert.doesNotMatch(publicWork?.description || '', /one optional durable workspace task/i, 'relai_work discovery must not frame substantial task creation as merely optional');
 const publicWorkSchema = publicWork?.inputSchema;
 for (const field of ['workspace', 'title', 'objective', 'steps', 'bootstrap', 'instructionPath', 'summary', 'reason', 'work_id']) {
@@ -139,10 +140,11 @@ for (const field of ['queries', 'maxResults', 'maxFiles']) {
 assert.equal(publicSearchInputSchema?.properties?.queries?.maxItems, 8, 'flat discovery must advertise the widest supported batch without weakening action-specific runtime validation');
 assert.equal(publicSearchInputSchema?.properties?.pattern?.description, undefined, 'flat discovery must not repeat action ownership on individual fields');
 assert.equal(publicSearchInputSchema?.properties?.query?.description, undefined, 'flat discovery must not repeat action ownership on individual fields');
-assert.match(publicSearchInputSchema?.properties?.action?.description || '', /Actions: text(?:\(work_id\))?, semantic(?:\(work_id\))?/i, 'flat discovery must summarize available actions and optional task attribution once on the action selector');
+assert.deepEqual(publicSearchInputSchema?.properties?.action?.enum, ['text', 'semantic'], 'the action selector must enumerate both search modes without repeating their names in prose');
 assert.match(publicSearchInputSchema?.properties?.action?.description || '', /text: pattern or queries.*semantic: queries or query|text: pattern or queries.*semantic: query or queries/, 'flat discovery must preserve canonical alternative input forms');
 assert.doesNotMatch(publicSearchInputSchema?.properties?.action?.description || '', /\[\d+-\d+\]/, 'validation-only numeric bounds must stay out of compact discovery; canonical runtime validation below remains authoritative');
-assert.match(publicWorkSchema?.properties?.action?.description || '', /context\(work_id!\).*plan\([^)]*steps![^)]*work_id!|context\(work_id!\).*plan\([^)]*work_id![^)]*steps!/, 'flat discovery must retain task identity and plan requirements on the action selector');
+assert.match(publicWorkSchema?.properties?.action?.description || '', /work_id!/, 'flat discovery must retain the shared task identity requirement');
+assert.match(publicWorkSchema?.properties?.action?.description || '', /plan\(steps!\)/, 'flat discovery must retain the plan step requirement');
 const publicValidateInputSchema = publicSchemas.find(item => item.name === 'relai_validate')?.inputSchema;
 assert.equal(publicValidateInputSchema?.properties?.timeoutMs?.anyOf, undefined, 'relai_validate root timeoutMs schema must collapse bounded action variants instead of advertising a redundant union');
 const publicReadSchema = publicSchemas.find(item => item.name === 'relai_read');
@@ -172,7 +174,8 @@ assert.equal(publicEditSchema?.inputSchema?.properties?.writeId, undefined, 'int
 const publicProcessSchema = publicSchemas.find(item => item.name === 'relai_process');
 assert.match(publicProcessSchema?.inputSchema?.properties?.command?.description || '', /shell (?:command|syntax)/i, 'public process discovery must identify the shell execution form');
 assert.doesNotMatch(publicProcessSchema?.inputSchema?.properties?.command?.description || '', /Action usage:/i, 'public process fields must not repeat action-routing prose');
-assert.match(publicProcessSchema?.inputSchema?.properties?.action?.description || '', /processId! except start\/list.*start\([^)]*kind![^)]*purpose![^)]*\).*read.*write.*stop.*list/i, 'public process discovery must factor repeated process identity while preserving action requirements');
+assert.match(publicProcessSchema?.inputSchema?.properties?.action?.description || '', /processId! except start\/list.*start\([^)]*kind![^)]*purpose![^)]*\)/i, 'public process discovery must factor repeated process identity while preserving action requirements');
+assert.deepEqual(publicProcessSchema?.inputSchema?.properties?.action?.enum, ['start', 'read', 'write', 'stop', 'list']);
 assert.match(publicExecSchema?.description || '', /direct executable \+ argv.*command string/i, 'ChatGPT discovery must describe both execution forms declaratively');
 assert.match(publicExecSchema?.inputSchema?.description || '', /direct executable \+ argv, and shell command/i);
 assert.match(publicExecSchema?.inputSchema?.description || '', /Input form: command or executable\./i, 'flat discovery must preserve canonical executable-mode alternatives');

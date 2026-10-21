@@ -32,6 +32,7 @@ import { invalidateRepositoryTopology } from '../workflow/topology.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { observeRepeatCall } from './repeatCallGuard.js';
 import { applyTaskProgressPatch } from './taskProgress.js';
+import { validateToolOutput, outputValidationFailure } from './outputValidation.js';
 import { classifySensitivePath, resolveSafePath } from '../safety.js';
 import {
   measurePerformancePhaseSync,
@@ -307,7 +308,24 @@ async function callToolObserved(name, args = {}, context = {}) {
     });
     if (taskProgressPatch) applyTaskProgressPatch(requestedTaskId, taskProgressPatch, finishActivity?.update);
     const execution = await executeToolCall({
-      config, name, executionName: operationName, effectiveArgs, context, requestTaskContext, finishActivity, definition, started, workspaceOverride
+      config, name, executionName: operationName, effectiveArgs,
+      context: operationName === OP.COMPOSE ? { ...context,
+        invokeTool: async (childName, childArgs, childContext) => {
+          const childRequestContext = {
+            ...context, principal: effectivePrincipal,
+            signal: childContext.signal, deadlineAtMs: childContext.deadlineAtMs,
+            requestId: childContext.requestId,
+            // The parent fallback operation owns the aggregate result. A child
+            // must never overwrite that result or inherit its replay identity.
+            fallbackOperationId: '', requestTaskContext: undefined
+          };
+          const output = await callTool(childName, childArgs, childRequestContext);
+          if (output?.ok === false) return output;
+          try { await validateToolOutput(config, childName, childArgs, output); return output; }
+          catch (error) { return outputValidationFailure(output, error, childRequestContext); }
+        }
+      } : context,
+      requestTaskContext, finishActivity, definition, started, workspaceOverride
     });
     const value = execution.value;
     if (operationName === OP.SNAPSHOT && (value?.skillDiscovery?.resumable || value?.skillDiscovery?.resumed))
@@ -553,6 +571,7 @@ async function validateCompletePublicInput(name, input) {
 }
 
 function taskBookkeepingOptionalFor(operationName, args = {}, definition = {}) {
+  if (operationName === OP.COMPOSE) return true; // Child calls own integrity checks.
   if (taskLifecycleCanRunWithoutIntegrity(operationName) || definition.annotations?.readOnlyHint === true) return true;
   if ([OP.PROCESS_READ, OP.PROCESS_LIST, OP.PROCESS_STOP].includes(operationName)) return true;
   if (args.dryRun === true) return true;

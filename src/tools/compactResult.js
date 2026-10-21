@@ -1,6 +1,7 @@
 import { pruneEmpty } from './connectorHelpers.js';
 
 const REQUIRED_EMPTY_ARRAY_FIELDS = Object.freeze({
+  'relai_compose:default': new Set(['outputs', 'calls']),
   'relai_edit:default': new Set(['keys', 'missingKeys', 'extraKeys', 'malformedLines', 'templateMalformedLines']),
   'relai_process:list': new Set(['processes']),
   'relai_validate:diagnostics': new Set(['diagnostics'])

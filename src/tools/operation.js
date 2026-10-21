@@ -14,6 +14,7 @@ function describeToolOperation(name, args = {}) {
   const path = String(args.path || '').trim();
   const suffix = workspace ? ` in ${workspace}` : '';
   switch (name) {
+    case OP.COMPOSE: return `Composing tools${suffix}`;
     case OP.WORK_BEGIN: {
       const title = cleanText(args.title, 60);
       if (title) return `Starting task "${title}"${suffix}`;

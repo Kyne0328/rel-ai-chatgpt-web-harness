@@ -25,6 +25,7 @@ const catalogToolByName = new Map<string, CatalogTool>(getCatalogTools().map(too
 const TOOL_NAMES: readonly string[] = Object.freeze(toolDefinitions.map(definition => definition.name));
 const PUBLIC_DISCOVERY_OUTPUT_FIELDS: readonly string[] = Object.freeze(['ok']);
 const TOOL_INVOCATION_STATUS: Readonly<Record<string, readonly [string, string]>> = Object.freeze({
+  relai_compose: ['Composing Rel.AI tools…', 'Composition finished'],
   relai_work: ['Updating Rel.AI task…', 'Rel.AI task updated'],
   relai_snapshot: ['Scanning repository…', 'Repository scanned'],
   relai_read: ['Reading repository…', 'Repository read'],

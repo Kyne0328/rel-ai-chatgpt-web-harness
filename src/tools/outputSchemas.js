@@ -11,6 +11,10 @@ const ARRAY = { type: 'array', items: OBJECT };
 const STRING_ARRAY = { type: 'array', items: STRING };
 
 const FIELD_SCHEMAS = Object.freeze({
+  compositionId: STRING,
+  compositionOutputRef: STRING,
+  outputs: ARRAY,
+  unsettledCalls: NUMBER,
   ok: BOOLEAN,
   version: STRING,
   workspace: { type: ['string', 'object', 'null'], additionalProperties: true },
@@ -508,6 +512,7 @@ const FIELD_SCHEMAS = Object.freeze({
 });
 
 const TOOL_FIELDS = Object.freeze({
+  [OP.COMPOSE]: ['ok', 'workspace', 'work_id', 'compositionId', 'compositionOutputRef', 'outputs', 'calls', 'unsettledCalls', 'durationMs', 'summary', 'error', 'errorCode', 'nextAction'],
   [OP.WORK_CONTEXT]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
   [OP.WORK_PLAN]: ['ok', 'workspace', 'work_id', 'plan', 'message'],
   [OP.WORK_BEGIN]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'plan', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],

@@ -1,6 +1,7 @@
 const INFERRED_ACTION_TOOLS = new Set(['relai_search', 'relai_process', 'relai_validate', 'relai_changes', 'relai_publish']);
 const HIDDEN_INDEPENDENT_DISCOVERY_TOOLS = new Set(['relai_work', 'relai_snapshot', 'relai_read', 'relai_search', 'relai_inspect']);
 const SHARED_ACTION_REQUIRED_FIELDS = Object.freeze({
+  relai_work: 'work_id',
   relai_process: 'processId',
   relai_ui: 'sessionId',
   relai_browser: 'sessionId',
@@ -113,6 +114,10 @@ function stripDiscoveryValidationNoise(value) {
     if (['minLength', 'maxLength', 'minimum', 'maximum'].includes(key)) continue;
     compact[key] = stripDiscoveryValidationNoise(child);
   }
+  if (Array.isArray(compact.anyOf)) {
+    compact.anyOf = [...new Map(compact.anyOf.map(branch => [JSON.stringify(branch), branch])).values()];
+    if (compact.anyOf.length === 1 && Object.keys(compact).length === 1) return compact.anyOf[0];
+  }
   return compact;
 }
 
@@ -173,9 +178,11 @@ function compactActionGrammar(actions, name) {
     ])]
       .filter(field => !['workspace', 'action', shared.field].includes(field))
       .map(field => `${field}${required.has(field) ? '!' : ''}`);
-    return fields.length ? `${entry.action}(${fields.join(',')})` : entry.action;
-  });
-  const grammar = parts.length ? `Actions: ${parts.join(', ')}. ! required.` : '';
+    return fields.length ? `${entry.action}(${fields.join(',')})` : '';
+  }).filter(Boolean);
+  // The action enum already lists every action. Only repeat names here when
+  // they explain additional required fields or an optional operation target.
+  const grammar = parts.length ? `Fields: ${parts.join(', ')}. ! required.` : '';
   return [shared.hint, grammar].filter(Boolean).join(' ');
 }
 

@@ -1,6 +1,7 @@
 // Explicit everyday regression executables.
 // Prefer adding behavior to an existing suite-*-unit.mjs file. Add a standalone file here only when process/global isolation or an independently maintained boundary is required.
 export const EVERYDAY_TEST_FILES = [
+  'composition-unit.mjs',
   // Goal monitor globals and its isolated MCP child require separate processes.
   "chatgpt-goal-mode-unit.mjs",
   // Isolated native-browser account transport and evaluator cancellation fixtures.

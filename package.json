@@ -229,6 +229,7 @@
   },
   "dependencies": {
     "@hono/node-server": "2.1.4",
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
     "@midscene/computer": "1.14.0",
     "@modelcontextprotocol/node": "2.1.1",
     "@modelcontextprotocol/server": "2.3.1",
@@ -247,6 +248,7 @@
     "piscina": "^5.3.2",
     "playwright-core": "^1.64.0",
     "pyright": "1.1.414",
+    "quickjs-emscripten-core": "0.32.0",
     "semver": "^7.8.5",
     "sharp": "0.35.5",
     "simple-git": "^4.0.2",
@@ -271,6 +273,8 @@
     "uuid": "11.1.1"
   },
   "bundleDependencies": [
+    "@jitl/quickjs-wasmfile-release-sync",
+    "quickjs-emscripten-core",
     "@hono/node-server",
     "@midscene/computer",
     "@modelcontextprotocol/server",

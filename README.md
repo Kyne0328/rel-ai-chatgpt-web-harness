@@ -431,6 +431,10 @@ See [Development](docs/DEVELOPMENT.md) for source architecture, generated assets
 
 ## Documentation
 
+Use [Programmable tool composition](docs/TOOL_COMPOSITION.md) to coordinate public
+Rel.AI tools with bounded JavaScript, parallel reads, dependent actions and explicit
+output while retaining normal authorization and task evidence.
+
 | Goal | Documentation |
 | --- | --- |
 | Install and configure Rel.AI | [One-click setup](docs/ONE_CLICK_SETUP.md) |

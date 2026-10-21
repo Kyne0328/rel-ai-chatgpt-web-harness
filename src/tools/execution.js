@@ -109,6 +109,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           ...(deadlineAtMs > 0 ? { deadlineAtMs } : {}),
           beforeNativeMutation: workspace && taskId ? (paths, options) => captureNativeMutationPaths(config, taskId, workspace.alias, paths, options) : undefined,
           principal: queuePrincipal,
+          ...(executionName === OP.COMPOSE ? { invokeTool: context.invokeTool } : {}),
           authorizedWorkspaces: authorizedWorkspaceAliases(queuePrincipal, Object.keys(config.workspaces || {})),
 
           transportType: context?.transportType,
@@ -155,6 +156,13 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
 
       if (executionName === OP.WORK_FINISH) finishActivity?.assertCompletionAvailable?.();
       const operationSignal = combineAbortSignals(requestSignal, finishActivity?.signal);
+      // The coordinator cannot hold the task/workspace queue while its children
+      // acquire it. Every child enters this same execution path independently.
+      if (executionName === OP.COMPOSE) {
+        operationSignal?.throwIfAborted();
+        timeline.transition('admitted');
+        return invokeHandler(effectiveArgs, operationSignal);
+      }
       timeline.transition('queued');
       const result = await runWorkspaceOperation(
         executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || executionName === OP.PROCESS_STOP || executionName === OP.PROCESS_READ || executionName === OP.PROCESS_LIST || backgroundStatusMode

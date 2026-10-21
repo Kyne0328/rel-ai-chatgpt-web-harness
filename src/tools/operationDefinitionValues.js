@@ -9,6 +9,19 @@ import { OPERATION_IDS as OP } from './operationIds.js';
 /** @type {ToolDefinitionInput[]} */
 const OPERATION_DEFINITION_VALUES = [
   {
+    name: OP.COMPOSE,
+    title: 'Compose Rel.AI Tools',
+    description: 'Execute bounded JavaScript coordinating public Rel.AI tools through their canonical dispatcher. Each child retains authorization, task attribution, locking, cancellation and receipts.',
+    inputSchema: { type: 'object', properties: {
+      workspace: { type: 'string' },
+      code: { type: 'string', minLength: 1, maxLength: 131072, description: 'Raw JavaScript with top-level await. tools.<publicName>(args) returns its normal structured result. ALL_TOOLS includes schemas; text(value) and image(childImage) emit output.' },
+      timeoutMs: { type: 'integer', minimum: 100, maximum: 120000, description: 'Total composition deadline including nested calls; default 60000 ms.' }
+    }, required: ['code'], additionalProperties: false },
+    handlerName: 'composeTools',
+    behavior: { taskScope: 'optional', longRunning: true },
+    dashboard: { category: 'Workflow', capabilities: ['workflow'] }
+  },
+  {
     name: OP.WORK_BEGIN,
     title: "Start Logical Task",
     description: "Create or reuse one durable logical work session for a meaningful Rel.AI user goal. Recent /goal and /loop commands select adaptive monitoring. mode selects explicitly; goal:true alone preserves legacy fixed behavior. Every durable task starts with a non-empty ordered plan and keeps it updated as evidence changes. Supply steps for a proportional multi-step plan; when omitted, Rel.AI atomically seeds one goal step so the task is never planless. Projectless one-shot utility/control requests should run taskless. action context is optional for deeper continuity/bootstrap retrieval; begin never scans the repository.",

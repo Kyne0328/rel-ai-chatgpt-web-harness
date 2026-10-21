@@ -6,6 +6,17 @@ This document supplements the project [NOTICE](NOTICE). It does not replace lice
 
 ## Major bundled components
 
+### QuickJS and quickjs-emscripten
+
+Programmable tool composition runs JavaScript in QuickJS compiled to WebAssembly,
+using `quickjs-emscripten-core`, `@jitl/quickjs-wasmfile-release-sync`, and
+`@jitl/quickjs-ffi-types` 0.32.0.
+
+- Upstream bindings: <https://github.com/justjake/quickjs-emscripten>
+- License: MIT; copyright (c) 2019-2024 Jake Teton-Landis
+- The WASM package includes the upstream QuickJS copyright and MIT license terms.
+- Complete license texts remain in the bundled packages' `LICENSE` files.
+
 ### .NET NativeAOT runtime
 
 The Windows x64 process-ownership companion includes the .NET NativeAOT runtime

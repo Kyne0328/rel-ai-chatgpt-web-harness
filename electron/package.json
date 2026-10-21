@@ -160,6 +160,9 @@
         "to": "node_modules",
         "filter": [
           "@modelcontextprotocol/core/**",
+          "@jitl/quickjs-wasmfile-release-sync/**",
+          "@jitl/quickjs-ffi-types/**",
+          "quickjs-emscripten-core/**",
           "@streamparser/json/**",
           "7zip-bin/**",
           "tar/**",

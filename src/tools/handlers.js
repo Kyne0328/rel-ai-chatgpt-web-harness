@@ -35,6 +35,7 @@ import { compactSessionSummary } from '../context/session-compactor.js';
 import { compactActiveRelatedWork } from '../context/activeRelatedWork.js';
 import { getToolActivity, getCurrentTaskAbortSignal, taskError } from '../toolActivity.js';
 import { combineAbortSignals } from '../abortSignals.js';
+import { composeTools } from './composition.js';
 import { applyTaskProgressPatch } from './taskProgress.js';
 function resolveOptionalWorkspace(config, args = {}) {
   const reference = String(args.workspace || '').trim();
@@ -189,6 +190,7 @@ const taskPlanHandler = async (config, args, context) => {
 };
 
 const HANDLERS = Object.freeze({
+  composeTools,
   startTask: startTaskHandler,
   goalStatus,
   goalStop: stopGoal,

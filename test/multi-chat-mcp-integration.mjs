@@ -102,7 +102,8 @@ try {
   assert.equal(listedTools.result.tools.length, activeMcpToolCount);
   const listedStartTask = listedTools.result.tools.find(tool => tool.name === 'relai_work');
   assert.equal(listedStartTask.inputSchema.properties.workspace.description, undefined, 'unified discovery must not repeat action ownership on shared fields');
-  assert.match(listedStartTask.inputSchema.properties.action.description || '', /Actions:.*context\(work_id!\).*plan\([^)]*steps![^)]*work_id!|Actions:.*context\(work_id!\).*plan\([^)]*work_id![^)]*steps!/, 'unified discovery must explain task identity requirements without duplicating shared workspace ownership');
+  assert.match(listedStartTask.inputSchema.properties.action.description || '', /work_id!/, 'unified discovery must explain the shared task identity requirement');
+  assert.match(listedStartTask.inputSchema.properties.action.description || '', /plan\(steps!\)/, 'unified discovery must retain required plan steps without repeating workspace ownership');
 
   const startA = await rpc('relai_work', { action: 'begin', workspace: 'appA', objective: 'Validate task A.', bootstrap: 'compact' });
   const startB = await rpc('relai_work', { action: 'begin', workspace: 'appB', objective: 'Validate task B.', bootstrap: 'compact' });

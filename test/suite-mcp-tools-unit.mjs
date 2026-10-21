@@ -795,6 +795,7 @@ async function case_mcp_tool_presentation_unit() {
   for (const schema of mcpSchemas) assert.equal(ToolSchema.safeParse(schema).success, true, `${schema.name} must remain a valid MCP tool descriptor`);
   
   const invocationLabels = new Map([
+    ['relai_compose', ['Composing Rel.AI tools…', 'Composition finished']],
     ['relai_work', ['Updating Rel.AI task…', 'Rel.AI task updated']],
     ['relai_snapshot', ['Scanning repository…', 'Repository scanned']],
     ['relai_read', ['Reading repository…', 'Repository read']],
@@ -1182,6 +1183,7 @@ async function case_tool_action_catalog_parity_unit() {
       case 'relai_inspect:trace': args.symbol = 'target'; break;
       case 'relai_inspect:related': args.query = 'target'; break;
       case 'relai_inspect:impact': args.paths = ['src/index.js']; break;
+      case 'relai_compose:default': args.code = 'text(1);'; break;
       case 'relai_exec:default': args.command = 'node --version'; break;
       case 'relai_process:start': Object.assign(args, { command: 'node server.js', kind: 'service', purpose: 'Catalog parity.' }); break;
       case 'relai_process:read':
@@ -1463,6 +1465,7 @@ async function case_tool_action_contract_unit() {
       case 'relai_inspect:trace': args.symbol = 'target'; break;
       case 'relai_inspect:related': args.query = 'target'; break;
       case 'relai_inspect:impact': args.paths = ['src/index.js']; break;
+      case 'relai_compose:default': args.code = 'text(1);'; break;
       case 'relai_exec:default': args.command = 'node --version'; break;
       case 'relai_process:start': Object.assign(args, { command: 'node server.js', kind: 'service', purpose: 'Contract parity.' }); break;
       case 'relai_process:read':
@@ -1863,6 +1866,7 @@ async function case_tool_output_validation_unit() {
       case 'relai_inspect:trace': return { symbol: 'target' };
       case 'relai_inspect:related': return { query: 'target' };
       case 'relai_inspect:impact': return { paths: ['src/index.js'] };
+      case 'relai_compose:default': return { code: 'text(1);' };
       case 'relai_exec:default': return { command: 'npm test' };
       case 'relai_process:start': return { command: 'npm run dev', kind: 'service', purpose: 'Validate.' };
       case 'relai_ui:start': return { port: 3000 };

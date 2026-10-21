@@ -109,6 +109,14 @@ function conciseToolResultText(payload, options = {}) {
     return boundedText(String(payload ?? ''), MAX_TOOL_TEXT_BYTES) || 'Rel.AI returned no structured result.';
   }
   const success = payload.ok !== false && options.isError !== true;
+  if (payload.compositionId && Array.isArray(payload.outputs)) {
+    return [
+      success ? 'Rel.AI composition finished.' : 'Rel.AI composition failed.',
+      payload.summary, payload.error, payload.nextAction,
+      payload.compositionOutputRef ? `Complete JSON output: relai_read outputRef ${payload.compositionOutputRef}` : '',
+      ...payload.outputs.filter(output => output.type === 'text').map(output => output.text)
+    ].filter(Boolean).join('\n');
+  }
   if (success) {
     const lines = ['Rel.AI operation succeeded.'];
     appendCompletionNotices(lines, payload.completedOperations);

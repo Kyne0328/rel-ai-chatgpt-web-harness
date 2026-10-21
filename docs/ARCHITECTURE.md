@@ -108,6 +108,14 @@ The transport cannot select a repository by absolute path, bypass tool authoriza
 
 ## Canonical tool and action catalog
 
+`relai_compose` is an execution coordinator over the same public catalog and
+dispatcher. Its isolated QuickJS/WASM worker has no direct host capabilities.
+Children inherit the principal and optional task/workspace scope, independently
+validate input/output, and acquire the existing execution queues. The outer call
+does not hold a queue while awaiting children. Existing operation receipts and
+private output storage own recovery; composition introduces no task tracker or
+workflow planner. See [Tool composition](TOOL_COMPOSITION.md).
+
 `src/tools/actionDefinitions.ts` owns immutable tool definitions. `src/tools/actionCatalog.js` is the single owner of action mapping, authorization capability, approval policy, catalog construction, operation resolution, schemas, annotations, task scope, concurrency scope, execution class, dashboard metadata, and tool-surface version.
 
 The public tool count is derived from the canonical runtime catalog and recorded as `toolCount` in `release-manifest.json`. `src/tools/runtimeRegistry.js` contains executable function references only and deliberately does not become a second schema or policy source.

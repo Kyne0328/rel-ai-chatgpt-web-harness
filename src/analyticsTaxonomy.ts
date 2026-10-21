@@ -21,6 +21,7 @@ const OPERATION_USE_CASE: Readonly<Record<string, AnalyticsUseCase>> = Object.fr
   [OP.INSPECT]: 'explore',
   [OP.EDIT]: 'edit',
   [OP.EXEC]: 'execute',
+  [OP.COMPOSE]: 'execute',
   [OP.PROCESS_START]: 'execute',
   [OP.PROCESS_READ]: 'execute',
   [OP.PROCESS_WRITE]: 'execute',
