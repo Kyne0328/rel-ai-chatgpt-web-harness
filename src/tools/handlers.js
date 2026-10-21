@@ -65,7 +65,7 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
         ...(args.mode && !args.strategy ? { strategy: 'adaptive' } : {}) },
       { ...context, requestTaskContext: { session: current || { ...task, status: 'planning', workspace: workspace?.alias || '', objective: args.objective || args.title } } });
   } else {
-    queueGoalDetection(config, task, context);
+    queueGoalDetection(config, task, { ...context, chatgptProjectName: args.chatgptProjectName });
   }
   return {
     ...task,

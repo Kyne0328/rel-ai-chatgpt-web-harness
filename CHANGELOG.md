@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Bound ChatGPT Goal Mode discovery to recent chats and the intended Project.** Add an optional chat-context Project name to `relai_work begin`, resolve it within the authenticated account, and inspect at most ten recent conversations instead of paging through every Project's history. Without a hint, use recent ordinary chats and sidebar previews only. Preserve exact receipt verification, scoped reuse of verified host-session links, bounded retries, and clear unavailable/ambiguous Project diagnostics.
+
 - **Retain completion evidence when process-lock cleanup fails.** Keep verified Windows native-job receipts until their durable mutation marker has been retired, accept authoritative same-boot completion despite an existing recovery checkpoint, and retire native evidence only after verified archival. Use file-metadata-bound Windows ACL proof instead of expiring a safe archival transaction by clock time. On Linux, use delegated cgroup v2 containment when available to track detached descendants across process sessions; keep safe fallback behavior when it is unavailable. Back off outstanding live-process checks rather than polling every half-second indefinitely.
 
 - **Keep automatic mutation recovery lightweight and startup-safe.** Protect only workspaces with unresolved durable ownership before asynchronous recovery begins; leave read-only work available, wake recovery on ownership changes, and back off targeted Windows native-job checks while uncertainty persists. Healthy workspaces have no polling timer or process scans; one lightweight event listener detects newly uncertain commands. Native boot-identity lookup is warmed once asynchronously rather than delaying the first mutating command.

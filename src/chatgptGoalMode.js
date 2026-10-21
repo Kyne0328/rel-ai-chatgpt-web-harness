@@ -6,13 +6,13 @@ import { readTaskHistorySessionRecord, readRecentWorkflowEvidence } from './task
 import { readTaskIntegrity, readWorkspaceIntegrity } from './taskIntegrity.ts';
 import { resolveWorkspace } from './config.js';
 import { createValidationFingerprint } from './bridge/validationPlan.js';
-import { goalKey, loadGoal, listGoals, saveGoal as persistGoal, updateGoal as mutateGoal, claimContinuation, clearUnsentContinuation, readChatLink, checkpointChatDiscovery, commitGoalBinding } from './chatgptGoalState.js';
+import { goalKey, loadGoal, listGoals, saveGoal as persistGoal, updateGoal as mutateGoal, claimContinuation, clearUnsentContinuation, readChatLink, commitGoalBinding } from './chatgptGoalState.js';
 import { buildGoalEvidence } from './chatgptGoalEvidence.js';
 import { evaluateGoalDecision } from './chatgptGoalEvaluator.js';
 import { isTerminalTaskStatus } from './taskState.js';
 import { principalFingerprint } from './mcp/principal.ts';
 import { principalTunnelId } from './mcp/tunnelIdentity.js';
-import { hasChatLinkReceipt, clearGoalDiscovery, chatgptCredentials, hasGoalBrowserTransport, getConversation, findRecentGoalCommand, latestGoalCommand, initiatingGoalCommand, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
+import { hasChatLinkReceipt, chatgptCredentials, hasGoalBrowserTransport, getConversation, findRecentGoalCommand, latestGoalCommand, initiatingGoalCommand, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
 import { goalMessageExists } from './chatgptConversationReader.js';
 
 const DETECTION_PREFIX = 'chatgpt_goal_detection:';
@@ -134,7 +134,6 @@ function scheduleDetectionRetry(config, record) {
 }
 
 function saveDetection(config, value) {
-  if (value.state !== 'checking') clearGoalDiscovery(value.workId, { tunnelId: value.tunnelId });
   const saved = withStateDatabase(config, db => {
     const key = detectionKey(value.workId);
     const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
@@ -156,6 +155,7 @@ function queueGoalDetection(config, task, context = {}, deps = {}) {
   const detection = {
     workId, owner: ownerFingerprint(context), workspace: String(task.workspace || ''),
     conversationCorrelation: String(context.conversationId || ''),
+    chatgptProjectName: String(context.chatgptProjectName || '').trim(),
     tunnelId: principalTunnelId(context.principal),
     objective: String(task.objective || task.title || '').slice(0, 500),
     startedAt: Date.now(), attempts: 0, state: 'checking', nextAttemptAt: Date.now()
@@ -202,7 +202,7 @@ async function checkGoalDetection(config, workId, deps = {}) {
     }
     const match = await findRecentGoalCommand({ ...deps, startedAt: record.startedAt, signal: controller.signal,
       tunnelId: record.tunnelId,
-      conversationCorrelation: deps.linkId ? record.conversationCorrelation : verifiedCorrelation(config, record),
+      conversationCorrelation: verifiedCorrelation(config, record),
       explicitConversation: record.explicitConversation === true, workId, requireWorkReceipt: true });
     if (controller.signal.aborted) return;
     if (match.state === 'matched') {
@@ -210,6 +210,7 @@ async function checkGoalDetection(config, workId, deps = {}) {
           ...goalConfiguration(match.command || {}), revision: 1, lastCommandId: match.messageId || '',
           workId, owner: record.owner, workspace: record.workspace, objective: match.command?.objective || record.objective,
           conversationCorrelation: record.conversationCorrelation,
+          chatgptProjectName: record.chatgptProjectName || '',
           tunnelId: record.tunnelId,
           conversationId: match.conversationId, createdAt: record.startedAt,
           active: true, state: 'monitoring', observedNode: '', stableSince: 0,
@@ -222,8 +223,11 @@ async function checkGoalDetection(config, workId, deps = {}) {
     const attempts = record.attempts + 1;
     saveDetection(config, { ...record, attempts,
       state: match.state === 'ambiguous' ? 'ambiguous'
-        : attempts >= (deps.linkId ? MAX_RETRIES : DETECTION_MAX_ATTEMPTS) ? 'not_requested' : 'checking',
-      error: match.state === 'ambiguous' ? 'Multiple verified goal conversations; linking refused.' : '',
+        : match.state === 'project_unavailable' ? 'unavailable'
+          : attempts >= (deps.linkId ? MAX_RETRIES : DETECTION_MAX_ATTEMPTS) ? 'not_requested' : 'checking',
+      error: match.state === 'ambiguous' ? 'Multiple matching ChatGPT conversations or Project names; linking refused.'
+        : match.state === 'project_unavailable' ? 'The named ChatGPT Project was not found in the connected account.'
+          : 'No matching work receipt in the ten most recently updated eligible chats.',
       nextAttemptAt: Date.now() + (deps.linkId ? RETRY_DELAYS_MS[0] : DISCOVERY_RETRY_MS) });
   } catch (error) {
     if (!controller.signal.aborted) {
@@ -258,8 +262,9 @@ function coordinatedGoalDeps(config, record, deps) {
     const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
     return row ? JSON.parse(row.value) : {};
   }, { readonly: true, missingValue: {} });
-  return { ...deps, ...(link ? { linkId: link.linkId, issuedAt: link.issuedAt,
-    discoveryState: link.scan, onDiscoveryState: scan => checkpointChatDiscovery(config, record, scan) } : {}),
+  return { ...deps, chatgptProjectName: record.chatgptProjectName || '',
+    chatgptProjectId: record.chatgptProjectId || '',
+    ...(link ? { linkId: link.linkId, issuedAt: link.issuedAt } : {}),
     tunnelId: record.tunnelId || '', cooldownUntil: limit.until || 0,
     rateLimitCount: limit.count || 0,
     onRateLimit: value => withStateDatabase(config, db => {
@@ -274,7 +279,7 @@ function verifiedCorrelation(config, record) {
   if (!record.conversationCorrelation) return '';
   const ids = new Set(listGoals(config).filter(goal => goal.owner === record.owner
     && goal.tunnelId === record.tunnelId && goal.conversationCorrelation === record.conversationCorrelation
-    && goal.conversationId).map(goal => goal.conversationId));
+    && goal.conversationId && goal.binding?.conversationId === goal.conversationId).map(goal => goal.conversationId));
   return ids.size === 1 ? [...ids][0] : record.conversationCorrelation;
 }
 
@@ -296,7 +301,6 @@ function pendingGoalDetections(config) {
 
 function saveGoal(config, goal, options = {}) {
   const saved = persistGoal(config, goal, options);
-  if (saved && !saved.active) clearGoalDiscovery(saved.workId, { tunnelId: saved.tunnelId });
   return saved;
 }
 
@@ -610,6 +614,8 @@ function activateGoal(config, args, context) {
     lastCommandId: existing?.lastCommandId || '', commandResolutionPending: existing ? existing.commandResolutionPending === true : true,
     tunnelId: existing?.tunnelId || principalTunnelId(context.principal),
     conversationCorrelation: existing?.conversationCorrelation || String(context?.conversationId || task.correlation?.conversationId || ''),
+    chatgptProjectName: String(args.chatgptProjectName || existing?.chatgptProjectName || '').trim(),
+    chatgptProjectId: switchingConversation ? '' : existing?.chatgptProjectId || '',
     observedNode: switchingConversation ? '' : existing?.observedNode || '',
     stableSince: switchingConversation ? 0 : existing?.stableSince || 0,
     pendingNode: switchingConversation || existing?.pendingOutcome === 'not_sent' ? '' : existing?.pendingNode || '',
@@ -678,7 +684,6 @@ function stopGoalRecord(config, goal) {
   activePolls.get(goal.workId)?.abort();
   const stopped = mutateGoal(config, goal.workId, current => ({ ...current, active: false,
     state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now() }));
-  clearGoalDiscovery(goal.workId, { tunnelId: goal.tunnelId });
   scheduleGoalRetry(config, stopped);
   return publicGoal(stopped);
 }
@@ -701,7 +706,6 @@ function resumeAuthenticatedGoals(config, tunnelId) {
       return true;
     }, { transaction: true });
     if (reset) {
-      clearGoalDiscovery(pending.workId, { tunnelId });
       resumedDetections.push(pending.workId);
       if (monitorConfig && getStateDir(monitorConfig) === getStateDir(config)) {
         setImmediate(() => { if (monitorConfig) runGoalBackground(monitorConfig, pending.workId, 'detection'); });
@@ -747,7 +751,6 @@ function stopGoal(config, args, context) {
     if (args.mode && args.mode !== (current.mode || 'goal')) throw new Error('The requested command mode does not match this work session.');
     const record = { ...current, revision: Number(current.revision || 0) + 1, active: false, state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now() };
     db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify(record), key);
-    clearGoalDiscovery(workId, { tunnelId: record.tunnelId });
     return goal ? publicGoal(record) : { ok: true, work_id: workId, goalActive: false, state: 'stopped' };
   }, { transaction: true });
   clearBackgroundGoal(workId);
@@ -1006,17 +1009,19 @@ async function pollGoal(config, workId, deps = {}) {
     if ((!goal.conversationId || needsBinding) && (!goal.pendingNode || ['accepted', 'not_sent'].includes(pendingOutcome(goal)))) {
       deps = coordinatedGoalDeps(config, goal, deps);
       const match = await findRecentGoalCommand({ ...deps, startedAt: goal.createdAt, signal: controller.signal,
-        conversationCorrelation: goal.conversationId || (deps.linkId ? goal.conversationCorrelation : verifiedCorrelation(config, goal)),
+        conversationCorrelation: goal.conversationId || verifiedCorrelation(config, goal),
         explicitConversation: Boolean(goal.conversationId), workId,
         verifyLegacy: Boolean(goal.conversationId && !deps.linkId), requireWorkReceipt: true, explicitGoal: true });
       if (controller.signal.aborted) return;
-      if (match.state === 'ambiguous') {
+      if (match.state === 'ambiguous' || match.state === 'project_unavailable') {
         saveGoal(config, { ...goal, active: false, state: 'needs_user',
-          error: 'Multiple conversations contain this task receipt. Choose the intended chat before continuing.' });
+          error: match.state === 'project_unavailable'
+            ? 'The named ChatGPT Project was not found in the connected account.'
+            : 'Multiple matching ChatGPT conversations or Project names; linking refused.' });
         return;
       }
       if (match.state !== 'matched') {
-        retryGoal(config, goal, Object.assign(new Error('No verified ChatGPT conversation is linked to this work session.'),
+        retryGoal(config, goal, Object.assign(new Error('No matching Goal Mode receipt in the ten most recently updated eligible chats.'),
           { retryAt: Date.now() + (deps.linkId ? RETRY_DELAYS_MS[Number(goal.retryCount || 0)] || 20_000 : DISCOVERY_RETRY_MS) }), { notSent: true });
         return;
       }

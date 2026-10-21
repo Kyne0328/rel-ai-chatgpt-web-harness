@@ -34,24 +34,6 @@ function readChatLink(config, record) {
   }, { readonly: true, missingValue: null });
 }
 
-function checkpointChatDiscovery(config, record, scan) {
-  withStateDatabase(config, db => {
-    const key = LINK_PREFIX + record.workId;
-    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
-    if (!row) return;
-    const link = JSON.parse(row.value);
-    if (link.owner !== record.owner || link.tunnelId !== (record.tunnelId || '')) return;
-    const goalRow = db.prepare('SELECT value FROM state_meta WHERE key=?').get(goalKey(record.workId));
-    const goal = goalRow ? JSON.parse(goalRow.value) : null;
-    if (goal && (!goal.active || goal.revision !== record.revision)) return;
-    if (!goal) {
-      const detection = db.prepare('SELECT value FROM state_meta WHERE key=?').get('chatgpt_goal_detection:' + record.workId);
-      if (!detection || JSON.parse(detection.value).state !== 'checking') return;
-    }
-    db.prepare('UPDATE state_meta SET value=? WHERE key=? AND value=?')
-      .run(JSON.stringify({ ...link, scan }), key, row.value);
-  }, { transaction: true });
-}
 
 function commitGoalBinding(config, goal, match, { detection = false } = {}) {
   return withStateDatabase(config, db => {
@@ -72,6 +54,7 @@ function commitGoalBinding(config, goal, match, { detection = false } = {}) {
       owner: goal.owner, tunnelId: goal.tunnelId || '', messageId: match.messageId,
       receiptMessageId: match.receiptMessageId || '', verifiedAt: Date.now() };
     const saved = writeGoalRow(db, row, { ...goal, conversationId: match.conversationId,
+      ...(match.projectId ? { chatgptProjectId: match.projectId } : {}),
       binding, state: 'monitoring', error: '', retryCount: 0, nextAttemptAt: 0, updatedAt: Date.now() });
     if (!claim) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(claimKey, goal.workId);
     if (link) db.prepare('UPDATE state_meta SET value=? WHERE key=?')
@@ -276,4 +259,4 @@ function recordGoalCompletionRequest(config, workId, completion, options = {}) {
   }, { transaction: true });
 }
 
-export { ensureChatLink, readChatLink, checkpointChatDiscovery, commitGoalBinding, goalKey, normalizeGoalRecord, loadGoal, listGoals, saveGoal, updateGoal, claimContinuation, clearUnsentContinuation, recordLoopMilestone, recordGoalCompletionRequest };
+export { ensureChatLink, readChatLink, commitGoalBinding, goalKey, normalizeGoalRecord, loadGoal, listGoals, saveGoal, updateGoal, claimContinuation, clearUnsentContinuation, recordLoopMilestone, recordGoalCompletionRequest };

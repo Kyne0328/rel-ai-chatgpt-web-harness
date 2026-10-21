@@ -9,7 +9,7 @@ import { getToolSchemas } from '../src/tools/schema.js';
 import { parseGoalCommand } from '../src/goalCommands.js';
 import { buildGoalEvidence } from '../src/chatgptGoalEvidence.js';
 import { goalMessageExists, readConversationProjection } from '../src/chatgptConversationReader.js';
-import { ensureChatLink, readChatLink, checkpointChatDiscovery, commitGoalBinding, normalizeGoalRecord, loadGoal, saveGoal, updateGoal, claimContinuation, recordLoopMilestone } from '../src/chatgptGoalState.js';
+import { ensureChatLink, readChatLink, commitGoalBinding, normalizeGoalRecord, loadGoal, saveGoal, updateGoal, claimContinuation, recordLoopMilestone } from '../src/chatgptGoalState.js';
 import { withStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { beginConnectorToolCall, getToolActivity, resetToolActivity, runWithToolActivity, requestCurrentTaskCancellation, onToolActivity } from '../src/toolActivity.js';
@@ -950,225 +950,101 @@ test('Project Goal Mode discovers an opaque-host conversation without a URL from
     'a sidebar preview should avoid an unnecessary per-project catalogue read');
 });
 
-test('Project Goal Mode finds a receipt through Project and sidebar cursor pages', async () => {
-  const workId = 'project-pagination-receipt';
-  const projectId = 'g-p-6a68897d433881919527e08c99703cba';
+test('a Project hint searches only the ten newest chats in the matching Project', async () => {
+  const project = 'g-p-' + 'a'.repeat(32);
+  const workId = 'project-scoped-recent';
+  const link = { version: 1, link_id: 'a'.repeat(32) };
+  const ids = Array.from({ length: 11 }, (_, i) =>
+    '00000000-0000-4000-8000-' + String(i + 1).padStart(12, '0'));
+  ids[9] = ID;
   const requests = [];
   const fetch = async url => {
     requests.push(url);
-    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
-    if (url.includes('/gizmos/snorlax/sidebar')) {
-      if (url.includes('cursor=sidebar-next')) return response({ items: [{
-        gizmo: { gizmo: { id: projectId }, conversations: { items: [] } }
-      }], cursor: null });
-      return response({ items: [], cursor: 'sidebar-next' });
-    }
-    if (url.includes('/gizmos/' + projectId + '/conversations?')) {
-      if (url.includes('cursor=project-next')) return response({
-        items: [{ id: ID, update_time: new Date().toISOString() }], cursor: null
-      });
-      return response({ items: [{ id: OTHER, update_time: new Date().toISOString() }], cursor: 'project-next' });
-    }
-    if (url.endsWith('/conversation/' + ID)) return response(conversationWithReceipt(ID, workId, 'run the test'));
-    if (url.endsWith('/conversation/' + OTHER)) return response(conversation(OTHER, 'Unrelated'));
-    throw new Error('Unexpected ChatGPT request: ' + url);
+    if (url.includes('/snorlax/sidebar')) return response({ items: [{
+      gizmo: { gizmo: { id: project, name: 'Rel-ai-mcp' }, conversations: { items: [] } }
+    }], cursor: null });
+    if (url.includes('/gizmos/' + project + '/conversations?')) return response({
+      items: ids.map((id, i) => ({ id, update_time: new Date(Date.now() - i * 1000).toISOString() })),
+      cursor: 'more-older-chats'
+    });
+    const id = url.split('/').at(-1);
+    if (url.includes('/conversation/')) return response(id === ID
+      ? linkedConversation(ID, workId, link) : conversation(id, 'Unrelated'));
+    throw new Error('Unexpected request: ' + url);
   };
-  const match = await findRecentGoalCommand({ credentials, fetch, startedAt: Date.now(),
-    conversationCorrelation: 'v1/another-opaque-session', workId, explicitGoal: true, requireWorkReceipt: true });
-  assert.equal(match.conversationId, ID);
-  assert.ok(requests.some(url => url.includes('cursor=sidebar-next')));
-  assert.ok(requests.some(url => url.includes('cursor=project-next')));
-});
-
-test('live Goal Mode monitor links and continues a Project chat without supplying its URL', async t => {
-  await withMonitoredGoal(t, async f => {
-    const projectId = 'g-p-6a68897d433881919527e08c99703cba';
-    f.tree.mapping.u.message.content.parts = ['do a goal mode test'];
-    f.tree.mapping.receipt = { parent: 'u', message: {
-      author: { role: 'tool' }, create_time: Date.now() / 1000,
-      content: { workIds: [f.work_id] }
-    } };
-    f.tree.mapping.a.parent = 'receipt';
-    f.patchGoal({ conversationId: '', conversationCorrelation: 'v1/opaque-host-project-session' });
-    const transport = async payload => {
-      if (payload.path?.includes('/backend-api/conversations?')) return { ok: true, data: { items: [] } };
-      if (payload.path?.includes('/gizmos/snorlax/sidebar')) return { ok: true, data: { items: [{
-        gizmo: { gizmo: { id: projectId }, conversations: { items: [
-          { id: ID, update_time: new Date().toISOString() }
-        ] } }
-      }], cursor: null } };
-      return f.deps.nativeTransport(payload);
-    };
-    await pollGoal(f.config, f.work_id, { nativeTransport: transport });
-    assert.equal(f.status().conversationId, ID);
-    assert.equal(f.status().retryCount, 0);
-    assert.equal(f.status().continuationCount, 1);
-    assert.equal(f.calls.filter(call => call.action === 'continue').length, 1);
-  });
-});
-
-test('Project Goal Mode makes forward progress beyond the account read budget', async t => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-  const workId = 'project-budget-progress';
-  const ids = Array.from({ length: 42 }, (_, i) => ({
-    project: 'g-p-' + String(i + 1).padStart(32, '0'),
-    chat: 'aaaaaaaa-bbbb-4ccc-8ddd-' + String(i + 1).padStart(12, '0')
-  }));
-  const target = ids.at(-1);
-  const targetTree = conversationWithReceipt(target.chat, workId, 'start Project Goal Mode');
-  let readCount = 0;
-  const fetch = async url => {
-    readCount++;
-    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
-    if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: ids.map(({ project }) => ({
-      gizmo: { gizmo: { id: project }, conversations: { items: [] } }
-    })), cursor: null });
-    const project = ids.find(item => url.includes('/gizmos/' + item.project + '/conversations?'));
-    if (project) return response({ items: [{ id: project.chat, update_time: new Date().toISOString() }], cursor: null });
-    const chat = ids.find(item => url.endsWith('/conversation/' + item.chat));
-    if (chat) return response(chat === target
-      ? targetTree : conversation(chat.chat, 'Unrelated conversation'));
-    throw new Error('Unexpected request ' + url);
-  };
-  const deps = { credentials, fetch, workId, explicitGoal: true,
-    requireWorkReceipt: true, conversationCorrelation: 'v1/opaque-goal', startedAt: Date.now() };
-  let match = null;
-  for (let attempt = 0; attempt < 8 && !match; attempt++) {
-    try { match = await findRecentGoalCommand(deps); }
-    catch (error) {
-      assert.equal(error.deferred, true, 'limited reads must defer without exhausting retries');
-      t.mock.timers.tick(61_000);
-    }
-  }
-  assert.equal(match?.conversationId, target.chat,
-    'subsequent attempts must resume after previous projects, not repeat the first read window');
-  assert.ok(readCount > 30);
-});
-
-test('Project goal searches later sidebar previews before unrelated deep Project histories', async t => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-  const workId = 'sidebar-preview-priority';
-  const calls = [];
-  const targetTree = conversationWithReceipt(ID, workId, 'Start goal without URL');
-  const fetch = async url => {
-    calls.push(url);
-    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
-    if (url.includes('/gizmos/snorlax/sidebar')) {
-      const cursor = new URL(url).searchParams.get('cursor');
-      const page = cursor ? Number(cursor.slice(5)) : 0;
-      return response({ items: [{ gizmo: {
-        gizmo: { id: 'g-p-' + String(page + 1).padStart(32, '0') },
-        conversations: { items: page === 4 ? [{ id: ID, update_time: new Date().toISOString() }] : [] }
-      } }], cursor: page < 4 ? 'page-' + (page + 1) : null });
-    }
-    if (url.endsWith('/conversation/' + ID)) return response(targetTree);
-    if (url.includes('/gizmos/') && url.includes('/conversations?')) {
-      // Old Projects have long histories. No deep history should be required
-      // before visiting the fifth sidebar page with a recent matching chat.
-      const cursor = new URL(url).searchParams.get('cursor');
-      return response({ items: [], cursor: 'more-' + (cursor === '0' ? 1 : Number(cursor.slice(5)) + 1) });
-    }
-    throw new Error('Unexpected Goal Mode request: ' + url);
-  };
-  const deps = { credentials, fetch, workId, explicitGoal: true, requireWorkReceipt: true,
-    conversationCorrelation: 'v1/sidebar-target-later', startedAt: Date.now() };
-  let found = null;
-  for (let attempt = 0; attempt < 2 && !found; attempt++) {
-    try { found = await findRecentGoalCommand(deps); }
-    catch (error) { assert.equal(error.deferred, true); t.mock.timers.tick(21_000); }
-  }
-  assert.equal(found?.conversationId, ID,
-    'a fresh chat in the next sidebar batch must not wait behind old Project histories');
-  assert.equal(calls.some(url => url.includes('/gizmos/g-p-') && url.includes('/conversations?')), false,
-    'recent sidebar previews should be checked before historical fallback');
-});
-
-test('Project discovery advances past bounded sidebar pagination', async t => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-  const workId = 'project-sidebar-deep';
-  const project = 'g-p-' + 'f'.repeat(32);
-  const target = conversationWithReceipt(ID, workId, 'Goal Mode inside a Project');
-  const fetch = async url => {
-    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
-    if (url.includes('/gizmos/snorlax/sidebar')) {
-      const cursor = new URL(url).searchParams.get('cursor');
-      const page = cursor ? Number(cursor.slice(8)) : 0;
-      return response({ items: [{
-        gizmo: { gizmo: { id: page === 4 ? project : 'g-p-' + String(page + 1).padStart(32, '0') },
-          conversations: { items: [] } }
-      }], cursor: page < 4 ? 'sidebar-' + (page + 1) : null });
-    }
-    if (url.includes('/gizmos/' + project + '/conversations?')) return response({ items: [{ id: ID }], cursor: null });
-    if (url.includes('/gizmos/')) return response({ items: [], cursor: null });
-    if (url.endsWith('/conversation/' + ID)) return response(target);
-    throw new Error('Unexpected request ' + url);
-  };
-  const deps = { credentials, fetch, workId, explicitGoal: true, requireWorkReceipt: true,
-    startedAt: Date.now(), conversationCorrelation: 'v1/sidebar-deep' };
-  let match;
-  for (let retry = 0; retry < 8 && !match; retry++) {
-    try { match = await findRecentGoalCommand(deps); }
-    catch (error) { assert.equal(error.deferred, true); t.mock.timers.tick(61_000); }
-  }
-  assert.equal(match?.conversationId, ID);
-});
-
-test('automatic Goal discovery advances sidebar pages after cache expiry without reading full histories', async t => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-  const workId = 'automatic-sidebar-deep';
-  const pages = [];
-  const target = conversationWithReceipt(ID, workId);
-  const fetch = async url => {
-    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
-    if (url.includes('/gizmos/snorlax/sidebar')) {
-      const cursor = new URL(url).searchParams.get('cursor');
-      const page = cursor ? Number(cursor.slice(8)) : 0;
-      pages.push(page);
-      return response({ items: [{ gizmo: {
-        gizmo: { id: 'g-p-' + String(page + 1).padStart(32, '0') },
-        conversations: { items: page === 4 ? [{ id: ID }] : [] }
-      } }], cursor: page < 4 ? 'sidebar-' + (page + 1) : null });
-    }
-    if (url.endsWith('/conversation/' + ID)) return response(target);
-    assert.fail('Automatic detection must not read full Project histories: ' + url);
-  };
-  const deps = { credentials, fetch, workId, requireWorkReceipt: true,
-    startedAt: Date.now(), conversationCorrelation: 'v1/automatic-sidebar' };
-  await assert.rejects(findRecentGoalCommand(deps), error => error.deferred === true);
-  t.mock.timers.tick(121_000);
-  const match = await findRecentGoalCommand(deps);
+  const match = await findRecentGoalCommand({ workId, linkId: link.link_id, issuedAt: Date.now(),
+    chatgptProjectName: 'REL-AI-MCP', credentials, fetch });
   assert.equal(match.state, 'matched');
   assert.equal(match.conversationId, ID);
-  assert.deepEqual(pages, [0, 1, 2, 3, 4]);
+  assert.equal(match.projectId, project);
+  assert.equal(requests.filter(url => url.includes('/conversation/')).length, 11,
+    'ten candidates and one fresh verification read');
+  assert.equal(requests.some(url => url.includes('/backend-api/conversations?')), false);
+  assert.equal(requests.some(url => url.includes('cursor=more-older-chats')), false);
 });
 
-test('Project discovery resumes beyond two Project conversation pages', async t => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
-  const workId = 'project-conversation-deep';
-  const project = 'g-p-' + 'e'.repeat(32);
-  const target = conversationWithReceipt(ID, workId, 'Goal Mode in long Project chat history');
+test('Project name discovery refuses unknown and duplicate names without scanning other Projects', async () => {
+  const first = 'g-p-' + 'b'.repeat(32);
+  const second = 'g-p-' + 'c'.repeat(32);
+  const calls = [];
   const fetch = async url => {
-    if (url.includes('/backend-api/conversations?')) return response({ items: [] });
-    if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: project }, conversations: { items: [] } }
-    }], cursor: null });
-    if (url.includes('/gizmos/' + project + '/conversations?')) {
-      const cursor = new URL(url).searchParams.get('cursor');
-      return response(cursor === 'page-2'
-        ? { items: [{ id: ID }], cursor: null }
-        : { items: [], cursor: cursor === '0' ? 'page-1' : 'page-2' });
-    }
-    if (url.endsWith('/conversation/' + ID)) return response(target);
-    throw new Error('Unexpected request ' + url);
+    calls.push(url);
+    if (url.includes('/snorlax/sidebar')) return response({ items: [
+      { gizmo: { gizmo: { id: first, name: 'Example' } } },
+      { gizmo: { gizmo: { id: second, name: 'EXAMPLE' } } }
+    ], cursor: null });
+    throw new Error('Unexpected scan outside Project name lookup: ' + url);
   };
-  const deps = { credentials, fetch, workId, explicitGoal: true, requireWorkReceipt: true,
-    startedAt: Date.now(), conversationCorrelation: 'v1/project-deep' };
-  let match;
-  for (let retry = 0; retry < 8 && !match; retry++) {
-    try { match = await findRecentGoalCommand(deps); }
-    catch (error) { assert.equal(error.deferred, true); t.mock.timers.tick(61_000); }
-  }
-  assert.equal(match?.conversationId, ID);
+  const args = { credentials, fetch, chatgptProjectName: 'Missing', workId: 'work' };
+  assert.equal((await findRecentGoalCommand(args)).state, 'project_unavailable');
+  assert.equal((await findRecentGoalCommand({ ...args, chatgptProjectName: 'example' })).state, 'ambiguous');
+  assert.equal(calls.every(url => url.includes('/snorlax/sidebar')), true);
+});
+
+test('without a Project hint, discovery uses only the latest ten ordinary and sidebar previews', async () => {
+  const workId = 'fallback-recent';
+  const link = { version: 1, link_id: 'd'.repeat(32) };
+  const ordinary = Array.from({ length: 12 }, (_, i) => ({
+    id: '10000000-0000-4000-8000-' + String(i + 1).padStart(12, '0'),
+    update_time: new Date(Date.now() - (i + 1) * 1000).toISOString()
+  }));
+  const calls = [];
+  const fetch = async url => {
+    calls.push(url);
+    if (url.includes('/backend-api/conversations?')) return response({ items: ordinary, has_more: true });
+    if (url.includes('/snorlax/sidebar')) return response({ items: [{
+      gizmo: { gizmo: { id: 'g-p-' + 'e'.repeat(32) }, conversations: {
+        items: [{ id: ID, update_time: new Date().toISOString() }]
+      } }
+    }], cursor: 'older-projects' });
+    if (url.includes('/conversation/')) return response(url.endsWith('/' + ID)
+      ? linkedConversation(ID, workId, link) : conversation(url.split('/').at(-1), 'Unrelated'));
+    throw new Error('Unexpected request: ' + url);
+  };
+  const match = await findRecentGoalCommand({ workId, linkId: link.link_id,
+    issuedAt: Date.now(), credentials, fetch });
+  assert.equal(match.conversationId, ID);
+  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 11);
+  assert.equal(calls.some(url => url.includes('cursor=older-projects')), false);
+  assert.equal(calls.some(url => url.includes('/gizmos/g-p-') && url.includes('/conversations?')), false);
+});
+
+test('recent discovery reports absent receipts instead of repeatedly scanning historical pages', async () => {
+  const workId = 'recent-receipt-missing';
+  const calls = [];
+  const fetch = async url => {
+    calls.push(url);
+    if (url.includes('/backend-api/conversations?')) return response({ items: [{ id: ID }] });
+    if (url.includes('/snorlax/sidebar')) return response({ items: [] });
+    return response(conversation(ID, 'Ordinary work'));
+  };
+  const args = { workId, linkId: 'p'.repeat(32), issuedAt: Date.now(), credentials, fetch };
+  assert.equal((await findRecentGoalCommand(args)).state, 'absent');
+  assert.equal((await findRecentGoalCommand(args)).state, 'absent');
+  assert.equal(calls.filter(url => url.includes('/backend-api/conversations?')).length, 1,
+    'catalogue cache is shared; there is no historical-pagination round');
+  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 2,
+    'receipt evidence is checked fresh on each attempt');
 });
 
 test('Project Goal Mode refuses missing or off-branch work receipts', async () => {
@@ -1330,7 +1206,9 @@ test('explicit goal monitor resolves a natural-language work receipt without a c
     f.tree.mapping.a.parent = 'receipt';
     f.patchGoal({ conversationId: '', conversationCorrelation: 'opaque-host-session' });
     const transport = async payload => payload.path?.includes('/conversations?')
-      ? { ok: true, data: { items: [{ id: ID }] } } : f.deps.nativeTransport(payload);
+      ? { ok: true, data: { items: [{ id: ID }] } }
+      : payload.path?.includes('/snorlax/sidebar') ? { ok: true, data: { items: [] } }
+        : f.deps.nativeTransport(payload);
     await pollGoal(f.config, f.work_id, { nativeTransport: transport });
     assert.equal(f.status().conversationId, ID);
     assert.equal(f.status().retryCount, 0, JSON.stringify(f.status()));
@@ -1721,6 +1599,7 @@ test('concurrent goals share account discovery instead of rescanning every task 
   const transport = async payload => {
     reads.push(payload);
     if (payload.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID }, { id: OTHER }] } };
+    if (payload.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
     const id = payload.path.endsWith(ID) ? ID : OTHER;
     const tree = conversation(id);
     tree.mapping.receipt = { parent: 'u', message: { author: { role: 'tool' }, content: { workIds: [id] } } };
@@ -1731,12 +1610,12 @@ test('concurrent goals share account discovery instead of rescanning every task 
     workId, requireWorkReceipt: true, conversationCorrelation: 'opaque', startedAt: Date.now() });
   const first = await Promise.all([lookup(ID), lookup(OTHER)]);
   assert.deepEqual(first.map(r => r.conversationId), [ID, OTHER]);
-  assert.equal(reads.length, 3, 'one catalog and one read per chat must serve both tasks');
+  assert.equal(reads.length, 4, 'one ordinary catalogue, one sidebar and one read per chat serve both tasks');
   t.mock.timers.tick(30_000);
   await Promise.all([lookup(ID), lookup(OTHER)]);
   assert.equal(reads.filter(r => r.path.includes('/conversations?')).length, 1,
     'a new task cycle must not repeat the catalog scan');
-  assert.equal(reads.length, 5, 'only matched chats need fresh receipt verification');
+  assert.equal(reads.length, 6, 'only recent chats need fresh receipt verification');
   await findRecentGoalCommand({ nativeTransport: transport, tunnelId: 'account-b',
     conversationCorrelation: ID, startedAt: Date.now() });
   assert.equal(reads.at(-1).tunnelId, 'account-b', 'accounts must never share cached evidence');
@@ -1811,6 +1690,7 @@ test('discovery cancellation does not cancel another task sharing the same read'
       await pending;
       return { ok: true, data: { items: [{ id: ID }] } };
     }
+    if (payload.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
     return { ok: true, data: conversation(ID) };
   };
   const deps = { nativeTransport: transport, startedAt: Date.now() };
@@ -1820,7 +1700,7 @@ test('discovery cancellation does not cancel another task sharing the same read'
   await assert.rejects(() => cancelled, e => e.name === 'AbortError');
   release();
   assert.equal((await surviving).state, 'matched');
-  assert.equal(reads, 2, 'the surviving task must finish using the one shared catalog request');
+  assert.equal(reads, 3, 'the surviving task shares one ordinary and one sidebar catalogue');
 });
 
 test('429 cooldown survives transport restart and does not exhaust detection attempts', async t => {
@@ -1965,7 +1845,7 @@ test('connector work begin detects /goal without an AI-supplied boolean and clai
       calls.push(url);
       return url.includes('/conversations?')
         ? response({ items: [{ id: ID }] })
-        : response(conversationWithReceipt(ID, 'firmware-work', '/goal start now. Do everything possible until firmware is finished'));
+        : emptyProjectCatalogue(url) || response(conversationWithReceipt(ID, 'firmware-work', '/goal start now. Do everything possible until firmware is finished'));
     };
     const deps = { credentials, fetch, task: { status: 'planning' } };
     const task = { work_id: 'firmware-work', workspace: 'pldt',
@@ -2013,7 +1893,7 @@ test('auto detection is bounded, fails closed on ambiguity and does not invent a
     const task = { work_id: 'ambiguous-test', workspace: 'example', objective: 'Make a build' };
     const fetch = async url => url.includes('/conversations?')
       ? response({ items: [{ id: ID }, { id: OTHER }] })
-      : response(conversationWithReceipt(url.endsWith(ID) ? ID : OTHER, task.work_id));
+      : emptyProjectCatalogue(url) || response(conversationWithReceipt(url.endsWith(ID) ? ID : OTHER, task.work_id));
     const deps = { credentials, fetch, task: { status: 'planning' } };
     queueGoalDetection(config, task, context, deps);
     for (let i = 0; i < 30 && goalStatus(config, { work_id: task.work_id }, context).state === 'checking'; i++) {
@@ -2266,62 +2146,45 @@ test('versioned linking accepts a delayed receipt after later user messages and 
   assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
 });
 
-test('versioned linking paginates ordinary chats and refuses a duplicate in a Project', async () => {
-  const workId = 'paged-work';
+test('versioned linking rejects receipts outside the ten newest eligible chats', async () => {
+  const workId = 'recent-link-bounds';
   const link = { version: 1, link_id: 'p'.repeat(32) };
-  const tree = linkedConversation(ID, workId, link);
-  let copied = false;
-  const requests = [];
-  const project = 'g-p-' + 'a'.repeat(32);
+  const ids = Array.from({ length: 11 }, (_, i) =>
+    '20000000-0000-4000-8000-' + String(i + 1).padStart(12, '0'));
+  ids[10] = ID;
+  const calls = [];
   const fetch = async url => {
-    requests.push(url);
-    if (url.includes('/conversations?offset=')) return response(url.includes('offset=0&')
-      ? { items: [{ id: OTHER }], has_more: true } : { items: [{ id: ID }], has_more: false });
-    if (url.includes('/snorlax/sidebar')) return response({ items: copied
-      ? [{ gizmo: { id: project }, conversations: { items: [{ id: OTHER }] } }] : [] });
-    if (url.includes('/gizmos/')) return response({ items: [] });
-    return response(url.endsWith(ID) ? tree : copied ? linkedConversation(OTHER, workId, link) : conversation(OTHER));
+    calls.push(url);
+    if (url.includes('/conversations?offset=')) return response({
+      items: ids.map((id, i) => ({ id, update_time: new Date(Date.now() - i * 1000).toISOString() })),
+      has_more: true
+    });
+    if (url.includes('/snorlax/sidebar')) return response({ items: [] });
+    return response(url.endsWith(ID) ? linkedConversation(ID, workId, link) : conversation(url.split('/').at(-1)));
   };
   const deps = { workId, linkId: link.link_id, issuedAt: Date.now(), credentials, fetch };
-  assert.equal((await findRecentGoalCommand(deps)).conversationId, ID);
-  assert.ok(requests.some(url => url.includes('offset=1&')));
-  copied = true;
-  // A fresh transport represents recovery after an application restart.
-  assert.equal((await findRecentGoalCommand({ ...deps, fetch: url => fetch(url) })).state, 'ambiguous');
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+  assert.equal(calls.some(url => url.includes('offset=20')), false);
+  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 10);
 });
 
-test('versioned linking resumes a checkpointed page after transport restart and delayed visibility', async () => {
-  const workId = 'restart-work';
+test('versioned linking refuses duplicate recent receipts and never selects a first match', async () => {
+  const workId = 'recent-link-duplicate';
   const link = { version: 1, link_id: 'r'.repeat(32) };
-  const ids = Array.from({ length: 45 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
-  const reads = [];
-  let scan;
-  let visible = false;
+  const project = 'g-p-' + 'f'.repeat(32);
   const fetch = async url => {
-    if (url.includes('/conversations?offset=')) {
-      const offset = Number(new URL(url).searchParams.get('offset'));
-      return response({ items: ids.slice(offset, offset + 20).map(id => ({ id })), total: ids.length });
-    }
-    if (url.includes('/snorlax/sidebar')) return response({ items: [] });
-    const id = url.split('/').at(-1);
-    reads.push(id);
-    return response(visible && id === ids.at(-1) ? linkedConversation(id, workId, link) : conversation(id));
+    if (url.includes('/conversations?offset=')) return response({
+      items: [{ id: ID, update_time: new Date().toISOString() }], has_more: false
+    });
+    if (url.includes('/snorlax/sidebar')) return response({ items: [{
+      gizmo: { gizmo: { id: project }, conversations: {
+        items: [{ id: OTHER, update_time: new Date().toISOString() }]
+      } }
+    }] });
+    return response(linkedConversation(url.endsWith(ID) ? ID : OTHER, workId, link));
   };
-  const base = { workId, linkId: link.link_id, issuedAt: Date.now(), credentials,
-    onDiscoveryState: value => { scan = structuredClone(value); } };
-  await assert.rejects(() => findRecentGoalCommand({ ...base, fetch }), error => error.deferred);
-  const firstReadCount = reads.length;
-  assert.ok(scan.at > 0);
-  visible = true;
-  let found;
-  for (let i = 0; i < 4; i++) {
-    try {
-      found = await findRecentGoalCommand({ ...base, discoveryState: scan, fetch: url => fetch(url) });
-      break;
-    } catch (error) { assert.equal(error.deferred, true); }
-  }
-  assert.equal(found?.conversationId, ids.at(-1));
-  assert.equal(reads.slice(firstReadCount).includes(ids[0]), false, 'restart resumes rather than rescanning page one');
+  const deps = { workId, linkId: link.link_id, issuedAt: Date.now(), credentials, fetch };
+  assert.equal((await findRecentGoalCommand(deps)).state, 'ambiguous');
 });
 
 test('durable linking receipts are idempotent, owner scoped and cannot bind after Stop', async t => {
@@ -2331,12 +2194,9 @@ test('durable linking receipts are idempotent, owner scoped and cannot bind afte
     assert.deepEqual(ensureChatLink(f.config, f.work_id, context), receipt);
     assert.throws(() => ensureChatLink(f.config, f.work_id, { connector: true, principal: 'other' }), /owner mismatch/);
     const goal = loadGoal(f.config, f.work_id);
-    checkpointChatDiscovery(f.config, goal, { phase: 'projects', offset: 20 });
-    assert.equal(readChatLink(f.config, goal).scan.offset, 20);
+    assert.equal(readChatLink(f.config, goal).scan, undefined, 'no historical discovery cursor is persisted');
     stopGoal(f.config, { work_id: f.work_id }, f.context);
     assert.equal(commitGoalBinding(f.config, goal, { conversationId: ID, messageId: 'user-1' }), null);
-    checkpointChatDiscovery(f.config, goal, { offset: 99 });
-    assert.equal(readChatLink(f.config, goal).scan.offset, 20);
   });
 });
 
@@ -2394,6 +2254,23 @@ test('versioned automatic detection needs no host conversation ID and does not e
     assert.equal((await findRecentGoalCommand({ workId: f.work_id, linkId: link.link_id,
       issuedAt: Date.now(), conversationCorrelation: ID, explicitConversation: true, credentials,
       fetch: async () => response(linkedConversation(ID, f.work_id, link, 'Ordinary task')) })).state, 'absent');
+  });
+});
+
+test('work begin persists a ChatGPT Project hint independently of the local workspace', async t => {
+  await withMonitoredGoal(t, async f => {
+    const context = { ...f.context, connector: true };
+    const value = await runWithToolActivity({ taskId: f.work_id }, () =>
+      HANDLERS.startTask(f.config, {
+        title: 'Project scoped goal', goal: true, chatgptProjectName: 'Rel-ai-mcp'
+      }, context));
+    assert.equal(value.work_id, f.work_id);
+    const goal = loadGoal(f.config, f.work_id);
+    assert.equal(goal.chatgptProjectName, 'Rel-ai-mcp');
+    assert.equal(goal.workspace, f.context.requestTaskContext.session.workspace,
+      'ChatGPT Project names must not override the authorized local workspace');
+    const schema = getToolSchemas().find(tool => tool.name === 'relai_work');
+    assert.ok(schema, 'the public work tool must remain exposed');
   });
 });
 
