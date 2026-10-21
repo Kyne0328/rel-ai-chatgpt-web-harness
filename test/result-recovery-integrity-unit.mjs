@@ -57,6 +57,52 @@ function start(overrides = {}) {
 }
 try {
 
+  // Missing indexes in a large pre-index operation directory must not leak a
+  // transient recovery rejection to ordinary command admission or rerun work.
+  {
+    const legacyConfig = { ...config, stateDir: path.join(root, 'legacy-scope-admission') };
+    let calls = 0;
+    const executeToolResult = async () => { calls++; return result({ marker: 'legacy-scope' }); };
+    const args = { workspace: 'app', command: 'harmless legacy-scope fixture' };
+    const invoke = id => handleTransportFallbackRequest(legacyConfig, make(id, args, 'relai_exec'),
+      { ...options, synchronousFallbackGraceMs: 1000, executeToolResult });
+    const initial = (await invoke('legacy-scope-initial')).body.result.structuredContent;
+    assert.equal(initial.ok, true, JSON.stringify(initial));
+    assert.equal(calls, 1);
+    const scopeDirectory = path.join(legacyConfig.stateDir, 'fallback-scopes');
+    const [scopeIndex] = fs.readdirSync(scopeDirectory);
+    fs.rmSync(path.join(scopeDirectory, scopeIndex));
+    const receiptDirectory = path.join(legacyConfig.stateDir, 'fallback-executions');
+    for (let index = 0; index < 275; index++) {
+      const operationId = `fallback_legacy_work_pointer_${String(index).padStart(25, '0')}`;
+      fs.writeFileSync(path.join(receiptDirectory, `${operationId}.json`),
+        JSON.stringify({ operationId, workId: `other-task-${index}` }));
+    }
+    fallback.resetFallbackExecutions();
+    const replay = (await invoke('legacy-scope-replay')).body.result.structuredContent;
+    assert.equal(replay.ok, true, JSON.stringify(replay));
+    assert.equal(replay.operationId, initial.operationId);
+    assert.equal(calls, 1, 'an unindexed legacy receipt must be replayed, never re-executed');
+    const malformed = path.join(receiptDirectory, 'fallback_legacy_work_pointer_0000000000000000000000000.json');
+    const intact = fs.readFileSync(malformed, 'utf8');
+    fs.writeFileSync(malformed, '{');
+    fallback.resetFallbackExecutions();
+    const blocked = (await handleTransportFallbackRequest(legacyConfig,
+      make('legacy-scope-invalid', { ...args, command: 'different harmless fixture' }, 'relai_exec'),
+      { ...options, synchronousFallbackGraceMs: 1000, executeToolResult })).body.result.structuredContent;
+    assert.equal(blocked.errorCode, 'FALLBACK_RECOVERY_UNAVAILABLE');
+    assert.equal(blocked.executed, false);
+    assert.equal(calls, 1, 'unreadable legacy evidence must not admit a new operation');
+    fs.writeFileSync(malformed, intact);
+    const novel = (await handleTransportFallbackRequest(legacyConfig,
+      make('legacy-scope-new', { ...args, command: 'different harmless fixture' }, 'relai_exec'),
+      { ...options, synchronousFallbackGraceMs: 1000, executeToolResult })).body.result.structuredContent;
+    assert.equal(novel.ok, true, JSON.stringify(novel));
+    assert.equal(calls, 2, 'a different scope must admit exactly one new operation');
+    cases.push('large pre-index history transparently recovers and preserves exact command replay');
+    fallback.resetFallbackExecutions();
+  }
+
   // The actual task-history worker holds a queued write behind an isolated
   // SQLite lock. Admission must wait without scheduling the handler.
   const { recordTaskActivityEvent, flushTaskHistoryPersistence, withTaskHistoryPersistenceBarrier, clearTaskHistory } = await import('../src/taskHistoryStore.ts');

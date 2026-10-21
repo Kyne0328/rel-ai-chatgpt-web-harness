@@ -305,9 +305,9 @@ function legacyDirectoryStamp(root) {
 // synchronous probe continues in small asynchronous slices; retries use its
 // progress instead of traversing the first entries again on every request.
 function beginLegacyScopeRecovery(root, stamp) {
-  const state = { stamp, status: 'running', candidates: [], error: null, generation: 0 };
+  const state = { stamp, status: 'running', candidates: [], error: null, promise: null };
   legacyScopeRecoveries.set(root, state);
-  void (async () => {
+  state.promise = (async () => {
     let entries = 0;
     let bytes = 0;
     let sliceStart = Date.now();
@@ -388,7 +388,9 @@ function readPersistedScope(config, reference, options = {}) {
   }
   if (recovery) {
     if (recovery.status === 'failed') throw recovery.error;
-    if (recovery.status !== 'done') throw legacyRecoveryError('Legacy replay recovery is incomplete. Retry this admission; no operation has been started.');
+    if (recovery.status !== 'done') throw Object.assign(
+      legacyRecoveryError('Legacy replay recovery is incomplete. Retry this admission; no operation has been started.'),
+      { recoveryPromise: recovery.promise });
     return recovery.candidates
       .filter(record => matching(record) && fresh(record))
       .map(record => {
@@ -417,8 +419,9 @@ function readPersistedScope(config, reference, options = {}) {
     let entry;
     while ((entry = directory.readSync())) {
       if (++count > LEGACY_SYNC_ENTRIES || bytes > LEGACY_SYNC_BYTES || Date.now() - startedAt > LEGACY_SYNC_MS) {
-        beginLegacyScopeRecovery(root, stamp);
-        throw legacyRecoveryError('Legacy replay recovery is continuing asynchronously. Retry admission without repeating the operation.');
+        const pending = beginLegacyScopeRecovery(root, stamp);
+        throw Object.assign(legacyRecoveryError('Legacy replay recovery is continuing asynchronously. Retry admission without repeating the operation.'),
+          { recoveryPromise: pending.promise });
       }
       if (!entry.isFile() || !/^fallback_[A-Za-z0-9_-]{20,160}\.json$/.test(entry.name)) continue;
       let record;
@@ -427,8 +430,9 @@ function readPersistedScope(config, reference, options = {}) {
         const stat = fs.statSync(file);
         if (!stat.isFile() || stat.size > LEGACY_RECOVERY_FILE_BYTES
           || (bytes += stat.size) > LEGACY_SYNC_BYTES) {
-          beginLegacyScopeRecovery(root, stamp);
-          throw legacyRecoveryError('Legacy replay recovery is continuing asynchronously. Retry admission.');
+          const pending = beginLegacyScopeRecovery(root, stamp);
+          throw Object.assign(legacyRecoveryError('Legacy replay recovery is continuing asynchronously. Retry admission.'),
+            { recoveryPromise: pending.promise });
         }
         record = readJsonFile(file);
       } catch (cause) {

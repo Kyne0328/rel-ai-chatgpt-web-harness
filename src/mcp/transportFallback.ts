@@ -263,13 +263,30 @@ async function runFallbackToolExecution(config: any, message: any, args: any, op
       })
     });
     const retryUntil = performance.now() + 500;
+    const recoveryWaitUntil = Date.now() + 5_000;
     for (;;) {
       try {
+        options.signal?.throwIfAborted();
         started = workId && options.persistFallback !== false
           ? await withTaskHistoryPersistenceBarrier(config, workId, admit, { signal: options.signal, deadlineAtMs })
           : admit();
         break;
       } catch (error: any) {
+        // A bounded legacy index rebuild proves whether a prior command exists.
+        // Wait for that proof instead of surfacing a transient refusal; never
+        // retry an admission whose handler may have started.
+        if (error?.code === 'FALLBACK_RECOVERY_UNAVAILABLE' && error?.executed === false
+          && error?.recoveryPromise) {
+          const remaining = Math.min(recoveryWaitUntil - Date.now(),
+            deadlineAtMs > 0 ? deadlineAtMs - Date.now() : Number.POSITIVE_INFINITY);
+          if (remaining <= 0) throw error;
+          await Promise.race([
+            error.recoveryPromise,
+            delay(remaining, undefined, { signal: options.signal, ref: false }).then(() => { throw error; })
+          ]);
+          options.signal?.throwIfAborted();
+          continue;
+        }
         const cause = error?.cause;
         const busy = (Number(cause?.errcode) & 0xff) === 5 || cause?.code === 'SQLITE_BUSY';
         if (error?.code !== 'FALLBACK_PERSISTENCE_FAILED' || error?.executed !== false || !busy
