@@ -18,14 +18,19 @@ const PATHS = [
 
 // Opaque host session IDs cannot identify a Web chat. Retain only exact work
 // IDs from bounded JSON tool receipts so discovery can prove the association.
-function receiptWorkIds(text) {
+function workReceipts(text) {
   if (typeof text !== 'string' || text.length > MAX_RECEIPT_CHARS) return [];
   let receipt;
   try { receipt = JSON.parse(text); } catch { return []; }
-  const ids = new Set();
+  const receipts = new Map();
   const visit = (value, depth) => {
-    if (!value || typeof value !== 'object' || depth > 3 || ids.size >= 8) return;
-    if (typeof value.work_id === 'string' && value.work_id.length <= 128) ids.add(value.work_id);
+    if (!value || typeof value !== 'object' || depth > 3 || receipts.size >= 8) return;
+    if (typeof value.work_id === 'string' && value.work_id.length <= 128) {
+      const link = value.chat_link;
+      const linkId = link?.version === 1 && typeof link.link_id === 'string'
+        && /^[A-Za-z0-9_-]{32}$/.test(link.link_id) ? link.link_id : '';
+      receipts.set(value.work_id + ':' + linkId, { workId: value.work_id, linkId });
+    }
     visit(value.structuredContent, depth + 1);
     for (const part of Array.isArray(value.content) ? value.content.slice(0, 8) : []) {
       if (part?.type === 'text' && typeof part.text === 'string' && part.text.length <= MAX_RECEIPT_CHARS) {
@@ -34,7 +39,7 @@ function receiptWorkIds(text) {
     }
   };
   visit(receipt, 0);
-  return [...ids];
+  return [...receipts.values()];
 }
 
 function goalMessageExists(conversation, expectedText, expectedParentNode) {
@@ -92,10 +97,14 @@ function conversationProjection() {
     if (stack.length === 6 && stack[4]?.key === 'content' && stack[5]?.key === 'parts'
       && Number.isSafeInteger(key) && key >= 0) {
       const parts = message.content.parts;
-      const workIds = receiptWorkIds(value);
+      const receipts = workReceipts(value);
+      const workIds = receipts.map(receipt => receipt.workId);
       if (workIds.length && key < 8) message.content.workIds = [...new Set([
         ...(message.content.workIds || []), ...workIds
       ])].slice(0, 8);
+      if (receipts.length && key < 8) message.content.workReceipts = [
+        ...(message.content.workReceipts || []), ...receipts
+      ].slice(0, 8);
       // The command can span multiple content parts. Preserve the complete
       // command or nothing: a partial '/goal' must not pass as a bare command.
       const textLimit = /^Continue goal /i.test(key === 0 ? value : parts[0] || '')

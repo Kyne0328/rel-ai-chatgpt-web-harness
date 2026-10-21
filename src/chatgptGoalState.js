@@ -1,9 +1,85 @@
 // Durable Goal/Loop records share the existing state_meta namespace so upgrades
 // preserve stopped goals, spent counters and unresolved submission receipts.
 import { withStateDatabase } from './stateDatabase.ts';
+import { randomBytes } from 'node:crypto';
+import { principalFingerprint } from './mcp/principal.ts';
+import { principalTunnelId } from './mcp/tunnelIdentity.js';
 import { goalContinuationPrompt } from './chatgptGoalProtocol.js';
 
 const PREFIX = 'chatgpt_goal:';
+const LINK_PREFIX = 'chatgpt_goal_link:';
+
+// This receipt identifies a tool response, never authorizes task execution.
+function ensureChatLink(config, workId, context) {
+  if (!context?.connector) return null;
+  const owner = principalFingerprint(context.principal || 'anonymous');
+  const tunnelId = principalTunnelId(context.principal);
+  return withStateDatabase(config, db => {
+    const key = LINK_PREFIX + workId;
+    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
+    const link = row ? JSON.parse(row.value) : {
+      workId, owner, tunnelId, issuedAt: Date.now(), linkId: randomBytes(24).toString('base64url')
+    };
+    if (link.owner !== owner || link.tunnelId !== tunnelId) throw new Error('Chat linking owner mismatch.');
+    if (!row) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(key, JSON.stringify(link));
+    return { version: 1, link_id: link.linkId };
+  }, { transaction: true });
+}
+
+function readChatLink(config, record) {
+  return withStateDatabase(config, db => {
+    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(LINK_PREFIX + record.workId);
+    const link = row ? JSON.parse(row.value) : null;
+    return link?.owner === record.owner && link.tunnelId === (record.tunnelId || '') ? link : null;
+  }, { readonly: true, missingValue: null });
+}
+
+function checkpointChatDiscovery(config, record, scan) {
+  withStateDatabase(config, db => {
+    const key = LINK_PREFIX + record.workId;
+    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
+    if (!row) return;
+    const link = JSON.parse(row.value);
+    if (link.owner !== record.owner || link.tunnelId !== (record.tunnelId || '')) return;
+    const goalRow = db.prepare('SELECT value FROM state_meta WHERE key=?').get(goalKey(record.workId));
+    const goal = goalRow ? JSON.parse(goalRow.value) : null;
+    if (goal && (!goal.active || goal.revision !== record.revision)) return;
+    if (!goal) {
+      const detection = db.prepare('SELECT value FROM state_meta WHERE key=?').get('chatgpt_goal_detection:' + record.workId);
+      if (!detection || JSON.parse(detection.value).state !== 'checking') return;
+    }
+    db.prepare('UPDATE state_meta SET value=? WHERE key=? AND value=?')
+      .run(JSON.stringify({ ...link, scan }), key, row.value);
+  }, { transaction: true });
+}
+
+function commitGoalBinding(config, goal, match, { detection = false } = {}) {
+  return withStateDatabase(config, db => {
+    const row = readGoalRow(db, goal.workId);
+    const detectionKey = 'chatgpt_goal_detection:' + goal.workId;
+    if (detection) {
+      const pending = db.prepare('SELECT value FROM state_meta WHERE key=?').get(detectionKey);
+      if (row || !pending || JSON.parse(pending.value).state !== 'checking') return null;
+    } else if (!row?.goal.active || row.goal.revision !== goal.revision) return null;
+    const linkRow = db.prepare('SELECT value FROM state_meta WHERE key=?').get(LINK_PREFIX + goal.workId);
+    const link = linkRow ? JSON.parse(linkRow.value) : null;
+    if (link && (link.owner !== goal.owner || link.tunnelId !== (goal.tunnelId || ''))) return null;
+    const claimKey = 'chatgpt_goal_command:' + (link ? goal.owner + ':' + (goal.tunnelId || '') + ':' : '')
+      + match.conversationId + ':' + match.messageId;
+    const claim = db.prepare('SELECT value FROM state_meta WHERE key=?').get(claimKey);
+    if (claim && claim.value !== goal.workId) return null;
+    const binding = { version: link ? 1 : 0, conversationId: match.conversationId,
+      owner: goal.owner, tunnelId: goal.tunnelId || '', messageId: match.messageId,
+      receiptMessageId: match.receiptMessageId || '', verifiedAt: Date.now() };
+    const saved = writeGoalRow(db, row, { ...goal, conversationId: match.conversationId,
+      binding, state: 'monitoring', error: '', retryCount: 0, nextAttemptAt: 0, updatedAt: Date.now() });
+    if (!claim) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(claimKey, goal.workId);
+    if (link) db.prepare('UPDATE state_meta SET value=? WHERE key=?')
+      .run(JSON.stringify({ ...link, scan: null }), LINK_PREFIX + goal.workId);
+    if (detection) db.prepare('DELETE FROM state_meta WHERE key=?').run(detectionKey);
+    return saved;
+  }, { transaction: true });
+}
 
 function goalKey(workId) { return PREFIX + String(workId); }
 
@@ -122,6 +198,10 @@ function claimContinuation(config, workId, nodeId, taskCalls, options = {}) {
   return withStateDatabase(config, db => {
     const row = readGoalRow(db, workId);
     const current = row?.goal;
+    const link = db.prepare('SELECT 1 FROM state_meta WHERE key=?').get(LINK_PREFIX + workId);
+    if (link && (!current?.binding || current.binding.version !== 1
+      || current.binding.conversationId !== current.conversationId || current.binding.owner !== current.owner
+      || current.binding.tunnelId !== (current.tunnelId || ''))) return null;
     if (!current?.active || !nodeId || options.expectedRevision !== current.revision
       || current.pendingNode === nodeId || current.observedNode !== nodeId
       || (current.pendingNode && !['accepted', 'not_sent'].includes(current.pendingOutcome))) return null;
@@ -196,4 +276,4 @@ function recordGoalCompletionRequest(config, workId, completion, options = {}) {
   }, { transaction: true });
 }
 
-export { goalKey, normalizeGoalRecord, loadGoal, listGoals, saveGoal, updateGoal, claimContinuation, clearUnsentContinuation, recordLoopMilestone, recordGoalCompletionRequest };
+export { ensureChatLink, readChatLink, checkpointChatDiscovery, commitGoalBinding, goalKey, normalizeGoalRecord, loadGoal, listGoals, saveGoal, updateGoal, claimContinuation, clearUnsentContinuation, recordLoopMilestone, recordGoalCompletionRequest };

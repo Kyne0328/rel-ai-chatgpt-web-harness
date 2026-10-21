@@ -176,12 +176,13 @@ try {
   tunnelStopGate = deferred();
   const reconnecting = runtime.restartConnection();
   await new Promise(resolve => setImmediate(resolve));
+  const queuedSettingsReconnect = runtime.restartConnection({ afterPending: true });
   assert.equal(additionalTunnelStopCalls, additionalStopsBeforeReconnect,
     'primary reconnect must keep healthy additional tunnels running');
   const stoppingReconnect = runtime.stopServer({ preserveDashboard: true });
   await new Promise(resolve => setImmediate(resolve));
   tunnelStopGate.resolve();
-  await Promise.all([reconnecting, stoppingReconnect]);
+  await Promise.all([reconnecting, stoppingReconnect, queuedSettingsReconnect]);
   tunnelStopGate = null;
   assert.equal(tunnelStartCalls, startsBeforeReconnectStop,
     'reconnect invalidated while stopping its old tunnel must not start a replacement');
@@ -393,6 +394,60 @@ try {
   assert.equal(readGuiConfig().tunnelId, '', 'saving a local port preserves intentional disconnection');
   saveLauncherConfig({ tunnelId: 'tunnel_restored123456' });
   assert.equal(readGuiConfig().tunnelId, 'tunnel_restored123456', 'adding a connection clears local-only mode');
+
+  // The primary connection must not own local or peer availability.
+  for (const failure of ['missing-key', 'decrypt-key', 'slow-primary']) {
+    let peerStarts = 0;
+    let primaryStarts = 0;
+    let peerListening = false;
+    let peerStatus = {};
+    const primaryGate = deferred();
+    const peerRuntime = createDesktopServiceRuntime({
+      app: { getVersion: () => 'fixture' },
+      connection: { generateToken: () => 'fixture-token', writeLaunchEnv() {}, writeConnectionProfile() {} },
+      configModule: { ensureConfig() {}, getConfigPath: () => configPath },
+      serviceProcessClient: {
+        isListening: () => peerListening, updateContext() {},
+        async start() { peerListening = true; return { port: 4567 }; },
+        async stop() { peerListening = false; return { ok: true }; }
+      },
+      dashboardWindowManager: { async close() {} },
+      runtimeLogs: { snapshot: () => ({}), append() {} },
+      fetchImpl: async url => ({ ok: url.endsWith('/health'), status: url.endsWith('/mcp') ? 405 : 200 }),
+      secureTunnelRuntime: {
+        snapshot: () => ({ state: peerStatus.tunnelStatus }),
+        start() { primaryStarts++; return primaryGate.promise; },
+        async stop() { primaryGate.resolve({ cancelled: true }); return { stopped: true, exited: true }; }
+      },
+      additionalTunnelRuntime: {
+        async sync() { peerStarts++; return { connections: [{ state: 'running' }] }; },
+        snapshot: () => ({ connections: [] }), async stop() { return { stopped: true }; }
+      },
+      tunnelConnections: { list: () => [], runtimeConnections: () => [{ tunnelId: 'tunnel_peerfixture123', apiKey: 'peer-key' }] },
+      tunnelCredentials: { getApiKey() {
+        if (failure === 'decrypt-key') throw new Error('private decrypt cause');
+        return failure === 'missing-key' ? '' : 'fixture-key';
+      } },
+      errorCodes: { CONFIGURATION_INVALID: 'configuration_invalid', TUNNEL_CREDENTIALS_UNAVAILABLE: 'tunnel_credentials_unavailable' },
+      getCurrentStatus: () => peerStatus,
+      setStatus: next => { peerStatus = { ...peerStatus, ...next }; },
+      replaceCurrentStatus: next => { peerStatus = next; }, pushStatus() {}
+    });
+    const start = peerRuntime.startServer();
+    try {
+      const ready = await peerRuntime.waitUntilListening(0);
+      assert.equal(ready.serverRunning, true, `${failure}: the local dashboard must start independently`);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(peerStarts, 1, `${failure}: healthy peers must start before primary startup settles`);
+      assert.equal(primaryStarts, failure === 'slow-primary' ? 1 : 0);
+      if (failure !== 'slow-primary') {
+        const failed = await start;
+        assert.equal(failed.tunnelStatus, 'failed');
+        assert.equal(failed.errorCode, 'tunnel_credentials_unavailable');
+        assert.doesNotMatch(JSON.stringify(failed), /private decrypt cause/);
+      }
+    } finally { await peerRuntime.stopServer(); await start; }
+  }
 } finally {
   if (previousState === undefined) delete process.env.REL_AI_MCP_STATE_DIR; else process.env.REL_AI_MCP_STATE_DIR = previousState;
   if (previousConfig === undefined) delete process.env.REL_AI_MCP_CONFIG; else process.env.REL_AI_MCP_CONFIG = previousConfig;

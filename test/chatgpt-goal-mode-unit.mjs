@@ -8,12 +8,15 @@ import { updateGoal as updateGoalOptions, activateGoal, queueGoalDetection, chec
 import { getToolSchemas } from '../src/tools/schema.js';
 import { parseGoalCommand } from '../src/goalCommands.js';
 import { buildGoalEvidence } from '../src/chatgptGoalEvidence.js';
-import { goalMessageExists } from '../src/chatgptConversationReader.js';
-import { normalizeGoalRecord, loadGoal, saveGoal, updateGoal, claimContinuation, recordLoopMilestone } from '../src/chatgptGoalState.js';
+import { goalMessageExists, readConversationProjection } from '../src/chatgptConversationReader.js';
+import { ensureChatLink, readChatLink, checkpointChatDiscovery, commitGoalBinding, normalizeGoalRecord, loadGoal, saveGoal, updateGoal, claimContinuation, recordLoopMilestone } from '../src/chatgptGoalState.js';
 import { withStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { beginConnectorToolCall, getToolActivity, resetToolActivity, runWithToolActivity, requestCurrentTaskCancellation, onToolActivity } from '../src/toolActivity.js';
 import { recordTaskActivityEvent, clearTaskHistory } from '../src/taskHistoryStore.ts';
+import { HANDLERS } from '../src/tools/handlers.js';
+import { validateToolOutput } from '../src/tools/outputValidation.js';
+import { serializeConnectorResult } from '../src/tools/connector.js';
 
 const ID = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
 const OTHER = 'ca32ef5a-77b0-49f0-983d-b39c12c45ff2';
@@ -68,7 +71,8 @@ async function withMonitoredGoal(t, run) {
     const goal = JSON.parse(db.prepare('SELECT value FROM state_meta WHERE key=?').get(key).value);
     db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify({ ...goal, ...patch }), key);
   }, { transaction: true });
-  patchGoal({ observedNode: 'a', stableSince: Date.now() - 100_000 });
+  patchGoal({ observedNode: 'a', stableSince: Date.now() - 100_000,
+    binding: { version: 0, conversationId: ID, owner: 'fixture', messageId: 'user-1', receiptMessageId: 'tool-receipt' } });
   const tree = conversation(ID);
   const calls = [];
   let onRead = () => {};
@@ -2224,4 +2228,200 @@ test('HTTP 422 identifies the rejected stage without exposing response content o
     && !error.message.includes('account or conversation data'));
   assert.deepEqual(nativeRequests.map(request => request.action), ['continue'],
     'native failures must not retry or fall back to protocol message submission');
+});
+
+function linkedConversation(id, workId, link, command = '/loop Keep working') {
+  const tree = conversationWithReceipt(id, workId, command);
+  tree.mapping.receipt.message.content.parts = [JSON.stringify({ work_id: workId, chat_link: link })];
+  return tree;
+}
+
+test('versioned linking accepts a delayed receipt after later user messages and rejects forged evidence', async () => {
+  const workId = 'versioned-work';
+  const link = { version: 1, link_id: 'a'.repeat(32) };
+  const issuedAt = Date.now() - 600_000;
+  const tree = linkedConversation(ID, workId, link);
+  tree.mapping.receipt.message.create_time = Date.now() / 1000;
+  tree.mapping.later = { parent: 'a', message: { id: 'later-user', author: { role: 'user' },
+    content: { parts: ['Any progress?'] } } };
+  tree.current_node = 'later';
+  const deps = { workId, linkId: link.link_id, issuedAt, conversationCorrelation: ID, explicitConversation: true, credentials,
+    fetch: async () => response(tree) };
+  const found = await findRecentGoalCommand(deps);
+  assert.equal(found.conversationId, ID);
+  assert.equal(found.command.mode, 'loop');
+  assert.equal(found.receiptMessageId, 'tool-receipt');
+  let parent = 'a';
+  for (let i = 0; i < 1005; i++) {
+    tree.mapping['later-' + i] = { parent, message: { id: 'later-' + i, author: { role: 'assistant' }, content: { parts: ['Still working'] } } };
+    parent = 'later-' + i;
+  }
+  tree.mapping.later.parent = parent;
+  assert.equal((await findRecentGoalCommand(deps)).conversationId, ID, 'link proof survives a long initiating turn');
+  tree.mapping.receipt.message.author.role = 'assistant';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+  tree.mapping.receipt.message.author.role = 'tool';
+  assert.equal((await findRecentGoalCommand({ ...deps, linkId: 'b'.repeat(32) })).state, 'absent');
+  tree.mapping.a.parent = 'u';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+});
+
+test('versioned linking paginates ordinary chats and refuses a duplicate in a Project', async () => {
+  const workId = 'paged-work';
+  const link = { version: 1, link_id: 'p'.repeat(32) };
+  const tree = linkedConversation(ID, workId, link);
+  let copied = false;
+  const requests = [];
+  const project = 'g-p-' + 'a'.repeat(32);
+  const fetch = async url => {
+    requests.push(url);
+    if (url.includes('/conversations?offset=')) return response(url.includes('offset=0&')
+      ? { items: [{ id: OTHER }], has_more: true } : { items: [{ id: ID }], has_more: false });
+    if (url.includes('/snorlax/sidebar')) return response({ items: copied
+      ? [{ gizmo: { id: project }, conversations: { items: [{ id: OTHER }] } }] : [] });
+    if (url.includes('/gizmos/')) return response({ items: [] });
+    return response(url.endsWith(ID) ? tree : copied ? linkedConversation(OTHER, workId, link) : conversation(OTHER));
+  };
+  const deps = { workId, linkId: link.link_id, issuedAt: Date.now(), credentials, fetch };
+  assert.equal((await findRecentGoalCommand(deps)).conversationId, ID);
+  assert.ok(requests.some(url => url.includes('offset=1&')));
+  copied = true;
+  // A fresh transport represents recovery after an application restart.
+  assert.equal((await findRecentGoalCommand({ ...deps, fetch: url => fetch(url) })).state, 'ambiguous');
+});
+
+test('versioned linking resumes a checkpointed page after transport restart and delayed visibility', async () => {
+  const workId = 'restart-work';
+  const link = { version: 1, link_id: 'r'.repeat(32) };
+  const ids = Array.from({ length: 45 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`);
+  const reads = [];
+  let scan;
+  let visible = false;
+  const fetch = async url => {
+    if (url.includes('/conversations?offset=')) {
+      const offset = Number(new URL(url).searchParams.get('offset'));
+      return response({ items: ids.slice(offset, offset + 20).map(id => ({ id })), total: ids.length });
+    }
+    if (url.includes('/snorlax/sidebar')) return response({ items: [] });
+    const id = url.split('/').at(-1);
+    reads.push(id);
+    return response(visible && id === ids.at(-1) ? linkedConversation(id, workId, link) : conversation(id));
+  };
+  const base = { workId, linkId: link.link_id, issuedAt: Date.now(), credentials,
+    onDiscoveryState: value => { scan = structuredClone(value); } };
+  await assert.rejects(() => findRecentGoalCommand({ ...base, fetch }), error => error.deferred);
+  const firstReadCount = reads.length;
+  assert.ok(scan.at > 0);
+  visible = true;
+  let found;
+  for (let i = 0; i < 4; i++) {
+    try {
+      found = await findRecentGoalCommand({ ...base, discoveryState: scan, fetch: url => fetch(url) });
+      break;
+    } catch (error) { assert.equal(error.deferred, true); }
+  }
+  assert.equal(found?.conversationId, ids.at(-1));
+  assert.equal(reads.slice(firstReadCount).includes(ids[0]), false, 'restart resumes rather than rescanning page one');
+});
+
+test('durable linking receipts are idempotent, owner scoped and cannot bind after Stop', async t => {
+  await withMonitoredGoal(t, async f => {
+    const context = { ...f.context, connector: true };
+    const receipt = ensureChatLink(f.config, f.work_id, context);
+    assert.deepEqual(ensureChatLink(f.config, f.work_id, context), receipt);
+    assert.throws(() => ensureChatLink(f.config, f.work_id, { connector: true, principal: 'other' }), /owner mismatch/);
+    const goal = loadGoal(f.config, f.work_id);
+    checkpointChatDiscovery(f.config, goal, { phase: 'projects', offset: 20 });
+    assert.equal(readChatLink(f.config, goal).scan.offset, 20);
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    assert.equal(commitGoalBinding(f.config, goal, { conversationId: ID, messageId: 'user-1' }), null);
+    checkpointChatDiscovery(f.config, goal, { offset: 99 });
+    assert.equal(readChatLink(f.config, goal).scan.offset, 20);
+  });
+});
+
+test('versioned monitor links through the owner browser, survives restart and continues the original work once', async t => {
+  await withMonitoredGoal(t, async f => {
+    const link = ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
+    f.patchGoal({ conversationId: '', conversationCorrelation: 'opaque-session', observedNode: '', binding: null });
+    const tree = linkedConversation(ID, f.work_id, link, 'Finish this task');
+    const sends = [];
+    const deps = { nativeTransport: async request => {
+      if (request.action === 'continue') { sends.push(request); return { ok: true, accepted: true }; }
+      if (request.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID }], has_more: false } };
+      if (request.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
+      return { ok: true, data: await readConversationProjection(response(tree)) };
+    } };
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().chatLink.state, 'linked');
+    assert.equal(f.status().conversationId, ID);
+    assert.equal(sends.length, 0);
+    stopGoalMonitor();
+    t.mock.timers.tick(31_000);
+    // A new transport cannot require another catalog scan for a bound goal.
+    await pollGoal(f.config, f.work_id, { nativeTransport: request => {
+      assert.notEqual(request.path?.includes('/conversations?'), true);
+      return deps.nativeTransport(request);
+    } });
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].workId, f.work_id);
+    assert.equal(sends[0].conversationId, ID);
+    assert.equal(f.status().continuationCount, 1);
+    tree.mapping.a.parent = 'u';
+    await pollGoal(f.config, f.work_id, deps);
+    assert.equal(f.status().state, 'needs_user');
+    assert.equal(sends.length, 1, 'a branch without the bound receipt cannot send');
+  });
+});
+
+test('versioned automatic detection needs no host conversation ID and does not enable ordinary work', async t => {
+  await withMonitoredGoal(t, async f => {
+    withStateDatabase(f.config, db => db.prepare('DELETE FROM state_meta WHERE key=?').run('chatgpt_goal:' + f.work_id), { transaction: true });
+    const context = { ...f.context, connector: true };
+    const link = ensureChatLink(f.config, f.work_id, context);
+    const tree = linkedConversation(ID, f.work_id, link, '/loop Keep working');
+    const deps = { task: f.task(), nativeTransport: async request => {
+      if (request.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID }], has_more: false } };
+      if (request.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
+      return { ok: true, data: await readConversationProjection(response(tree)) };
+    } };
+    queueGoalDetection(f.config, { work_id: f.work_id, title: 'Loop' }, context, { env: {} });
+    await checkGoalDetection(f.config, f.work_id, deps);
+    assert.equal(f.status().mode, 'loop');
+    assert.equal(f.status().chatLink.state, 'linked');
+    assert.equal(f.status().strategy, 'adaptive');
+    assert.equal(f.status().continuationCount, 0);
+    assert.equal((await findRecentGoalCommand({ workId: f.work_id, linkId: link.link_id,
+      issuedAt: Date.now(), conversationCorrelation: ID, explicitConversation: true, credentials,
+      fetch: async () => response(linkedConversation(ID, f.work_id, link, 'Ordinary task')) })).state, 'absent');
+  });
+});
+
+test('connector begin delivers its durable linking receipt through output validation and compaction', async t => {
+  await withMonitoredGoal(t, async f => {
+    const value = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(f.config,
+      { title: 'Receipt contract' }, { ...f.context, connector: true }));
+    await validateToolOutput(f.config, 'relai_work', { action: 'begin' }, value);
+    const output = serializeConnectorResult({ publicName: 'relai_work', action: 'begin', operationName: 'work.begin',
+      value, args: {}, workId: f.work_id });
+    assert.equal(output.work_id, f.work_id);
+    assert.equal(output.chat_link.version, 1);
+    assert.equal(output.chat_link.link_id, readChatLink(f.config, loadGoal(f.config, f.work_id)).linkId);
+  });
+});
+
+test('legacy linked tasks verify an exact old receipt without resetting continuation state', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, continuationCount: 3, createdAt: Date.now() - 600_000,
+      pendingNode: 'previous-branch', pendingOutcome: 'accepted', sentTaskCalls: f.task().calls });
+    const tree = conversationWithReceipt(ID, f.work_id, 'Existing work');
+    tree.mapping.receipt.message.create_time = (Date.now() - 500_000) / 1000;
+    const deps = { nativeTransport: async () => ({ ok: true, data: await readConversationProjection(response(tree)) }) };
+    await pollGoal(f.config, f.work_id, deps);
+    const saved = loadGoal(f.config, f.work_id);
+    assert.equal(saved.binding.version, 0);
+    assert.equal(saved.binding.receiptMessageId, 'tool-receipt');
+    assert.equal(saved.continuationCount, 3);
+    assert.equal(saved.pendingOutcome, 'accepted');
+  });
 });

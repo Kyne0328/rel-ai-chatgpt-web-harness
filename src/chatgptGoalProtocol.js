@@ -198,6 +198,17 @@ async function listConversations(deps = {}) {
   return Array.isArray(result.items) ? result.items : [];
 }
 
+async function listConversationPage(offset, deps) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000) throw new Error('Invalid conversation listing offset.');
+  const result = await requestChatgpt('/backend-api/conversations?offset=' + offset
+    + '&limit=20&order=updated&is_archived=false', { signal: deps.signal }, deps);
+  if (!Array.isArray(result?.items)) throw new Error('ChatGPT conversations have an unsupported response.');
+  const more = typeof result.has_more === 'boolean' ? result.has_more
+    : Number.isSafeInteger(result.total) ? offset + result.items.length < result.total : result.items.length === 20;
+  if (more && !result.items.length) throw new Error('ChatGPT conversation pagination made no progress.');
+  return { items: result.items, next: more ? offset + result.items.length : null };
+}
+
 // Project chats have a separate catalogue. The sidebar supplies recent chat
 // previews, avoiding a per-project request in the common case.
 const PROJECT_ID = /^g-p-[0-9a-f]{32}$/i;
@@ -276,7 +287,7 @@ async function discoveryRead(key, load, deps) {
   const record = { promise: null };
   record.promise = Promise.resolve().then(() => load({ ...deps,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })).then(value => {
-    scope.discovery.set(key, { value, expiresAt: Date.now() + DISCOVERY_CACHE_MS });
+    scope.discovery.set(key, { value, expiresAt: Date.now() + (deps.discoveryCacheMs ?? DISCOVERY_CACHE_MS) });
     while (scope.discovery.size > 32) {
       const oldest = [...scope.discovery].find(([key, entry]) => key !== 'catalog' && !entry.promise)?.[0];
       if (oldest === undefined) break;
@@ -291,13 +302,13 @@ async function discoveryRead(key, load, deps) {
   return { value: await waitForDiscovery(record.promise, deps.signal), cached: false };
 }
 
-function activeMessages(conversation) {
+function activeMessages(conversation, maxNodes = 1000) {
   const mapping = conversation?.mapping;
   if (!mapping || typeof mapping !== 'object') return [];
   const nodes = [];
   const seen = new Set();
   let nodeId = conversation.current_node;
-  while (nodeId && mapping[nodeId] && !seen.has(nodeId) && nodes.length < 1000) {
+  while (nodeId && mapping[nodeId] && !seen.has(nodeId) && seen.size < maxNodes) {
     seen.add(nodeId);
     const node = mapping[nodeId];
     if (node.message) nodes.push({ id: nodeId, message: node.message });
@@ -332,6 +343,13 @@ function turnState(conversation) {
 }
 
 async function findRecentGoalCommand(deps = {}) {
+  if (deps.linkId) return findLinkedGoalCommand(deps);
+  if (deps.verifyLegacy) {
+    const id = parseConversationUrl(deps.conversationCorrelation);
+    const receipt = goalCommandEvidence(await getConversation(id, deps)).receipts.find(item => item.workId === deps.workId);
+    return receipt ? { state: 'matched', conversationId: id, messageId: receipt.messageId,
+      receiptMessageId: receipt.receiptMessageId, command: receipt.command || null } : { state: 'absent' };
+  }
   const startedAt = Number(deps.startedAt || 0);
   let correlatedId = '';
   try { correlatedId = parseConversationUrl(deps.conversationCorrelation); } catch {}
@@ -513,6 +531,121 @@ async function findRecentGoalCommand(deps = {}) {
   return { state: 'absent' };
 }
 
+// Versioned receipts remove dependence on host session formats and receipt
+// timestamps. Only compact listing progress and proof IDs are checkpointed.
+async function findLinkedGoalCommand(deps) {
+  let exact = '';
+  try { exact = parseConversationUrl(deps.conversationCorrelation); } catch {}
+  const stored = deps.discoveryState;
+  const scan = stored?.version === 1 && stored.linkId === deps.linkId ? structuredClone(stored) : {
+    version: 1, linkId: deps.linkId, phase: 'ordinary', offset: 0, sidebarCursor: '',
+    projects: [], projectAt: 0, cursor: '0', candidates: [], rounds: 0
+  };
+  const shared = { ...deps, discoveryCacheMs: 5_000 };
+  const evidence = async (id, fresh = false) => {
+    try {
+      const load = async d => goalCommandEvidence(await getConversation(id, d));
+      return fresh ? await load(deps) : (await discoveryRead('link-evidence:' + id, load, shared)).value;
+    }
+    catch (error) {
+      // A deleted/unavailable unrelated chat cannot prevent discovery elsewhere.
+      if ([403, 404].includes(error?.status)) return null;
+      throw error;
+    }
+  };
+  const match = proof => proof?.receipts.find(receipt => receipt.workId === deps.workId
+    && receipt.linkId === deps.linkId && receipt.messageId && receipt.receiptMessageId
+    && (deps.explicitGoal || receipt.command?.action === 'start'));
+  const candidate = (id, receipt) => ({ conversationId: id, messageId: receipt.messageId,
+    receiptMessageId: receipt.receiptMessageId, command: receipt.command || null });
+  const inspect = async items => {
+    if (items.length > 10_000) throw new Error('ChatGPT discovery page exceeded its bounded size.');
+    scan.page ||= items.filter(item => UUID.test(String(item?.id || '')))
+      .map(item => ({ id: item.id, update_time: item.update_time }));
+    scan.at ||= 0;
+    while (scan.at < scan.page.length) {
+      const item = scan.page[scan.at];
+      const updated = typeof item.update_time === 'number' ? item.update_time * 1000 : Date.parse(item.update_time || '');
+      if (!Number.isFinite(updated) || updated >= deps.issuedAt - 120_000) {
+        const receipt = match(await evidence(item.id));
+        if (receipt && !scan.candidates.some(found => found.conversationId === item.id)) {
+          scan.candidates.push(candidate(item.id, receipt));
+        }
+      }
+      scan.at++;
+      if (scan.candidates.length > 1) return false;
+    }
+    delete scan.page;
+    delete scan.at;
+    return true;
+  };
+  const defer = () => { throw Object.assign(new Error('Chat linking is continuing through saved conversations.'),
+    { deferred: true, retryAt: Date.now() + 5_000 }); };
+  try {
+    if (exact) {
+      const receipt = match(await evidence(exact, true));
+      if (receipt) return { state: 'matched', ...candidate(exact, receipt) };
+      if (deps.explicitConversation) return { state: 'absent' };
+    }
+    // Each call performs a bounded batch. Read-budget deferrals checkpoint the
+    // exact page position, so restart and concurrent tasks cannot starve it.
+    for (let batch = 0; batch < 4; batch++) {
+      if (scan.phase === 'ordinary') {
+        const listing = scan.listing || (await discoveryRead('link-catalog:' + scan.offset,
+          d => listConversationPage(scan.offset, d), shared)).value;
+        scan.listing = { ...listing, items: listing.items.map(item => ({ id: item.id, update_time: item.update_time })) };
+        if (!await inspect(listing.items)) return { state: 'ambiguous' };
+        delete scan.listing;
+        const older = listing.items.length > 0 && listing.items.every(item => {
+          const updated = typeof item.update_time === 'number' ? item.update_time * 1000 : Date.parse(item.update_time || '');
+          return Number.isFinite(updated) && updated < deps.issuedAt - 120_000;
+        });
+        if (listing.next !== null && !older) scan.offset = listing.next;
+        else scan.phase = 'sidebar';
+      } else if (scan.phase === 'sidebar') {
+        const listing = scan.listing || (await discoveryRead('link-project-catalog:' + scan.sidebarCursor,
+          d => listGoalProjects(d, scan.sidebarCursor), shared)).value;
+        scan.listing = listing;
+        if (!await inspect(listing.previews)) return { state: 'ambiguous' };
+        scan.projects = [...new Set([...scan.projects, ...listing.projects])];
+        if (scan.projects.length > 1024) throw new Error('ChatGPT Project discovery exceeded its bounded catalogue.');
+        delete scan.listing;
+        if (listing.complete) scan.phase = 'projects';
+        else scan.sidebarCursor = listing.cursor;
+      } else if (scan.projectAt < scan.projects.length) {
+        const project = scan.projects[scan.projectAt];
+        const listing = scan.listing || (await discoveryRead('link-project:' + project + ':' + scan.cursor,
+          d => listProjectChats(project, scan.cursor, d), shared)).value;
+        scan.listing = { ...listing, items: listing.items.map(item => ({ id: item.id, update_time: item.update_time })) };
+        if (!await inspect(listing.items)) return { state: 'ambiguous' };
+        delete scan.listing;
+        if (listing.cursor) {
+          scan.seenCursors ||= [];
+          if (scan.seenCursors.includes(listing.cursor) || scan.seenCursors.length >= 256) {
+            throw new Error('ChatGPT Project pagination made no progress or exceeded its bound.');
+          }
+          scan.seenCursors.push(listing.cursor);
+          scan.cursor = listing.cursor;
+        } else { scan.projectAt++; scan.cursor = '0'; delete scan.seenCursors; }
+      } else {
+        // A full scoped scan precedes selection. Never choose the first match
+        // before checking the other catalogues for a copied/forked receipt.
+        const verified = [];
+        for (const found of scan.candidates) {
+          const receipt = match(await evidence(found.conversationId, true));
+          if (receipt) verified.push(candidate(found.conversationId, receipt));
+        }
+        if (verified.length > 1) return { state: 'ambiguous' };
+        if (verified.length === 1) return { state: 'matched', ...verified[0] };
+        Object.assign(scan, { phase: 'ordinary', offset: 0, sidebarCursor: '', projects: [],
+          projectAt: 0, cursor: '0', candidates: [], rounds: scan.rounds + 1 });
+        return { state: 'absent', rounds: scan.rounds };
+      }
+    }
+    defer();
+  } finally { deps.onDiscoveryState?.(scan); }
+}
+
 function recentGoalEvidence(evidence, startedAt) {
   return startedAt && evidence.messageId && Number.isFinite(evidence.timestamp)
     && evidence.timestamp >= startedAt - 120_000 && evidence.timestamp <= startedAt + 15_000;
@@ -526,6 +659,12 @@ function goalEvidenceForWork(evidence, deps, correlatedId) {
   }
   if (!evidence.requested || (deps.requireWorkReceipt && !correlatedId && !evidence.workIds.includes(deps.workId))) return null;
   return evidence;
+}
+
+function hasChatLinkReceipt(conversation, workId, linkId, binding) {
+  return goalCommandEvidence(conversation).receipts.some(receipt => receipt.workId === workId
+    && receipt.linkId === linkId && receipt.messageId === binding.messageId
+    && receipt.receiptMessageId === binding.receiptMessageId);
 }
 
 function latestGoalCommand(conversation) {
@@ -542,7 +681,9 @@ function initiatingGoalCommand(conversation, workId, startedAt) {
 }
 
 function goalCommandEvidence(conversation) {
-  const messages = activeMessages(conversation);
+  // Receipt ancestry must outlive the bounded recent-turn context. Projection
+  // already enforces the 100,000-node wire bound and discards tool bodies.
+  const messages = activeMessages(conversation, 100_000);
   const command = messages.filter(n => n.message?.author?.role === 'user').at(-1);
   const parsed = latestGoalCommand(conversation);
   const receipts = [];
@@ -550,11 +691,13 @@ function goalCommandEvidence(conversation) {
   for (const node of messages) {
     if (node.message?.author?.role === 'user') user = node.message;
     if (node.message?.author?.role !== 'tool' || !user) continue;
-    for (const workId of node.message?.content?.workIds || []) {
+    for (const receipt of node.message?.content?.workReceipts
+      || (node.message?.content?.workIds || []).map(workId => ({ workId, linkId: '' }))) {
       // Work may start after a long reasoning/setup phase in the same turn.
       // Date its proof by the tool response; older responses without a timestamp
       // retain the conservative initiating-user fallback.
-      receipts.push({ workId, timestamp: Number(node.message.create_time ?? user.create_time) * 1_000,
+      receipts.push({ ...receipt, receiptMessageId: String(node.message.id || '').trim(),
+        timestamp: Number(node.message.create_time ?? user.create_time) * 1_000,
         messageId: String(user.id || '').trim(), command: parseGoalCommand(user) });
     }
   }
@@ -746,4 +889,4 @@ async function evaluateGoalHelper(packet, deps = {}) {
   return result;
 }
 
-export { latestGoalCommand, initiatingGoalCommand, evaluateGoalHelper, clearGoalDiscovery, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };
+export { hasChatLinkReceipt, latestGoalCommand, initiatingGoalCommand, evaluateGoalHelper, clearGoalDiscovery, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };

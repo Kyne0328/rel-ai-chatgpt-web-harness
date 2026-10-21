@@ -43,6 +43,9 @@ function boundResponsePayload(value, maxBytes) {
   }
   if (jsonBytes(result) <= maxBytes) return result;
   const compact = { ok: result.ok !== false, truncated: true, originalBytes: result.originalBytes };
+  if (result.chat_link?.version === 1 && /^[A-Za-z0-9_-]{32}$/.test(result.chat_link.link_id)) {
+    compact.chat_link = { version: 1, link_id: result.chat_link.link_id };
+  }
   for (const key of ['work_id', 'operationId', 'kind', 'errorCode']) if (result[key] !== undefined) compact[key] = utf8Head(result[key], 160);
   const alias = typeof result.workspace === 'object' ? result.workspace?.alias : result.workspace;
   if (alias) compact.workspace = utf8Head(alias, 160);

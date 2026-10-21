@@ -12,6 +12,7 @@ import { relaiStatus } from './status.js';
 import { completeTask } from './completion.js';
 import { cancelTask, stopTaskOperations } from './cancellation.js';
 import { activateGoal, queueGoalDetection, goalStatus, stopGoal, pauseGoal, resumeGoal, updateGoal } from '../chatgptGoalMode.js';
+import { ensureChatLink } from '../chatgptGoalState.js';
 import { relaiSearch } from '../bridge/search.js';
 import { relaiCodeInspect } from '../bridge/codeIntelligence.js';
 import { relaiExec } from '../bridge/exec.js';
@@ -57,6 +58,7 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   const initialSteps = Array.isArray(args.steps) && args.steps.length ? args.steps : defaultTaskSteps(args);
   const progress = hasPlan ? null : applyTaskProgressPatch(task.work_id, { steps: initialSteps });
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
+  const chatLink = ensureChatLink(config, task.work_id, context);
   if (args.goal === true || args.mode) {
     activateGoal(config,
       { ...args, work_id: task.work_id, objective: args.objective || current?.objective || args.title,
@@ -67,6 +69,7 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   }
   return {
     ...task,
+    ...(chatLink ? { chat_link: chatLink } : {}),
     plan: progress?.plan || current?.plan,
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
     ...(recovered ? { bootstrap: { recoveredTask: compactSessionSummary(recovered) } } : {})

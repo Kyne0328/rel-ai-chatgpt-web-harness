@@ -6,6 +6,7 @@ const TERMINAL_TUNNEL_CODES = new Set([
   'tunnel_access_denied',
   'tunnel_not_found',
   'tunnel_runtime_unavailable',
+  'tunnel_credentials_unavailable',
   'secure_tunnel_stop_failed'
 ]);
 
@@ -28,6 +29,8 @@ function createTunnelRecoverySupervisor({
   let attempt = 0;
   let nextRetryAt = null;
   let recoveryGeneration = 0;
+  let activeRecoveryGeneration = -1;
+  let currentAttempt = null;
 
   function observe(status = {}) {
     const tunnelStatus = String(status.state || status.tunnelStatus || '');
@@ -67,18 +70,28 @@ function createTunnelRecoverySupervisor({
   }
 
   function retryNow() {
-    clearScheduledRetry();
-    attempt = 0;
-    if (attemptInFlight && recoveryPromise) return recoveryPromise;
+    if (attemptInFlight && activeRecoveryGeneration === recoveryGeneration && currentAttempt) return currentAttempt.promise;
+    reset(true);
     const runGeneration = recoveryGeneration;
-    return runRecovery(runGeneration);
+    const recovery = runRecovery(runGeneration);
+    const firstAttempt = currentAttempt;
+    // The foreground action settles after one attempt; the owner keeps retrying.
+    void recovery.then(firstAttempt.resolve, firstAttempt.reject);
+    return firstAttempt.promise;
   }
 
   function runRecovery(runGeneration = recoveryGeneration) {
-    if (recoveryPromise && runGeneration === recoveryGeneration) return recoveryPromise;
+    if (recoveryPromise && activeRecoveryGeneration === runGeneration) return recoveryPromise;
+    activeRecoveryGeneration = runGeneration;
+    currentAttempt = deferred();
+    const initialAttempt = currentAttempt;
+    let firstAttempt = true;
 
     const pending = pRetry(async () => {
       if (runGeneration !== recoveryGeneration) return cancelledStatus();
+      const result = firstAttempt ? initialAttempt : deferred();
+      firstAttempt = false;
+      currentAttempt = result;
       attemptInFlight = true;
       let status;
       try {
@@ -91,8 +104,9 @@ function createTunnelRecoverySupervisor({
           error: error instanceof Error ? error.message : String(error || 'Secure MCP Tunnel retry failed.')
         };
       } finally {
-        attemptInFlight = false;
+        if (currentAttempt === result) attemptInFlight = false;
       }
+      result.resolve(status);
 
       if (runGeneration !== recoveryGeneration) return status;
       const tunnelStatus = String(status?.tunnelStatus || status?.state || '');
@@ -186,6 +200,12 @@ class RetryableTunnelStatus extends Error {
     super(String(status?.error || 'Secure MCP Tunnel is still unavailable.'));
     this.status = status;
   }
+}
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 
 function cancelledStatus() {

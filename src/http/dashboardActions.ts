@@ -40,9 +40,9 @@ async function handleTaskControl(ctx: HttpRouteContext): Promise<void> {
     const action = String(payload.action || '').trim();
     const workId = String(payload.work_id || payload.workId || '').trim();
     const operationId = String(payload.operationId || '').trim();
-    if (action !== 'stop' && action !== 'cancel' && action !== 'goal_stop') throw new Error('action must be stop, cancel or goal_stop');
+    if (action !== 'stop' && action !== 'cancel' && action !== 'goal_stop' && action !== 'goal_retry_link') throw new Error('Unknown task control action.');
     if (!workId) throw new Error('work_id is required');
-    sendJson(ctx.res, 200, await controlDashboardTask(action, workId, operationId));
+    sendJson(ctx.res, 200, await controlDashboardTask(action, workId, operationId, String(payload.conversationUrl || '')));
   } catch (error) {
     sendJson(ctx.res, 200, { ok: false, error: errorMessage(error) });
   }

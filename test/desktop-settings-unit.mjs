@@ -137,6 +137,51 @@ try {
   assert.equal(unsafeRollbackStarts, 1, 'failed credential restoration must not reconnect inconsistent settings');
   assert.deepEqual(readGuiConfig(), { port: 3333, token: 'local-only-token', tunnelId: '' });
 
+  // A damaged encrypted record must be replaceable without decrypting it, and
+  // an unrelated local restart failure must restore the original encrypted bytes.
+  {
+    const { createTunnelCredentialStore } = await import('../electron/tunnel-credentials.js');
+    const store = createTunnelCredentialStore({ stateDir: root, safeStorage: {
+      isEncryptionAvailable: () => true, encryptString: value => Buffer.from('encrypted:' + value),
+      decryptString: value => value.toString().replace(/^encrypted:/, '')
+    } });
+    const corrupt = Buffer.from('{unreadable encrypted record');
+    const credentialActions = { ...runtimeActions, getCurrentStatus: () => ({ serverRunning: true }),
+      setTunnelApiKey: store.setApiKey, getTunnelApiKey: store.getApiKey,
+      clearTunnelApiKey: store.clear, captureTunnelApiKey: store.capture, restoreTunnelApiKey: store.restore,
+      restartConnection: async () => ({ serverRunning: true, tunnelStatus: 'running' }) };
+    saveLauncherConfig({ port: 3333, token: 'fixture-token', tunnelId: 'tunnel_repairfixture123' });
+    fs.writeFileSync(store.statePath(), corrupt);
+    const repaired = await saveDesktopSettings({ tunnelApiKey: 'fixture-repaired-key' }, credentialActions);
+    assert.equal(repaired.ok, true);
+    assert.equal(store.getApiKey(), 'fixture-repaired-key');
+    fs.writeFileSync(store.statePath(), corrupt);
+    let calls = 0;
+    await assert.rejects(() => saveDesktopSettings({ tunnelApiKey: 'fixture-replacement-key' }, {
+      ...credentialActions, restartConnection: async () => ++calls === 1
+        ? { serverRunning: false, error: 'fixture local failure' }
+        : { serverRunning: true, tunnelStatus: 'failed', error: 'original credential remains unreadable' }
+    }), /fixture local failure/);
+    assert.deepEqual(fs.readFileSync(store.statePath()), corrupt, 'rollback preserves exact encrypted evidence even when it cannot decrypt');
+  }
+
+  {
+    const { createTunnelRecoverySupervisor } = await import('../electron/tunnel-recovery-supervisor.js');
+    const scheduled = [];
+    const supervisor = createTunnelRecoverySupervisor({
+      restartConnection: async () => ({ serverRunning: true, tunnelStatus: 'degraded', errorCode: 'tunnel_connection_interrupted' }),
+      setTimer(fn) { const timer = { fn }; scheduled.push(timer); return timer; }, clearTimer() {}
+    });
+    try {
+      const result = await saveDesktopSettings({ tunnelApiKey: 'fixture-offline-key' }, {
+        ...runtimeActions, getCurrentStatus: () => ({ serverRunning: true }), restartConnection: supervisor.retryNow
+      });
+      assert.equal(result.status.tunnelStatus, 'degraded');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(supervisor.snapshot().scheduled, true, 'a completed save must keep offline recovery scheduled');
+    } finally { supervisor.cancel(); }
+  }
+
 } finally {
   if (previousStateDir === undefined) delete process.env.REL_AI_MCP_STATE_DIR;
   else process.env.REL_AI_MCP_STATE_DIR = previousStateDir;

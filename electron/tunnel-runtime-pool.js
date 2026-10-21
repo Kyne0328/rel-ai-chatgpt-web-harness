@@ -13,7 +13,7 @@ function createTunnelRuntimePool({
   const statuses = new Map();
   let generation = 0;
 
-  async function sync({ connections = [], port, localToken } = {}) {
+  async function sync({ connections = [], port, localToken, retryFailed = false } = {}) {
     const syncGeneration = ++generation;
     const desiredById = new Map(connections.filter(connection => connection?.enabled !== false)
       .map(connection => [String(connection.tunnelId || '').trim(), connection]));
@@ -24,7 +24,8 @@ function createTunnelRuntimePool({
       const nextConfig = connection && !connection.credentialError
         ? startConfigFor(connection, port, localToken)
         : null;
-      if (!nextConfig || entry.stopPromise || entry.stopFailed || !sameStartConfig(entry.startConfig, nextConfig)) {
+      const retryRequested = retryFailed && statuses.get(tunnelId)?.state === 'failed';
+      if (!nextConfig || entry.stopPromise || entry.stopFailed || retryRequested || !sameStartConfig(entry.startConfig, nextConfig)) {
         await stopRuntime(tunnelId);
       }
     }));

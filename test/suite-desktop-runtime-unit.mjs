@@ -1715,6 +1715,8 @@ async function case_additional_tunnel_stop_failure() {
       const failed = await pool.stop();
       assert.equal(failed.stopped, false, `${failure}: aggregate cleanup must not claim a failed stop succeeded`);
       assert.equal(failed.connections[0].state, 'failed');
+      await pool.sync({ ...config, retryFailed: true });
+      assert.equal(starts, 1, 'explicit retry must not replace a tunnel whose exit remains unconfirmed');
       await pool.sync({ ...config, connections: [] });
       assert.equal(pool.snapshot().connections[0].state, 'failed', 'removed but still live tunnel must remain visible');
       assert.equal(starts, 1, 'failed termination must never create a duplicate tunnel');
@@ -1727,6 +1729,42 @@ async function case_additional_tunnel_stop_failure() {
   }
 }
 await case_additional_tunnel_stop_failure();
+
+// Explicit recovery retries failed peers without interrupting healthy ones.
+{
+  const { createTunnelRuntimePool } = await import('../electron/tunnel-runtime-pool.js');
+  const assert = (await import('node:assert/strict')).default;
+  const starts = [];
+  const stops = [];
+  let repaired = false;
+  const pool = createTunnelRuntimePool({ createRuntime: options => {
+    let state = { state: 'stopped' };
+    return {
+      async start() {
+        starts.push(options.instanceId);
+        state = options.instanceId === 'tunnel_failedfixture123' && !repaired
+          ? { state: 'failed', errorCode: 'tunnel_runtime_unavailable', error: 'fixture binary unavailable' }
+          : { state: 'running' };
+        options.onStatus(state);
+        if (state.state === 'failed') throw Object.assign(new Error(state.error), { code: state.errorCode });
+        return state;
+      },
+      async stop() { stops.push(options.instanceId); state = { state: 'stopped' }; options.onStatus(state); return { stopped: true, exited: true }; },
+      snapshot: () => state
+    };
+  } });
+  const config = { connections: ['tunnel_failedfixture123', 'tunnel_healthyfixture123'].map(tunnelId => ({ tunnelId, apiKey: 'fixture-key' })), port: 3333, localToken: 'fixture-token' };
+  try {
+    await pool.sync(config);
+    repaired = true;
+    await pool.sync(config);
+    assert.equal(starts.length, 2, 'ordinary synchronization must preserve terminal failures and healthy peers');
+    const retried = await pool.sync({ ...config, retryFailed: true });
+    assert.equal(starts.length, 3, 'explicit retry must restart the failed runtime with unchanged settings');
+    assert.deepEqual(stops, ['tunnel_failedfixture123']);
+    assert.ok(retried.connections.every(item => item.state === 'running'));
+  } finally { await pool.stop(); }
+}
 
 async function case_additional_tunnel_remove_failure() {
   const assert = (await import('node:assert/strict')).default;
@@ -1959,7 +1997,8 @@ async function case_uniform_tunnel_management() {
   const source = fs.readFileSync(new URL('../electron/desktop-host.js', import.meta.url), 'utf8');
   const begin = source.indexOf('  async function saveAdditionalTunnel(input = {}) {');
   const end = source.indexOf('  async function setKeepAwake(', begin);
-  const handlers = runInNewContext(source.slice(begin, end) + '\n({ saveAdditionalTunnel, removeAdditionalTunnel })', {
+  const additionalSettingsSource = source.slice(source.indexOf('  function readAdditionalTunnelSettings('), source.indexOf('  function configuredGoalConnections('));
+  const handlers = runInNewContext(additionalSettingsSource + source.slice(begin, end) + '\n({ saveAdditionalTunnel, removeAdditionalTunnel })', {
     currentDesktopSettings: () => ({ ...config }),
     readGuiConfig: () => ({ ...config }),
     tunnelConnections: store,

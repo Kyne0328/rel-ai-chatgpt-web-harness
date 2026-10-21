@@ -58,7 +58,7 @@ const OPERATION_DEFINITION_VALUES = [
     name: OP.GOAL_RESUME,
     title: "Resume Goal or Loop",
     description: "Resume the exact paused or stopped nonterminal work_id. Preserve unresolved send receipts; never select another task.",
-    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"mode":{"type":"string","enum":["goal","loop"]}},"required":[],"additionalProperties":false},
+    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"conversationUrl":{"type":"string","maxLength":300,"description":"Optional exact ChatGPT chat URL for verified linking recovery. Stop before rebinding an active linked goal."},"mode":{"type":"string","enum":["goal","loop"]}},"required":[],"additionalProperties":false},
     handlerName: 'goalResume',
     behavior: { taskScope: 'required' }, dashboard: { category: 'Workflow' }
   },

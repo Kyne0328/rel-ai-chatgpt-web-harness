@@ -606,17 +606,20 @@ async function createDesktopHost(options = {}) {
       tunnelErrorCode: currentStatus.errorCode,
       tunnelError: currentStatus.error
     });
+    const additional = readAdditionalTunnelSettings(settings.tunnelId);
     return {
       ...settings,
-      tunnelLabel: tunnelConnections.launcherLabel(settings.tunnelId),
-      additionalTunnels: tunnelConnections.list(),
+      tunnelLabel: additional.tunnelLabel,
+      additionalTunnels: additional.connections,
+      additionalTunnelError: additional.error,
       additionalTunnelStatuses: additionalTunnelRuntime.snapshot().connections
     };
   }
 
   function updateDesktopSettings(settings, { allowExistingTunnel = false } = {}) {
     const requestedTunnelId = String(settings?.tunnelId || '').trim();
-    if (!allowExistingTunnel && requestedTunnelId && tunnelConnections.list().some(connection => connection.tunnelId === requestedTunnelId)) {
+    if (!allowExistingTunnel && requestedTunnelId && requestedTunnelId !== readGuiConfig().tunnelId
+      && tunnelConnections.list().some(connection => connection.tunnelId === requestedTunnelId)) {
       throw new Error('This Tunnel ID is already configured.');
     }
     return saveDesktopSettings(settings, {
@@ -625,9 +628,11 @@ async function createDesktopHost(options = {}) {
       setTunnelApiKey: tunnelCredentials.setApiKey,
       getTunnelApiKey: tunnelCredentials.getApiKey,
       clearTunnelApiKey: tunnelCredentials.clear,
+      captureTunnelApiKey: tunnelCredentials.capture,
+      restoreTunnelApiKey: tunnelCredentials.restore,
       canRestart: action => taskActivityBlockReason(desktopPower.getStatus(), action),
       getCurrentStatus: () => currentStatus,
-      restartConnection,
+      restartConnection: () => restartConnection({ settingsChanged: true }),
       restartDesktop: () => launchConfiguredDesktop({ restart: true })
     });
   }
@@ -642,6 +647,10 @@ async function createDesktopHost(options = {}) {
       const label = String(input.label || 'Connection 1').trim();
       if (label.length > 80) throw new Error('Use a connection name of 80 characters or fewer.');
       const settings = await updateDesktopSettings({ tunnelId: input.tunnelId, tunnelApiKey: input.apiKey });
+      const additional = readAdditionalTunnelSettings(input.tunnelId);
+      if (additional.error) return { ...settings, saved: true, ok: false,
+        error: `Primary connection settings were saved. ${additional.error}`,
+        connections: [], statuses: additionalTunnelRuntime.snapshot().connections };
       tunnelConnections.setLauncherLabel(input.tunnelId, label);
       return { ...settings, saved: true, connection: { tunnelId: input.tunnelId, label },
         connections: tunnelConnections.list(), statuses: additionalTunnelRuntime.snapshot().connections };
@@ -698,14 +707,14 @@ async function createDesktopHost(options = {}) {
       connection.writeConnectionProfile({ host: '127.0.0.1', port: previous.port, tunnelId: '',
         tunnelProvider: 'openai-secure-mcp', configPath: configModule.getConfigPath() }, { replace: true });
       tunnelCredentials.clear();
-      const status = await restartConnection();
+      const status = await restartConnection({ settingsChanged: true });
       if (status?.serverRunning !== true || status?.tunnelStatus !== 'disabled') {
         throw new Error('The tunnel could not be disconnected. Previous connection settings will be restored.');
       }
     } catch (error) {
       options.saveLauncherConfig(previous);
       if (previousKey) tunnelCredentials.setApiKey(previousKey);
-      await restartConnection();
+      await restartConnection({ settingsChanged: true });
       throw error;
     }
     return { ok: true, removed: true, connections: tunnelConnections.list(), statuses: additionalTunnelRuntime.snapshot().connections };
@@ -757,7 +766,9 @@ async function createDesktopHost(options = {}) {
   }
 
   function hasConfiguredDesktop() {
-    return hasExistingConfig() && (!readGuiConfig().tunnelId || tunnelCredentials.status().apiKeyConfigured);
+    // Existing connection configuration is enough to open the local dashboard,
+    // where an unavailable primary key can be repaired without disabling peers.
+    return hasExistingConfig();
   }
 
   function focusActiveWindow() {
@@ -1030,8 +1041,10 @@ async function createDesktopHost(options = {}) {
     // Logout can remove connection files before a later cleanup step fails.
     // Recovery stays local and must not reread partial state or wake the service.
     if (pendingLogout) return false;
+    const additional = readAdditionalTunnelSettings(readGuiConfig().tunnelId);
+    currentStatus = { ...currentStatus, additionalTunnelError: additional.error };
     const { taskActivity: _taskActivity, ...status } = currentStatus;
-    const context = { status, runtimeAccess: updateRuntimeAccess(), tunnelConnections: configuredGoalConnections() };
+    const context = { status, runtimeAccess: updateRuntimeAccess(), tunnelConnections: configuredGoalConnections(additional.connections) };
     const key = JSON.stringify(context);
     if (key === lastServiceContextKey) return false;
     lastServiceContextKey = key;
@@ -1039,11 +1052,21 @@ async function createDesktopHost(options = {}) {
     return true;
   }
 
-  function configuredGoalConnections() {
+  function readAdditionalTunnelSettings(primary) {
+    try {
+      return { connections: tunnelConnections.list(), tunnelLabel: tunnelConnections.launcherLabel?.(primary) || 'Connection 1', error: '' };
+    } catch {
+      return { connections: [], tunnelLabel: 'Connection 1',
+        error: 'Additional tunnel settings could not be read. The saved file was preserved; restore it before reconnecting those tunnels.' };
+    }
+  }
+
+  function configuredGoalConnections(connections) {
     const primary = readGuiConfig().tunnelId;
+    const additional = connections || readAdditionalTunnelSettings(primary).connections;
     return [
-      ...(primary ? [{ tunnelId: primary, label: tunnelConnections.launcherLabel(primary), enabled: true }] : []),
-      ...tunnelConnections.list().filter(item => item.tunnelId !== primary)
+      ...(primary ? [{ tunnelId: primary, label: readAdditionalTunnelSettings(primary).tunnelLabel, enabled: true }] : []),
+      ...additional.filter(item => item.tunnelId !== primary)
     ].map(({ tunnelId, label, enabled }) => ({ tunnelId, label, enabled }));
   }
 
@@ -1060,10 +1083,18 @@ async function createDesktopHost(options = {}) {
     return serviceRuntime.startServer();
   }
 
-  function restartConnection() {
+  function restartConnection({ settingsChanged = false } = {}) {
     assertInstallerSettled();
     if (pendingLogout) return logoutApplication({ clearData: pendingLogout.clearData });
-    return tunnelRecoverySupervisor?.retryNow() || serviceRuntime.restartConnection();
+    if (settingsChanged) tunnelRecoverySupervisor?.cancel();
+    const primary = settingsChanged
+      ? serviceRuntime.restartConnection({ afterPending: true })
+      : tunnelRecoverySupervisor?.retryNow() || serviceRuntime.restartConnection();
+    return Promise.resolve(primary).then(async status => {
+      if (settingsChanged) tunnelRecoverySupervisor?.observe(status);
+      if (status?.serverRunning && serviceRuntime.isListening()) await serviceRuntime.restartAdditionalTunnels();
+      return currentStatus;
+    });
   }
 
   function stopServer(stopOptions = {}) {

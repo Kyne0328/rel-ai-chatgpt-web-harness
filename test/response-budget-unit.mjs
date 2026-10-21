@@ -13,6 +13,11 @@ for (const limit of [2048, 4096, 8000, 16000]) {
 }
 const giant = { ok: true, entries: [{ eventId: 'one', cursor: 'after-one', summary: '🐱'.repeat(50000) }], cursor: 'after-one', hasMore: false };
 const single = boundResponsePayload(giant, 1024);
+const chatLink = { version: 1, link_id: 'x'.repeat(32) };
+const compactBegin = toolResult({ ok: true, work_id: 'receipt-work', chat_link: chatLink,
+  plan: { steps: [{ detail: 'x'.repeat(50000) }] } }, false, undefined, { maxResponseBytes: 2048 });
+assert.ok(jsonBytes(compactBegin) <= 2048);
+assert.deepEqual(compactBegin.structuredContent.chat_link, chatLink, 'budget compaction must preserve the exact linking receipt');
 assert.ok(jsonBytes(single) <= 1024);
 assert.equal(single.entries[0].eventId, 'one');
 assert.equal(single.entries[0].receiptTruncated, true);

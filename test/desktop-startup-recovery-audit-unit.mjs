@@ -179,7 +179,7 @@ const connectionProfile = await import(pathToFileURL(path.join(root, 'src', 'con
 try {
   for (const fixture of [
     { localOnly: true, key: false, configured: true },
-    { localOnly: false, key: false, configured: false },
+    { localOnly: false, key: false, configured: true },
     { localOnly: false, key: true, configured: true }
   ]) {
     connectionProfile.writeLaunchEnv({ REL_AI_MCP_PORT: '3333',
@@ -216,7 +216,7 @@ try {
     });
     focus();
     assert.equal(focusOpens, fixture.configured ? 1 : 0, 'focusing a stopped/closed dashboard must honor local-only configuration');
-    assert.equal(setupCalls, fixture.configured ? 0 : 3, 'tunnel mode still requires an API key on every entry point');
+    assert.equal(setupCalls, fixture.configured ? 0 : 3, 'persisted configuration must open the dashboard so a missing key can be repaired');
   }
   connectionProfile.clearConnectionState();
   assert.equal(runInNewContext(configuredSource + '\nhasConfiguredDesktop()', {
@@ -267,3 +267,38 @@ try {
 }
 
 console.log('Desktop startup & recovery audit regression unit tests passed.');
+
+// A malformed optional connection document must not block primary/local recovery.
+{
+  const { createTunnelConnectionStore } = await import('../electron/tunnel-connections.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-corrupt-connections-'));
+  try {
+    const store = createTunnelConnectionStore({ stateDir: directory, safeStorage: {
+      isEncryptionAvailable: () => true, encryptString: value => Buffer.from(value), decryptString: value => value.toString()
+    } });
+    const original = Buffer.from('{broken');
+    fs.writeFileSync(store.statePath(), original);
+    const publication = [];
+    const source = desktopHostSource.slice(desktopHostSource.indexOf('  function syncServiceContext()'), desktopHostSource.indexOf('  function assertInstallerSettled()'));
+    const settings = desktopHostSource.slice(desktopHostSource.indexOf('  function currentDesktopSettings()'), desktopHostSource.indexOf('  function updateDesktopSettings('));
+    const api = runInNewContext(source + settings + '\n({ syncServiceContext, configuredGoalConnections, currentDesktopSettings })', {
+      pendingLogout: null, currentStatus: {}, lastServiceContextKey: '',
+      readGuiConfig: () => ({ tunnelId: 'tunnel_primaryfixture123' }),
+      readDesktopSettings: () => ({ tunnelId: 'tunnel_primaryfixture123' }),
+      tunnelConnections: store, updateRuntimeAccess: () => ({ blocked: false }),
+      tunnelCredentials: { status: () => ({ apiKeyConfigured: true }) },
+      desktopNotifications: { getPreferences: () => ({ enabled: true }) },
+      additionalTunnelRuntime: { snapshot: () => ({ connections: [] }) },
+      serviceProcessClient: { updateContext: value => publication.push(value) }
+    });
+    api.syncServiceContext();
+    assert.equal(publication.length, 1, 'service context must still publish while optional tunnel settings are corrupt');
+    assert.equal(publication[0].tunnelConnections.length, 1);
+    assert.equal(publication[0].tunnelConnections[0].tunnelId, 'tunnel_primaryfixture123');
+    const view = api.currentDesktopSettings();
+    assert.equal(view.additionalTunnels.length, 0, 'unreadable peer identities must not be authorized');
+    assert.match(view.additionalTunnelError, /preserved/);
+    assert.deepEqual(fs.readFileSync(store.statePath()), original);
+    assert.throws(() => store.upsert({ tunnelId: 'tunnel_newfixture123', apiKey: 'fixture-api-key' }), /settings are corrupted/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+}

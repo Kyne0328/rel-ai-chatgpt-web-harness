@@ -576,17 +576,35 @@ function createBrowserSurfaceHost(options = {}) {
 
   async function startGoalLogin(input = {}) {
     const account = goalAccount(String(input.tunnelId || ''));
-    if (goalLoginOpenings.has(account.tunnelId)) return goalLoginOpenings.get(account.tunnelId);
-    const opening = openGoalLogin(account);
+    const conversationId = input.conversationId ? parseConversationUrl(input.conversationId) : '';
+    if (goalLoginOpenings.has(account.tunnelId)) {
+      const pending = goalLoginOpenings.get(account.tunnelId);
+      return conversationId ? pending.then(() => openGoalLogin(account, conversationId)) : pending;
+    }
+    const opening = openGoalLogin(account, conversationId);
     goalLoginOpenings.set(account.tunnelId, opening);
     try { return await opening; } finally {
       if (goalLoginOpenings.get(account.tunnelId) === opening) goalLoginOpenings.delete(account.tunnelId);
     }
   }
 
-  async function openGoalLogin(account) {
+  async function openGoalLogin(account, conversationId = '') {
+    const url = conversationId ? 'https://chatgpt.com/c/' + conversationId : 'https://chatgpt.com/';
     const existing = sessions.get(goalLoginSessionIds.get(account.tunnelId));
     if (existing && !existing.closePromise) {
+      if (conversationId) {
+        // This is an explicit dashboard navigation in a new tab. Keep the
+        // user's existing tab/control intact; AI tools still use openPage gates.
+        const page = createPage(existing, { active: true });
+        try {
+          await withTimeout(page.webContents.loadURL(url), 18_000, 'ChatGPT navigation timed out.');
+          await syncPageRuntime(existing, page);
+        } catch (error) {
+          page.webContents.stop?.();
+          await destroyPage(existing, page, { emit: true });
+          throw error;
+        }
+      }
       confirmedGoalLogins.delete(existing.nativeSessionId);
       await setControlForSession(existing.nativeSessionId, 'user', 'goal_login');
       return { ok: true, browserOpen: true, ...(account.tunnelId ? { tunnelId: account.tunnelId } : {}) };
@@ -597,7 +615,7 @@ function createBrowserSurfaceHost(options = {}) {
       const opened = await openPage({ nativeSessionId: started.nativeSessionId });
       const record = requireSession(started.nativeSessionId);
       const page = requirePage(record, opened.nativePageId);
-      await navigatePage(record, page, { url: 'https://chatgpt.com/' });
+      await navigatePage(record, page, { url });
       await setControlForSession(started.nativeSessionId, 'user', 'goal_login');
       return { ok: true, browserOpen: true, ...(account.tunnelId ? { tunnelId: account.tunnelId } : {}) };
     } catch (error) {

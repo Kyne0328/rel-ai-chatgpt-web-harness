@@ -320,7 +320,7 @@ function connectionPrimaryAction(state = {}) {
   if (local === 'failed' || local === 'stopped') return { kind: 'route', href: '#diagnostics', label: 'Troubleshoot' };
   if (endpoint === 'disabled') return { kind: 'control', label: 'Set up connection' };
   if (endpoint === 'unavailable') {
-    if (errorCode === 'tunnel_authentication_failed') return { kind: 'settings', label: 'Replace runtime key' };
+    if (errorCode === 'tunnel_authentication_failed' || errorCode === 'tunnel_credentials_unavailable') return { kind: 'settings', label: 'Replace runtime key' };
     if (errorCode === 'tunnel_access_denied') return { kind: 'settings', label: 'Review key permissions' };
     if (errorCode === 'tunnel_not_found') return { kind: 'settings', label: 'Review Tunnel ID' };
     return { kind: 'restart', label: 'Retry now' };
@@ -421,6 +421,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null, onC
         tunnelErrorCode: String(settings.tunnelErrorCode || ''),
         tunnelError: String(settings.tunnelError || ''),
         additionalTunnels: Array.isArray(settings.additionalTunnels) ? settings.additionalTunnels : [],
+        additionalTunnelError: String(settings.additionalTunnelError || ''),
         additionalTunnelStatuses: Array.isArray(settings.additionalTunnelStatuses) ? settings.additionalTunnelStatuses : []
       };
       setForm(next);
@@ -446,7 +447,8 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null, onC
     return desktop.onStatus(status => {
       if (!Array.isArray(status?.additionalTunnelStatuses)) return;
       setForm(current => current && !current.loadError
-        ? { ...current, additionalTunnelStatuses: status.additionalTunnelStatuses }
+        ? { ...current, additionalTunnelStatuses: status.additionalTunnelStatuses,
+          additionalTunnelError: String(status.additionalTunnelError || '') }
         : current);
     });
   }, [desktop]);
@@ -524,6 +526,7 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null, onC
   },
     h('summary', { className: 'connector-details-summary' }, h('span', null, h('strong', null, 'Connection settings'), h('small', null, 'Manage tunnels and the local port'))),
     h('div', { className: 'card-body settings-panel-body' },
+      form.additionalTunnelError ? h('p', { role: 'alert', className: 'settings-help' }, form.additionalTunnelError) : null,
       h(TunnelConnections, {
         primary: form.tunnelId ? { ...primaryTunnel, tunnelId: form.tunnelId, label: form.tunnelLabel, error: credentialError, apiKeyConfigured: form.tunnelApiKeyConfigured } : null,
         connections: form.additionalTunnels,
@@ -538,7 +541,8 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null, onC
           setForm(current => ({ ...current, tunnelId: settings.tunnelId || '', tunnelLabel: settings.tunnelLabel || 'Connection 1',
             tunnelApiKeyConfigured: settings.tunnelApiKeyConfigured === true,
             tunnelErrorCode: settings.tunnelErrorCode || '', tunnelError: settings.tunnelError || '',
-            additionalTunnels: settings.additionalTunnels || [], additionalTunnelStatuses: settings.additionalTunnelStatuses || [] }));
+            additionalTunnels: settings.additionalTunnels || [], additionalTunnelError: settings.additionalTunnelError || '',
+            additionalTunnelStatuses: settings.additionalTunnelStatuses || [] }));
         }
       }),
       h('details', { className: 'settings-advanced connection-advanced-settings' },
@@ -829,6 +833,7 @@ function connectionSnapshot(value) {
 
 function tunnelCredentialError(value = {}) {
   const code = String(value.tunnelErrorCode || '');
+  if (code === 'tunnel_credentials_unavailable') return value.tunnelError || 'The runtime API key is unavailable. Save it again, then reconnect.';
   if (code === 'tunnel_authentication_failed') return value.tunnelError || 'OpenAI rejected the runtime API key. Replace it with the correct key, then reconnect.';
   if (code === 'tunnel_access_denied') return value.tunnelError || 'This runtime API key does not have access to the configured tunnel.';
   if (code === 'tunnel_not_found') return value.tunnelError || 'The configured tunnel could not be found for this OpenAI account.';

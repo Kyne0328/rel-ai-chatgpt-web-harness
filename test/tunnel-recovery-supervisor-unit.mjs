@@ -81,6 +81,8 @@ supervisor.observe({ state: 'failed', errorCode: 'tunnel_authentication_failed',
 assert.equal(timers.length, timerCountBeforeFatal, 'authentication failures must remain terminal and must not retry');
 supervisor.observe({ state: 'failed', errorCode: 'tunnel_runtime_unavailable', error: 'bundled tunnel-client missing' });
 assert.equal(timers.length, timerCountBeforeFatal, 'permanent local tunnel runtime failures must not retry forever');
+supervisor.observe({ state: 'failed', errorCode: 'tunnel_credentials_unavailable', error: 'local key cannot decrypt' });
+assert.equal(timers.length, timerCountBeforeFatal, 'unreadable credentials must wait for explicit replacement');
 
 supervisor.observe({ state: 'failed', errorCode: 'secure_tunnel_failed', error: 'offline again' });
 const scheduledBeforeManualRetry = timers.at(-1);
@@ -118,6 +120,53 @@ assert.equal(inFlightSupervisor.snapshot().scheduled, false, 'an in-flight retry
 assert.equal(inFlightTimers.length, 0, 'a stale in-flight retry result must not schedule another timer after cancellation');
 
 console.log('Secure tunnel recovery supervisor retries transient failures and stops on terminal failures.');
+
+// A foreground save/retry waits for one attempt; recovery continues separately.
+{
+  const timers = [];
+  const started = deferred();
+  const response = deferred();
+  let calls = 0;
+  const supervisor = createTunnelRecoverySupervisor({
+    restartConnection: () => {
+      calls++;
+      started.resolve();
+      return response.promise;
+    },
+    setTimer(fn) { const timer = { fn }; timers.push(timer); return timer; },
+    clearTimer() {}
+  });
+  let settled = false;
+  const first = supervisor.retryNow().then(status => { settled = true; return status; });
+  await started.promise;
+  response.resolve({ serverRunning: true, tunnelStatus: 'degraded', errorCode: 'tunnel_connection_interrupted' });
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    assert.equal(settled, true, 'foreground retry must return after its first failed attempt');
+    assert.equal((await first).tunnelStatus, 'degraded');
+    assert.equal(supervisor.snapshot().scheduled, true, 'returning to the form must preserve automatic recovery');
+    const second = supervisor.retryNow();
+    assert.equal((await second).tunnelStatus, 'degraded');
+    assert.equal(calls, 2, 'Retry now during backoff must start a fresh immediate attempt');
+  } finally { supervisor.cancel(); await first; }
+}
+
+{
+  const gates = [deferred(), deferred()];
+  let calls = 0;
+  const supervisor = createTunnelRecoverySupervisor({ restartConnection: () => gates[calls++].promise });
+  const first = supervisor.retryNow();
+  supervisor.cancel();
+  const second = supervisor.retryNow();
+  gates[0].resolve({ serverRunning: true, tunnelStatus: 'degraded' });
+  await first;
+  assert.equal(supervisor.snapshot().inFlight, true, 'a cancelled result must not clear the replacement attempt');
+  assert.equal(supervisor.retryNow(), second, 'manual retry must coalesce with the current attempt');
+  assert.equal(calls, 2);
+  gates[1].resolve({ serverRunning: true, tunnelStatus: 'running' });
+  await second;
+  supervisor.cancel();
+}
 
 async function fireTimer(timer) {
   assert.equal(timer.cancelled, false, 'test attempted to fire a cancelled timer');

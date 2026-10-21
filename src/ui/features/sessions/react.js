@@ -7,7 +7,7 @@ import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { OperationDiagnostics, RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
 import { formatDuration, timeAgo } from '../../utils.js';
-import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, replaceRouteParams, routeHref, setWorkspaceFilter, subscribeRoute } from '../../router.js';
+import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, navigate, replaceRouteParams, routeHref, setWorkspaceFilter, subscribeRoute } from '../../router.js';
 import { activityEventId } from '../../activity-event.js';
 import { orderWorkspacesAlphabetically } from '../../components/workspace-menu.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
@@ -38,6 +38,15 @@ const h = React.createElement;
 const SESSION_PAGE_SIZE = 50;
 const MOBILE_SESSION_PAGE_SIZE = 12;
 const MOBILE_SESSION_QUERY = '(max-width: 760px)';
+
+function chatLinkLabel(goal) {
+  const labels = { finding_chat: 'Finding the ChatGPT conversation…', linked: 'ChatGPT conversation linked.',
+    waiting_for_account: 'Chat linking is waiting for ChatGPT sign-in.', rate_limited: 'Chat linking is waiting for the account cooldown.',
+    conflicting_matches: 'Multiple chats contain this task receipt. Select the intended conversation.',
+    needs_attention: 'Chat linking needs attention.' };
+  const label = labels[goal.chatLink.state] || 'Verifying the ChatGPT conversation…';
+  return goal.nextAttemptAt ? `${label} Next check: ${new Date(goal.nextAttemptAt).toLocaleTimeString()}.` : label;
+}
 const TASK_HISTORY_PAGE_SIZE = 100;
 const TASK_ACTIVITY_PAGE_SIZE = 200;
 const TASK_HISTORY_URL = '/api/tasks/history';
@@ -590,7 +599,8 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     ? (semantic.currentActivity || operationValue || 'Task is open.')
     : (session.summary || session.endReason || sessionDescription(session, false, operationValue, semantic));
   const [controlKey, setControlKey] = useState('');
-  useEffect(() => { setControlKey(''); }, [id]);
+  const [linkUrl, setLinkUrl] = useState('');
+  useEffect(() => { setControlKey(''); setLinkUrl(''); }, [id]);
   const activeGoal = session.goalMode?.goalActive === true;
   const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
   const controlTask = useCallback(async (action, operationId = '') => {
@@ -610,13 +620,14 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
       const result = await postJson('/api/tasks/control', {
         action,
         work_id: id,
-        ...(operationId ? { operationId } : {})
+        ...(operationId ? { operationId } : {}),
+        ...(action === 'goal_retry_link' && linkUrl.trim() ? { conversationUrl: linkUrl.trim() } : {})
       }, { timeout: 10000, pauseTimeoutWhenHidden: false });
       if (result?.ok === false) {
         toast(result.error || 'The task action could not be completed.', { variant: 'error' });
         return;
       }
-      toast(action === 'goal_stop'
+      toast(action === 'goal_retry_link' ? 'Chat linking scheduled.' : action === 'goal_stop'
         ? 'Goal stopped. The task is unchanged.'
         : action === 'cancel'
         ? (result.status === 'cancelled' ? 'Task cancelled.' : 'Task cancellation requested.')
@@ -631,7 +642,19 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     } finally {
       setControlKey('');
     }
-  }, [id, onControlComplete]);
+  }, [id, onControlComplete, linkUrl]);
+
+  const openLinkedChat = async () => {
+    setControlKey('open_chat');
+    try {
+      const result = await window.relaiDesktop.browser.goalLoginStart({
+        tunnelId: session.goalMode.tunnelId, conversationId: session.goalMode.conversationId
+      });
+      if (result?.ok === false) throw new Error(result.error || 'The linked chat could not be opened.');
+      navigate('browser');
+    } catch (error) { toast(error instanceof Error ? error.message : String(error), { variant: 'error' }); }
+    finally { setControlKey(''); }
+  };
 
   return h('div', { className: 'detail-stack session-detail' },
     h('header', { className: 'task-detail-header' },
@@ -665,6 +688,24 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         live ? h('strong', null, currentTitle) : null,
         h('span', null, currentCopy)
       ),
+      session.goalMode?.chatLink ? h('div', { className: 'detail-stack', 'data-chat-link': '' },
+        h('p', { role: 'status' }, chatLinkLabel(session.goalMode)),
+        session.goalMode.chatLink.state === 'linked' && session.goalMode.tunnelId
+          && typeof window.relaiDesktop?.browser?.goalLoginStart === 'function'
+          ? h('button', { type: 'button', className: 'secondary', disabled: Boolean(controlKey),
+            onClick: () => { void openLinkedChat(); } }, controlKey === 'open_chat' ? 'Opening…' : 'Open linked chat') : null,
+        !session.goalMode.goalActive && session.goalMode.error
+          ? h('p', { className: 'connection-notice', role: 'status' }, session.goalMode.error) : null,
+        live && session.goalMode.chatLink.version === undefined && session.goalMode.state !== 'stopped'
+          ? h('details', null,
+            h('summary', null, 'Recover chat linking'),
+            h('label', { htmlFor: `chat-link-url-${id}` }, 'ChatGPT conversation URL (optional)'),
+            h('input', { id: `chat-link-url-${id}`, type: 'url', value: linkUrl, maxLength: 300,
+              placeholder: 'https://chatgpt.com/c/…', onChange: event => setLinkUrl(event.target.value) }),
+            h('button', { type: 'button', className: 'secondary', disabled: Boolean(controlKey),
+              onClick: () => { void controlTask('goal_retry_link'); } }, 'Retry linking')
+          ) : null
+      ) : null,
       ['paused', 'retrying', 'verifying', 'needs_auth', 'rate_limited'].includes(session.goalMode?.state) && session.goalMode.error
         ? h('p', { className: 'connection-notice bad', role: 'status', 'data-goal-pause': '' },
           session.goalMode.goalActive

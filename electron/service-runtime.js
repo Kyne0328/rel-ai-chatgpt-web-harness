@@ -37,6 +37,7 @@ function createDesktopServiceRuntime(deps) {
   let restartPromise = null;
   let localReadyPromise = null;
   let lifecycleToken = 0;
+  let stopGeneration = 0;
   let activePort = 0;
   let activeToken = '';
 
@@ -85,7 +86,7 @@ function createDesktopServiceRuntime(deps) {
       }));
       return getCurrentStatus();
     }
-    const { guiConfig, apiKey } = prepared;
+    const { guiConfig } = prepared;
 
     setStatus({
       serverRunning: false,
@@ -167,11 +168,17 @@ function createDesktopServiceRuntime(deps) {
     });
     markLocalReady(getCurrentStatus());
 
-    return startTunnel({ runToken, guiConfig, apiKey, actualPort, timing });
+    return startTunnel({ runToken, guiConfig, actualPort, timing });
   }
 
-  function restartConnection() {
-    if (restartPromise) return restartPromise;
+  function restartConnection({ afterPending = false } = {}) {
+    if (restartPromise) {
+      if (!afterPending) return restartPromise;
+      const queuedStopGeneration = stopGeneration;
+      return restartPromise.catch(() => {}).then(() => queuedStopGeneration === stopGeneration
+        ? restartConnection()
+        : getCurrentStatus());
+    }
     const pendingRestart = restartConnectionNow();
     restartPromise = pendingRestart;
     const clearPending = () => {
@@ -199,7 +206,7 @@ function createDesktopServiceRuntime(deps) {
       }));
       return getCurrentStatus();
     }
-    const { guiConfig, apiKey } = prepared;
+    const { guiConfig } = prepared;
     guiConfig.token ||= activeToken;
     if (!guiConfig.token) {
       const error = new Error('Rel.AI local authentication is unavailable. Restart the full connection.');
@@ -226,26 +233,38 @@ function createDesktopServiceRuntime(deps) {
       error: '',
       errorCode: ''
     });
-    return startTunnel({ runToken, guiConfig, apiKey, actualPort: activePort });
+    return startTunnel({ runToken, guiConfig, actualPort: activePort });
   }
 
-  async function startTunnel({ runToken, guiConfig, apiKey, actualPort, timing = null }) {
+  async function startTunnel({ runToken, guiConfig, actualPort, timing = null }) {
     const localUrl = `http://127.0.0.1:${actualPort}`;
+    // All peers share the local service, but not primary credentials or readiness.
+    const additionalStart = syncAdditionalTunnels(actualPort, guiConfig.token);
     if (!guiConfig.tunnelId) {
       setStatus({ serverRunning: true, tunnelStatus: 'disabled', tunnelId: '',
         tunnelHealthUrl: '', mcpUrl: '', localMcpUrl: `${localUrl}/mcp`, localUrl, error: '', errorCode: '' });
-      await syncAdditionalTunnels(actualPort, guiConfig.token);
+      await additionalStart;
       return getCurrentStatus();
     }
     let result;
     try {
       // A former pooled connection may be taking over the legacy launcher slot.
       // Confirm that its pooled process stopped before launching the replacement.
-      if (tunnelConnections?.list?.().some(item => item.tunnelId === guiConfig.tunnelId)) {
-        const synchronized = await syncAdditionalTunnels(actualPort, guiConfig.token);
+      if (additionalTunnelRuntime?.snapshot?.().connections?.some(item => item.tunnelId === guiConfig.tunnelId)) {
+        const synchronized = await additionalStart;
         if (synchronized.error || synchronized.connections?.some(item => item.tunnelId === guiConfig.tunnelId)) {
           throw new Error('The previous tunnel process could not be stopped. Retry the connection.');
         }
+      }
+      if (runToken !== lifecycleToken) return getCurrentStatus();
+      let apiKey;
+      try {
+        apiKey = tunnelCredentials.getApiKey();
+        if (!apiKey) throw new Error('Missing runtime key.');
+      } catch {
+        throw Object.assign(new Error('The primary tunnel runtime key is unavailable or cannot be decrypted. Save its runtime API key again in Connection settings.'), {
+          code: 'tunnel_credentials_unavailable'
+        });
       }
       connection.writeConnectionProfile({
         host: '127.0.0.1',
@@ -284,7 +303,6 @@ function createDesktopServiceRuntime(deps) {
           localUrl
         }
       ));
-      void syncAdditionalTunnels(actualPort, guiConfig.token);
       return getCurrentStatus();
     }
     if (runToken !== lifecycleToken || result.cancelled) return getCurrentStatus();
@@ -305,19 +323,21 @@ function createDesktopServiceRuntime(deps) {
       errorCode: degraded ? (result.errorCode || 'tunnel_connection_interrupted') : '',
       localUrl
     });
-    void syncAdditionalTunnels(actualPort, guiConfig.token);
     return getCurrentStatus();
   }
 
-  async function syncAdditionalTunnels(port = activePort, localToken = activeToken) {
+  async function syncAdditionalTunnels(port = activePort, localToken = activeToken, { retryFailed = false } = {}) {
     if (!additionalTunnelRuntime?.sync || !tunnelConnections?.runtimeConnections) {
       return { connections: [], results: [] };
     }
     if (!port || !localToken) return { connections: [], results: [] };
+    let documentUnavailable = false;
     try {
       const launcherTunnelId = getCurrentStatus().tunnelId;
-      const connections = tunnelConnections.runtimeConnections().filter(item => item.tunnelId !== launcherTunnelId);
-      return await additionalTunnelRuntime.sync({ connections, port, localToken });
+      let connections;
+      try { connections = tunnelConnections.runtimeConnections().filter(item => item.tunnelId !== launcherTunnelId); }
+      catch (error) { documentUnavailable = true; throw error; }
+      return await additionalTunnelRuntime.sync({ connections, port, localToken, retryFailed });
     } catch (error) {
       runtimeLogs.append?.('Additional Secure MCP Tunnel connections could not be started.', {
         level: 'warning',
@@ -325,7 +345,11 @@ function createDesktopServiceRuntime(deps) {
         code: 'additional_tunnel_start_failed',
         details: { message: formatError(error) }
       });
-      return { connections: additionalTunnelRuntime.snapshot?.().connections || [], results: [], error: formatError(error) };
+      if (!documentUnavailable) return { connections: additionalTunnelRuntime.snapshot?.().connections || [], results: [], error: formatError(error) };
+      // A corrupt document must not keep authenticating or advertising old peers.
+      const stopped = await additionalTunnelRuntime.sync({ connections: [], port, localToken })
+        .catch(() => ({ connections: additionalTunnelRuntime.snapshot?.().connections || [], stopped: false }));
+      return { ...stopped, error: 'Additional Secure MCP Tunnel settings could not be read. The saved file was preserved; restore it before reconnecting those tunnels.' };
     }
   }
 
@@ -333,7 +357,7 @@ function createDesktopServiceRuntime(deps) {
     if (!isListening() || !activePort || !activeToken) {
       throw new Error('Start the Rel.AI connection before changing additional tunnels.');
     }
-    return syncAdditionalTunnels(activePort, activeToken);
+    return syncAdditionalTunnels(activePort, activeToken, { retryFailed: true });
   }
 
   async function runTunnelDoctor() {
@@ -342,7 +366,8 @@ function createDesktopServiceRuntime(deps) {
     }
     const prepared = prepareConnectionConfig({ createToken: false });
     if (!prepared.ok) throw prepared.error;
-    const { guiConfig, apiKey } = prepared;
+    const { guiConfig } = prepared;
+    const apiKey = guiConfig.tunnelId ? tunnelCredentials.getApiKey() : '';
     return secureTunnelRuntime.doctor({
       tunnelId: guiConfig.tunnelId,
       port: activePort,
@@ -357,13 +382,11 @@ function createDesktopServiceRuntime(deps) {
       const guiConfig = readGuiConfig();
       guiConfig.port = normalizePort(guiConfig.port || 3333);
       if (guiConfig.tunnelId) guiConfig.tunnelId = normalizeTunnelId(guiConfig.tunnelId);
-      const apiKey = guiConfig.tunnelId ? tunnelCredentials.getApiKey() : '';
-      if (guiConfig.tunnelId && !apiKey) throw new Error('OpenAI tunnel runtime API key is required. Open Connection settings to finish setup.');
       if (!guiConfig.token && createToken) {
         guiConfig.token = connection.generateToken(32);
         connection.writeLaunchEnv({ REL_AI_MCP_TOKEN: guiConfig.token });
       }
-      return { ok: true, guiConfig, apiKey };
+      return { ok: true, guiConfig };
     } catch (error) {
       return { ok: false, error };
     }
@@ -403,6 +426,7 @@ function createDesktopServiceRuntime(deps) {
   }
 
   async function stop(options) {
+    stopGeneration += 1;
     const pendingLocalReady = localReadyPromise;
     lifecycleToken += 1;
     startPromise = null;
@@ -508,6 +532,7 @@ function isRetryableLocalStartupError(error) {
 
 function tunnelErrorCode(error, errorCodes) {
   const code = String(error?.code || '');
+  if (code === 'tunnel_credentials_unavailable') return errorCodes.TUNNEL_CREDENTIALS_UNAVAILABLE || code;
   if (code === 'tunnel_authentication_failed') return errorCodes.TUNNEL_AUTHENTICATION_FAILED || code;
   if (code === 'tunnel_access_denied') return errorCodes.TUNNEL_ACCESS_DENIED || code;
   if (code === 'tunnel_not_found') return errorCodes.TUNNEL_NOT_FOUND || code;
@@ -517,7 +542,8 @@ function tunnelErrorCode(error, errorCodes) {
 }
 
 function isTerminalTunnelCode(code, errorCodes) {
-  return code === errorCodes.TUNNEL_AUTHENTICATION_FAILED
+  return code === 'tunnel_credentials_unavailable'
+    || code === errorCodes.TUNNEL_AUTHENTICATION_FAILED
     || code === errorCodes.TUNNEL_ACCESS_DENIED
     || code === errorCodes.TUNNEL_NOT_FOUND
     || code === errorCodes.TUNNEL_RUNTIME_UNAVAILABLE

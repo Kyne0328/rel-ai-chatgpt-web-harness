@@ -832,6 +832,20 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
 }
 
 {
+  const tunnelId = 'tunnel_linkedChat12345';
+  const { host } = createHarness({ goalLoginProfileDirectory: path.join(os.tmpdir(), 'relai-linked-chat-fixture'),
+    getGoalConnections: () => [{ tunnelId, enabled: true }] });
+  const conversationId = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
+  await host.startGoalLogin({ tunnelId, conversationId });
+  assert.equal(host.getState().url, 'https://chatgpt.com/c/' + conversationId);
+  assert.equal(host.getState().goalTunnelId, tunnelId);
+  await host.startGoalLogin({ tunnelId, conversationId: 'ca32ef5a-77b0-49f0-983d-b39c12c45ff2' });
+  assert.equal(host.getState().activeSessionCount, 1, 'opening a linked chat must reuse its tunnel profile');
+  assert.equal(host.getState().url, 'https://chatgpt.com/c/ca32ef5a-77b0-49f0-983d-b39c12c45ff2');
+  await host.closeAll();
+}
+
+{
   const handlers = new Map();
   const ipc = { handle: (channel, _label, handler) => handlers.set(channel, handler) };
   const channels = {
@@ -878,6 +892,9 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
   assert.throws(() => handlers.get('clear-saved-site')({}, 'file:///tmp/browser'), /absolute HTTP or HTTPS origin/i);
   handlers.get('goal-login-start')({}, { tunnelId: 'tunnel_accountA12345' });
   assert.deepEqual(receivedGoalAccount, { tunnelId: 'tunnel_accountA12345' });
+  handlers.get('goal-login-start')({}, { tunnelId: 'tunnel_accountA12345', conversationId: 'b5b9731a-8496-4a92-9b44-55d080038c7d' });
+  assert.equal(receivedGoalAccount.conversationId, 'b5b9731a-8496-4a92-9b44-55d080038c7d');
+  assert.throws(() => handlers.get('goal-login-start')({}, { tunnelId: 'tunnel_accountA12345', conversationId: 'https://example.test/' }), /Invalid ChatGPT conversation/);
   handlers.get('goal-login-status')({}, { tunnelId: 'tunnel_accountA12345', refresh: true });
   assert.deepEqual(receivedGoalAccount, { tunnelId: 'tunnel_accountA12345', refresh: true });
   assert.throws(() => handlers.get('goal-login-start')({}, { tunnelId: 'tunnel_accountA12345', refresh: true }), /configured ChatGPT tunnel/);

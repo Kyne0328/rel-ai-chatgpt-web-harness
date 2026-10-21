@@ -3,6 +3,7 @@ import { readGuiConfig } from './launcher-utils.js';
 import { normalizeApiKey } from './tunnel-credentials.js';
 
 const TUNNEL_SETTING_ERROR_CODES = new Set([
+  'tunnel_credentials_unavailable',
   'tunnel_authentication_failed',
   'tunnel_access_denied',
   'tunnel_not_found',
@@ -41,6 +42,8 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
     setTunnelApiKey,
     getTunnelApiKey = () => '',
     clearTunnelApiKey = () => {},
+    captureTunnelApiKey,
+    restoreTunnelApiKey,
     canRestart = () => '',
     getCurrentStatus = () => ({}),
     restartConnection,
@@ -73,7 +76,9 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
     if (restartBlock) throw new Error(restartBlock);
   }
 
-  const previousApiKey = replacementApiKey ? String(getTunnelApiKey() || '') : '';
+  const encryptedRollback = typeof captureTunnelApiKey === 'function' && typeof restoreTunnelApiKey === 'function';
+  const previousCredential = replacementApiKey && encryptedRollback ? captureTunnelApiKey() : null;
+  const previousApiKey = replacementApiKey && !encryptedRollback ? String(getTunnelApiKey() || '') : '';
   const previousNotifications = getNotificationsEnabled() !== false;
   const canReconnectWithoutLocalRestart = connectionChanged
     && !portChanged
@@ -114,9 +119,12 @@ async function saveDesktopSettings(settings = {}, runtimeActions = {}) {
     } catch (rollbackError) { rollbackErrors.push(rollbackError); }
     if (replacementApiKey) {
       try {
-        if (previousApiKey) setTunnelApiKey(previousApiKey);
-        else clearTunnelApiKey();
-        if (String(getTunnelApiKey() || '') !== previousApiKey) throw new Error('Previous tunnel credential was not restored.', { cause: error });
+        if (encryptedRollback) restoreTunnelApiKey(previousCredential);
+        else {
+          if (previousApiKey) setTunnelApiKey(previousApiKey);
+          else clearTunnelApiKey();
+          if (String(getTunnelApiKey() || '') !== previousApiKey) throw new Error('Previous tunnel credential was not restored.', { cause: error });
+        }
       } catch (rollbackError) { rollbackErrors.push(rollbackError); }
     }
     if (notificationChange) {

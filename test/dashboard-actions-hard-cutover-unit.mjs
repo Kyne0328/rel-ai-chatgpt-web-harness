@@ -155,10 +155,26 @@ try {
   }, { principal: clientPrincipal, publicHttpOnly: false });
   assert.equal(ownerRetry.duplicate, true, 'the original client must retain access to its cancelled task');
 
+  const linkingTask = await callTool('relai_work', { action: 'begin', workspace: 'repo',
+    title: 'Link recovery', objective: 'Verify exact chat recovery', goal: true },
+  { principal: clientPrincipal, publicHttpOnly: false });
+  const linkingRequest = Readable.from([Buffer.from(JSON.stringify({ action: 'goal_retry_link',
+    work_id: linkingTask.work_id, conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d' }))]);
+  linkingRequest.headers = { 'content-type': 'application/json' };
+  const linkingResponse = responseRecorder();
+  await handleTaskControl({ req: linkingRequest, res: linkingResponse.res, options: { maxBodyBytes: 4096 } });
+  assert.equal(linkingResponse.json().ok, true);
+  assert.equal(linkingResponse.json().conversationId, 'b5b9731a-8496-4a92-9b44-55d080038c7d');
+  const linkingStatus = await callTool('relai_work', { action: 'goal_status', work_id: linkingTask.work_id },
+    { principal: clientPrincipal, publicHttpOnly: false });
+  assert.equal(linkingStatus.continuationCount, 0, 'link recovery must not send a continuation');
+  assert.equal(linkingStatus.chatLink.state, 'finding_chat', 'a supplied URL is only a candidate until verified');
+  assert.equal(readTaskHistorySessionRecord({ stateDir }, linkingTask.work_id).principalFingerprint,
+    principalFingerprint(clientPrincipal), 'link recovery must preserve the original task owner');
+
   const adapterSource = fs.readFileSync(new URL('../src/http/dashboardActions.ts', import.meta.url), 'utf8');
   const coreSource = fs.readFileSync(new URL('../src/core/dashboard-actions.ts', import.meta.url), 'utf8');
   assert.match(adapterSource, /runWorkspaceValidation\(workspace\)/, 'HTTP must delegate validation to the Core operation');
-  assert.match(adapterSource, /controlDashboardTask\(action, workId, operationId\)/, 'HTTP task controls must delegate to the Core operation');
   assert.doesNotMatch(adapterSource, /callTool\(/, 'HTTP must not own tool orchestration after the Core cutover');
   assert.doesNotMatch(coreSource, /callTool\('relai_run_checks'/);
   assert.match(coreSource, /callTool\('relai_work'/);

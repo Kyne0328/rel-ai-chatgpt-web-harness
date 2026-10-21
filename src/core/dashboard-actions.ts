@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { readConfig } from '../config.js';
-import { stopDashboardGoal } from '../chatgptGoalMode.js';
+import { stopDashboardGoal, retryDashboardGoalLink } from '../chatgptGoalMode.js';
 import { callTool } from '../tools.js';
 
 export interface WorkspacePreflightFinding {
@@ -27,11 +27,12 @@ export function resolveWorkspaceFolder(workspaceAlias: string): string {
   return workspace.path;
 }
 
-export async function controlDashboardTask(action: 'stop' | 'cancel' | 'goal_stop', workId: string, operationId = ''): Promise<Record<string, unknown>> {
+export async function controlDashboardTask(action: 'stop' | 'cancel' | 'goal_stop' | 'goal_retry_link', workId: string, operationId = '', conversationUrl = ''): Promise<Record<string, unknown>> {
   const taskId = String(workId || '').trim();
   if (!taskId) throw new Error('work_id is required');
-  if (!['stop', 'cancel', 'goal_stop'].includes(action)) throw new Error('action must be stop, cancel or goal_stop');
+  if (!['stop', 'cancel', 'goal_stop', 'goal_retry_link'].includes(action)) throw new Error('Unknown task control action.');
   if (action === 'goal_stop') return stopDashboardGoal(readConfig(), taskId);
+  if (action === 'goal_retry_link') return retryDashboardGoalLink(readConfig(), taskId, conversationUrl);
   // The authenticated local dashboard may control tasks created by MCP clients.
   return callTool('relai_work', {
     action,

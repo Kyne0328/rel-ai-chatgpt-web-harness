@@ -85,7 +85,7 @@ assert.doesNotMatch(activity, /dangerouslySetInnerHTML|pillHtml/, 'Activity Reac
 assert.match(activity, /activitySessionView\(entry, sessionIndex\)/, 'Activity rows must resolve task titles from the current session index');
 assert.match(sessionsReact, /fetchJson\(`\$\{TASK_SESSION_URL\}\?task=/, 'task history must hydrate from the canonical task-session endpoint after immediate summary selection');
 assert.doesNotMatch(sessionsReact, /Request ID|Trace ID/, 'session diagnostics must not present per-call protocol identifiers as stable task identifiers');
-assert.doesNotMatch(sessionsReact, /task-plan-collapsible|h\('details'.*data-task-plan/s, 'task plans must remain visible instead of using a disclosure control');
+assert.doesNotMatch(functionSource(sessionsReact, 'PlanSection'), /task-plan-collapsible|h\('details'/, 'task plans must remain visible instead of using a disclosure control');
 assert.doesNotMatch(sessionsReact, /modeLabel.*Planned.*Direct/s, 'durable task rows must not expose obsolete Direct versus Planned mode labels');
 assert.match(sessionsReact, /label: 'Tool calls'/, 'task inspector must retain tool-call counts after list simplification');
 assert.match(sessionsReact, /label: 'Project files'/, 'task inspector must retain the Project files count');

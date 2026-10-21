@@ -53,7 +53,22 @@ function createTunnelCredentialStore({
     return { apiKeyConfigured: false };
   }
 
-  return Object.freeze({ status, getApiKey, setApiKey, clear, statePath: () => filePath });
+  // Internal rollback evidence stays encrypted, including an unreadable record.
+  function capture() {
+    return fs.existsSync(filePath) ? fs.readFileSync(filePath) : null;
+  }
+
+  function restore(snapshot) {
+    if (snapshot === null) clear();
+    else {
+      if (!Buffer.isBuffer(snapshot)) throw new TypeError('Encrypted credential snapshot is required.');
+      writeStateBytes(filePath, snapshot);
+    }
+    const actual = capture();
+    if (snapshot === null ? actual !== null : !actual?.equals(snapshot)) throw new Error('Previous tunnel credential was not restored.');
+  }
+
+  return Object.freeze({ status, getApiKey, setApiKey, clear, capture, restore, statePath: () => filePath });
 }
 
 function configureTunnelSafeStorage({ safeStorage, platform = process.platform, passwordStore = '' } = {}) {
@@ -89,11 +104,15 @@ function validateDiskState(value) {
 }
 
 function writeState(filePath, disk) {
+  writeStateBytes(filePath, Buffer.from(`${JSON.stringify(disk, null, 2)}\n`, 'utf8'));
+}
+
+function writeStateBytes(filePath, bytes) {
   const directory = path.dirname(filePath);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify(disk, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(temporary, bytes, { mode: 0o600, flag: 'wx' });
     try { fs.chmodSync(temporary, 0o600); } catch {}
     fs.renameSync(temporary, filePath);
     try { fs.chmodSync(filePath, 0o600); } catch {}
