@@ -189,9 +189,10 @@ async function requestChatgptUncoordinated(path, options = {}, deps = {}) {
   return JSON.parse(new TextDecoder().decode(bytes));
 }
 
-async function listConversations(deps = {}) {
-  const result = await requestChatgpt('/backend-api/conversations?offset=0&limit=20&order=updated&is_archived=false', { signal: deps.signal }, deps);
-  return Array.isArray(result.items) ? result.items : [];
+async function conversationPage(deps = {}, offset = 0) {
+  const result = await requestChatgpt(`/backend-api/conversations?offset=${offset}&limit=20&order=updated&is_archived=false`, { signal: deps.signal }, deps);
+  if (!Array.isArray(result?.items) || result.items.length > 200) throw new Error('ChatGPT conversation listing has an unsupported response.');
+  return { items: result.items, more: result.has_more === true || Number(result.total) > offset + result.items.length };
 }
 
 // Project chats have a separate catalogue. The sidebar supplies recent chat
@@ -219,7 +220,7 @@ async function listGoalProjects(deps = {}, initialCursor = '', maxPages = MAX_SI
       const recentChats = record?.conversations?.items;
       if (Array.isArray(recentChats)) for (const conversation of recentChats) {
         if (UUID.test(String(conversation?.id || ''))) previews.push({
-          id: conversation.id, update_time: conversation.update_time
+          id: conversation.id, update_time: conversation.update_time, projectId: id
         });
       }
     }
@@ -241,7 +242,10 @@ async function listProjectChats(projectId, cursor, deps = {}) {
   }
   const result = await requestChatgpt('/backend-api/gizmos/' + projectId
     + '/conversations?cursor=' + encodeURIComponent(cursor), { signal: deps.signal }, deps);
-  if (!Array.isArray(result?.items)) throw new Error('ChatGPT Project conversations have an unsupported response.');
+  if (!Array.isArray(result?.items) || result.items.length > 200
+    || result.cursor != null && (typeof result.cursor !== 'string' || result.cursor.length > 2048)) {
+    throw new Error('ChatGPT Project conversations have an unsupported response.');
+  }
   return { items: result.items, cursor: result.cursor || null };
 }
 
@@ -327,20 +331,20 @@ function turnState(conversation) {
   };
 }
 
-// A new Goal is expected among recently updated conversations. Scanning old
-// Project histories is both expensive and unrelated to finding the initiating turn.
+// Start with recent chats; durable discovery can page further on later rounds.
 const RECENT_GOAL_CHATS = 10;
 
-function recentChats(items) {
+function recentChats(items, limit = RECENT_GOAL_CHATS) {
   const unique = new Map();
   for (const item of items) {
     if (!UUID.test(String(item?.id || ''))) continue;
     const updated = typeof item.update_time === 'number' ? item.update_time * 1000
       : Date.parse(item.update_time || '') || 0;
     const previous = unique.get(item.id);
-    if (!previous || updated > previous.updated) unique.set(item.id, { id: item.id, updated });
+    if (!previous || updated > previous.updated) unique.set(item.id, { id: item.id, updated,
+      ...(item.projectId ? { projectId: item.projectId } : {}) });
   }
-  return [...unique.values()].sort((a, b) => b.updated - a.updated).slice(0, RECENT_GOAL_CHATS);
+  return [...unique.values()].sort((a, b) => b.updated - a.updated).slice(0, limit);
 }
 
 async function recentGoalCandidates(deps) {
@@ -348,27 +352,95 @@ async function recentGoalCandidates(deps) {
   let projectId = String(deps.chatgptProjectId || '');
   if (hint || projectId) {
     if (!PROJECT_ID.test(projectId)) {
-      const { value: catalogue } = await discoveryRead('projects-by-name',
-        shared => listGoalProjects(shared), deps);
+      const { value: catalogue } = await discoveryRead('sidebar-page:',
+        shared => listGoalProjects(shared, '', 1), deps);
       const sameName = name => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase()
         === hint.replace(/\s+/g, ' ').toLowerCase();
       const matches = catalogue.projects.filter(item => sameName(item.name));
-      if (!catalogue.complete) return { state: 'project_unavailable' };
-      if (matches.length > 1) return { state: 'ambiguous', reason: 'project_name_ambiguous' };
-      if (!matches.length) return { state: 'project_unavailable' };
-      projectId = matches[0].id;
+      // A display name is only a hint. Missing, duplicate and partially listed
+      // names cannot establish absence or prevent receipt-based discovery.
+      projectId = matches.length === 1 ? matches[0].id : '';
     }
-    const { value: page } = await discoveryRead('project-recent:' + projectId,
-      shared => listProjectChats(projectId, '0', shared), deps);
-    return { state: 'ready', projectId, items: recentChats(page.items) };
+    if (projectId) {
+      try {
+        const { value: page } = await discoveryRead('project-recent:' + projectId,
+          shared => listProjectChats(projectId, '0', shared), deps);
+        return { state: 'ready', projectId, items: recentChats(page.items) };
+      } catch (error) { if (![403, 404].includes(error?.status)) throw error; }
+    }
   }
-  // No verified Project hint: check only the ten newest across ordinary chat
-  // listings and the first Project sidebar page; never enumerate old histories.
-  const ordinary = await discoveryRead('recent-ordinary',
-    listConversations, deps);
-  const sidebar = await discoveryRead('recent-project-previews',
+  // First pass without a usable hint: prioritize the ten newest ordinary chats
+  // and Project previews. A missed receipt schedules resumable discovery.
+  const ordinary = await discoveryRead('ordinary-page:0',
+    conversationPage, deps);
+  const sidebar = await discoveryRead('sidebar-page:',
     shared => listGoalProjects(shared, '', 1), deps);
-  return { state: 'ready', items: recentChats([...ordinary.value, ...sidebar.value.previews]) };
+  return { state: 'ready', items: recentChats([...ordinary.value.items, ...sidebar.value.previews]) };
+}
+
+// A bounded page of a durable scan. A round reads at most ten conversations and
+// three catalogue pages; subsequent rounds resume rather than restarting at the
+// sidebar. This uses the same tunnel-scoped transport and account read budget.
+async function nextGoalCandidates(deps) {
+  if (!deps.discovery?.scan) return recentGoalCandidates(deps);
+  const scan = structuredClone(deps.discovery.scan);
+  deps.discovery.scan = scan;
+  for (let pages = 0; pages < 3; pages++) {
+    if (scan.pending?.length) {
+      return { state: 'ready', items: scan.pending.slice(0, RECENT_GOAL_CHATS) };
+    }
+    if (scan.phase === 'done') {
+      deps.discovery.scan = null;
+      deps.discovery.complete = true;
+      return { state: 'ready', items: [] };
+    }
+    if (scan.phase === 'ordinary') {
+      const offset = scan.offset || 0;
+      const { value: page } = await discoveryRead('ordinary-page:' + offset,
+        shared => conversationPage(shared, offset), deps);
+      scan.offset = offset + page.items.length;
+      if (!page.more || !page.items.length) scan.phase = 'sidebar';
+      scan.pending = recentChats(page.items, 200);
+    } else if (scan.phase === 'sidebar') {
+      const cursor = scan.sidebarCursor || '';
+      const { value: page } = await discoveryRead('sidebar-page:' + cursor,
+        shared => listGoalProjects(shared, cursor, 1), deps);
+      scan.sidebarCursor = page.cursor;
+      scan.sidebarComplete = page.complete;
+      scan.projects = page.projects.map(project => project.id);
+      scan.projectCursor = '0';
+      scan.phase = 'project';
+    } else if (scan.phase === 'project') {
+      const projectId = scan.projects[0];
+      if (!projectId) { scan.phase = scan.sidebarComplete ? 'done' : 'sidebar'; continue; }
+      const cursor = scan.projectCursor;
+      let page;
+      try {
+        ({ value: page } = await discoveryRead('project-page:' + projectId + ':' + cursor,
+          shared => listProjectChats(projectId, cursor, shared), deps));
+      } catch (error) {
+        if (![403, 404].includes(error?.status)) throw error;
+        page = { items: [], cursor: null };
+      }
+      if (page.cursor === cursor) throw new Error('ChatGPT Project conversations repeated a pagination cursor.');
+      scan.projectCursor = page.cursor || '0';
+      if (!page.cursor) scan.projects.shift();
+      scan.pending = recentChats(page.items.map(item => ({ ...item, projectId })), 200);
+    } else throw new Error('Unsupported ChatGPT discovery scan state.');
+  }
+  return { state: 'ready', items: scan.pending?.slice(0, RECENT_GOAL_CHATS) || [] };
+}
+
+function finishDiscoveryPage(deps, catalogue) {
+  // Advance only after the whole batch was read. A cooldown or cancellation
+  // halfway through must not discard a receipt already seen in that batch.
+  deps.discovery?.scan?.pending?.splice(0, catalogue.items.length);
+}
+
+function continueDiscovery(deps, exact) {
+  if (deps.discovery && !exact && !deps.discovery.scan && !deps.discovery.complete) {
+    deps.discovery.scan = { phase: 'ordinary', offset: 0, pending: [] };
+  }
 }
 
 async function findRecentGoalCommand(deps = {}) {
@@ -381,7 +453,7 @@ async function findRecentGoalCommand(deps = {}) {
     return receipt ? { state: 'matched', conversationId: exact, messageId: receipt.messageId,
       receiptMessageId: receipt.receiptMessageId, command: receipt.command || null } : { state: 'absent' };
   }
-  const catalogue = exact ? { state: 'ready', items: [{ id: exact }] } : await recentGoalCandidates(deps);
+  const catalogue = exact ? { state: 'ready', items: [{ id: exact }] } : await nextGoalCandidates(deps);
   if (catalogue.state !== 'ready') return catalogue;
   const matches = [];
   for (const item of catalogue.items) {
@@ -406,20 +478,21 @@ async function findRecentGoalCommand(deps = {}) {
     }
     matches.push({ conversationId: item.id, messageId: receipt.messageId,
       receiptMessageId: receipt.receiptMessageId, command: receipt.command || null,
-      ...(catalogue.projectId ? { projectId: catalogue.projectId } : {}) });
+      ...(item.projectId || catalogue.projectId ? { projectId: item.projectId || catalogue.projectId } : {}) });
     if (matches.length > 1) return { state: 'ambiguous' };
   }
+  finishDiscoveryPage(deps, catalogue);
+  if (!matches.length) continueDiscovery(deps, exact);
   return matches[0] ? { state: 'matched', ...matches[0] } : { state: 'absent' };
 }
 
 async function findLinkedGoalCommand(deps) {
   let exact = '';
   try { exact = parseConversationUrl(deps.conversationCorrelation); } catch {}
-  const catalogue = exact ? { state: 'ready', items: [{ id: exact }] } : await recentGoalCandidates(deps);
+  const catalogue = exact ? { state: 'ready', items: [{ id: exact }] } : await nextGoalCandidates(deps);
   if (catalogue.state !== 'ready') return catalogue;
   const findReceipt = proof => proof?.receipts.find(receipt => receipt.workId === deps.workId
-    && receipt.linkId === deps.linkId && receipt.messageId && receipt.receiptMessageId
-    && (deps.explicitGoal || receipt.command?.action === 'start'));
+    && receipt.linkId === deps.linkId && receipt.messageId && receipt.receiptMessageId);
   const matches = [];
   for (const item of catalogue.items) {
     let evidence;
@@ -429,15 +502,23 @@ async function findLinkedGoalCommand(deps) {
     if (!receipt) continue;
     matches.push({ conversationId: item.id, messageId: receipt.messageId,
       receiptMessageId: receipt.receiptMessageId, command: receipt.command || null,
-      ...(catalogue.projectId ? { projectId: catalogue.projectId } : {}) });
+      ...(item.projectId || catalogue.projectId ? { projectId: item.projectId || catalogue.projectId } : {}) });
     if (matches.length > 1) return { state: 'ambiguous' };
   }
-  if (!matches.length) return { state: 'absent', reason: 'receipt_not_found_recent' };
+  if (!matches.length) {
+    finishDiscoveryPage(deps, catalogue);
+    continueDiscovery(deps, exact);
+    return { state: 'absent', reason: 'receipt_not_found' };
+  }
   // Fresh active-branch read is mandatory even if a catalogue result was cached.
   const found = matches[0];
   const receipt = findReceipt(goalCommandEvidence(await getConversation(found.conversationId, deps)));
   if (!receipt || receipt.messageId !== found.messageId
     || receipt.receiptMessageId !== found.receiptMessageId) return { state: 'absent', reason: 'receipt_not_verified' };
+  if (!deps.explicitGoal && receipt.command?.action !== 'start') {
+    if (deps.discovery) deps.discovery.notRequested = true;
+    return { state: 'absent', reason: 'goal_not_requested' };
+  }
   return { state: 'matched', ...found };
 }
 

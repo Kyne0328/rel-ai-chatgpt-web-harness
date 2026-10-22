@@ -163,12 +163,13 @@ try {
   linkingRequest.headers = { 'content-type': 'application/json' };
   const linkingResponse = responseRecorder();
   await handleTaskControl({ req: linkingRequest, res: linkingResponse.res, options: { maxBodyBytes: 4096 } });
-  assert.equal(linkingResponse.json().ok, true);
-  assert.equal(linkingResponse.json().conversationId, 'b5b9731a-8496-4a92-9b44-55d080038c7d');
+  assert.equal(linkingResponse.json().ok, false);
+  assert.equal(linkingResponse.json().error, 'Unknown task control action.');
   const linkingStatus = await callTool('relai_work', { action: 'goal_status', work_id: linkingTask.work_id },
     { principal: clientPrincipal, publicHttpOnly: false });
-  assert.equal(linkingStatus.continuationCount, 0, 'link recovery must not send a continuation');
-  assert.equal(linkingStatus.chatLink.state, 'finding_chat', 'a supplied URL is only a candidate until verified');
+  assert.equal(linkingStatus.continuationCount, 0, 'a removed action must not send a continuation');
+  assert.equal(linkingStatus.conversationId, null, 'a removed action cannot choose a chat');
+  assert.equal(linkingStatus.chatLink.state, 'finding_chat', 'linking remains automatic');
   assert.equal(readTaskHistorySessionRecord({ stateDir }, linkingTask.work_id).principalFingerprint,
     principalFingerprint(clientPrincipal), 'link recovery must preserve the original task owner');
 

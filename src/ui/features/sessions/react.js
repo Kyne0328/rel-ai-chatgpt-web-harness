@@ -42,7 +42,7 @@ const MOBILE_SESSION_QUERY = '(max-width: 760px)';
 function chatLinkLabel(goal) {
   const labels = { finding_chat: 'Finding the ChatGPT conversation…', linked: 'ChatGPT conversation linked.',
     waiting_for_account: 'Chat linking is waiting for ChatGPT sign-in.', rate_limited: 'Chat linking is waiting for the account cooldown.',
-    conflicting_matches: 'Multiple chats contain this task receipt. Select the intended conversation.',
+    conflicting_matches: 'Multiple chats contain this task receipt. Automatic linking is paused.',
     needs_attention: 'Chat linking needs attention.' };
   const label = labels[goal.chatLink.state] || 'Verifying the ChatGPT conversation…';
   return goal.nextAttemptAt ? `${label} Next check: ${new Date(goal.nextAttemptAt).toLocaleTimeString()}.` : label;
@@ -599,8 +599,7 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     ? (semantic.currentActivity || operationValue || 'Task is open.')
     : (session.summary || session.endReason || sessionDescription(session, false, operationValue, semantic));
   const [controlKey, setControlKey] = useState('');
-  const [linkUrl, setLinkUrl] = useState('');
-  useEffect(() => { setControlKey(''); setLinkUrl(''); }, [id]);
+  useEffect(() => { setControlKey(''); }, [id]);
   const activeGoal = session.goalMode?.goalActive === true;
   const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
   const controlTask = useCallback(async (action, operationId = '') => {
@@ -620,14 +619,13 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
       const result = await postJson('/api/tasks/control', {
         action,
         work_id: id,
-        ...(operationId ? { operationId } : {}),
-        ...(action === 'goal_retry_link' && linkUrl.trim() ? { conversationUrl: linkUrl.trim() } : {})
+        ...(operationId ? { operationId } : {})
       }, { timeout: 10000, pauseTimeoutWhenHidden: false });
       if (result?.ok === false) {
         toast(result.error || 'The task action could not be completed.', { variant: 'error' });
         return;
       }
-      toast(action === 'goal_retry_link' ? 'Chat linking scheduled.' : action === 'goal_stop'
+      toast(action === 'goal_stop'
         ? 'Goal stopped. The task is unchanged.'
         : action === 'cancel'
         ? (result.status === 'cancelled' ? 'Task cancelled.' : 'Task cancellation requested.')
@@ -642,7 +640,7 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     } finally {
       setControlKey('');
     }
-  }, [id, onControlComplete, linkUrl]);
+  }, [id, onControlComplete]);
 
   const openLinkedChat = async () => {
     setControlKey('open_chat');
@@ -695,16 +693,7 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
           ? h('button', { type: 'button', className: 'secondary', disabled: Boolean(controlKey),
             onClick: () => { void openLinkedChat(); } }, controlKey === 'open_chat' ? 'Opening…' : 'Open linked chat') : null,
         !session.goalMode.goalActive && session.goalMode.error
-          ? h('p', { className: 'connection-notice', role: 'status' }, session.goalMode.error) : null,
-        live && session.goalMode.chatLink.version === undefined && session.goalMode.state !== 'stopped'
-          ? h('details', null,
-            h('summary', null, 'Recover chat linking'),
-            h('label', { htmlFor: `chat-link-url-${id}` }, 'ChatGPT conversation URL (optional)'),
-            h('input', { id: `chat-link-url-${id}`, type: 'url', value: linkUrl, maxLength: 300,
-              placeholder: 'https://chatgpt.com/c/…', onChange: event => setLinkUrl(event.target.value) }),
-            h('button', { type: 'button', className: 'secondary', disabled: Boolean(controlKey),
-              onClick: () => { void controlTask('goal_retry_link'); } }, 'Retry linking')
-          ) : null
+          ? h('p', { className: 'connection-notice', role: 'status' }, session.goalMode.error) : null
       ) : null,
       ['paused', 'retrying', 'verifying', 'needs_auth', 'rate_limited'].includes(session.goalMode?.state) && session.goalMode.error
         ? h('p', { className: 'connection-notice bad', role: 'status', 'data-goal-pause': '' },

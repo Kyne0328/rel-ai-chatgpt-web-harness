@@ -55,10 +55,8 @@ function commitGoalBinding(config, goal, match, { detection = false } = {}) {
       receiptMessageId: match.receiptMessageId || '', verifiedAt: Date.now() };
     const saved = writeGoalRow(db, row, { ...goal, conversationId: match.conversationId,
       ...(match.projectId ? { chatgptProjectId: match.projectId } : {}),
-      binding, state: 'monitoring', error: '', retryCount: 0, nextAttemptAt: 0, updatedAt: Date.now() });
+      binding, discoveryScan: null, state: 'monitoring', error: '', retryCount: 0, nextAttemptAt: 0, updatedAt: Date.now() });
     if (!claim) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(claimKey, goal.workId);
-    if (link) db.prepare('UPDATE state_meta SET value=? WHERE key=?')
-      .run(JSON.stringify({ ...link, scan: null }), LINK_PREFIX + goal.workId);
     if (detection) db.prepare('DELETE FROM state_meta WHERE key=?').run(detectionKey);
     return saved;
   }, { transaction: true });
