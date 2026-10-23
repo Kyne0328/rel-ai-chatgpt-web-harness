@@ -492,7 +492,10 @@ function DesktopSidebar({ collapsed, extensionsEnabled, openAccordion, route, se
         setOpenAccordion
       })
     ),
-    h('div', { className: 'sidebar-note' }, surface === 'desktop' ? 'Desktop app · live status' : 'Live status from this computer.')
+    h('div', { className: 'sidebar-note' },
+      h('span', { className: 'dot', 'aria-hidden': 'true' }),
+      h('span', null, surface === 'desktop' ? 'Desktop app · live status' : 'Live status from this computer.')
+    )
   );
 }
 
@@ -1010,7 +1013,10 @@ function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onCl
                   preloadReactNavigationTarget(command.href);
                 }
               },
-              h('span', { className: 'command-option-copy' }, h('strong', null, command.label), h('small', null, command.description)),
+              h('span', { className: 'command-option-start' },
+                command.icon ? h(Icon, { name: command.icon, className: 'command-option-icon' }) : null,
+                h('span', { className: 'command-option-copy' }, h('strong', null, command.label), h('small', null, command.description))
+              ),
               h('span', { className: 'command-group' }, command.group)
             ))
             : h('div', { className: 'command-empty' }, 'No matching page, action, or project.')
@@ -1026,6 +1032,7 @@ function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePa
     label: item.group === 'Settings' ? `Settings · ${item.label}` : item.label,
     description: item.description,
     group: item.group,
+    icon: item.icon || item.id,
     href: item.href,
     run: () => { closePalette(); location.hash = item.href; }
   }));
@@ -1034,6 +1041,7 @@ function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePa
     label: 'Toggle light / dark theme',
     description: 'Switch the dashboard between light and dark appearance.',
     group: 'Action',
+    icon: 'dark',
     searchAliases: 'theme dark light appearance color',
     run: () => {
       const current = document.documentElement.dataset.theme || getUiPreferences().theme;
@@ -1047,6 +1055,7 @@ function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePa
       label: 'Restart connection service',
       description: 'Restart the local Rel.AI connection service.',
       group: 'Action',
+      icon: 'refresh',
       searchAliases: 'connection reconnect restart service',
       run: async () => { closePalette(); await desktop.restartConnection(); }
     });
@@ -1057,6 +1066,7 @@ function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePa
       label: 'Add project',
       description: 'Choose another project folder for ChatGPT.',
       group: 'Action',
+      icon: 'add',
       run: async () => { closePalette(); await onAddWorkspace(); }
     });
   }
@@ -1070,6 +1080,7 @@ function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePa
       label: `Project · ${alias}`,
       description: workspace.path || 'Open project status and actions.',
       group: 'Project',
+      icon: 'folder',
       href,
       run: () => { closePalette(); location.hash = href; }
     });
