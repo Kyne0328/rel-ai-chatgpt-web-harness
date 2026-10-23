@@ -3,6 +3,13 @@ import { eventTimestampMs, eventTimestampValue, terminalTaskTimestampValue, time
 import { buildTaskSemanticProgress, classifyTaskChangedFiles } from '../../../taskSemanticProgress.js';
 import { workSessionStateView } from '../../task-identity.js';
 
+export function goalModeNotice(goal = {}) {
+  if (!goal?.error || !['paused', 'retrying', 'verifying', 'needs_auth', 'rate_limited'].includes(goal.state)) return null;
+  const waiting = goal.state === 'rate_limited';
+  return { waiting, message: waiting || !goal.goalActive ? goal.error
+    : `Goal Mode retry ${goal.retryCount}/${goal.maxRetries}: ${goal.error}` };
+}
+
 export function sessionsForDisplay(data = {}, workspace = '') {
   return orderSessionsForDisplay((Array.isArray(data?.tasks) ? data.tasks : [])
     .filter(session => !workspace || session.workspace === workspace));

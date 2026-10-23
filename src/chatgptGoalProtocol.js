@@ -92,9 +92,12 @@ function accountScope(deps) {
   let accounts = accountScopes.get(transport);
   if (!accounts) { accounts = new Map(); accountScopes.set(transport, accounts); }
   const key = deps.tunnelId || deps.credentials || 'local';
-  if (!accounts.has(key)) accounts.set(key, { reads: [], cooldownUntil: 0, rateLimits: 0, discovery: new Map() });
+  if (!accounts.has(key)) accounts.set(key, { reads: [], cooldownUntil: 0, cooldownReason: 'upstream', rateLimits: 0, discovery: new Map() });
   const scope = accounts.get(key);
-  scope.cooldownUntil = Math.max(scope.cooldownUntil, Number(deps.cooldownUntil || 0));
+  if (Number(deps.cooldownUntil || 0) > scope.cooldownUntil) {
+    scope.cooldownUntil = Number(deps.cooldownUntil);
+    scope.cooldownReason = deps.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream';
+  }
   scope.rateLimits = Math.max(scope.rateLimits, Number(deps.rateLimitCount || 0));
   return scope;
 }
@@ -106,9 +109,9 @@ function retryAfterMilliseconds(value) {
   return Number.isFinite(milliseconds) ? Math.max(0, Math.min(milliseconds, 86_400_000)) : 0;
 }
 
-function rateLimitError(until, deferred = true) {
+function rateLimitError(until, deferred = true, rateLimitReason = 'upstream') {
   return Object.assign(new Error('ChatGPT reads are rate limited; waiting for the account cooldown.'),
-    { status: 429, retryAt: until, deferred });
+    { status: 429, retryAt: until, deferred, rateLimitReason });
 }
 
 function rememberRateLimit(error, deps) {
@@ -117,8 +120,11 @@ function rememberRateLimit(error, deps) {
   const suppliedDelay = Number(error.retryAfterMs) || 0;
   const delay = suppliedDelay > 0 ? Math.max(error.deferred ? 1_000 : 60_000, Math.min(suppliedDelay, 86_400_000))
     : RATE_LIMIT_DEFAULT_MS * 2 ** Math.max(0, scope.rateLimits - 1);
-  scope.cooldownUntil = Math.max(scope.cooldownUntil, Date.now() + delay);
-  try { deps.onRateLimit?.({ until: scope.cooldownUntil, count: scope.rateLimits }); } catch {}
+  if (Date.now() + delay >= scope.cooldownUntil) {
+    scope.cooldownUntil = Date.now() + delay;
+    scope.cooldownReason = error.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream';
+  }
+  try { deps.onRateLimit?.({ until: scope.cooldownUntil, count: scope.rateLimits, reason: scope.cooldownReason }); } catch {}
   return Object.assign(error, { retryAt: scope.cooldownUntil });
 }
 
@@ -126,12 +132,12 @@ async function requestChatgpt(path, options = {}, deps = {}) {
   options.signal?.throwIfAborted();
   const scope = accountScope(deps);
   const now = Date.now();
-  if (scope.cooldownUntil > now) throw rateLimitError(scope.cooldownUntil);
+  if (scope.cooldownUntil > now) throw rateLimitError(scope.cooldownUntil, true, scope.cooldownReason);
   if (!options.method || options.method === 'GET') {
     scope.reads = scope.reads.filter(time => time > now - READ_WINDOW_MS);
     if (scope.reads.length >= MAX_ACCOUNT_READS) throw Object.assign(
       new Error('ChatGPT account read budget reached; deferring this read.'),
-      { deferred: true, retryAt: scope.reads[0] + READ_WINDOW_MS });
+      { deferred: true, retryAt: scope.reads[0] + READ_WINDOW_MS, rateLimitReason: 'read_budget' });
     scope.reads.push(now);
   }
   try {
@@ -150,7 +156,8 @@ async function requestChatgptUncoordinated(path, options = {}, deps = {}) {
       headers: options.headers, raw: options.raw === true,
       ...(options.projectConversation ? { projectConversation: true } : {}) }, { signal: options.signal });
     if (!result?.ok) throw Object.assign(protocolFailure(path, result?.status, result?.retryAfterMs),
-      { deferred: result?.deferred === true });
+      { deferred: result?.deferred === true,
+        rateLimitReason: result?.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream' });
     return options.raw ? { text: async () => result.streamObserved ? 'event: accepted\n\n' : '' } : result.data;
   }
   const credentials = deps.credentials || chatgptCredentials();
@@ -267,7 +274,7 @@ function waitForDiscovery(promise, signal) {
 async function discoveryRead(key, load, deps) {
   deps.signal?.throwIfAborted();
   const scope = accountScope(deps);
-  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil);
+  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil, true, scope.cooldownReason);
   const existing = scope.discovery.get(key);
   if (existing?.promise) return { value: await waitForDiscovery(existing.promise, deps.signal), cached: false };
   if (existing && Date.now() < existing.expiresAt) return { value: existing.value, cached: true };
@@ -375,7 +382,11 @@ async function recentGoalCandidates(deps) {
     conversationPage, deps);
   const sidebar = await discoveryRead('sidebar-page:',
     shared => listGoalProjects(shared, '', 1), deps);
-  return { state: 'ready', items: recentChats([...ordinary.value.items, ...sidebar.value.previews]) };
+  const candidates = recentChats([...ordinary.value.items, ...sidebar.value.previews], 200);
+  return { state: 'ready', items: candidates.slice(0, RECENT_GOAL_CHATS), nextScan: {
+    phase: ordinary.value.more ? 'ordinary' : 'sidebar', offset: ordinary.value.items.length,
+    pending: candidates.slice(RECENT_GOAL_CHATS)
+  } };
 }
 
 // A bounded page of a durable scan. A round reads at most ten conversations and
@@ -437,9 +448,9 @@ function finishDiscoveryPage(deps, catalogue) {
   deps.discovery?.scan?.pending?.splice(0, catalogue.items.length);
 }
 
-function continueDiscovery(deps, exact) {
+function continueDiscovery(deps, exact, catalogue) {
   if (deps.discovery && !exact && !deps.discovery.scan && !deps.discovery.complete) {
-    deps.discovery.scan = { phase: 'ordinary', offset: 0, pending: [] };
+    deps.discovery.scan = catalogue.nextScan || { phase: 'ordinary', offset: 0, pending: [] };
   }
 }
 
@@ -482,7 +493,7 @@ async function findRecentGoalCommand(deps = {}) {
     if (matches.length > 1) return { state: 'ambiguous' };
   }
   finishDiscoveryPage(deps, catalogue);
-  if (!matches.length) continueDiscovery(deps, exact);
+  if (!matches.length) continueDiscovery(deps, exact, catalogue);
   return matches[0] ? { state: 'matched', ...matches[0] } : { state: 'absent' };
 }
 
@@ -507,7 +518,7 @@ async function findLinkedGoalCommand(deps) {
   }
   if (!matches.length) {
     finishDiscoveryPage(deps, catalogue);
-    continueDiscovery(deps, exact);
+    continueDiscovery(deps, exact, catalogue);
     return { state: 'absent', reason: 'receipt_not_found' };
   }
   // Fresh active-branch read is mandatory even if a catalogue result was cached.
@@ -614,7 +625,8 @@ async function stopStalledTurn(id, expectedNodeId, deps = {}) {
     ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}) }, { signal: deps.signal });
   if (result?.status === 429) throw rememberRateLimit(Object.assign(
     protocolFailure('/backend-api/conversation/' + id, 429, result.retryAfterMs),
-    { notSent: true, deferred: result.deferred === true }), deps);
+    { notSent: true, deferred: result.deferred === true,
+      rateLimitReason: result.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream' }), deps);
   if (result?.ok && result.stopped === true) return true;
   if (result?.ok && result.alreadyFinished === true) return false;
   throw Object.assign(new Error('Stalled ChatGPT response could not be stopped and verified.'), {
@@ -637,7 +649,7 @@ async function sendContinue(id, parentMessageId, deps = {}) {
   const native = deps.nativeTransport || (!deps.fetch && !deps.credentials ? goalBrowserTransport : null);
   if (native) {
     const scope = accountScope(deps);
-    if (scope.cooldownUntil > Date.now()) throw Object.assign(rateLimitError(scope.cooldownUntil), { notSent: true });
+    if (scope.cooldownUntil > Date.now()) throw Object.assign(rateLimitError(scope.cooldownUntil, true, scope.cooldownReason), { notSent: true });
     let result;
     try {
       assertGoalCurrent(deps);
@@ -651,7 +663,8 @@ async function sendContinue(id, parentMessageId, deps = {}) {
     }
     if (result?.status === 429) throw rememberRateLimit(Object.assign(
       protocolFailure('/backend-api/conversation/' + id, 429, result.retryAfterMs),
-      { notSent: result.notSent === true, deferred: result.deferred === true }), deps);
+      { notSent: result.notSent === true, deferred: result.deferred === true,
+        rateLimitReason: result.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream' }), deps);
     if (result?.ok && result.accepted === true) return { accepted: true };
     const failure = message => Object.assign(new Error(message), {
       notSent: result?.notSent === true, deferred: result?.busy === true
@@ -753,7 +766,7 @@ async function evaluateGoalHelper(packet, deps = {}) {
   if (!native) throw Object.assign(new Error('Adaptive Goal/Loop evaluation requires the signed-in desktop helper.'),
     { code: 'GOAL_EVALUATOR_UNAVAILABLE' });
   const scope = accountScope(deps);
-  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil);
+  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil, true, scope.cooldownReason);
   assertGoalCurrent(deps);
   const result = await native({ action: 'evaluate', packet,
     workId: packet?.evidence?.workId, expectedGoalRevision: packet?.expectedRevision,
@@ -761,7 +774,8 @@ async function evaluateGoalHelper(packet, deps = {}) {
     ...(deps.tunnelId ? { tunnelId: deps.tunnelId } : {}) }, { signal: deps.signal });
   if (result?.status === 429) throw rememberRateLimit(Object.assign(
     protocolFailure('/backend-api/conversation/evaluate', 429, result.retryAfterMs),
-    { deferred: true, notSent: result.notSent === true }), deps);
+    { deferred: true, notSent: result.notSent === true,
+      rateLimitReason: result.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream' }), deps);
   return result;
 }
 

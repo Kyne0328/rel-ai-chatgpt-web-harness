@@ -1093,11 +1093,12 @@ function createBrowserSurfaceHost(options = {}) {
     const now = Date.now();
     let limit = goalProtocolLimits.get(account.directory);
     if (!limit) { limit = { reads: [], until: 0, count: 0 }; goalProtocolLimits.set(account.directory, limit); }
-    if (limit.until > now) return { ok: false, status: 429, retryAfterMs: limit.until - now, deferred: true, notSent: true };
+    if (limit.until > now) return { ok: false, status: 429, retryAfterMs: limit.until - now,
+      deferred: true, notSent: true, rateLimitReason: 'upstream' };
     if (!consume) return null;
     limit.reads = limit.reads.filter(time => time > now - 60_000);
     if (limit.reads.length >= 30) return { ok: false, status: 429,
-      retryAfterMs: limit.reads[0] + 60_000 - now, deferred: true, notSent: true };
+      retryAfterMs: limit.reads[0] + 60_000 - now, deferred: true, notSent: true, rateLimitReason: 'read_budget' };
     limit.reads.push(now);
     return null;
   }

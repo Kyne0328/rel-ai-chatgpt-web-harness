@@ -1755,6 +1755,36 @@ test('detection preserves a sanitized read error without storing upstream payloa
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('local browser read limits retain their cause across restart without consuming retries', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, conversationId: '', conversationCorrelation: 'opaque', retryCount: 0 });
+    let reads = 0;
+    const limited = { nativeTransport: async () => {
+      reads++;
+      return { ok: false, status: 429, deferred: true, rateLimitReason: 'read_budget', retryAfterMs: 10_000 };
+    } };
+    await pollGoal(f.config, f.work_id, limited);
+    assert.equal(f.status().retryCount, 0);
+    assert.match(f.status().error, /Rel\.AI.*read budget/);
+    assert.equal(f.status().nextAttemptAt, Date.now() + 10_000);
+    const task = { work_id: 'local-budget-restart', objective: 'Automatic discovery' };
+    const context = { connector: true, principal: 'monitor-fixture', conversationId: 'opaque' };
+    const restarted = { task: { status: 'planning' }, nativeTransport: async () => {
+      reads++;
+      return { ok: true, data: { items: [] } };
+    } };
+    queueGoalDetection(f.config, task, context, restarted);
+    await checkGoalDetection(f.config, task.work_id, restarted);
+    const status = goalStatus(f.config, { work_id: task.work_id }, context);
+    assert.equal(reads, 1);
+    assert.equal(status.chatLink.state, 'rate_limited');
+    assert.equal(status.chatLink.rateLimitReason, 'read_budget');
+    assert.match(status.error, /Rel\.AI.*read budget/);
+    assert.equal(status.nextAttemptAt, Date.now() + 10_000);
+    stopGoal(f.config, { work_id: task.work_id }, context);
+  });
+});
+
 test('native sender rate limits preserve whether Send may already have happened', async t => {
   for (const notSent of [true, false]) await withMonitoredGoal(t, async f => {
     const deps = { nativeTransport: async payload => {
@@ -2175,13 +2205,12 @@ test('automatic discovery resumes beyond the first ten chats and keeps each roun
   assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
   assert.equal(calls.some(url => url.includes('offset=20')), false);
   assert.equal(calls.filter(url => url.includes('/conversation/')).length, 10);
-  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
   const restarted = { ...deps, discovery: structuredClone(deps.discovery), fetch: url => fetch(url) };
   const match = await findRecentGoalCommand(restarted);
   assert.equal(match.state, 'matched');
   assert.equal(match.conversationId, ID);
-  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 22,
-    'two bounded batches plus the final receipt and fresh verification');
+  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 12,
+    'pagination must preserve the first batch instead of reading those chats twice');
 });
 
 test('versioned linking refuses duplicate recent receipts and never selects a first match', async () => {

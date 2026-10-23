@@ -417,6 +417,28 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
 }
 
 {
+  const directory = path.join(os.tmpdir(), 'relai-goal-local-budget-fixture');
+  mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const { host, pathSessions } = createHarness({ goalLoginProfileDirectory: directory });
+  await host.startGoalLogin();
+  const goalSession = pathSessions.get(path.resolve(directory));
+  goalSession.authenticated = true;
+  for (let read = 0; read < 30; read++) {
+    assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).ok, true);
+  }
+  const requests = goalSession.requests.length;
+  const limited = await host.goalProtocolRequest({ path: '/backend-api/conversations' });
+  assert.equal(limited.rateLimitReason, 'read_budget');
+  assert.equal(limited.deferred, true);
+  assert.equal(limited.retryAfterMs, 60_000);
+  assert.equal(goalSession.requests.length, requests, 'a local budget wait must not contact ChatGPT');
+  mock.timers.tick(60_000);
+  assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).ok, true);
+  await host.closeAll();
+  mock.timers.reset();
+}
+
+{
   const tunnelId = 'tunnel_refresh12345';
   const { host, pathSessions, events } = createHarness({
     goalLoginProfileDirectory: path.join(os.tmpdir(), 'relai-goal-refresh-fixture'),

@@ -1184,6 +1184,20 @@ async function case_ui_list_ordering_unit() {
 }
 await case_ui_list_ordering_unit();
 
+{
+  const assert = (await import('node:assert/strict')).default;
+  const { goalModeNotice } = await import('../src/ui/features/sessions/model.js');
+  const goal = { state: 'rate_limited', goalActive: true, retryCount: 0, maxRetries: 5,
+    error: 'Chat linking will resume automatically after the cooldown.' };
+  const notice = goalModeNotice(goal);
+  assert.equal(notice.waiting, true);
+  assert.equal(notice.message, goal.error, 'cooldown waits must not be presented as failed retries');
+  assert.equal(goalModeNotice({ ...goal, state: 'retrying', retryCount: 2 }).message,
+    `Goal Mode retry 2/5: ${goal.error}`, 'actual retries must retain their count');
+  assert.equal(goalModeNotice(), null);
+  assert.equal(goalModeNotice(null), null);
+}
+
 // Extension source mutations must invalidate the normal route's cached snapshot.
 async function case_extension_source_cache_unit() {
   const assert = (await import('node:assert/strict')).default;

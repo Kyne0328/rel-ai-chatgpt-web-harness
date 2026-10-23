@@ -221,7 +221,7 @@ async function checkGoalDetection(config, workId, deps = {}) {
       return;
     }
     const attempts = record.attempts + 1;
-    saveDetection(config, { ...record, attempts, discoveryScan: deps.discovery?.scan || null,
+    saveDetection(config, { ...record, attempts, rateLimitUntil: 0, discoveryScan: deps.discovery?.scan || null,
       state: match.state === 'ambiguous' ? 'ambiguous'
         : deps.discovery?.notRequested || !deps.linkId && attempts >= DETECTION_MAX_ATTEMPTS ? 'not_requested' : 'checking',
       error: match.state === 'ambiguous' ? 'Multiple matching ChatGPT conversations or Project names; linking refused.'
@@ -231,11 +231,14 @@ async function checkGoalDetection(config, workId, deps = {}) {
     if (!controller.signal.aborted) {
       const transient = error?.deferred || error?.status === 429;
       const attempts = record.attempts + (transient ? 0 : 1);
-      saveDetection(config, { ...record, attempts, discoveryScan: deps.discovery?.scan || record.discoveryScan || null,
+      saveDetection(config, { ...record, attempts, rateLimitUntil: transient ? Number(error.retryAt || 0) : 0,
+        rateLimitReason: error.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream',
+        discoveryScan: deps.discovery?.scan || record.discoveryScan || null,
         state: error?.status === 401 ? 'needs_auth'
           : !deps.linkId && !transient && attempts >= DETECTION_MAX_ATTEMPTS ? 'unavailable' : 'checking',
         error: detectionError(error),
-        nextAttemptAt: Math.max(Number(error?.retryAt || 0), Date.now() + (deps.linkId ? RETRY_DELAYS_MS[attempts - 1] || DISCOVERY_RETRY_MS : DISCOVERY_RETRY_MS)) });
+        nextAttemptAt: transient && error.retryAt ? Math.max(Number(error.retryAt), Date.now() + 1_000)
+          : Date.now() + (deps.linkId ? RETRY_DELAYS_MS[attempts - 1] || DISCOVERY_RETRY_MS : DISCOVERY_RETRY_MS) });
     }
   } finally {
     activeDetections.delete(workId);
@@ -243,8 +246,10 @@ async function checkGoalDetection(config, workId, deps = {}) {
 }
 
 function detectionError(error) {
+  if (error?.rateLimitReason === 'read_budget') return 'Rel.AI account read budget reached. Chat linking will resume automatically in the next read window.';
+  if (error?.status === 429) return 'ChatGPT account requests are rate limited (HTTP 429). Chat linking will resume automatically after the cooldown.';
   if (Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599) {
-    return `ChatGPT goal discovery failed (HTTP ${error.status}).${error.status === 429 ? ' Waiting for the account cooldown.' : ''}`;
+    return `ChatGPT goal discovery failed (HTTP ${error.status}).`;
   }
   if (error?.name === 'TimeoutError') return 'ChatGPT goal discovery timed out.';
   if (error?.code === 'GOAL_ACCOUNT_UNAVAILABLE') return 'The configured ChatGPT Goal Mode account is unavailable.';
@@ -263,12 +268,13 @@ function coordinatedGoalDeps(config, record, deps) {
     chatgptProjectId: record.chatgptProjectId || '',
     ...(link ? { linkId: link.linkId, issuedAt: link.issuedAt } : {}),
     tunnelId: record.tunnelId || '', cooldownUntil: limit.until || 0,
-    rateLimitCount: limit.count || 0,
+    rateLimitCount: limit.count || 0, rateLimitReason: limit.reason || 'upstream',
     onRateLimit: value => withStateDatabase(config, db => {
       const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
       const old = row ? JSON.parse(row.value) : {};
       db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-        .run(key, JSON.stringify({ until: Math.max(old.until || 0, value.until), count: value.count }));
+        .run(key, JSON.stringify({ until: Math.max(old.until || 0, value.until), count: value.count,
+          reason: value.until >= (old.until || 0) ? value.reason : old.reason || 'upstream' }));
     }, { transaction: true }) };
 }
 
@@ -638,9 +644,10 @@ function goalStatus(config, args, context) {
 function publicDetection(pending) {
   return { ok: true, work_id: pending.workId, goalActive: false, state: pending.state,
     tunnelId: pending.tunnelId || '', attempts: pending.attempts, nextAttemptAt: pending.nextAttemptAt,
-    chatLink: { state: pending.state === 'checking' ? 'finding_chat'
+    chatLink: { state: pending.state === 'checking' ? pending.rateLimitUntil > Date.now() ? 'rate_limited' : 'finding_chat'
       : pending.state === 'needs_auth' ? 'waiting_for_account'
-        : pending.state === 'ambiguous' ? 'conflicting_matches' : 'needs_attention' },
+        : pending.state === 'ambiguous' ? 'conflicting_matches' : 'needs_attention',
+      ...(pending.rateLimitUntil > Date.now() ? { rateLimitReason: pending.rateLimitReason || 'upstream' } : {}) },
     ...(pending.error ? { error: pending.error } : {}) };
 }
 
@@ -778,6 +785,7 @@ function publicGoal(goal) {
       : goal.authRequired || goal.state === 'needs_auth' ? 'waiting_for_account'
         : goal.state === 'rate_limited' ? 'rate_limited'
           : goal.active ? 'finding_chat' : 'needs_attention',
+      ...(goal.state === 'rate_limited' ? { rateLimitReason: goal.rateLimitReason || 'upstream' } : {}),
       ...(goal.binding ? { version: goal.binding.version, verifiedAt: goal.binding.verifiedAt,
         conversationUrl: 'https://chatgpt.com/c/' + goal.conversationId } : {}) },
     ...(goal.tunnelId ? { tunnelId: goal.tunnelId } : {}),
@@ -839,12 +847,13 @@ function retryGoal(config, goal, error, { notSent = false } = {}) {
     ...(notSent && goal.pendingOutcome !== 'accepted'
       ? { pendingNode: '', pendingOutcome: 'not_sent', pendingPrompt: '' } : {}),
     active: !exhausted, state: exhausted ? (error?.status === 401 ? 'needs_auth' : 'paused')
-      : error?.status === 429 ? 'rate_limited'
+      : error?.status === 429 || error?.rateLimitReason === 'read_budget' ? 'rate_limited'
       : !notSent && goal.pendingNode ? 'verifying' : 'retrying',
     retryCount: exhausted || error?.deferred ? count : count + 1,
     nextAttemptAt: exhausted ? 0 : Math.max(Number(error?.retryAt || 0),
       Date.now() + (error?.deferred ? RETRY_DELAYS_MS[0] : RETRY_DELAYS_MS[count])),
     challenge: error?.challenge || null,
+    rateLimitReason: error?.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream',
     authRequired: error?.status === 401,
     error: exhausted ? `Automatic continuation stopped after five retries: ${reason}` : reason, updatedAt: Date.now()
   });
@@ -857,11 +866,12 @@ function deferGoalDiscovery(config, goal, deps, error = null) {
   if (terminal) return saveGoal(config, { ...goal, active: false, ...terminal, updatedAt: Date.now() });
   const count = Number(goal.retryCount || 0);
   return saveGoal(config, { ...goal, discoveryScan: deps.discovery?.scan || null,
+    rateLimitReason: error?.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream',
     active: error?.status !== 401, state: error?.status === 401 ? 'needs_auth'
-      : error?.status === 429 ? 'rate_limited' : 'linking',
+      : error?.status === 429 || error?.deferred ? 'rate_limited' : 'linking',
     retryCount: error?.deferred || error?.status === 429 ? count : Math.min(count + 1, MAX_RETRIES),
-    nextAttemptAt: error?.status === 401 ? 0 : Math.max(Number(error?.retryAt || 0),
-      Date.now() + (RETRY_DELAYS_MS[count] || DISCOVERY_RETRY_MS)),
+    nextAttemptAt: error?.status === 401 ? 0 : error?.retryAt ? Math.max(Number(error.retryAt), Date.now() + 1_000)
+      : Date.now() + (RETRY_DELAYS_MS[count] || DISCOVERY_RETRY_MS),
     authRequired: error?.status === 401,
     error: error ? detectionError(error) : 'Waiting for the task receipt; chat discovery will continue automatically.',
     updatedAt: Date.now() });

@@ -17,6 +17,7 @@ import { StatusPill as UnifiedStatusPill } from '../../components/pill.js';
 import { statusPillClass } from '../../status-tone.js';
 import {
   isOngoingSession,
+  goalModeNotice,
   mergeSessionDetail,
   mergeSessionEvents,
   operationForTool,
@@ -44,7 +45,9 @@ function chatLinkLabel(goal) {
     waiting_for_account: 'Chat linking is waiting for ChatGPT sign-in.', rate_limited: 'Chat linking is waiting for the account cooldown.',
     conflicting_matches: 'Multiple chats contain this task receipt. Automatic linking is paused.',
     needs_attention: 'Chat linking needs attention.' };
-  const label = labels[goal.chatLink.state] || 'Verifying the ChatGPT conversation…';
+  const label = goal.chatLink.state === 'rate_limited' && goal.chatLink.rateLimitReason === 'read_budget'
+    ? 'Chat linking is waiting for Rel.AI’s next account read window.'
+    : labels[goal.chatLink.state] || 'Verifying the ChatGPT conversation…';
   return goal.nextAttemptAt ? `${label} Next check: ${new Date(goal.nextAttemptAt).toLocaleTimeString()}.` : label;
 }
 const TASK_HISTORY_PAGE_SIZE = 100;
@@ -601,6 +604,7 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
   const [controlKey, setControlKey] = useState('');
   useEffect(() => { setControlKey(''); }, [id]);
   const activeGoal = session.goalMode?.goalActive === true;
+  const goalNotice = goalModeNotice(session.goalMode);
   const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
   const controlTask = useCallback(async (action, operationId = '') => {
     const key = operationId ? `stop:${operationId}` : action;
@@ -695,11 +699,9 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         !session.goalMode.goalActive && session.goalMode.error
           ? h('p', { className: 'connection-notice', role: 'status' }, session.goalMode.error) : null
       ) : null,
-      ['paused', 'retrying', 'verifying', 'needs_auth', 'rate_limited'].includes(session.goalMode?.state) && session.goalMode.error
-        ? h('p', { className: 'connection-notice bad', role: 'status', 'data-goal-pause': '' },
-          session.goalMode.goalActive
-            ? `Goal Mode retry ${session.goalMode.retryCount}/${session.goalMode.maxRetries}: ${session.goalMode.error}`
-            : session.goalMode.error)
+      goalNotice
+        ? h('p', { className: goalNotice.waiting ? 'connection-notice' : 'connection-notice bad',
+          role: 'status', 'data-goal-pause': '' }, goalNotice.message)
         : null,
       h(PlanSection, { plan: session.plan }),
       h('div', { className: 'task-detail-grid task-detail-facts' },
