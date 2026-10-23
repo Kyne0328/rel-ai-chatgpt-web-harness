@@ -145,7 +145,7 @@ try {
   assert.equal(directoryBound.fileCount, 0);
   assert.ok(directoryBound.reasons.includes('entry-limit'));
 
-  const task = await callTool('relai_work', {
+  const task = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'benchmark', title: 'Measure isolated Git overhead',
     steps: [{ title: 'Measure fixture commands', status: 'in_progress' }], bootstrap: 'none'
   }, context);

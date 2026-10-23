@@ -73,7 +73,7 @@ try {
   assert.equal(Object.hasOwn(status.toolSurface || {}, 'compatibilityAliases'), false);
   requestId += 1;
 
-  client.call(requestId, 'relai_work', { action: 'begin', workspace: 'repo' });
+  client.call(requestId, 'relai_work', { mode: 'normal', action: 'begin', workspace: 'repo' });
   const task = structuredContentOf(await client.waitFor(requestId));
   requestId += 1;
 

@@ -43,11 +43,11 @@ try {
   const workspace = { alias: 'app', path: workspaceRoot };
   await assert.rejects(() => startManagedProcess(workspace, config, { ...startArgs, lifecycle: 'task' }),
     error => error.code === 'PROCESS_TASK_LIFETIME_REQUIRES_WORK_ID');
-  const projectless = await callTool('relai_work', { action: 'begin', bootstrap: 'none', title: 'Projectless process guard fixture' });
+  const projectless = await callTool('relai_work', { mode: 'normal', action: 'begin', bootstrap: 'none', title: 'Projectless process guard fixture' });
   await assert.rejects(() => callTool('relai_process', { ...startArgs, work_id: projectless.work_id, lifecycle: 'task' }),
     error => error.code === 'PROCESS_TASK_WORKSPACE_REQUIRED');
-  const first = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Finish lifetime fixture' });
-  const second = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Cancel lifetime fixture' });
+  const first = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Finish lifetime fixture' });
+  const second = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Cancel lifetime fixture' });
   const persistent = await callTool('relai_process', { ...startArgs, work_id: first.work_id });
   const owned = await callTool('relai_process', { ...startArgs, work_id: first.work_id, lifecycle: 'task' });
   assert.notEqual(owned.processId, persistent.processId, 'task lifetime must never adopt an existing persistent service');
@@ -111,7 +111,7 @@ try {
   await assert.rejects(() => cleanupTaskManagedProcesses(config, 'app', first.work_id, { ...ownerContext, taskId: second.work_id }),
     error => error.code === 'PROCESS_SESSION_MISMATCH');
 
-  const blockedTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Unconfirmed cleanup fixture' });
+  const blockedTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Unconfirmed cleanup fixture' });
   synthetic('b', { workSessionId: blockedTask.work_id, processCreationIdentity: 'unverified-cleanup-fixture' });
   const blockedFinish = await callTool('relai_work', { action: 'finish', workspace: 'app', work_id: blockedTask.work_id, summary: 'Must not falsely finish.' });
   assert.equal(blockedFinish.ok, false);
@@ -122,7 +122,7 @@ try {
   assert.equal(blockedCancel.processCleanup.complete, false, 'cancellation must preserve unresolved cleanup diagnostics');
   assert.equal(isProcessTreeAlive(persistent.pid), true);
 
-  const startupTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Startup race fixture' });
+  const startupTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Startup race fixture' });
   const startupController = new AbortController();
   const startupContext = { ...ownerContext, taskId: startupTask.work_id, signal: startupController.signal };
   const pendingStart = startManagedProcess(workspace, config, {
@@ -145,7 +145,7 @@ try {
   assert.equal(afterRace.terminationConfirmed, true, 'startup failure cleanup must preserve a concurrent confirmed stop');
   assert.equal(afterRace.status, 'stopped');
 
-  const naturalTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Natural root fixture' });
+  const naturalTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Natural root fixture' });
   const naturalPersistent = await startManagedProcess(workspace, config, {
     ...startArgs, purpose: 'Natural persistent root exit proof.',
     argv: ['-e', 'process.stdin.once("data", () => process.exit(0)); setInterval(() => {}, 1000)']

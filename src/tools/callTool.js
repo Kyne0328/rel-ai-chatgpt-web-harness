@@ -1,3 +1,4 @@
+import { validateWorkMode } from '../goalCommands.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fromJsonSchema } from '@modelcontextprotocol/server';
@@ -106,6 +107,7 @@ async function callToolObserved(name, args = {}, context = {}) {
     operationName = resolved.operationName;
     resolvedAction = resolved.action || '';
     effectiveArgs = resolved.operationArgs;
+    if (operationName === OP.WORK_BEGIN) validateWorkMode(effectiveArgs);
     const optionalIntegrity = taskBookkeepingOptionalFor(operationName, effectiveArgs, definition);
     if (effectiveArgs?.taskProgress !== undefined) {
       taskProgressPatch = effectiveArgs.taskProgress;

@@ -43,7 +43,7 @@ async function invoke(name, args, context = {}) {
 }
 
 try {
-  const localMissing = await invoke('relai_work', { action: 'begin', title: 'Projectless local recovery goal' }, { publicHttpOnly: true });
+  const localMissing = await invoke('relai_work', { mode: 'normal', action: 'begin', title: 'Projectless local recovery goal' }, { publicHttpOnly: true });
   assert.equal(localMissing.isError, false);
   assert.equal(localMissing.structuredContent.workspace, undefined, 'work.begin must not require selecting a configured workspace');
   assert.ok(localMissing.structuredContent.work_id);
@@ -57,7 +57,7 @@ try {
     })
   };
 
-  const restrictedMissing = await invoke('relai_work', { action: 'begin', title: 'Restricted projectless recovery goal' }, {
+  const restrictedMissing = await invoke('relai_work', { mode: 'normal', action: 'begin', title: 'Restricted projectless recovery goal' }, {
     publicHttpOnly: true,
     principal: restrictedPrincipal
   });
@@ -70,7 +70,7 @@ try {
     reason: 'restricted recovery test cleanup'
   }, { publicHttpOnly: true, principal: restrictedPrincipal });
 
-  const restrictedUnknown = await invoke('relai_work', { action: 'begin', workspace: 'typo-repo' }, {
+  const restrictedUnknown = await invoke('relai_work', { mode: 'normal', action: 'begin', workspace: 'typo-repo' }, {
     publicHttpOnly: true,
     principal: restrictedPrincipal
   });
@@ -94,7 +94,7 @@ try {
   assert.equal(snapshotUnknown.structuredContent.errorCode, 'WORKSPACE_NOT_CONFIGURED');
   assert.deepEqual(snapshotUnknown.structuredContent.errorDetails.workspaceAliases, ['repo']);
 
-  const unauthorizedKnown = await invoke('relai_work', { action: 'begin', workspace: 'other' }, {
+  const unauthorizedKnown = await invoke('relai_work', { mode: 'normal', action: 'begin', workspace: 'other' }, {
     publicHttpOnly: true,
     principal: restrictedPrincipal
   });
@@ -102,7 +102,7 @@ try {
   assert.equal(unauthorizedKnown.structuredContent.errorCode, 'AUTHORIZATION_DENIED');
   assert.equal(unauthorizedKnown.structuredContent.errorDetails.workspaceAliases, undefined);
 
-  const anonymousMissing = await invoke('relai_work', { action: 'begin' }, {
+  const anonymousMissing = await invoke('relai_work', { mode: 'normal', action: 'begin' }, {
     publicHttpOnly: true,
     principal: undefined
   });
@@ -110,7 +110,7 @@ try {
   assert.equal(anonymousMissing.structuredContent.errorCode, 'AUTHORIZATION_DENIED');
   assert.equal(anonymousMissing.structuredContent.errorDetails.workspaceAliases, undefined);
 
-  const recovered = await invoke('relai_work', { action: 'begin', workspace: 'repo', bootstrap: 'none' }, {
+  const recovered = await invoke('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', bootstrap: 'none' }, {
     publicHttpOnly: true,
     principal: restrictedPrincipal
   });

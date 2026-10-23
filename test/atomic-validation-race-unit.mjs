@@ -67,7 +67,7 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 const context = { publicHttpOnly: true };
 
 async function startTask(title) {
-  const result = await callTool('relai_work', {
+  const result = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'app',
     bootstrap: 'none',

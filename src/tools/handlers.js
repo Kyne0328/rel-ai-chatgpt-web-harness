@@ -11,8 +11,9 @@ import { workspaceHistory } from './history.ts';
 import { relaiStatus } from './status.js';
 import { completeTask } from './completion.js';
 import { cancelTask, stopTaskOperations } from './cancellation.js';
-import { activateGoal, queueGoalDetection, goalStatus, stopGoal, pauseGoal, resumeGoal, updateGoal } from '../chatgptGoalMode.js';
-import { ensureChatLink } from '../chatgptGoalState.js';
+import { activateGoal, goalStatus, stopGoal, pauseGoal, resumeGoal, updateGoal } from '../chatgptGoalMode.js';
+import { acceptNormalWorkMode, ensureChatLink, loadGoal } from '../chatgptGoalState.js';
+import { validateWorkMode } from '../goalCommands.js';
 import { relaiSearch } from '../bridge/search.js';
 import { relaiCodeInspect } from '../bridge/codeIntelligence.js';
 import { relaiExec } from '../bridge/exec.js';
@@ -44,11 +45,7 @@ function resolveOptionalWorkspace(config, args = {}) {
 }
 
 const startTaskHandler = async (config, args = {}, context = {}) => {
-  const goalOptions = ['mode', 'strategy', 'successCriteria', 'brief'].some(key => args[key] !== undefined);
-  if (goalOptions && args.goal !== true && !args.mode) {
-    throw new Error('Goal/Loop configuration requires an explicit mode or goal:true.');
-  }
-  if (args.goal === false && goalOptions) throw new Error('goal:false cannot enable Goal/Loop configuration.');
+  const mode = validateWorkMode(args);
   const workspace = resolveOptionalWorkspace(config, args);
   const task = startTask(workspace, args);
   const recovered = context?.requestTaskContext?.session;
@@ -58,17 +55,24 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   const initialSteps = Array.isArray(args.steps) && args.steps.length ? args.steps : defaultTaskSteps(args);
   const progress = hasPlan ? null : applyTaskProgressPatch(task.work_id, { steps: initialSteps });
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
-  const chatLink = ensureChatLink(config, task.work_id, context);
-  if (args.goal === true || args.mode) {
-    activateGoal(config,
+  let chatLink;
+  let modeAcknowledgement;
+  if (mode !== 'normal') {
+    const existing = loadGoal(config, task.work_id);
+    if (existing && existing.mode !== mode) throw new Error('Use goal_update with this exact work_id to change its monitoring mode.');
+    const goal = existing ? goalStatus(config, { work_id: task.work_id }, context) : activateGoal(config,
       { ...args, work_id: task.work_id, objective: args.objective || current?.objective || args.title,
-        ...(args.mode && !args.strategy ? { strategy: 'adaptive' } : {}) },
+        ...(!args.strategy ? { strategy: args.goal === true ? 'fixed' : 'adaptive' } : {}) },
       { ...context, requestTaskContext: { session: current || { ...task, status: 'planning', workspace: workspace?.alias || '', objective: args.objective || args.title } } });
+    chatLink = ensureChatLink(config, task.work_id, context);
+    modeAcknowledgement = { requested: mode, effective: goal.mode,
+      readiness: goal.modeAcknowledgement.readiness };
   } else {
-    queueGoalDetection(config, task, { ...context, chatgptProjectName: args.chatgptProjectName });
+    modeAcknowledgement = acceptNormalWorkMode(config, task.work_id, context);
   }
   return {
     ...task,
+    modeAcknowledgement,
     ...(chatLink ? { chat_link: chatLink } : {}),
     plan: progress?.plan || current?.plan,
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),

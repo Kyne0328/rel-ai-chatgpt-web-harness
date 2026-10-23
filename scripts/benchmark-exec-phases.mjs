@@ -42,7 +42,7 @@ try {
 
   const context = { principal: 'local:trusted', publicHttpOnly: true, transportType: 'benchmark' };
   const beginStart = performance.now();
-  const task = await rawCallTool('relai_work', { action: 'begin', workspace: 'bench', bootstrap: 'compact' }, context);
+  const task = await rawCallTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'bench', bootstrap: 'compact' }, context);
   const beginWallMs = performance.now() - beginStart;
   const beginResponseBytes = Buffer.byteLength(JSON.stringify(task), 'utf8');
   const workId = task.work_id;

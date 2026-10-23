@@ -105,7 +105,7 @@ function workBeginMessage(id) {
     method: 'tools/call',
     params: {
       name: 'relai_work',
-      arguments: {
+      arguments: { mode: 'normal',
         action: 'begin',
         workspace: 'app',
         title: 'Replay-safe start',

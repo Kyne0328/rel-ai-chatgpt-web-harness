@@ -92,8 +92,8 @@ try {
   process.env.REL_AI_MCP_CONFIG = configPath;
   resetToolActivity();
 
-  const taskA = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Branch writer A' });
-  const taskB = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Branch writer B' });
+  const taskA = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Branch writer A' });
+  const taskB = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Branch writer B' });
 
   const firstStarted = waitForFile(startedPath);
   const firstSwitch = callTool('relai_exec', {

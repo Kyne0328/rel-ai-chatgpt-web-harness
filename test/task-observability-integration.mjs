@@ -50,7 +50,7 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 try {
   const context = { publicHttpOnly: true, requestId: 'request-1', serverInstanceId: 'server-1', transportType: 'streamable-http', conversationId: 'task-observability-chat' };
 
-  const taskArgs = {
+  const taskArgs = { mode: 'normal',
     action: 'begin',
     workspace: 'repo',
     title: 'Inspect session activity model',
@@ -105,7 +105,7 @@ try {
   assert.match(session.events[0]?.summary, /Started logical task/);
 
   await flushTaskHistoryPersistence();
-  const contextual = await callTool('relai_work', {
+  const contextual = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'repo',
     title: 'Review session persistence',

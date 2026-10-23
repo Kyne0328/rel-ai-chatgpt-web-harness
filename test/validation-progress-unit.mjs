@@ -56,7 +56,7 @@ try {
   async function startTask(label) {
     resetToolActivity();
     events.length = 0;
-    return callTool('relai_work', { action: 'begin', workspace: 'app', title: label }, context);
+    return callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', title: label }, context);
   }
 
   function sequence(taskId) {

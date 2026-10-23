@@ -145,7 +145,7 @@ try {
   const help = await readResourceText(primarySession, 14, 'relai://server/help');
   assert.ok(help.includes(`version: ${applicationVersion}`));
 
-  const started = await callTool(primarySession, 15, 'relai_work', {
+  const started = await callTool(primarySession, 15, 'relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'acceptance',
     title: 'Packaged connector acceptance',

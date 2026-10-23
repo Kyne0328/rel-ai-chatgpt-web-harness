@@ -37,8 +37,8 @@ const callTool = (name, args) => rawCallTool(name, args, {
 });
 
 try {
-  const blocker = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' });
-  const finisher = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' });
+  const blocker = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' });
+  const finisher = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' });
 
   const activeMutation = callTool('relai_exec', {
     workspace: 'app',

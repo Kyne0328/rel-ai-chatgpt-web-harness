@@ -384,7 +384,7 @@ try {
     const lookup = await relaiStatus(config, { workspace: 'app', operationId: body.operationId }, { connector: true, principal });
     assert.equal(lookup.errorCode, undefined);
   }
-  const begin = await handleTransportFallbackRequest(config, make('begin', { action: 'begin', workspace: 'app',
+  const begin = await handleTransportFallbackRequest(config, make('begin', { mode: 'normal', action: 'begin', workspace: 'app',
     title: 'Read recovery fixture', objective: 'Read one harmless fixture', steps: [{ title: 'Read fixture', status: 'in_progress' }] }, 'relai_work'),
     { ...options, synchronousFallbackGraceMs: 1000 });
   const workId = begin.body.result.structuredContent.work_id;

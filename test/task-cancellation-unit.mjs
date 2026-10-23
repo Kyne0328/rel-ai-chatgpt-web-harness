@@ -113,7 +113,7 @@ try {
   const { fallbackExecutionStatus, startFallbackExecution } = await import('../src/mcp/fallbackExecutions.js');
   resetToolActivity();
   const context = { publicHttpOnly: true, requestId: 'cancel-test' };
-  const started = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'Cancelable task' }, context);
+  const started = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', title: 'Cancelable task' }, context);
   assert.equal(started.status, 'planning');
   await callTool('relai_work', { action: 'plan', workspace: 'app', work_id: started.work_id,
     steps: [{ id: 'retain-output', title: 'Retain task output', status: 'in_progress' }] }, context);
@@ -189,7 +189,7 @@ try {
     workspace: 'app', work_id: started.work_id, reason: 'Retry'
   }, context);
   assert.equal(duplicate.duplicate, true);
-  const completedTask = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'Retained completed output' }, context);
+  const completedTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', title: 'Retained completed output' }, context);
   await callTool('relai_work', { action: 'plan', workspace: 'app', work_id: completedTask.work_id,
     steps: [{ id: 'retain-output', title: 'Retain task output', status: 'completed' }] }, context);
   const completedWriter = createOutputSpillWriter({ stateDir }, completedTask.work_id);

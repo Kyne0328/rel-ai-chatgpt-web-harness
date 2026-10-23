@@ -1,10 +1,11 @@
 // Durable Goal/Loop records share the existing state_meta namespace so upgrades
 // preserve stopped goals, spent counters and unresolved submission receipts.
 import { withStateDatabase } from './stateDatabase.ts';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { principalFingerprint } from './mcp/principal.ts';
 import { principalTunnelId } from './mcp/tunnelIdentity.js';
 import { goalContinuationPrompt } from './chatgptGoalProtocol.js';
+import { getStateDir } from './statePaths.js';
 
 const PREFIX = 'chatgpt_goal:';
 const LINK_PREFIX = 'chatgpt_goal_link:';
@@ -12,18 +13,65 @@ const LINK_PREFIX = 'chatgpt_goal_link:';
 // This receipt identifies a tool response, never authorizes task execution.
 function ensureChatLink(config, workId, context) {
   if (!context?.connector) return null;
+  return withStateDatabase(config, db => ensureChatLinkRow(db, workId, context), { transaction: true });
+}
+
+function ensureChatLinkRow(db, workId, context) {
   const owner = principalFingerprint(context.principal || 'anonymous');
   const tunnelId = principalTunnelId(context.principal);
+  const key = LINK_PREFIX + workId;
+  const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
+  const link = row ? JSON.parse(row.value) : {
+    workId, owner, tunnelId, issuedAt: Date.now(), linkId: randomBytes(24).toString('base64url')
+  };
+  if (link.owner !== owner || link.tunnelId !== tunnelId) throw new Error('Chat linking owner mismatch.');
+  if (!row) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(key, JSON.stringify(link));
+  return { version: 1, link_id: link.linkId };
+}
+
+function acceptNormalWorkMode(config, workId, context) {
+  // Acceptance receipts record requested intent. The goal row alone owns the
+  // effective monitoring mode; these receipts never drive scheduling.
+  const owner = principalFingerprint(context.principal || 'anonymous');
   return withStateDatabase(config, db => {
-    const key = LINK_PREFIX + workId;
+    if (readGoalRow(db, workId)) throw new Error('This task already has Goal/Loop intent. Use its exact lifecycle controls instead of restarting it as normal.');
+    const key = 'work_mode:' + workId;
     const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
-    const link = row ? JSON.parse(row.value) : {
-      workId, owner, tunnelId, issuedAt: Date.now(), linkId: randomBytes(24).toString('base64url')
-    };
-    if (link.owner !== owner || link.tunnelId !== tunnelId) throw new Error('Chat linking owner mismatch.');
-    if (!row) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(key, JSON.stringify(link));
-    return { version: 1, link_id: link.linkId };
+    if (row && JSON.parse(row.value).owner !== owner) throw new Error('Work mode owner mismatch.');
+    db.prepare('INSERT OR IGNORE INTO state_meta(key,value) VALUES(?,?)')
+      .run(key, JSON.stringify({ workId, owner, requestedMode: 'normal', acceptedAt: Date.now() }));
+    return { requested: 'normal', effective: 'normal', readiness: 'ready' };
   }, { transaction: true });
+}
+
+// This is derived discovery evidence, never task or authorization authority.
+// One lease per owner/tunnel serializes catalogue and candidate reads across
+// service processes. The lease token prevents a late owner overwriting a scan.
+function goalDiscoveryStore(config, record) {
+  const key = 'chatgpt_goal_discovery:' + record.owner + ':' + (record.tunnelId || 'local');
+  const read = db => {
+    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
+    return row ? JSON.parse(row.value) : {};
+  };
+  return {
+    key: getStateDir(config) + ':' + key,
+    read: () => withStateDatabase(config, read, { readonly: true, missingValue: {} }),
+    claim: () => withStateDatabase(config, db => {
+      const current = read(db);
+      if (current.lease?.until > Date.now()) return { retryAt: current.lease.until };
+      const token = randomUUID();
+      db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .run(key, JSON.stringify({ ...current, lease: { token, until: Date.now() + 180_000 } }));
+      return { token, state: current };
+    }, { transaction: true }),
+    save: (token, value) => withStateDatabase(config, db => {
+      const current = read(db);
+      if (current.lease?.token !== token) return false;
+      db.prepare('UPDATE state_meta SET value=? WHERE key=?')
+        .run(JSON.stringify({ ...value, lease: null }), key);
+      return true;
+    }, { transaction: true })
+  };
 }
 
 function readChatLink(config, record) {
@@ -35,14 +83,10 @@ function readChatLink(config, record) {
 }
 
 
-function commitGoalBinding(config, goal, match, { detection = false } = {}) {
+function commitGoalBinding(config, goal, match) {
   return withStateDatabase(config, db => {
     const row = readGoalRow(db, goal.workId);
-    const detectionKey = 'chatgpt_goal_detection:' + goal.workId;
-    if (detection) {
-      const pending = db.prepare('SELECT value FROM state_meta WHERE key=?').get(detectionKey);
-      if (row || !pending || JSON.parse(pending.value).state !== 'checking') return null;
-    } else if (!row?.goal.active || row.goal.revision !== goal.revision) return null;
+    if (!row?.goal.active || row.goal.revision !== goal.revision) return null;
     const linkRow = db.prepare('SELECT value FROM state_meta WHERE key=?').get(LINK_PREFIX + goal.workId);
     const link = linkRow ? JSON.parse(linkRow.value) : null;
     if (link && (link.owner !== goal.owner || link.tunnelId !== (goal.tunnelId || ''))) return null;
@@ -57,7 +101,6 @@ function commitGoalBinding(config, goal, match, { detection = false } = {}) {
       ...(match.projectId ? { chatgptProjectId: match.projectId } : {}),
       binding, discoveryScan: null, state: 'monitoring', error: '', retryCount: 0, nextAttemptAt: 0, updatedAt: Date.now() });
     if (!claim) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(claimKey, goal.workId);
-    if (detection) db.prepare('DELETE FROM state_meta WHERE key=?').run(detectionKey);
     return saved;
   }, { transaction: true });
 }
@@ -156,7 +199,22 @@ function writeGoalRow(db, row, goal, options = {}) {
 
 function saveGoal(config, goal, options = {}) {
   if (!goal || !String(goal.workId || '').trim()) throw new Error('Goal work ID is required.');
-  return withStateDatabase(config, db => writeGoalRow(db, readGoalRow(db, goal.workId), goal, options),
+  return withStateDatabase(config, db => {
+    const previous = readGoalRow(db, goal.workId);
+    const saved = writeGoalRow(db, previous, goal, options);
+    if (options.activationContext) {
+      if (!saved || saved.revision !== (previous?.goal.revision || 0) + 1) {
+        throw new Error('Goal activation changed concurrently; inspect this work_id before retrying.');
+      }
+      if (options.activationContext.connector) ensureChatLinkRow(db, goal.workId, options.activationContext);
+      const key = 'work_mode:' + goal.workId;
+      const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
+      if (row && JSON.parse(row.value).owner !== goal.owner) throw new Error('Work mode owner mismatch.');
+      db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+        .run(key, JSON.stringify({ workId: goal.workId, owner: goal.owner, requestedMode: goal.mode, acceptedAt: Date.now() }));
+    }
+    return saved;
+  },
     { transaction: true });
 }
 
@@ -257,4 +315,4 @@ function recordGoalCompletionRequest(config, workId, completion, options = {}) {
   }, { transaction: true });
 }
 
-export { ensureChatLink, readChatLink, commitGoalBinding, goalKey, normalizeGoalRecord, loadGoal, listGoals, saveGoal, updateGoal, claimContinuation, clearUnsentContinuation, recordLoopMilestone, recordGoalCompletionRequest };
+export { acceptNormalWorkMode, goalDiscoveryStore, ensureChatLink, readChatLink, commitGoalBinding, goalKey, normalizeGoalRecord, loadGoal, listGoals, saveGoal, updateGoal, claimContinuation, clearUnsentContinuation, recordLoopMilestone, recordGoalCompletionRequest };

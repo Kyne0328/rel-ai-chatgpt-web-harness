@@ -34,7 +34,7 @@ const callTool = (name, args) => rawCallTool(name, args, context);
 try {
   resetToolActivity();
 
-  const started = await callTool('relai_work', {
+  const started = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'repo',
     title: 'Task plan regression',
@@ -143,7 +143,7 @@ try {
   const restored = await callTool('relai_work', { action: 'status', work_id: started.work_id });
   assert.equal(restored.task?.plan?.revision, 6, 'the last serialized plan revision must survive restart recovery');
 
-  const piggybackTask = await callTool('relai_work', {
+  const piggybackTask = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'repo', title: 'Piggyback plan regression', objective: 'Update plan state without separate plan calls.',
     steps: [
       { id: 'inspect', title: 'Inspect implementation', status: 'pending' },
@@ -178,7 +178,7 @@ try {
   assert.match(terminalPiggyback?.plan?.steps[1]?.detail || '', /completed before this step reported a terminal outcome/i,
     'terminal reconciliation must preserve that an unresolved step was not explicitly reported as completed');
 
-  const finishProgressTask = await callTool('relai_work', {
+  const finishProgressTask = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'repo', title: 'Finish progress regression', objective: 'Finalize the last checklist step without a separate plan call.',
     steps: [{ id: 'finish', title: 'Finish the task', status: 'in_progress' }]
   });
@@ -200,7 +200,7 @@ try {
     'durable task plans must not be clearable to an empty state'
   );
 
-  const projectless = await callTool('relai_work', {
+  const projectless = await callTool('relai_work', { mode: 'normal',
     action: 'begin', title: 'Projectless planning regression', objective: 'Inspect a project after it is selected.',
     steps: [{ id: 'inspect', title: 'Inspect the selected project', status: 'in_progress' }]
   });

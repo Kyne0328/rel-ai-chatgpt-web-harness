@@ -245,7 +245,7 @@ try {
 
   const projectless = await client.request('tools/call', {
     name: 'relai_work',
-    arguments: { action: 'begin', title: 'Projectless HTTP smoke goal' }
+    arguments: { mode: 'normal', action: 'begin', title: 'Projectless HTTP smoke goal' }
   });
   assert.equal(projectless.response.status, 200, JSON.stringify(projectless.body));
   assert.equal(projectless.body.result?.isError, false, JSON.stringify(projectless.body));
@@ -259,7 +259,7 @@ try {
 
   const started = await client.request('tools/call', {
     name: 'relai_work',
-    arguments: { action: 'begin', workspace: root, bootstrap: 'none' },
+    arguments: { mode: 'normal', action: 'begin', workspace: root, bootstrap: 'none' },
     _meta: { 'openai/session': 'chat-session-regression' }
   });
   assert.equal(started.response.status, 200, JSON.stringify(started.body));

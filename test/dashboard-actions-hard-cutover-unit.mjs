@@ -55,7 +55,7 @@ try {
   assert.match(result.work_id || '', /^[0-9a-f-]{36}$/i);
   assert.match(result.summary || '', /Dashboard validation completed for repo/);
 
-  const activeTask = await callTool('relai_work', {
+  const activeTask = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'repo', bootstrap: 'none', title: 'Dashboard cancellation fixture'
   }, { publicHttpOnly: false });
   const cancelReq = Readable.from([Buffer.from(JSON.stringify({ action: 'cancel', work_id: activeTask.work_id }))]);
@@ -86,7 +86,7 @@ try {
     authMode: 'oauth',
     authorizationPolicy: createLocalAdminPolicy()
   };
-  const clientTask = await callTool('relai_work', {
+  const clientTask = await callTool('relai_work', { mode: 'goal',
     action: 'begin', workspace: 'repo', bootstrap: 'none', title: 'Client-owned dashboard cancellation fixture',
     objective: 'Verify Goal Mode stop is separate from task cancellation', goal: true
   }, { principal: clientPrincipal, publicHttpOnly: false });
@@ -155,7 +155,7 @@ try {
   }, { principal: clientPrincipal, publicHttpOnly: false });
   assert.equal(ownerRetry.duplicate, true, 'the original client must retain access to its cancelled task');
 
-  const linkingTask = await callTool('relai_work', { action: 'begin', workspace: 'repo',
+  const linkingTask = await callTool('relai_work', { mode: 'goal', action: 'begin', workspace: 'repo',
     title: 'Link recovery', objective: 'Verify exact chat recovery', goal: true },
   { principal: clientPrincipal, publicHttpOnly: false });
   const linkingRequest = Readable.from([Buffer.from(JSON.stringify({ action: 'goal_retry_link',

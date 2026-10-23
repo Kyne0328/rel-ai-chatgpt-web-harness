@@ -55,7 +55,7 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 try {
   resetToolActivity();
   const context = { publicHttpOnly: true };
-  const task = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const task = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   await callTool('relai_edit', {
     workspace: 'app',
     work_id: task.work_id,
@@ -80,7 +80,7 @@ try {
   assert.equal(repositoryIntelligence.status({ alias: 'app', path: workspacePath }, readConfig()).watching, false,
     'validation impact analysis must not start a live repository watcher');
 
-  const unrelated = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const unrelated = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   await callTool('relai_edit', {
     workspace: 'app',
     work_id: unrelated.work_id,
@@ -99,7 +99,7 @@ try {
     action: 'cancel', workspace: 'app', work_id: unrelated.work_id, reason: 'Concurrent scope coverage complete.'
   }, context);
 
-  const configTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const configTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   await callTool('relai_edit', {
     workspace: 'app', work_id: configTask.work_id, path: 'src/config-owned.js', content: 'export const configOwned = true;\n'
   }, context);

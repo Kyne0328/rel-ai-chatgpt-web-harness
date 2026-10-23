@@ -203,7 +203,7 @@ try {
     assert.equal(rejectedGet.status, 401, 'the read-only admission probe must still reject invalid bearer credentials');
     const clientA = await createHttpMcpSession(scopedBase, { token: tokenA });
     const clientB = await createHttpMcpSession(scopedBase, { token: tokenB });
-    const created = await clientA.request('tools/call', { name: 'relai_work', arguments: {
+    const created = await clientA.request('tools/call', { name: 'relai_work', arguments: { mode: 'goal',
       action: 'begin', title: 'Account A goal', objective: 'Prove tunnel ownership', goal: true,
       conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d'
     } });
@@ -232,8 +232,8 @@ try {
       }
       assert.fail('scoped staging operation did not settle');
     };
-    const ownerA = await scopedTool(clientA, 'relai_work', { action: 'begin', workspace: 'scoped', title: 'Staging owner A' });
-    const ownerB = await scopedTool(clientB, 'relai_work', { action: 'begin', workspace: 'scoped', title: 'Staging owner B' });
+    const ownerA = await scopedTool(clientA, 'relai_work', { mode: 'normal', action: 'begin', workspace: 'scoped', title: 'Staging owner A' });
+    const ownerB = await scopedTool(clientB, 'relai_work', { mode: 'normal', action: 'begin', workspace: 'scoped', title: 'Staging owner B' });
     for (const kind of ['content', 'updateText']) {
       const startArgs = kind === 'content' ? { path: 'scoped.txt', content: 'A\n' }
         : { updateText: '*** Begin Patch\n*** Add File: scoped-patch.txt\n+A\n*** End Patch' };
@@ -306,7 +306,7 @@ try {
     assert.equal(reply.body.result.isError, false, JSON.stringify(reply.body));
     return reply.body.result.structuredContent;
   };
-  const task = await tool('relai_work', { action: 'begin', workspace: 'fixture', title: 'HTTP result wait', objective: 'Verify result delivery without restarting commands.',
+  const task = await tool('relai_work', { mode: 'normal', action: 'begin', workspace: 'fixture', title: 'HTTP result wait', objective: 'Verify result delivery without restarting commands.',
     steps: [{ id: 'verify', title: 'Verify HTTP result retrieval', status: 'in_progress' }] });
   const taskArgs = { workspace: 'fixture', work_id: task.work_id };
   const receipt = await tool('relai_exec', { ...taskArgs, executable: process.execPath,

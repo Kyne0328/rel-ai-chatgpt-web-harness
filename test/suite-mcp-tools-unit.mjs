@@ -1171,7 +1171,7 @@ async function case_tool_action_catalog_parity_unit() {
     const args = entry.action === 'default' ? {} : { action: entry.action };
     if (entry.behavior.taskScope === 'required') args.work_id = 'work_catalog';
     switch (key) {
-      case 'relai_work:begin':
+      case 'relai_work:begin': args.mode = 'normal'; args.workspace = 'repo'; break;
       case 'relai_work:history': args.workspace = 'repo'; break;
       case 'relai_work:result': args.operationId = 'fallback_abcdefghijklmnopqrstuvwx'; break;
       case 'relai_work:plan': args.steps = [{ title: 'Catalog plan step', status: 'pending' }]; break;
@@ -1453,7 +1453,7 @@ async function case_tool_action_contract_unit() {
     const args = entry.action === 'default' ? {} : { action: entry.action };
     if (entry.behavior?.taskScope === 'required') args.work_id = 'work_contract';
     switch (key) {
-      case 'relai_work:begin':
+      case 'relai_work:begin': args.mode = 'normal'; args.workspace = 'repo'; break;
       case 'relai_work:history': args.workspace = 'repo'; break;
       case 'relai_work:result': args.operationId = 'fallback_abcdefghijklmnopqrstuvwx'; break;
       case 'relai_work:plan': args.steps = [{ title: 'Contract plan step', status: 'pending' }]; break;
@@ -1693,7 +1693,7 @@ async function case_tool_output_validation_unit() {
     truncated: false,
     next: 'Use cycles to review dependency boundaries.'
   }));
-  await assert.doesNotReject(() => validateToolOutput({}, 'relai_work', {
+  await assert.doesNotReject(() => validateToolOutput({}, 'relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'repo'
   }, {
@@ -1854,7 +1854,7 @@ async function case_tool_output_validation_unit() {
   function requiredArgs(entry) {
     const key = `${entry.publicTool}:${entry.action}`;
     switch (key) {
-      case 'relai_work:begin':
+      case 'relai_work:begin': return { mode: 'normal', workspace: 'repo' };
       case 'relai_work:history': return { workspace: 'repo' };
       case 'relai_work:result': return { operationId: 'fallback_abcdefghijklmnopqrstuvwx' };
       case 'relai_work:plan': return { steps: [{ title: 'Output validation plan step', status: 'pending' }] };
@@ -2083,7 +2083,7 @@ async function case_tool_surface_discovery_unit() {
         }
       }
   
-      client.call(3, 'relai_work', { action: 'begin', workspace: 'repo', bootstrap: 'none' });
+      client.call(3, 'relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', bootstrap: 'none' });
       const work = structuredContentOf(await client.waitFor(3));
       assert.ok(work.work_id, 'raw MCP dispatch must create a repository work session');
   

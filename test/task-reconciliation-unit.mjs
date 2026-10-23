@@ -28,7 +28,7 @@ function git(...args) {
 }
 
 async function begin(label) {
-  const result = await rawCallTool('relai_work', { action: 'begin', workspace: 'app', title: label }, context);
+  const result = await rawCallTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', title: label }, context);
   assert.ok(result.work_id);
   return result.work_id;
 }
@@ -252,13 +252,13 @@ try {
   const completedWithStaleHistory = readTaskHistory(readConfig(), getToolActivity(), { limit: 100 });
   assert.equal(completedWithStaleHistory.find(session => session.id === completedWithStaleBackground)?.status, 'completed', 'explicit completion must outrank stale persisted background state');
 
-  const differentConversation = await rawCallTool('relai_work', {
+  const differentConversation = await rawCallTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Idle task must remain resumable', bootstrap: 'none'
   }, { ...context, conversationId: 'different-reconciliation-chat' });
   assert.notEqual(differentConversation.work_id, idleTask, 'durable recovery must not cross ChatGPT conversation identity');
   await rawCallTool('relai_work', { action: 'cancel', workspace: 'app', work_id: differentConversation.work_id, reason: 'Conversation isolation regression complete.' }, { ...context, conversationId: 'different-reconciliation-chat' });
   resetToolActivity();
-  const recoveredBegin = await rawCallTool('relai_work', {
+  const recoveredBegin = await rawCallTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Idle task must remain resumable', bootstrap: 'compact'
   }, context);
   assert.equal(recoveredBegin.work_id, idleTask, 'relai_work begin must recover the persisted unfinished task after live context is lost');

@@ -4,12 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
-import { updateGoal as updateGoalOptions, activateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
+import { updateGoal as updateGoalOptions, activateGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
-import { parseGoalCommand } from '../src/goalCommands.js';
+import { parseGoalCommand, validateWorkMode } from '../src/goalCommands.js';
 import { buildGoalEvidence } from '../src/chatgptGoalEvidence.js';
 import { goalMessageExists, readConversationProjection } from '../src/chatgptConversationReader.js';
-import { ensureChatLink, readChatLink, commitGoalBinding, normalizeGoalRecord, loadGoal, saveGoal, updateGoal, claimContinuation, recordLoopMilestone } from '../src/chatgptGoalState.js';
+import { goalDiscoveryStore, ensureChatLink, readChatLink, commitGoalBinding, normalizeGoalRecord, loadGoal, saveGoal, updateGoal, claimContinuation, recordLoopMilestone } from '../src/chatgptGoalState.js';
 import { withStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { beginConnectorToolCall, getToolActivity, resetToolActivity, runWithToolActivity, requestCurrentTaskCancellation, onToolActivity } from '../src/toolActivity.js';
@@ -23,6 +23,9 @@ const OTHER = 'ca32ef5a-77b0-49f0-983d-b39c12c45ff2';
 const credentials = { bearer: 'placeholder', cookie: 'session=fake' };
 
 function response(payload) {
+  if (payload && Array.isArray(payload.items)) payload = { ...payload,
+    items: payload.items.map(item => item.id && !item.update_time ? { ...item, update_time: Date.now() / 1000 } : item) };
+
   return { ok: true, json: async () => payload, text: async () => typeof payload === 'string' ? payload : JSON.stringify(payload) };
 }
 
@@ -569,38 +572,6 @@ test('Goal background retry reconciles an accepted send when receipt persistence
   });
 });
 
-test('automatic detection recovers from locked success and error saves without an unhandled rejection', async t => {
-  await withMonitoredGoal(t, async f => {
-    const now = Date.now();
-    t.mock.timers.reset();
-    t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
-    const writer = new DatabaseSync(stateDatabasePath(f.config));
-    const workId = 'locked-automatic-detection';
-    let locked = false;
-    let reads = 0;
-    const deps = { task: { status: 'running' }, nativeTransport: async () => {
-      if (++reads === 1) { writer.exec('BEGIN IMMEDIATE'); locked = true; }
-      return { ok: true, data: conversationWithReceipt(ID, workId) };
-    } };
-    const context = { connector: true, conversationId: ID, principal: 'monitor-fixture' };
-    try {
-      queueGoalDetection(f.config, { work_id: workId, title: 'Locked detection' }, context, deps);
-      await new Promise(resolve => setImmediate(resolve));
-      assert.equal(reads, 1);
-      assert.equal(goalStatus(f.config, { work_id: workId }, context).state, 'checking');
-      writer.exec('ROLLBACK'); locked = false;
-      t.mock.timers.tick(5_000);
-      await new Promise(resolve => setImmediate(resolve));
-      assert.equal(reads, 2);
-      assert.equal(goalStatus(f.config, { work_id: workId }, context).state, 'monitoring');
-    } finally {
-      if (locked) writer.exec('ROLLBACK');
-      writer.close();
-      stopGoalMonitor();
-    }
-  });
-});
-
 test('Stop cancels a storage-independent Goal retry before another account read', async t => {
   await withMonitoredGoal(t, async f => {
     const now = Date.now();
@@ -667,30 +638,6 @@ test('transportless runtimes leave desktop goal progress and retry deadlines unt
   });
 });
 
-test('transportless runtimes leave queued desktop goal detection for its native owner', async t => {
-  await withMonitoredGoal(t, async f => {
-    const context = { connector: true, conversationId: ID,
-      principal: { clientId: 'secure-tunnel:tunnel_accountA12345' } };
-    const begin = beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.begin',
-      createTask: true, scopeId: 'transportless-lookup', input: { title: 'Transport owner lookup' } });
-    begin({ ok: true });
-    const task = { work_id: begin.taskId, objective: 'Detect goal on the native owner' };
-    configureGoalBrowserTransport(null);
-    queueGoalDetection(f.config, task, context, { env: {} });
-    await new Promise(resolve => setImmediate(resolve));
-    await checkGoalDetection(f.config, task.work_id, { credentials, fetch: async () => {
-      assert.fail('unrelated credentials cannot run native-account discovery');
-    } });
-    assert.equal(goalStatus(f.config, task, context).state, 'checking');
-    assert.equal(goalStatus(f.config, task, context).attempts, 0);
-    await checkGoalDetection(f.config, task.work_id, {
-      nativeTransport: async () => ({ ok: false, status: 401 })
-    });
-    assert.equal(goalStatus(f.config, task, context).state, 'needs_auth');
-    stopGoal(f.config, task, context);
-  });
-});
-
 test('a scoped goal routes every browser read and Send through its authenticated tunnel', async t => {
   await withMonitoredGoal(t, async f => {
     const tunnelId = 'tunnel_accountA12345';
@@ -738,39 +685,6 @@ test('sign-in refresh supersedes an in-flight obsolete authentication failure', 
     await pollGoal(f.config, f.work_id, f.deps);
     assert.equal(f.status().state, 'verifying', 'the prepared attempt remains uncertain until receipt reconciliation');
     assert.equal(f.calls.filter(call => call.action === 'continue').length, 0);
-  });
-});
-
-test('sign-in retries an unconfirmed slash-goal lookup without reviving a stopped lookup', async t => {
-  await withMonitoredGoal(t, async f => {
-    const tunnelId = 'tunnel_accountA12345';
-    const principal = { clientId: 'secure-tunnel:' + tunnelId };
-    const context = { connector: true, conversationId: ID, principal };
-    const begin = beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.begin',
-      createTask: true, scopeId: 'authentication-lookup', input: { title: 'Authentication lookup' } });
-    begin({ ok: true });
-    const task = { work_id: begin.taskId, objective: 'Resume slash goal after sign-in' };
-    const unavailable = { nativeTransport: async () => ({ ok: false, status: 401 }) };
-    queueGoalDetection(f.config, task, context, unavailable);
-    await checkGoalDetection(f.config, task.work_id, unavailable);
-    assert.equal(goalStatus(f.config, task, context).state, 'needs_auth');
-    assert.deepEqual(resumeAuthenticatedGoals(f.config, 'tunnel_accountB12345').resumedDetectionWorkIds, []);
-    assert.deepEqual(resumeAuthenticatedGoals(f.config, tunnelId).resumedDetectionWorkIds, [task.work_id]);
-    await checkGoalDetection(f.config, task.work_id, { nativeTransport: async payload => {
-      assert.equal(payload.tunnelId, tunnelId);
-      return { ok: true, data: conversation(ID) };
-    } });
-    assert.equal(goalStatus(f.config, task, context).goalActive, true);
-    stopGoal(f.config, task, context);
-    const other = beginConnectorToolCall({ tool: 'relai_work', internalOperation: 'work.begin',
-      createTask: true, scopeId: 'stopped-authentication-lookup', input: { title: 'Stopped authentication lookup' } });
-    other({ ok: true });
-    const stoppedTask = { ...task, work_id: other.taskId };
-    queueGoalDetection(f.config, stoppedTask, context, unavailable);
-    await checkGoalDetection(f.config, stoppedTask.work_id, unavailable);
-    assert.equal(stopGoal(f.config, stoppedTask, context).state, 'stopped');
-    assert.deepEqual(resumeAuthenticatedGoals(f.config, tunnelId).resumedDetectionWorkIds, []);
-    assert.equal(goalStatus(f.config, stoppedTask, context).state, 'stopped');
   });
 });
 
@@ -907,25 +821,6 @@ test('persisted receipts from before retry support keep their successful-send co
   }
 });
 
-test('automatic detection cannot claim a slash goal from another correlated chat', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-goal-correlation-'));
-  const config = { stateDir: dir };
-  const task = { work_id: 'ordinary-chat-a', objective: 'Ordinary work' };
-  const context = { principal: 'correlation-fixture', connector: true, conversationId: ID };
-  const reads = [];
-  const deps = { task: { status: 'planning' }, credentials, fetch: async url => {
-    reads.push(url);
-    return url.includes('/conversations?') ? response({ items: [{ id: OTHER }] })
-      : response(conversation(url.endsWith(ID) ? ID : OTHER, url.endsWith(ID) ? 'Ordinary chat' : '/goal Other work'));
-  } };
-  try {
-    queueGoalDetection(config, task, context, deps);
-    await checkGoalDetection(config, task.work_id, deps);
-    assert.equal(goalStatus(config, { work_id: task.work_id }, context).goalActive, false);
-    assert.equal(reads.some(url => url.endsWith(OTHER)), false, 'a known chat ID must constrain discovery');
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-});
-
 test('Project Goal Mode discovers an opaque-host conversation without a URL from its sidebar preview', async () => {
   const workId = 'project-preview-receipt';
   const projectId = 'g-p-6a68897d433881919527e08c99703cba';
@@ -945,115 +840,9 @@ test('Project Goal Mode discovers an opaque-host conversation without a URL from
     conversationCorrelation: 'v1/opaque-host-conversation', workId, explicitGoal: true, requireWorkReceipt: true });
   assert.equal(match.state, 'matched');
   assert.equal(match.conversationId, ID);
-  assert.equal(requests.filter(url => url.endsWith('/conversation/' + ID)).length, 1);
+  assert.equal(requests.filter(url => url.endsWith('/conversation/' + ID)).length, 2);
   assert.equal(requests.some(url => url.includes('/gizmos/' + projectId + '/conversations')), false,
     'a sidebar preview should avoid an unnecessary per-project catalogue read');
-});
-
-test('a Project hint searches only the ten newest chats in the matching Project', async () => {
-  const project = 'g-p-' + 'a'.repeat(32);
-  const workId = 'project-scoped-recent';
-  const link = { version: 1, link_id: 'a'.repeat(32) };
-  const ids = Array.from({ length: 11 }, (_, i) =>
-    '00000000-0000-4000-8000-' + String(i + 1).padStart(12, '0'));
-  ids[9] = ID;
-  const requests = [];
-  const fetch = async url => {
-    requests.push(url);
-    if (url.includes('/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: project, name: 'Rel-ai-mcp' }, conversations: { items: [] } }
-    }], cursor: null });
-    if (url.includes('/gizmos/' + project + '/conversations?')) return response({
-      items: ids.map((id, i) => ({ id, update_time: new Date(Date.now() - i * 1000).toISOString() })),
-      cursor: 'more-older-chats'
-    });
-    const id = url.split('/').at(-1);
-    if (url.includes('/conversation/')) return response(id === ID
-      ? linkedConversation(ID, workId, link) : conversation(id, 'Unrelated'));
-    throw new Error('Unexpected request: ' + url);
-  };
-  const match = await findRecentGoalCommand({ workId, linkId: link.link_id, issuedAt: Date.now(),
-    chatgptProjectName: 'REL-AI-MCP', credentials, fetch });
-  assert.equal(match.state, 'matched');
-  assert.equal(match.conversationId, ID);
-  assert.equal(match.projectId, project);
-  assert.equal(requests.filter(url => url.includes('/conversation/')).length, 11,
-    'ten candidates and one fresh verification read');
-  assert.equal(requests.some(url => url.includes('/backend-api/conversations?')), false);
-  assert.equal(requests.some(url => url.includes('cursor=more-older-chats')), false);
-});
-
-test('missing, duplicate and incompletely listed Project names fall back to exact receipt discovery', async () => {
-  const first = 'g-p-' + 'b'.repeat(32);
-  const second = 'g-p-' + 'c'.repeat(32);
-  const workId = 'project-name-is-a-hint';
-  const link = { version: 1, link_id: 'b'.repeat(32) };
-  let incomplete = false;
-  const fetch = async url => {
-    if (url.includes('/snorlax/sidebar')) return response({ items: [
-      { gizmo: { gizmo: { id: first, name: 'Example' } } },
-      { gizmo: { gizmo: { id: second, name: 'EXAMPLE' } } }
-    ], cursor: incomplete ? String(Number(new URL(url).searchParams.get('cursor') || 0) + 1) : null });
-    if (url.includes('/backend-api/conversations?')) return response({ items: [{ id: ID }] });
-    if (url.endsWith('/conversation/' + ID)) return response(linkedConversation(ID, workId, link));
-    throw new Error('Unexpected request: ' + url);
-  };
-  const args = { credentials, fetch, chatgptProjectName: 'Missing', workId, linkId: link.link_id };
-  for (const name of ['Missing', 'example']) {
-    const match = await findRecentGoalCommand({ ...args, chatgptProjectName: name });
-    assert.equal(match.state, 'matched');
-    assert.equal(match.conversationId, ID);
-  }
-  incomplete = true;
-  const match = await findRecentGoalCommand({ ...args, fetch: url => fetch(url) });
-  assert.equal(match.state, 'matched', 'a partial catalogue cannot prove that a Project is missing');
-  assert.equal(match.conversationId, ID);
-});
-
-test('without a Project hint, discovery uses only the latest ten ordinary and sidebar previews', async () => {
-  const workId = 'fallback-recent';
-  const link = { version: 1, link_id: 'd'.repeat(32) };
-  const ordinary = Array.from({ length: 12 }, (_, i) => ({
-    id: '10000000-0000-4000-8000-' + String(i + 1).padStart(12, '0'),
-    update_time: new Date(Date.now() - (i + 1) * 1000).toISOString()
-  }));
-  const calls = [];
-  const fetch = async url => {
-    calls.push(url);
-    if (url.includes('/backend-api/conversations?')) return response({ items: ordinary, has_more: true });
-    if (url.includes('/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: 'g-p-' + 'e'.repeat(32) }, conversations: {
-        items: [{ id: ID, update_time: new Date().toISOString() }]
-      } }
-    }], cursor: 'older-projects' });
-    if (url.includes('/conversation/')) return response(url.endsWith('/' + ID)
-      ? linkedConversation(ID, workId, link) : conversation(url.split('/').at(-1), 'Unrelated'));
-    throw new Error('Unexpected request: ' + url);
-  };
-  const match = await findRecentGoalCommand({ workId, linkId: link.link_id,
-    issuedAt: Date.now(), credentials, fetch });
-  assert.equal(match.conversationId, ID);
-  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 11);
-  assert.equal(calls.some(url => url.includes('cursor=older-projects')), false);
-  assert.equal(calls.some(url => url.includes('/gizmos/g-p-') && url.includes('/conversations?')), false);
-});
-
-test('stateless discovery shares catalogue reads and checks receipt evidence fresh', async () => {
-  const workId = 'recent-receipt-missing';
-  const calls = [];
-  const fetch = async url => {
-    calls.push(url);
-    if (url.includes('/backend-api/conversations?')) return response({ items: [{ id: ID }] });
-    if (url.includes('/snorlax/sidebar')) return response({ items: [] });
-    return response(conversation(ID, 'Ordinary work'));
-  };
-  const args = { workId, linkId: 'p'.repeat(32), issuedAt: Date.now(), credentials, fetch };
-  assert.equal((await findRecentGoalCommand(args)).state, 'absent');
-  assert.equal((await findRecentGoalCommand(args)).state, 'absent');
-  assert.equal(calls.filter(url => url.includes('/backend-api/conversations?')).length, 1,
-    'stateless callers share the catalogue cache');
-  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 2,
-    'receipt evidence is checked fresh on each attempt');
 });
 
 test('Project Goal Mode refuses missing or off-branch work receipts', async () => {
@@ -1064,7 +853,7 @@ test('Project Goal Mode refuses missing or off-branch work receipts', async () =
   const fetch = async url => {
     if (url.includes('/backend-api/conversations?')) return response({ items: [] });
     if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: projectId }, conversations: { items: [{ id: ID }] } }
+      gizmo: { gizmo: { id: projectId }, conversations: { items: [{ id: ID, update_time: Date.now() / 1000 }] } }
     }], cursor: null });
     if (url.includes('/gizmos/' + projectId + '/conversations')) return response({ items: [], cursor: null });
     return response(tree);
@@ -1215,7 +1004,7 @@ test('explicit goal monitor resolves a natural-language work receipt without a c
     f.tree.mapping.a.parent = 'receipt';
     f.patchGoal({ conversationId: '', conversationCorrelation: 'opaque-host-session' });
     const transport = async payload => payload.path?.includes('/conversations?')
-      ? { ok: true, data: { items: [{ id: ID }] } }
+      ? { ok: true, data: { items: [{ id: ID, update_time: Date.now() / 1000 }] } }
       : payload.path?.includes('/snorlax/sidebar') ? { ok: true, data: { items: [] } }
         : f.deps.nativeTransport(payload);
     await pollGoal(f.config, f.work_id, { nativeTransport: transport });
@@ -1310,6 +1099,8 @@ test('Goal Mode reuses relai_work and is opt-in on begin', () => {
   assert.ok(begin);
   assert.equal(begin.properties.goal.type, 'boolean');
   assert.equal(begin.required.includes('goal'), false);
+  assert.equal(begin.required.includes('mode'), true);
+  assert.deepEqual(begin.properties.mode.enum, ['normal', 'goal', 'loop']);
   assert.ok(branches.some(branch => branch.properties?.action?.const === 'goal_status'));
   assert.ok(branches.some(branch => branch.properties?.action?.const === 'goal_stop'));
 });
@@ -1607,7 +1398,7 @@ test('concurrent goals share account discovery instead of rescanning every task 
   const reads = [];
   const transport = async payload => {
     reads.push(payload);
-    if (payload.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID }, { id: OTHER }] } };
+    if (payload.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID, update_time: Date.now() / 1000 }, { id: OTHER, update_time: Date.now() / 1000 }] } };
     if (payload.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
     const id = payload.path.endsWith(ID) ? ID : OTHER;
     const tree = conversation(id);
@@ -1619,12 +1410,12 @@ test('concurrent goals share account discovery instead of rescanning every task 
     workId, requireWorkReceipt: true, conversationCorrelation: 'opaque', startedAt: Date.now() });
   const first = await Promise.all([lookup(ID), lookup(OTHER)]);
   assert.deepEqual(first.map(r => r.conversationId), [ID, OTHER]);
-  assert.equal(reads.length, 4, 'one ordinary catalogue, one sidebar and one read per chat serve both tasks');
-  t.mock.timers.tick(30_000);
+  assert.equal(reads.length, 6, 'shared discovery reads each chat once, then each binding verifies fresh');
+  t.mock.timers.tick(1_000);
   await Promise.all([lookup(ID), lookup(OTHER)]);
   assert.equal(reads.filter(r => r.path.includes('/conversations?')).length, 1,
     'a new task cycle must not repeat the catalog scan');
-  assert.equal(reads.length, 6, 'only recent chats need fresh receipt verification');
+  assert.equal(reads.length, 8, 'cached discovery still requires a fresh binding verification per task');
   await findRecentGoalCommand({ nativeTransport: transport, tunnelId: 'account-b',
     conversationCorrelation: ID, startedAt: Date.now() });
   assert.equal(reads.at(-1).tunnelId, 'account-b', 'accounts must never share cached evidence');
@@ -1697,7 +1488,7 @@ test('discovery cancellation does not cancel another task sharing the same read'
     reads++;
     if (payload.path.includes('/conversations?')) {
       await pending;
-      return { ok: true, data: { items: [{ id: ID }] } };
+      return { ok: true, data: { items: [{ id: ID, update_time: Date.now() / 1000 }] } };
     }
     if (payload.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
     return { ok: true, data: conversation(ID) };
@@ -1709,80 +1500,7 @@ test('discovery cancellation does not cancel another task sharing the same read'
   await assert.rejects(() => cancelled, e => e.name === 'AbortError');
   release();
   assert.equal((await surviving).state, 'matched');
-  assert.equal(reads, 3, 'the surviving task shares one ordinary and one sidebar catalogue');
-});
-
-test('429 cooldown survives transport restart and does not exhaust detection attempts', async t => {
-  await withMonitoredGoal(t, async f => {
-    f.patchGoal({ conversationId: '', conversationCorrelation: 'opaque', observedNode: '' });
-    let requests = 0;
-    const limited = { nativeTransport: async () => { requests++; return { ok: false, status: 429, retryAfterMs: 180_000 }; } };
-    await pollGoal(f.config, f.work_id, limited);
-    assert.equal(f.status().state, 'rate_limited');
-    assert.equal(f.status().goalActive, true);
-    assert.equal(f.status().nextAttemptAt, Date.now() + 180_000);
-    const task = { work_id: 'new-during-cooldown', objective: 'Explicit work' };
-    const context = { connector: true, conversationId: 'opaque', principal: 'monitor-fixture' };
-    const restarted = { task: { status: 'planning' }, nativeTransport: async () => {
-      requests++; return { ok: true, data: { items: [] } };
-    } };
-    queueGoalDetection(f.config, task, context, restarted);
-    await checkGoalDetection(f.config, task.work_id, restarted);
-    const status = goalStatus(f.config, { work_id: task.work_id }, context);
-    assert.equal(requests, 1, 'a new transport must restore the durable account cooldown');
-    assert.equal(status.attempts, 0, 'cooldown waits are not failed command detection');
-    assert.match(status.error, /429/);
-    assert.equal(status.nextAttemptAt, Date.now() + 180_000);
-    stopGoal(f.config, { work_id: task.work_id }, context);
-  });
-});
-
-test('detection preserves a sanitized read error without storing upstream payloads', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-goal-detection-error-'));
-  try {
-    const config = { stateDir: dir };
-    const task = { work_id: 'read-error-task', objective: 'Explicit work' };
-    const context = { connector: true, conversationId: ID, principal: 'error-fixture' };
-    const deps = { task: { status: 'planning' }, nativeTransport: async () => {
-      throw new Error('private upstream content and accessToken=do-not-persist');
-    } };
-    queueGoalDetection(config, task, context, deps);
-    await checkGoalDetection(config, task.work_id, deps);
-    const status = goalStatus(config, { work_id: task.work_id }, context);
-    assert.match(status.error, /discovery failed/);
-    assert.equal(JSON.stringify(status).includes('do-not-persist'), false);
-    stopGoal(config, { work_id: task.work_id }, context);
-  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-});
-
-test('local browser read limits retain their cause across restart without consuming retries', async t => {
-  await withMonitoredGoal(t, async f => {
-    f.patchGoal({ binding: null, conversationId: '', conversationCorrelation: 'opaque', retryCount: 0 });
-    let reads = 0;
-    const limited = { nativeTransport: async () => {
-      reads++;
-      return { ok: false, status: 429, deferred: true, rateLimitReason: 'read_budget', retryAfterMs: 10_000 };
-    } };
-    await pollGoal(f.config, f.work_id, limited);
-    assert.equal(f.status().retryCount, 0);
-    assert.match(f.status().error, /Rel\.AI.*read budget/);
-    assert.equal(f.status().nextAttemptAt, Date.now() + 10_000);
-    const task = { work_id: 'local-budget-restart', objective: 'Automatic discovery' };
-    const context = { connector: true, principal: 'monitor-fixture', conversationId: 'opaque' };
-    const restarted = { task: { status: 'planning' }, nativeTransport: async () => {
-      reads++;
-      return { ok: true, data: { items: [] } };
-    } };
-    queueGoalDetection(f.config, task, context, restarted);
-    await checkGoalDetection(f.config, task.work_id, restarted);
-    const status = goalStatus(f.config, { work_id: task.work_id }, context);
-    assert.equal(reads, 1);
-    assert.equal(status.chatLink.state, 'rate_limited');
-    assert.equal(status.chatLink.rateLimitReason, 'read_budget');
-    assert.match(status.error, /Rel\.AI.*read budget/);
-    assert.equal(status.nextAttemptAt, Date.now() + 10_000);
-    stopGoal(f.config, { work_id: task.work_id }, context);
-  });
+  assert.equal(reads, 4, 'surviving discovery shares metadata and freshly verifies its match');
 });
 
 test('native sender rate limits preserve whether Send may already have happened', async t => {
@@ -1868,103 +1586,6 @@ test('goal record is scoped to principal and stopped without cancelling the task
     assert.equal(stopDashboardGoal(config, work_id).state, 'stopped');
     assert.equal(activateGoal(config, { work_id, objective: 'Fix the current project' }, context).goalActive, true,
       'only an explicit new start may reactivate a stopped goal');
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('connector work begin detects /goal without an AI-supplied boolean and claims the command once', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-auto-goal-'));
-  try {
-    const config = { stateDir: dir };
-    const context = { connector: true, conversationId: 'opaque-host-session',
-      principal: 'chatgpt-principal' };
-    const calls = [];
-    const fetch = async url => {
-      calls.push(url);
-      return url.includes('/conversations?')
-        ? response({ items: [{ id: ID }] })
-        : emptyProjectCatalogue(url) || response(conversationWithReceipt(ID, 'firmware-work', '/goal start now. Do everything possible until firmware is finished'));
-    };
-    const deps = { credentials, fetch, task: { status: 'planning' } };
-    const task = { work_id: 'firmware-work', workspace: 'pldt',
-      objective: 'Create fully verifiable HG6245D firmware offline' };
-    assert.deepEqual(queueGoalDetection(config, task, context, deps), { state: 'checking' });
-    assert.equal(goalStatus(config, { work_id: task.work_id }, context).state, 'checking');
-    for (let i = 0; i < 30 && goalStatus(config, { work_id: task.work_id }, context)?.state === 'checking'; i++) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    const linked = goalStatus(config, { work_id: task.work_id }, context);
-    assert.equal(linked.goalActive, true, JSON.stringify(linked));
-    assert.equal(linked.conversationId, ID);
-    assert.equal(linked.state, 'monitoring');
-    assert.ok(calls.length >= 2);
-    assert.equal(queueGoalDetection(config, task, context, deps), null,
-      'an already registered goal must not be reset');
-    assert.throws(() => goalStatus(config, { work_id: task.work_id },
-      { ...context, principal: 'another-principal' }));
-    const competing = { ...task, work_id: 'unrelated-work' };
-    const correlated = { ...context, conversationId: ID };
-    assert.deepEqual(queueGoalDetection(config, competing, correlated, deps), { state: 'checking' });
-    for (let i = 0; i < 30 && goalStatus(config, { work_id: competing.work_id }, context).state === 'checking'; i++) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    assert.equal(goalStatus(config, { work_id: competing.work_id }, context).state, 'ambiguous',
-      'one user command must not activate a second task');
-    assert.equal(stopGoal(config, { work_id: task.work_id }, context).state, 'stopped');
-    assert.equal(queueGoalDetection(config, { ...task, work_id: 'cli-work' },
-      { ...context, connector: false }, deps), null);
-    const stoppedEarly = { ...task, work_id: 'stopped-early' };
-    queueGoalDetection(config, stoppedEarly, context, deps);
-    assert.equal(stopGoal(config, { work_id: stoppedEarly.work_id }, context).state, 'stopped');
-    await checkGoalDetection(config, stoppedEarly.work_id, deps);
-    assert.equal(goalStatus(config, { work_id: stoppedEarly.work_id }, context).goalActive, false);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('auto detection is bounded, fails closed on ambiguity and does not invent a goal for ordinary work', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-goal-ambiguity-'));
-  try {
-    const config = { stateDir: dir };
-    const context = { connector: true, conversationId: 'host-session', principal: 'principal' };
-    const task = { work_id: 'ambiguous-test', workspace: 'example', objective: 'Make a build' };
-    const fetch = async url => url.includes('/conversations?')
-      ? response({ items: [{ id: ID }, { id: OTHER }] })
-      : emptyProjectCatalogue(url) || response(conversationWithReceipt(url.endsWith(ID) ? ID : OTHER, task.work_id));
-    const deps = { credentials, fetch, task: { status: 'planning' } };
-    queueGoalDetection(config, task, context, deps);
-    for (let i = 0; i < 30 && goalStatus(config, { work_id: task.work_id }, context).state === 'checking'; i++) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    assert.equal(goalStatus(config, { work_id: task.work_id }, context).state, 'ambiguous');
-    assert.equal(goalStatus(config, { work_id: task.work_id }, context).goalActive, false);
-    assert.equal(dashboardGoalStatus(config, task.work_id), null,
-      'ordinary task inspector must not show an unconfirmed Goal Mode');
-
-    const normalTask = { ...task, work_id: 'ordinary-work' };
-    queueGoalDetection(config, normalTask, context, { ...deps,
-      fetch: async url => url.includes('/conversations?')
-        ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || response(conversation(ID, 'Please analyze this repository')) });
-    for (let i = 0; i < 30 && goalStatus(config, { work_id: normalTask.work_id }, context).state === 'checking'
-      && goalStatus(config, { work_id: normalTask.work_id }, context).state === 'checking'; i++) {
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    const waiting = goalStatus(config, { work_id: normalTask.work_id }, context);
-    assert.equal(waiting.goalActive, false);
-    assert.equal(waiting.state, 'checking', 'one absent result schedules one bounded retry');
-    withStateDatabase(config, db => {
-      const key = 'chatgpt_goal_detection:' + normalTask.work_id;
-      const original = JSON.parse(db.prepare('SELECT value FROM state_meta WHERE key=?').get(key).value);
-      db.prepare('UPDATE state_meta SET value=? WHERE key=?')
-        .run(JSON.stringify({ ...original, nextAttemptAt: 0 }), key);
-    }, { transaction: true });
-    await checkGoalDetection(config, normalTask.work_id, { ...deps,
-      fetch: async url => url.includes('/conversations?')
-        ? response({ items: [{ id: ID }] }) : emptyProjectCatalogue(url) || response(conversation(ID, 'No /goal request')) });
-    assert.equal(goalStatus(config, { work_id: normalTask.work_id }, context).state, 'not_requested');
-    assert.equal(goalStatus(config, { work_id: normalTask.work_id }, context).goalActive, false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -2185,34 +1806,6 @@ test('versioned linking accepts a delayed receipt after later user messages and 
   assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
 });
 
-test('automatic discovery resumes beyond the first ten chats and keeps each round bounded', async () => {
-  const workId = 'recent-link-bounds';
-  const link = { version: 1, link_id: 'p'.repeat(32) };
-  const ids = Array.from({ length: 11 }, (_, i) =>
-    '20000000-0000-4000-8000-' + String(i + 1).padStart(12, '0'));
-  ids[10] = ID;
-  const calls = [];
-  const fetch = async url => {
-    calls.push(url);
-    if (url.includes('/conversations?offset=')) return response({
-      items: ids.map((id, i) => ({ id, update_time: new Date(Date.now() - i * 1000).toISOString() })),
-      has_more: false
-    });
-    if (url.includes('/snorlax/sidebar')) return response({ items: [] });
-    return response(url.endsWith(ID) ? linkedConversation(ID, workId, link) : conversation(url.split('/').at(-1)));
-  };
-  const deps = { workId, linkId: link.link_id, issuedAt: Date.now(), credentials, fetch, discovery: { scan: null } };
-  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
-  assert.equal(calls.some(url => url.includes('offset=20')), false);
-  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 10);
-  const restarted = { ...deps, discovery: structuredClone(deps.discovery), fetch: url => fetch(url) };
-  const match = await findRecentGoalCommand(restarted);
-  assert.equal(match.state, 'matched');
-  assert.equal(match.conversationId, ID);
-  assert.equal(calls.filter(url => url.includes('/conversation/')).length, 12,
-    'pagination must preserve the first batch instead of reading those chats twice');
-});
-
 test('versioned linking refuses duplicate recent receipts and never selects a first match', async () => {
   const workId = 'recent-link-duplicate';
   const link = { version: 1, link_id: 'r'.repeat(32) };
@@ -2232,61 +1825,6 @@ test('versioned linking refuses duplicate recent receipts and never selects a fi
   assert.equal((await findRecentGoalCommand(deps)).state, 'ambiguous');
 });
 
-test('discovery paginates ordinary chats and Project histories across transport restarts', async () => {
-  for (const location of ['ordinary', 'project']) {
-    const project = 'g-p-' + 'f'.repeat(32);
-    const workId = 'paged-' + location;
-    const link = { version: 1, link_id: 'q'.repeat(32) };
-    const requests = [];
-    const fetch = async url => {
-      requests.push(url);
-      if (url.includes('/conversations?offset=')) return response(location === 'ordinary'
-        ? url.includes('offset=0&') ? { items: [{ id: OTHER }], has_more: true }
-          : { items: [{ id: ID }], has_more: false } : { items: [], has_more: false });
-      if (url.includes('/snorlax/sidebar')) return response(url.includes('cursor=')
-        ? { items: [{ gizmo: { gizmo: { id: project, name: 'Renamed' } } }], cursor: null }
-        : { items: [], cursor: 'second-sidebar-page' });
-      if (url.includes('/gizmos/' + project + '/conversations?')) return response(url.includes('cursor=0')
-        ? { items: [{ id: OTHER }], cursor: 'second-chat-page' }
-        : { items: [{ id: ID }], cursor: null });
-      if (url.includes('/conversation/')) return response(url.endsWith(ID)
-        ? linkedConversation(ID, workId, link) : conversation(OTHER, 'Unrelated'));
-      throw new Error('Unexpected request: ' + url);
-    };
-    let discovery = { scan: null };
-    let match;
-    for (let round = 0; round < 10; round++) {
-      // New transports simulate a restart; only the serialized cursor survives.
-      discovery = structuredClone(discovery);
-      match = await findRecentGoalCommand({ credentials, fetch: url => fetch(url), workId,
-        linkId: link.link_id, discovery });
-      if (match.state === 'matched') break;
-      assert.equal(match.state, 'absent');
-    }
-    assert.equal(match.state, 'matched', location);
-    assert.equal(match.conversationId, ID);
-    if (location === 'project') {
-      assert.equal(match.projectId, project);
-      assert.equal(requests.some(url => url.includes('cursor=second-sidebar-page')), true);
-      assert.equal(requests.some(url => url.includes('cursor=second-chat-page')), true);
-    } else assert.equal(requests.some(url => url.includes('offset=1&')), true);
-  }
-});
-
-test('a partial discovery batch retains its candidate receipt when a later read is rate limited', async () => {
-  const workId = 'paged-cooldown';
-  const link = { version: 1, link_id: 'r'.repeat(32) };
-  const discovery = { scan: { phase: 'done', pending: [{ id: ID }, { id: OTHER }] } };
-  await assert.rejects(() => findRecentGoalCommand({ credentials, workId, linkId: link.link_id, discovery,
-    fetch: async url => url.endsWith(ID) ? response(linkedConversation(ID, workId, link))
-      : { ok: false, status: 429 } }), error => error.status === 429);
-  const match = await findRecentGoalCommand({ credentials, workId, linkId: link.link_id,
-    discovery: structuredClone(discovery), fetch: async url => response(url.endsWith(ID)
-      ? linkedConversation(ID, workId, link) : conversation(OTHER, 'Unrelated')) });
-  assert.equal(match.state, 'matched');
-  assert.equal(match.conversationId, ID);
-});
-
 test('automatic linking stays resumable after five misses and binds a delayed receipt without recovery', async t => {
   await withMonitoredGoal(t, async f => {
     const link = ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
@@ -2296,7 +1834,7 @@ test('automatic linking stays resumable after five misses and binds a delayed re
     const requests = [];
     const deps = { nativeTransport: async request => {
       requests.push(request);
-      if (request.path.includes('/conversations?')) return { ok: true, data: { items: visible ? [{ id: ID }] : [] } };
+      if (request.path.includes('/conversations?')) return { ok: true, data: { items: visible ? [{ id: ID, update_time: Date.now() / 1000 }] : [] } };
       if (request.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
       return { ok: true, data: await readConversationProjection(response(linkedConversation(ID, f.work_id, link))) };
     } };
@@ -2345,51 +1883,6 @@ test('monitor startup recovers old lookup failures while preserving Stop, pauses
   });
 });
 
-test('automatic detection persists discovery and requeues a legacy Project failure on startup', async t => {
-  await withMonitoredGoal(t, async f => {
-    const now = Date.now();
-    t.mock.timers.reset();
-    t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now });
-    withStateDatabase(f.config, db => db.prepare('DELETE FROM state_meta WHERE key=?').run('chatgpt_goal:' + f.work_id),
-      { transaction: true });
-    const context = { ...f.context, connector: true };
-    const link = ensureChatLink(f.config, f.work_id, context);
-    queueGoalDetection(f.config, { work_id: f.work_id, title: 'Automatic linking' }, context, { env: {} });
-    let visible = false;
-    const transport = async request => {
-      assert.equal(request.action, undefined, 'detection cannot submit continuations');
-      if (request.path.includes('/conversations?')) return { ok: true, data: { items: visible ? [{ id: ID }] : [] } };
-      if (request.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
-      return { ok: true, data: await readConversationProjection(response(linkedConversation(ID, f.work_id, link))) };
-    };
-    for (let round = 0; round < 7; round++) {
-      await checkGoalDetection(f.config, f.work_id, { nativeTransport: transport });
-      const status = f.status();
-      assert.equal(status.state, 'checking');
-      t.mock.timers.tick(status.nextAttemptAt - Date.now());
-    }
-    withStateDatabase(f.config, db => {
-      const key = 'chatgpt_goal_detection:' + f.work_id;
-      const record = JSON.parse(db.prepare('SELECT value FROM state_meta WHERE key=?').get(key).value);
-      db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify({ ...record,
-        state: 'unavailable', error: 'The named ChatGPT Project was not found in the connected account.' }), key);
-    }, { transaction: true });
-    configureGoalBrowserTransport(transport);
-    try {
-      startGoalMonitor(f.config);
-      assert.equal(f.status().state, 'checking');
-      stopGoalMonitor();
-      visible = true;
-      for (let round = 0; round < 6 && f.status().chatLink.state !== 'linked'; round++) {
-        await checkGoalDetection(f.config, f.work_id, { nativeTransport: request => transport(request) });
-        if (f.status().nextAttemptAt) t.mock.timers.tick(f.status().nextAttemptAt - Date.now());
-      }
-      assert.equal(f.status().chatLink.state, 'linked');
-      assert.equal(f.status().continuationCount, 0);
-    } finally { stopGoalMonitor(); configureGoalBrowserTransport(null); }
-  });
-});
-
 test('durable linking receipts are idempotent, owner scoped and cannot bind after Stop', async t => {
   await withMonitoredGoal(t, async f => {
     const context = { ...f.context, connector: true };
@@ -2410,7 +1903,7 @@ test('versioned monitor links through the owner browser, survives restart and co
     const sends = [];
     const deps = { nativeTransport: async request => {
       if (request.action === 'continue') { sends.push(request); return { ok: true, accepted: true }; }
-      if (request.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID }], has_more: false } };
+      if (request.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID, update_time: Date.now() / 1000 }], has_more: false } };
       if (request.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
       return { ok: true, data: await readConversationProjection(response(tree)) };
     } };
@@ -2436,34 +1929,13 @@ test('versioned monitor links through the owner browser, survives restart and co
   });
 });
 
-test('versioned automatic detection needs no host conversation ID and does not enable ordinary work', async t => {
-  await withMonitoredGoal(t, async f => {
-    withStateDatabase(f.config, db => db.prepare('DELETE FROM state_meta WHERE key=?').run('chatgpt_goal:' + f.work_id), { transaction: true });
-    const context = { ...f.context, connector: true };
-    const link = ensureChatLink(f.config, f.work_id, context);
-    const tree = linkedConversation(ID, f.work_id, link, '/loop Keep working');
-    const deps = { task: f.task(), nativeTransport: async request => {
-      if (request.path.includes('/conversations?')) return { ok: true, data: { items: [{ id: ID }], has_more: false } };
-      if (request.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: [] } };
-      return { ok: true, data: await readConversationProjection(response(tree)) };
-    } };
-    queueGoalDetection(f.config, { work_id: f.work_id, title: 'Loop' }, context, { env: {} });
-    await checkGoalDetection(f.config, f.work_id, deps);
-    assert.equal(f.status().mode, 'loop');
-    assert.equal(f.status().chatLink.state, 'linked');
-    assert.equal(f.status().strategy, 'adaptive');
-    assert.equal(f.status().continuationCount, 0);
-    assert.equal((await findRecentGoalCommand({ workId: f.work_id, linkId: link.link_id,
-      issuedAt: Date.now(), conversationCorrelation: ID, explicitConversation: true, credentials,
-      fetch: async () => response(linkedConversation(ID, f.work_id, link, 'Ordinary task')) })).state, 'absent');
-  });
-});
-
 test('work begin persists a ChatGPT Project hint independently of the local workspace', async t => {
   await withMonitoredGoal(t, async f => {
+    withStateDatabase(f.config, db => db.prepare('DELETE FROM state_meta WHERE key=?')
+      .run('chatgpt_goal:' + f.work_id), { transaction: true });
     const context = { ...f.context, connector: true };
     const value = await runWithToolActivity({ taskId: f.work_id }, () =>
-      HANDLERS.startTask(f.config, {
+      HANDLERS.startTask(f.config, { mode: 'goal',
         title: 'Project scoped goal', goal: true, chatgptProjectName: 'Rel-ai-mcp'
       }, context));
     assert.equal(value.work_id, f.work_id);
@@ -2479,9 +1951,9 @@ test('work begin persists a ChatGPT Project hint independently of the local work
 test('connector begin delivers its durable linking receipt through output validation and compaction', async t => {
   await withMonitoredGoal(t, async f => {
     const value = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(f.config,
-      { title: 'Receipt contract' }, { ...f.context, connector: true }));
-    await validateToolOutput(f.config, 'relai_work', { action: 'begin' }, value);
-    const output = serializeConnectorResult({ publicName: 'relai_work', action: 'begin', operationName: 'work.begin',
+      { mode: 'goal', title: 'Receipt contract' }, { ...f.context, connector: true }));
+    await validateToolOutput(f.config, 'relai_work', { mode: 'normal', action: 'begin' }, value);
+    const output = serializeConnectorResult({ mode: 'normal', publicName: 'relai_work', action: 'begin', operationName: 'work.begin',
       value, args: {}, workId: f.work_id });
     assert.equal(output.work_id, f.work_id);
     assert.equal(output.chat_link.version, 1);
@@ -2502,5 +1974,275 @@ test('legacy linked tasks verify an exact old receipt without resetting continua
     assert.equal(saved.binding.receiptMessageId, 'tool-receipt');
     assert.equal(saved.continuationCount, 3);
     assert.equal(saved.pendingOutcome, 'accepted');
+  });
+});
+
+
+test('explicit work mode is required and normal connector work never discovers chats', async t => {
+  await withMonitoredGoal(t, async f => {
+    withStateDatabase(f.config, db => db.prepare('DELETE FROM state_meta WHERE key=?').run('chatgpt_goal:' + f.work_id), { transaction: true });
+    for (const args of [{}, { goal: true }, { mode: 'normal', goal: true }, { mode: 'loop', goal: true }, { mode: 'goal', goal: false }]) {
+      assert.throws(() => validateWorkMode(args), /mode|Conflicting/);
+    }
+    let reads = 0;
+    configureGoalBrowserTransport(async () => { reads++; throw new Error('Normal work cannot contact ChatGPT'); });
+    try {
+      const result = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(f.config,
+        { mode: 'normal', goal: false, title: 'Ordinary work' }, { ...f.context, connector: true }));
+      assert.deepEqual(result.modeAcknowledgement, { requested: 'normal', effective: 'normal', readiness: 'ready' });
+      assert.equal(result.chat_link, undefined);
+      startGoalMonitor(f.config);
+      assert.equal(loadGoal(f.config, f.work_id), null);
+      assert.equal(reads, 0);
+      const count = withStateDatabase(f.config, db => db.prepare("SELECT count(*) AS n FROM state_meta WHERE key GLOB 'chatgpt_goal_detection:*'").get().n, { readonly: true });
+      assert.equal(count, 0);
+    } finally { stopGoalMonitor(); configureGoalBrowserTransport(null); }
+  });
+});
+
+test('mode activation acknowledges durable intent and can enable an exact normal work session', async t => {
+  await withMonitoredGoal(t, async f => {
+    withStateDatabase(f.config, db => db.prepare('DELETE FROM state_meta WHERE key=?').run('chatgpt_goal:' + f.work_id), { transaction: true });
+    const context = { ...f.context, connector: true };
+    const result = updateGoalOptions(f.config, { work_id: f.work_id, mode: 'loop', brief: 'Improve this fixture' }, context);
+    assert.equal(result.work_id, f.work_id);
+    assert.equal(result.mode, 'loop');
+    assert.equal(result.state, 'linking');
+    assert.ok(readChatLink(f.config, loadGoal(f.config, f.work_id)));
+    assert.equal(result.continuationCount, 0);
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    assert.equal(loadGoal(f.config, f.work_id).active, false);
+  });
+});
+
+test('mode slash aliases preserve controls and established objectives', () => {
+  const msg = text => ({ author: { role: 'user' }, content: { parts: [text] } });
+  for (const mode of ['goal', 'loop']) {
+    assert.equal(parseGoalCommand(msg('/' + mode + ' mode')).objective, '');
+    assert.equal(parseGoalCommand(msg('/' + mode + ' mode Repair fixture')).objective, 'Repair fixture');
+    assert.equal(parseGoalCommand(msg('/' + mode + ' mode stop')).action, 'stop');
+  }
+  for (const text of ['Do not use Goal Mode', 'What is Goal Mode?', 'Example: /goal mode', '```\n/goal mode\n```']) {
+    assert.equal(parseGoalCommand(msg(text)), null);
+  }
+});
+
+function discoveryFixture({ ordinary = [], pages = [], trees = {} } = {}) {
+  const requests = [];
+  const transport = async request => {
+    requests.push(request);
+    if (request.path.includes('/conversations?offset=')) return { ok: true, data: { items: ordinary, has_more: false } };
+    if (request.path.includes('/snorlax/sidebar')) {
+      const page = Number(new URL(request.path, 'https://chatgpt.com').searchParams.get('cursor') || 0);
+      return { ok: true, data: { items: pages[page] || [], cursor: page + 1 < pages.length ? String(page + 1) : null } };
+    }
+    if (request.path.includes('/conversation/')) {
+      const id = request.path.split('/').at(-1);
+      return { ok: true, data: await readConversationProjection(response(trees[id] || conversation(id, 'Unrelated'))) };
+    }
+    throw new Error('Unexpected discovery request: ' + request.path);
+  };
+  return { requests, transport, trees };
+}
+function projectPreview(index, items) {
+  return { gizmo: { gizmo: { id: 'g-p-' + String(index).padStart(32, '0'), name: 'Project ' + index },
+    conversations: { items } } };
+}
+function rankedChat(index, updated) {
+  return { id: '30000000-0000-4000-8000-' + String(index).padStart(12, '0'), update_time: updated };
+}
+
+test('global newest five can all belong to a later Project page and never read older chat bodies', async () => {
+  const workId = 'latest-project', link = { version: 1, link_id: 's'.repeat(32) };
+  const latest = Array.from({ length: 5 }, (_, i) => rankedChat(i + 1, 2000 - i));
+  const older = [rankedChat(6, 1000), rankedChat(7, 900)];
+  const fixture = discoveryFixture({ ordinary: older, pages: [
+    [projectPreview(1, older)], [projectPreview(2, latest)]
+  ], trees: { [latest[3].id]: linkedConversation(latest[3].id, workId, link) } });
+  const result = await findRecentGoalCommand({ workId, linkId: link.link_id, explicitGoal: true,
+    nativeTransport: fixture.transport, chatgptProjectName: 'Wrong hint' });
+  assert.equal(result.conversationId, latest[3].id);
+  const bodyIds = fixture.requests.filter(r => r.path.includes('/conversation/')).map(r => r.path.split('/').at(-1));
+  assert.equal(new Set(bodyIds).size, 5);
+  assert.equal(bodyIds.some(id => older.some(item => item.id === id)), false);
+  assert.equal(bodyIds.length, 6, 'five candidates and one fresh verification');
+});
+
+test('four pending goals share the same five candidate reads and receive separate verified matches', async () => {
+  const chats = Array.from({ length: 6 }, (_, i) => rankedChat(i + 1, 2000 - i));
+  const links = chats.slice(0, 4).map((_, i) => ({ version: 1, link_id: String.fromCharCode(97 + i).repeat(32) }));
+  const trees = Object.fromEntries(chats.slice(0, 4).map((chat, i) => [chat.id, linkedConversation(chat.id, 'work-' + i, links[i])]));
+  const fixture = discoveryFixture({ ordinary: [chats[0], chats[2], chats[5]],
+    pages: [[projectPreview(1, [chats[1], chats[3], chats[4]])]], trees });
+  const results = await Promise.all(links.map((link, i) => findRecentGoalCommand({
+    nativeTransport: fixture.transport, workId: 'work-' + i, linkId: link.link_id, explicitGoal: true })));
+  assert.deepEqual(results.map(r => r.conversationId), chats.slice(0, 4).map(chat => chat.id));
+  assert.equal(fixture.requests.length, 11, 'two metadata reads, five shared bodies, four fresh verifications');
+  assert.equal(fixture.requests.some(r => r.path.endsWith(chats[5].id)), false);
+});
+
+test('cached discovery survives transport restart but freshly rejects an off-branch match', async t => {
+  await withMonitoredGoal(t, async f => {
+    const link = { version: 1, link_id: 't'.repeat(32) };
+    const chat = rankedChat(1, 2000);
+    const tree = linkedConversation(chat.id, f.work_id, link);
+    const fixture = discoveryFixture({ ordinary: [chat], trees: { [chat.id]: tree } });
+    const discoveryStore = goalDiscoveryStore(f.config, { owner: 'cache-owner', tunnelId: 'cache-tunnel' });
+    const deps = { workId: f.work_id, linkId: link.link_id, explicitGoal: true, discoveryStore };
+    assert.equal((await findRecentGoalCommand({ ...deps, nativeTransport: fixture.transport })).state, 'matched');
+    const before = fixture.requests.length;
+    tree.mapping.a.parent = 'u';
+    const result = await findRecentGoalCommand({ ...deps, nativeTransport: r => fixture.transport(r) });
+    assert.equal(result.state, 'absent');
+    assert.equal(fixture.requests.length, before + 1, 'durable index avoids metadata and candidate rereads; binding still verifies fresh');
+    assert.equal(result.reason, 'receipt_not_verified');
+  });
+});
+
+test('negative evidence expires even when listing timestamps have not changed', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const chat = rankedChat(1, 2000), link = { version: 1, link_id: 'u'.repeat(32) };
+  const fixture = discoveryFixture({ ordinary: [chat] });
+  const deps = { workId: 'delayed-work', linkId: link.link_id, explicitGoal: true, nativeTransport: fixture.transport };
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+  fixture.trees[chat.id] = linkedConversation(chat.id, deps.workId, link);
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+  t.mock.timers.tick(5001);
+  assert.equal((await findRecentGoalCommand(deps)).state, 'matched');
+});
+
+test('incomplete Project catalogues defer bodies, persist metadata progress and resume after restart', async t => {
+  await withMonitoredGoal(t, async f => {
+    const link = { version: 1, link_id: 'v'.repeat(32) };
+    const newest = rankedChat(9, 9000);
+    const pages = Array.from({ length: 5 }, (_, i) => [projectPreview(i + 1, [rankedChat(i + 1, 1000 + i)])]);
+    pages[4] = [projectPreview(5, [newest])];
+    const fixture = discoveryFixture({ pages, trees: { [newest.id]: linkedConversation(newest.id, f.work_id, link) } });
+    const discoveryStore = goalDiscoveryStore(f.config, { owner: 'paged-owner', tunnelId: 'paged-tunnel' });
+    const deps = { workId: f.work_id, linkId: link.link_id, explicitGoal: true, discoveryStore };
+    await assert.rejects(() => findRecentGoalCommand({ ...deps, nativeTransport: fixture.transport }), e => e.deferred);
+    assert.equal(fixture.requests.some(r => r.path.includes('/conversation/')), false);
+    assert.equal(discoveryStore.read().scan.cursor, '4');
+    const match = await findRecentGoalCommand({ ...deps, nativeTransport: r => fixture.transport(r) });
+    assert.equal(match.conversationId, newest.id);
+  });
+});
+
+test('invalid ranking metadata defers discovery instead of reading a provisional top five', async () => {
+  const fixture = discoveryFixture({ ordinary: [{ id: ID }] });
+  await assert.rejects(() => findRecentGoalCommand({ workId: 'unknown-ranking', linkId: 'w'.repeat(32),
+    nativeTransport: fixture.transport }), e => e.deferred);
+  assert.equal(fixture.requests.some(r => r.path.includes('/conversation/')), false);
+});
+
+test('account discovery leases isolate owners and refuse late writes from expired owners', async t => {
+  await withMonitoredGoal(t, async f => {
+    const store = goalDiscoveryStore(f.config, { owner: 'one', tunnelId: 'same' });
+    const first = store.claim();
+    assert.ok(first.token);
+    assert.equal(store.claim().token, undefined);
+    const other = goalDiscoveryStore(f.config, { owner: 'two', tunnelId: 'same' });
+    assert.ok(other.claim().token);
+    t.mock.timers.tick(180001);
+    const second = store.claim();
+    assert.ok(second.token);
+    assert.equal(store.save(first.token, { evidence: [] }), false);
+    assert.equal(store.save(second.token, { evidence: [] }), true);
+  });
+});
+
+
+test('activation transaction rolls back mode and linking receipt together on persistence failure', async t => {
+  await withMonitoredGoal(t, async f => {
+    withStateDatabase(f.config, db => {
+      db.prepare('DELETE FROM state_meta WHERE key=?').run('chatgpt_goal:' + f.work_id);
+      db.exec("CREATE TRIGGER fail_goal_activation BEFORE INSERT ON state_meta WHEN NEW.key GLOB 'chatgpt_goal:*' BEGIN SELECT RAISE(ABORT, 'fixture activation failure'); END;");
+      db.prepare('DELETE FROM state_meta WHERE key=?').run('work_mode:' + f.work_id);
+    }, { transaction: true });
+    assert.throws(() => updateGoalOptions(f.config, { work_id: f.work_id, mode: 'goal' },
+      { ...f.context, connector: true }), /fixture activation failure/);
+    assert.equal(loadGoal(f.config, f.work_id), null);
+    assert.equal(readChatLink(f.config, { workId: f.work_id, owner: 'unused', tunnelId: '' }), null);
+    const mode = withStateDatabase(f.config, db => db.prepare('SELECT value FROM state_meta WHERE key=?')
+      .get('work_mode:' + f.work_id), { readonly: true });
+    assert.equal(mode, undefined);
+  });
+});
+
+test('repeated begin acknowledges a stopped goal without reactivating or clearing its pending send', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ pendingNode: 'original-node', pendingOutcome: 'uncertain', pendingPrompt: 'Original pending intent' });
+    stopGoal(f.config, { work_id: f.work_id }, f.context);
+    const result = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(f.config,
+      { mode: 'goal', title: 'Existing goal' }, { ...f.context, connector: true }));
+    assert.equal(result.modeAcknowledgement.readiness, 'stopped');
+    const goal = loadGoal(f.config, f.work_id);
+    assert.equal(goal.active, false);
+    assert.equal(goal.pendingNode, 'original-node');
+    assert.equal(goal.pendingPrompt, 'Original pending intent');
+  });
+});
+
+test('startup retires speculative ordinary-task detections while preserving enabled goal intent', async t => {
+  await withMonitoredGoal(t, async f => {
+    withStateDatabase(f.config, db => db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)')
+      .run('chatgpt_goal_detection:ordinary-old-task', JSON.stringify({ workId: 'ordinary-old-task', state: 'checking' })),
+      { transaction: true });
+    const before = loadGoal(f.config, f.work_id);
+    try {
+      startGoalMonitor(f.config);
+      const after = loadGoal(f.config, f.work_id);
+      assert.equal(after.active, before.active);
+      assert.equal(after.mode, before.mode);
+      assert.equal(after.continuationCount, before.continuationCount);
+      const old = withStateDatabase(f.config, db => db.prepare('SELECT value FROM state_meta WHERE key=?')
+        .get('chatgpt_goal_detection:ordinary-old-task'), { readonly: true });
+      assert.equal(old, undefined);
+    } finally { stopGoalMonitor(); }
+  });
+});
+
+
+test('explicit-goal discovery restores the account cooldown across transports without spending retries', async t => {
+  await withMonitoredGoal(t, async f => {
+    ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
+    f.patchGoal({ binding: null, conversationId: '', conversationCorrelation: 'opaque', pendingNode: '' });
+    let requests = 0;
+    await pollGoal(f.config, f.work_id, { nativeTransport: async () => {
+      requests++;
+      return { ok: false, status: 429, deferred: true, rateLimitReason: 'read_budget', retryAfterMs: 10000 };
+    } });
+    assert.equal(f.status().retryCount, 0);
+    assert.equal(f.status().chatLink.rateLimitReason, 'read_budget');
+    assert.equal(f.status().nextAttemptAt, Date.now() + 10000);
+    f.patchGoal({ nextAttemptAt: 0 });
+    await pollGoal(f.config, f.work_id, { nativeTransport: async () => {
+      requests++; throw new Error('The durable account cooldown must prevent this read');
+    } });
+    assert.equal(requests, 1);
+    assert.equal(f.status().retryCount, 0);
+    assert.equal(f.status().nextAttemptAt, Date.now() + 10000);
+  });
+});
+
+test('a second discovery transport waits for the account lease and then reuses the saved evidence', async t => {
+  await withMonitoredGoal(t, async f => {
+    const chat = rankedChat(1, 2000), link = { version: 1, link_id: 'x'.repeat(32) };
+    const entered = Promise.withResolvers(), release = Promise.withResolvers();
+    const discoveryStore = goalDiscoveryStore(f.config, { owner: 'lease-owner', tunnelId: 'lease-tunnel' });
+    const fixture = discoveryFixture({ ordinary: [chat], trees: { [chat.id]: linkedConversation(chat.id, f.work_id, link) } });
+    const deps = { workId: f.work_id, linkId: link.link_id, explicitGoal: true, discoveryStore };
+    const first = findRecentGoalCommand({ ...deps, nativeTransport: async request => {
+      if (request.path.includes('/conversations?')) { entered.resolve(); await release.promise; }
+      return fixture.transport(request);
+    } });
+    await entered.promise;
+    await assert.rejects(() => findRecentGoalCommand({ ...deps, nativeTransport: r => fixture.transport(r) }),
+      e => e.deferred && e.code === 'GOAL_DISCOVERY_BUSY');
+    release.resolve();
+    assert.equal((await first).state, 'matched');
+    const before = fixture.requests.length;
+    assert.equal((await findRecentGoalCommand({ ...deps, nativeTransport: r => fixture.transport(r) })).state, 'matched');
+    assert.equal(fixture.requests.length, before + 1);
   });
 });

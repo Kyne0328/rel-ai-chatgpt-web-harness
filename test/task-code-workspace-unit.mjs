@@ -49,7 +49,7 @@ let taskId = '';
 
 try {
   resetToolActivity();
-  const task = await callTool('relai_work', {
+  const task = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'app',
     bootstrap: 'none',

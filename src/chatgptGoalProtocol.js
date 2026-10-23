@@ -7,7 +7,6 @@ import { parseGoalCommand } from './goalCommands.js';
 const ORIGIN = 'https://chatgpt.com';
 let goalBrowserTransport = null;
 let accountScopes = new WeakMap();
-const DISCOVERY_CACHE_MS = 120_000;
 const RATE_LIMIT_DEFAULT_MS = 300_000;
 const READ_WINDOW_MS = 60_000;
 const MAX_ACCOUNT_READS = 30;
@@ -271,33 +270,6 @@ function waitForDiscovery(promise, signal) {
   });
 }
 
-async function discoveryRead(key, load, deps) {
-  deps.signal?.throwIfAborted();
-  const scope = accountScope(deps);
-  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil, true, scope.cooldownReason);
-  const existing = scope.discovery.get(key);
-  if (existing?.promise) return { value: await waitForDiscovery(existing.promise, deps.signal), cached: false };
-  if (existing && Date.now() < existing.expiresAt) return { value: existing.value, cached: true };
-  // Shared requests own their deadline. Cancelling one task must not cancel
-  // another task's discovery or retain an unbounded request.
-  const record = { promise: null };
-  record.promise = Promise.resolve().then(() => load({ ...deps,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })).then(value => {
-    scope.discovery.set(key, { value, expiresAt: Date.now() + (deps.discoveryCacheMs ?? DISCOVERY_CACHE_MS) });
-    while (scope.discovery.size > 32) {
-      const oldest = [...scope.discovery].find(([key, entry]) => key !== 'catalog' && !entry.promise)?.[0];
-      if (oldest === undefined) break;
-      scope.discovery.delete(oldest);
-    }
-    return value;
-  }, error => {
-    if (scope.discovery.get(key) === record) scope.discovery.delete(key);
-    throw error;
-  });
-  scope.discovery.set(key, record);
-  return { value: await waitForDiscovery(record.promise, deps.signal), cached: false };
-}
-
 function activeMessages(conversation, maxNodes = 1000) {
   const mapping = conversation?.mapping;
   if (!mapping || typeof mapping !== 'object') return [];
@@ -338,120 +310,118 @@ function turnState(conversation) {
   };
 }
 
-// Start with recent chats; durable discovery can page further on later rounds.
-const RECENT_GOAL_CHATS = 10;
+// Catalogue metadata is shared across the account; conversation bodies are
+// fetched only for the global five candidates. No historical body expansion.
+const RECENT_GOAL_CHATS = 5;
+const CATALOGUE_TTL_MS = 15_000;
+const EVIDENCE_TTL_MS = 5_000;
 
 function recentChats(items, limit = RECENT_GOAL_CHATS) {
   const unique = new Map();
   for (const item of items) {
     if (!UUID.test(String(item?.id || ''))) continue;
     const updated = typeof item.update_time === 'number' ? item.update_time * 1000
-      : Date.parse(item.update_time || '') || 0;
+      : Date.parse(item.update_time || '');
+    if (!Number.isFinite(updated) || updated <= 0) {
+      throw Object.assign(new Error('Chat listing timestamps are incomplete; waiting for a fresh catalogue.'),
+        { code: 'GOAL_CATALOGUE_INVALID', deferred: true, retryAt: Date.now() + CATALOGUE_TTL_MS });
+    }
     const previous = unique.get(item.id);
     if (!previous || updated > previous.updated) unique.set(item.id, { id: item.id, updated,
       ...(item.projectId ? { projectId: item.projectId } : {}) });
   }
-  return [...unique.values()].sort((a, b) => b.updated - a.updated).slice(0, limit);
+  return [...unique.values()].sort((a, b) => b.updated - a.updated || a.id.localeCompare(b.id)).slice(0, limit);
 }
 
-async function recentGoalCandidates(deps) {
-  const hint = String(deps.chatgptProjectName || '').trim();
-  let projectId = String(deps.chatgptProjectId || '');
-  if (hint || projectId) {
-    if (!PROJECT_ID.test(projectId)) {
-      const { value: catalogue } = await discoveryRead('sidebar-page:',
-        shared => listGoalProjects(shared, '', 1), deps);
-      const sameName = name => String(name || '').trim().replace(/\s+/g, ' ').toLowerCase()
-        === hint.replace(/\s+/g, ' ').toLowerCase();
-      const matches = catalogue.projects.filter(item => sameName(item.name));
-      // A display name is only a hint. Missing, duplicate and partially listed
-      // names cannot establish absence or prevent receipt-based discovery.
-      projectId = matches.length === 1 ? matches[0].id : '';
-    }
-    if (projectId) {
-      try {
-        const { value: page } = await discoveryRead('project-recent:' + projectId,
-          shared => listProjectChats(projectId, '0', shared), deps);
-        return { state: 'ready', projectId, items: recentChats(page.items) };
-      } catch (error) { if (![403, 404].includes(error?.status)) throw error; }
-    }
+async function latestGoalCatalogue(deps, state) {
+  if (state.catalogue && Date.now() - state.catalogue.at < CATALOGUE_TTL_MS) return state.catalogue.items;
+  // Checkpoints cover metadata only. An incomplete Project listing cannot
+  // authorize reading the provisional first five conversation bodies.
+  const scan = state.scan || { cursor: '', seen: [], items: [], startedAt: Date.now() };
+  state.scan = scan;
+  if (!scan.ordinary) {
+    const ordinary = await conversationPage(deps);
+    scan.items = recentChats(ordinary.items);
+    scan.ordinary = true;
   }
-  // First pass without a usable hint: prioritize the ten newest ordinary chats
-  // and Project previews. A missed receipt schedules resumable discovery.
-  const ordinary = await discoveryRead('ordinary-page:0',
-    conversationPage, deps);
-  const sidebar = await discoveryRead('sidebar-page:',
-    shared => listGoalProjects(shared, '', 1), deps);
-  const candidates = recentChats([...ordinary.value.items, ...sidebar.value.previews], 200);
-  return { state: 'ready', items: candidates.slice(0, RECENT_GOAL_CHATS), nextScan: {
-    phase: ordinary.value.more ? 'ordinary' : 'sidebar', offset: ordinary.value.items.length,
-    pending: candidates.slice(RECENT_GOAL_CHATS)
-  } };
-}
-
-// A bounded page of a durable scan. A round reads at most ten conversations and
-// three catalogue pages; subsequent rounds resume rather than restarting at the
-// sidebar. This uses the same tunnel-scoped transport and account read budget.
-async function nextGoalCandidates(deps) {
-  if (!deps.discovery?.scan) return recentGoalCandidates(deps);
-  const scan = structuredClone(deps.discovery.scan);
-  deps.discovery.scan = scan;
-  for (let pages = 0; pages < 3; pages++) {
-    if (scan.pending?.length) {
-      return { state: 'ready', items: scan.pending.slice(0, RECENT_GOAL_CHATS) };
-    }
-    if (scan.phase === 'done') {
-      deps.discovery.scan = null;
-      deps.discovery.complete = true;
-      return { state: 'ready', items: [] };
-    }
-    if (scan.phase === 'ordinary') {
-      const offset = scan.offset || 0;
-      const { value: page } = await discoveryRead('ordinary-page:' + offset,
-        shared => conversationPage(shared, offset), deps);
-      scan.offset = offset + page.items.length;
-      if (!page.more || !page.items.length) scan.phase = 'sidebar';
-      scan.pending = recentChats(page.items, 200);
-    } else if (scan.phase === 'sidebar') {
-      const cursor = scan.sidebarCursor || '';
-      const { value: page } = await discoveryRead('sidebar-page:' + cursor,
-        shared => listGoalProjects(shared, cursor, 1), deps);
-      scan.sidebarCursor = page.cursor;
-      scan.sidebarComplete = page.complete;
-      scan.projects = page.projects.map(project => project.id);
-      scan.projectCursor = '0';
-      scan.phase = 'project';
-    } else if (scan.phase === 'project') {
-      const projectId = scan.projects[0];
-      if (!projectId) { scan.phase = scan.sidebarComplete ? 'done' : 'sidebar'; continue; }
-      const cursor = scan.projectCursor;
-      let page;
-      try {
-        ({ value: page } = await discoveryRead('project-page:' + projectId + ':' + cursor,
-          shared => listProjectChats(projectId, cursor, shared), deps));
-      } catch (error) {
-        if (![403, 404].includes(error?.status)) throw error;
-        page = { items: [], cursor: null };
+  for (let page = 0; page < MAX_SIDEBAR_PAGES; page++) {
+    const listing = await listGoalProjects(deps, scan.cursor, 1);
+    // Previews contain only metadata. Missing previews are not proof that a
+    // Project has no chats, so list that Project's first conversation page.
+    for (const project of listing.projects) {
+      if (scan.processed?.includes(project.id)) continue;
+      const items = listing.previews.filter(item => item.projectId === project.id);
+      if (!items.length) {
+        const chats = await listProjectChats(project.id, '0', deps);
+        items.push(...chats.items.map(item => ({ ...item, projectId: project.id })));
       }
-      if (page.cursor === cursor) throw new Error('ChatGPT Project conversations repeated a pagination cursor.');
-      scan.projectCursor = page.cursor || '0';
-      if (!page.cursor) scan.projects.shift();
-      scan.pending = recentChats(page.items.map(item => ({ ...item, projectId })), 200);
-    } else throw new Error('Unsupported ChatGPT discovery scan state.');
+      scan.items = recentChats([...scan.items.map(item => ({ ...item, update_time: item.updated / 1000 })), ...items]);
+      scan.processed = [...(scan.processed || []), project.id];
+    }
+    if (listing.complete) {
+      state.catalogue = { at: Date.now(), items: scan.items };
+      state.scan = null;
+      return scan.items;
+    }
+    if (scan.seen.includes(listing.cursor)) throw new Error('ChatGPT Project listing repeated a pagination cursor.');
+    scan.seen = [...scan.seen.slice(-79), listing.cursor];
+    scan.cursor = listing.cursor;
+    scan.processed = [];
   }
-  return { state: 'ready', items: scan.pending?.slice(0, RECENT_GOAL_CHATS) || [] };
+  throw Object.assign(new Error('Completing the account chat catalogue before linking.'),
+    { code: 'GOAL_CATALOGUE_INCOMPLETE', deferred: true, retryAt: Date.now() + 5_000 });
 }
 
-function finishDiscoveryPage(deps, catalogue) {
-  // Advance only after the whole batch was read. A cooldown or cancellation
-  // halfway through must not discard a receipt already seen in that batch.
-  deps.discovery?.scan?.pending?.splice(0, catalogue.items.length);
+function discoveryEvidence(conversation) {
+  const evidence = goalCommandEvidence(conversation);
+  return { ...evidence, receipts: evidence.receipts.slice(-256), workIds: evidence.workIds.slice(-256) };
 }
 
-function continueDiscovery(deps, exact, catalogue) {
-  if (deps.discovery && !exact && !deps.discovery.scan && !deps.discovery.complete) {
-    deps.discovery.scan = catalogue.nextScan || { phase: 'ordinary', offset: 0, pending: [] };
-  }
+async function sharedGoalEvidence(deps) {
+  const scope = accountScope(deps);
+  if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil, true, scope.cooldownReason);
+  const key = 'latest-five-evidence:' + (deps.discoveryStore?.key || 'fixture');
+  const cached = scope.discovery.get(key);
+  if (cached?.promise) return waitForDiscovery(cached.promise, deps.signal);
+  if (cached?.value && Date.now() < cached.expiresAt) return cached.value;
+  const record = { promise: null };
+  record.promise = (async () => {
+    const claim = deps.discoveryStore?.claim();
+    if (claim && !claim.token) throw Object.assign(new Error('Another runtime is discovering chats for this account.'),
+      { code: 'GOAL_DISCOVERY_BUSY', deferred: true, retryAt: Math.min(claim.retryAt, Date.now() + 5_000) });
+    const state = claim?.state || scope.goalIndex || {};
+    const shared = { ...deps, signal: AbortSignal.timeout(120_000) };
+    try {
+      const candidates = await latestGoalCatalogue(shared, state);
+      const entries = [];
+      for (const item of candidates) {
+        let entry = state.evidence?.find(old => old.id === item.id && old.updated === item.updated
+          && Date.now() - old.at < EVIDENCE_TTL_MS);
+        if (!entry) {
+          try {
+            entry = { ...item, at: Date.now(), proof: discoveryEvidence(await getConversation(item.id, shared)) };
+          } catch (error) { if ([403, 404].includes(error?.status)) continue; throw error; }
+        }
+        entries.push(entry);
+        // Retain successful reads across a later budget wait or crash recovery.
+        state.evidence = [...entries, ...(state.evidence || []).filter(old => !entries.some(e => e.id === old.id))].slice(0, 5);
+      }
+      state.evidence = entries;
+      scope.goalIndex = state;
+      if (claim?.token && !deps.discoveryStore.save(claim.token, state)) {
+        throw Object.assign(new Error('Chat discovery lease changed; rechecking account evidence.'),
+          { deferred: true, retryAt: Date.now() + 5_000 });
+      }
+      scope.discovery.set(key, { value: entries, expiresAt: Date.now() + EVIDENCE_TTL_MS });
+      return entries;
+    } catch (error) {
+      scope.goalIndex = state;
+      if (claim?.token) deps.discoveryStore.save(claim.token, state);
+      throw error;
+    }
+  })().catch(error => { if (scope.discovery.get(key) === record) scope.discovery.delete(key); throw error; });
+  scope.discovery.set(key, record);
+  return waitForDiscovery(record.promise, deps.signal);
 }
 
 async function findRecentGoalCommand(deps = {}) {
@@ -464,24 +434,13 @@ async function findRecentGoalCommand(deps = {}) {
     return receipt ? { state: 'matched', conversationId: exact, messageId: receipt.messageId,
       receiptMessageId: receipt.receiptMessageId, command: receipt.command || null } : { state: 'absent' };
   }
-  const catalogue = exact ? { state: 'ready', items: [{ id: exact }] } : await nextGoalCandidates(deps);
-  if (catalogue.state !== 'ready') return catalogue;
+  const entries = exact ? [{ id: exact, proof: goalCommandEvidence(await getConversation(exact, deps)) }]
+    : await sharedGoalEvidence(deps);
   const matches = [];
-  for (const item of catalogue.items) {
-    let proof;
-    let cached = false;
-    try {
-      if (exact) proof = goalCommandEvidence(await getConversation(item.id, deps));
-      else {
-        const result = await discoveryRead('recent-evidence:' + item.id,
-          shared => getConversation(item.id, shared).then(goalCommandEvidence), deps);
-        proof = result.value;
-        cached = result.cached;
-      }
-    } catch (error) { if ([403, 404].includes(error?.status)) continue; throw error; }
-    let receipt = goalEvidenceForWork(proof, deps, exact);
+  for (const item of entries) {
+    let receipt = goalEvidenceForWork(item.proof, deps, exact);
     if (!receipt || !recentGoalEvidence(receipt, Number(deps.startedAt || 0))) continue;
-    if (cached) {
+    if (!exact) {
       const expectedMessageId = receipt.messageId;
       receipt = goalEvidenceForWork(goalCommandEvidence(await getConversation(item.id, deps)), deps, exact);
       if (!receipt || receipt.messageId !== expectedMessageId
@@ -489,47 +448,35 @@ async function findRecentGoalCommand(deps = {}) {
     }
     matches.push({ conversationId: item.id, messageId: receipt.messageId,
       receiptMessageId: receipt.receiptMessageId, command: receipt.command || null,
-      ...(item.projectId || catalogue.projectId ? { projectId: item.projectId || catalogue.projectId } : {}) });
+      ...(item.projectId ? { projectId: item.projectId } : {}) });
     if (matches.length > 1) return { state: 'ambiguous' };
   }
-  finishDiscoveryPage(deps, catalogue);
-  if (!matches.length) continueDiscovery(deps, exact, catalogue);
   return matches[0] ? { state: 'matched', ...matches[0] } : { state: 'absent' };
 }
 
 async function findLinkedGoalCommand(deps) {
   let exact = '';
   try { exact = parseConversationUrl(deps.conversationCorrelation); } catch {}
-  const catalogue = exact ? { state: 'ready', items: [{ id: exact }] } : await nextGoalCandidates(deps);
-  if (catalogue.state !== 'ready') return catalogue;
+  const entries = exact ? [{ id: exact, proof: goalCommandEvidence(await getConversation(exact, deps)) }]
+    : await sharedGoalEvidence(deps);
   const findReceipt = proof => proof?.receipts.find(receipt => receipt.workId === deps.workId
     && receipt.linkId === deps.linkId && receipt.messageId && receipt.receiptMessageId);
-  const matches = [];
-  for (const item of catalogue.items) {
-    let evidence;
-    try { evidence = goalCommandEvidence(await getConversation(item.id, deps)); }
-    catch (error) { if ([403, 404].includes(error?.status)) continue; throw error; }
-    const receipt = findReceipt(evidence);
-    if (!receipt) continue;
-    matches.push({ conversationId: item.id, messageId: receipt.messageId,
+  const matches = entries.flatMap(item => {
+    const receipt = findReceipt(item.proof);
+    return receipt ? [{ conversationId: item.id, messageId: receipt.messageId,
       receiptMessageId: receipt.receiptMessageId, command: receipt.command || null,
-      ...(item.projectId || catalogue.projectId ? { projectId: item.projectId || catalogue.projectId } : {}) });
-    if (matches.length > 1) return { state: 'ambiguous' };
-  }
-  if (!matches.length) {
-    finishDiscoveryPage(deps, catalogue);
-    continueDiscovery(deps, exact, catalogue);
-    return { state: 'absent', reason: 'receipt_not_found' };
-  }
-  // Fresh active-branch read is mandatory even if a catalogue result was cached.
+      ...(item.projectId ? { projectId: item.projectId } : {}) }] : [];
+  });
+  if (matches.length > 1) return { state: 'ambiguous' };
+  if (!matches.length) return { state: 'absent', reason: 'receipt_not_found_latest_five' };
   const found = matches[0];
+  // Cached discovery can locate evidence, never authorize binding. Fresh active
+  // branch verification is required even after restart or unchanged timestamps.
   const receipt = findReceipt(goalCommandEvidence(await getConversation(found.conversationId, deps)));
-  if (!receipt || receipt.messageId !== found.messageId
-    || receipt.receiptMessageId !== found.receiptMessageId) return { state: 'absent', reason: 'receipt_not_verified' };
-  if (!deps.explicitGoal && receipt.command?.action !== 'start') {
-    if (deps.discovery) deps.discovery.notRequested = true;
-    return { state: 'absent', reason: 'goal_not_requested' };
+  if (!receipt || receipt.messageId !== found.messageId || receipt.receiptMessageId !== found.receiptMessageId) {
+    return { state: 'absent', reason: 'receipt_not_verified' };
   }
+  if (!deps.explicitGoal && receipt.command?.action !== 'start') return { state: 'absent', reason: 'goal_not_requested' };
   return { state: 'matched', ...found };
 }
 

@@ -89,7 +89,7 @@ test('parallel children actually overlap and dependent calls consume prior resul
 });
 
 test('canonical reads and dependent edits keep one task and do not deadlock', async () => {
-  const task = await callTool('relai_work', { action: 'begin', workspace: 'app', title: 'Composition fixture', bootstrap: 'none' }, context);
+  const task = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', title: 'Composition fixture', bootstrap: 'none' }, context);
   const result = await run(`
     const read = await tools.relai_read({paths:['a.txt']});
     text({readOk: read.ok});

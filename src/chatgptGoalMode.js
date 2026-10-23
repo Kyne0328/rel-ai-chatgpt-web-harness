@@ -6,7 +6,7 @@ import { readTaskHistorySessionRecord, readRecentWorkflowEvidence } from './task
 import { readTaskIntegrity, readWorkspaceIntegrity } from './taskIntegrity.ts';
 import { resolveWorkspace } from './config.js';
 import { createValidationFingerprint } from './bridge/validationPlan.js';
-import { goalKey, loadGoal, listGoals, saveGoal as persistGoal, updateGoal as mutateGoal, claimContinuation, clearUnsentContinuation, readChatLink, commitGoalBinding } from './chatgptGoalState.js';
+import { goalKey, loadGoal, listGoals, saveGoal as persistGoal, updateGoal as mutateGoal, claimContinuation, clearUnsentContinuation, readChatLink, commitGoalBinding, goalDiscoveryStore } from './chatgptGoalState.js';
 import { buildGoalEvidence } from './chatgptGoalEvidence.js';
 import { evaluateGoalDecision } from './chatgptGoalEvaluator.js';
 import { isTerminalTaskStatus } from './taskState.js';
@@ -17,9 +17,7 @@ import { goalMessageExists } from './chatgptConversationReader.js';
 
 const DETECTION_PREFIX = 'chatgpt_goal_detection:';
 const RATE_LIMIT_PREFIX = 'chatgpt_goal_rate_limit:';
-const DETECTION_MAX_ATTEMPTS = 2;
 const DISCOVERY_RETRY_MS = 120_000;
-const activeDetections = new Map();
 const SETTLE_MS = 30_000;
 const UNFINISHED_TURN_IDLE_MS = 4 * 60_000 + 30_000;
 const RETRY_DELAYS_MS = [5_000, 5_000, 10_000, 15_000, 20_000];
@@ -29,7 +27,6 @@ const activePolls = new Map();
 const retryTimers = new Map();
 let monitorConfig = null;
 let timer = null;
-let lastDetectionCleanupAt = 0;
 
 // A persistence error may also break the error-state save. Background launches
 // therefore have a final, storage-independent boundary and bounded short retries.
@@ -37,13 +34,9 @@ const backgroundGoals = new Map();
 const MAX_BACKGROUND_GOALS = 128;
 
 function clearBackgroundGoal(workId) {
-  clearTimeout(retryTimers.get('detection:' + workId));
-  retryTimers.delete('detection:' + workId);
-  for (const kind of ['poll', 'detection']) {
-    const key = kind + ':' + workId;
-    clearTimeout(backgroundGoals.get(key)?.timer);
-    backgroundGoals.delete(key);
-  }
+  const key = 'poll:' + workId;
+  clearTimeout(backgroundGoals.get(key)?.timer);
+  backgroundGoals.delete(key);
 }
 
 function runGoalBackground(config, workId, kind, deps = {}) {
@@ -60,8 +53,7 @@ function runGoalBackground(config, workId, kind, deps = {}) {
   }
   // The promise chain itself is terminal: its rejection handler does not read
   // or write SQLite, and never resends a persisted uncertain continuation.
-  void Promise.resolve().then(() => kind === 'detection'
-    ? checkGoalDetection(config, workId, deps) : pollGoal(config, workId, deps)).then(() => {
+  void Promise.resolve().then(() => pollGoal(config, workId, deps)).then(() => {
     if (backgroundGoals.get(key) === pending) backgroundGoals.delete(key);
   }, error => {
     if (backgroundGoals.get(key) !== pending) return; // Stop/shutdown won.
@@ -82,8 +74,6 @@ function runGoalBackground(config, workId, kind, deps = {}) {
     }
   });
 }
-
-function detectionKey(workId) { return DETECTION_PREFIX + workId; }
 
 function canMonitorGoal(record, deps = {}) {
   // Durable records are shared by desktop, CLI and HTTP runtimes. Only the
@@ -113,139 +103,10 @@ function scheduleGoalRetry(config, goal) {
   retryTimers.set(goal.workId, wake);
 }
 
-function loadDetection(config, workId) {
-  return withStateDatabase(config, db => {
-    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(detectionKey(workId));
-    return row ? JSON.parse(row.value) : null;
-  }, { readonly: true, missingValue: null });
-}
-
-function scheduleDetectionRetry(config, record) {
-  const key = 'detection:' + record.workId;
-  clearTimeout(retryTimers.get(key));
-  retryTimers.delete(key);
-  if (monitorConfig !== config || record.state !== 'checking' || !canMonitorGoal(record)) return;
-  const wake = setTimeout(() => {
-    retryTimers.delete(key);
-    runGoalBackground(config, record.workId, 'detection');
-  }, Math.max(1_000, Number(record.nextAttemptAt || 0) - Date.now()));
-  wake.unref?.();
-  retryTimers.set(key, wake);
-}
-
-function saveDetection(config, value) {
-  const saved = withStateDatabase(config, db => {
-    const key = detectionKey(value.workId);
-    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
-    if (!row || JSON.parse(row.value).state !== 'checking') return false;
-    db.prepare('UPDATE state_meta SET value=? WHERE key=? AND value=?')
-      .run(JSON.stringify(value), key, row.value);
-    return true;
-  }, { transaction: true });
-  if (saved) scheduleDetectionRetry(config, value);
-  return saved;
-}
-
-function queueGoalDetection(config, task, context = {}, deps = {}) {
-  // Versioned receipts also support hosts with no conversation metadata.
-  // Normal CLI tasks never trigger ChatGPT account lookups.
-  if (!context.connector) return null;
-  const workId = String(task.work_id || '');
-  if (!workId) return null;
-  const detection = {
-    workId, owner: ownerFingerprint(context), workspace: String(task.workspace || ''),
-    conversationCorrelation: String(context.conversationId || ''),
-    chatgptProjectName: String(context.chatgptProjectName || '').trim(),
-    tunnelId: principalTunnelId(context.principal),
-    objective: String(task.objective || task.title || '').slice(0, 500),
-    startedAt: Date.now(), attempts: 0, state: 'checking', nextAttemptAt: Date.now()
-  };
-  const register = () => !loadGoal(config, workId) && withStateDatabase(config,
-    db => db.prepare('INSERT OR IGNORE INTO state_meta(key,value) VALUES(?,?)')
-      .run(detectionKey(workId), JSON.stringify(detection)).changes === 1, { transaction: true });
-  try {
-    const inserted = register();
-    if (inserted) setImmediate(() => { runGoalBackground(config, workId, 'detection', deps); });
-    return inserted ? { state: 'checking' } : null;
-  } catch {
-    // Automatic detection must not fail an otherwise valid relai_work begin
-    // when the local state database is momentarily busy.
-    const retry = setTimeout(() => {
-      try { if (register()) runGoalBackground(config, workId, 'detection', deps); } catch {}
-    }, 500);
-    retry.unref?.();
-    return null;
-  }
-}
-
-async function checkGoalDetection(config, workId, deps = {}) {
-  if (activeDetections.has(workId)) return;
-  const record = loadDetection(config, workId);
-  if (record?.state !== 'checking' || Date.now() < record.nextAttemptAt || !canMonitorGoal(record, deps)) return;
-  const controller = new AbortController();
-  activeDetections.set(workId, controller);
-  try {
-    deps = coordinatedGoalDeps(config, record, deps);
-    const task = deps.task || getToolActivity().tasks.find(item => (item.id || item.taskId) === workId)
-      || readTaskHistorySessionRecord(config, workId, { reconcileInactive: true, persistReconciliation: false });
-    if (!task || isTerminalTaskStatus(task.status)) {
-      // The begin call may still be persisting the task record. Permit one
-      // bounded retry; do not treat an unknown task as approval to activate.
-      saveDetection(config, { ...record, attempts: record.attempts + 1,
-        state: record.attempts + 1 >= DETECTION_MAX_ATTEMPTS ? 'unavailable' : 'checking',
-        error: 'Work session is unavailable for goal detection.', nextAttemptAt: Date.now() + POLL_MS });
-      return;
-    }
-    if (task.principalFingerprint && task.principalFingerprint !== record.owner) {
-      saveDetection(config, { ...record, state: 'unavailable', error: 'Goal detection owner does not match the work session.' });
-      return;
-    }
-    const match = await findRecentGoalCommand({ ...deps, startedAt: record.startedAt, signal: controller.signal,
-      tunnelId: record.tunnelId,
-      conversationCorrelation: verifiedCorrelation(config, record),
-      explicitConversation: record.explicitConversation === true, workId, requireWorkReceipt: true });
-    if (controller.signal.aborted) return;
-    if (match.state === 'matched') {
-      const committed = commitGoalBinding(config, {
-          ...goalConfiguration(match.command || {}), revision: 1, lastCommandId: match.messageId || '',
-          workId, owner: record.owner, workspace: record.workspace, objective: match.command?.objective || record.objective,
-          conversationCorrelation: record.conversationCorrelation,
-          chatgptProjectName: record.chatgptProjectName || '',
-          tunnelId: record.tunnelId,
-          conversationId: match.conversationId, createdAt: record.startedAt,
-          active: true, state: 'monitoring', observedNode: '', stableSince: 0,
-          pendingNode: '', continuationCount: 0, updatedAt: Date.now()
-      }, match, { detection: true });
-      if (!committed) saveDetection(config, { ...record, state: 'ambiguous' });
-      else { clearTimeout(retryTimers.get('detection:' + workId)); retryTimers.delete('detection:' + workId); }
-      return;
-    }
-    const attempts = record.attempts + 1;
-    saveDetection(config, { ...record, attempts, rateLimitUntil: 0, discoveryScan: deps.discovery?.scan || null,
-      state: match.state === 'ambiguous' ? 'ambiguous'
-        : deps.discovery?.notRequested || !deps.linkId && attempts >= DETECTION_MAX_ATTEMPTS ? 'not_requested' : 'checking',
-      error: match.state === 'ambiguous' ? 'Multiple matching ChatGPT conversations or Project names; linking refused.'
-        : deps.discovery?.notRequested ? '' : 'Waiting for the task receipt; chat discovery will continue automatically.',
-      nextAttemptAt: Date.now() + (deps.linkId ? RETRY_DELAYS_MS[attempts - 1] || DISCOVERY_RETRY_MS : DISCOVERY_RETRY_MS) });
-  } catch (error) {
-    if (!controller.signal.aborted) {
-      const transient = error?.deferred || error?.status === 429;
-      const attempts = record.attempts + (transient ? 0 : 1);
-      saveDetection(config, { ...record, attempts, rateLimitUntil: transient ? Number(error.retryAt || 0) : 0,
-        rateLimitReason: error.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream',
-        discoveryScan: deps.discovery?.scan || record.discoveryScan || null,
-        state: error?.status === 401 ? 'needs_auth'
-          : !deps.linkId && !transient && attempts >= DETECTION_MAX_ATTEMPTS ? 'unavailable' : 'checking',
-        error: detectionError(error),
-        nextAttemptAt: transient && error.retryAt ? Math.max(Number(error.retryAt), Date.now() + 1_000)
-          : Date.now() + (deps.linkId ? RETRY_DELAYS_MS[attempts - 1] || DISCOVERY_RETRY_MS : DISCOVERY_RETRY_MS) });
-    }
-  } finally {
-    activeDetections.delete(workId);
-  }
-}
-
 function detectionError(error) {
+  if (error?.code === 'GOAL_CATALOGUE_INVALID') return 'ChatGPT listing timestamps are incomplete; waiting for a fresh catalogue.';
+  if (error?.code === 'GOAL_CATALOGUE_INCOMPLETE') return 'Completing the account chat catalogue; linking will continue automatically.';
+  if (error?.code === 'GOAL_DISCOVERY_BUSY') return 'Account chat discovery is in progress in another runtime; waiting for its results.';
   if (error?.rateLimitReason === 'read_budget') return 'Rel.AI account read budget reached. Chat linking will resume automatically in the next read window.';
   if (error?.status === 429) return 'ChatGPT account requests are rate limited (HTTP 429). Chat linking will resume automatically after the cooldown.';
   if (Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599) {
@@ -264,7 +125,7 @@ function coordinatedGoalDeps(config, record, deps) {
     const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
     return row ? JSON.parse(row.value) : {};
   }, { readonly: true, missingValue: {} });
-  return { ...deps, discovery: { scan: record.discoveryScan || null }, chatgptProjectName: record.chatgptProjectName || '',
+  return { ...deps, discoveryStore: goalDiscoveryStore(config, record), chatgptProjectName: record.chatgptProjectName || '',
     chatgptProjectId: record.chatgptProjectId || '',
     ...(link ? { linkId: link.linkId, issuedAt: link.issuedAt } : {}),
     tunnelId: record.tunnelId || '', cooldownUntil: limit.until || 0,
@@ -284,23 +145,6 @@ function verifiedCorrelation(config, record) {
     && goal.tunnelId === record.tunnelId && goal.conversationCorrelation === record.conversationCorrelation
     && goal.conversationId && goal.binding?.conversationId === goal.conversationId).map(goal => goal.conversationId));
   return ids.size === 1 ? [...ids][0] : record.conversationCorrelation;
-}
-
-function pendingGoalDetections(config) {
-  const rows = withStateDatabase(config, db => db.prepare('SELECT value FROM state_meta WHERE key LIKE ?')
-    .all(DETECTION_PREFIX + '%').map(row => JSON.parse(row.value)), { readonly: true, missingValue: [] });
-  // Keep terminal results briefly for status inspection, not permanently for
-  // every ordinary ChatGPT task. Cleanup is at most hourly.
-  if (Date.now() - lastDetectionCleanupAt >= 60 * 60_000) {
-    lastDetectionCleanupAt = Date.now();
-    const obsolete = rows.filter(row => row.state !== 'checking'
-      && terminalGoalState(statusForTask(config, row)) && Date.now() - row.startedAt > 24 * 60 * 60_000);
-    if (obsolete.length) withStateDatabase(config, db => {
-      const remove = db.prepare('DELETE FROM state_meta WHERE key=?');
-      for (const row of obsolete) remove.run(detectionKey(row.workId));
-    }, { transaction: true });
-  }
-  return rows;
 }
 
 function saveGoal(config, goal, options = {}) {
@@ -378,10 +222,6 @@ function pauseGoal(config, args, context) {
 }
 
 function resumeGoal(config, args, context) {
-  const pending = loadDetection(config, String(args.work_id || '').trim());
-  if (!loadGoal(config, String(args.work_id || '').trim()) && pending?.owner === ownerFingerprint(context)) {
-    return resumeGoalDetection(config, pending.workId, args.conversationUrl || '');
-  }
   const goal = requireOwnedGoal(config, args, context);
   const task = statusForTask(config, goal);
   if (!task || terminalGoalState(task)) throw new Error('Cannot resume a finished, cancelled or unavailable work session.');
@@ -406,6 +246,10 @@ function resumeGoal(config, args, context) {
 
 function updateGoal(config, args, context) {
   // Mode is a configuration change here, not the namespace guard for controls.
+  if (!loadGoal(config, String(args.work_id || '').trim())) {
+    if (!['goal', 'loop'].includes(args.mode)) throw new Error('Select goal or loop to activate monitoring for this task.');
+    return activateGoal(config, args, context);
+  }
   const goal = requireOwnedGoal(config, { ...args, mode: undefined }, context);
   const objective = String(args.objective ?? goal.objective).trim();
   if (!objective || objective.length > 500) throw new Error('Goal objective must be 1-500 characters.');
@@ -597,7 +441,7 @@ function activateGoal(config, args, context) {
   const task = context?.requestTaskContext?.session;
   if (!task || !workId) throw new Error('Start a Rel.AI work session before activating Goal Mode.');
   if (isTerminalTaskStatus(task.status)) throw new Error('Cannot activate Goal Mode on a finished or cancelled task.');
-  const objective = String(args.objective || task.objective || '').trim();
+  const objective = String(args.objective || task.objective || task.title || '').trim();
   if (!objective || objective.length > 500) throw new Error('Goal objective must be 1-500 characters.');
   const owner = ownerFingerprint(context);
   const existing = loadGoal(config, workId);
@@ -629,51 +473,12 @@ function activateGoal(config, args, context) {
     retryCount: existing?.active ? Number(existing.retryCount || 0) : 0,
     nextAttemptAt: existing?.active ? Number(existing.nextAttemptAt || 0) : 0,
     error: '', challenge: null, updatedAt: Date.now()
-  }, { reactivate: true });
+  }, { reactivate: true, activationContext: context });
   return publicGoal(goal);
 }
 
 function goalStatus(config, args, context) {
-  const goal = loadGoal(config, String(args.work_id || '').trim());
-  if (goal) return publicGoal(requireOwnedGoal(config, args, context));
-  const pending = loadDetection(config, String(args.work_id || '').trim());
-  if (pending && pending.owner === ownerFingerprint(context)) return publicDetection(pending);
   return publicGoal(requireOwnedGoal(config, args, context));
-}
-
-function publicDetection(pending) {
-  return { ok: true, work_id: pending.workId, goalActive: false, state: pending.state,
-    tunnelId: pending.tunnelId || '', attempts: pending.attempts, nextAttemptAt: pending.nextAttemptAt,
-    chatLink: { state: pending.state === 'checking' ? pending.rateLimitUntil > Date.now() ? 'rate_limited' : 'finding_chat'
-      : pending.state === 'needs_auth' ? 'waiting_for_account'
-        : pending.state === 'ambiguous' ? 'conflicting_matches' : 'needs_attention',
-      ...(pending.rateLimitUntil > Date.now() ? { rateLimitReason: pending.rateLimitReason || 'upstream' } : {}) },
-    ...(pending.error ? { error: pending.error } : {}) };
-}
-
-function resumeGoalDetection(config, workId, conversationUrl = '') {
-  const record = loadDetection(config, workId);
-  if (!record || !statusForTask(config, record) || terminalGoalState(statusForTask(config, record))) {
-    throw new Error('Cannot resume discovery for a finished or unavailable task.');
-  }
-  if (record.state === 'stopped') throw new Error('Cannot resume stopped automatic discovery.');
-  const conversationId = conversationUrl ? parseConversationUrl(conversationUrl) : '';
-  invalidateGoalPoll(workId);
-  activeDetections.get(workId)?.abort();
-  const updated = withStateDatabase(config, db => {
-    const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(detectionKey(workId));
-    if (!row || db.prepare('SELECT 1 FROM state_meta WHERE key=?').get(goalKey(workId))) return null;
-    const current = JSON.parse(row.value);
-    if (current.state === 'stopped') return null;
-    const next = { ...current, state: 'checking', attempts: 0, error: '', nextAttemptAt: 0, discoveryScan: null,
-      conversationCorrelation: conversationId || current.conversationCorrelation,
-      explicitConversation: Boolean(conversationId) || current.explicitConversation === true };
-    db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify(next), detectionKey(workId));
-    return next;
-  }, { transaction: true });
-  if (!updated) throw new Error('Chat linking changed; refresh this task.');
-  scheduleDetectionRetry(config, updated);
-  return publicDetection(updated);
 }
 
 function stopGoalRecord(config, goal) {
@@ -687,28 +492,6 @@ function stopGoalRecord(config, goal) {
 
 function resumeAuthenticatedGoals(config, tunnelId) {
   const resumed = [];
-  const resumedDetections = [];
-  for (const pending of pendingGoalDetections(config)) {
-    if (pending.tunnelId !== tunnelId || pending.state !== 'needs_auth') continue;
-    const task = statusForTask(config, pending);
-    if (!task || terminalGoalState(task) || (task.principalFingerprint && task.principalFingerprint !== pending.owner)) continue;
-    const reset = withStateDatabase(config, db => {
-      const key = detectionKey(pending.workId);
-      const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
-      if (!row || db.prepare('SELECT 1 FROM state_meta WHERE key=?').get(goalKey(pending.workId))) return false;
-      const current = JSON.parse(row.value);
-      if (current.state !== 'needs_auth' || current.tunnelId !== tunnelId) return false;
-      db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify({ ...current,
-        state: 'checking', attempts: 0, nextAttemptAt: Date.now() }), key);
-      return true;
-    }, { transaction: true });
-    if (reset) {
-      resumedDetections.push(pending.workId);
-      if (monitorConfig && getStateDir(monitorConfig) === getStateDir(config)) {
-        setImmediate(() => { if (monitorConfig) runGoalBackground(monitorConfig, pending.workId, 'detection'); });
-      }
-    }
-  }
   for (const goal of listGoals(config)) {
     if (goal.tunnelId !== tunnelId || !(goal.state === 'needs_auth' || (goal.active && goal.authRequired))) continue;
     const task = statusForTask(config, goal);
@@ -733,26 +516,17 @@ function resumeAuthenticatedGoals(config, tunnelId) {
       setImmediate(() => { if (monitorConfig) runGoalBackground(monitorConfig, goal.workId, 'poll'); });
     }
   }
-  return { ok: true, resumedWorkIds: resumed, resumedDetectionWorkIds: resumedDetections };
+  return { ok: true, resumedWorkIds: resumed, resumedDetectionWorkIds: [] };
 }
 
 function stopGoal(config, args, context) {
   const workId = String(args.work_id || '').trim();
-  const owner = ownerFingerprint(context);
-  const stopped = withStateDatabase(config, db => {
-    const goal = db.prepare('SELECT value FROM state_meta WHERE key=?').get(goalKey(workId));
-    const key = goal ? goalKey(workId) : detectionKey(workId);
-    const row = goal || db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
-    if (!row || JSON.parse(row.value).owner !== owner) throw new Error('Goal Mode record not found for this authorized task.');
-    const current = JSON.parse(row.value);
-    if (args.mode && args.mode !== (current.mode || 'goal')) throw new Error('The requested command mode does not match this work session.');
-    const record = { ...current, revision: Number(current.revision || 0) + 1, active: false, state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now() };
-    db.prepare('UPDATE state_meta SET value=? WHERE key=?').run(JSON.stringify(record), key);
-    return goal ? publicGoal(record) : { ok: true, work_id: workId, goalActive: false, state: 'stopped' };
-  }, { transaction: true });
+  requireOwnedGoal(config, args, context);
+  const stopped = publicGoal(mutateGoal(config, workId, current => ({ ...current,
+    active: false, state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now()
+  })));
   clearBackgroundGoal(workId);
   activePolls.get(workId)?.abort();
-  activeDetections.get(workId)?.abort();
   scheduleGoalRetry(config, { workId, active: false });
   return stopped;
 }
@@ -761,8 +535,7 @@ function stopGoal(config, args, context) {
 function dashboardGoalStatus(config, workId) {
   const goal = loadGoal(config, String(workId || '').trim());
   if (goal) return publicGoal(goal);
-  const pending = loadDetection(config, String(workId || '').trim());
-  return pending && pending.state !== 'not_requested' && readChatLink(config, pending) ? publicDetection(pending) : null;
+  return null;
 }
 
 function stopDashboardGoal(config, workId) {
@@ -773,6 +546,8 @@ function stopDashboardGoal(config, workId) {
 
 function publicGoal(goal) {
   return { ok: true, work_id: goal.workId, goalActive: goal.active,
+    modeAcknowledgement: { requested: goal.mode || 'goal', effective: goal.mode || 'goal',
+      readiness: goal.active && goal.binding && goal.state === 'monitoring' ? 'ready' : goal.state },
     state: goal.state, mode: goal.mode || 'goal', strategy: goal.strategy || 'fixed',
     revision: Number(goal.revision || 0), objective: goal.objective,
     successCriteria: goal.successCriteria || [], brief: goal.brief || '',
@@ -868,7 +643,7 @@ function deferGoalDiscovery(config, goal, deps, error = null) {
   return saveGoal(config, { ...goal, discoveryScan: deps.discovery?.scan || null,
     rateLimitReason: error?.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream',
     active: error?.status !== 401, state: error?.status === 401 ? 'needs_auth'
-      : error?.status === 429 || error?.deferred ? 'rate_limited' : 'linking',
+      : error?.status === 429 || error?.rateLimitReason === 'read_budget' ? 'rate_limited' : 'linking',
     retryCount: error?.deferred || error?.status === 429 ? count : Math.min(count + 1, MAX_RETRIES),
     nextAttemptAt: error?.status === 401 ? 0 : error?.retryAt ? Math.max(Number(error.retryAt), Date.now() + 1_000)
       : Date.now() + (RETRY_DELAYS_MS[count] || DISCOVERY_RETRY_MS),
@@ -1137,18 +912,10 @@ function recoverAutomaticDiscovery(config) {
       error: '', discoveryScan: null, retryCount: 0, nextAttemptAt: Date.now() }),
     { reactivate: true, expectedRevision: goal.revision });
   }
-  for (const pending of pendingGoalDetections(config)) {
-    if (!eligible(pending)) continue;
-    withStateDatabase(config, db => {
-      const key = detectionKey(pending.workId);
-      const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
-      if (!row || db.prepare('SELECT 1 FROM state_meta WHERE key=?').get(goalKey(pending.workId))) return;
-      const current = JSON.parse(row.value);
-      if (current.state === 'stopped' || current.owner !== pending.owner || !lookupFailure(current.error)) return;
-      db.prepare('UPDATE state_meta SET value=? WHERE key=? AND value=?').run(JSON.stringify({ ...current,
-        state: 'checking', attempts: 0, discoveryScan: null, error: '', nextAttemptAt: Date.now() }), key, row.value);
-    }, { transaction: true });
-  }
+  // These records were speculative checks of ordinary connector tasks. They
+  // carry no explicit monitoring intent and must never restart account scans.
+  withStateDatabase(config, db => db.prepare('DELETE FROM state_meta WHERE key GLOB ?')
+    .run(DETECTION_PREFIX + '*'), { transaction: true });
 }
 
 function startGoalMonitor(config) {
@@ -1156,14 +923,13 @@ function startGoalMonitor(config) {
   monitorConfig = config;
   recoverAutomaticDiscovery(config);
   for (const goal of listGoals(config)) scheduleGoalRetry(config, goal);
-  for (const record of pendingGoalDetections(config)) scheduleDetectionRetry(config, record);
   timer = setInterval(() => {
     try {
-      for (const pending of pendingGoalDetections(config).filter(item =>
-        item.state === 'checking' && Date.now() >= item.nextAttemptAt).slice(0, 3)) {
-        runGoalBackground(config, pending.workId, 'detection');
-      }
-      for (const goal of listGoals(config)) {
+      const goals = listGoals(config).sort((a, b) => {
+        const priority = goal => goal.pendingNode && !['accepted', 'not_sent'].includes(pendingOutcome(goal)) ? 0 : goal.binding ? 1 : 2;
+        return priority(a) - priority(b) || Number(a.nextAttemptAt || 0) - Number(b.nextAttemptAt || 0);
+      });
+      for (const goal of goals) {
         if (goal.active) runGoalBackground(config, goal.workId, 'poll');
       }
     } catch (error) {
@@ -1182,7 +948,6 @@ function stopGoalMonitor() {
   for (const wake of retryTimers.values()) clearTimeout(wake);
   retryTimers.clear();
   for (const controller of activePolls.values()) controller.abort();
-  for (const controller of activeDetections.values()) controller.abort();
 }
 
-export { activateGoal, pauseGoal, resumeGoal, updateGoal, queueGoalDetection, checkGoalDetection, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor };
+export { activateGoal, pauseGoal, resumeGoal, updateGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor };

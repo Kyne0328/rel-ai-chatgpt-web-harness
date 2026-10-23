@@ -1977,7 +1977,7 @@ async function case_stdio_shutdown_persistence_unit() {
   try {
     client.initialize(1);
     await client.waitFor(1);
-    client.call(2, 'relai_work', { action: 'begin', workspace: 'repo', bootstrap: 'none' });
+    client.call(2, 'relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', bootstrap: 'none' });
     const started = structuredContentOf(await client.waitFor(2));
     assert.match(started.work_id || '', /^[0-9a-f-]{36}$/i);
   

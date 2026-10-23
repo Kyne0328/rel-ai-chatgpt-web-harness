@@ -17,7 +17,7 @@ const client = startMcpClient({
 try {
   client.initialize(1);
   await client.waitFor(1);
-  client.call(2, 'relai_work', {
+  client.call(2, 'relai_work', { mode: 'goal',
     action: 'begin', title: 'Goal opt-in smoke', objective: 'Verify Goal Mode opt-in', goal: true
   });
   const started = structuredContentOf(await client.waitFor(2));
@@ -37,12 +37,12 @@ try {
   const workStatus = structuredContentOf(await client.waitFor(5));
   assert.notEqual(workStatus?.task?.status, 'cancelled');
 
-  client.call(6, 'relai_work', { action: 'begin', title: 'Ordinary task', objective: 'No goal requested' });
+  client.call(6, 'relai_work', { mode: 'normal', action: 'begin', title: 'Ordinary task', objective: 'No goal requested' });
   const normal = structuredContentOf(await client.waitFor(6));
   assert.ok(normal.work_id);
   assert.equal(normal.goalMode, undefined);
 
-  client.call(7, 'relai_work', { action: 'begin', goal: true,
+  client.call(7, 'relai_work', { mode: 'goal', action: 'begin', goal: true,
     title: 'Offline milestone with hardware blocker', objective: 'Complete feasible work and record the blocker',
     steps: [{ id: 'offline', title: 'Finish offline integration', status: 'in_progress' },
       { id: 'hardware', title: 'Verify physical device', status: 'pending' }] });

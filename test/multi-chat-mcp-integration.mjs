@@ -105,9 +105,9 @@ try {
   assert.match(listedStartTask.inputSchema.properties.action.description || '', /work_id!/, 'unified discovery must explain the shared task identity requirement');
   assert.match(listedStartTask.inputSchema.properties.action.description || '', /plan\(steps!\)/, 'unified discovery must retain required plan steps without repeating workspace ownership');
 
-  const startA = await rpc('relai_work', { action: 'begin', workspace: 'appA', objective: 'Validate task A.', bootstrap: 'compact' });
-  const startB = await rpc('relai_work', { action: 'begin', workspace: 'appB', objective: 'Validate task B.', bootstrap: 'compact' });
-  const startMismatch = await rpc('relai_work', { action: 'begin', workspace: 'appA', objective: 'Exercise workspace ownership.', bootstrap: 'none' });
+  const startA = await rpc('relai_work', { mode: 'normal', action: 'begin', workspace: 'appA', objective: 'Validate task A.', bootstrap: 'compact' });
+  const startB = await rpc('relai_work', { mode: 'normal', action: 'begin', workspace: 'appB', objective: 'Validate task B.', bootstrap: 'compact' });
+  const startMismatch = await rpc('relai_work', { mode: 'normal', action: 'begin', workspace: 'appA', objective: 'Exercise workspace ownership.', bootstrap: 'none' });
   const taskA = startA.payload.work_id;
   const taskB = startB.payload.work_id;
   const mismatchTaskId = startMismatch.payload.work_id;

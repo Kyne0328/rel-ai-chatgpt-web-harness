@@ -65,7 +65,8 @@ assert.deepEqual(
 );
 assert.ok(Buffer.byteLength(JSON.stringify(connectorInstructions(config)), 'utf8') > 0, 'connector instructions must serialize to a non-empty payload');
 assert.match(connectorInstructions(config), /work_id is durable task attribution/i, 'global instructions must define durable task identity without framing substantial work as optional');
-assert.match(connectorInstructions(config), /Projectless one-shot utility\/control work runs taskless.*Taskless calls may also handle isolated resource\/recovery\/observation/i, 'global instructions must distinguish projectless utilities from durable goals while preserving low-level taskless recovery');
+assert.match(connectorInstructions(config), /Projectless.*utilit.*taskless/i, 'global instructions must distinguish projectless utilities from durable work');
+assert.match(connectorInstructions(config), /(?:Taskless.*isolated.*resource.*recovery.*observation|isolated.*resource.*recovery.*observation.*taskless)/i, 'isolated resource, recovery and observation calls must retain taskless guidance');
 assert.match(connectorInstructions(config), /approval/i, 'global instructions retain approval safety where defined');
 assert.match(connectorInstructions(config), /results are authoritative/i, 'global instructions must identify returned results as authoritative evidence');
 assert.match(connectorInstructions(config), /report (?:only )?checks (?:actually )?performed/i, 'global instructions must require reporting performed checks rather than unverified checks');
@@ -209,19 +210,19 @@ assert.match(editSchema.inputSchema.properties.content.description, /staged inte
 assert.match(editSchema.inputSchema.properties.updateText.description, /One logical patch can contain repository-wide changes/i);
 assert.deepEqual(editSchema.inputSchema.properties.stage.enum, ['start', 'append', 'commit', 'abort'], 'canonical executable schema must retain the internal staged transport lifecycle');
 
-await valid('relai_work', { action: 'begin', workspace: 'repo' });
-await valid('relai_work', { action: 'begin', workspace: 'repo', steps: [{ id: 'goal', title: 'Complete goal', status: 'in_progress' }] });
+await valid('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo' });
+await valid('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', steps: [{ id: 'goal', title: 'Complete goal', status: 'in_progress' }] });
 await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'planned' });
 await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'direct' });
-await valid('relai_work', { action: 'begin' });
-await valid('relai_work', { action: 'begin', goal: true, objective: 'Verify the requested goal',
+await valid('relai_work', { mode: 'normal', action: 'begin' });
+await valid('relai_work', { mode: 'goal', action: 'begin', goal: true, objective: 'Verify the requested goal',
   conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d' });
 await valid('relai_work', { action: 'begin', mode: 'loop', strategy: 'adaptive', brief: 'Improve only the approved scope' });
 await valid('relai_work', { action: 'goal_update', work_id: 'work', mode: 'goal',
   objective: 'Finish the approved objective', successCriteria: ['Observed result verified'] });
 await invalid('relai_work', { action: 'begin', mode: 'unknown' });
-await invalid('relai_work', { action: 'begin', strategy: 'unknown' });
-await invalid('relai_work', { action: 'begin', maxContinuations: 8 });
+await invalid('relai_work', { mode: 'normal', action: 'begin', strategy: 'unknown' });
+await invalid('relai_work', { mode: 'normal', action: 'begin', maxContinuations: 8 });
 for (const action of ['goal_status', 'goal_stop', 'goal_pause', 'goal_resume', 'goal_update']) {
   await valid('relai_work', { action, work_id: 'work' });
   await valid('relai_work', { action, work_id: 'work', mode: 'loop' });
@@ -310,11 +311,11 @@ await invalid('relai_edit', { work_id: 'work', path: 'README.md', content: '# Re
 // Connector discovery intentionally exposes a flat, import-safe superset of
 // callable fields. Conditional requirements and cross-action ownership are
 // enforced once by the canonical executable/runtime contract below.
-await publicValid('relai_work', { action: 'begin', workspace: 'repo' });
-await publicValid('relai_work', { action: 'begin', workspace: 'repo', steps: [{ id: 'goal', title: 'Complete goal', status: 'in_progress' }] });
+await publicValid('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo' });
+await publicValid('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', steps: [{ id: 'goal', title: 'Complete goal', status: 'in_progress' }] });
 await publicInvalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'planned' });
 await publicInvalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'direct' });
-await publicValid('relai_work', { action: 'begin' });
+await publicValid('relai_work', { mode: 'normal', action: 'begin' });
 await publicValid('relai_work', { action: 'status', title: 'runtime-rejects-sibling-field' });
 await valid('relai_work', { action: 'status', workspace: 'repo', operationId: 'fallback_12345678901234567890' });
 await publicValid('relai_read', { work_id: 'work', paths: ['README.md'] });
@@ -351,7 +352,7 @@ await assert.rejects(() => validateExecutableOperationInput(OP.VALIDATE_HTTP, { 
 await assert.rejects(() => validateExecutableOperationInput(OP.EXEC, { workspace: 'repo' }), /Input validation error for exec/);
 await assert.rejects(() => validateExecutableOperationInput(OP.EDIT, { workspace: 'repo', path: 'README.md' }), /Input validation error for edit/);
 
-assert.throws(() => resolveToolOperation('relai_work', { action: 'begin', workspace: 'repo', work_id: 'wrong-action-field' }), /Unsupported field 'work_id'/);
+assert.throws(() => resolveToolOperation('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', work_id: 'wrong-action-field' }), /Unsupported field 'work_id'/);
 assert.throws(() => resolveToolOperation('relai_work', { action: 'status', title: 'wrong-action-field' }), /Unsupported field 'title'/);
 assert.throws(() => resolveToolOperation('relai_process', { action: 'read', work_id: 'work', processId: 'p', command: 'wrong-action-field' }), /Unsupported field 'command'/);
 assert.throws(() => resolveToolOperation('relai_process', { action: 'read', work_id: 'work', processId: 'p', unknown: true }), /Unsupported field 'unknown'/);

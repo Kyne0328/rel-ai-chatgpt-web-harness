@@ -145,7 +145,7 @@ try {
 
   const secret = 'exec-secret-value';
   const context = { publicHttpOnly: true };
-  const initialTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const initialTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   const execCall = (args) => callTool('relai_exec', { work_id: initialTask.work_id, ...args }, context);
   const success = await execCall({
     command: `${nodeCommand(path.join(workspace, 'scripts', 'emit.js'))} --token ${secret}`,
@@ -447,7 +447,7 @@ try {
   const smallChunk = (await readByteChunk({ maxBytes: 1000 })).structuredContent.items[0];
   assert.equal(smallChunk.returnedBytes, 1000, 'the byte reader must honor a smaller explicit budget');
 
-  const otherTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const otherTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   await assert.rejects(
     () => callTool('relai_read', {
       work_id: otherTask.work_id,
@@ -501,7 +501,7 @@ try {
   // Preserve the original early-stop ordering: the operation is admitted, but
   // its caller has not started. Independently owned Git preflight cleanup must
   // permit a fresh, fully accounted mutation in this same workspace.
-  const earlyTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Early preflight stop' }, context);
+  const earlyTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Early preflight stop' }, context);
   const earlyCallerReady = path.join(temp, 'early-caller-ready');
   const earlyPending = callTool('relai_exec', {
     workspace: 'app', work_id: earlyTask.work_id,
@@ -548,7 +548,7 @@ try {
   await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: earlyTask.work_id, reason: 'Early-stop regression complete.' }, context);
 
   // A user can stop one finite operation without terminally cancelling the task.
-  const stoppableTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Stop hanging command' }, context);
+  const stoppableTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Stop hanging command' }, context);
   const stoppedCommandReady = path.join(temp, 'stoppable-command-ready');
   const stoppableExec = callTool('relai_exec', {
     workspace: 'app',
@@ -596,7 +596,7 @@ try {
 
   // ChatGPT/user cancellation, not elapsed time, ends unpredictable durable work.
   // Cancellation must still terminate the process tree before the next writer runs.
-  const cancellableTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Cancel hanging command' }, context);
+  const cancellableTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Cancel hanging command' }, context);
   const hangingExec = callTool('relai_exec', {
     workspace: 'app',
     work_id: cancellableTask.work_id,
@@ -627,7 +627,7 @@ try {
   assert.equal(terminalCancellation.duplicate, true);
   assert.ok(terminalCancellation.endedAt);
 
-  const afterCancelTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Verify mutation lane recovered' }, context);
+  const afterCancelTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Verify mutation lane recovered' }, context);
   const afterCancel = await callTool('relai_exec', {
     workspace: 'app',
     work_id: afterCancelTask.work_id,
@@ -688,7 +688,7 @@ try {
 
   resetToolActivity();
   const plainContext = { publicHttpOnly: true };
-  const plainTask = await callTool('relai_work', { action: 'begin', workspace: 'plain', bootstrap: 'none' }, plainContext);
+  const plainTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'plain', bootstrap: 'none' }, plainContext);
   const plainMutation = await callTool('relai_exec', {
     workspace: 'plain',
     work_id: plainTask.work_id,
@@ -723,7 +723,7 @@ try {
 
   resetToolActivity();
   const noValidationContext = { publicHttpOnly: true };
-  const noValidationTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, noValidationContext);
+  const noValidationTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, noValidationContext);
   await callTool('relai_exec', {
     workspace: 'app',
     work_id: noValidationTask.work_id,
@@ -739,7 +739,7 @@ try {
 
   resetToolActivity();
   const validatedContext = { publicHttpOnly: true };
-  const validatedTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, validatedContext);
+  const validatedTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, validatedContext);
   const initialValidation = await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: validatedTask.work_id, level: 'standard', complete: false }, validatedContext);
   assert.equal(initialValidation.validationStatus, 'passed', JSON.stringify(initialValidation));
   await callTool('relai_exec', {
@@ -756,7 +756,7 @@ try {
 
   resetToolActivity();
   const mutationContext = { publicHttpOnly: true };
-  const mutationTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, mutationContext);
+  const mutationTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, mutationContext);
   const beforeMutationValidation = await callTool('relai_validate', { action: 'checks', workspace: 'app', work_id: mutationTask.work_id, level: 'standard', complete: false }, mutationContext);
   assert.equal(beforeMutationValidation.validationStatus, 'passed', JSON.stringify(beforeMutationValidation));
   await callTool('relai_exec', {

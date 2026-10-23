@@ -197,7 +197,7 @@ const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_work',
     title: 'Manage Goal Work',
-    description: 'Durable project tasks: begin with non-empty steps and carry work_id. /goal and /loop use adaptive monitoring; goal:true retains fixed mode. No total continuation limit. Keep plans current. status/history/context recover facts; result(operationId) waits up to 5s, waitMs:0 returns immediately. stop(operationId) stops one command; task stop/cancel stops all. Finish after operations settle. Projectless utilities run taskless.',
+    description: 'Tasks: begin with mode:normal|goal|loop and non-empty steps; verify modeAcknowledgement. Normal never scans chats. Reuse work_id and update plans. status/history/context recover facts; result retrieves operationId. stop(operationId) stops a command; cancel stops the task. Finish after settlement; projectless utilities run taskless.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },

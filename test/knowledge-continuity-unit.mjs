@@ -69,7 +69,7 @@ try {
   migratedDb.close();
 
   const context = { publicHttpOnly: true, conversationId: 'knowledge-continuity-chat' };
-  const first = await callTool('relai_work', {
+  const first = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Remember continuity marker', objective: 'Remember continuity marker',
     contextSummary: 'Host capsule alpha', bootstrap: 'compact'
   }, context);
@@ -83,7 +83,7 @@ try {
   const status = await callTool('relai_work', { action: 'status', workspace: 'app', work_id: first.work_id }, context);
   assert.equal(status.task?.hostContextSummary, 'Host capsule alpha');
 
-  const second = await callTool('relai_work', {
+  const second = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Continue continuity marker', objective: 'Continue continuity marker',
     contextSummary: 'Host capsule beta', bootstrap: 'compact'
   }, context);
@@ -93,7 +93,7 @@ try {
   assert(second.bootstrap.conversationContinuity?.every(item => !('workId' in item) && !('workspace' in item)));
   await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: second.work_id, reason: 'continuity regression complete' }, context);
 
-  const retrievalSource = await callTool('relai_work', {
+  const retrievalSource = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Overview analytics initial mount failure',
     objective: 'Repair overview analytics initial rendering failure', bootstrap: 'none'
   }, { publicHttpOnly: true, conversationId: 'retrieval-source-chat' });
@@ -102,7 +102,7 @@ try {
     summary: 'Fixed the overview analytics first render so data appears without navigation.'
   }, { publicHttpOnly: true, conversationId: 'retrieval-source-chat' });
   await flushTaskHistoryPersistence();
-  const retrievalConsumer = await callTool('relai_work', {
+  const retrievalConsumer = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Investigate dashboard display', objective: 'Investigate dashboard display behavior',
     contextSummary: 'The analytics panel is blank until I switch tabs.', bootstrap: 'compact'
   }, { publicHttpOnly: true, conversationId: 'retrieval-consumer-chat' });
@@ -113,10 +113,10 @@ try {
 
   const peerAContext = { publicHttpOnly: true, conversationId: 'peer-worker-a' };
   const peerBContext = { publicHttpOnly: true, conversationId: 'peer-worker-b' };
-  const peerA = await callTool('relai_work', {
+  const peerA = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Backend continuation worker', objective: 'Update backend continuation contract', bootstrap: 'none'
   }, peerAContext);
-  const peerB = await callTool('relai_work', {
+  const peerB = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Task UI worker', objective: 'Update task UI for continuation state', bootstrap: 'none'
   }, peerBContext);
   assert(peerB.activeRelatedWork?.some(item => item.goal?.includes('backend continuation contract')), 'a newly started peer must receive compact active sibling work');
@@ -126,7 +126,7 @@ try {
   await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: peerA.work_id, reason: 'peer coordination regression complete' }, peerAContext);
   await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: peerB.work_id, reason: 'peer coordination regression complete' }, peerBContext);
 
-  const task = await callTool('relai_work', {
+  const task = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Fix alpha syntax flow', objective: 'Fix alpha syntax flow safely', bootstrap: 'none'
   }, context);
   await callTool('relai_edit', {
@@ -162,7 +162,7 @@ try {
     'state import must preserve validated path-to-command affinity');
 
   await repositoryIntelligence.ensure({ alias: 'app', path: workspace, context: {} }, config, { watch: false });
-  const compactWithRepositorySummary = await callTool('relai_work', {
+  const compactWithRepositorySummary = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Inspect alpha syntax', objective: 'Inspect alpha syntax', bootstrap: 'compact'
   }, context);
   compactWithRepositorySummary.bootstrap = (await callTool('relai_work', { action: 'context', work_id: compactWithRepositorySummary.work_id }, context)).bootstrap;

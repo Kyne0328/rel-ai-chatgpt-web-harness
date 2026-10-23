@@ -55,7 +55,7 @@ try {
   }, { connector: true, principal: 'local:trusted' });
   assert.ok(Array.isArray(generatedFull.workspace.discoveredCommandKeys), 'explicit full status still gathers repository diagnostics');
 
-  const task = await callTool('relai_work', {
+  const task = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'app',
     bootstrap: 'none',
@@ -137,7 +137,7 @@ try {
   });
   assert.equal(cancelled.status, 'cancelled');
 
-  const queueTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Same-task resource queue' });
+  const queueTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Same-task resource queue' });
   const startedPath = path.join(workspace, 'queue-started');
   const releasePath = path.join(workspace, 'queue-release');
   const donePath = path.join(workspace, 'queue-done');

@@ -161,7 +161,7 @@ try {
         assert.ok(heldResources[lane].limit > 0);
         assert.equal(heldResources[lane].active, heldResources[lane].limit, `${mode}: ${lane} slots must all be held before MCP startup`);
       }
-      const begin = await rpc('relai_work', { action: 'begin', workspace: 'fixture', objective: 'Verify protected context under memory pressure.', bootstrap: 'compact' });
+      const begin = await rpc('relai_work', { mode: 'normal', action: 'begin', workspace: 'fixture', objective: 'Verify protected context under memory pressure.', bootstrap: 'compact' });
       assert.equal(begin.payload.status, 'planning', 'cold begin must complete while optional work is blocked');
       assert.ok(begin.payload.work_id);
       const context = await rpc('relai_work', { action: 'context', work_id: begin.payload.work_id, bootstrap: 'compact' });

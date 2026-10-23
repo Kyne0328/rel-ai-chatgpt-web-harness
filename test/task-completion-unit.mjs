@@ -67,7 +67,7 @@ try {
 
 
   async function startTask(scopeId) {
-    const result = await callTool('relai_work', { action: 'begin', workspace: 'app' }, {
+    const result = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app' }, {
       publicHttpOnly: true,
       requestId: `${scopeId}:start`,
       transportType: 'test',
@@ -78,7 +78,7 @@ try {
   }
 
   resetToolActivity();
-  const plainReadTask = await callTool('relai_work', {
+  const plainReadTask = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'plain', bootstrap: 'none'
   }, { publicHttpOnly: true });
   const plainReadCompletion = await callTool('relai_work', {
@@ -89,7 +89,7 @@ try {
   assert.equal(plainReadCompletion.residualState, 'clean');
 
   resetToolActivity();
-  const plainEditTask = await callTool('relai_work', {
+  const plainEditTask = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'plain', bootstrap: 'none'
   }, { publicHttpOnly: true });
   let durableBeginning;

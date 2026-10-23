@@ -46,7 +46,7 @@ export async function controlDashboardTask(action: 'stop' | 'cancel' | 'goal_sto
 export async function runWorkspaceValidation(workspace: string): Promise<Record<string, unknown>> {
   let workId = '';
   try {
-    const started = await callTool('relai_work', {
+    const started = await callTool('relai_work', { mode: 'normal',
       action: 'begin',
       workspace,
       title: `Validate ${workspace}`,

@@ -256,7 +256,7 @@ try {
     const publicContext = { principal: 'local:trusted', publicHttpOnly: true, transportType: 'benchmark' };
     let workId;
     try {
-      const task = await callTool('relai_work', { action: 'begin', workspace: 'skills', bootstrap: 'none' }, publicContext);
+      const task = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'skills', bootstrap: 'none' }, publicContext);
       workId = task.work_id;
       let complete, pageCount = 0;
       for (; pageCount < 200; pageCount++) {

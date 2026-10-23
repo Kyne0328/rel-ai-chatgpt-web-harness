@@ -23,7 +23,7 @@ const trace = {
   completed: true,
   durationMs: 60_000,
   calls: [
-    { tool: 'relai_work', action: 'begin', signature: 'begin', startedAtMs: 1_000, resultBytes: 300 },
+    { mode: 'normal', tool: 'relai_work', action: 'begin', signature: 'begin', startedAtMs: 1_000, resultBytes: 300 },
     { tool: 'relai_edit', action: 'patch', signature: 'edit:a', startedAtMs: 2_000, resultBytes: 500 },
     { tool: 'relai_validate', action: 'checks', signature: 'validate:a', startedAtMs: 3_000, resultBytes: 800 },
     { tool: 'relai_work', action: 'status', signature: 'status', startedAtMs: 4_000, resultBytes: 200 },

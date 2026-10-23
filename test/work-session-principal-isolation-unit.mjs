@@ -67,7 +67,7 @@ try {
   };
 
   const projectlessOwner = { ...sameOwner, conversationId: 'projectless-goal-regression' };
-  const projectless = await callTool('relai_work', {
+  const projectless = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     title: 'Projectless goal',
     objective: 'Track a meaningful goal before choosing a project'
@@ -94,7 +94,7 @@ try {
   assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, projectless.work_id)?.workspace || '', '', 'projectless completion must stay projectless in durable history');
 
   const projectlessCancelOwner = { ...sameOwner, conversationId: 'projectless-cancel-regression' };
-  const projectlessCancel = await callTool('relai_work', {
+  const projectlessCancel = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     title: 'Projectless cancel goal',
     objective: 'Cancel without ever binding a project'
@@ -112,7 +112,7 @@ try {
   const loopOwner = { ...sameOwner, conversationId: 'loop-milestone-regression' };
   const loop = await callTool('relai_work', {
     action: 'begin', title: 'Review queue', objective: 'Review only the authorized queue',
-    goal: true, mode: 'loop', strategy: 'fixed', brief: 'Review only the authorized queue',
+    mode: 'loop', strategy: 'fixed', brief: 'Review only the authorized queue',
     conversationUrl: 'https://chatgpt.com/c/b5b9731a-8496-4a92-9b44-55d080038c7d',
     steps: [{ id: 'iteration', title: 'Review the next queue item', status: 'in_progress' }]
   }, loopOwner);
@@ -198,7 +198,7 @@ try {
   let deadline;
   try {
     started = await Promise.race([
-      callTool('relai_work', { action: 'begin', workspace: 'repo', title: 'Principal ownership', bootstrap: 'full' }, owner),
+      callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', title: 'Principal ownership', bootstrap: 'full' }, owner),
       new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('begin waited on an unrelated workspace operation')), 5000); })
     ]);
   } finally {
@@ -216,7 +216,7 @@ try {
   assert.equal(readTaskIntegrity({ stateDir }, started.work_id).baseline.pending, true, 'begin must not wait for Git baseline probes');
 
   const bindingOwner = { ...sameOwner, conversationId: 'projectless-binding-regression' };
-  const unbound = await callTool('relai_work', {
+  const unbound = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     title: 'Bind project later',
     objective: 'Start projectless and bind only when repository access becomes necessary'
@@ -240,7 +240,7 @@ try {
   assert.equal(boundFinished.workspace, 'repo');
 
   const mutationOwner = { ...sameOwner, conversationId: 'projectless-mutation-binding-regression' };
-  const unboundMutation = await callTool('relai_work', {
+  const unboundMutation = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     title: 'Bind before first mutation',
     objective: 'Prove projectless work binds before its first repository write'
@@ -267,9 +267,9 @@ try {
   const { resetToolActivity } = await import('../src/toolActivity.js');
   await taskHistoryStore.flushTaskHistoryPersistence();
   resetToolActivity();
-  const replayed = await callTool('relai_work', { action: 'begin', workspace: 'repo', title: 'Principal ownership' }, sameOwner);
+  const replayed = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', title: 'Principal ownership' }, sameOwner);
   assert.equal(replayed.work_id, started.work_id, 'a lost begin response must be recoverable after live state is reset');
-  const concurrent = await Promise.all([1, 2].map(() => callTool('relai_work', { action: 'begin', workspace: 'repo', title: 'Concurrent retry' }, sameOwner)));
+  const concurrent = await Promise.all([1, 2].map(() => callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', title: 'Concurrent retry' }, sameOwner)));
   assert.equal(concurrent[0].work_id, concurrent[1].work_id, 'simultaneous retries must share one durable ID');
   await callTool('relai_work', { action: 'cancel', work_id: concurrent[0].work_id }, sameOwner);
   const detachedRead = await callTool('relai_read', { workspace: 'repo', paths: ['probe.txt'] }, sameOwner);

@@ -82,7 +82,7 @@ try {
     const listed = await client.waitFor(2);
     assert.deepEqual(listed.result.tools, getMcpToolSchemas(config), 'source and extracted MCP tools/list must match, including native ChatGPT status metadata');
 
-    client.call(3, 'relai_work', { action: 'begin', workspace: root, bootstrap: 'none' });
+    client.call(3, 'relai_work', { mode: 'normal', action: 'begin', workspace: root, bootstrap: 'none' });
     const started = structuredContentOf(await client.waitFor(3));
     assert.match(started.work_id, /^[0-9a-f-]{36}$/i, 'installed MCP server must start work through relai_work begin');
 

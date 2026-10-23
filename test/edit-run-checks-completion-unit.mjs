@@ -45,7 +45,7 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 try {
   const context = { publicHttpOnly: true };
   resetToolActivity();
-  const task = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const task = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   const edit = await callTool('relai_edit', {
     workspace: 'app',
     work_id: task.work_id,
@@ -66,7 +66,7 @@ try {
   assert.equal(completion.validationStatus, 'passed');
 
   fs.writeFileSync(path.join(workspacePath, 'package.json'), JSON.stringify({ scripts: { check: 'node --check src/failing.js' } }));
-  const failingTask = await callTool('relai_work', { action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  const failingTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   const failingEdit = await callTool('relai_edit', { workspace: 'app', work_id: failingTask.work_id,
     path: 'src/failing.js', content: 'const = invalid;\n', runChecks: true }, context);
   assert.equal(failingEdit.ok, false);

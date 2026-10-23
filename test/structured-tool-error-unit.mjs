@@ -35,7 +35,7 @@ async function invoke(name, args, context = {}) {
 }
 
 try {
-  const initialTaskResponse = await invoke('relai_work', { action: 'begin', workspace: 'repo', bootstrap: 'none' });
+  const initialTaskResponse = await invoke('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', bootstrap: 'none' });
   const initialTaskId = initialTaskResponse.structuredContent.work_id;
   const response = await invoke('relai_read', { work_id: initialTaskId, paths: ['.env'], guidanceMode: 'none' });
 
@@ -48,7 +48,7 @@ try {
   assert.match(readPayload.error, /None of the requested paths could be read/);
   assert.doesNotMatch(JSON.stringify(readPayload), /not-returned/);
 
-  const dotWorkspaceResponse = await invoke('relai_work', { action: 'begin', workspace: '.' }, { publicHttpOnly: true });
+  const dotWorkspaceResponse = await invoke('relai_work', { mode: 'normal', action: 'begin', workspace: '.' }, { publicHttpOnly: true });
   assert.equal(dotWorkspaceResponse.isError, true);
   const dotWorkspace = dotWorkspaceResponse.structuredContent;
   assert.equal(dotWorkspace.errorCode, 'WORKSPACE_AMBIGUOUS_RELATIVE_INPUT');
@@ -58,18 +58,18 @@ try {
   assert.deepEqual(dotWorkspace.errorDetails.configuredWorkspaceAliases, ['repo']);
   assert.match(dotWorkspace.error, /configured workspace alias/);
 
-  const directPathResponse = await invoke('relai_work', { action: 'begin', workspace: workspaceRoot, bootstrap: 'none' }, { publicHttpOnly: true });
+  const directPathResponse = await invoke('relai_work', { mode: 'normal', action: 'begin', workspace: workspaceRoot, bootstrap: 'none' }, { publicHttpOnly: true });
   assert.equal(directPathResponse.isError, false);
   assert.equal(directPathResponse.structuredContent.workspace, 'repo');
   const taskId = directPathResponse.structuredContent.work_id;
 
   const unknownPath = path.join(tmp, 'unknown-repo');
   fs.mkdirSync(unknownPath);
-  const unknownPathResponse = await invoke('relai_work', { action: 'begin', workspace: unknownPath }, { publicHttpOnly: true });
+  const unknownPathResponse = await invoke('relai_work', { mode: 'normal', action: 'begin', workspace: unknownPath }, { publicHttpOnly: true });
   assert.equal(unknownPathResponse.isError, true);
   assert.equal(unknownPathResponse.structuredContent.errorCode, 'WORKSPACE_PATH_NOT_CONFIGURED');
 
-  const omittedWorkspaceResponse = await invoke('relai_work', { action: 'begin', title: 'Projectless structured error probe' }, { publicHttpOnly: true });
+  const omittedWorkspaceResponse = await invoke('relai_work', { mode: 'normal', action: 'begin', title: 'Projectless structured error probe' }, { publicHttpOnly: true });
   assert.equal(omittedWorkspaceResponse.isError, false);
   assert.equal(omittedWorkspaceResponse.structuredContent.workspace, undefined, 'logical work may begin before a project is selected');
   assert.ok(omittedWorkspaceResponse.structuredContent.work_id);

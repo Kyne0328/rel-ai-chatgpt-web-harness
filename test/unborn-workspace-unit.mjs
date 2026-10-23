@@ -34,7 +34,7 @@ process.env.REL_AI_MCP_CONFIG = configPath;
 
 try {
   resetToolActivity();
-  const task = await rawCallTool('relai_work', {
+  const task = await rawCallTool('relai_work', { mode: 'normal',
     action: 'begin',
     workspace: 'app',
     bootstrap: 'compact',

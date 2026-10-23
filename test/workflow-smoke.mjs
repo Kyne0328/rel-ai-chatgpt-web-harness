@@ -98,7 +98,7 @@ try {
   const discovery = await client.waitFor(1);
   if (!discovery.result?.supportedVersions?.includes(MCP_VERSION)) throw new Error('MCP discovery failed.');
 
-  taskCall(2, 'relai_work', { action: 'begin', workspace: 'smoke' });
+  taskCall(2, 'relai_work', { mode: 'normal', action: 'begin', workspace: 'smoke' });
   const startedTask = structuredContentOf(await client.waitFor(2));
   taskId = startedTask.work_id;
   if (!taskId || startedTask.identity !== 'work_session') throw new Error('Work-session bootstrap failed.');
@@ -228,7 +228,7 @@ try {
   if (completed.summary !== 'Completed and validated the public workflow smoke task.') throw new Error('Atomic workflow completion lost its summary.');
 
   taskId = '';
-  taskCall(32, 'relai_work', { action: 'begin', workspace: 'smoke', bootstrap: 'full' });
+  taskCall(32, 'relai_work', { mode: 'normal', action: 'begin', workspace: 'smoke', bootstrap: 'full' });
   const graphTask = structuredContentOf(await client.waitFor(32));
   taskId = graphTask.work_id;
   const graphBootstrapped = await completedTaskCall(33, 'relai_work', { action: 'context', workspace: 'smoke', bootstrap: 'full' });

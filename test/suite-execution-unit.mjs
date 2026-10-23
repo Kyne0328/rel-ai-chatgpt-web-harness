@@ -74,7 +74,7 @@ async function case_deferred_operation_unit() {
       assert.equal(tool.outputSchema?.properties?.operationTask, undefined, `${name} must not expose operationTask`);
     }
   
-    const started = await call('relai_work', { action: 'begin', workspace: 'app' });
+    const started = await call('relai_work', { mode: 'normal', action: 'begin', workspace: 'app' });
     assert.equal(started.result?.isError, false, JSON.stringify(started));
     const logicalTaskId = started.result.structuredContent.work_id;
   

@@ -14,7 +14,7 @@ function parseGoalCommand(message) {
   const match = /^ {0,3}\/(goal|loop)(?:\s|$)/i.exec(raw);
   if (!match) return null;
   const mode = match[1].toLowerCase();
-  const body = raw.slice(match[0].length).trim();
+  const body = raw.slice(match[0].length).trim().replace(/^mode(?:\s+|$)/i, '').trim();
   const first = body.split(/\s/, 1)[0].toLowerCase();
   if (CONTROLS.has(first)) {
     // '/goal stop later' must neither stop work nor create a fresh objective.
@@ -28,4 +28,13 @@ function parseGoalCommand(message) {
     ...(mode === 'loop' ? { brief: body } : {}) };
 }
 
-export { parseGoalCommand };
+function validateWorkMode(args = {}) {
+  if (!['normal', 'goal', 'loop'].includes(args.mode)) throw new Error('Work begin requires mode: normal, goal, or loop.');
+  const monitoringOptions = ['strategy', 'successCriteria', 'brief', 'conversationUrl', 'chatgptProjectName']
+    .some(key => args[key] !== undefined);
+  if (args.mode === 'normal' && monitoringOptions || args.goal === true && args.mode !== 'goal'
+    || args.mode !== 'normal' && args.goal === false) throw new Error('Conflicting work mode and Goal/Loop options.');
+  return args.mode;
+}
+
+export { parseGoalCommand, validateWorkMode };

@@ -16,7 +16,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -39,7 +40,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -63,7 +65,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -86,7 +89,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -109,7 +113,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -179,7 +184,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -215,7 +221,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -241,7 +248,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -264,7 +272,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -284,7 +293,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -335,7 +345,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -358,7 +369,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",
@@ -381,7 +393,8 @@
       "calls": [
         {
           "tool": "relai_work",
-          "action": "begin"
+          "action": "begin",
+          "mode": "normal"
         },
         {
           "tool": "relai_work",

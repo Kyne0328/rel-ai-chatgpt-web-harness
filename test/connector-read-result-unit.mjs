@@ -73,7 +73,7 @@ try {
   }
   assert.equal(fs.readFileSync(path.join(privateDirectory, 'config'), 'utf8'), 'synthetic private configuration\n');
 
-  const task = await callTool('relai_work', { action: 'begin',
+  const task = await callTool('relai_work', { mode: 'normal', action: 'begin',
     workspace: 'repo',
     bootstrap: 'none'
   }, { publicHttpOnly: true, requestId: 1, transportType: 'test' });
@@ -160,7 +160,7 @@ try {
   assert.equal(sensitiveRead.returnedCount, 0, 'direct filesystem access must preserve sensitive-path blocking');
   assert.match(sensitiveRead.skipped[0].reason, /blocked sensitive path|sensitive path/i);
 
-  const projectlessTask = await callTool('relai_work', {
+  const projectlessTask = await callTool('relai_work', { mode: 'normal',
     action: 'begin',
     title: 'Direct filesystem task',
     objective: 'Edit an ordinary file outside configured projects.',
