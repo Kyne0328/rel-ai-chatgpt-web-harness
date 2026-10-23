@@ -6,7 +6,7 @@ body.pulse-page {
   -webkit-user-select: none;
   user-select: none;
   background: transparent;
-  font: 14px/1.6 "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font: 14px/1.6 'Geist', 'Inter', "Segoe UI Variable Text", "Segoe UI", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 button { font: inherit; }
