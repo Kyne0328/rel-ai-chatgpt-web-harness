@@ -22,8 +22,9 @@
 .usage-side-by-side { @apply grid min-w-0 gap-3; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .usage-side-by-side > .card { min-width: 0; }
 .usage-loading { @apply rounded-xl border p-5 text-[12px]; color: var(--ui-text-secondary); border-color: var(--ui-border-default); background: var(--ui-surface-primary); }
-.usage-metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); border: 1px solid var(--ui-border-default); border-radius: var(--card-radius, 10px); overflow: visible; background: var(--ui-surface-primary); }
-.usage-metric { @apply grid min-w-0 gap-1 p-4; border-right: 1px solid var(--ui-border-default); border-bottom: 0; }
+.usage-metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); border: 1px solid var(--ui-border-default); border-radius: var(--radius-lg); overflow: hidden; background: var(--ui-surface-primary); box-shadow: var(--shadow-sm); }
+.usage-metric { @apply grid min-w-0 gap-1 p-4; border-right: 1px solid var(--ui-border-default); border-bottom: 0; transition: background-color var(--dur-fast) var(--ease); }
+.usage-metric:hover { background: var(--ui-surface-secondary); }
 .usage-metric:last-child { border-right: 0; }
 .usage-metric-label-row { @apply flex min-w-0 items-center justify-between gap-1; }
 .usage-metric-label-main { @apply flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden; }
@@ -65,7 +66,7 @@
 .usage-metric.bad > i { background: var(--ui-status-danger-foreground); opacity: .8; }
 .usage-bar-row progress { width: 100%; accent-color: var(--ui-action-primary); }
 .usage-bar-list { @apply grid gap-2; }
-.usage-bar-row { @apply grid min-w-0 items-center gap-3 rounded-lg px-2 py-2 text-[12px]; grid-template-columns: minmax(100px,180px) minmax(100px,1fr) auto; color: var(--ui-text-secondary); }
+.usage-bar-row { @apply grid min-w-0 items-center gap-3 px-2 py-2 text-[12px]; grid-template-columns: minmax(100px,180px) minmax(100px,1fr) auto; border-radius: var(--radius-md); color: var(--ui-text-secondary); transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
 .usage-bar-row:hover { background: var(--ui-surface-secondary); color: var(--ui-text-primary); }
 .usage-bar-row.active { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .usage-bar-label { @apply truncate font-semibold; }
@@ -91,10 +92,10 @@
 
 /* Analytics visualizer */
 .usage-range-control { @apply grid min-w-0 gap-1 text-[12px] font-semibold; color: var(--ui-text-secondary); }
-.usage-range-switch { @apply flex flex-wrap gap-0.5 rounded-lg p-0.5; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
-.usage-range-switch button { min-width: 44px; min-height: 44px; padding-inline: 10px; border-color: transparent; background: transparent; color: var(--ui-text-secondary); }
+.usage-range-switch { @apply flex flex-wrap gap-0.5 p-0.5; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
+.usage-range-switch button { min-width: 44px; min-height: 44px; padding-inline: 10px; border-radius: var(--radius-md); border-color: transparent; background: transparent; color: var(--ui-text-secondary); transition: all var(--dur-fast) var(--ease); }
 .usage-range-switch button:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
-.usage-range-switch button[aria-pressed="true"] { background: var(--ui-surface-raised); border-color: var(--ui-border-default); color: var(--ui-action-primary); }
+.usage-range-switch button[aria-pressed="true"] { background: var(--ui-surface-raised); border-color: var(--ui-border-default); color: var(--ui-action-primary); box-shadow: var(--shadow-sm); font-weight: 600; }
 .usage-custom-range { @apply flex items-end gap-2; }
 .usage-custom-range[hidden] { display: none; }
 .usage-custom-range label { @apply grid gap-1 text-[12px] font-semibold; color: var(--ui-text-secondary); }
@@ -117,10 +118,10 @@
 .usage-timeline-card { min-width: 0; }
 .usage-timeline-head { @apply items-start gap-4; }
 .usage-chart-switch { @apply flex flex-wrap justify-end gap-1; }
-.usage-chart-switch button { @apply inline-flex items-center gap-1.5; min-height: 44px; }
-.usage-chart-switch button.active { border-color: var(--ui-border-control); color: var(--ui-action-primary); background: var(--ui-surface-raised); }
+.usage-chart-switch button { @apply inline-flex items-center gap-1.5; min-height: 44px; border-radius: var(--radius-md); transition: all var(--dur-fast) var(--ease); }
+.usage-chart-switch button.active { border-color: var(--ui-border-control); color: var(--ui-action-primary); background: var(--ui-surface-raised); box-shadow: var(--shadow-sm); font-weight: 600; }
 .usage-timeline-body { min-height: 248px; }
-.usage-timeline-plot { @apply rounded-lg border px-3 pb-2 pt-2; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+.usage-timeline-plot { @apply border px-3 pb-2 pt-2; border-radius: var(--radius-lg); border-color: var(--ui-border-default); background: var(--ui-surface-primary); box-shadow: var(--shadow-sm); }
 .usage-chart-readout { @apply flex min-h-11 items-baseline gap-2 border-b pb-2 text-[13px]; border-color: var(--ui-border-subtle); }
 .usage-chart-readout > span { color: var(--ui-text-secondary); }
 .usage-chart-readout > strong { @apply text-[14px] font-bold; color: var(--ui-text-primary); }

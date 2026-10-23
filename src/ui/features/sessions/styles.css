@@ -22,7 +22,7 @@
 .inspector-empty strong { color: var(--ui-text-primary); font-size: 13px; }
 .inspector-empty span { max-width: 420px; font-size: 13px; line-height: 1.5; }
 .inspector-empty.compact { min-height: 160px; }
-.session-row, .task-row { @apply grid w-full items-center rounded-none px-3 py-2 text-left; min-height: 48px; gap: 8px; grid-template-columns: auto minmax(0,1fr) auto 18px; background: transparent; border: 0; border-bottom: 1px solid var(--ui-border-subtle); }
+.session-row, .task-row { @apply grid w-full items-center rounded-none px-3 py-2 text-left; min-height: 48px; gap: 8px; grid-template-columns: auto minmax(0,1fr) auto 18px; background: transparent; border: 0; border-bottom: 1px solid var(--ui-border-subtle); transition: background-color var(--dur-fast) var(--ease); }
 .session-row:last-child { border-bottom: 0; }
 .task-list-items > li:last-child .task-row { border-bottom: 0; }
 .session-row:hover, .task-row:hover { background: var(--ui-surface-secondary); }
@@ -61,9 +61,9 @@
 
 .session-detail { @apply gap-3; }
 .inspector-tabs { display: flex; gap: 4px; position: sticky; top: -18px; z-index: var(--z-sticky); margin: 0 -18px 14px; padding: 10px 18px; background: var(--ui-surface-primary); border-bottom: 1px solid var(--ui-border-default); }
-.inspector-tab { min-height: 44px; padding: 0 14px; border-radius: 8px; color: var(--ui-text-secondary); background: transparent; border: 1px solid transparent; font-size: 13px; font-weight: 600; cursor: pointer; }
+.inspector-tab { min-height: 44px; padding: 0 14px; border-radius: var(--radius-md); color: var(--ui-text-secondary); background: transparent; border: 1px solid transparent; font-size: 13px; font-weight: 600; cursor: pointer; transition: all var(--dur-fast) var(--ease); }
 .inspector-tab:hover { color: var(--ui-text-primary); background: var(--ui-surface-secondary); }
-.inspector-tab.is-active { color: var(--ui-text-primary); background: var(--ui-surface-raised); border-color: var(--ui-border-default); }
+.inspector-tab.is-active { color: var(--ui-text-primary); background: var(--ui-surface-raised); border-color: var(--ui-border-default); box-shadow: var(--shadow-sm); }
 .inspector-panel { display: grid; gap: 14px; }
 .inspector-panel[hidden] { display: none; }
 .session-inline-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid var(--ui-border-default); }
@@ -81,7 +81,7 @@
 .task-detail-current span { @apply text-[13px] leading-5; color: var(--ui-text-secondary); }
 .task-detail-grid { @apply grid gap-1.5; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .task-detail-facts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 0; }
-.task-detail-grid > div { @apply grid min-w-0 gap-1 rounded-md px-2.5 py-2; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
+.task-detail-grid > div { @apply grid min-w-0 gap-1 px-2.5 py-2; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); transition: border-color var(--dur-fast) var(--ease); }
 .task-detail-grid span { @apply text-[12px] font-bold uppercase tracking-[.05em] leading-5; color: var(--ui-text-secondary); }
 .task-detail-grid strong { @apply break-words text-[12px]; }
 .task-detail-facts > div { display: inline-flex; min-width: 0; align-items: baseline; gap: 4px; padding: 0; border: 0; border-radius: 0; background: transparent; }
@@ -97,7 +97,7 @@
 .task-detail-heading { @apply flex items-center justify-between gap-3; }
 .task-detail-heading > span { @apply inline-flex min-h-7 min-w-7 items-center justify-center rounded-full px-2 text-[11px] font-semibold; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); color: var(--ui-text-secondary); }
 .task-plan-list { @apply m-0 grid list-none gap-1.5 p-0; }
-.task-plan-step { @apply relative grid min-w-0 items-start gap-2 rounded-md px-2.5 py-2; grid-template-columns: 22px minmax(0,1fr); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
+.task-plan-step { @apply relative grid min-w-0 items-start gap-2 px-2.5 py-2; grid-template-columns: 22px minmax(0,1fr); border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); transition: all var(--dur-fast) var(--ease); }
 .task-plan-marker { @apply relative z-[1] inline-flex size-5 items-center justify-center rounded-full text-[11px] font-bold; color: var(--ui-text-secondary); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); }
 .task-plan-copy { @apply grid min-w-0 gap-0.5; }
 .task-plan-copy strong { @apply break-words text-[12px] leading-5; color: var(--ui-text-primary); }
@@ -107,7 +107,7 @@
 .task-plan-step.is-in_progress {
   background: var(--ui-surface-raised);
   border-color: var(--ui-border-default);
-  box-shadow: inset 2px 0 0 var(--ui-action-primary);
+  box-shadow: inset 2px 0 0 var(--ui-action-primary), 0 0 12px color-mix(in srgb, var(--ui-action-primary) 10%, transparent);
 }
 .task-plan-step.is-in_progress .task-plan-marker {
   color: var(--ui-action-primary);
@@ -149,7 +149,7 @@
 .task-file-more:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .task-file-more:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
 .task-event-list { @apply grid gap-1; }
-.task-event { @apply grid min-w-0 items-center gap-3 rounded-md px-2.5 py-2 text-left; grid-template-columns: 72px minmax(0,1fr) auto; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-primary); text-decoration: none; }
+.task-event { @apply grid min-w-0 items-center gap-3 px-2.5 py-2 text-left; grid-template-columns: 72px minmax(0,1fr) auto; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-primary); text-decoration: none; transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
 .task-event > span { @apply whitespace-nowrap text-[11px]; color: var(--ui-text-tertiary); }
 .task-event-copy { @apply grid min-w-0 gap-0.5; }
 .task-event-copy small { @apply truncate text-[11px] font-normal; color: var(--ui-text-tertiary); }
@@ -158,8 +158,8 @@
 .task-operation-actions button { @apply min-h-9; }
 .task-event-copy .task-event-command { @apply mt-1 grid gap-1 text-[11px] font-normal; overflow: visible; white-space: normal; }
 .task-event-command > span { @apply font-semibold; color: var(--ui-text-tertiary); }
-.task-event-command code { @apply block break-all rounded-md px-2 py-1.5 text-[11px] leading-5; overflow: visible; text-overflow: clip; white-space: pre-wrap; background: var(--ui-surface-raised); color: var(--ui-text-primary); }
-.task-event-link:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-default); }
+.task-event-command code { @apply block break-all px-2 py-1.5 text-[11px] leading-5; font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; border-radius: var(--radius-md); overflow: visible; text-overflow: clip; white-space: pre-wrap; background: var(--ui-surface-raised); color: var(--ui-text-primary); }
+.task-event-link:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-default); box-shadow: var(--shadow-sm); }
 .task-event-more { @apply min-h-10 w-full justify-center; }
 
 .task-detail-technical { @apply border-t pt-3; border-color: var(--ui-border-default); }
@@ -167,7 +167,7 @@
 .task-detail-technical > summary { @apply flex min-h-11 cursor-pointer items-center text-[12px] font-semibold; color: var(--ui-text-secondary); }
 .task-detail-technical > .task-detail-grid { @apply mt-2; }
 .task-detail-technical > .task-detail-section { @apply mt-3; }
-.task-detail-workflow { @apply mt-2 grid gap-1 rounded-md p-3; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
+.task-detail-workflow { @apply mt-2 grid gap-1 p-3; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
 .task-detail-workflow strong { @apply text-[12px] font-bold; color: var(--ui-text-primary); }
 .task-detail-workflow span { @apply text-[12px] leading-5; color: var(--ui-text-secondary); }
 .session-detail-actions { @apply sticky bottom-0 flex justify-end border-t pt-3; border-color: var(--ui-border-default); background: var(--ui-surface-primary); }
