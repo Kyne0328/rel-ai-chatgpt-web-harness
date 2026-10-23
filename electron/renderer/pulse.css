@@ -18,10 +18,7 @@ button { font: inherit; }
   border: 1px solid var(--ui-border-default);
   border-radius: 20px;
   background: var(--ui-surface-primary);
-  box-shadow: var(--ui-shadow-popover);
   transform-origin: top right;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
 }
 .pulse-shell[data-expanded="true"] {
   border-radius: 16px;

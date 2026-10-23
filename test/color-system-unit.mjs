@@ -77,6 +77,11 @@ for (const themeName of THEME_NAMES) {
     expectContrast(themeName, 'focusRing', background, 3);
     expectContrast(themeName, 'borderControl', background, 3);
   }
+  for (const foreground of ['textPrimary', 'textSecondary']) {
+    for (const background of ['surfaceRaised', 'selectionBackground']) {
+      expectContrast(themeName, foreground, background, 4.5);
+    }
+  }
 }
 
 for (const themeName of THEME_NAMES) {

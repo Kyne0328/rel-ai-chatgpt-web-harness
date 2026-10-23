@@ -95,7 +95,7 @@
 .usage-range-switch { @apply flex flex-wrap gap-0.5 p-0.5; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
 .usage-range-switch button { min-width: 44px; min-height: 44px; padding-inline: 10px; border-radius: var(--radius-md); border-color: transparent; background: transparent; color: var(--ui-text-secondary); transition: all var(--dur-fast) var(--ease); }
 .usage-range-switch button:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
-.usage-range-switch button[aria-pressed="true"] { background: var(--ui-surface-raised); border-color: var(--ui-border-default); color: var(--ui-action-primary); box-shadow: var(--shadow-sm); font-weight: 600; }
+.usage-range-switch button[aria-pressed="true"] { background: var(--ui-surface-raised); border-color: var(--ui-border-default); color: var(--ui-text-primary); box-shadow: var(--shadow-sm); font-weight: 600; }
 .usage-custom-range { @apply flex items-end gap-2; }
 .usage-custom-range[hidden] { display: none; }
 .usage-custom-range label { @apply grid gap-1 text-[12px] font-semibold; color: var(--ui-text-secondary); }
@@ -119,7 +119,7 @@
 .usage-timeline-head { @apply items-start gap-4; }
 .usage-chart-switch { @apply flex flex-wrap justify-end gap-1; }
 .usage-chart-switch button { @apply inline-flex items-center gap-1.5; min-height: 44px; border-radius: var(--radius-md); transition: all var(--dur-fast) var(--ease); }
-.usage-chart-switch button.active { border-color: var(--ui-border-control); color: var(--ui-action-primary); background: var(--ui-surface-raised); box-shadow: var(--shadow-sm); font-weight: 600; }
+.usage-chart-switch button.active { border-color: var(--ui-border-control); color: var(--ui-text-primary); background: var(--ui-surface-raised); box-shadow: var(--shadow-sm); font-weight: 600; }
 .usage-timeline-body { min-height: 248px; }
 .usage-timeline-plot { @apply border px-3 pb-2 pt-2; border-radius: var(--radius-lg); border-color: var(--ui-border-default); background: var(--ui-surface-primary); box-shadow: var(--shadow-sm); }
 .usage-chart-readout { @apply flex min-h-11 items-baseline gap-2 border-b pb-2 text-[13px]; border-color: var(--ui-border-subtle); }
