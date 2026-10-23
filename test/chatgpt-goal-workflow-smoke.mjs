@@ -73,6 +73,10 @@ try {
   assert.equal(duplicateFinish.completionKnown, true);
   assert.equal(duplicateFinish.duplicate, true);
   assert.equal(duplicateFinish.validationAt, '', 'finishing a goal must not invent a validation timestamp');
+  client.call(13, 'relai_work', { action: 'goal_status', work_id: resolvable.work_id });
+  const blockedGoal = structuredContentOf(await client.waitFor(13));
+  assert.equal(blockedGoal.state, 'blocked', 'a feasible-work closure must preserve its blocked objective status');
+  assert.equal(blockedGoal.objectiveAchieved, false, 'blocked hardware work is not verified success');
 
   console.log('Goal Mode lifecycle preserves blockers and closes resolved goals; ordinary work stays explicit.');
 } finally {

@@ -63,9 +63,9 @@ export function processStateView(process = {}) {
     label,
     terminal,
     active,
-    canStop,
+    canStop: canStop && process.canStop !== false,
     pillClass,
-    recovery
+    recovery: typeof process.recovery === 'string' && process.recovery ? process.recovery : recovery
   };
 }
 

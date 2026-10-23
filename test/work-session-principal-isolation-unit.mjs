@@ -144,6 +144,60 @@ try {
   assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, loop.work_id)?.status, 'cancelled');
 
 
+  // RI8 publication reproduction is a simulated five-step fixture, not an
+  // external GitHub publication. It verifies iteration/terminal distinction.
+  const ri8Owner = { ...sameOwner, conversationId: 'ri8-completion-regression' };
+  const ri8Steps = ['Inspect source', 'Prepare source sync', 'Review changes', 'Merge PR #1', 'Verify publication']
+    .map((title, index) => ({ id: 'ri8-' + index, title, status: 'in_progress' }));
+  const ri8 = await callTool('relai_work', {
+    action: 'begin', mode: 'loop', strategy: 'fixed',
+    title: 'Publish RI8 Source Sync (fixture)', objective: 'Publish and verify RI8 source',
+    brief: 'One-time publication; no repeated publishing', steps: ri8Steps
+  }, ri8Owner);
+  await callTool('relai_work', { action: 'plan', work_id: ri8.work_id,
+    steps: ri8Steps.map(step => ({ ...step, status: 'completed' })) }, ri8Owner);
+  assert.notEqual(readTaskHistorySession({ stateDir, auditLogPath }, ri8.work_id)?.status, 'completed',
+    'completed plan steps alone cannot finalize a task');
+  const ri8Iteration = await callTool('relai_work', { action: 'finish', work_id: ri8.work_id,
+    summary: 'Fixture PR merged and publishing verified; this is only an iteration milestone.' }, ri8Owner);
+  assert.equal(ri8Iteration.iterationCompleted, true);
+  assert.equal(ri8Iteration.completionKnown, false);
+  const ri8AwaitingCompletion = await callTool('relai_work', { action: 'goal_status', work_id: ri8.work_id }, ri8Owner);
+  assert.match(ri8AwaitingCompletion.nextAction || '', /action "complete"/);
+  assert.match(ri8Iteration.nextAction, /action "complete"/);
+  // Simulate an HTTP 429 linkage cooldown already active at the monitor layer.
+  const { updateGoal: mutateRi8Goal } = await import('../src/chatgptGoalState.js');
+  mutateRi8Goal({ stateDir }, ri8.work_id, current => ({ ...current,
+    state: 'rate_limited', nextAttemptAt: Date.now() + 60_000 }));
+  const ri8Complete = await callTool('relai_work', { action: 'complete', work_id: ri8.work_id,
+    summary: 'Fixture only: all five RI8 publication steps independently verified.' }, ri8Owner);
+  assert.equal(ri8Complete.completionKnown, true);
+  assert.equal(ri8Complete.completionSource, 'relai_work:complete');
+  assert.equal(ri8Complete.endReason, 'explicit_completion');
+  assert.equal(readTaskHistorySessionRecord({ stateDir, auditLogPath }, ri8.work_id)?.status, 'completed');
+  const ri8Monitor = await callTool('relai_work', { action: 'goal_status', work_id: ri8.work_id }, ri8Owner);
+  assert.equal(ri8Monitor.goalActive, false);
+  assert.equal(ri8Monitor.objectiveAchieved, true);
+  assert.equal(ri8Monitor.state, 'finished');
+  assert.equal((await callTool('relai_work', { action: 'goal_stop', work_id: ri8.work_id }, ri8Owner)).state, 'finished',
+    'late Stop must not demote a successful terminal loop');
+  assert.equal((await callTool('relai_work', { action: 'goal_pause', work_id: ri8.work_id }, ri8Owner)).state, 'finished',
+    'late Pause must not demote a successful terminal loop');
+  const ri8Duplicate = await callTool('relai_work', { action: 'complete', work_id: ri8.work_id,
+    summary: 'Duplicate request must not publish anything.' }, ri8Owner);
+  assert.equal(ri8Duplicate.duplicate, true);
+  assert.equal(ri8Duplicate.completionKnown, true);
+  assert.equal((await callTool('relai_work', { action: 'goal_status', work_id: ri8.work_id }, ri8Owner)).iterationCount, 1);
+  await assert.rejects(callTool('relai_work', { action: 'goal_resume', work_id: ri8.work_id }, ri8Owner),
+    'a terminal task may not restart monitoring');
+
+  const normalCompleteOwner = { ...sameOwner, conversationId: 'normal-complete-regression' };
+  const normalComplete = await callTool('relai_work', { action: 'begin', mode: 'normal',
+    title: 'Normal task completion', steps: [{ title: 'Verify', status: 'completed' }] }, normalCompleteOwner);
+  assert.equal((await callTool('relai_work', { action: 'complete', work_id: normalComplete.work_id,
+    summary: 'Normal objective verified.' }, normalCompleteOwner)).completionKnown, true);
+  assert.equal(readTaskHistorySessionRecord({ stateDir, auditLogPath }, normalComplete.work_id)?.status, 'completed');
+
   const adaptiveOwner = { ...sameOwner, conversationId: 'adaptive-finish-regression' };
   const adaptive = await callTool('relai_work', { action: 'begin', title: 'Finite evidence-backed goal',
     objective: 'Complete the fixture with supporting evidence', goal: true, mode: 'goal', strategy: 'adaptive',
@@ -163,24 +217,43 @@ try {
   const pausedFinish = await callTool('relai_work', { action: 'finish', work_id: adaptive.work_id,
     summary: 'A paused Goal still requires supported completion.' }, adaptiveOwner);
   assert.equal(pausedFinish.completionKnown, false);
+  const stoppedAdaptive = await callTool('relai_work', { action: 'goal_stop', work_id: adaptive.work_id }, adaptiveOwner);
+  assert.equal(stoppedAdaptive.objectiveAchieved, false);
+  const unsupportedComplete = await callTool('relai_work', { action: 'complete', work_id: adaptive.work_id,
+    summary: 'Stopping the evaluator is not proof of success.' }, adaptiveOwner);
+  assert.equal(unsupportedComplete.completionKnown, false, 'a stopped adaptive Goal still requires achievement evidence');
   assert.equal((await callTool('relai_work', { action: 'goal_status', work_id: adaptive.work_id }, adaptiveOwner)).goalActive, false);
   const { updateGoal: updateDurableGoal } = await import('../src/chatgptGoalState.js');
-  // The controller owns this receipt; this fixture isolates finish's guarded handoff.
-  const achievementEvidence = { planRevision: readTaskHistorySession({ stateDir, auditLogPath }, adaptive.work_id).plan.revision,
+  // A fresh adaptive Goal with a current controller receipt may close; Stop
+  // on the previous Goal stays sticky and never manufactures the receipt.
+  const supportedOwner = { ...sameOwner, conversationId: 'adaptive-supported-completion-regression' };
+  const supportedAdaptive = await callTool('relai_work', { action: 'begin',
+    title: 'Evidence-backed Goal success', mode: 'goal', strategy: 'adaptive',
+    objective: 'Verify the fixture before completion',
+    steps: [{ id: 'verify', title: 'Verify the fixture', status: 'in_progress' }]
+  }, supportedOwner);
+  await callTool('relai_work', { action: 'plan', work_id: supportedAdaptive.work_id,
+    steps: [{ id: 'verify', title: 'Verify the fixture', status: 'completed' }]
+  }, supportedOwner);
+  // The controller owns this receipt; the fixture isolates guarded handoff.
+  const achievementEvidence = { planRevision: readTaskHistorySession({ stateDir, auditLogPath }, supportedAdaptive.work_id).plan.revision,
     mutationGeneration: null, workspaceGeneration: null, repositoryFingerprint: '', requiresValidation: false };
-  updateDurableGoal({ stateDir }, adaptive.work_id, current => ({ ...current,
+  updateDurableGoal({ stateDir }, supportedAdaptive.work_id, current => ({ ...current,
     objectiveAchieved: true, state: 'needs_finalization',
     achievementEvidence: { ...achievementEvidence, planRevision: achievementEvidence.planRevision - 1 } }));
-  const staleFinish = await callTool('relai_work', { action: 'finish', work_id: adaptive.work_id,
-    summary: 'A stale plan verdict cannot complete newer work.' }, adaptiveOwner);
+  const staleFinish = await callTool('relai_work', { action: 'complete', work_id: supportedAdaptive.work_id,
+    summary: 'A stale plan verdict cannot complete newer work.' }, supportedOwner);
   assert.equal(staleFinish.completionKnown, false);
   assert.equal(staleFinish.completionPending, true);
-  updateDurableGoal({ stateDir }, adaptive.work_id, current => ({ ...current,
+  updateDurableGoal({ stateDir }, supportedAdaptive.work_id, current => ({ ...current,
     objectiveAchieved: true, state: 'needs_finalization', achievementEvidence }));
-  const supportedFinish = await callTool('relai_work', { action: 'finish', work_id: adaptive.work_id,
-    summary: 'The controller has accepted supporting evidence.' }, adaptiveOwner);
-  assert.equal(supportedFinish.completionKnown, true);
-  assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, adaptive.work_id)?.status, 'completed');
+  const supportedFinish = await callTool('relai_work', { action: 'complete', work_id: supportedAdaptive.work_id,
+    summary: 'The controller has accepted supporting evidence.' }, supportedOwner);
+  assert.equal(supportedFinish.completionKnown, true, JSON.stringify(supportedFinish));
+  assert.equal(readTaskHistorySession({ stateDir, auditLogPath }, supportedAdaptive.work_id)?.status, 'completed');
+  const adaptiveStatus = await callTool('relai_work', { action: 'goal_status', work_id: supportedAdaptive.work_id }, supportedOwner);
+  assert.equal(adaptiveStatus.state, 'finished');
+  assert.equal(adaptiveStatus.objectiveAchieved, true);
 
   const { bindWorkspaceOperationIdentity, runWorkspaceOperation } = await import('../src/workspaceOperationQueue.js');
   // Match real public admission: bind the physical workspace before taking a

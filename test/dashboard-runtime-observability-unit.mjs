@@ -28,6 +28,11 @@ const restartedProcess = processStateView({ status: 'orphaned', pid: 123 });
 assert.equal(restartedProcess.label, 'Unknown after restart');
 assert.equal(restartedProcess.canStop, true);
 assert.match(restartedProcess.recovery, /Stop the process if it is still running/i);
+const missingController = processStateView({
+  status: 'orphaned', canStop: false, recovery: 'Restart Windows, then reopen Rel.AI to verify cleanup.'
+});
+assert.equal(missingController.canStop, false, 'recovery must not offer Stop when the controller cannot receive it');
+assert.match(missingController.recovery, /Restart Windows/);
 const processSummary = processListView({
   managedProcesses: [
     { processId: 'orphaned-process', status: 'orphaned', pid: 123 },
@@ -160,6 +165,30 @@ assert.ok(processNodes.some(node => node?.props?.['data-stop-process'] === true 
 assert.ok(processNodes.includes('Unknown after restart'), 'the renderer must disclose uncertain restart state');
 assert.ok(processNodes.some(node => typeof node === 'string' && /Stop the process if it is still running/.test(node)), 'the renderer must retain restart recovery guidance');
 assert.ok(processNodes.includes('0 running · 1 needs attention'), 'uncertain processes must not be counted as running or finished');
+
+const noControllerTree = processRenderContext.renderProcesses(() => ({
+  managedProcesses: [{ processId: 'missing-controller', status: 'orphaned', canStop: false, recovery: missingController.recovery }]
+}))();
+const previousNodes = processNodes.splice(0);
+visitProcessNode(noControllerTree);
+assert.equal(processNodes.some(node => node?.props?.['data-stop-process'] === true), false);
+assert.ok(processNodes.includes(missingController.recovery), 'the row must show the backend recovery action');
+processNodes.splice(0, processNodes.length, ...previousNodes);
+
+const defaultUseState = processRenderContext.useState;
+let rowStateIndex = 0;
+processRenderContext.useState = initial => {
+  const index = rowStateIndex++;
+  return [index === 0 ? 'error' : index === 1 ? 'Old stop failure' : initial, () => {}];
+};
+const resolvedProcessTree = processRenderContext.renderProcesses(() => ({
+  managedProcesses: [{ processId: 'resolved-controller', status: 'exited', terminationConfirmed: true }]
+}))();
+processRenderContext.useState = defaultUseState;
+const restartedNodes = processNodes.splice(0);
+visitProcessNode(resolvedProcessTree);
+assert.equal(processNodes.some(node => node?.props?.className?.includes('process-stop-error')), false, 'a terminal refresh must clear an obsolete Stop error');
+processNodes.splice(0, processNodes.length, ...restartedNodes);
 
 processNodes.find(node => node?.props?.['data-stop-process'] === true).props.onClick();
 await new Promise(resolve => setImmediate(resolve));

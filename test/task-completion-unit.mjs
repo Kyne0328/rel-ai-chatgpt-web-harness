@@ -88,6 +88,63 @@ try {
   assert.equal(plainReadCompletion.completionKnown, true, 'read-only work in a non-Git project must finish normally');
   assert.equal(plainReadCompletion.residualState, 'clean');
 
+  // A real repository check with complete:true ends only the Loop iteration.
+  // Explicit complete reuses that check evidence and closes the same work_id.
+  resetToolActivity();
+  const validatedLoop = await callTool('relai_work', {
+    action: 'begin', mode: 'loop', strategy: 'fixed', workspace: 'app',
+    objective: 'Validate a one-time fixture and close', brief: 'One validation only',
+    steps: [{ id: 'verify', title: 'Verify the checked source', status: 'completed' }]
+  }, { publicHttpOnly: true });
+  const iterationValidation = await callTool('relai_validate', {
+    action: 'checks', workspace: 'app', work_id: validatedLoop.work_id,
+    check: 'node --check src/index.js', complete: true,
+    summary: 'One repository check passed.'
+  }, { publicHttpOnly: true });
+  assert.equal(iterationValidation.validationStatus, 'passed');
+  assert.equal(iterationValidation.iterationCompleted, true);
+  assert.equal(iterationValidation.completionKnown, false);
+  assert.notEqual(readTaskHistorySessionRecord(readConfig(), validatedLoop.work_id)?.status, 'completed');
+  const stopValidatedLoop = await callTool('relai_work', {
+    action: 'goal_stop', work_id: validatedLoop.work_id
+  }, { publicHttpOnly: true });
+  assert.equal(stopValidatedLoop.goalActive, false);
+  assert.equal(stopValidatedLoop.objectiveAchieved, false, 'Stop alone is not achievement');
+  const finalValidatedLoop = await callTool('relai_work', {
+    action: 'complete', work_id: validatedLoop.work_id,
+    summary: 'The single repository check passed; no further iteration is necessary.'
+  }, { publicHttpOnly: true });
+  assert.equal(finalValidatedLoop.completionKnown, true, JSON.stringify(finalValidatedLoop));
+  assert.equal(finalValidatedLoop.validationStatus, 'passed', 'completion must preserve current validation evidence');
+  assert.equal(readTaskHistorySessionRecord(readConfig(), validatedLoop.work_id)?.status, 'completed');
+  const { loadGoal: loadDurableGoal } = await import('../src/chatgptGoalState.js');
+  const persistedLoop = loadDurableGoal(readConfig(), validatedLoop.work_id);
+  assert.equal(persistedLoop.state, 'finished');
+  assert.equal(persistedLoop.objectiveAchieved, true);
+  assert.equal(persistedLoop.active, false);
+  resetTaskHistoryCaches();
+  assert.equal(readTaskHistorySessionRecord(readConfig(), validatedLoop.work_id)?.status, 'completed',
+    'successful terminal state must survive a history-cache reset');
+
+  resetToolActivity();
+  const racingLoop = await callTool('relai_work', {
+    action: 'begin', mode: 'loop', strategy: 'fixed', workspace: 'app',
+    brief: 'One concurrency fixture', objective: 'Close once',
+    steps: [{ id: 'check', title: 'Check concurrency', status: 'completed' }]
+  }, { publicHttpOnly: true });
+  const [raceFinish, raceComplete] = await Promise.allSettled([
+    callTool('relai_work', { action: 'finish', work_id: racingLoop.work_id,
+      summary: 'Concurrent milestone only.' }, { publicHttpOnly: true }),
+    callTool('relai_work', { action: 'complete', work_id: racingLoop.work_id,
+      summary: 'Concurrent success with no external side effects.' }, { publicHttpOnly: true })
+  ]);
+  assert.ok([raceFinish, raceComplete].some(result =>
+    result.status === 'fulfilled' && result.value.completionKnown === true),
+  'one concurrent lifecycle request must commit task completion');
+  assert.equal(readTaskHistorySessionRecord(readConfig(), racingLoop.work_id)?.status, 'completed');
+  assert.equal(loadDurableGoal(readConfig(), racingLoop.work_id)?.active, false);
+  assert.ok(loadDurableGoal(readConfig(), racingLoop.work_id)?.iterationCount <= 1);
+
   resetToolActivity();
   const plainEditTask = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'plain', bootstrap: 'none'

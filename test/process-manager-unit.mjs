@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
 
 import { dashboardManagedProcesses } from '../src/core/dashboard-data.ts';
 import {
@@ -68,6 +69,7 @@ setInterval(() => {}, 1000);
 fs.writeFileSync(exitScript, `process.stderr.write('startup failed\\n'); process.exit(7);\n`);
 
 try {
+  await verifyWindowsJobRecovery();
   const initialInput = 'initial `$value "quoted"\n';
   const started = await startManagedProcess(workspace, config, {
     executable: process.execPath,
@@ -432,6 +434,145 @@ try {
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
+
+async function verifyWindowsJobRecovery() {
+  const boot = { platform: 'win32', host: 'a'.repeat(64), boot: 'b'.repeat(64) };
+  let observedBoot = boot;
+  let instance = 0;
+  const modulePrefix = new URL('../src/processManager.ts', import.meta.url).href + '?windows-recovery-';
+  const bootModule = 'data:text/javascript,' + encodeURIComponent('export const currentMutationBootIdentity = () => globalThis.__relaiManagedRecoveryBoot();');
+  globalThis.__relaiManagedRecoveryBoot = async () => observedBoot;
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.startsWith(modulePrefix) && specifier === './mutationBootIdentity.js') return { url: bootModule, shortCircuit: true };
+      return nextResolve(specifier, context);
+    }
+  });
+  const recoveryConfig = { stateDir: path.join(root, 'windows-recovery') };
+  const managers = [];
+  const manager = async () => {
+    const value = await import(modulePrefix + (++instance));
+    managers.push(value);
+    return value;
+  };
+  let scenario = 0;
+  function fixture(fields = {}) {
+    const processId = 'proc_' + String(++scenario).padStart(24, '0');
+    const directory = path.join(recoveryConfig.stateDir, 'processes', processId);
+    const jobDirectory = path.join(directory, 'job-fixture');
+    const nonce = 'c'.repeat(64);
+    const pid = 2000000000;
+    fs.mkdirSync(jobDirectory, { recursive: true });
+    fs.writeFileSync(path.join(jobDirectory, 'request.json'), JSON.stringify({ protocol: 1, nonce }));
+    const receipt = { protocol: 1, nonce, helperPid: pid, rootPid: pid - 1, commandStarted: true,
+      rootExited: false, activeProcesses: 1, final: false, jobComplete: false, cleanupConfirmed: false };
+    fs.writeFileSync(path.join(jobDirectory, 'receipt.json'), JSON.stringify(receipt));
+    const metadata = { schemaVersion: 4, runtimeId: 'previous-runtime', processId, workspaceId: 'recovery',
+      workspacePath: workspaceRoot, workSessionId: 'recovery-session', lifecycle: 'persistent',
+      status: 'orphaned', startedAt: new Date().toISOString(), endedAt: '', pid,
+      processCreationIdentity: 'win32:1', windowsJobOwned: true, windowsJobDirectory: 'job-fixture',
+      terminationConfirmed: false, terminationError: 'old cleanup error', error: 'old cleanup error', ...fields };
+    fs.writeFileSync(path.join(directory, 'metadata.json'), JSON.stringify(metadata));
+    return { processId, directory, jobDirectory, receipt };
+  }
+  const readMetadata = item => JSON.parse(fs.readFileSync(path.join(item.directory, 'metadata.json'), 'utf8'));
+  try {
+    const m = await manager();
+    const late = fixture();
+    assert.equal(m.readManagedProcess(recoveryConfig, late).status, 'orphaned');
+    const record = m.activeProcessesForWorkSession(recoveryConfig, 'recovery', 'recovery-session').find(item => item.processId === late.processId);
+    let releases = 0;
+    record.hostResourceRelease = () => { releases++; };
+    const changes = [];
+    const unsubscribe = m.onManagedProcessChange(event => changes.push(event));
+    fs.writeFileSync(path.join(late.jobDirectory, 'receipt.json'), JSON.stringify({ ...late.receipt,
+      rootExited: true, rootExitCode: 0, activeProcesses: 0, final: true, jobComplete: true, cleanupConfirmed: true }));
+    const originalRemove = fs.rmSync;
+    const cleanupStates = [];
+    fs.rmSync = (target, options) => {
+      if (target === late.jobDirectory) cleanupStates.push(readMetadata(late));
+      return originalRemove(target, options);
+    };
+    syncBuiltinESMExports();
+    try {
+      const resolved = m.readManagedProcess(recoveryConfig, late);
+      assert.equal(resolved.status, 'exited', 'a cached orphan must reconcile a late exact native completion receipt');
+      assert.equal(resolved.terminationConfirmed, true);
+      assert.equal(resolved.error, undefined);
+      assert.equal(resolved.terminationError, undefined);
+      assert.equal(releases, 1, 'late completion releases retained capacity exactly once');
+      assert.equal(changes.filter(event => event.processId === late.processId).length, 1);
+      assert.equal(m.listManagedProcesses(recoveryConfig).processes.some(item => item.processId === late.processId), false);
+      assert.equal((await m.stopManagedProcess(recoveryConfig, late)).duplicate, true);
+      assert.equal(releases, 1);
+      assert.equal(readMetadata(late).status, 'exited');
+      assert.ok(cleanupStates.length > 0, 'persisted terminal state permits native evidence cleanup');
+      assert.ok(cleanupStates.every(item => item.terminationConfirmed === true && item.status === 'exited'), 'completion proof must survive until terminal metadata is saved');
+    } finally { fs.rmSync = originalRemove; syncBuiltinESMExports(); unsubscribe(); }
+    assert.equal((await manager()).readManagedProcess(recoveryConfig, late).status, 'exited', 'a second restart preserves resolved state after receipt cleanup');
+
+    const alreadyConfirmed = fixture({ terminationConfirmed: true });
+    assert.equal(m.readManagedProcess(recoveryConfig, alreadyConfirmed).status, 'stopped', 'durable cleanup confirmation must survive a missing native receipt');
+
+    const failedPersistence = fixture();
+    m.readManagedProcess(recoveryConfig, failedPersistence);
+    fs.writeFileSync(path.join(failedPersistence.jobDirectory, 'receipt.json'), JSON.stringify({ ...failedPersistence.receipt,
+      rootExited: true, rootExitCode: 0, activeProcesses: 0, final: true, jobComplete: true, cleanupConfirmed: true }));
+    const mkdir = fs.promises.mkdir;
+    let failedWrites = 0;
+    fs.promises.mkdir = async (target, ...args) => {
+      if (target === failedPersistence.directory) {
+        failedWrites++;
+        throw Object.assign(new Error('Fixture terminal metadata write denied'), { code: 'EACCES' });
+      }
+      return mkdir(target, ...args);
+    };
+    try {
+      await m.stopManagedProcess(recoveryConfig, failedPersistence);
+      assert.ok(failedWrites > 0, 'the fixture must exercise terminal persistence failure');
+      assert.ok(fs.existsSync(path.join(failedPersistence.jobDirectory, 'receipt.json')), 'failed terminal persistence must retain native completion proof');
+    } finally { fs.promises.mkdir = mkdir; }
+
+    const previousBoot = fixture({ bootIdentity: { ...boot, boot: 'd'.repeat(64) } });
+    const resolvedBoot = await m.stopManagedProcess(recoveryConfig, previousBoot);
+    assert.equal(resolvedBoot.status, 'stopped', 'a verified kernel reboot settles jobs from the same host');
+    assert.equal(resolvedBoot.terminationConfirmed, true);
+    assert.equal(fs.existsSync(path.join(previousBoot.jobDirectory, 'control.json')), false, 'reboot recovery must never signal an old PID or helper');
+
+    const sameBoot = fixture({ bootIdentity: boot });
+    const pending = await m.stopManagedProcess(recoveryConfig, sameBoot);
+    assert.equal(pending.status, 'orphaned', 'helper disappearance on the same boot is not native job-zero proof');
+    assert.equal(pending.terminationConfirmed, false);
+    assert.match(pending.error, /restart Windows/i);
+    assert.equal(pending.canStop, false, 'a missing controller must not advertise an ineffective Stop action');
+    assert.equal(fs.existsSync(path.join(sameBoot.jobDirectory, 'control.json')), false);
+
+    const missingControl = fixture({ bootIdentity: boot, pid: process.pid });
+    fs.rmSync(path.join(missingControl.jobDirectory, 'request.json'));
+    const noControl = await m.stopManagedProcess(recoveryConfig, missingControl);
+    assert.equal(noControl.terminationConfirmed, false, 'missing control identity cannot authorize terminating a live PID');
+    assert.equal(noControl.canStop, false);
+
+    const legacy = fixture();
+    assert.equal((await m.stopManagedProcess(recoveryConfig, legacy)).terminationConfirmed, false);
+    assert.deepEqual(readMetadata(legacy).recoveryBootIdentity, boot, 'legacy recovery saves a checkpoint before trusting a later reboot');
+    assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, legacy)).terminationConfirmed, false, 'app restart on the same boot cannot settle a legacy job');
+    observedBoot = { ...boot, boot: 'e'.repeat(64) };
+    assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, legacy)).terminationConfirmed, true, 'legacy checkpoint recovers after an actual boot identity change');
+
+    observedBoot = { ...boot, host: 'f'.repeat(64) };
+    const otherHost = fixture({ bootIdentity: boot });
+    assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, otherHost)).terminationConfirmed, false, 'another host cannot prove cleanup');
+    observedBoot = null;
+    const unavailable = fixture({ bootIdentity: boot });
+    assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, unavailable)).terminationConfirmed, false, 'a failed boot probe must retain ownership');
+    assert.equal(readMetadata(unavailable).recoveryBootIdentity, undefined);
+  } finally {
+    for (const value of managers) await value.stopAllManagedProcesses(recoveryConfig);
+    hooks.deregister();
+    delete globalThis.__relaiManagedRecoveryBoot;
+  }
+}
 
 async function verifyUnresolvedShutdownAccounting() {
   const { createRelaiCoreRuntime } = await import('../src/core/runtime.ts');

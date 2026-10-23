@@ -167,7 +167,11 @@ function writeGoalRow(db, row, goal, options = {}) {
   const current = row?.goal;
   const expectedRevision = options.expectedRevision ?? goal.revision ?? 0;
   if (current && current.revision !== expectedRevision) return current;
-  if (current?.state === 'stopped' && options.reactivate !== true) {
+  // A verified explicit task completion can succeed after monitor Stop without
+  // allowing any delayed browser observation or send to reactivate monitoring.
+  const terminalSuccess = options.successfulCompletion === true && goal.active === false
+    && goal.state === 'finished' && goal.objectiveAchieved === true;
+  if (current?.state === 'stopped' && options.reactivate !== true && !terminalSuccess) {
     // An accepted transport receipt may arrive after Stop. Record it exactly
     // once, without letting the delayed sender alter Stop or newer settings.
     if (options.recordReceipt !== true || goal.active !== false || goal.state !== 'stopped'

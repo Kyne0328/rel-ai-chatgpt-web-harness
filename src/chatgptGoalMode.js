@@ -214,7 +214,7 @@ function invalidateGoalPoll(workId, code = 'GOAL_UPDATED') {
 
 function pauseGoal(config, args, context) {
   const goal = requireOwnedGoal(config, args, context);
-  const paused = mutateGoal(config, goal.workId, current => ({ ...current,
+  const paused = mutateGoal(config, goal.workId, current => current.state === 'finished' ? current : ({ ...current,
     active: false, state: 'paused', nextAttemptAt: 0, pauseReason: 'user', updatedAt: Date.now()
   }));
   invalidateGoalPoll(goal.workId, 'GOAL_PAUSED');
@@ -478,16 +478,46 @@ function activateGoal(config, args, context) {
 }
 
 function goalStatus(config, args, context) {
-  return publicGoal(requireOwnedGoal(config, args, context));
+  const goal = requireOwnedGoal(config, args, context);
+  const result = publicGoal(goal);
+  const task = statusForTask(config, goal);
+  if (goal.mode === 'loop' && !isTerminalTaskStatus(task?.status)
+    && resolvedGoalPlan(task) === 'finished') return { ...result,
+    nextAction: 'The iteration plan is complete, but this Loop task is still open. If its objective is verified, call relai_work action "complete" with this work_id and a factual summary; otherwise plan the next necessary iteration.' };
+  if (goal.mode === 'goal' && goal.objectiveAchieved && goal.state === 'needs_finalization') return { ...result,
+    nextAction: 'Achievement evidence is accepted. Call relai_work action "complete" with this work_id and a factual summary.' };
+  return result;
 }
 
 function stopGoalRecord(config, goal) {
   clearBackgroundGoal(goal.workId);
   activePolls.get(goal.workId)?.abort();
-  const stopped = mutateGoal(config, goal.workId, current => ({ ...current, active: false,
+  const stopped = mutateGoal(config, goal.workId, current => current.state === 'finished' ? current : ({ ...current, active: false,
     state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now() }));
   scheduleGoalRetry(config, stopped);
   return publicGoal(stopped);
+}
+
+// The successful terminal transition also disables scheduled continuation.
+// Goal state is durable; task completion is committed by the shared work.finish path.
+function finishGoalMonitor(config, workId, expectedRevision, options = {}) {
+  const blocked = resolvedGoalPlan(statusForTask(config, { workId })) === 'blocked';
+  if (blocked && options.requireSuccess === true) {
+    throw Object.assign(new Error('Resolve the blocked plan steps before claiming successful task completion.'),
+      { code: 'TASK_PLAN_BLOCKED' });
+  }
+  const finished = mutateGoal(config, workId, current => ({ ...current,
+    active: false, state: blocked ? 'blocked' : 'finished', objectiveAchieved: !blocked,
+    authRequired: false, nextAttemptAt: 0, error: '', updatedAt: Date.now()
+  }), { expectedRevision, successfulCompletion: !blocked });
+  if (!finished || finished.revision !== expectedRevision + 1 || finished.objectiveAchieved !== !blocked) {
+    throw Object.assign(new Error('Goal/Loop state changed before successful task completion. Retry against the current work_id.'),
+      { code: 'GOAL_STATE_CHANGED' });
+  }
+  clearBackgroundGoal(workId);
+  activePolls.get(workId)?.abort();
+  scheduleGoalRetry(config, { workId, active: false });
+  return finished;
 }
 
 function resumeAuthenticatedGoals(config, tunnelId) {
@@ -522,7 +552,7 @@ function resumeAuthenticatedGoals(config, tunnelId) {
 function stopGoal(config, args, context) {
   const workId = String(args.work_id || '').trim();
   requireOwnedGoal(config, args, context);
-  const stopped = publicGoal(mutateGoal(config, workId, current => ({ ...current,
+  const stopped = publicGoal(mutateGoal(config, workId, current => current.state === 'finished' ? current : ({ ...current,
     active: false, state: 'stopped', authRequired: false, nextAttemptAt: 0, updatedAt: Date.now()
   })));
   clearBackgroundGoal(workId);
@@ -596,7 +626,7 @@ function terminalMonitorOutcome(goal, task) {
   const state = terminalGoalState(task);
   if (!state) return null;
   if (!task) return { state, error: 'Work session is unavailable; completion is unknown.' };
-  if (task.status === 'completed' && goal.mode === 'loop') return {
+  if (task.status === 'completed' && goal.mode === 'loop' && !goal.objectiveAchieved) return {
     state: 'paused', error: 'The Loop work session was closed externally. It was not reopened.' };
   if (task.status === 'completed' && goal.strategy === 'adaptive' && !goal.objectiveAchieved) return {
     state: 'completed_unverified', error: 'The work session closed before adaptive success criteria were independently verified.' };
@@ -763,7 +793,7 @@ async function pollGoal(config, workId, deps = {}) {
     const terminalState = terminalGoalState(task);
     if (terminalState) {
       const unverified = task?.status === 'completed' && goal.strategy === 'adaptive' && !goal.objectiveAchieved;
-      const closedLoop = task?.status === 'completed' && goal.mode === 'loop';
+      const closedLoop = task?.status === 'completed' && goal.mode === 'loop' && !goal.objectiveAchieved;
       saveGoal(config, { ...goal, active: false,
         state: closedLoop ? 'paused' : unverified ? 'completed_unverified' : terminalState,
         error: closedLoop ? 'The Loop work session was closed externally. It was not reopened.'
@@ -950,4 +980,4 @@ function stopGoalMonitor() {
   for (const controller of activePolls.values()) controller.abort();
 }
 
-export { activateGoal, pauseGoal, resumeGoal, updateGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor };
+export { activateGoal, pauseGoal, resumeGoal, updateGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor, finishGoalMonitor };

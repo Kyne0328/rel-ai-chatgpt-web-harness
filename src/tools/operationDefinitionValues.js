@@ -363,9 +363,9 @@ const OPERATION_DEFINITION_VALUES = [
   },
   {
     name: OP.WORK_FINISH,
-    title: "Report Task Completion",
-    description: "Explicitly close the durable work session identified by work_id. Completion records the session's actual validation state (passed, failed, stale, not_run, or not_required) but does not require validation as permission to finish. Rel.AI never falls back to another task in the workspace.",
-    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"summary":{"type":"string","minLength":1,"maxLength":2000}},"required":["summary"],"additionalProperties":false},
+    title: "Finish Iteration or Complete Task",
+    description: "relai_work finish preserves legacy behavior: it closes normal tasks, records an iteration (not task success) in Loop Mode, and awaits supported achievement evidence for adaptive Goals. relai_work complete explicitly closes a successful task in normal, Goal, or Loop Mode, prevents further continuation, and records the actual validation state without inventing passed checks. Adaptive Goals still require fresh objective-achievement evidence. Stop, cancel, and failure are not success. Rel.AI never falls back to another task in the workspace.",
+    inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"summary":{"type":"string","minLength":1,"maxLength":2000},"action":{"type":"string","enum":["complete"]}},"required":["summary"],"additionalProperties":false},
     handlerName: 'completeTask',
     behavior: {"audit":"completion","summary":"completion","concurrencyScope":"mutation"},
     dashboard: {"category":"Workflow"}

@@ -13,8 +13,10 @@ import { runWorkspaceMutationBoundary } from '../workspaceOperationQueue.js';
 import { assertFallbackCompletionAvailable } from '../mcp/fallbackExecutions.js';
 import { loadGoal, recordLoopMilestone, recordGoalCompletionRequest, updateGoal } from '../chatgptGoalState.js';
 import { isTerminalTaskStatus } from '../taskState.js';
+import { finishGoalMonitor } from '../chatgptGoalMode.js';
 
 const WORK_FINISH_SOURCE = 'relai_work:finish';
+const WORK_COMPLETE_SOURCE = 'relai_work:complete';
 const VALIDATE_CHECKS_SOURCE = 'relai_validate:checks';
 
 async function completeTask(config, args = {}, handlerContext = {}) {
@@ -43,15 +45,17 @@ async function completeTask(config, args = {}, handlerContext = {}) {
   }
 
   const summary = normalizeCompletionSummary(args.summary);
+  const explicitComplete = args.action === 'complete';
+  const completionSource = explicitComplete ? WORK_COMPLETE_SOURCE : WORK_FINISH_SOURCE;
   assertFallbackCompletionAvailable(requestedTaskId, { config, excludeOperationId: handlerContext.fallbackOperationId });
   if (!workspace) {
     const goal = await refreshedCompletionGoal(config, null, requestedTaskId, signal);
-    if (requiresLoopIteration(goal) || requiresGoalEvidence(goal)) return monitoredCompletionResult(config, requestedTaskId, {
+    if ((!explicitComplete && requiresLoopIteration(goal)) || requiresGoalEvidence(goal)) return monitoredCompletionResult(config, requestedTaskId, {
       summary, validationStatus: 'not_required', validationAt: '', validationFingerprint: '',
-      changedFiles: [], completionSource: WORK_FINISH_SOURCE
+      changedFiles: [], completionSource
     }, handlerContext, goal);
     assertCompletionGoalUnchanged(config, requestedTaskId, goal);
-    return finalizeProjectlessTask(summary);
+    return finalizeProjectlessTask(config, requestedTaskId, goal, summary, completionSource, explicitComplete);
   }
   const authority = readCompletionIntegrity(config, requestedTaskId, workspace.alias);
   const validation = await factualValidationState(config, workspace, authority, { signal });
@@ -62,13 +66,15 @@ async function completeTask(config, args = {}, handlerContext = {}) {
     validationAt: authority?.validationAt || '',
     validationFingerprint: validation.fingerprint,
     changedFiles: authority ? taskOwnedChangedFiles(config, requestedTaskId, workspace.alias) : previous?.changedFiles || [],
-    completionSource: WORK_FINISH_SOURCE,
+    completionSource,
+    explicitComplete,
     processContext: handlerContext,
     signal
   });
 }
 
-function finalizeProjectlessTask(summary) {
+function finalizeProjectlessTask(config, taskId, goal, summary, completionSource, explicitComplete) {
+  if (goal) finishGoalMonitor(config, taskId, goal.revision, { requireSuccess: explicitComplete });
   const completion = requestCurrentTaskCompletion({
     summary,
     validationStatus: 'not_required',
@@ -84,7 +90,7 @@ function finalizeProjectlessTask(summary) {
     duplicate: completion.duplicate === true,
     completionKnown: true,
     endReason: 'explicit_completion',
-    completionSource: WORK_FINISH_SOURCE,
+    completionSource,
     summary,
     validationStatus: 'not_required',
     validationLevel: '',
@@ -93,7 +99,7 @@ function finalizeProjectlessTask(summary) {
     changedFiles: [],
     residualChangedFiles: [],
     residualState: 'clean',
-    message: completionMessage(WORK_FINISH_SOURCE, completion.duplicate === true, [])
+    message: completionMessage(completionSource, completion.duplicate === true, [])
   };
 }
 
@@ -111,7 +117,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
     ? readTaskIntegrity(config, taskId, workspace.alias)
     : readCompletionIntegrity(config, taskId, workspace.alias);
   const goal = await refreshedCompletionGoal(config, workspace, taskId, options.signal);
-  if (requiresLoopIteration(goal) || requiresGoalEvidence(goal)) {
+  if ((!options.explicitComplete && requiresLoopIteration(goal)) || requiresGoalEvidence(goal)) {
     let validationStatus = String(options.validationStatus || 'not_run');
     if (options.completionSource === VALIDATE_CHECKS_SOURCE) {
       const checked = options.currentValidationResult;
@@ -196,9 +202,10 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
   options.signal?.throwIfAborted?.();
   const finalGoal = await refreshedCompletionGoal(config, workspace, taskId, options.signal);
   assertCompletionGoalUnchanged(config, taskId, goal);
-  if (requiresLoopIteration(finalGoal) || requiresGoalEvidence(finalGoal)) {
+  if ((!options.explicitComplete && requiresLoopIteration(finalGoal)) || requiresGoalEvidence(finalGoal)) {
     throw taskError('GOAL_STATE_CHANGED', 'Goal/Loop completion evidence changed during finalization. The work remains open.');
   }
+  if (finalGoal) finishGoalMonitor(config, taskId, finalGoal.revision, { requireSuccess: options.explicitComplete });
   const completion = requestCurrentTaskCompletion({
     summary,
     validationStatus,
@@ -290,7 +297,7 @@ async function finalizeDuplicateCompletion(config, workspace, context, previous,
     duplicate: true,
     completionKnown: true,
     endReason: 'explicit_completion',
-    completionSource: WORK_FINISH_SOURCE,
+    completionSource: previous.completionSource || WORK_FINISH_SOURCE,
     summary,
     validationStatus: previous.validation || 'not_run',
     validationLevel: previous.validationLevel || '',
@@ -321,7 +328,7 @@ function assertCompletionGoalUnchanged(config, taskId, observedGoal) {
 async function refreshedCompletionGoal(config, workspace, taskId, signal) {
   const goal = loadGoal(config, taskId);
   if (!goal || goal.mode !== 'goal' || goal.strategy !== 'adaptive'
-    || goal.state === 'stopped' || goal.objectiveAchieved !== true) return goal;
+    || goal.objectiveAchieved !== true) return goal;
   const accepted = goal.achievementEvidence;
   const authority = workspace ? readCompletionIntegrity(config, taskId, workspace.alias) : null;
   const validation = workspace
@@ -353,7 +360,7 @@ async function refreshedCompletionGoal(config, workspace, taskId, signal) {
 
 function requiresGoalEvidence(goal) {
   return goal?.mode === 'goal' && goal.strategy === 'adaptive'
-    && goal.objectiveAchieved !== true && goal.state !== 'stopped';
+    && goal.objectiveAchieved !== true;
 }
 
 function monitoredCompletionResult(config, taskId, evidence, handlerContext = {}, observedGoal) {
@@ -368,6 +375,12 @@ function monitoredCompletionResult(config, taskId, evidence, handlerContext = {}
     message: 'The Loop is paused; this finish request does not end or resume it.',
     nextAction: 'Inspect goal_status and resolve its blocker. Resume explicitly to continue, or stop monitoring before final task closure.'
   };
+  if (observedGoal.mode === 'goal' && observedGoal.strategy === 'adaptive' && !observedGoal.active) return {
+    ok: true, work_id: taskId, ...evidence, completionKnown: false, completionPending: true,
+    iterationCompleted: false, mode: 'goal', state: observedGoal.state,
+    message: 'The Goal has no supported achievement evidence and its monitor is inactive; it remains open.',
+    nextAction: 'Inspect goal_status and resolve its blocker. Restart evidence evaluation explicitly before successful completion.'
+  };
   const milestone = { ...evidence,
     changedFiles: Array.isArray(evidence.changedFiles) ? evidence.changedFiles.slice(0, 200) : [],
     operationId: String(handlerContext.fallbackOperationId || context.operationId || '') };
@@ -381,12 +394,12 @@ function monitoredCompletionResult(config, taskId, evidence, handlerContext = {}
     completionPending: true, mode: 'goal',
     message: 'Completion requested; the task remains open until the objective has supported evidence.',
     nextAction: goal.active
-      ? 'Check goal_status for evidence evaluation. Finish normally only after objectiveAchieved and needs_finalization are reported.'
+      ? 'Check goal_status for evidence evaluation. Call relai_work action "complete" once objectiveAchieved and needs_finalization are reported.'
       : 'The Goal is paused. Inspect goal_status, resolve the blocker and explicitly resume before completion can be evaluated.' };
   return { ok: true, work_id: taskId, ...evidence, completionKnown: false,
     iterationCompleted: true, iterationCount: goal.iterationCount, mode: 'loop',
     endReason: 'loop_iteration', message: 'Loop iteration recorded; the same work session remains open.',
-    nextAction: 'Refine the next plan within the original Loop brief and continue this work_id. Pause for real blockers or required user decisions.' };
+    nextAction: 'Continue the original Loop brief if more work remains. If its objective has been verified, call relai_work action "complete" with this work_id and a factual summary to terminate successfully.' };
 }
 
 function readCompletionIntegrity(config, taskId, workspace) {

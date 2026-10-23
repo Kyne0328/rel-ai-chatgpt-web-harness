@@ -191,7 +191,7 @@ for (const removed of removedDirectNames) {
 }
 
 const publicSchemaByName = new Map(publicSchemas.map(schema => [schema.name, schema]));
-assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'result', 'history', 'stop', 'finish', 'cancel', 'goal_status', 'goal_stop', 'goal_pause', 'goal_resume', 'goal_update']);
+assert.deepEqual(schemaByName.get('relai_work').inputSchema.properties.action.enum, ['begin', 'context', 'plan', 'status', 'result', 'history', 'stop', 'finish', 'complete', 'cancel', 'goal_status', 'goal_stop', 'goal_pause', 'goal_resume', 'goal_update']);
 const processSchema = schemaByName.get('relai_process');
 assert.deepEqual(processSchema.inputSchema.properties.action.enum, ['start', 'read', 'write', 'stop', 'list']);
 assert.ok(processSchema.inputSchema.properties.kind.enum.includes('service'));
@@ -234,6 +234,9 @@ await valid('relai_work', { action: 'stop', workspace: 'repo', work_id: 'work', 
 await invalid('relai_work', { action: 'plan', workspace: 'repo', work_id: 'work', steps: [{ title: 'Invalid state', status: 'working' }] });
 await valid('relai_work', { action: 'finish', work_id: 'work', summary: 'Done.' });
 await invalid('relai_work', { action: 'finish', work_id: 'work' });
+await valid('relai_work', { action: 'complete', work_id: 'work', summary: 'Objective verified.' });
+await invalid('relai_work', { action: 'complete', work_id: 'work' });
+assert.ok(publicSchemaByName.get('relai_work').inputSchema.properties.action.enum.includes('complete'), 'completion must be discoverable to MCP callers');
 await valid('relai_process', { action: 'start', workspace: 'repo', command: 'npm run dev', kind: 'service', purpose: 'Run the development server.', reuseExisting: true });
 await valid('relai_process', { action: 'start', work_id: 'work', executable: 'node', argv: ['server.js', '--port', '3000'], input: 'ready\n', kind: 'service', purpose: 'Run the development server directly.' });
 await invalid('relai_process', { action: 'start', work_id: 'work', command: 'npm run dev', executable: 'node', kind: 'service', purpose: 'Ambiguous execution mode.' });

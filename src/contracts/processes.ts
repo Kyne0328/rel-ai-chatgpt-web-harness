@@ -35,6 +35,8 @@ export interface ManagedProcessDto {
   terminationConfirmed?: boolean | null;
   rootExitConfirmed?: boolean;
   terminationError?: string;
+  canStop?: boolean;
+  recovery?: string;
 
   workSessionId: string | null;
   startedAt: string;

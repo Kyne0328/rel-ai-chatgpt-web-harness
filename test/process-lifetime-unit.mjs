@@ -96,6 +96,9 @@ try {
     fs.writeFileSync(path.join(directory, 'metadata.json'), JSON.stringify({
       ...persisted, processId, runtimeId: 'previous-runtime', status: 'running', endedAt: '',
       terminationConfirmed: null, rootExitConfirmed: false, pid: persistent.pid,
+      // These fixtures exercise PID identity, not the retired source job's
+      // deleted containment/control directory. Native recovery is tested below.
+      windowsJobOwned: false, windowsJobDirectory: '', linuxCgroup: null,
       ...fields
     }));
     readManagedProcess(config, { processId }, { internal: true });

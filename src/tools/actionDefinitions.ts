@@ -335,7 +335,7 @@ function withTaskProgressInputSchema(schema: ObjectJsonSchema): ObjectJsonSchema
 
 function withWorkFinishTaskProgressInputSchema(schema: ObjectJsonSchema): ObjectJsonSchema {
   if (!Array.isArray(schema.oneOf)) return schema;
-  const oneOf = schema.oneOf.map(branch => branch?.properties?.action?.const === 'finish'
+  const oneOf = schema.oneOf.map(branch => ['finish', 'complete'].includes(String(branch?.properties?.action?.const || ''))
     ? { ...branch, properties: { ...(branch.properties || {}), taskProgress: TASK_PROGRESS_SCHEMA } }
     : branch);
   return {

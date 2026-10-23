@@ -116,7 +116,7 @@ const ProcessRow = memo(function ProcessRow({ row }) {
         state.status === 'stopping' ? h('span', { className: 'process-stop-state', role: 'status' }, 'Stopping…') : null
       )
     ),
-    stopError ? h('div', { className: 'connection-notice bad process-stop-error', role: 'alert' },
+    stopError && !state.terminal ? h('div', { className: 'connection-notice bad process-stop-error', role: 'alert' },
       h('strong', null, 'Stop not confirmed'),
       h('div', null, stopError)
     ) : null,

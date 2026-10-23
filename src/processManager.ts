@@ -15,6 +15,7 @@ import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
 import { createHttpPrincipal, principalFingerprint } from './mcp/principal.ts';
 import { getStateDir } from './statePaths.js';
+import { currentMutationBootIdentity } from './mutationBootIdentity.js';
 import { readTaskHistorySession } from './taskHistoryStore.ts';
 import { runSpan, addSpanEvent, traceContextEnvironment } from './telemetry.ts';
 import { measurePerformancePhase, measurePerformancePhaseSync } from './performanceObservability.ts';
@@ -130,6 +131,12 @@ interface HostResourceLease {
   releaseResource?(resourceClass: string): void;
 }
 
+interface ManagedProcessBootIdentity {
+  readonly platform: 'win32';
+  readonly host: string;
+  readonly boot: string;
+}
+
 interface ManagedProcessRecord extends GenericRecord {
   schemaVersion: number;
   runtimeId: string;
@@ -176,6 +183,9 @@ interface ManagedProcessRecord extends GenericRecord {
   windowsJob?: WindowsProcessJob | null;
   windowsJobDirectory?: string;
   windowsJobOwned?: boolean;
+  bootIdentity?: ManagedProcessBootIdentity | null;
+  recoveryBootIdentity?: ManagedProcessBootIdentity | null;
+  windowsControllerUnavailable?: boolean;
   windowsRootPid?: number;
   windowsRootCreationIdentity?: string;
   ptyProcess: PtyProcess | null;
@@ -313,6 +323,34 @@ const processReuseReservations = new Map<string, Promise<void>>();
 let processStateVersion = 0;
 let nodePtyPromise: Promise<NodePtyApi> | null = null;
 let restoredCapacityReservation: Promise<void> = Promise.resolve();
+let managedBootIdentity: ManagedProcessBootIdentity | null | undefined;
+let managedBootIdentityPromise: Promise<ManagedProcessBootIdentity | null> | null = null;
+const pendingBootReconciliations = new Set<string>();
+
+function parseManagedProcessBootIdentity(value: unknown): ManagedProcessBootIdentity | null {
+  const identity = asRecord(value);
+  return identity.platform === 'win32' && /^[a-f0-9]{64}$/.test(String(identity.host || ''))
+    && /^[a-f0-9]{64}$/.test(String(identity.boot || ''))
+    ? { platform: 'win32', host: String(identity.host), boot: String(identity.boot) } : null;
+}
+
+function loadManagedProcessBootIdentity(): Promise<ManagedProcessBootIdentity | null> {
+  managedBootIdentityPromise ||= Promise.resolve(currentMutationBootIdentity())
+    .then((value: unknown) => { managedBootIdentity = parseManagedProcessBootIdentity(value); return managedBootIdentity; })
+    .catch(() => { managedBootIdentity = null; return null; });
+  return managedBootIdentityPromise;
+}
+
+function scheduleManagedProcessBootReconciliation(config: ManagedProcessConfig): void {
+  const root = processRoot(config);
+  if (managedBootIdentity !== undefined || pendingBootReconciliations.has(root)) return;
+  pendingBootReconciliations.add(root);
+  void loadManagedProcessBootIdentity().then(() => {
+    for (const record of processes.values()) {
+      if (path.dirname(path.dirname(record.stdoutPath)) === root) reconcileWindowsJobRecord(config, record);
+    }
+  }).finally(() => pendingBootReconciliations.delete(root));
+}
 
 function processRoot(config: ManagedProcessConfig): string {
   return path.join(getStateDir(config), 'processes');
@@ -565,6 +603,7 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       record.hostResourceRelease = resourceLease.release;
       record.queueWaitMs = resourceLease.waitMs;
       if (process.platform === 'win32') {
+        record.bootIdentity = await loadManagedProcessBootIdentity();
         record.windowsJob = await prepareWindowsProcessJob(config, {
           executable: invocation.processExecutable, args: invocation.processArgv,
           cwd: cwd.absolutePath, env: childEnvironment
@@ -576,9 +615,9 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
       record.linuxCgroup = prepareLinuxMutationCgroup();
       const containedCommand = record.linuxCgroup
         ? linuxMutationCgroupCommand(record.linuxCgroup, invocation.processExecutable, invocation.processArgv) : null;
-      // Persist containment before the launcher can enter it. Recovery never
-      // needs a surviving root PID to find this exact owned cgroup.
-      if (record.linuxCgroup) persistMetadata(config, record);
+      // Persist containment and boot evidence before native launch, so a
+      // restart cannot lose ownership of caller code that already ran.
+      if (record.linuxCgroup || record.windowsJobOwned) persistMetadata(config, record);
       const processExecutable = record.windowsJob?.executable || containedCommand?.executable || invocation.processExecutable;
       const processArgv = record.windowsJob?.args || containedCommand?.args || invocation.processArgv;
       if (record.pty) {
@@ -1171,6 +1210,11 @@ async function writeManagedProcess(config: ManagedProcessConfig, args: ManagedPr
 async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedProcessArgs = {}, context: ManagedProcessContext = {}) {
   const record = requireProcess(config, args.processId);
   assertProcessAccess(config, record, args, context, { requireSession: false });
+  if (record.windowsJobOwned) {
+    await loadManagedProcessBootIdentity();
+    reconcileWindowsJobRecord(config, record);
+    if (record.windowsControllerUnavailable && record.terminationConfirmed !== true) return processSnapshot(record, { includeTail: true });
+  }
   const duplicate = TERMINAL_STATUSES.has(record.status)
     && record.terminationConfirmed === true;
   if (!duplicate && (record.runtimeId !== RUNTIME_ID || record.rootExitConfirmed
@@ -1182,6 +1226,10 @@ async function stopManagedProcess(config: ManagedProcessConfig, args: ManagedPro
     await stopRecordInternal(config, record, {
       graceMs: clampNumber(args.graceMs, 0, 30000, DEFAULT_STOP_GRACE_MS)
     });
+  } else {
+    // A refresh may have just reconciled late proof. An idempotent Stop still
+    // waits for terminal persistence before returning completion to the caller.
+    await flushManagedProcessPersistence(config, record);
   }
   return {
     ...processSnapshot(record, { includeTail: true, tailBytes: 8192 }),
@@ -1733,6 +1781,8 @@ function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotO
     terminationConfirmed: record.terminationConfirmed,
     rootExitConfirmed: record.rootExitConfirmed,
     ...(record.terminationError ? { terminationError: record.terminationError } : {}),
+    ...(record.windowsControllerUnavailable && record.status === 'orphaned'
+      ? { canStop: false, recovery: record.terminationError } : {}),
 
     workSessionId: record.workSessionId || null,
     startedAt: record.startedAt,
@@ -1840,7 +1890,6 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
   clearScheduledPersist(record);
   resumeLogSources(record);
   releaseManagedProcessResource(record);
-  record.windowsJob?.cleanup();
   if (record.linuxCgroup) cleanupLinuxMutationCgroup(record.linuxCgroup);
   Object.assign(record, fields, { endedAt: new Date().toISOString() });
   record.child = null;
@@ -2013,10 +2062,17 @@ function persistMetadata(config: ManagedProcessConfig, record: ManagedProcessRec
   writeJsonAtomic(target, metadataRecord(record), { mode: 0o600, backup: true });
 }
 
-function persistMetadataAsync(config: ManagedProcessConfig, record: ManagedProcessRecord): Promise<unknown> {
+async function persistMetadataAsync(config: ManagedProcessConfig, record: ManagedProcessRecord): Promise<unknown> {
   const directory = processDirectory(config, record.processId);
   const target = path.join(directory, 'metadata.json');
-  return writeJsonAtomicAsync(target, metadataRecord(record), { mode: 0o600, backup: true, durable: false });
+  const metadata = metadataRecord(record);
+  const result = await writeJsonAtomicAsync(target, metadata, {
+    mode: 0o600, backup: true, durable: metadata.terminationConfirmed === true && record.windowsJobOwned === true
+  });
+  // The per-record queue has drained older snapshots before this write. Never
+  // erase the only native-zero receipt before terminal metadata is durable.
+  if (metadata.terminationConfirmed === true && TERMINAL_STATUSES.has(String(metadata.status))) record.windowsJob?.cleanup();
+  return result;
 }
 
 function queueMetadataPersist(config: ManagedProcessConfig, record: ManagedProcessRecord): Promise<boolean> {
@@ -2068,6 +2124,8 @@ function metadataRecord(record: ManagedProcessRecord): GenericRecord {
     linuxCgroup: record.linuxCgroup || null,
     windowsJobDirectory: record.windowsJobDirectory || '',
     windowsJobOwned: record.windowsJobOwned === true,
+    ...(record.bootIdentity ? { bootIdentity: record.bootIdentity } : {}),
+    ...(record.recoveryBootIdentity ? { recoveryBootIdentity: record.recoveryBootIdentity } : {}),
     windowsRootPid: record.windowsRootPid || null,
     windowsRootCreationIdentity: record.windowsRootCreationIdentity || '',
     stdoutBytes: Number(record.stdoutBytes || 0),
@@ -2195,6 +2253,8 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       windowsRootCreationIdentity: /^win32:\d{1,20}$/.test(String(metadata.windowsRootCreationIdentity || '')) ? String(metadata.windowsRootCreationIdentity) : '',
       windowsRootPid: Number.isSafeInteger(metadata.windowsRootPid) && Number(metadata.windowsRootPid) > 0 ? Number(metadata.windowsRootPid) : 0,
       windowsJobOwned: metadata.windowsJobOwned === true || Boolean(metadata.windowsJobDirectory),
+      bootIdentity: parseManagedProcessBootIdentity(metadata.bootIdentity),
+      recoveryBootIdentity: parseManagedProcessBootIdentity(metadata.recoveryBootIdentity),
       windowsJobDirectory: /^job-[a-zA-Z0-9]+$/.test(String(metadata.windowsJobDirectory || '')) ? String(metadata.windowsJobDirectory) : '',
       windowsJob: /^job-[a-zA-Z0-9]+$/.test(String(metadata.windowsJobDirectory || ''))
         ? restoreWindowsProcessJob(path.join(directory, String(metadata.windowsJobDirectory)), Number(metadata.pid) || null) : null,
@@ -2265,6 +2325,11 @@ async function reserveRestoredManagedProcessCapacityInternal(config: ManagedProc
   const restored = [...processes.values()].filter(record => record.status === 'orphaned' && record.runtimeId !== RUNTIME_ID);
   const live = [];
   for (const record of restored) {
+    if (record.windowsJobOwned) {
+      await loadManagedProcessBootIdentity();
+      reconcileWindowsJobRecord(config, record);
+      if (record.terminationConfirmed === true) continue;
+    }
     const identity = await verifyRestoredProcessIdentity(config, record);
     if (identity === 'verified' || ((record.windowsJobOwned || record.linuxCgroup) && record.terminationConfirmed !== true)) {
       live.push(record);
@@ -2316,11 +2381,10 @@ function reconcileRestoredRecord(config: ManagedProcessConfig, record: ManagedPr
     return record;
   }
   if (record.windowsJobOwned) {
-    record.terminationConfirmed = record.windowsJob?.outcome().exited === true;
-    record.rootExitConfirmed ||= record.windowsJob?.receipt()?.rootExited === true;
-    record.status = record.terminationConfirmed ? 'stopped' : 'orphaned';
-    record.endedAt = record.terminationConfirmed ? (record.endedAt || new Date().toISOString()) : '';
-    if (!record.terminationConfirmed) {
+    reconcileWindowsJobRecord(config, record);
+    if (record.terminationConfirmed !== true && !record.windowsControllerUnavailable) {
+      record.status = 'orphaned';
+      record.endedAt = '';
       record.terminationError = 'Recovered Windows job completion remains unconfirmed.';
       record.error = record.terminationError;
     }
@@ -2432,6 +2496,10 @@ function restoredProcessIdentityError(record: ManagedProcessRecord, state: 'unve
 }
 
 function reconcileOwnedPersistentGroupExit(config: ManagedProcessConfig, record: ManagedProcessRecord): void {
+  if (record.windowsJobOwned) {
+    reconcileWindowsJobRecord(config, record);
+    return;
+  }
   if (record.lifecycle !== 'persistent' || !record.rootExitConfirmed
     || record.terminationConfirmed === true || record.stopPromise || record.terminationInProgress
     || (record.linuxCgroup
@@ -2441,6 +2509,59 @@ function reconcileOwnedPersistentGroupExit(config: ManagedProcessConfig, record:
   record.terminationError = '';
   if (!record.persistenceFailureHandled) record.error = '';
   finishRecord(config, record, { status: record.exitCode === 0 ? 'exited' : 'failed' });
+}
+
+function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: ManagedProcessRecord): void {
+  if (!record.windowsJobOwned || record.stopPromise || record.terminationInProgress
+    || (TERMINAL_STATUSES.has(record.status) && record.terminationConfirmed === true)) return;
+  const nativeComplete = record.windowsJob?.outcome().exited === true;
+  const boot = managedBootIdentity;
+  const previous = record.bootIdentity || record.recoveryBootIdentity;
+  const rebooted = record.runtimeId !== RUNTIME_ID && boot && previous
+    && previous.platform === boot.platform && previous.host === boot.host && previous.boot !== boot.boot;
+  if (record.terminationConfirmed === true || nativeComplete || rebooted) {
+    const receipt = nativeComplete ? record.windowsJob?.receipt() : null;
+    record.terminationConfirmed = true;
+    record.rootExitConfirmed = true;
+    record.terminationError = '';
+    record.windowsControllerUnavailable = false;
+    if (!record.persistenceFailureHandled) record.error = '';
+    if (rebooted && !nativeComplete) record.signal = 'verified_windows_reboot';
+    const exitCode = receipt?.rootExitCode;
+    finishRecord(config, record, {
+      status: nativeComplete
+        ? receipt?.stopReason ? 'stopped' : (exitCode === 0 && !receipt?.error ? 'exited' : 'failed')
+        : 'stopped',
+      ...(typeof exitCode === 'number' ? { exitCode } : {})
+    });
+    safePersistMetadata(config, record);
+    return;
+  }
+  if (record.persistenceFailureHandled) return;
+  if (record.runtimeId === RUNTIME_ID && record.status !== 'orphaned') return;
+  if (boot && !previous) {
+    // Legacy entries have no original boot proof. Checkpoint the unresolved
+    // ownership now; only a later kernel boot on this host may settle it.
+    record.recoveryBootIdentity = boot;
+    if (!safePersistMetadata(config, record)) return;
+  }
+  if (managedBootIdentity === undefined) scheduleManagedProcessBootReconciliation(config);
+  if (!record.windowsJob || !record.pid || !isProcessTreeAlive(record.pid)) {
+    record.windowsControllerUnavailable = true;
+    const recovery = boot && (!previous || previous.host === boot.host)
+      ? 'The Windows job controller cannot be reached and completion is unconfirmed. Restart Windows, then reopen Rel.AI to verify cleanup.'
+      : 'The Windows job controller is unavailable and cleanup cannot be verified. Reopen Rel.AI on the original computer with Windows boot verification available.';
+    const changed = record.status !== 'orphaned' || record.terminationError !== recovery;
+    record.status = 'orphaned';
+    record.endedAt = '';
+    record.terminationConfirmed = false;
+    record.terminationError = recovery;
+    record.error = recovery;
+    if (changed) {
+      safePersistMetadata(config, record);
+      notifyProcessState(record);
+    }
+  }
 }
 
 function hydrateProcessMetadata(config: ManagedProcessConfig): void {

@@ -8,6 +8,7 @@ import { normalizeExecutionInvocation, resolveCommandCwd } from '../src/executio
 import { makeProcessEnvironment } from '../src/processEnvironment.js';
 import { runProcess, runOwnedReadOnlyProcess } from '../src/process.ts';
 import { hostResourceStats } from '../src/hostResourceScheduler.js';
+import { currentMutationBootIdentity } from '../src/mutationBootIdentity.js';
 import { startManagedProcess, readManagedProcess, stopManagedProcess, sampleManagedProcessMemory } from '../src/processManager.ts';
 import { once } from 'node:events';
 import { runTestProcess } from './helpers/run-test-process.mjs';
@@ -395,6 +396,38 @@ setInterval(()=>{if(fs.existsSync(dir+'/release-root'))process.exit(0);},20);set
     fs.writeFileSync(path.join(managedDir, 'release-child'), '');
     await stopManagedProcess(config, { processId: managed.processId }, owner);
     if (managedChildPid) await until(() => !alive(managedChildPid));
+  }
+
+  // Root/helper close can be observed before the final receipt is readable.
+  // Refresh must settle this runtime's orphan as soon as exact proof returns.
+  {
+    const delayed = await startManagedProcess(workspace, config, {
+      executable: process.execPath,
+      argv: ['-e', 'process.stdin.once("data", () => process.exit(0)); process.stdin.resume();'],
+      startupWaitMs: 0, reuseExisting: false, kind: 'service', purpose: 'Verify late managed native completion.'
+    }, owner);
+    const directory = path.join(config.stateDir, 'processes', delayed.processId);
+    const metadata = JSON.parse(fs.readFileSync(path.join(directory, 'metadata.json'), 'utf8'));
+    assert.deepEqual(metadata.bootIdentity || null, await currentMutationBootIdentity(), 'managed Windows ownership persists the available native boot identity');
+    const jobDirectory = path.join(directory, metadata.windowsJobDirectory);
+    const receiptMethod = WindowsProcessJob.prototype.receipt;
+    WindowsProcessJob.prototype.receipt = function(...args) {
+      const receipt = receiptMethod.apply(this, args);
+      return this.directory === jobDirectory && receipt?.final ? null : receipt;
+    };
+    try {
+      const { writeManagedProcess } = await import('../src/processManager.ts');
+      await writeManagedProcess(config, { processId: delayed.processId, input: 'exit\n' }, owner);
+      await until(() => readManagedProcess(config, { processId: delayed.processId }, owner).status === 'orphaned');
+      assert.equal(hostResourceStats().persistent.active, beforePersistent + 1);
+    } finally { WindowsProcessJob.prototype.receipt = receiptMethod; }
+    const settled = readManagedProcess(config, { processId: delayed.processId }, owner);
+    assert.equal(settled.status, 'exited');
+    assert.equal(settled.terminationConfirmed, true);
+    assert.equal(settled.terminationError, undefined);
+    assert.equal(hostResourceStats().persistent.active, beforePersistent);
+    await stopManagedProcess(config, { processId: delayed.processId }, owner);
+    assert.equal(fs.existsSync(jobDirectory), false, 'native proof is retired after terminal persistence');
   }
 
   // This assertion belongs to the Windows gate even though byte-tail controls
