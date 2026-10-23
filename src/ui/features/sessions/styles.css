@@ -96,8 +96,22 @@
 .task-detail-section > h3, .task-detail-heading h3 { @apply text-[12px] font-bold; }
 .task-detail-heading { @apply flex items-center justify-between gap-3; }
 .task-detail-heading > span { @apply inline-flex min-h-7 min-w-7 items-center justify-center rounded-full px-2 text-[11px] font-semibold; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); color: var(--ui-text-secondary); }
+.task-plan-filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 2px; }
+.task-plan-filter-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 2px 10px; border: 1px solid var(--ui-border-control); border-radius: var(--radius-md); background: var(--ui-surface-secondary); color: var(--ui-text-secondary); font-size: 11px; font-weight: 600; cursor: pointer; transition: all var(--dur-fast) var(--ease); }
+.task-plan-filter-chip:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); border-color: var(--ui-border-default); }
+.task-plan-filter-chip.active { background: var(--ui-selection-background); color: var(--ui-action-primary); border-color: color-mix(in srgb, var(--ui-action-primary) 38%, transparent); }
+.task-plan-filter-chip:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 1px; }
+.task-plan-empty-filter { padding: 12px; font-size: 11px; color: var(--ui-text-tertiary); text-align: center; list-style: none; }
 .task-plan-list { @apply m-0 grid list-none gap-1.5 p-0; }
-.task-plan-step { @apply relative grid min-w-0 items-start gap-2 px-2.5 py-2; grid-template-columns: 22px minmax(0,1fr); border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); transition: all var(--dur-fast) var(--ease); }
+.task-plan-step { @apply relative grid min-w-0 items-start gap-2 px-2.5 py-2; grid-template-columns: 22px minmax(0,1fr); border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); transition: all var(--dur-fast) var(--ease); cursor: pointer; user-select: none; }
+.task-plan-step:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-default); }
+.task-plan-step:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 1px; }
+.task-plan-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.task-plan-toggle-icon { color: var(--ui-text-tertiary); flex-shrink: 0; }
+.task-plan-step-history { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--ui-border-subtle); font-size: 11px; }
+.task-plan-step-history small { color: var(--ui-text-tertiary); display: block; }
+.task-plan-step-history p { margin: 4px 0 0; color: var(--ui-text-secondary); }
+.task-plan-history-items { margin: 4px 0 0; padding-left: 16px; color: var(--ui-text-secondary); list-style: disc; }
 .task-plan-marker { @apply relative z-[1] inline-flex size-5 items-center justify-center rounded-full text-[11px] font-bold; color: var(--ui-text-secondary); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); }
 .task-plan-copy { @apply grid min-w-0 gap-0.5; }
 .task-plan-copy strong { @apply break-words text-[12px] leading-5; color: var(--ui-text-primary); }
@@ -160,6 +174,8 @@
 .task-event-command > span { @apply font-semibold; color: var(--ui-text-tertiary); }
 .task-event-command code { @apply block break-all px-2 py-1.5 text-[11px] leading-5; font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; border-radius: var(--radius-md); overflow: visible; text-overflow: clip; white-space: pre-wrap; background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .task-event-link:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-default); box-shadow: var(--shadow-sm); }
+.task-event-meta { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.task-event-duration { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .task-event-more { @apply min-h-10 w-full justify-center; }
 
 .task-detail-technical { @apply border-t pt-3; border-color: var(--ui-border-default); }

@@ -87,7 +87,16 @@ export function AnalyticsTimelineChart({
     datasets: [{
       data,
       borderColor: accent,
-      backgroundColor: withAlpha(accent, 0.08),
+      backgroundColor: context => {
+        const chart = context?.chart;
+        if (!chart || !chart.ctx) return withAlpha(accent, 0.08);
+        const { ctx, chartArea } = chart;
+        if (!chartArea || typeof ctx.createLinearGradient !== 'function') return withAlpha(accent, 0.08);
+        const grad = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+        grad.addColorStop(0, withAlpha(accent, 0.22));
+        grad.addColorStop(1, withAlpha(accent, 0.01));
+        return grad;
+      },
       borderWidth: 2,
       cubicInterpolationMode: 'monotone',
       tension: 0.34,

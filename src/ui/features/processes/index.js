@@ -37,6 +37,7 @@ function processRowView(process = {}, now = Date.now()) {
     elapsed: durationFor(process, state.active, now),
     exitCode: process.exitCode,
     error: process.error || '',
+    memory: process.memoryBytes ?? process.memory ?? process.rssBytes ?? process.rss ?? null,
     state,
     output
   };

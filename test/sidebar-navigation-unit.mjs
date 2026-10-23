@@ -40,4 +40,37 @@ assert.match(appCss, /\.sidebar-accordion > summary/);
 assert.match(appCss, /\.sidebar-subnav/);
 assert.doesNotMatch(settingsCss, /\.settings-rail\b/, 'Settings must not reintroduce a redundant in-page navigation rail');
 
-console.log('Sidebar accordion and collapsed navigation contracts passed.');
+// Topbar breadcrumb navigation hierarchy
+assert.match(reactShell, /className:\s*'topbar-breadcrumbs'/, 'Topbar must include accessible breadcrumb container');
+assert.match(reactShell, /'aria-label':\s*'Breadcrumb'/, 'Breadcrumbs must declare aria-label="Breadcrumb"');
+assert.match(reactShell, /className:\s*'breadcrumb-list'/, 'Breadcrumbs must render breadcrumb-list');
+assert.match(reactShell, /className:\s*'breadcrumb-separator'/, 'Breadcrumbs must render breadcrumb-separator');
+assert.match(reactShell, /className:\s*'breadcrumb-current'/, 'Breadcrumbs must render breadcrumb-current');
+assert.match(reactShell, /'aria-current':\s*'page'/, 'Active breadcrumb page must set aria-current="page"');
+assert.match(reactShell, /h\('h1',\s*\{\s*className:\s*'page-title',\s*id:\s*'pageTitle'/, 'h1.page-title#pageTitle must remain intact');
+assert.match(appCss, /\.topbar-breadcrumbs\b/, 'app.css must style .topbar-breadcrumbs');
+assert.match(appCss, /\.breadcrumb-list\b/, 'app.css must style .breadcrumb-list');
+assert.match(appCss, /\.breadcrumb-separator\b/, 'app.css must style .breadcrumb-separator');
+assert.match(appCss, /\.breadcrumb-current\b/, 'app.css must style .breadcrumb-current');
+
+// Command Palette multi-category search indexing & token matching
+const { buildCommands, commandMatchesQuery, normalizeSearch } = await import('../src/ui/react/main.js');
+assert.equal(typeof normalizeSearch, 'function', 'normalizeSearch helper must be exported');
+const testData = {
+  config: { workspaces: [{ alias: 'core', path: '/dev/core' }] },
+  tasks: [
+    { id: 'task-42', title: 'Implement OAuth authentication', status: 'running', workspace: 'core' },
+    { id: 'task-99', title: 'Refactor database models', status: 'completed' }
+  ]
+};
+const commands = buildCommands(testData, null, false, null, () => {});
+const taskCmd = commands.find(c => c.id === 'task-42');
+assert.ok(taskCmd, 'Active task must be indexed in command palette');
+assert.equal(taskCmd.group, 'Task', 'Task command must have group: "Task"');
+assert.equal(taskCmd.href, '#tasks?task=task-42', 'Task command must link to #tasks?task=${id}');
+assert.ok(commandMatchesQuery(taskCmd, 'task oauth'), 'Multi-word token search must match across group and title');
+assert.ok(commandMatchesQuery(taskCmd, 'auth core'), 'Multi-word token search must match across title and workspace');
+assert.ok(commandMatchesQuery(taskCmd, 'implment'), 'Fuzzy matching should handle approximate typing');
+assert.equal(commandMatchesQuery(taskCmd, 'nonexistentxyz'), false, 'Non-matching query must return false');
+
+console.log('Sidebar accordion, collapsed navigation, topbar breadcrumbs, and command palette contracts passed.');

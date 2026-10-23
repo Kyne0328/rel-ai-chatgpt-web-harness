@@ -42,6 +42,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [filePath, setFilePath] = useState('');
   const [diffFile, setDiffFile] = useState(null);
+  const [collapsedFolders, setCollapsedFolders] = useState(() => new Set());
   const [viewerMessage, setViewerMessage] = useState('Loading task changes…');
   const [viewerTone, setViewerTone] = useState('');
   const [query, setQuery] = useState('');
@@ -173,6 +174,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
     setDiffFile(null);
     setViewerMessage('Loading task changes…');
     setViewerTone('');
+    setCollapsedFolders(new Set());
   }, [selectedTaskId]);
 
   useEffect(() => () => {
@@ -248,6 +250,16 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
     void loadDiff(selectedTaskId, path);
   };
 
+  const toggleFolder = useCallback(path => {
+    if (!path) return;
+    setCollapsedFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
   return h('div', { className: 'section code-page', 'data-code-react': '' },
     h('div', { className: 'feature-toolbar code-toolbar' },
       h('div', { className: 'code-task-control' },
@@ -320,7 +332,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
         ),
         h('div', { className: 'code-file-list', 'data-code-files': '' },
           visibleFiles.length
-            ? h('ul', { className: 'code-file-tree' }, ...renderFileTree(fileTree, { workspace, filePath, openFile }))
+            ? h('ul', { className: 'code-file-tree' }, ...renderFileTree(fileTree, { workspace, filePath, openFile, collapsedFolders, toggleFolder }))
             : h('div', { className: 'code-file-empty' }, query ? 'No matching changed files.' : (workspaceError ? 'Task changes are unavailable.' : 'No task-owned changes to review.'))
         )
       ),
@@ -603,12 +615,30 @@ function renderFileTree(node, context, prefix = '') {
   return [
     ...folders.map(([name, child]) => {
       const path = prefix ? `${prefix}/${name}` : name;
+      const isCollapsed = context.collapsedFolders instanceof Set
+        ? context.collapsedFolders.has(path)
+        : Boolean(context.collapsedFolders?.[path]);
+      const toggle = () => context.toggleFolder?.(path);
+      const onKeyDown = event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggle();
+        }
+      };
       return h('li', { className: 'code-tree-folder', key: `folder:${path}` },
-        h('div', { className: 'code-tree-folder-label', title: path },
-          h(Icon, { name: 'chevronDown', size: 13 }),
+        h('div', {
+          className: 'code-tree-folder-label',
+          title: path,
+          role: 'button',
+          tabIndex: 0,
+          'aria-expanded': !isCollapsed,
+          onClick: toggle,
+          onKeyDown
+        },
+          h(Icon, { name: isCollapsed ? 'chevronRight' : 'chevronDown', size: 13 }),
           h('span', null, name)
         ),
-        h('ul', null, ...renderFileTree(child, context, path))
+        !isCollapsed ? h('ul', null, ...renderFileTree(child, context, path)) : null
       );
     }),
     ...files.map(file => {

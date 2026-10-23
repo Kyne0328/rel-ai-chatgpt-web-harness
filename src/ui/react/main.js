@@ -37,15 +37,15 @@ import {
 import { getOverlaySnapshot, removeToastOverlay, subscribeOverlay } from '../overlay-store.js';
 import { getUiPreferences, setThemePreference } from '../preferences.js';
 import { normalizeRouteKey } from '../route-policy.js';
-import { getRouteSnapshot, initRouter, subscribeRoute } from '../router.js';
+import { getRouteSnapshot, getWorkspaceFilter, initRouter, routeHref, subscribeRoute } from '../router.js';
 export { initConnectorRefreshModal } from '../connector-refresh-modal.js';
 export { initUpdateAvailableModal } from '../update-available-modal.js';
 export { applyLiveEvent, getSnapshot, init, patchLocalConnection, subscribe } from '../store.js';
 
-if (import.meta.env.DEV) void import('../styles/app.css');
+if (import.meta.env?.DEV) void import('../styles/app.css');
 
 const h = React.createElement;
-const SHELL_STORE_KEYS = Object.freeze(['ok', 'config', 'connectionState', 'taskActivity', 'live']);
+const SHELL_STORE_KEYS = Object.freeze(['ok', 'config', 'connectionState', 'taskActivity', 'live', 'tasks']);
 const DashboardStoreContext = createContext(null);
 const reactRouteComponents = new Map();
 const reactRoutePreloads = new Map();
@@ -274,6 +274,8 @@ function useRoutePresentation() {
     const title = path === 'settings' || path.startsWith('settings/')
       ? `Settings · ${metadata.label}`
       : metadata.label;
+    const searchParams = new URLSearchParams(routeSnapshot.search?.slice(1) || routeKey.split('?')[1] || '');
+    const workspace = searchParams.get('workspace') || '';
     return Object.freeze({
       announcement: `${title} page loaded.`,
       description: metadata.description,
@@ -281,7 +283,8 @@ function useRoutePresentation() {
       owner: desktopNavigationOwner(section),
       path,
       section,
-      title
+      title,
+      workspace
     });
   }, [routeSnapshot]);
 }
@@ -396,6 +399,20 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
         h(MobileNavigation, { extensionsEnabled, open: mobileMoreOpen, route, setOpen: setMobileMoreOpen }),
         h('header', { className: 'topbar' },
           h('div', { className: 'title-wrap' },
+            h('nav', { className: 'topbar-breadcrumbs', 'aria-label': 'Breadcrumb' },
+              h('ol', { className: 'breadcrumb-list' },
+                h('li', { className: 'breadcrumb-item' },
+                  h('a', {
+                    className: 'breadcrumb-link',
+                    href: routeHref('home')
+                  }, route.workspace || getWorkspaceFilter() || 'Rel.AI')
+                ),
+                h('li', { className: 'breadcrumb-separator', 'aria-hidden': 'true' }, '/'),
+                h('li', { className: 'breadcrumb-item' },
+                  h('span', { className: 'breadcrumb-current', 'aria-current': 'page' }, route.title)
+                )
+              )
+            ),
             h('h1', { className: 'page-title', id: 'pageTitle', tabIndex: -1 }, route.title),
             h('div', { className: 'page-subtitle', id: 'subtitle' }, route.description)
           ),
@@ -899,8 +916,7 @@ function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onCl
   const inputRef = useRef(null);
   const commands = useMemo(() => buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, onClose), [data, desktop, extensionsEnabled, onAddWorkspace, onClose]);
   const visible = useMemo(() => {
-    const normalized = normalizeSearch(query);
-    return commands.filter(command => !normalized || command.searchText.includes(normalized)).slice(0, 14);
+    return commands.filter(command => commandMatchesQuery(command, query)).slice(0, 14);
   }, [commands, query]);
   const safeIndex = visible.length ? Math.min(activeIndex, visible.length - 1) : 0;
 
@@ -1085,6 +1101,28 @@ function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePa
       run: () => { closePalette(); location.hash = href; }
     });
   }
+  const seenTaskIds = new Set();
+  const rawTasks = [
+    ...(Array.isArray(data?.tasks) ? data.tasks : []),
+    ...(Array.isArray(data?.taskActivity?.tasks) ? data.taskActivity.tasks : [])
+  ];
+  for (const task of rawTasks) {
+    const id = String(task.id || task.taskId || task.work_id || '').trim();
+    if (!id || seenTaskIds.has(id)) continue;
+    seenTaskIds.add(id);
+    const title = String(task.title || task.operation || id).trim();
+    const href = `#tasks?task=${id}`;
+    commands.push({
+      id: id.startsWith('task-') ? id : `task-${id}`,
+      label: title,
+      description: task.description || task.summary || (task.workspace ? `Project · ${task.workspace}` : 'View task details.'),
+      group: 'Task',
+      icon: 'tasks',
+      href,
+      searchAliases: [id, task.workspace, task.status, 'task', 'tasks'].filter(Boolean).join(' '),
+      run: () => { closePalette(); location.hash = href; }
+    });
+  }
   return commands.map(command => ({
     ...command,
     searchText: normalizeSearch([command.label, command.description, command.group, command.searchAliases].join(' '))
@@ -1092,7 +1130,35 @@ function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePa
 }
 
 function normalizeSearch(value) {
-  return String(value || '').trim().toLowerCase();
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function fuzzyMatch(pattern, text) {
+  if (!pattern) return true;
+  if (!text) return false;
+  let pIdx = 0;
+  let tIdx = 0;
+  while (pIdx < pattern.length && tIdx < text.length) {
+    if (pattern[pIdx] === text[tIdx]) {
+      pIdx++;
+    }
+    tIdx++;
+  }
+  return pIdx === pattern.length;
+}
+
+function commandMatchesQuery(command, query) {
+  const normalized = normalizeSearch(query);
+  if (!normalized) return true;
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (!tokens.length) return true;
+  return tokens.every(token => (
+    command.searchText.includes(token) || (token.length >= 2 && fuzzyMatch(token, command.searchText))
+  ));
 }
 
 const OverlayHost = memo(function OverlayHost({ drawer, modal }) {
@@ -1323,3 +1389,5 @@ function ToastItem({ toast }) {
 function debugError(error) {
   if (window.localStorage?.getItem('relai_debug') === '1') console.error(error);
 }
+
+export { buildCommands, commandMatchesQuery, normalizeSearch };

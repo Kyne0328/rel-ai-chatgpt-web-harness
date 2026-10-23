@@ -296,6 +296,36 @@
     box-shadow: var(--ui-shadow-topbar);
   }
   .title-wrap { @apply min-w-0 flex-1 py-0.5; }
+  .topbar-breadcrumbs {
+    @apply mb-1 flex min-w-0 items-center text-xs;
+  }
+  .breadcrumb-list {
+    @apply m-0 flex min-w-0 flex-wrap items-center p-0 list-none;
+    gap: var(--space-1);
+  }
+  .breadcrumb-item {
+    @apply inline-flex min-w-0 items-center;
+  }
+  .breadcrumb-link {
+    color: var(--ui-text-secondary);
+    text-decoration: none;
+    transition: color var(--dur-fast) var(--ease);
+  }
+  .breadcrumb-link:hover,
+  .breadcrumb-link:focus-visible {
+    color: var(--ui-text-primary);
+    text-decoration: underline;
+  }
+  .breadcrumb-separator {
+    color: var(--ui-text-tertiary);
+    user-select: none;
+    font-size: var(--font-11);
+    padding: 0 var(--space-1);
+  }
+  .breadcrumb-current {
+    color: var(--ui-text-primary);
+    font-weight: var(--weight-medium);
+  }
   .page-title { @apply font-extrabold; font-size: var(--text-page-title); line-height: 1.35; overflow-wrap: anywhere; }
   .page-subtitle { @apply mt-1 text-[13px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
   .top-controls { @apply flex min-w-0 items-center justify-end gap-2; }

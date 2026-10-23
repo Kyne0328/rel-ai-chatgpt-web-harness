@@ -86,7 +86,10 @@ const ProcessRow = memo(function ProcessRow({ row }) {
       h('div', { className: 'process-identity' },
         h('div', { className: 'process-title-line' },
           h('strong', null, row.label),
-          h(StatusPill, { label: state.label, tone: state.pillClass })
+          h(StatusPill, { label: state.label, tone: state.pillClass }),
+          row.memory ? h('span', { className: 'process-gauge-badge memory', title: `Memory: ${formatBytes(row.memory)}` }, formatBytes(row.memory)) : (
+            state.active ? h('span', { className: 'process-gauge-badge active', title: `Active status: ${state.label}` }, 'Active') : null
+          )
         ),
         h('div', { className: 'process-meta' },
           h('span', null, row.project),
@@ -242,7 +245,7 @@ function OutputBlock({ processId, stream, value, meta, active }) {
     ) : null,
     history?.gap ? h('div', { className: 'process-output-notice warning' }, 'A gap in this output could not be recovered from retained logs.') : null,
     error ? h('div', { className: 'process-output-error', role: 'alert' }, error) : null,
-    h('pre', { tabIndex: 0, 'aria-label': `Recent ${stream} output` }, formatTerminalOutput(visible).trim()),
+    h('pre', { tabIndex: 0, 'aria-label': `Recent ${stream} output` }, renderTerminalOutput(visible)),
     canLoadEarlier ? h('div', { className: 'process-output-actions' },
       h('button', {
         className: 'secondary compact-button',
@@ -280,17 +283,77 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Process output could not be loaded.');
 }
 
-function formatTerminalOutput(raw) {
-  if (raw == null) return '';
-  const text = String(raw);
-  const stripped = text
+function renderTerminalOutput(raw) {
+  if (raw == null) return [''];
+  const text = String(raw)
     // eslint-disable-next-line no-control-regex
     .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
     // eslint-disable-next-line no-control-regex
-    .replace(/\x1B\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1B\[[0-9;?]*[ -/]*[@-ln-~]/g, '')
     // eslint-disable-next-line no-control-regex
-    .replace(/\x1B[@-Z\\-_]/g, '');
-  return stripped.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    .replace(/\x1B[@-Z\\-_]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  if (!text.trim()) return [''];
+
+  // eslint-disable-next-line no-control-regex
+  const sgrRegex = /\x1B\[([0-9;]*)m/g;
+  const elements = [];
+  let lastIndex = 0;
+  let currentColor = null;
+  let isBold = false;
+  let key = 0;
+
+  const pushChunk = content => {
+    if (!content) return;
+    const classes = [];
+    if (currentColor) classes.push(currentColor);
+    if (isBold) classes.push('ansi-bold');
+
+    if (classes.length > 0) {
+      elements.push(h('span', { key: `ansi-${key++}`, className: classes.join(' ') }, content));
+    } else {
+      elements.push(content);
+    }
+  };
+
+  let match;
+  while ((match = sgrRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      pushChunk(text.slice(lastIndex, match.index));
+    }
+    lastIndex = sgrRegex.lastIndex;
+
+    const codes = match[1] ? match[1].split(';') : ['0'];
+    for (const codeStr of codes) {
+      const code = parseInt(codeStr, 10) || 0;
+      if (code === 0) {
+        currentColor = null;
+        isBold = false;
+      } else if (code === 1) {
+        isBold = true;
+      } else if (code === 22) {
+        isBold = false;
+      } else if (code === 31 || code === 91) {
+        currentColor = 'ansi-red';
+      } else if (code === 32 || code === 92) {
+        currentColor = 'ansi-green';
+      } else if (code === 33 || code === 93) {
+        currentColor = 'ansi-yellow';
+      } else if (code === 34 || code === 36 || code === 94 || code === 96) {
+        currentColor = 'ansi-info';
+      } else if (code === 39) {
+        currentColor = null;
+      }
+    }
+  }
+
+  if (lastIndex < text.length) {
+    pushChunk(text.slice(lastIndex));
+  }
+
+  return elements.length > 0 ? elements : [''];
 }
 
 

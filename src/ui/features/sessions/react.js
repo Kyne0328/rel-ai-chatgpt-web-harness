@@ -776,6 +776,9 @@ function DurationDetail({ session, live }) {
 
 function PlanSection({ plan }) {
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
+  const [expandedSteps, setExpandedSteps] = useState(() => new Set());
+  const [planFilter, setPlanFilter] = useState('all');
+
   if (!steps.length) {
     return h('section', { className: 'task-detail-section task-plan-section', 'data-task-plan': '', 'data-task-plan-missing': '' },
       h('div', { className: 'task-detail-heading' },
@@ -786,28 +789,92 @@ function PlanSection({ plan }) {
     );
   }
   const resolved = steps.filter(step => ['completed', 'skipped'].includes(String(step?.status || ''))).length;
+  const inProgressCount = steps.filter(step => String(step?.status || '') === 'in_progress').length;
+  const completedCount = steps.filter(step => String(step?.status || '') === 'completed').length;
+
+  const toggleStep = stepKey => {
+    setExpandedSteps(prev => {
+      const next = new Set(prev);
+      if (next.has(stepKey)) next.delete(stepKey);
+      else next.add(stepKey);
+      return next;
+    });
+  };
+
+  const filteredSteps = steps.filter(step => {
+    const status = String(step?.status || 'pending');
+    if (planFilter === 'in_progress') return status === 'in_progress';
+    if (planFilter === 'completed') return status === 'completed';
+    return true;
+  });
+
+  const filterChipsBar = h('div', { className: 'task-plan-filter-bar', role: 'group', 'aria-label': 'Filter plan steps' },
+    [
+      { id: 'all', label: `All (${steps.length})` },
+      { id: 'in_progress', label: `In Progress (${inProgressCount})` },
+      { id: 'completed', label: `Completed (${completedCount})` }
+    ].map(chip => h('button', {
+      key: chip.id,
+      type: 'button',
+      className: `task-plan-filter-chip${planFilter === chip.id ? ' active' : ''}`,
+      'aria-pressed': planFilter === chip.id,
+      onClick: () => setPlanFilter(chip.id)
+    }, chip.label))
+  );
+
   const list = h('ol', { className: 'task-plan-list' },
-    ...steps.map((step, index) => {
-      const status = String(step?.status || 'pending');
-      const markerIcon = status === 'completed' ? 'check' : status === 'skipped' ? 'minimize' : status === 'blocked' ? 'warning' : 'circle';
-      const statusLabel = status === 'in_progress' ? 'In progress' : status.charAt(0).toUpperCase() + status.slice(1);
-      const marker = status === 'in_progress'
-        ? h('span', { className: 'task-plan-active-dot', 'aria-hidden': 'true' })
-        : h(Icon, { name: markerIcon, size: 12 });
-      return h('li', { key: `${String(step?.id || 'step')}:${index}`, className: `task-plan-step is-${status}`, 'data-plan-step-status': status },
-        h('span', { className: 'task-plan-marker', role: 'img', 'aria-label': statusLabel }, marker),
-        h('span', { className: 'task-plan-copy' },
-          h('strong', null, String(step?.title || `Step ${index + 1}`)),
-          step?.detail ? h('span', null, String(step.detail)) : null
-        )
-      );
-    })
+    filteredSteps.length
+      ? filteredSteps.map((step, index) => {
+          const status = String(step?.status || 'pending');
+          const stepKey = String(step?.id || `step-${index}`);
+          const isExpanded = expandedSteps.has(stepKey);
+          const markerIcon = status === 'completed' ? 'check' : status === 'skipped' ? 'minimize' : status === 'blocked' ? 'warning' : 'circle';
+          const statusLabel = status === 'in_progress' ? 'In progress' : status.charAt(0).toUpperCase() + status.slice(1);
+          const marker = status === 'in_progress'
+            ? h('span', { className: 'task-plan-active-dot', 'aria-hidden': 'true' })
+            : h(Icon, { name: markerIcon, size: 12 });
+          const toggleExpand = () => toggleStep(stepKey);
+          const onKeyDown = event => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              toggleExpand();
+            }
+          };
+          return h('li', {
+            key: `${String(step?.id || 'step')}:${index}`,
+            className: `task-plan-step is-${status}${isExpanded ? ' is-expanded' : ''}`,
+            'data-plan-step-status': status,
+            role: 'button',
+            tabIndex: 0,
+            'aria-expanded': isExpanded,
+            onClick: toggleExpand,
+            onKeyDown
+          },
+            h('span', { className: 'task-plan-marker', role: 'img', 'aria-label': statusLabel }, marker),
+            h('span', { className: 'task-plan-copy' },
+              h('div', { className: 'task-plan-header' },
+                h('strong', null, String(step?.title || `Step ${index + 1}`)),
+                h(Icon, { name: isExpanded ? 'chevronUp' : 'chevronDown', size: 12, className: 'task-plan-toggle-icon' })
+              ),
+              step?.detail ? h('span', { className: `task-plan-detail${isExpanded ? ' is-expanded' : ''}` }, String(step.detail)) : null,
+              isExpanded && (step?.history || step?.updatedAt || step?.notes) ? h('div', { className: 'task-plan-step-history' },
+                step.updatedAt ? h('small', null, `Updated ${timeAgo(step.updatedAt)}`) : null,
+                step.notes ? h('p', null, String(step.notes)) : null,
+                Array.isArray(step.history) && step.history.length > 0 ? h('ul', { className: 'task-plan-history-items' },
+                  step.history.map((item, hIdx) => h('li', { key: hIdx }, String(item?.message || item?.summary || item)))
+                ) : null
+              ) : null
+            )
+          );
+        })
+      : h('li', { className: 'task-plan-empty-filter' }, 'No plan steps match this filter.')
   );
   return h('section', { className: 'task-detail-section task-plan-section', 'data-task-plan': '' },
     h('div', { className: 'task-detail-heading' },
       h('h3', null, 'Plan'),
       h('span', { 'aria-label': `${resolved} of ${steps.length} steps resolved` }, `${resolved}/${steps.length}`)
     ),
+    filterChipsBar,
     list
   );
 }
@@ -957,6 +1024,12 @@ function EventRow({ event, session, older = false }) {
   const timestamp = eventTimestampValue(event);
   const status = event.status || (event.ok === false ? 'failed' : 'succeeded');
   const command = String(event.command || '').trim();
+  const durationMs = event.durationMs != null && Number.isFinite(Number(event.durationMs))
+    ? Number(event.durationMs)
+    : (event.elapsedMs != null && Number.isFinite(Number(event.elapsedMs)) ? Number(event.elapsedMs) : null);
+  const durationLabel = durationMs != null
+    ? (durationMs >= 1000 ? `${(durationMs / 1000).toFixed(durationMs < 10000 ? 1 : 0)}s` : `${Math.round(durationMs)}ms`)
+    : (event.elapsed || event.duration || event.elapsedTime ? String(event.elapsed || event.duration || event.elapsedTime) : '');
   const href = taskActivityHref(session, {
     workspace: event.workspace || session.workspace,
     task: event.taskId || sessionIdentifier(session),
@@ -975,7 +1048,10 @@ function EventRow({ event, session, older = false }) {
       event.summary ? h('small', null, event.summary) : null,
       command ? h('small', { className: 'task-event-command' }, h('span', null, 'Command'), h('code', null, command)) : null
     ),
-    h(StatusPill, { state: { status, pillClass: '' }, label: status })
+    h('div', { className: 'task-event-meta' },
+      durationLabel ? h('span', { className: 'task-event-duration', 'aria-label': `Duration: ${durationLabel}` }, durationLabel) : null,
+      h(StatusPill, { state: { status, pillClass: '' }, label: status })
+    )
   );
 }
 
