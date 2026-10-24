@@ -332,7 +332,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
         ),
         h('div', { className: 'code-file-list', 'data-code-files': '' },
           visibleFiles.length
-            ? h('ul', { className: 'code-file-tree' }, ...renderFileTree(fileTree, { workspace, filePath, openFile, collapsedFolders, toggleFolder }))
+            ? h('ul', { className: 'code-file-tree' }, ...renderFileTree(fileTree, { workspace, filePath, openFile, collapsedFolders, toggleFolder, filtering: Boolean(query.trim()) }))
             : h('div', { className: 'code-file-empty' }, query ? 'No matching changed files.' : (workspaceError ? 'Task changes are unavailable.' : 'No task-owned changes to review.'))
         )
       ),
@@ -615,10 +615,11 @@ function renderFileTree(node, context, prefix = '') {
   return [
     ...folders.map(([name, child]) => {
       const path = prefix ? `${prefix}/${name}` : name;
-      const isCollapsed = context.collapsedFolders instanceof Set
+      const wasCollapsed = context.collapsedFolders instanceof Set
         ? context.collapsedFolders.has(path)
         : Boolean(context.collapsedFolders?.[path]);
-      const toggle = () => context.toggleFolder?.(path);
+      const isCollapsed = !context.filtering && wasCollapsed;
+      const toggle = () => { if (!context.filtering) context.toggleFolder?.(path); };
       const onKeyDown = event => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
@@ -632,6 +633,7 @@ function renderFileTree(node, context, prefix = '') {
           role: 'button',
           tabIndex: 0,
           'aria-expanded': !isCollapsed,
+          'aria-disabled': context.filtering || undefined,
           onClick: toggle,
           onKeyDown
         },

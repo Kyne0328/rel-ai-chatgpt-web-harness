@@ -874,6 +874,8 @@ async function case_local_protocol_unit() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-protocol-'));
   try {
     fs.writeFileSync(path.join(temp, 'status.html'), '<main>ready</main>');
+    const fontBytes = Buffer.from([0x77, 0x4f, 0x46, 0x32]);
+    fs.writeFileSync(path.join(temp, 'fixture.woff2'), fontBytes);
     let handler = null;
     const protocol = {
       handle(scheme, callback) {
@@ -888,6 +890,12 @@ async function case_local_protocol_unit() {
     assert.equal(existing.status, 200);
     assert.equal(existing.headers.get('content-type'), 'text/html; charset=utf-8');
     assert.equal(await existing.text(), '<main>ready</main>');
+
+    const font = await handler({ url: 'relai-app://renderer/fixture.woff2' });
+    assert.equal(font.status, 200);
+    assert.equal(font.headers.get('content-type'), 'font/woff2');
+    assert.deepEqual(Buffer.from(await font.arrayBuffer()), fontBytes);
+    assert.equal(resolveLocalRendererPath('relai-app://renderer/../fixture.woff2', temp), '', 'font support must retain the renderer-root boundary');
   
     const missing = await handler({ url: 'relai-app://renderer/missing.html' });
     assert.equal(missing.status, 404, 'missing allow-listed renderer files must fail through the async read path');

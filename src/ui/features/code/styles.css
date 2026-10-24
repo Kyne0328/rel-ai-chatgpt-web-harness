@@ -25,13 +25,13 @@
 .code-file-row { display: grid; width: 100%; min-height: 44px; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 4px 6px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--ui-text-secondary); text-align: left; cursor: pointer; transition: all var(--dur-fast) var(--ease); }
 .code-file-row:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .code-file-row.active { background: var(--ui-selection-background); color: var(--ui-text-primary); box-shadow: inset 2px 0 0 var(--ui-action-primary); }
-.code-file-marker { display: inline-grid; width: 24px; height: 20px; place-items: center; border: 1px solid var(--ui-status-neutral-border); border-radius: var(--radius-sm); background: var(--ui-status-neutral-background); color: var(--ui-status-neutral-foreground); font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", Consolas, monospace; font-size: 12px; font-weight: 700; line-height: 1; text-align: center; }
+.code-file-marker { display: inline-grid; width: 24px; height: 20px; place-items: center; border: 1px solid var(--ui-status-neutral-border); border-radius: var(--radius-sm); background: var(--ui-status-neutral-background); color: var(--ui-status-neutral-foreground); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", Consolas, monospace; font-size: 12px; font-weight: 700; line-height: 1; text-align: center; }
 .code-file-marker.status-info { border-color: var(--ui-status-info-border); background: var(--ui-status-info-background); color: var(--ui-status-info-foreground); }
 .code-file-marker.status-success { border-color: var(--ui-status-success-border); background: var(--ui-status-success-background); color: var(--ui-status-success-foreground); }
 .code-file-marker.status-warning { border-color: var(--ui-status-warning-border); background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground); }
 .code-file-marker.status-danger { border-color: var(--ui-status-danger-border); background: var(--ui-status-danger-background); color: var(--ui-status-danger-foreground); }
-.code-file-name { min-width: 0; overflow: hidden; font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.code-file-stats { display: inline-flex; align-items: center; gap: 5px; font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.code-file-name { min-width: 0; overflow: hidden; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.code-file-stats { display: inline-flex; align-items: center; gap: 5px; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .code-file-stats .additions { color: var(--ui-status-success-foreground); }
 .code-file-stats .deletions { color: var(--ui-status-danger-foreground); }
 .code-file-empty { padding: 14px 10px; color: var(--ui-text-tertiary); font-size: 12px; }
@@ -55,7 +55,7 @@
 .code-diff-column { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--ui-border-subtle); }
 .code-diff-column:last-child { border-right: 0; }
 .code-diff-column > strong { padding: 8px 12px; border-bottom: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-size: 11px; }
-.code-diff-column pre { min-height: 0; flex: 1; overflow: auto; margin: 0; padding: 14px; white-space: pre; color: var(--ui-text-primary); font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 12px; line-height: 1.5; }
+.code-diff-column pre { min-height: 0; flex: 1; overflow: auto; margin: 0; padding: 14px; white-space: pre; color: var(--ui-text-primary); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 12px; line-height: 1.5; }
 @media (max-width: 900px) {
   .code-toolbar { align-items: stretch; flex-direction: column; }
   .code-task-control { min-width: 0; }

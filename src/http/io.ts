@@ -346,6 +346,7 @@ function contentTypeForStaticAsset(filePath: string): string {
   if (lower.endsWith('.svg')) return 'image/svg+xml';
   if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
   if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.woff2')) return 'font/woff2';
   return 'application/octet-stream';
 }
 

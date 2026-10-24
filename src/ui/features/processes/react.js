@@ -376,7 +376,9 @@ function renderTerminalOutput(raw) {
       } else if (code === 34 || code === 36 || code === 94 || code === 96) {
         currentColor = 'ansi-info';
         i++;
-      } else if (code === 39) {
+      } else if (code === 39 || (code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+        // Unmapped foreground colors use the default text color rather than
+        // inheriting a previous semantic color such as error red.
         currentColor = null;
         i++;
       } else if (code === 38 || code === 48) {

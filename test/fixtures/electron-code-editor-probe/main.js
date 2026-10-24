@@ -38,6 +38,10 @@ app.whenReady().then(async () => {
           await wait(10);
         }
       };
+      const setInputValue = (field, value) => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, value);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+      };
       const nativeFetch = window.fetch.bind(window);
       const detailRequests = [];
       let retryDetailFails = true;
@@ -169,6 +173,21 @@ app.whenReady().then(async () => {
           monaco: rectFor('.monaco-editor:not(.gutter)')
         }
       };
+      const folder = () => document.querySelector('.code-tree-folder-label[title="src"]');
+      folder().click();
+      await until(() => folder()?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-code-file]'), 'folder collapse');
+      setInputValue(document.querySelector('[data-code-search]'), 'new.js');
+      await until(() => document.querySelector('[data-code-file="src/new.js"]') && !document.querySelector('[data-code-file="src/example.js"]'), 'matching file inside collapsed folder');
+      result.filteredFolderExpanded = folder().getAttribute('aria-expanded') === 'true';
+      setInputValue(document.querySelector('[data-code-search]'), '');
+      await until(() => folder()?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-code-file]'), 'restore folder collapse after filtering');
+      result.filterPreservedFolderCollapse = true;
+      folder().click();
+      await until(() => document.querySelectorAll('[data-code-file]').length === 2, 'restore changed file rows');
+      result.fontFaces = await Promise.all(['Geist Variable', 'Geist Mono Variable'].map(async family => {
+        const faces = await document.fonts.load('400 15px "' + family + '"', 'Rel.AI');
+        return { family, loaded: faces.length > 0 && faces.every(face => face.status === 'loaded') };
+      }));
       // Older same-path responses must not overwrite the latest task revision.
       window.relaiCodeProbe.setRevision(3, 300);
       snapshot = { ...snapshot, tasks: snapshot.tasks.map(task => task.work_id === 'probe-task' ? { ...task, changeRevision: 3 } : task) };
@@ -268,8 +287,7 @@ app.whenReady().then(async () => {
       document.querySelector('.activity-row-trigger').click();
       await until(() => activityTaskLink(), 'Activity task return link');
       const activitySearch = document.querySelector('input[placeholder="Search activity"]');
-      activitySearch.value = 'Activity return context';
-      activitySearch.dispatchEvent(new Event('input', { bubbles: true }));
+      setInputValue(activitySearch, 'Activity return context');
       await until(() => new URLSearchParams(location.hash.split('?')[1]).get('search') === 'Activity return context', 'independent Activity search');
       result.activityTaskReturnHref = activityTaskLink().getAttribute('href');
       document.querySelector('.activity-session-actions a[href^="#activity"]').click();

@@ -369,6 +369,8 @@ try {
   // still not a substitute for the documented manual assistive-technology checks.
   assert.deepEqual(coverageViolations, [], 'Route accessibility failures: ' + JSON.stringify(coverageViolations));
 
+  assert.ok(result.fontFaces.length === 2 && result.fontFaces.every(font => font.loaded), 'bundled UI and monospace fonts must load successfully');
+  assert.ok(result.fontCacheRecovery.every(probe => probe.recovered), 'font cache probes must be followed by successful font responses');
   assert.equal(result.failures.length, 0, JSON.stringify(result.failures));
   await closePromise;
   console.log(`Real Electron Chromium dashboard acceptance passed across ${result.responsive.length} viewport scenarios; fixture screenshots were generated and their existence checked.`);

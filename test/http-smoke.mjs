@@ -90,6 +90,7 @@ try {
   }
   assert.equal(contentTypeForStaticAsset('example.MJS'), 'application/javascript');
   assert.equal(contentTypeForStaticAsset('example.ts'), 'application/javascript');
+  assert.equal(contentTypeForStaticAsset('example.WOFF2'), 'font/woff2');
   for (const filePath of ['asset.unknown', 'asset.mjs.map', 'assetmjs', 'asset']) {
     assert.equal(contentTypeForStaticAsset(filePath), 'application/octet-stream', `${filePath} must keep the unknown-extension fallback`);
   }

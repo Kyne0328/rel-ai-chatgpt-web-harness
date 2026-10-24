@@ -11,7 +11,8 @@ const CONTENT_TYPES = Object.freeze({
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
-  '.png': 'image/png'
+  '.png': 'image/png',
+  '.woff2': 'font/woff2'
 });
 
 function registerLocalScheme(protocol) {

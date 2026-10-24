@@ -196,6 +196,23 @@ assert.equal(processStopRequests[0]?.[0], '/api/processes/stop');
 assert.equal(processStopRequests[0]?.[1]?.processId, 'restart-survivor', 'Stop must target the displayed process through the existing backend endpoint');
 assert.equal(processRefreshes, 1);
 
+// Foreground changes must replace the previous color, including colors whose
+// visual representation falls back to the terminal's default foreground.
+for (const nextColor of [30, 35, 37, 90, 95, 97, 39]) {
+  processNodes.length = 0;
+  visitProcessNode(processRenderContext.renderProcesses(() => ({
+    managedProcesses: [{
+      processId: 'ansi-transition', status: 'running',
+      stdoutTail: `\u001b[31merror\u001b[${nextColor}mnormal`, stderrTail: ''
+    }]
+  }))());
+  const output = processNodes.find(node => node?.type === 'pre' && node.props['aria-label'] === 'Recent stdout output');
+  const chunks = output.children.flat();
+  assert.equal(chunks[0].props.className, 'ansi-red');
+  assert.equal(chunks[0].children.join(''), 'error');
+  assert.equal(chunks[1], 'normal', `SGR ${nextColor} must not retain the preceding error color`);
+}
+
 // Drive the real OutputBlock effects with controlled request completion order.
 async function exerciseProcessOutputFollow(newestFirst) {
   const slots = [];

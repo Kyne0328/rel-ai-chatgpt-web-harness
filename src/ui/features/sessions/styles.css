@@ -169,10 +169,10 @@
 .task-operation-actions button { @apply min-h-9; }
 .task-event-copy .task-event-command { @apply mt-1 grid gap-1 text-[11px] font-normal; overflow: visible; white-space: normal; }
 .task-event-command > span { @apply font-semibold; color: var(--ui-text-tertiary); }
-.task-event-command code { @apply block break-all px-2 py-1.5 text-[11px] leading-5; font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; border-radius: var(--radius-md); overflow: visible; text-overflow: clip; white-space: pre-wrap; background: var(--ui-surface-raised); color: var(--ui-text-primary); }
+.task-event-command code { @apply block break-all px-2 py-1.5 text-[11px] leading-5; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; border-radius: var(--radius-md); overflow: visible; text-overflow: clip; white-space: pre-wrap; background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .task-event-link:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-default); box-shadow: var(--shadow-sm); }
 .task-event-meta { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
-.task-event-duration { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-family: 'Geist Mono', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.task-event-duration { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .task-event-more { @apply min-h-10 w-full justify-center; }
 
 .task-detail-technical { @apply border-t pt-3; border-color: var(--ui-border-default); }

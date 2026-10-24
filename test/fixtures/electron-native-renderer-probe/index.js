@@ -102,6 +102,11 @@ async function load(surface, query = {}) {
   await cdp('Accessibility.enable');
   await setMedia();
   await evaluate('document.documentElement.dataset.theme = ' + JSON.stringify(theme));
+  const fonts = await evaluate(`Promise.all(['Geist Variable', 'Geist Mono Variable'].map(async family => {
+    const faces = await document.fonts.load('400 15px "' + family + '"', 'Rel.AI');
+    return { family, loaded: faces.length > 0 && faces.every(face => face.status === 'loaded') };
+  }))`);
+  check(surface + ' bundles UI and monospace fonts', fonts.every(font => font.loaded), fonts);
   await frames();
 }
 const normalizedName = value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -118,6 +123,9 @@ async function axNames(expected, label) {
   return nodes;
 }
 async function audit(label) {
+  // Retry controls transition from disabled colors when an action settles.
+  // Measure the settled enabled state, rather than an intermediate animation.
+  await evaluate('Promise.all(document.getAnimations().filter(animation => animation instanceof CSSTransition).map(animation => animation.finished.catch(() => {})))');
   stage(theme + ': axe ' + label);
   await evaluate(axeSource);
   const result = await evaluate('axe.run(document, { runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"] } }).then(result => ({ violations: result.violations, incomplete: result.incomplete, passes: result.passes.map(rule => rule.id) }))');

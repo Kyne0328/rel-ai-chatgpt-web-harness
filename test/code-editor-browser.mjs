@@ -55,6 +55,9 @@ try {
   assert.equal(result.inlineDiffEditor, true, 'the Changes surface must render task changes with Monaco diff rendering');
   assert.equal(result.readOnly, true, 'the rendered task diff must be read-only');
   assert.equal(result.saveButtonPresent, false, 'the Changes surface must not expose a Save control');
+  assert.equal(result.filteredFolderExpanded, true, 'filtering must reveal matching files inside collapsed folders');
+  assert.equal(result.filterPreservedFolderCollapse, true, 'clearing a filter must restore the previous folder collapse state');
+  assert.ok(result.fontFaces.length === 2 && result.fontFaces.every(face => face.loaded), 'both UI and monospace fonts must load from bundled assets');
   assert.deepEqual(result.changedFileRows, ['src/example.js', 'src/new.js'], 'the file explorer must show only changed files and hide untouched files');
   assert.deepEqual(result.taskOptions, ['probe-task'], 'Changes must exclude tasks with no project-file changes and support-only artifacts');
   assert.equal(result.taskReturnHref, '#tasks?workspace=app&task=probe-task', 'Changes must provide a contextual link back to the selected task');

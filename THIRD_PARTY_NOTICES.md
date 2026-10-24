@@ -6,6 +6,18 @@ This document supplements the project [NOTICE](NOTICE). It does not replace lice
 
 ## Major bundled components
 
+### Geist and Geist Mono
+
+The dashboard and Electron pages bundle the variable-weight Geist and Geist Mono
+fonts from `@fontsource-variable/geist` and `@fontsource-variable/geist-mono` 5.3.0.
+
+- Upstream: <https://github.com/vercel/geist-font>
+- Distribution: <https://github.com/fontsource/font-files>
+- License: SIL Open Font License 1.1, Copyright 2024 The Geist Project Authors
+- Complete license texts: `electron/renderer/geist-LICENSE.txt` and
+  `electron/renderer/geist-mono-LICENSE.txt`; dashboard distributions retain copies
+  in `public/assets/`. The Fontsource packages also retain these licenses.
+
 ### QuickJS and quickjs-emscripten
 
 Programmable tool composition runs JavaScript in QuickJS compiled to WebAssembly,

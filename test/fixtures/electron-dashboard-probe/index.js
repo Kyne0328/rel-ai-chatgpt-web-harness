@@ -15,6 +15,8 @@ fs.writeFileSync(outputPath, JSON.stringify({ stage: 'script_started', argv: pro
 let app;
 let BrowserWindow;
 const failures = [];
+const fontCacheProbes = [];
+const completedFonts = new Set();
 try {
   ({ app, BrowserWindow } = await import('electron'));
 } catch (error) {
@@ -53,9 +55,16 @@ app.whenReady().then(async () => {
   }
   win.webContents.session.webRequest.onCompleted({ urls: ['http://*/*'] }, details => {
     if (details.statusCode >= 400) failures.push(`http:${details.statusCode}:${details.url}`);
+    if (details.resourceType === 'font' && details.statusCode === 200) completedFonts.add(details.url);
   });
   win.webContents.session.webRequest.onErrorOccurred({ urls: ['http://*/*'] }, details => {
     if (expectedEventStreamClose(details)) return;
+    // Chromium can probe its font cache before issuing the actual network
+    // request. Reconcile only these misses against successful font responses.
+    if (details.resourceType === 'font' && details.error === 'net::ERR_CACHE_MISS') {
+      fontCacheProbes.push(details.url);
+      return;
+    }
     failures.push(`network:${details.error}:${details.url}`);
   });
   const navigationCounts = { didStartNavigation: 0, didNavigate: 0, didFinishLoad: 0 };
@@ -539,7 +548,17 @@ app.whenReady().then(async () => {
   }
 
   const uiuxCoverage = await exerciseUIUXCoverage({ win, axePath, screenshotDir, auditAccessibility, waitFor, waitForCapturePaint });
+  const fontFaces = await win.webContents.executeJavaScript(`Promise.all(['Geist Variable', 'Geist Mono Variable'].map(async family => {
+    const faces = await document.fonts.load('400 15px "' + family + '"', 'Rel.AI');
+    return { family, loaded: faces.length > 0 && faces.every(face => face.status === 'loaded') };
+  }))`);
+  const fontCacheRecovery = fontCacheProbes.map(url => ({ url, recovered: completedFonts.has(url) }));
+  for (const probe of fontCacheRecovery) {
+    if (!probe.recovered) failures.push(`network:unresolved font cache miss:${probe.url}`);
+  }
   const result = {
+    fontFaces,
+    fontCacheRecovery,
     uiuxCoverage,
     initialHydration,
     initial,

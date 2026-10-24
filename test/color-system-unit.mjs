@@ -20,6 +20,21 @@ function read(relativePath) {
   return fs.readFileSync(path.join(root, relativePath), 'utf8');
 }
 
+// Electron serves local files directly while the dashboard bundles the npm CSS.
+// Keep their font declarations, bytes and redistribution licenses in sync.
+const desktopFontCss = read('electron/renderer/fonts.css');
+for (const family of ['geist', 'geist-mono']) {
+  const source = `node_modules/@fontsource-variable/${family}`;
+  const fontCss = read(`${source}/wght.css`);
+  assert.ok(desktopFontCss.includes(fontCss.replaceAll('./files/', './')), `${family} font declarations must match the bundled dashboard font`);
+  for (const [, file] of fontCss.matchAll(/url\(\.\/files\/([^)]+)\)/g)) {
+    assert.deepEqual(fs.readFileSync(path.join(root, 'electron/renderer', file)), fs.readFileSync(path.join(root, source, 'files', file)), `${file} must match its Fontsource asset`);
+  }
+  for (const directory of ['electron/renderer', 'public/assets']) {
+    assert.equal(read(`${directory}/${family}-LICENSE.txt`), read(`${source}/LICENSE`), `${directory} must retain the ${family} redistribution license`);
+  }
+}
+
 function expectContrast(themeName, foregroundRole, backgroundRole, threshold) {
   const theme = COLOR_THEMES[themeName];
   const ratio = contrastRatio(theme[foregroundRole], theme[backgroundRole]);
