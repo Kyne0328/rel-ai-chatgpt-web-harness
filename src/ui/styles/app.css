@@ -239,7 +239,7 @@
   }
 
   .sidebar {
-    @apply fixed inset-y-0 left-0 flex flex-col overflow-y-auto p-3;
+    @apply fixed inset-y-0 left-0 flex flex-col overflow-hidden p-3;
     z-index: var(--z-sidebar);
     width: var(--sidebar-width);
     scrollbar-gutter: stable;
@@ -248,7 +248,7 @@
     box-shadow: var(--ui-shadow-sidebar);
   }
 
-  .brand { @apply mb-3 flex items-center justify-between gap-2 border-b pb-3; border-color: var(--ui-border-subtle); }
+  .brand { @apply mb-3 flex shrink-0 items-center justify-between gap-2 border-b pb-3; border-color: var(--ui-border-subtle); }
   .brand-identity { @apply flex min-w-0 items-center gap-2.5; }
   .brand-copy { @apply min-w-0; }
   .brand .logo { @apply grid size-9 shrink-0 place-items-center overflow-hidden; background: var(--ui-brand-mark-surface); border: 1px solid var(--ui-brand-mark-border); border-radius: 8px; box-shadow: var(--ui-brand-mark-shadow); }
@@ -259,27 +259,22 @@
   .sidebar-toggle:hover { color: var(--ui-text-primary); background: var(--ui-surface-secondary); border-color: var(--ui-border-subtle); }
   .sidebar-toggle svg { @apply size-4 fill-none stroke-current; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--dur) var(--ease); }
 
+  .sidebar-navigation { @apply min-h-0 flex-1 overflow-y-auto; scrollbar-gutter: stable; }
+  .sidebar-utilities { @apply shrink-0; }
   .nav, .secondary-nav { @apply flex flex-col gap-0.5; }
   .secondary-nav { @apply mt-3 border-t pt-3; border-color: var(--ui-border-subtle); }
   .sidebar-group-label { @apply px-2 text-[11px] font-bold uppercase tracking-[.08em]; color: var(--ui-text-tertiary); }
-  .nav a, .secondary-nav a, .mobile-nav a, .sidebar-accordion > summary {
+  .nav a, .secondary-nav a, .mobile-nav a {
     @apply flex items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-semibold transition-all;
     min-height: 42px;
     color: var(--ui-text-secondary);
     border: 1px solid transparent;
   }
-  .nav a:hover, .secondary-nav a:hover, .mobile-nav a:hover, .sidebar-accordion > summary:hover { color: var(--ui-text-primary); background: var(--ui-surface-secondary); border-color: var(--ui-border-subtle); }
-  .nav a.active, .secondary-nav a.active, .mobile-nav a.active, .sidebar-accordion > summary.active { color: var(--ui-text-primary); background: var(--ui-surface-raised); border-color: var(--ui-border-subtle); }
-  .sidebar .nav a.active, .sidebar .secondary-nav a.active, .sidebar .sidebar-accordion > summary.active { box-shadow: inset 3px 0 0 var(--ui-action-primary); }
+  .nav a:hover, .secondary-nav a:hover, .mobile-nav a:hover { color: var(--ui-text-primary); background: var(--ui-surface-secondary); border-color: var(--ui-border-subtle); }
+  .nav a.active, .secondary-nav a.active, .mobile-nav a.active { color: var(--ui-text-primary); background: var(--ui-surface-raised); border-color: var(--ui-border-subtle); }
+  .sidebar .nav a.active, .sidebar .secondary-nav a.active { box-shadow: inset 3px 0 0 var(--ui-action-primary); }
   .mobile-nav a.active .nav-icon { color: var(--ui-action-primary); }
   .nav-icon { @apply size-4 shrink-0 fill-none stroke-current; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-  .sidebar-accordion { @apply min-w-0; }
-  .sidebar-accordion > summary { @apply cursor-pointer list-none; }
-  .sidebar-accordion > summary::-webkit-details-marker { display: none; }
-  .sidebar-accordion-chevron { @apply ml-auto size-3.5 shrink-0 fill-none stroke-current; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--dur-fast) var(--ease); }
-  .sidebar-accordion[open] > summary .sidebar-accordion-chevron { transform: rotate(90deg); }
-  .sidebar-subnav { @apply flex flex-col gap-1 py-1 pl-3 my-0.5 border-l; border-color: var(--ui-border-subtle); margin-left: 14px; }
-  .sidebar-subnav a { @apply text-[12px] min-h-9 rounded-md; }
   .sidebar-note { @apply mt-auto flex items-center gap-2 border-t pt-3 pb-1 text-[11px] leading-5; color: var(--ui-text-tertiary); border-color: var(--ui-border-subtle); }
   .sidebar-note .dot { @apply size-1.5 shrink-0; }
 
@@ -671,20 +666,15 @@
 :root[data-sidebar="collapsed"] .brand-copy,
 :root[data-sidebar="collapsed"] .nav-label,
 :root[data-sidebar="collapsed"] .sidebar-note,
-:root[data-sidebar="collapsed"] .sidebar-group-label,
-:root[data-sidebar="collapsed"] .sidebar-accordion-chevron { display: none; }
+:root[data-sidebar="collapsed"] .sidebar-group-label { display: none; }
 :root[data-sidebar="collapsed"] .nav a,
-:root[data-sidebar="collapsed"] .secondary-nav a,
-:root[data-sidebar="collapsed"] .sidebar-accordion > summary { @apply justify-center px-2; }
-:root[data-sidebar="collapsed"] .sidebar-subnav { @apply pl-0; }
+:root[data-sidebar="collapsed"] .secondary-nav a { @apply justify-center px-2; }
 :root[data-sidebar="collapsed"] .nav-icon { @apply size-5; }
 :root[data-sidebar="collapsed"] .sidebar-toggle svg { transform: rotate(180deg); }
 :root[data-sidebar="collapsed"] .nav a:focus-visible,
-:root[data-sidebar="collapsed"] .secondary-nav a:focus-visible,
-:root[data-sidebar="collapsed"] .sidebar-accordion > summary:focus-visible { @apply flex-col gap-1 py-2; }
+:root[data-sidebar="collapsed"] .secondary-nav a:focus-visible { @apply flex-col gap-1 py-2; }
 :root[data-sidebar="collapsed"] .nav a:focus-visible .nav-label,
-:root[data-sidebar="collapsed"] .secondary-nav a:focus-visible .nav-label,
-:root[data-sidebar="collapsed"] .sidebar-accordion > summary:focus-visible .nav-label {
+:root[data-sidebar="collapsed"] .secondary-nav a:focus-visible .nav-label {
   display: block;
   max-width: 100%;
   font-size: 11px;
@@ -711,9 +701,7 @@
   :root[data-sidebar="collapsed"] { --sidebar-width: 82px; }
   :root[data-sidebar="collapsed"] .sidebar { padding-inline: 10px; }
   :root[data-sidebar="collapsed"] .nav a,
-  :root[data-sidebar="collapsed"] .secondary-nav a,
-  :root[data-sidebar="collapsed"] .sidebar-accordion > summary { @apply justify-center px-2; }
-  :root[data-sidebar="collapsed"] .sidebar-subnav { @apply pl-0; }
+  :root[data-sidebar="collapsed"] .secondary-nav a { @apply justify-center px-2; }
   :root[data-sidebar="collapsed"] .nav-icon { @apply size-5; }
   .topbar { @apply flex-col items-stretch gap-3; }
   .top-controls { @apply justify-start; }
@@ -804,7 +792,7 @@
 
 @media (pointer: coarse) {
   :root { --control-height-dense: 44px; }
-  button, .buttonlike, input, select, textarea, summary, .nav a, .secondary-nav a, .mobile-nav a, .sidebar-accordion > summary { min-height: 44px; }
+  button, .buttonlike, input, select, textarea, summary, .nav a, .secondary-nav a, .mobile-nav a { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

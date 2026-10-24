@@ -33,7 +33,6 @@
 .ansi-info { color: var(--ui-status-info-foreground); }
 .ansi-bold { font-weight: 700; }
 .process-gauge-badge { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-sm); background: var(--ui-surface-secondary); color: var(--ui-text-tertiary); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 11px; font-weight: 600; line-height: 1.4; }
-.process-gauge-badge.active { border-color: var(--ui-status-info-border); background: var(--ui-status-info-background); color: var(--ui-status-info-foreground); }
 .process-gauge-badge.memory { color: var(--ui-text-secondary); }
 .process-output-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .65rem; margin-top: .55rem; }
 .process-output-actions > span, .process-output-following { color: var(--ui-text-tertiary); font-size: .7rem; }

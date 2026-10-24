@@ -98,6 +98,7 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/release-notes': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleReleaseNotes') },
   '/api/workspace/preflight': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleWorkspacePreflight') },
   '/api/processes/output': { auth: authDashboard, handler: lazyRoute(loadDashboardProcesses, 'handleApiProcessOutput') },
+  '/api/processes/memory': { auth: authDashboard, handler: lazyRoute(loadDashboardProcesses, 'handleApiProcessMemory') },
   '/events': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleEvents') }
 });
 

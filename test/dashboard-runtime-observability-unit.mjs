@@ -71,6 +71,24 @@ assert.match(emptyIncludedOutput.message, /No recent stdout or stderr output was
 const includedOutput = processOutputView({ stdoutTail: 'ready\n', stderrTail: '' });
 assert.equal(includedOutput.hasOutput, true);
 assert.equal(includedOutput.stdout, 'ready\n');
+const sampleTime = Date.parse('2026-10-24T00:00:00Z');
+const measuredProcess = { processId: 'memory-root', pid: 321, status: 'running' };
+const memoryRoot = {
+  processId: 'memory-root', pid: 321, sampledAt: new Date(sampleTime).toISOString(),
+  identityVerified: true, measurementStatus: 'measured', workingSetBytes: 12 * 1024 ** 2
+};
+const memoryRow = (root = memoryRoot, overrides = {}, now = sampleTime) => processListView({
+  managedProcesses: [{ ...measuredProcess, ...overrides }], processMemory: { roots: root ? [root] : [] }
+}, now).rows[0];
+assert.equal(memoryRow().memory.workingSetBytes, memoryRoot.workingSetBytes);
+assert.equal(memoryRow({ ...memoryRoot, workingSetBytes: 0 }).memory.workingSetBytes, 0);
+assert.equal(memoryRow({ ...memoryRoot, identityVerified: false }).memory, null);
+assert.equal(memoryRow({ ...memoryRoot, measurementStatus: 'unknown', reason: 'probe_failed_or_timed_out' }).memory, null);
+assert.equal(memoryRow({ ...memoryRoot, pid: 999 }).memory, null);
+assert.equal(memoryRow({ ...memoryRoot, workingSetBytes: null }).memory, null);
+assert.equal(memoryRow(memoryRoot, {}, sampleTime + 5000).memory, null, 'expired samples must not be presented as current RAM');
+assert.equal(memoryRow(memoryRoot, { status: 'exited' }).memory, null);
+assert.equal(memoryRow(null, { memoryBytes: 1234 }).memory, null, 'unverified ad hoc memory fields must not become measured gauges');
 const truncatedOutput = processOutputView({
   stdoutTail: 'latest output\n',
   stderrTail: '',
@@ -148,7 +166,7 @@ const processRenderContext = {
   requestDashboardRefresh: () => { processRefreshes += 1; }
 };
 vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace('export function createProcessesRoute', 'function createProcessesRoute')
-  + '\nglobalThis.renderProcesses = createProcessesRoute;', processRenderContext);
+  + '\nglobalThis.renderProcesses = createProcessesRoute; globalThis.renderProcessRow = ProcessRow;', processRenderContext);
 const restartedProcessTree = processRenderContext.renderProcesses(() => ({
   managedProcesses: [{ processId: 'restart-survivor', status: 'unknown_after_restart', pid: 456, label: 'Restart survivor' }]
 }))();
@@ -181,9 +199,9 @@ processRenderContext.useState = initial => {
   const index = rowStateIndex++;
   return [index === 0 ? 'error' : index === 1 ? 'Old stop failure' : initial, () => {}];
 };
-const resolvedProcessTree = processRenderContext.renderProcesses(() => ({
+const resolvedProcessTree = processRenderContext.renderProcessRow({ row: processListView({
   managedProcesses: [{ processId: 'resolved-controller', status: 'exited', terminationConfirmed: true }]
-}))();
+}).rows[0] });
 processRenderContext.useState = defaultUseState;
 const restartedNodes = processNodes.splice(0);
 visitProcessNode(resolvedProcessTree);
@@ -195,6 +213,100 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(processStopRequests[0]?.[0], '/api/processes/stop');
 assert.equal(processStopRequests[0]?.[1]?.processId, 'restart-survivor', 'Stop must target the displayed process through the existing backend endpoint');
 assert.equal(processRefreshes, 1);
+
+// The visible Commands route samples through the authenticated endpoint,
+// expires observations, ignores hidden/unmounted responses, and has no idle poll.
+async function exerciseProcessMemoryLifecycle() {
+  const slots = [];
+  const effects = [];
+  const requests = [];
+  const timers = new Map();
+  const listeners = new Map();
+  let cursor = 0;
+  let timerId = 0;
+  let writes = 0;
+  let now = sampleTime;
+  const document = {
+    visibilityState: 'visible',
+    addEventListener: (name, listener) => listeners.set(name, listener),
+    removeEventListener: name => listeners.delete(name)
+  };
+  const context = {
+    React: { createElement() {} }, memo: component => component,
+    document,
+    window: {
+      setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, at: now + delay }); return id; },
+      clearTimeout: id => timers.delete(id)
+    },
+    Date: class extends Date { static now() { return now; } },
+    useState(initial) {
+      const index = cursor++;
+      slots[index] ||= { value: typeof initial === 'function' ? initial() : initial };
+      return [slots[index].value, value => { writes++; slots[index].value = value; }];
+    },
+    useEffect(effect, dependencies) {
+      const index = cursor++;
+      const previous = slots[index];
+      if (previous && dependencies.every((value, i) => Object.is(value, previous.dependencies[i]))) return;
+      effects.push(() => {
+        previous?.cleanup?.();
+        slots[index] = { dependencies, cleanup: effect() };
+      });
+    },
+    fetchJson(url, options) { return new Promise(resolve => requests.push({ url, options, resolve })); }
+  };
+  vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace('export function createProcessesRoute', 'function createProcessesRoute')
+    + '\nglobalThis.readMemory = useProcessMemory;', context);
+  const render = (key = '[["memory-root",321]]') => {
+    cursor = 0;
+    const value = context.readMemory(key);
+    while (effects.length) effects.shift()();
+    return value;
+  };
+  const drain = async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); };
+  const response = { ok: true, cacheAgeMs: 0, roots: [memoryRoot] };
+  render();
+  assert.equal(requests[0].url, '/api/processes/memory');
+  assert.equal(requests[0].options.cache, 'no-store');
+  render();
+  assert.equal(requests.length, 1, 'ordinary output refreshes must not launch more probes');
+  document.visibilityState = 'hidden'; listeners.get('visibilitychange')();
+  requests[0].resolve(response); await drain();
+  assert.equal(render(), null, 'a response arriving after hiding must not populate a gauge');
+  assert.equal(timers.size, 0, 'hidden pages must not poll memory');
+  document.visibilityState = 'visible'; listeners.get('visibilitychange')();
+  requests[1].resolve(response); await drain();
+  assert.equal(render().roots[0].workingSetBytes, memoryRoot.workingSetBytes);
+  assert.ok([...timers.values()].some(timer => timer.at === now + 5000), 'samples need an expiration deadline');
+  now += 5000;
+  for (const [id, timer] of [...timers]) {
+    if (timer.at <= now) { timers.delete(id); timer.callback(); }
+  }
+  assert.equal(render(), null, 'expired memory must disappear while a replacement is pending');
+  assert.equal(requests.length, 3);
+  slots.forEach(slot => slot?.cleanup?.());
+  const writesAfterUnmount = writes;
+  requests[2].resolve(response); await drain();
+  assert.equal(writes, writesAfterUnmount, 'unmounted routes must ignore pending observations');
+  assert.equal(timers.size, 0);
+  assert.equal(listeners.size, 0);
+
+  // Empty routes mount no sampler at all.
+  slots.length = 0;
+  render('[]');
+  assert.equal(requests.length, 3);
+  assert.equal(timers.size, 0);
+  slots.forEach(slot => slot?.cleanup?.());
+}
+await exerciseProcessMemoryLifecycle();
+
+processNodes.length = 0;
+visitProcessNode(processRenderContext.renderProcessRow({ row: memoryRow() }));
+assert.ok(processNodes.includes('RAM 12 MiB'));
+assert.ok(processNodes.some(node => node?.props?.title?.includes('Descendants are not included')));
+processNodes.length = 0;
+visitProcessNode(processRenderContext.renderProcessRow({ row: memoryRow({ ...memoryRoot, identityVerified: false }) }));
+assert.ok(processNodes.includes('RAM unavailable'));
 
 // Foreground changes must replace the previous color, including colors whose
 // visual representation falls back to the terminal's default foreground.

@@ -41,12 +41,20 @@ try {
   assert.equal((await fetch(`${base}/dashboard`, { headers: { authorization: `Bearer ${token}` } })).status, 401, 'MCP bearer credentials must not authorize the dashboard');
   assert.equal((await fetch(`${base}/api/extensions`)).status, 401, 'extension catalog data must require dashboard authorization');
   assert.equal((await fetch(`${base}/api/telemetry`)).status, 401, 'telemetry settings must require dashboard authorization');
+  assert.equal((await fetch(`${base}/api/processes/memory`)).status, 401, 'managed-root memory requires dashboard authorization');
+  assert.equal((await fetch(`${base}/api/processes/memory`, { headers: { authorization: `Bearer ${token}` } })).status, 401, 'MCP credentials must not authorize managed-root dashboard readings');
   const dashboardLogin = await fetch(`${base}/dashboard?token=${encodeURIComponent(token)}`);
   assert.equal(dashboardLogin.status, 200);
   const dashboardCookie = String(dashboardLogin.headers.get('set-cookie') || '').split(';')[0];
   assert.match(dashboardCookie, /^relai_dashboard_session=/);
   await dashboardLogin.arrayBuffer();
   assert.equal((await fetch(`${base}/api/diagnostics`, { headers: { cookie: dashboardCookie } })).status, 200);
+  const processMemoryResponse = await fetch(`${base}/api/processes/memory`, { headers: { cookie: dashboardCookie } });
+  assert.equal(processMemoryResponse.status, 200);
+  const processMemory = await processMemoryResponse.json();
+  assert.equal(processMemory.ok, true);
+  assert.equal(processMemory.scope, 'managed_roots_only');
+  assert.deepEqual(processMemory.roots, []);
 
   const challenge = await fetch(`${base}/mcp`, {
     method: 'POST',

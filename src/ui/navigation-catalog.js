@@ -2,7 +2,7 @@ function route(id, label, path, description, group) {
   return Object.freeze({ id, label, path, href: `#${path}`, description, group, icon: id });
 }
 
-export const WORK_NAV_ITEMS = Object.freeze([
+const WORK_NAV_ITEMS = Object.freeze([
   route('home', 'Overview', 'home', 'Connection status, projects, and recent tasks.', 'Work'),
   route('tasks', 'Tasks', 'tasks', 'See active and completed Rel.AI tasks.', 'Work'),
   route('code', 'Changes', 'code', 'Review current and committed file changes for a Rel.AI task.', 'Work'),
@@ -18,7 +18,7 @@ export const SYSTEM_NAV_ITEMS = Object.freeze([
   route('usage', 'Analytics', 'usage', 'See activity trends, success rates, timing, and problem areas.', 'System')
 ]);
 
-export const APPLICATION_NAV_ITEMS = Object.freeze([
+const APPLICATION_NAV_ITEMS = Object.freeze([
   route('system', 'System', 'processes', 'Running commands, troubleshooting, tools, and analytics.', 'Application'),
   route('settings', 'Settings', 'settings', 'Change connection, preferences, privacy, and app settings.', 'Application')
 ]);
@@ -31,10 +31,12 @@ export const EXTENSIONS_NAV_ITEM = route(
   'Application'
 );
 
-export const DESKTOP_NAV_ITEMS = Object.freeze([
-  ...WORK_NAV_ITEMS,
-  APPLICATION_NAV_ITEMS[0],
-  APPLICATION_NAV_ITEMS[1]
+export const DESKTOP_WORK_NAV_ITEMS = Object.freeze(WORK_NAV_ITEMS.filter(item => item.id !== 'activity'));
+export const DESKTOP_SYSTEM_NAV_ITEMS = Object.freeze([
+  SYSTEM_NAV_ITEMS.find(item => item.id === 'processes'),
+  WORK_NAV_ITEMS.find(item => item.id === 'activity'),
+  SYSTEM_NAV_ITEMS.find(item => item.id === 'tools'),
+  SYSTEM_NAV_ITEMS.find(item => item.id === 'diagnostics')
 ]);
 export const MOBILE_PRIMARY_NAV_ITEMS = Object.freeze([
   WORK_NAV_ITEMS.find(item => item.id === 'home'),
@@ -48,8 +50,6 @@ export const MOBILE_MORE_NAV_ITEMS = Object.freeze([
   APPLICATION_NAV_ITEMS[0],
   APPLICATION_NAV_ITEMS[1]
 ].filter(Boolean));
-export const MOBILE_NAV_ITEMS = Object.freeze([...DESKTOP_NAV_ITEMS]);
-
 export const SETTINGS_NAV_ITEMS = Object.freeze([
   route('connection', 'Connection', 'settings/connection', 'Connect this computer and manage the saved OpenAI connection.', 'Settings'),
   route('preferences', 'Preferences', 'settings', 'Change appearance, Rel.AI Pulse, and desktop notifications.', 'Settings'),
@@ -57,6 +57,16 @@ export const SETTINGS_NAV_ITEMS = Object.freeze([
   route('application', 'App', 'settings/application', 'Choose startup behavior and manage app updates.', 'Settings'),
   route('about', 'About', 'settings/about', 'View app, developer, source code, and license information.', 'Settings')
 ]);
+
+export const DESKTOP_UTILITY_NAV_ITEMS = Object.freeze([
+  SYSTEM_NAV_ITEMS.find(item => item.id === 'usage'),
+  APPLICATION_NAV_ITEMS[1],
+  SETTINGS_NAV_ITEMS.find(item => item.id === 'connection')
+]);
+export const DESKTOP_NAV_ITEMS = Object.freeze([
+  ...DESKTOP_WORK_NAV_ITEMS, ...DESKTOP_SYSTEM_NAV_ITEMS, ...DESKTOP_UTILITY_NAV_ITEMS
+]);
+export const MOBILE_NAV_ITEMS = Object.freeze([...WORK_NAV_ITEMS, ...APPLICATION_NAV_ITEMS]);
 
 const ROUTES = new Map([...DESKTOP_NAV_ITEMS, EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => [item.path, item]));
 

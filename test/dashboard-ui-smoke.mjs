@@ -8,7 +8,7 @@ import { OperationDiagnostics, RuntimeBuildIdentity } from '../src/ui/components
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DESKTOP_NAV_ITEMS, MOBILE_MORE_NAV_ITEMS, MOBILE_NAV_ITEMS, MOBILE_PRIMARY_NAV_ITEMS, SETTINGS_NAV_ITEMS, navigationCommands, routeMetadata } from '../src/ui/navigation-catalog.js';
+import { DESKTOP_NAV_ITEMS, MOBILE_MORE_NAV_ITEMS, MOBILE_NAV_ITEMS, MOBILE_PRIMARY_NAV_ITEMS, SETTINGS_NAV_ITEMS, SYSTEM_NAV_ITEMS, navigationCommands, routeMetadata } from '../src/ui/navigation-catalog.js';
 import { normalizeRouteKey } from '../src/ui/route-policy.js';
 import { repositorySummary } from '../src/ui/features/workspaces/model.js';
 import { advanceDeveloperUnlockClicks, runtimeCompatibilityNotice } from '../src/ui/features/settings/react.js';
@@ -66,16 +66,19 @@ assert.match(settingsReact, /Remove saved data for \$\{site\.host\}/, 'Privacy &
 assert.match(settingsReact, /Clear all browser data/, 'Privacy & data must retain an explicit all-sites reset');
 
 const desktopNavIds = DESKTOP_NAV_ITEMS.map(item => item.id);
-const mobileNavIds = MOBILE_NAV_ITEMS.map(item => item.id);
-assert.deepEqual(mobileNavIds, desktopNavIds, 'desktop and mobile navigation must keep the same reachable destinations');
+const mobileDestinations = MOBILE_NAV_ITEMS.flatMap(item => item.id === 'system' ? SYSTEM_NAV_ITEMS : item.id === 'settings' ? SETTINGS_NAV_ITEMS : [item]);
+assert.deepEqual(
+  [...new Set(mobileDestinations.map(item => item.href))].sort(),
+  [...new Set([...DESKTOP_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => item.href))].sort(),
+  'flat desktop and grouped mobile navigation must keep the same reachable destinations'
+);
 assert.deepEqual(MOBILE_PRIMARY_NAV_ITEMS.map(item => item.id), ['home', 'tasks', 'workspaces', 'activity']);
 assert.deepEqual(MOBILE_MORE_NAV_ITEMS.map(item => item.id), ['code', 'browser', 'system', 'settings']);
 assert.equal(new Set(desktopNavIds).size, desktopNavIds.length, 'primary navigation destinations must be unique');
-for (const required of ['home', 'tasks', 'workspaces', 'activity', 'browser', 'system', 'settings']) assert.ok(desktopNavIds.includes(required), `${required} must remain reachable`);
+for (const required of ['home', 'tasks', 'workspaces', 'activity', 'browser', 'processes', 'tools', 'diagnostics', 'usage', 'settings', 'connection']) assert.ok(desktopNavIds.includes(required), `${required} must remain reachable`);
 assert.ok(!desktopNavIds.includes('extensions'), 'Extensions must stay out of normal navigation while the feature is experimental');
 assert.ok(DESKTOP_NAV_ITEMS.every(item => String(item.label || '').trim()), 'every navigation destination must have a label');
-assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'system')?.href, '#processes');
-assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'system')?.label, 'System');
+assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'processes')?.href, '#processes');
 assert.equal(routeMetadata('extensions').id, 'extensions', 'Extensions must remain a valid hidden route');
 assert.ok(!navigationCommands().some(item => item.id === 'extensions'), 'Extensions must stay out of quick navigation by default');
 assert.ok(navigationCommands({ includeExtensions: true }).some(item => item.id === 'extensions'), 'The Extensions feature flag must add Extensions to quick navigation');

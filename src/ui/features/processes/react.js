@@ -13,9 +13,13 @@ const PROCESS_OUTPUT_CHUNK_BYTES = 256 * 1024;
 export function createProcessesRoute(useDashboardSlices) {
   return function ProcessesRoute() {
     const data = useDashboardSlices(PROCESS_STORE_KEYS);
+    const sampleKey = JSON.stringify((data.managedProcesses || [])
+      .filter(process => ['starting', 'running', 'stopping'].includes(process.status))
+      .map(process => [process.processId, process.pid]).sort());
+    const processMemory = useProcessMemory(sampleKey);
     const model = useMemo(
-      () => processListView(data),
-      [data]
+      () => processListView({ ...data, processMemory }),
+      [data, processMemory]
     );
     const rows = model.rows.filter(row => !row.state.terminal);
     const attentionCount = rows.filter(row => !row.state.active).length;
@@ -45,6 +49,53 @@ export function createProcessesRoute(useDashboardSlices) {
       )
     );
   };
+}
+
+function useProcessMemory(sampleKey) {
+  const [sample, setSample] = useState(null);
+  useEffect(() => {
+    const timestamps = (sample?.roots || []).map(root => Date.parse(root.sampledAt || '')).filter(Number.isFinite);
+    if (!timestamps.length) return undefined;
+    const timer = window.setTimeout(() => setSample(null), Math.max(0, Math.min(...timestamps) + 5000 - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [sample]);
+  useEffect(() => {
+    let disposed = false;
+    let timer;
+    let generation = 0;
+    const refresh = async () => {
+      const request = ++generation;
+      setSample(null);
+      if (disposed || document.visibilityState === 'hidden' || sampleKey === '[]') return;
+      let delay = 5000;
+      try {
+        const response = await fetchJson('/api/processes/memory', { cache: 'no-store', pauseTimeoutWhenHidden: false });
+        if (disposed || request !== generation || document.visibilityState === 'hidden') return;
+        if (response?.ok !== false) {
+          setSample(response);
+          delay = Math.max(1000, 5000 - Math.max(0, Number(response.cacheAgeMs) || 0));
+        }
+      } catch { /* Optional measurements do not affect process control. */ }
+      finally {
+        if (!disposed && request === generation && document.visibilityState !== 'hidden') {
+          timer = window.setTimeout(refresh, delay);
+        }
+      }
+    };
+    const visibilityChanged = () => {
+      window.clearTimeout(timer);
+      void refresh();
+    };
+    document.addEventListener('visibilitychange', visibilityChanged);
+    void refresh();
+    return () => {
+      disposed = true;
+      generation += 1;
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', visibilityChanged);
+    };
+  }, [sampleKey]);
+  return sample;
 }
 
 const ProcessRow = memo(function ProcessRow({ row }) {
@@ -87,8 +138,8 @@ const ProcessRow = memo(function ProcessRow({ row }) {
         h('div', { className: 'process-title-line' },
           h('strong', null, row.label),
           h(StatusPill, { label: state.label, tone: state.pillClass }),
-          row.memory ? h('span', { className: 'process-gauge-badge memory', title: `Memory: ${formatBytes(row.memory)}` }, formatBytes(row.memory)) : (
-            state.active ? h('span', { className: 'process-gauge-badge active', title: `Active status: ${state.label}` }, 'Active') : null
+          row.memory ? h('span', { className: 'process-gauge-badge memory', title: `Root working set · sampled ${row.memory.sampledAt}. Descendants are not included.` }, `RAM ${formatBytes(row.memory.workingSetBytes)}`) : (
+            state.active ? h('span', { className: 'process-gauge-badge', title: 'A current, identity-verified memory reading is unavailable for this process.' }, 'RAM unavailable') : null
           )
         ),
         h('div', { className: 'process-meta' },

@@ -14,13 +14,13 @@ export function processStopResult(result) {
 
 export function processListView(data = {}, now = Date.now()) {
   const processes = orderProcesses(data.managedProcesses || []);
-  const rows = processes.map(process => processRowView(process, now));
+  const rows = processes.map(process => processRowView(process, now, data.processMemory));
   const running = rows.filter(row => row.state.active).length;
   const finished = rows.filter(row => row.state.terminal).length;
   return { rows, running, finished };
 }
 
-function processRowView(process = {}, now = Date.now()) {
+function processRowView(process = {}, now = Date.now(), snapshot = null) {
   const state = processStateView(process);
   const output = processOutputView(process);
   const processId = String(process.processId || 'unknown');
@@ -37,10 +37,20 @@ function processRowView(process = {}, now = Date.now()) {
     elapsed: durationFor(process, state.active, now),
     exitCode: process.exitCode,
     error: process.error || '',
-    memory: process.memoryBytes ?? process.memory ?? process.rssBytes ?? process.rss ?? null,
+    memory: processMemoryView(process, snapshot, now),
     state,
     output
   };
+}
+
+function processMemoryView(process, snapshot, now) {
+  if (!processStateView(process).active || snapshot?.stale === true) return null;
+  const root = snapshot?.roots?.find(root => root.processId === process.processId && root.pid === process.pid);
+  const sampledAt = Date.parse(root?.sampledAt || '');
+  if (root?.identityVerified !== true || root.measurementStatus !== 'measured'
+    || !Number.isFinite(sampledAt) || now < sampledAt || now - sampledAt >= 5000
+    || !Number.isSafeInteger(root.workingSetBytes) || root.workingSetBytes < 0) return null;
+  return { workingSetBytes: root.workingSetBytes, sampledAt: root.sampledAt };
 }
 
 function durationFor(process = {}, active = false, now = Date.now()) {

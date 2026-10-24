@@ -23,13 +23,14 @@ import { connectionLayerViews, connectionStateFor, connectionSummary } from '../
 import { DEVELOPER_FEATURE_CHANGE_EVENT, DEVELOPER_FEATURES, readDeveloperFeatureEnabled } from '../developer-mode.js';
 import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import {
-  APPLICATION_NAV_ITEMS,
+  DESKTOP_WORK_NAV_ITEMS,
+  DESKTOP_SYSTEM_NAV_ITEMS,
+  DESKTOP_UTILITY_NAV_ITEMS,
   EXTENSIONS_NAV_ITEM,
   MOBILE_MORE_NAV_ITEMS,
   MOBILE_PRIMARY_NAV_ITEMS,
   SETTINGS_NAV_ITEMS,
   SYSTEM_NAV_ITEMS,
-  WORK_NAV_ITEMS,
   desktopNavigationOwner,
   navigationCommands,
   routeMetadata
@@ -295,9 +296,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   const overlays = useSyncExternalStore(subscribeOverlay, getOverlaySnapshot, getOverlaySnapshot);
   const route = useRoutePresentation();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => document.documentElement.dataset.sidebar === 'collapsed');
-  const [openAccordion, setOpenAccordion] = useState(() => (
-    route.owner === 'system' || route.owner === 'settings' ? route.owner : ''
-  ));
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(() => readDeveloperFeatureEnabled('extensions'));
@@ -307,7 +305,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
 
   useEffect(() => {
     document.title = `${route.title} · Rel.AI MCP`;
-    if (route.owner === 'system' || route.owner === 'settings') setOpenAccordion(route.owner);
     setMobileMoreOpen(false);
   }, [route.owner, route.path, route.title]);
 
@@ -390,9 +387,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
       h(DesktopSidebar, {
         collapsed: sidebarCollapsed,
         extensionsEnabled,
-        openAccordion,
         route,
-        setOpenAccordion,
         toggleSidebar
       }),
       h('main', { id: 'main', className: 'main', tabIndex: -1, 'aria-labelledby': 'pageTitle' },
@@ -462,7 +457,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   );
 }
 
-function DesktopSidebar({ collapsed, extensionsEnabled, openAccordion, route, setOpenAccordion, toggleSidebar }) {
+function DesktopSidebar({ collapsed, extensionsEnabled, route, toggleSidebar }) {
   const surface = document.documentElement.dataset.surface || 'browser';
   return h('aside', { className: 'sidebar', id: 'desktopSidebar' },
     h('div', { className: 'brand' },
@@ -483,62 +478,35 @@ function DesktopSidebar({ collapsed, extensionsEnabled, openAccordion, route, se
         onClick: toggleSidebar
       }, h(Icon, { name: collapsed ? 'sidebarOpen' : 'sidebarClose' }))
     ),
-    h('div', { className: 'sidebar-group' },
-      h('div', { className: 'sidebar-group-label' }, 'Work'),
-      h('nav', { className: 'nav', 'aria-label': 'Work navigation' },
-        WORK_NAV_ITEMS.map(item => h(NavLink, { key: item.id, item, active: route.owner === item.id }))
+    h('div', { className: 'sidebar-navigation' },
+      h('div', { className: 'sidebar-group' },
+        h('div', { className: 'sidebar-group-label' }, 'Work'),
+        h('nav', { className: 'nav', 'aria-label': 'Work navigation' },
+          DESKTOP_WORK_NAV_ITEMS.map(item => h(NavLink, { key: item.id, item, active: route.path === item.path }))
+        )
+      ),
+      h('div', { className: 'sidebar-group secondary-nav' },
+        h('div', { className: 'sidebar-group-label' }, 'System'),
+        h('nav', { className: 'nav', 'aria-label': 'System navigation' },
+          DESKTOP_SYSTEM_NAV_ITEMS.map(item => h(NavLink, { key: item.id, item, active: route.path === item.path }))
+        ),
+        extensionsEnabled ? h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }) : null,
       )
     ),
-    h('div', { className: 'sidebar-group secondary-nav' },
-      h('div', { className: 'sidebar-group-label' }, 'Application'),
-      extensionsEnabled ? h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }) : null,
-      h(SidebarAccordion, {
-        parent: APPLICATION_NAV_ITEMS[0],
-        items: SYSTEM_NAV_ITEMS,
-        activeOwner: route.owner,
-        activePath: route.path,
-        openAccordion,
-        setOpenAccordion
-      }),
-      h(SidebarAccordion, {
-        parent: APPLICATION_NAV_ITEMS[1],
-        items: SETTINGS_NAV_ITEMS,
-        activeOwner: route.owner,
-        activePath: route.path,
-        openAccordion,
-        setOpenAccordion
-      })
+    h('div', { className: 'sidebar-utilities secondary-nav' },
+      h('div', { className: 'sidebar-group-label' }, 'Utilities'),
+      h('nav', { className: 'nav', 'aria-label': 'Utilities navigation' },
+        DESKTOP_UTILITY_NAV_ITEMS.map(item => h(NavLink, {
+          key: item.id, item,
+          active: item.id === 'settings'
+            ? route.owner === 'settings' && route.path !== 'settings/connection'
+            : route.path === item.path
+        }))
+      )
     ),
     h('div', { className: 'sidebar-note' },
       h('span', { className: 'dot', 'aria-hidden': 'true' }),
       h('span', null, surface === 'desktop' ? 'Desktop app · live status' : 'Live status from this computer.')
-    )
-  );
-}
-
-function SidebarAccordion({ parent, items, activeOwner, activePath, openAccordion, setOpenAccordion }) {
-  const active = activeOwner === parent.id;
-  const open = openAccordion === parent.id;
-  return h('details', {
-    className: 'sidebar-accordion',
-    'data-nav-accordion': parent.id,
-    open,
-    onToggle: event => {
-      const isOpen = event.currentTarget.open;
-      setOpenAccordion(current => isOpen ? parent.id : (current === parent.id ? '' : current));
-    }
-  },
-    h('summary', {
-      className: active ? 'active' : undefined,
-      'aria-label': parent.label,
-      title: parent.label
-    },
-      h(NavIcon, { item: parent }),
-      h('span', { className: 'nav-label' }, parent.label),
-      h(Icon, { className: 'sidebar-accordion-chevron', name: 'chevronRight' })
-    ),
-    h('nav', { className: 'sidebar-subnav', 'aria-label': `${parent.label} navigation` },
-      items.map(item => h(NavLink, { key: item.id, item, active: item.path === activePath }))
     )
   );
 }
@@ -916,7 +884,7 @@ function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onCl
   const inputRef = useRef(null);
   const commands = useMemo(() => buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, onClose), [data, desktop, extensionsEnabled, onAddWorkspace, onClose]);
   const visible = useMemo(() => {
-    return commands.filter(command => commandMatchesQuery(command, query)).slice(0, 14);
+    return rankCommands(commands, query).slice(0, 14);
   }, [commands, query]);
   const safeIndex = visible.length ? Math.min(activeIndex, visible.length - 1) : 0;
 
@@ -1161,6 +1129,25 @@ function commandMatchesQuery(command, query) {
   ));
 }
 
+function rankCommands(commands, query) {
+  const normalized = normalizeSearch(query);
+  if (!normalized) return [...commands];
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const rank = command => {
+    const label = normalizeSearch(command.label);
+    if (label === normalized) return 0;
+    if (label.includes(normalized)) return 1;
+    if (tokens.every(token => label.includes(token))) return 2;
+    if (command.searchText.includes(normalized)) return 3;
+    if (tokens.every(token => command.searchText.includes(token))) return 4;
+    return 5;
+  };
+  return commands.filter(command => commandMatchesQuery(command, query))
+    .map(command => ({ command, score: rank(command) }))
+    .sort((left, right) => left.score - right.score)
+    .map(({ command }) => command);
+}
+
 const OverlayHost = memo(function OverlayHost({ drawer, modal }) {
   return h(React.Fragment, null,
     modal ? h(ModalPortal, { descriptor: modal }) : null,
@@ -1390,4 +1377,4 @@ function debugError(error) {
   if (window.localStorage?.getItem('relai_debug') === '1') console.error(error);
 }
 
-export { buildCommands, commandMatchesQuery, normalizeSearch };
+export { buildCommands, commandMatchesQuery, normalizeSearch, rankCommands, DesktopSidebar };

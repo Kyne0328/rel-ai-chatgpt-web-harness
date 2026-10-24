@@ -1273,32 +1273,17 @@ async function exerciseNavigationControls(win, failures) {
     { selector: '.nav a[data-nav-id="code"]', hash: '#code', ready: `document.querySelector('[data-code-react]')` },
     { selector: '.nav a[data-nav-id="workspaces"]', hash: '#workspaces', ready: `document.querySelector('[data-workspaces-react]')` },
     { selector: '.nav a[data-nav-id="activity"]', hash: '#activity', ready: `document.querySelector('.activity-master-detail')` },
-    { opener: '[data-nav-accordion="system"] > summary', selector: '[data-nav-accordion="system"] .sidebar-subnav a[data-nav-id="processes"]', hash: '#processes', ready: `document.querySelector('[data-processes-react="true"]')` },
-    { opener: '[data-nav-accordion="system"] > summary', selector: '[data-nav-accordion="system"] .sidebar-subnav a[data-nav-id="diagnostics"]', hash: '#diagnostics', ready: `document.querySelector('.diagnostic-page')` },
-    { opener: '[data-nav-accordion="system"] > summary', selector: '[data-nav-accordion="system"] .sidebar-subnav a[data-nav-id="tools"]', hash: '#tools', ready: `document.querySelector('[data-tools-react="true"]')` },
-    { opener: '[data-nav-accordion="system"] > summary', selector: '[data-nav-accordion="system"] .sidebar-subnav a[data-nav-id="usage"]', hash: '#usage', ready: `document.querySelector('[data-usage-react="true"]')` },
-    { opener: '[data-nav-accordion="settings"] > summary', selector: '[data-nav-accordion="settings"] .sidebar-subnav a[data-nav-id="connection"]', hash: '#settings/connection', ready: `document.querySelector('#__settings-content .connection-page')` },
-    { opener: '[data-nav-accordion="settings"] > summary', selector: '[data-nav-accordion="settings"] .sidebar-subnav a[data-nav-id="preferences"]', hash: '#settings', ready: `document.querySelector('#__settings-content .theme-switch') && !document.querySelector('.settings-loading')` },
-    { opener: '[data-nav-accordion="settings"] > summary', selector: '[data-nav-accordion="settings"] .sidebar-subnav a[data-nav-id="application"]', hash: '#settings/application', ready: `document.querySelector('#__settings-content .application-update-panel') && !document.querySelector('.settings-loading')` },
-    { opener: '[data-nav-accordion="settings"] > summary', selector: '[data-nav-accordion="settings"] .sidebar-subnav a[data-nav-id="about"]', hash: '#settings/about', ready: `document.querySelector('#__settings-content .about-product') && !document.querySelector('.settings-loading')` }
+    { selector: '.sidebar .nav a[data-nav-id="processes"]', hash: '#processes', ready: `document.querySelector('[data-processes-react="true"]')` },
+    { selector: '.sidebar .nav a[data-nav-id="diagnostics"]', hash: '#diagnostics', ready: `document.querySelector('.diagnostic-page')` },
+    { selector: '.sidebar .nav a[data-nav-id="tools"]', hash: '#tools', ready: `document.querySelector('[data-tools-react="true"]')` },
+    { selector: '.sidebar .nav a[data-nav-id="usage"]', hash: '#usage', ready: `document.querySelector('[data-usage-react="true"]')` },
+    { selector: '.sidebar .nav a[data-nav-id="connection"]', hash: '#settings/connection', ready: `document.querySelector('#__settings-content .connection-page')` },
+    { selector: '.settings-navigation a[data-settings-page="preferences"]', hash: '#settings', ready: `document.querySelector('#__settings-content .theme-switch') && !document.querySelector('.settings-loading')` },
+    { selector: '.settings-navigation a[data-settings-page="application"]', hash: '#settings/application', ready: `document.querySelector('#__settings-content .application-update-panel') && !document.querySelector('.settings-loading')` },
+    { selector: '.settings-navigation a[data-settings-page="about"]', hash: '#settings/about', ready: `document.querySelector('#__settings-content .about-product') && !document.querySelector('.settings-loading')` }
   ];
   const results = [];
   for (const scenario of scenarios) {
-    if (scenario.opener) {
-      const openerTarget = await win.webContents.executeJavaScript(`(() => {
-        const opener = document.querySelector(${JSON.stringify(scenario.opener)});
-        if (!opener || opener.parentElement?.open === true) return null;
-        opener.scrollIntoView({ block: 'center', inline: 'center' });
-        const rect = opener.getBoundingClientRect();
-        return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
-      })()`);
-      if (openerTarget) {
-        win.webContents.sendInputEvent({ type: 'mouseMove', x: openerTarget.x, y: openerTarget.y });
-        win.webContents.sendInputEvent({ type: 'mouseDown', x: openerTarget.x, y: openerTarget.y, button: 'left', clickCount: 1 });
-        win.webContents.sendInputEvent({ type: 'mouseUp', x: openerTarget.x, y: openerTarget.y, button: 'left', clickCount: 1 });
-      }
-      await waitFor(win, `document.querySelector(${JSON.stringify(scenario.opener)})?.parentElement?.open === true`);
-    }
     const hitTarget = await win.webContents.executeJavaScript(`(() => {
       const control = document.querySelector(${JSON.stringify(scenario.selector)});
       if (!control) return null;

@@ -1,6 +1,11 @@
-import { readCoreManagedProcessOutput, stopCoreManagedProcess } from '../core/processes.ts';
+import { readCoreManagedProcessMemory, readCoreManagedProcessOutput, stopCoreManagedProcess } from '../core/processes.ts';
 import { readJsonBody, sendJson } from './io.ts';
 import type { HttpRouteContext } from './types.ts';
+
+async function handleApiProcessMemory(ctx: HttpRouteContext): Promise<void> {
+  // The authenticated dashboard opts into the existing bounded, identity-checked sampler.
+  sendJson(ctx.res, 200, { ok: true, ...await readCoreManagedProcessMemory() });
+}
 
 function handleApiProcessOutput(ctx: HttpRouteContext): void {
   try {
@@ -46,4 +51,4 @@ function optionalNonNegativeInteger(value: string | null, label: string): number
   return parsed;
 }
 
-export { handleApiProcessOutput, handleApiProcessStop };
+export { handleApiProcessMemory, handleApiProcessOutput, handleApiProcessStop };

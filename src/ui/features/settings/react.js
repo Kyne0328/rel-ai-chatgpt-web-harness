@@ -10,6 +10,7 @@ import { connectionLayerViews, connectionStateFor, connectionSummary, hasObserve
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath, getRouteSnapshot, subscribeRoute } from '../../router.js';
+import { SETTINGS_NAV_ITEMS } from '../../navigation-catalog.js';
 import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL } from './connection-guidance.js';
 import { restartConnection } from './connection-recovery.js';
 import { supportPolicyView } from './desktop-update-policy.js';
@@ -58,7 +59,15 @@ export function SettingsView({ data = {}, subPage = '' }) {
       runtimeCompatibility: data.runtimeCompatibility
     })
   }[page] || h(PreferencesPage);
-  return h('div', { id: '__settings-content', className: 'settings-content', 'data-settings-react': page }, content);
+  return h('div', { id: '__settings-content', className: 'settings-content', 'data-settings-react': page },
+    h('nav', { className: 'settings-navigation', 'aria-label': 'Settings pages' },
+      SETTINGS_NAV_ITEMS.map(item => h('a', {
+        key: item.id, href: item.href, 'data-settings-page': item.id,
+        'aria-current': item.id === page ? 'page' : undefined
+      }, item.label))
+    ),
+    content
+  );
 }
 
 function Card({ title, className = '', children }) {

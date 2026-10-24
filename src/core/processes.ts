@@ -1,5 +1,9 @@
 import { readConfig } from '../config.js';
-import { readManagedProcessLogRange, stopManagedProcess } from '../processManager.js';
+import { readManagedProcessLogRange, sampleManagedProcessMemory, stopManagedProcess } from '../processManager.js';
+
+export function readCoreManagedProcessMemory() {
+  return sampleManagedProcessMemory(readConfig(), { limit: 20 }, { internal: true });
+}
 
 type ProcessOutputStream = 'stdout' | 'stderr';
 
