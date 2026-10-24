@@ -1175,6 +1175,7 @@ async function case_tool_action_catalog_parity_unit() {
       case 'relai_work:history': args.workspace = 'repo'; break;
       case 'relai_work:result': args.operationId = 'fallback_abcdefghijklmnopqrstuvwx'; break;
       case 'relai_work:plan': args.steps = [{ title: 'Catalog plan step', status: 'pending' }]; break;
+      case 'relai_work:complete':
       case 'relai_work:finish': args.summary = 'Completed.'; break;
       case 'relai_search:text': args.pattern = 'needle'; break;
       case 'relai_search:semantic': args.query = 'needle'; break;
@@ -1457,6 +1458,7 @@ async function case_tool_action_contract_unit() {
       case 'relai_work:history': args.workspace = 'repo'; break;
       case 'relai_work:result': args.operationId = 'fallback_abcdefghijklmnopqrstuvwx'; break;
       case 'relai_work:plan': args.steps = [{ title: 'Contract plan step', status: 'pending' }]; break;
+      case 'relai_work:complete':
       case 'relai_work:finish': args.summary = 'Completed.'; break;
       case 'relai_search:text': args.pattern = 'needle'; break;
       case 'relai_search:semantic': args.query = 'needle'; break;
@@ -1858,6 +1860,7 @@ async function case_tool_output_validation_unit() {
       case 'relai_work:history': return { workspace: 'repo' };
       case 'relai_work:result': return { operationId: 'fallback_abcdefghijklmnopqrstuvwx' };
       case 'relai_work:plan': return { steps: [{ title: 'Output validation plan step', status: 'pending' }] };
+      case 'relai_work:complete':
       case 'relai_work:finish': return { summary: 'Done.' };
       case 'relai_search:text': return { pattern: 'needle' };
       case 'relai_search:semantic': return { query: 'needle' };
