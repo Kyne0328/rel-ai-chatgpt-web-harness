@@ -99,19 +99,16 @@
 .task-plan-filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 2px; }
 .task-plan-filter-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 2px 10px; border: 1px solid var(--ui-border-control); border-radius: var(--radius-md); background: var(--ui-surface-secondary); color: var(--ui-text-secondary); font-size: 11px; font-weight: 600; cursor: pointer; transition: all var(--dur-fast) var(--ease); }
 .task-plan-filter-chip:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); border-color: var(--ui-border-default); }
-.task-plan-filter-chip.active { background: var(--ui-selection-background); color: var(--ui-action-primary); border-color: color-mix(in srgb, var(--ui-action-primary) 38%, transparent); }
-.task-plan-filter-chip:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 1px; }
+.task-plan-filter-chip.active { background: var(--ui-selection-background); color: var(--ui-text-primary); border-color: color-mix(in srgb, var(--ui-action-primary) 38%, transparent); font-weight: 600; }
+.task-plan-filter-chip:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 1px; }
 .task-plan-empty-filter { padding: 12px; font-size: 11px; color: var(--ui-text-tertiary); text-align: center; list-style: none; }
 .task-plan-list { @apply m-0 grid list-none gap-1.5 p-0; }
-.task-plan-step { @apply relative grid min-w-0 items-start gap-2 px-2.5 py-2; grid-template-columns: 22px minmax(0,1fr); border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); transition: all var(--dur-fast) var(--ease); cursor: pointer; user-select: none; }
-.task-plan-step:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-default); }
-.task-plan-step:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 1px; }
+.task-plan-step { @apply relative grid min-w-0 items-start gap-2 px-2.5 py-2; grid-template-columns: 22px minmax(0,1fr); border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); transition: all var(--dur-fast) var(--ease); }
 .task-plan-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.task-plan-toggle { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 6px; border: 0; padding: 0; background: transparent; cursor: pointer; color: inherit; font: inherit; text-align: left; }
+.task-plan-toggle:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
 .task-plan-toggle-icon { color: var(--ui-text-tertiary); flex-shrink: 0; }
-.task-plan-step-history { margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--ui-border-subtle); font-size: 11px; }
-.task-plan-step-history small { color: var(--ui-text-tertiary); display: block; }
-.task-plan-step-history p { margin: 4px 0 0; color: var(--ui-text-secondary); }
-.task-plan-history-items { margin: 4px 0 0; padding-left: 16px; color: var(--ui-text-secondary); list-style: disc; }
+.task-plan-detail { display: block; margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--ui-text-secondary); word-break: break-word; }
 .task-plan-marker { @apply relative z-[1] inline-flex size-5 items-center justify-center rounded-full text-[11px] font-bold; color: var(--ui-text-secondary); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); }
 .task-plan-copy { @apply grid min-w-0 gap-0.5; }
 .task-plan-copy strong { @apply break-words text-[12px] leading-5; color: var(--ui-text-primary); }

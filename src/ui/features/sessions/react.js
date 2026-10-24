@@ -827,43 +827,38 @@ function PlanSection({ plan }) {
       ? filteredSteps.map((step, index) => {
           const status = String(step?.status || 'pending');
           const stepKey = String(step?.id || `step-${index}`);
-          const isExpanded = expandedSteps.has(stepKey);
+          const hasDetail = Boolean(step?.detail);
+          const isExpanded = hasDetail && expandedSteps.has(stepKey);
           const markerIcon = status === 'completed' ? 'check' : status === 'skipped' ? 'minimize' : status === 'blocked' ? 'warning' : 'circle';
           const statusLabel = status === 'in_progress' ? 'In progress' : status.charAt(0).toUpperCase() + status.slice(1);
           const marker = status === 'in_progress'
             ? h('span', { className: 'task-plan-active-dot', 'aria-hidden': 'true' })
             : h(Icon, { name: markerIcon, size: 12 });
-          const toggleExpand = () => toggleStep(stepKey);
-          const onKeyDown = event => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              toggleExpand();
-            }
-          };
           return h('li', {
             key: `${String(step?.id || 'step')}:${index}`,
             className: `task-plan-step is-${status}${isExpanded ? ' is-expanded' : ''}`,
-            'data-plan-step-status': status,
-            role: 'button',
-            tabIndex: 0,
-            'aria-expanded': isExpanded,
-            onClick: toggleExpand,
-            onKeyDown
+            'data-plan-step-status': status
           },
             h('span', { className: 'task-plan-marker', role: 'img', 'aria-label': statusLabel }, marker),
             h('span', { className: 'task-plan-copy' },
-              h('div', { className: 'task-plan-header' },
-                h('strong', null, String(step?.title || `Step ${index + 1}`)),
-                h(Icon, { name: isExpanded ? 'chevronUp' : 'chevronDown', size: 12, className: 'task-plan-toggle-icon' })
-              ),
-              step?.detail ? h('span', { className: `task-plan-detail${isExpanded ? ' is-expanded' : ''}` }, String(step.detail)) : null,
-              isExpanded && (step?.history || step?.updatedAt || step?.notes) ? h('div', { className: 'task-plan-step-history' },
-                step.updatedAt ? h('small', null, `Updated ${timeAgo(step.updatedAt)}`) : null,
-                step.notes ? h('p', null, String(step.notes)) : null,
-                Array.isArray(step.history) && step.history.length > 0 ? h('ul', { className: 'task-plan-history-items' },
-                  step.history.map((item, hIdx) => h('li', { key: hIdx }, String(item?.message || item?.summary || item)))
-                ) : null
-              ) : null
+              hasDetail
+                ? h('button', {
+                    type: 'button',
+                    className: 'task-plan-toggle',
+                    'aria-expanded': isExpanded,
+                    'aria-controls': `task-plan-detail-${index}`,
+                    'aria-label': `${isExpanded ? 'Collapse' : 'Expand'} details for ${String(step?.title || `Step ${index + 1}`)}`,
+                    onClick: () => toggleStep(stepKey)
+                  },
+                    h('strong', null, String(step?.title || `Step ${index + 1}`)),
+                    h(Icon, { name: isExpanded ? 'chevronUp' : 'chevronDown', size: 12, className: 'task-plan-toggle-icon' })
+                  )
+                : h('div', { className: 'task-plan-header' },
+                    h('strong', null, String(step?.title || `Step ${index + 1}`))
+                  ),
+              isExpanded && step?.detail
+                ? h('span', { id: `task-plan-detail-${index}`, className: 'task-plan-detail' }, String(step.detail))
+                : null
             )
           );
         })

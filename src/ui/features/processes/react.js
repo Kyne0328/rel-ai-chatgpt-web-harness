@@ -283,13 +283,21 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error || 'Process output could not be loaded.');
 }
 
+function map256Color(idx) {
+  if (idx === 1 || idx === 9) return 'ansi-red';
+  if (idx === 2 || idx === 10) return 'ansi-green';
+  if (idx === 3 || idx === 11) return 'ansi-yellow';
+  if (idx === 4 || idx === 6 || idx === 12 || idx === 14) return 'ansi-info';
+  return null;
+}
+
 function renderTerminalOutput(raw) {
   if (raw == null) return [''];
   const text = String(raw)
     // eslint-disable-next-line no-control-regex
     .replace(/\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)/g, '')
     // eslint-disable-next-line no-control-regex
-    .replace(/\x1B\[[0-9;?]*[ -/]*[@-ln-~]/g, '')
+    .replace(/\x1B\[[0-9;?:*]*[ -/]*[@-ln-~]/g, '')
     // eslint-disable-next-line no-control-regex
     .replace(/\x1B[@-Z\\-_]/g, '')
     .replace(/\r\n/g, '\n')
@@ -298,7 +306,7 @@ function renderTerminalOutput(raw) {
   if (!text.trim()) return [''];
 
   // eslint-disable-next-line no-control-regex
-  const sgrRegex = /\x1B\[([0-9;]*)m/g;
+  const sgrRegex = /\x1B\[([0-9;:]*)m/g;
   const elements = [];
   let lastIndex = 0;
   let currentColor = null;
@@ -325,26 +333,66 @@ function renderTerminalOutput(raw) {
     }
     lastIndex = sgrRegex.lastIndex;
 
-    const codes = match[1] ? match[1].split(';') : ['0'];
-    for (const codeStr of codes) {
-      const code = parseInt(codeStr, 10) || 0;
+    const params = match[1] ? match[1].split(';') : ['0'];
+    let i = 0;
+    while (i < params.length) {
+      const param = params[i];
+      if (param.includes(':')) {
+        const sub = param.split(':').map(s => parseInt(s, 10) || 0);
+        const cmd = sub[0];
+        if (cmd === 38) {
+          if (sub[1] === 5) currentColor = map256Color(sub[2]);
+          else if (sub[1] === 2) currentColor = null;
+        } else if (cmd === 48) {
+          // background extended - skip as a unit
+        } else if (cmd === 0) {
+          currentColor = null;
+          isBold = false;
+        }
+        i++;
+        continue;
+      }
+
+      const code = parseInt(param, 10) || 0;
       if (code === 0) {
         currentColor = null;
         isBold = false;
+        i++;
       } else if (code === 1) {
         isBold = true;
+        i++;
       } else if (code === 22) {
         isBold = false;
+        i++;
       } else if (code === 31 || code === 91) {
         currentColor = 'ansi-red';
+        i++;
       } else if (code === 32 || code === 92) {
         currentColor = 'ansi-green';
+        i++;
       } else if (code === 33 || code === 93) {
         currentColor = 'ansi-yellow';
+        i++;
       } else if (code === 34 || code === 36 || code === 94 || code === 96) {
         currentColor = 'ansi-info';
+        i++;
       } else if (code === 39) {
         currentColor = null;
+        i++;
+      } else if (code === 38 || code === 48) {
+        const mode = parseInt(params[i + 1], 10) || 0;
+        if (mode === 5) {
+          const colorIdx = parseInt(params[i + 2], 10) || 0;
+          if (code === 38) currentColor = map256Color(colorIdx);
+          i += 3;
+        } else if (mode === 2) {
+          if (code === 38) currentColor = null;
+          i += 5;
+        } else {
+          i++;
+        }
+      } else {
+        i++;
       }
     }
   }

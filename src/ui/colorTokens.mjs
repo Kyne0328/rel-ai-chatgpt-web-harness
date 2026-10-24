@@ -3,7 +3,7 @@ export const THEME_NAMES = Object.freeze(['dark', 'light']);
 export const COLOR_THEMES = Object.freeze({
   dark: Object.freeze({
     canvas: '#0a0a0a', surfacePrimary: '#111111', surfaceSecondary: '#161616', surfaceRaised: '#1f1f1f', surfaceInput: '#131313',
-    textPrimary: '#f4f4f5', textSecondary: '#b4b4bc', textTertiary: '#8a8a93', textDisabled: '#5a5a62',
+    textPrimary: '#f4f4f5', textSecondary: '#b4b4bc', textTertiary: '#909099', textDisabled: '#5a5a62',
     borderSubtle: '#222222', borderDefault: '#333333', borderControl: '#666666',
     brandMarkSurface: '#111111', brandMarkBorder: 'rgba(200,255,61,.18)', brandMarkShadow: '0 .25rem 1rem rgba(0,0,0,.35)',
     actionPrimary: '#c8ff3d', actionPrimaryHover: '#d8ff66', actionPrimaryActive: '#b5f229', actionPrimaryForeground: '#090a0f',
