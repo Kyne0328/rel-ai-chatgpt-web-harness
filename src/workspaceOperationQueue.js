@@ -339,7 +339,7 @@ function workspaceOperationQueueTimeoutError(timeoutMs, state = {}, requester = 
 
 function workspaceMutationBlockedError(workspace, block) {
   const detail = String(block?.reason || 'Rel.AI could not confirm that a previous mutating process stopped.');
-  const error = new Error(`Workspace '${workspace}' mutations are blocked for safety: ${detail} Restart the Rel.AI MCP runtime after confirming no stale process is still modifying this workspace.`);
+  const error = new Error(`Workspace '${workspace}' mutations are blocked for safety: ${detail} Rel.AI will retry execution inspection automatically; inspect the retained operation rather than rerunning it.`);
   error.code = 'WORKSPACE_MUTATION_BLOCKED';
   error.retryable = false;
   error.blockedAt = block?.blockedAt || null;
@@ -395,6 +395,18 @@ function blockWorkspaceMutations(workspaceAlias, reason) {
   const controller = mutationBlockControllerFor(workspace);
   if (!controller.signal.aborted) controller.abort(workspaceMutationBlockedError(workspace, block));
   return { ...block, created: true };
+}
+
+function updateOwnedWorkspaceMutationBlock(workspaceAlias, token, reason) {
+  const block = mutationBlocks.get(workspaceIdentity(workspaceAlias));
+  if (!block || block.token !== token || block.reason === reason) return false;
+  block.reason = String(reason);
+  for (const alias of workspaceOperationAliases(workspaceAlias)) {
+    for (const listener of mutationBlockListeners) {
+      try { listener({ alias, mutationBlock: workspaceMutationBlockSummary(alias) }); } catch {}
+    }
+  }
+  return true;
 }
 
 // A completed operation may release only the quarantine it created. Previously
@@ -569,4 +581,4 @@ function pendingWorkspaceOperations() {
   return locks.size;
 }
 
-export { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, workspaceOperationAliases, blockWorkspaceMutations, clearOwnedWorkspaceMutationBlock, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };
+export { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, workspaceOperationAliases, blockWorkspaceMutations, updateOwnedWorkspaceMutationBlock, clearOwnedWorkspaceMutationBlock, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange, runWorkspaceMutationBoundary, runWorkspaceOperation, pendingWorkspaceOperations };

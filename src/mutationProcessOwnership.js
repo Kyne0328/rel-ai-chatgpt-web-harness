@@ -8,6 +8,7 @@ import { getStateDir } from './statePaths.js';
 import { currentMutationBootIdentity } from './mutationBootIdentity.js';
 import { mutationAutoRecoveryCheckpointInvalid } from './mutationAutoRecovery.js';
 import { canonicalWorkspaceAuthority, workspaceMutationBlockSummary } from './workspaceOperationQueue.js';
+import { getCurrentToolActivityContext } from './toolActivity.js';
 
 const ownershipContext = new AsyncLocalStorage();
 const activeMutationRecords = new Set();
@@ -20,7 +21,9 @@ function runWithMutationProcessOwnership(config, workspace, callback, workspaceP
   const alias = String(workspace || '').trim();
   if (!alias) return callback();
   const authority = resolveMutationAuthority(config, alias, workspacePath);
-  const context = { config, workspace: alias, authority, records: new Set(), concurrentValidation: options.concurrentValidation === true };
+  const activity = getCurrentToolActivityContext();
+  const context = { config, workspace: alias, authority, records: new Set(), concurrentValidation: options.concurrentValidation === true,
+    taskId: String(options.taskId || activity?.taskId || ''), operationId: String(options.operationId || activity?.operationId || '') };
   const settle = () => {
     let changed = false;
     for (const file of context.records) changed = activeMutationRecords.delete(file) || changed;
@@ -56,6 +59,7 @@ async function prepareCurrentMutationProcess() {
   // PID attachment stays unknown rather than looking like confirmed completion.
   writeJsonAtomic(file, {
     schemaVersion: RECORD_SCHEMA_VERSION, runtimeId, workspace: current.workspace,
+    taskId: current.taskId, operationId: current.operationId,
     ...(current.bootIdentity ? { bootIdentity: current.bootIdentity } : {}),
     authority: current.authority, authorityStatus: current.authority ? 'bound' : 'unbound',
     ...(current.concurrentValidation ? { concurrentValidation: true } : {}),
@@ -100,6 +104,7 @@ function recordCurrentMutationProcess(pidValue, preparedFile = null) {
     ...(previous?.nativeJob ? { nativeJob: previous.nativeJob } : {}),
     ...(previous?.nativeCgroup ? { nativeCgroup: previous.nativeCgroup } : {}),
     runtimeId,
+    taskId: current.taskId, operationId: current.operationId,
     ...(current.bootIdentity ? { bootIdentity: current.bootIdentity } : {}),
     workspace: current.workspace,
     authority: current.authority,

@@ -21,6 +21,8 @@ import { relaiExec } from '../src/bridge/exec.js';
 import { planEdit } from '../src/executionPlanner.ts';
 import { readGitObservation } from '../src/repo/gitObservation.ts';
 import { listMutationProcessRecords, recordCurrentMutationProcess, removeMutationProcessRecord, runWithMutationProcessOwnership } from '../src/mutationProcessOwnership.js';
+import { inspectOwnedExecution } from '../src/executionRecovery.js';
+import { recoverMutationRecordsAtStartup } from '../src/mutationAutoRecovery.js';
 
 assert.equal(process.platform, 'win32', 'This is a Windows-only acceptance executable; run it in the native Windows gate.');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-windows-bookkeeping-wrapper-'));
@@ -39,6 +41,64 @@ const run = handler => executeToolCall({
 });
 const originalSpawn = childProcess.spawn;
 try {
+  // The native owner survives loss of its Node parent and its output reader.
+  // Killing the controller before a final receipt must still be recoverable
+  // through the witnessed kernel job, without using PID absence as proof.
+  for (const backend of ['companion', 'powershell']) {
+    const fixtureState = fs.mkdtempSync(path.join(os.homedir(), 'relai-native-restart-'));
+    const launched = childProcess.spawn(process.execPath, ['--input-type=module', '-e', `
+      import fs from 'node:fs';
+      import {spawn} from 'node:child_process';
+      import {prepareWindowsProcessJob} from ${JSON.stringify(new URL('../src/windowsProcessJob.ts', import.meta.url).href)};
+      const job = await prepareWindowsProcessJob({stateDir:${JSON.stringify(fixtureState)}}, {
+        executable:process.execPath,args:['-e', ${JSON.stringify("console.log('durable-before'); setInterval(()=>console.log('durable-after'),100);")}],
+        env:process.env,cwd:${JSON.stringify(canonicalWorkspacePath)},durableOutput:true
+      });
+      const powershell = ${JSON.stringify(path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))};
+      const executable = ${JSON.stringify(backend)} === 'powershell' ? powershell : job.executable;
+      const args = ${JSON.stringify(backend)} === 'powershell'
+        ? ['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',${JSON.stringify(path.resolve('src/windows-process-job.ps1'))},...job.args] : job.args;
+      const child = spawn(executable, args, {env:job.environment,detached:${backend === 'companion'},windowsHide:true,stdio:['pipe','ignore','pipe']});
+      child.stderr.on('data', data => process.stderr.write(data));
+      job.bind(child.pid); await job.waitStarted();
+      fs.writeFileSync(${JSON.stringify(path.join(fixtureState, 'launched.json'))}, JSON.stringify({pid:child.pid,nativeJob:job.ownershipReference()}));
+      child.unref(); process.exit(0);
+    `], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let launchError = '';
+    launched.stderr.on('data', data => { launchError += data; });
+    const [launchCode] = await once(launched, 'close');
+    assert.equal(launchCode, 0, launchError);
+    const identity = JSON.parse(fs.readFileSync(path.join(fixtureState, 'launched.json'), 'utf8'));
+    const fixtureConfig = { stateDir: fixtureState, workspaces: { restart: { path: workspace.path } } };
+    try {
+      const reconnected = await inspectOwnedExecution(fixtureConfig, identity);
+      assert.notEqual(reconnected.status, 'unknown', `OS inspection resolves the execution after its Node parent exited: ${JSON.stringify(reconnected)}`);
+      if (backend === 'companion') assert.equal(reconnected.status, 'running', 'the detached native owner survives its launching runtime');
+      const output = path.join(identity.nativeJob.directory, 'stdout.log');
+      if (reconnected.status === 'running') {
+        const deadline = Date.now() + 10000;
+        while ((!fs.existsSync(output) || !fs.readFileSync(output, 'utf8').includes('durable-after')) && Date.now() < deadline)
+          await new Promise(resolve => setTimeout(resolve, 20));
+        assert.match(fs.readFileSync(output, 'utf8'), /durable-before[\s\S]*durable-after/u, 'output continues after parent loss');
+      }
+      const marker = runWithMutationProcessOwnership(fixtureConfig, 'restart', () => recordCurrentMutationProcess(identity.pid), workspace.path);
+      const saved = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      fs.writeFileSync(marker, JSON.stringify({ ...saved, nativeJob: identity.nativeJob }));
+      if (reconnected.status === 'running') childProcess.execFileSync(path.join(process.env.SystemRoot, 'System32', 'taskkill.exe'), ['/f', '/pid', String(identity.pid)], { windowsHide: true, stdio: 'ignore' });
+      const stopped = await inspectOwnedExecution(fixtureConfig, identity);
+      assert.equal(stopped.status, 'stopped', JSON.stringify(stopped));
+      const receipt = JSON.parse(fs.readFileSync(path.join(identity.nativeJob.directory, 'receipt.json'), 'utf8'));
+      assert.equal(receipt.final, false, 'recovery does not manufacture a native completion receipt');
+      const recovered = await recoverMutationRecordsAtStartup(fixtureConfig);
+      assert.equal(recovered.released, 1, JSON.stringify(recovered));
+      assert.equal(recovered.pending, 0);
+      assert.equal(fs.existsSync(marker), false, 'same-boot kernel proof retires the mutation marker');
+      assert.ok(fs.existsSync(output), 'missing-receipt evidence is retained after recovery');
+    } finally {
+      try { process.kill(identity.pid); } catch {}
+      fs.rmSync(fixtureState, { recursive: true, force: true });
+    }
+  }
   await assert.rejects(runOwnedReadOnlyProcess(process.execPath, ['-e', 'process.exit(0)'],
     { resourceClass: 'heavy' }, config), /caller-managed resource admission/);
   const beforeProbes = hostResourceStats().gitObservation.active;

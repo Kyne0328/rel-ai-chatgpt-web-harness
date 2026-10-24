@@ -243,6 +243,46 @@ function readTaskBackgroundOperation(config: TaskHistoryConfig, taskId: unknown)
   }
 }
 
+// Execution recovery updates only the exact operation. Losing a handler does
+// not complete/cancel its task or invent a command exit code.
+async function reconcileTaskExecutionHistory(config: TaskHistoryConfig, taskId: string, operationId: string,
+  observation: { status: string; reason: string }): Promise<void> {
+  if (!cleanTaskId(taskId) || !operationId) return;
+  return withTaskHistoryPersistenceBarrier(config, taskId, () => {
+    ensureCurrentHistory(config);
+    const directory = getTaskHistoryDir(config);
+    const session = readWorkingSession(directory, taskId);
+    if (!session) return;
+    const stopped = observation.status === 'stopped';
+    const status = stopped ? 'interrupted' : observation.status === 'running' ? 'running' : 'unknown';
+    const summary = stopped ? 'Execution stopped after a runtime interruption. The original command result is unknown.'
+      : observation.status === 'running' ? 'The original execution is still running; Rel.AI has reconnected its monitoring.'
+        : `Execution state could not be verified: ${observation.reason}`;
+    let changed = false;
+    const events = (session.events || []).map((event: HistoryEvent) => {
+      if ((event.eventId || event.tool?.invocationId) !== operationId || ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(event.status)) return event;
+      if (event.status === status && event.summary === summary) return event;
+      changed = true;
+      return { ...event, status, title: stopped ? 'Execution interrupted' : status === 'unknown' ? 'Execution state unknown' : event.title,
+        summary, metadata: { ...event.metadata, executionRecovery: observation } };
+    });
+    const operations = taskBackgroundOperations(session).map(operation => {
+      if (operation.operationId !== operationId || !['running', 'interrupted'].includes(operation.status)) return operation;
+      const nextStatus = stopped ? 'interrupted' : 'running';
+      if (operation.status === nextStatus && operation.executionRecovery?.status === observation.status
+        && operation.executionRecovery?.reason === observation.reason) return operation;
+      changed = true;
+      return { ...operation, status: nextStatus, executionRecovery: observation,
+        ...(stopped ? { error: summary, completedAt: new Date().toISOString(), revision: Number(operation.revision || 0) + 1 } : {}) };
+    });
+    if (!changed) return;
+    const next = { ...session, events, backgroundOperations: operations } as TaskRecord;
+    if (session.backgroundOperation) next.backgroundOperation = operations.find(operation => operation.operationId === session.backgroundOperation.operationId) || session.backgroundOperation;
+    if (stopped) next.currentOperations = (session.currentOperations || []).filter((operation: HistoryEvent) => (operation.id || operation.operationId) !== operationId);
+    persistSession(directory, next);
+  });
+}
+
 function taskBackgroundOperations(session: TaskRecord): Record<string, any>[] {
   if (Array.isArray(session.backgroundOperations)) return session.backgroundOperations;
   return session.backgroundOperation ? [session.backgroundOperation] : [];
@@ -1123,6 +1163,7 @@ export {
   readTaskHistorySessionRecord,
   recordTaskActivityEvent,
   recordTaskBackgroundOperation,
+  reconcileTaskExecutionHistory,
   recordTaskHistoryEvent,
   recordWorkflowEvidence,
   recordWorkflowEvidenceBatch,

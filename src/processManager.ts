@@ -10,6 +10,7 @@ import { normalizeExecutionInvocation, resolveCommandCwd, normalizeCommandEnv } 
 import { redactCommandForAudit } from './commandDisplay.ts';
 import { isProcessTreeAlive, readProcessCreationIdentity, terminateProcessTree, type ProcessTreeTerminationResult } from './process.ts';
 import { prepareWindowsProcessJob, restoreWindowsProcessJob, type WindowsProcessJob } from './windowsProcessJob.ts';
+import { inspectOwnedExecution } from './executionRecovery.js';
 import { prepareLinuxMutationCgroup, validateLinuxMutationCgroup, linuxMutationCgroupCommand, linuxMutationCgroupEmpty, settleLinuxMutationCgroup, cleanupLinuxMutationCgroup } from './linuxMutationCgroup.js';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { extensionCommandPathEntries } from './extensions/paths.js';
@@ -187,6 +188,9 @@ interface ManagedProcessRecord extends GenericRecord {
   recoveryBootIdentity?: ManagedProcessBootIdentity | null;
   windowsControllerUnavailable?: boolean;
   windowsRecovery?: string;
+  executionInspection?: { status: string; reason: string };
+  executionInspectionPending?: boolean;
+  executionInspectionAt?: number;
   windowsRootPid?: number;
   windowsRootCreationIdentity?: string;
   ptyProcess: PtyProcess | null;
@@ -2522,7 +2526,8 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
   const previous = record.bootIdentity || record.recoveryBootIdentity;
   const rebooted = record.runtimeId !== RUNTIME_ID && boot && previous
     && previous.platform === boot.platform && previous.host === boot.host && previous.boot !== boot.boot;
-  if (record.terminationConfirmed === true || nativeComplete || rebooted) {
+  const inspected = record.executionInspection?.status === 'stopped';
+  if (record.terminationConfirmed === true || nativeComplete || rebooted || inspected) {
     const receipt = nativeComplete ? record.windowsJob?.receipt() : null;
     record.terminationConfirmed = true;
     record.rootExitConfirmed = true;
@@ -2530,6 +2535,7 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
     record.windowsControllerUnavailable = false;
     if (!record.persistenceFailureHandled) record.error = '';
     if (rebooted && !nativeComplete) record.signal = 'verified_windows_reboot';
+    if (inspected && !nativeComplete) record.signal = 'verified_execution_stopped';
     const exitCode = receipt?.rootExitCode;
     finishRecord(config, record, {
       status: nativeComplete
@@ -2542,6 +2548,21 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
   }
   if (record.persistenceFailureHandled) return;
   if (record.runtimeId === RUNTIME_ID && record.status !== 'orphaned') return;
+  if (record.windowsJob && boot && previous?.host === boot.host && !record.executionInspectionPending && Date.now() - (record.executionInspectionAt || 0) >= 5000) {
+    record.executionInspectionPending = true;
+    void inspectOwnedExecution(config, { pid: record.pid, nativeJob: record.windowsJob.ownershipReference() }).then((observation: { status: string; reason: string }) => {
+      if (record.terminationConfirmed === true) return;
+      record.executionInspection = observation;
+      record.executionInspectionAt = Date.now();
+      if (observation.status === 'stopped') reconcileWindowsJobRecord(config, record);
+      else {
+        record.windowsRecovery = observation.status === 'running'
+          ? 'The original execution is still running. Rel.AI is monitoring its owned process container.' : observation.reason;
+        safePersistMetadata(config, record);
+        notifyProcessState(record);
+      }
+    }).finally(() => { record.executionInspectionPending = false; });
+  }
   if (boot && !previous) {
     // Legacy entries have no original boot proof. Checkpoint the unresolved
     // ownership now; only a later kernel boot on this host may settle it.
@@ -2560,7 +2581,7 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
         ? 'Windows boot verification is unavailable. Reopen Rel.AI to retry verification.'
         : previous && previous.host !== boot.host
           ? 'This recovery record belongs to another computer. Reopen Rel.AI on the original computer to verify cleanup.'
-          : 'Windows still reports the same boot session recorded for this process. Choose Restart from the Windows power menu, then reopen Rel.AI to verify cleanup.';
+          : record.executionInspection?.reason || 'Rel.AI is inspecting the original execution container. A missing final receipt does not require a Windows restart.';
     const changed = record.status !== 'orphaned' || record.terminationError !== reason || record.windowsRecovery !== recovery;
     record.status = 'orphaned';
     record.endedAt = '';

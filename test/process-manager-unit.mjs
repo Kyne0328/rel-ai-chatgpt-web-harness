@@ -543,8 +543,8 @@ async function verifyWindowsJobRecovery() {
     const pending = await m.stopManagedProcess(recoveryConfig, sameBoot);
     assert.equal(pending.status, 'orphaned', 'helper disappearance on the same boot is not native job-zero proof');
     assert.equal(pending.terminationConfirmed, false);
-    assert.match(pending.recovery, /same boot session/i, 'same-boot recovery must explain why an app restart did not settle cleanup');
-    assert.match(pending.recovery, /Restart.*Windows power menu/i);
+    assert.match(pending.recovery, /execution container|queryable Windows job identity/i, 'recovery must describe the missing execution evidence');
+    assert.doesNotMatch(pending.recovery, /Choose Restart|Windows power menu/i, 'missing receipts must not prescribe a Windows reboot');
     assert.notEqual(pending.error, pending.recovery, 'the failure reason and recovery action must not repeat each other');
     assert.equal(pending.canStop, false, 'a missing controller must not advertise an ineffective Stop action');
     assert.equal(fs.existsSync(path.join(sameBoot.jobDirectory, 'control.json')), false);
@@ -552,7 +552,7 @@ async function verifyWindowsJobRecovery() {
     const checking = refreshing.readManagedProcess(recoveryConfig, sameBoot);
     await refreshing.stopManagedProcess(recoveryConfig, sameBoot);
     const refreshed = refreshing.readManagedProcess(recoveryConfig, { ...sameBoot, metadataRevision: checking.metadataRevision });
-    assert.match(refreshed.recovery, /same boot session/i, 'incremental reads must receive updated recovery guidance after boot verification');
+    assert.match(refreshed.recovery, /execution container|queryable Windows job identity/i, 'incremental reads must receive execution recovery guidance');
 
     const missingControl = fixture({ bootIdentity: boot, pid: process.pid });
     fs.rmSync(path.join(missingControl.jobDirectory, 'request.json'));

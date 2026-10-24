@@ -5,6 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { makeProcessEnvironment } from './processEnvironment.js';
 import { getStateDir } from './statePaths.js';
 import { readWindowsProcessJobArtifacts } from './windowsProcessJobArtifacts.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { prepareWslExecutionScope } from './wslExecutionScope.js';
+const execFileAsync = promisify(execFile);
 
 const HELPER = fileURLToPath(new URL('./windows-process-job.ps1', import.meta.url));
 const RECEIPT_LIMIT = 16 * 1024;
@@ -26,6 +30,11 @@ interface WindowsJobReceipt {
   readonly startupFailedBeforeCommand?: boolean;
   readonly stopReason?: string;
   readonly error?: string;
+  readonly jobName?: string;
+  readonly killOnClose?: boolean;
+  readonly outputError?: string;
+  readonly stdoutBytes?: string;
+  readonly stderrBytes?: string;
 }
 
 function completedNativeJob(receipt: WindowsJobReceipt | null): boolean {
@@ -41,6 +50,7 @@ interface JobInput {
   readonly cwd?: string;
   readonly env: Record<string, string | undefined>;
   readonly shellCommand?: string;
+  readonly durableOutput?: boolean;
 }
 
 interface NormalizedCommand {
@@ -97,6 +107,10 @@ export class WindowsProcessJob {
   readonly args: string[];
   readonly directory: string;
   readonly environment: Record<string, string | undefined>;
+  // PowerShell 5 exits before executing -File with DETACHED_PROCESS. The
+  // native companion supports detachment; fallback ownership is still safely
+  // recoverable through the same named job if its console host disappears.
+  readonly detached: boolean = false;
   private readonly nonce: string;
   private helperPid = 0;
   private completedReceipt: WindowsJobReceipt | null = null;
@@ -145,11 +159,37 @@ export class WindowsProcessJob {
         throw new Error('Native Windows companion architecture is unavailable.');
       this.executable = artifacts.executable;
       this.args = this.args.slice(this.args.indexOf('-RequestPath'));
+      this.detached = true;
     } catch { /* PowerShell compiles or loads the source-pinned owner. */ }
   }
 
   ownershipReference(): { directory: string; nonce: string } {
     return { directory: this.directory, nonce: this.nonce };
+  }
+
+  async inspect(): Promise<{ status: 'running' | 'stopped' | 'unknown'; reason: string }> {
+    if (this.outcome().exited) return { status: 'stopped', reason: 'verified-native-receipt' };
+    const receipt = this.receipt();
+    const name = 'Local\\RelAiJob-' + this.nonce;
+    if (receipt?.jobName !== name || receipt.killOnClose !== true)
+      return { status: 'unknown', reason: 'The original controller did not retain a queryable Windows job identity.' };
+    try {
+      const args = path.extname(this.executable).toLowerCase() === '.exe' && !this.args.includes('-File')
+        ? ['-InspectJob', name]
+        : [...this.args.slice(0, this.args.indexOf('-RequestPath')), '-InspectJob', name];
+      const env = { ...makeProcessEnvironment({}) };
+      for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+      const { stdout } = await execFileAsync(this.executable, args, { env, windowsHide: true, encoding: 'utf8', timeout: 5000, maxBuffer: 4096 });
+      const observed = JSON.parse(stdout);
+      if (observed.protocol !== PROTOCOL || observed.jobName !== name || !Number.isSafeInteger(observed.activeProcesses)
+        || observed.activeProcesses < -1) throw new Error('Invalid Windows job inspection response.');
+      if (observed.activeProcesses === 0 && receipt.commandStarted !== true)
+        return { status: 'unknown', reason: 'The controller has not yet published command admission; an empty job may still receive its root process.' };
+      return { status: observed.activeProcesses > 0 ? 'running' : 'stopped',
+        reason: observed.activeProcesses === -1 ? 'verified-native-job-destroyed' : 'verified-native-job-membership' };
+    } catch (error) {
+      return { status: 'unknown', reason: `Windows job inspection failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
 
   bind(pid: number | null | undefined): void {
@@ -232,8 +272,12 @@ export async function prepareWindowsProcessJob(config: Record<string, unknown>, 
   const directory = fs.mkdtempSync(path.join(root, 'job-'));
   const nonce = crypto.randomBytes(32).toString('hex');
   try {
+    const guest = input.durableOutput && normalized
+      ? prepareWslExecutionScope(executable, normalized.commandArguments, directory, nonce) : null;
     fs.writeFileSync(path.join(directory, 'request.json'), JSON.stringify({
-      protocol: PROTOCOL, nonce, executable, args: normalized?.commandArguments || [], cwd,
+      protocol: PROTOCOL, nonce, jobName: 'Local\\RelAiJob-' + nonce, executable, args: guest?.args || normalized?.commandArguments || [], cwd,
+      ...(guest ? { guestScope: guest.identity } : {}),
+      ...(input.durableOutput ? { durableOutput: true } : {}),
       environmentTransportKey: 'REL_AI_JOB_ENV_' + nonce,
       ...(normalized?.options.argv0 ? { argv0: normalized.options.argv0 } : {}),
       ...(normalized?.options.windowsVerbatimArguments === true ? { windowsVerbatimArguments: true } : {}),

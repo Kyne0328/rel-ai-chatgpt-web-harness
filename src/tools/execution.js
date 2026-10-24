@@ -218,7 +218,8 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
               () => maybeStartSession(config, executionName, effectiveArgs || {}, { taskId })
             );
             const handled = await (workspace && !directFilesystem && isMutationScope(queueScope)
-              ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal), workspace.path)
+              ? runWithMutationProcessOwnership(config, workspace.alias, () => invokeHandler(effectiveArgs, watchdog.signal), workspace.path,
+                { taskId, operationId: String(finishActivity?.operationId || context?.requestId || '') })
               : invokeHandler(effectiveArgs, watchdog.signal));
             if (workspace && isMutationScope(queueScope) && hasUnconfirmedTermination(handled)
               && !hasDurableMutationOwnership(config, workspace)) {

@@ -1,41 +1,41 @@
 {
   "protocol": 1,
   "runtime": "nativeaot-win-x64",
-  "nativeSourceSha256": "c63e2a2b2756fc30b8bc452dffe4c635b431373ac1c1860dd8812b38bef73bdf",
-  "hostSourceSha256": "8a4523cdc8fef2dad1b7d183924084c26c2d0f768ddabedf13f719a3dd8447e0",
+  "nativeSourceSha256": "e8953e4bb074e83dbab5abf69e6eae5ba90031197f401cea2446fdf95719c978",
+  "hostSourceSha256": "de7bee57027540351dcc9bbff748cc7d2b9c130af28c1023403f51bcc6db2eb0",
   "projectSourceSha256": "bc8608908ae38e3c0fe3b68a54ed2f3ce7dee0180702a045adef5f4dd85cc9f9",
-  "binarySha256": "60b243b3f101d0bd0f533d6f6741f7eb149217f09f886026ba73d23ba867e67d",
-  "binaryBytes": 1458176,
+  "binarySha256": "47f949907d31dea53265de7494fdf63fc9a6c9b11465eefb03955d0322a8f7d5",
+  "binaryBytes": 2063360,
   "provenance": {
     "fallback": {
-      "compilerVersion": "4.8.9221.0 built by: NET481REL1LAST_25H2",
+      "compilerVersion": "14.8.10001.0 built by: bd501acdc000004",
       "compilerOptions": "/optimize+ /platform:anycpu",
-      "powershell": "5.1.26100.9549",
-      "compilerSha256": "46809206887326d2d24db1eff1f3064de972c3451abe766b49111450a5e08e00",
+      "powershell": "5.1.26100.9711",
+      "compilerSha256": "eca02e6b15cde93009a59a3d129d5a77fb5008f2e1cf62cf573b6737c747ecc3",
       "references": [
         {
-          "sha256": "5bffb20e1217bad314143d7e5c4c809bf9f522e8a0a063c8e7e9b25113de26eb",
-          "version": "4.8.9345.0 built by: NET481REL1LAST_25H2_C",
+          "sha256": "94715f6991e2b9dc7481532c05aa99e74a5fff4ee147be541bca27f99e003fc7",
+          "version": "4.8.10008.0 built by: d5c29ab0c000001",
           "identity": "mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
         },
         {
-          "sha256": "2b3c17c6208a0b4b6beb94e1a066f99ba06cdb2ea919479e99d47e8c6d96dc71",
-          "version": "4.8.9340.0 built by: NET481REL1LAST_25H2_B",
+          "sha256": "09787b4f38f4f020c6b8a3894146085d4df7b8ae337577ed42d9acf1419660e8",
+          "version": "4.8.10001.0 built by: 5f296df0c000005",
           "identity": "System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
         },
         {
-          "sha256": "fd1097aed825d392a5dc8d19384381d4bb2a43498ea1c9d917f5d80c66600e1b",
-          "version": "4.8.9347.0 built by: NET481REL1LAST_25H2_B",
+          "sha256": "d1bafee1a4dd7e7bd9adf6859e7b1b654d1b4e0d031a38795e33ba040508c09d",
+          "version": "4.8.10008.0 built by: d5c29ab0c000000",
           "identity": "System.Core, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
         },
         {
-          "sha256": "83e2bfce895a7ba9138c470e5983d05ada404cb7c4cabc0d3c7f52a2d08b80af",
-          "version": "4.8.9340.0 built by: NET481REL1LAST_25H2_B",
+          "sha256": "fd5bac1dbe02bc0e91eabdbaefb102f44c1a391269b856d97c39cef9851cb983",
+          "version": "4.8.10008.0 built by: d5c29ab0c000000",
           "identity": "System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
         },
         {
-          "sha256": "ad9336320a8237f4a11504a87e9f4fda27182456b22773d64f0fd544ea650aee",
-          "version": "4.8.9340.0 built by: NET481REL1LAST_25H2_B",
+          "sha256": "7f30c677ba8781ee42dd50f6f56ed787679ff48be91e66f5b8d186f9f4931782",
+          "version": "4.8.10008.0 built by: d5c29ab0c000000",
           "identity": "System.Runtime.Serialization, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089"
         }
       ],

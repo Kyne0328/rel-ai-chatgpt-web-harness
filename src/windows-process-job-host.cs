@@ -74,6 +74,12 @@ public static class RelAiJobController {
         return true;
     }
     static void WriteReceipt() {
+        if (owner != null && Get(receipt, "final") is bool && (bool)receipt["final"]) {
+            owner.FinishOutput();
+            receipt["stdoutBytes"] = owner.OutputBytes.ToString(CultureInfo.InvariantCulture);
+            receipt["stderrBytes"] = owner.ErrorBytes.ToString(CultureInfo.InvariantCulture);
+            receipt["outputError"] = owner.OutputError;
+        }
         receipt["sequence"] = (int)receipt["sequence"] + 1;
         receipt["updatedAt"] = DateTime.UtcNow.ToString("o");
         string temporary = receiptPath + "." + GetCurrentProcessId() + ".tmp";
@@ -142,6 +148,16 @@ public static class RelAiJobController {
         return values;
     }
     public static int Main(string[] args) {
+        if (args.Length == 2 && args[0] == "-InspectJob") {
+            try {
+                int count = RelAiOwnedJob.Inspect(args[1]);
+                receipt = new Dictionary<string, object> {
+                    {"protocol", 1}, {"jobName", args[1]}, {"activeProcesses", count}
+                };
+                Console.Out.Write(Utf8.GetString(ReceiptJson()));
+                return 0;
+            } catch (Exception error) { Console.Error.Write(error.Message); return 125; }
+        }
         mainEntered = DateTime.UtcNow.Ticks;
         profile = Environment.GetEnvironmentVariable("REL_AI_JOB_PROFILE") == "1";
         return Run(args);
@@ -181,7 +197,13 @@ public static class RelAiJobController {
             object raw = Get(request, "rawCommandLine");
             if (raw != null && (!(raw is string) || !String.Equals(Path.GetFileName(executable), "cmd.exe", StringComparison.OrdinalIgnoreCase)))
                 throw new ArgumentException("rawCommandLine is restricted to the prepared cmd.exe shell path");
-            owner = new RelAiOwnedJob();
+            string jobName = Get(request, "jobName") as string;
+            if (Get(request, "jobName") != null && !String.Equals(jobName, "Local\\RelAiJob-" + nonce, StringComparison.Ordinal))
+                throw new ArgumentException("Invalid owned-job name binding");
+            owner = jobName == null ? new RelAiOwnedJob() : new RelAiOwnedJob(jobName);
+            receipt["jobName"] = jobName; receipt["killOnClose"] = true;
+            if (Get(request, "durableOutput") is bool && (bool)request["durableOutput"])
+                owner.DurableOutput(Path.GetDirectoryName(paths["-RequestPath"]));
             Mark("jobCreated");
             WriteReceipt(); // The private metadata destination must work before caller code.
             Mark("initialReceiptWritten");

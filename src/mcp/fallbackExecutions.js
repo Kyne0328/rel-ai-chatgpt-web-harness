@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import { readJsonFile, writeJsonAtomic } from '../durableState.ts';
 import { getStateDir } from '../statePaths.js';
 import { readTaskBackgroundOperation, readTaskBackgroundOperations, recordTaskBackgroundOperation } from '../taskHistoryStore.ts';
+import { listMutationProcessRecords } from '../mutationProcessOwnership.js';
 import { sanitizeTaskRecord } from '../taskObservability.js';
 import { retainOutputStreams } from '../outputSpill.js';
 import { FALLBACK_EXECUTION_STATUS } from './contracts.ts';
@@ -636,6 +637,7 @@ function publicFallbackRecord(record, now = Date.now) {
     ...(record.noticePersistenceError ? { noticePersistenceError: record.noticePersistenceError } : {}),
     ...(record.phase ? { phase: record.phase } : {}),
     ...(record.timeline ? { timeline: record.timeline } : {}),
+    ...(record.executionRecovery ? { executionRecovery: record.executionRecovery } : {}),
     ...(record.resultRetention ? { resultRetention: record.resultRetention } : {}),
     ...(record.persistedResultCompacted ? { persistedResultCompacted: true } : {}),
     startedAt: record.startedAt,
@@ -942,6 +944,15 @@ function recoverPersistedFallback(config, reference, now = Date.now, previous = 
   const persisted = previous || readPersistedFallback(config, reference);
   if (!persisted) return null;
   if (persisted.status !== FALLBACK_EXECUTION_STATUS.RUNNING) return persisted;
+  // The durable execution owner outlives its request handler. Its absence from
+  // this runtime's Promise map does not prove the subprocess stopped.
+  const workspacePath = config?.workspaces?.[persisted.workspace]?.path;
+  if (workspacePath) {
+    const owners = listMutationProcessRecords(config, persisted.workspace, workspacePath);
+    const pending = owners.some(owner => owner.operationId === persisted.operationId && owner.taskId === persisted.workId);
+    if (pending) return { ...persisted, phase: 'reconciling', executionRecovery: persisted.executionRecovery
+      || { status: 'unknown', reason: 'Rel.AI is reconnecting the durable execution owner.' } };
+  }
   const timestamp = timeValue(now);
   const interrupted = {
     ...persisted,
@@ -974,6 +985,7 @@ function hydratePersistedRecord(record) {
     status: String(record.status || ''),
     phase: String(record.phase || ''),
     timeline: record.timeline || null,
+    executionRecovery: record.executionRecovery || null,
     deadlineAtMs: Number(record.deadlineAtMs || 0),
     startedAt: String(record.startedAt || ''),
     startedAtMs: Date.parse(record.startedAt) || 0,
@@ -1012,6 +1024,7 @@ function persistentFallbackRecord(record) {
     status: record.status,
     ...(record.phase ? { phase: record.phase } : {}),
     ...(record.timeline ? { timeline: record.timeline } : {}),
+    ...(record.executionRecovery ? { executionRecovery: record.executionRecovery } : {}),
     ...(record.resultRetention ? { resultRetention: record.resultRetention } : {}),
     ...(record.persistedResultCompacted ? { persistedResultCompacted: true } : {}),
     ...(Number(record.deadlineAtMs) > 0 ? { deadlineAtMs: Math.floor(Number(record.deadlineAtMs)) } : {}),
@@ -1117,6 +1130,13 @@ function clearFallbackPersistenceRetry(operationId) {
 }
 
 function reconcileLiveFallback(config, record) {
+  if (record && !record.promise && record.workId && record.status === FALLBACK_EXECUTION_STATUS.RUNNING) {
+    const canonical = readTaskBackgroundOperations(config, record.workId).find(value => value.operationId === record.operationId);
+    if (canonical && (canonical.revision > record.revision || canonical.executionRecovery?.status !== record.executionRecovery?.status)) {
+      Object.assign(record, hydratePersistedRecord(canonical));
+      record.stateRoot = getStateDir(config);
+    }
+  }
   if (!record || (!record.pointerRepairPending && !record.persistenceError && record.durability !== 'memory_only' && record.durability !== 'journaled')) return;
   const now = Date.now();
   if (now - Number(record.lastPersistenceReconcileAtMs || 0) < 1000) return;

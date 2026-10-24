@@ -14,6 +14,7 @@ import { getStateDir } from './statePaths.js';
 import { traceContextEnvironment } from './telemetry.js';
 import { createOutputSpillWriter } from './outputSpill.js';
 import { acquireHostResource } from './hostResourceScheduler.js';
+import { observeDurableProcessOutput } from './durableProcessOutput.js';
 import { attachCurrentMutationProcessCgroup, attachCurrentMutationProcessJob, clearCurrentMutationProcess, markCurrentMutationProcessUncertain, prepareCurrentMutationProcess, recordCurrentMutationProcess, runWithoutMutationProcessOwnership } from './mutationProcessOwnership.js';
 
 const internalObservationOutcomes = new WeakSet<object>();
@@ -475,6 +476,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
   let pendingTerminationOwner: { pid: number; file: string | null; safeToRecheck: boolean } | null = null;
   let failureCleanup: (() => Promise<boolean>) | null = null;
   let windowsJob: WindowsProcessJob | null = null;
+  let durableOutput: ReturnType<typeof observeDurableProcessOutput> | null = null;
   let mutationProcessFile: string | null = null;
   let linuxCgroup: { directory: string; nonce: string } | null = null;
   let ownedControllerClosed = false;
@@ -619,6 +621,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
           executable: shell ? (process.env.ComSpec || String.raw`C:\Windows\System32\cmd.exe`) : executable,
           args: shell ? [] : processArgs, env: childEnvironment,
           ...(options.cwd ? { cwd: options.cwd } : {}),
+          durableOutput: Boolean(mutationProcessFile),
           ...(shell ? { shellCommand: file } : {})
         });
         if (mutationProcessFile) attachCurrentMutationProcessJob(windowsJob.ownershipReference(), mutationProcessFile);
@@ -638,7 +641,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       const linuxLaunch = linuxCgroup ? linuxMutationCgroupCommand(linuxCgroup, file, processArgs) : null;
       subprocess = execa(windowsJob?.executable || linuxLaunch?.executable || file,
         windowsJob?.args || linuxLaunch?.args || (shell ? [] : processArgs),
-        windowsJob ? { ...execaOptions, shell: false, env: windowsJob.environment }
+        windowsJob ? { ...execaOptions, shell: false, detached: Boolean(mutationProcessFile) && windowsJob.detached, env: windowsJob.environment }
           : linuxLaunch ? { ...execaOptions, shell: false } : execaOptions);
       windowsJob?.bind(subprocess.pid);
     } catch (error) {
@@ -698,6 +701,13 @@ async function runProcess(command: string, args: readonly string[] = [], options
       if (timeoutMs > 0) windowsTimeoutTimer = setTimeout(() => requestWindowsTermination('timeout'), timeoutMs);
     }
     const mutationProcessRecorded = Boolean(recordCurrentMutationProcess(subprocess.pid, mutationProcessFile));
+    durableOutput = windowsJob && mutationProcessFile ? observeDurableProcessOutput(windowsJob.directory,
+      (stream: string, buffer: Buffer) => {
+        if (stream === 'stdout') { stdoutBytes += buffer.length; stdoutBuffer.append(buffer); }
+        else { stderrBytes += buffer.length; stderrBuffer.append(buffer); }
+      }, async () => {
+        await Promise.all([stdoutSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES), stderrSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES)]);
+      }) : null;
     const stdoutBackpressure = createOutputBackpressure(subprocess.stdout, stdoutSpill);
     const stderrBackpressure = createOutputBackpressure(subprocess.stderr, stderrSpill);
     subprocess.stdout?.on('data', (chunk: Buffer | string) => {
@@ -762,11 +772,18 @@ async function runProcess(command: string, args: readonly string[] = [], options
       stderrBackpressure.release();
     }
     windowsTerminationOutcome ||= windowsTermination.promise ? await windowsTermination.promise : null;
+    const durableOutputError = await durableOutput?.finish() || '';
     const signalTimedOut = isTimeoutAbort(options.signal)
       && (windowsTermination.kind === 'timeout' || result.isCanceled === true);
     const timedOut = windowsTermination.kind === 'timeout' || result.timedOut === true || signalTimedOut;
     const cancelled = !timedOut && (windowsTermination.kind === 'cancel' || result.isCanceled === true);
     const nativeReceipt = windowsJob?.receipt();
+    const retainedStdoutBytes = stdoutBytes, retainedStderrBytes = stderrBytes;
+    if (durableOutput) {
+      const nativeStdout = Number(nativeReceipt?.stdoutBytes), nativeStderr = Number(nativeReceipt?.stderrBytes);
+      if (Number.isSafeInteger(nativeStdout) && nativeStdout >= stdoutBytes) stdoutBytes = nativeStdout;
+      if (Number.isSafeInteger(nativeStderr) && nativeStderr >= stderrBytes) stderrBytes = nativeStderr;
+    }
     let terminationOutcome = windowsTerminationOutcome || (windowsJob ? (executed ? windowsJob.outcome() : { exited: true, forced: false }) : null) || (linuxCgroup ? await settleLinuxMutationCgroup(linuxCgroup, forceWaitMs) : null) || ((timedOut || cancelled)
       ? await terminateProcessTree(subprocess, { graceMs: 0, forceWaitMs })
       : inheritedPipeDrain
@@ -824,9 +841,9 @@ async function runProcess(command: string, args: readonly string[] = [], options
     ]);
     const outputFinalizationTimedOut = stdoutSpillResult?.finalizationTimedOut === true
       || stderrSpillResult?.finalizationTimedOut === true;
-    const outputFinalizationError = outputFinalizationTimedOut
+    const outputFinalizationError = durableOutputError || nativeReceipt?.outputError || (outputFinalizationTimedOut
       ? `Output retention timed out after ${outputFinalizationTimeoutMs}ms; retained output may be incomplete.`
-      : '';
+      : '');
     if (outputFinalizationTimedOut) stderrBuffer.append(`\n[rel-ai-mcp ${outputFinalizationError}]\n`);
     reportPhase('drained', {
       ...(terminationOutcome ? { terminationConfirmed: terminationOutcome.exited } : {}),
@@ -872,8 +889,8 @@ async function runProcess(command: string, args: readonly string[] = [], options
       durationMs: Number(result.durationMs || 0),
       stdoutBytes,
       stderrBytes,
-      stdoutTruncated: stdoutBuffer.truncated,
-      stderrTruncated: stderrBuffer.truncated,
+      stdoutTruncated: stdoutBuffer.truncated || stdoutBytes > retainedStdoutBytes,
+      stderrTruncated: stderrBuffer.truncated || stderrBytes > retainedStderrBytes,
       ...(stdoutSpillResult ? {
         ...(stdoutSpillResult.outputRef ? { stdoutOutputRef: stdoutSpillResult.outputRef } : {}),
         stdoutSpillTruncated: stdoutSpillResult.spillTruncated === true
@@ -912,6 +929,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
     }
     throw cause;
   } finally {
+    await durableOutput?.finish();
     if (!retainResourceLease) {
       resourceLease?.release();
       if (windowsJob && !executed) fs.rmSync(windowsJob.directory, { recursive: true, force: true });

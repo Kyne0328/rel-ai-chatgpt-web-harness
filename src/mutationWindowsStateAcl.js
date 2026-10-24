@@ -49,17 +49,25 @@ async function privatelyOwnedWindowsPaths(files) {
     const exe = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
     for (let i = 0; i < unknown.length; i += 32) {
       const batch = unknown.slice(i, i + 32);
-      const before = batch.map(fingerprint);
-      const { stdout } = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
-        env: { ...process.env, RELAI_MUTATION_ACL_PATHS: JSON.stringify(batch) },
-        encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
-      });
-      if (stdout !== 'OK') return false;
-      const at = Date.now();
-      for (let j = 0; j < batch.length; j++) {
-        if (fingerprint(batch[j]) !== before[j]) return false;
-        checked.set(batch[j], { stamp: before[j], at });
+      const env = { ...process.env, RELAI_MUTATION_ACL_PATHS: JSON.stringify(batch) };
+      // A PowerShell 7 module path can make Windows PowerShell 5 unable to
+      // load Get-Acl. Resolve its native modules in the probe's own runtime.
+      for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+      let verified = false;
+      // A controller may atomically publish its startup receipt while ACLs
+      // are sampled. Retry changed metadata; never cache a mismatched proof.
+      for (let attempt = 0; attempt < 3 && !verified; attempt++) {
+        const before = batch.map(fingerprint);
+        const { stdout } = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
+          env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
+        });
+        if (stdout !== 'OK') return false;
+        if (batch.some((file, index) => fingerprint(file) !== before[index])) continue;
+        const at = Date.now();
+        for (let j = 0; j < batch.length; j++) checked.set(batch[j], { stamp: before[j], at });
+        verified = true;
       }
+      if (!verified) return false;
     }
     if (checked.size > 5000) checked.clear();
     return true;
