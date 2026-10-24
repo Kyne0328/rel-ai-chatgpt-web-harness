@@ -405,15 +405,35 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
   assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).deferred, true,
     'the browser bridge must also stop retained-page reads during the account cooldown');
   const requestsBeforeStatus = goalSession.requests.length;
-  assert.equal((await host.getGoalLoginStatus()).state, 'unverified');
+  const throttledStatus = await host.getGoalLoginStatus();
+  assert.equal(throttledStatus.state, 'signed_in', 'cooldown must not discard a still-valid verified account');
+  assert.ok(throttledStatus.account, 'the verified account identity remains available during cooldown');
   assert.equal(goalSession.requests.length, requestsBeforeStatus,
     'automatic sign-in checks must respect the account cooldown');
+  mock.timers.tick(61_000);
+  assert.equal((await host.getGoalLoginStatus()).state, 'checking',
+    'once the verified cache expires, a cooldown is pending verification, not proof of sign-out');
+  assert.equal(goalSession.requests.length, requestsBeforeStatus,
+    'pending verification must not bypass the ChatGPT cooldown');
   await host.signOutGoalLogin();
   mock.timers.tick(180_000);
   assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).status, 401,
     'sign-out must invalidate authentication cached for goal reads');
   await host.closeAll();
   mock.timers.reset();
+}
+
+{
+  const { host, pathSessions } = createHarness({
+    goalLoginProfileDirectory: path.join(os.tmpdir(), 'relai-goal-auth-rate-limit-fixture')
+  });
+  await host.getGoalLoginStatus();
+  const goalSession = [...pathSessions.values()][0];
+  goalSession.fetch = async () => new Response('', { status: 429, headers: { 'retry-after': '60' } });
+  const status = await host.getGoalLoginStatus({ refresh: true });
+  assert.equal(status.state, 'checking', 'a throttled ChatGPT authentication endpoint is not evidence of sign-out');
+  assert.ok(status.retryAfterMs >= 60_000, 'the UI must receive the retry delay for the pending verification');
+  await host.closeAll();
 }
 
 {

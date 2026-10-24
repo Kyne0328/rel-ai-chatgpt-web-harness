@@ -251,6 +251,15 @@ app.whenReady().then(async () => {
       location.hash = '#code?task=retained-task&file=src%2Fretained.js';
       await until(() => document.querySelector('[data-code-task]')?.value === 'retained-task' && document.querySelector('[data-code-file="src/retained.js"]') && document.querySelector('.monaco-diff-editor'), 'retained task without aggregate summaries');
       result.retainedTaskWithoutSummaries = [...document.querySelectorAll('[data-code-task] option')].map(option => option.value);
+      location.hash = '#code?task=historical-task&file=src%2Fretained.js';
+      await until(() => document.querySelector('[data-code-task]')?.value === 'historical-task'
+        && document.querySelector('[data-code-editor]')?.textContent.includes('original diff is unavailable'), 'historical task recorded files');
+      result.historicalDiffUnavailable = {
+        recordedFileVisible: Boolean(document.querySelector('[data-code-file="src/retained.js"]')),
+        contextPreserved: new URLSearchParams(location.hash.split('?')[1]).get('file') === 'src/retained.js',
+        noRawIpcError: !document.querySelector('[data-code-editor][role="alert"]'),
+        noUnverifiedDiffRequest: window.relaiCodeProbe.historicalDiffRequests() === 0
+      };
       snapshot = { ...snapshot, tasks: aggregateTasks };
       listeners.forEach(listener => listener());
       location.hash = '#tasks?task=probe-task';

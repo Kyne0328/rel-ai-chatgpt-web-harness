@@ -249,7 +249,8 @@ function GoalModeAccount({ browser, connectionsRevision }) {
   const connections = status?.connections;
   const selected = Array.isArray(connections) ? connections.find(item => item.tunnelId === selectedTunnelId) : status;
   useEffect(() => {
-    if (!selected?.browserOpen || selected.state === 'signed_in') return undefined;
+    if (!selected || selected.state === 'signed_in'
+      || (!selected.browserOpen && !(selected.state === 'checking' && selected.retryAfterMs))) return undefined;
     let disposed = false;
     let timer;
     const check = async () => {
@@ -262,9 +263,9 @@ function GoalModeAccount({ browser, connectionsRevision }) {
       catch { /* The current refresh reports its own error; stale reads are ignored. */ }
       if (!disposed) timer = setTimeout(check, delay);
     };
-    timer = setTimeout(check, 2_000);
+    timer = setTimeout(check, Math.max(2_000, Number(selected.retryAfterMs || 0)));
     return () => { disposed = true; clearTimeout(timer); invalidateRequests(); };
-  }, [refresh, selectedTunnelId, selected?.browserOpen, selected?.state, invalidateRequests]);
+  }, [refresh, selectedTunnelId, selected, invalidateRequests]);
   if (typeof browser?.goalLoginStart !== 'function') return null;
   const act = async (action, method) => {
     setBusy(action);
@@ -283,7 +284,7 @@ function GoalModeAccount({ browser, connectionsRevision }) {
   };
   const state = selected?.state || (error ? 'load_error' : 'checking');
   const label = state === 'signed_in' ? 'Signed in' : state === 'sign_in_required' ? 'Not signed in'
-    : state === 'disabled' ? 'Connection disabled' : state === 'unavailable' ? 'Unavailable' : state === 'checking' ? 'Checking sign-in' : state === 'load_error' ? 'Could not load sign-in' : 'Not verified';
+    : state === 'disabled' ? 'Connection disabled' : state === 'unavailable' ? 'Unavailable' : state === 'checking' ? 'Checking sign-in' : state === 'load_error' ? 'Could not load sign-in' : 'Verification unavailable';
   const account = selectedTunnelId ? { tunnelId: selectedTunnelId } : undefined;
   const unavailable = Boolean(busy) || refreshing || !status || (Array.isArray(connections) && (!selected || selected.enabled === false));
   const tone = state === 'signed_in' ? 'good' : state === 'checking' ? 'working'
@@ -305,12 +306,13 @@ function GoalModeAccount({ browser, connectionsRevision }) {
           connections.map(item => h('option', { key: item.tunnelId, value: item.tunnelId }, item.label || item.tunnelId)))) : null,
         h('div', { className: 'connection-goal-copy' },
           h('span', null, 'ChatGPT account'),
-          h('strong', { className: 'connection-goal-identity' }, selected?.account?.email || selected?.account?.name || 'No verified account'),
+          h('strong', { className: 'connection-goal-identity' }, selected?.account?.email || selected?.account?.name
+            || (state === 'signed_in' ? 'Verified ChatGPT account' : state === 'checking' ? 'Checking account…' : state === 'unverified' ? 'Verification unavailable' : 'No verified account')),
           h('p', { className: 'settings-help' }, 'Use the ChatGPT account that owns this tunnel.')
         )
       ),
       h('div', { className: 'connection-goal-controls' },
-        state !== 'signed_in' || selected?.browserOpen
+        state === 'sign_in_required' || state === 'unverified' || selected?.browserOpen
           ? h('button', { className: 'primary', type: 'button', disabled: unavailable, onClick: () => { void act('sign-in', () => browser.goalLoginStart(account)); } }, busy === 'sign-in' ? 'Opening…' : selected?.browserOpen ? 'Open sign-in' : 'Sign in to ChatGPT') : null,
         h('button', { className: 'secondary', type: 'button', disabled: Boolean(busy) || refreshing || typeof browser?.goalLoginStatus !== 'function', onClick: () => { void refresh(status ? { ...account, refresh: true } : undefined).catch(() => {}); } }, refreshing ? 'Checking…' : error ? 'Retry sign-in status' : 'Refresh sign-in'),
         state === 'signed_in' || state === 'unverified' || selected?.browserOpen

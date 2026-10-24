@@ -38,7 +38,7 @@ import {
 import { getOverlaySnapshot, removeToastOverlay, subscribeOverlay } from '../overlay-store.js';
 import { getUiPreferences, setThemePreference } from '../preferences.js';
 import { normalizeRouteKey } from '../route-policy.js';
-import { getRouteSnapshot, getWorkspaceFilter, initRouter, routeHref, subscribeRoute } from '../router.js';
+import { getRouteSnapshot, initRouter, subscribeRoute } from '../router.js';
 export { initConnectorRefreshModal } from '../connector-refresh-modal.js';
 export { initUpdateAvailableModal } from '../update-available-modal.js';
 export { applyLiveEvent, getSnapshot, init, patchLocalConnection, subscribe } from '../store.js';
@@ -363,7 +363,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   const revisionKey = JSON.stringify(data?.live?.revisions || {});
 
   return h(React.Fragment, null,
-    h(WindowTitlebar, { desktop, title: route.title }),
+    h(WindowTitlebar, { desktop }),
     h('a', {
       href: '#main',
       className: 'skip-link',
@@ -394,20 +394,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
         h(MobileNavigation, { extensionsEnabled, open: mobileMoreOpen, route, setOpen: setMobileMoreOpen }),
         h('header', { className: 'topbar' },
           h('div', { className: 'title-wrap' },
-            h('nav', { className: 'topbar-breadcrumbs', 'aria-label': 'Breadcrumb' },
-              h('ol', { className: 'breadcrumb-list' },
-                h('li', { className: 'breadcrumb-item' },
-                  h('a', {
-                    className: 'breadcrumb-link',
-                    href: routeHref('home')
-                  }, route.workspace || getWorkspaceFilter() || 'Rel.AI')
-                ),
-                h('li', { className: 'breadcrumb-separator', 'aria-hidden': 'true' }, '/'),
-                h('li', { className: 'breadcrumb-item' },
-                  h('span', { className: 'breadcrumb-current', 'aria-current': 'page' }, route.title)
-                )
-              )
-            ),
             h('h1', { className: 'page-title', id: 'pageTitle', tabIndex: -1 }, route.title),
             h('div', { className: 'page-subtitle', id: 'subtitle' }, route.description)
           ),
@@ -601,7 +587,7 @@ function NavIcon({ item }) {
   return h(Icon, { className: 'nav-icon', name: item.icon });
 }
 
-function WindowTitlebar({ desktop, title }) {
+function WindowTitlebar({ desktop }) {
   const [state, setState] = useState(() => normalizeWindowState({
     platform: document.documentElement.dataset.platform || 'other',
     customTitleBar: document.documentElement.dataset.windowChrome === 'custom',
@@ -630,8 +616,7 @@ function WindowTitlebar({ desktop, title }) {
   return h('header', { className: 'window-titlebar', id: 'windowTitlebar', 'aria-label': 'Application title bar' },
     h('div', { className: 'window-titlebar-identity', 'aria-hidden': 'true' },
       h('img', { src: '/public/assets/relai-logo.png', alt: '', 'aria-hidden': 'true', width: 193, height: 187 }),
-      h('strong', null, 'Rel.AI MCP'),
-      h('span', { id: 'windowContext' }, title)
+      h('strong', null, 'Rel.AI MCP')
     ),
     h('div', { className: 'window-titlebar-drag', 'aria-hidden': 'true' }),
     h('div', {

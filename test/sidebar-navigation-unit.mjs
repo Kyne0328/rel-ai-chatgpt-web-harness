@@ -40,18 +40,10 @@ assert.match(appCss, /\.sidebar-navigation/);
 assert.match(appCss, /\.sidebar-utilities/);
 assert.doesNotMatch(settingsCss, /\.settings-rail\b/, 'Settings must not reintroduce a redundant in-page navigation rail');
 
-// Topbar breadcrumb navigation hierarchy
-assert.match(reactShell, /className:\s*'topbar-breadcrumbs'/, 'Topbar must include accessible breadcrumb container');
-assert.match(reactShell, /'aria-label':\s*'Breadcrumb'/, 'Breadcrumbs must declare aria-label="Breadcrumb"');
-assert.match(reactShell, /className:\s*'breadcrumb-list'/, 'Breadcrumbs must render breadcrumb-list');
-assert.match(reactShell, /className:\s*'breadcrumb-separator'/, 'Breadcrumbs must render breadcrumb-separator');
-assert.match(reactShell, /className:\s*'breadcrumb-current'/, 'Breadcrumbs must render breadcrumb-current');
-assert.match(reactShell, /'aria-current':\s*'page'/, 'Active breadcrumb page must set aria-current="page"');
+// The sidebar identifies the route; only the main heading repeats it for page context.
+assert.doesNotMatch(reactShell, /topbar-breadcrumbs|breadcrumb-current|windowContext/, 'Do not duplicate the current page in the breadcrumb or window chrome');
 assert.match(reactShell, /h\('h1',\s*\{\s*className:\s*'page-title',\s*id:\s*'pageTitle'/, 'h1.page-title#pageTitle must remain intact');
-assert.match(appCss, /\.topbar-breadcrumbs\b/, 'app.css must style .topbar-breadcrumbs');
-assert.match(appCss, /\.breadcrumb-list\b/, 'app.css must style .breadcrumb-list');
-assert.match(appCss, /\.breadcrumb-separator\b/, 'app.css must style .breadcrumb-separator');
-assert.match(appCss, /\.breadcrumb-current\b/, 'app.css must style .breadcrumb-current');
+assert.doesNotMatch(appCss, /\.topbar-breadcrumbs\b|\.breadcrumb-current\b/, 'Do not keep unused breadcrumb styles');
 
 // Command Palette multi-category search indexing & token matching
 const { buildCommands, commandMatchesQuery, normalizeSearch, rankCommands, DesktopSidebar } = await import('../src/ui/react/main.js');

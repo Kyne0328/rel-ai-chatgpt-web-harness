@@ -69,6 +69,9 @@ try {
   assert.deepEqual(result.unavailableTaskContext, { selected: 'unavailable-task', routeTask: 'unavailable-task', routeFile: 'src/retained.js', errorIdentifiesTask: true, returnTask: 'unavailable-task' }, 'unavailable task changes must retain the requested context and expose recovery');
   assert.equal(result.unavailableTaskRecovered, true, 'Retry must load the same requested task after a transient failure');
   assert.deepEqual(result.retainedTaskWithoutSummaries, ['retained-task'], 'an explicit retained task must be resolvable when the aggregate has no tasks');
+  assert.deepEqual(result.historicalDiffUnavailable, {
+    recordedFileVisible: true, contextPreserved: true, noRawIpcError: true, noUnverifiedDiffRequest: true
+  }, 'older tasks with no verified commit must retain file navigation without attempting an unsafe diff');
   assert.deepEqual(result.taskFileHrefs, [
     '#code?task=probe-task&file=src%2Fexample.js&from=tasks',
     '#code?task=probe-task&file=src%2Fnew.js&from=tasks'

@@ -176,16 +176,6 @@
   :root[data-platform="darwin"] .window-titlebar-identity { padding-left: 82px; }
   .window-titlebar-identity img { width: 28px; height: 28px; padding: 4px; border: 1px solid var(--ui-brand-mark-border); border-radius: 7px; background: var(--ui-brand-mark-surface); object-fit: contain; box-shadow: var(--ui-brand-mark-shadow); }
   .window-titlebar-identity strong { flex: 0 0 auto; color: var(--ui-text-primary); font-size: 12px; letter-spacing: -.01em; }
-  .window-titlebar-identity span {
-    min-width: 0;
-    max-width: 320px;
-    overflow: hidden;
-    color: var(--ui-text-tertiary);
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .window-titlebar-identity span::before { content: "·"; margin-right: 8px; color: var(--ui-border-default); }
   .window-titlebar-drag { min-width: 24px; flex: 1; align-self: stretch; }
   .window-titlebar-controls {
     display: none;
@@ -293,36 +283,6 @@
     box-shadow: var(--ui-shadow-topbar);
   }
   .title-wrap { @apply min-w-0 flex-1 py-0.5; }
-  .topbar-breadcrumbs {
-    @apply mb-1 flex min-w-0 items-center text-xs;
-  }
-  .breadcrumb-list {
-    @apply m-0 flex min-w-0 flex-wrap items-center p-0 list-none;
-    gap: var(--space-1);
-  }
-  .breadcrumb-item {
-    @apply inline-flex min-w-0 items-center;
-  }
-  .breadcrumb-link {
-    color: var(--ui-text-secondary);
-    text-decoration: none;
-    transition: color var(--dur-fast) var(--ease);
-  }
-  .breadcrumb-link:hover,
-  .breadcrumb-link:focus-visible {
-    color: var(--ui-text-primary);
-    text-decoration: underline;
-  }
-  .breadcrumb-separator {
-    color: var(--ui-text-tertiary);
-    user-select: none;
-    font-size: var(--font-11);
-    padding: 0 var(--space-1);
-  }
-  .breadcrumb-current {
-    color: var(--ui-text-primary);
-    font-weight: var(--weight-medium);
-  }
   .page-title { @apply font-extrabold; font-size: var(--text-page-title); line-height: 1.35; overflow-wrap: anywhere; }
   .page-subtitle { @apply mt-1 text-[13px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
   .top-controls { @apply flex min-w-0 items-center justify-end gap-2; }

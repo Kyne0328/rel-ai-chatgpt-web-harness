@@ -3,6 +3,7 @@ const { contextBridge } = require('electron');
 let revision = 1;
 let unavailableTaskAvailable = false;
 const taskRequests = [];
+let historicalDiffRequests = 0;
 let diffDelayMs = 75;
 let content = [
   'const answer = 42;',
@@ -14,6 +15,7 @@ let content = [
 
 contextBridge.exposeInMainWorld('relaiCodeProbe', {
   taskRequests: () => [...taskRequests],
+  historicalDiffRequests: () => historicalDiffRequests,
   setUnavailableTaskAvailable: value => { unavailableTaskAvailable = value; },
   setRevision(value, delayMs = 75) {
     revision = value;
@@ -46,8 +48,8 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
       },
       changedFileCount: 2,
       fileCount: 2,
-      historyMode: 'live',
-      historyAvailable: true,
+      historyMode: taskId === 'historical-task' ? 'unavailable' : 'live',
+      historyAvailable: taskId !== 'historical-task',
       commitHead: '',
       commitHeads: [],
       commitSource: '',
@@ -55,6 +57,10 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
     });
     },
     diff: async (taskId, requestedPath) => {
+      if (taskId === 'historical-task') {
+        historicalDiffRequests++;
+        throw new Error('Old task diff has no verified commit.');
+      }
       const requestedContent = content;
       const requestedRevision = revision;
       await new Promise(resolve => setTimeout(resolve, diffDelayMs));

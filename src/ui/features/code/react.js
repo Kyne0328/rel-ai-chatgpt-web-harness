@@ -60,12 +60,22 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
   taskIdRef.current = selectedTaskId;
   filePathRef.current = filePath;
 
-  const loadDiff = useCallback(async (requestedTask, path) => {
+  const loadDiff = useCallback(async (requestedTask, path, snapshot) => {
     const normalizedTaskId = String(requestedTask || '').trim();
     const normalizedPath = String(path || '').trim();
     if (!normalizedTaskId || !normalizedPath) return false;
     const request = ++diffRequestRef.current;
     pendingDiffPathRef.current = normalizedPath;
+    if (snapshot?.historyMode === 'unavailable' || snapshot?.historyAvailable === false) {
+      filePathRef.current = normalizedPath;
+      setFilePath(normalizedPath);
+      replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
+      setDiffFile(null);
+      setViewerMessage('This task records the changed file, but its original diff is unavailable because the Git commit could not be verified.');
+      setViewerTone('');
+      pendingDiffPathRef.current = '';
+      return false;
+    }
     if (normalizedPath !== filePathRef.current) {
       setDiffFile(null);
       setViewerMessage('Loading file diff…');
@@ -150,7 +160,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
         setViewerTone('');
         return;
       }
-      if (nextPath !== currentPath || refreshCurrent) await loadDiff(normalizedTaskId, nextPath);
+      if (nextPath !== currentPath || refreshCurrent) await loadDiff(normalizedTaskId, nextPath, nextWorkspace);
     } catch (error) {
       if (request !== workspaceRequestRef.current || taskIdRef.current !== normalizedTaskId) return;
       diffRequestRef.current += 1;
@@ -220,7 +230,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
       return;
     }
     if (requestedFilePath === filePathRef.current || requestedFilePath === pendingDiffPathRef.current) return;
-    void loadDiff(selectedTaskId, requestedFilePath);
+    void loadDiff(selectedTaskId, requestedFilePath, workspace);
   }, [changedFiles, loadDiff, requestedFilePath, selectedTaskId, showUnavailableFile, workspace]);
   const visibleFiles = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -247,7 +257,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
   const openFile = path => {
     if (!path || path === filePathRef.current) return;
     replaceRouteParams({ file: path });
-    void loadDiff(selectedTaskId, path);
+    void loadDiff(selectedTaskId, path, workspace);
   };
 
   const toggleFolder = useCallback(path => {

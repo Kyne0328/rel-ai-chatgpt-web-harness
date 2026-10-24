@@ -642,12 +642,19 @@ function createBrowserSurfaceHost(options = {}) {
       ...(account.tunnelId ? { tunnelId: account.tunnelId, label: account.label, enabled: account.enabled } : {}) };
     try {
       const rateLimit = goalReadAdmission(account, true);
-      if (rateLimit) return { ...metadata, state: 'unverified', retryAfterMs: rateLimit.retryAfterMs };
+      if (rateLimit) {
+        const cached = goalProtocolAuth.get(account.directory);
+        if (rateLimit.status === 429 && cached?.result?.ok && Date.now() < cached.expiresAt) {
+          return { ...metadata, state: 'signed_in', account: cached.result.account, retryAfterMs: rateLimit.retryAfterMs };
+        }
+        return { ...metadata, state: rateLimit.status === 429 ? 'checking' : 'unverified',
+          retryAfterMs: rateLimit.retryAfterMs };
+      }
       const auth = await readGoalProtocolAuth(account, browserSession, input.refresh === true);
       if (!auth.ok) {
         rememberGoalReadLimit(account, auth);
         if (auth.status === 401) confirmedGoalLogins.delete(loginId);
-        return { ...metadata, state: auth.status === 401 ? 'sign_in_required' : 'unverified',
+        return { ...metadata, state: auth.status === 401 ? 'sign_in_required' : auth.status === 429 ? 'checking' : 'unverified',
           ...(auth.retryAfterMs ? { retryAfterMs: auth.retryAfterMs } : {}) };
       }
       if (account.tunnelId && (input.refresh === true || (browserOpen && loginId && !confirmedGoalLogins.has(loginId)))) {
