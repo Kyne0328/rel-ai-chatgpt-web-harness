@@ -41,6 +41,10 @@ const processSummary = processListView({
 });
 assert.equal(processSummary.running, 0);
 assert.equal(processSummary.finished, 1, 'orphaned processes must not be counted as finished');
+const uncertainTiming = processListView({ managedProcesses: [{
+  processId: 'unknown-duration', status: 'orphaned', startedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString()
+}] }).rows[0];
+assert.equal(uncertainTiming.elapsed, 'Duration unconfirmed', 'an unresolved process must not present time since launch as its running duration');
 const finishedTiming = processListView({
   managedProcesses: [{
     processId: 'timed-finished-process',
@@ -185,12 +189,14 @@ assert.ok(processNodes.some(node => typeof node === 'string' && /Stop the proces
 assert.ok(processNodes.includes('0 running · 1 needs attention'), 'uncertain processes must not be counted as running or finished');
 
 const noControllerTree = processRenderContext.renderProcesses(() => ({
-  managedProcesses: [{ processId: 'missing-controller', status: 'orphaned', canStop: false, recovery: missingController.recovery }]
+  managedProcesses: [{ processId: 'missing-controller', status: 'orphaned', canStop: false,
+    error: missingController.recovery, recovery: missingController.recovery }]
 }))();
 const previousNodes = processNodes.splice(0);
 visitProcessNode(noControllerTree);
 assert.equal(processNodes.some(node => node?.props?.['data-stop-process'] === true), false);
 assert.ok(processNodes.includes(missingController.recovery), 'the row must show the backend recovery action');
+assert.equal(processNodes.filter(node => node === missingController.recovery).length, 1, 'older servers sending the same error and recovery text must not duplicate it');
 processNodes.splice(0, processNodes.length, ...previousNodes);
 
 const defaultUseState = processRenderContext.useState;

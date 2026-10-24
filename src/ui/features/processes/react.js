@@ -178,7 +178,7 @@ const ProcessRow = memo(function ProcessRow({ row }) {
     row.error || ['failed', 'orphaned', 'unknown'].includes(state.status)
       ? h('div', { className: `connection-notice ${state.status === 'failed' ? 'bad' : 'warn'} process-recovery` },
           h('strong', null, row.error || state.label),
-          h('div', null, state.recovery)
+          state.recovery !== row.error ? h('div', null, state.recovery) : null
         )
       : null,
     h(ProcessOutput, { processId: row.processId, output: row.output, active: state.active })

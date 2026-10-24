@@ -186,6 +186,7 @@ interface ManagedProcessRecord extends GenericRecord {
   bootIdentity?: ManagedProcessBootIdentity | null;
   recoveryBootIdentity?: ManagedProcessBootIdentity | null;
   windowsControllerUnavailable?: boolean;
+  windowsRecovery?: string;
   windowsRootPid?: number;
   windowsRootCreationIdentity?: string;
   ptyProcess: PtyProcess | null;
@@ -1782,7 +1783,7 @@ function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotO
     rootExitConfirmed: record.rootExitConfirmed,
     ...(record.terminationError ? { terminationError: record.terminationError } : {}),
     ...(record.windowsControllerUnavailable && record.status === 'orphaned'
-      ? { canStop: false, recovery: record.terminationError } : {}),
+      ? { canStop: false, recovery: record.windowsRecovery } : {}),
 
     workSessionId: record.workSessionId || null,
     startedAt: record.startedAt,
@@ -1828,6 +1829,8 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
     record.terminationConfirmed,
     record.rootExitConfirmed,
     record.terminationError,
+    record.windowsControllerUnavailable === true,
+    record.windowsRecovery || '',
     Number(record.stdoutDroppedBytes || 0),
     Number(record.stderrDroppedBytes || 0),
     record.pty === true,
@@ -2548,15 +2551,23 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
   if (managedBootIdentity === undefined) scheduleManagedProcessBootReconciliation(config);
   if (!record.windowsJob || !record.pid || !isProcessTreeAlive(record.pid)) {
     record.windowsControllerUnavailable = true;
-    const recovery = boot && (!previous || previous.host === boot.host)
-      ? 'The Windows job controller cannot be reached and completion is unconfirmed. Restart Windows, then reopen Rel.AI to verify cleanup.'
-      : 'The Windows job controller is unavailable and cleanup cannot be verified. Reopen Rel.AI on the original computer with Windows boot verification available.';
-    const changed = record.status !== 'orphaned' || record.terminationError !== recovery;
+    const reason = record.windowsJob
+      ? 'The Windows job controller is no longer running; cleanup remains unconfirmed.'
+      : 'The Windows job control identity is unavailable; cleanup remains unconfirmed.';
+    const recovery = boot === undefined
+      ? 'Rel.AI is checking whether Windows has restarted since this process was recorded.'
+      : !boot
+        ? 'Windows boot verification is unavailable. Reopen Rel.AI to retry verification.'
+        : previous && previous.host !== boot.host
+          ? 'This recovery record belongs to another computer. Reopen Rel.AI on the original computer to verify cleanup.'
+          : 'Windows still reports the same boot session recorded for this process. Choose Restart from the Windows power menu, then reopen Rel.AI to verify cleanup.';
+    const changed = record.status !== 'orphaned' || record.terminationError !== reason || record.windowsRecovery !== recovery;
     record.status = 'orphaned';
     record.endedAt = '';
     record.terminationConfirmed = false;
-    record.terminationError = recovery;
-    record.error = recovery;
+    record.terminationError = reason;
+    record.error = reason;
+    record.windowsRecovery = recovery;
     if (changed) {
       safePersistMetadata(config, record);
       notifyProcessState(record);

@@ -543,9 +543,16 @@ async function verifyWindowsJobRecovery() {
     const pending = await m.stopManagedProcess(recoveryConfig, sameBoot);
     assert.equal(pending.status, 'orphaned', 'helper disappearance on the same boot is not native job-zero proof');
     assert.equal(pending.terminationConfirmed, false);
-    assert.match(pending.error, /restart Windows/i);
+    assert.match(pending.recovery, /same boot session/i, 'same-boot recovery must explain why an app restart did not settle cleanup');
+    assert.match(pending.recovery, /Restart.*Windows power menu/i);
+    assert.notEqual(pending.error, pending.recovery, 'the failure reason and recovery action must not repeat each other');
     assert.equal(pending.canStop, false, 'a missing controller must not advertise an ineffective Stop action');
     assert.equal(fs.existsSync(path.join(sameBoot.jobDirectory, 'control.json')), false);
+    const refreshing = await manager();
+    const checking = refreshing.readManagedProcess(recoveryConfig, sameBoot);
+    await refreshing.stopManagedProcess(recoveryConfig, sameBoot);
+    const refreshed = refreshing.readManagedProcess(recoveryConfig, { ...sameBoot, metadataRevision: checking.metadataRevision });
+    assert.match(refreshed.recovery, /same boot session/i, 'incremental reads must receive updated recovery guidance after boot verification');
 
     const missingControl = fixture({ bootIdentity: boot, pid: process.pid });
     fs.rmSync(path.join(missingControl.jobDirectory, 'request.json'));
@@ -558,14 +565,26 @@ async function verifyWindowsJobRecovery() {
     assert.deepEqual(readMetadata(legacy).recoveryBootIdentity, boot, 'legacy recovery saves a checkpoint before trusting a later reboot');
     assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, legacy)).terminationConfirmed, false, 'app restart on the same boot cannot settle a legacy job');
     observedBoot = { ...boot, boot: 'e'.repeat(64) };
-    assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, legacy)).terminationConfirmed, true, 'legacy checkpoint recovers after an actual boot identity change');
+    const afterReboot = await manager();
+    const reconciled = Promise.withResolvers();
+    const unsubscribeReboot = afterReboot.onManagedProcessChange(event => {
+      if (event.processId === legacy.processId && event.status === 'stopped') reconciled.resolve();
+    });
+    const timeout = setTimeout(() => reconciled.reject(new Error('Dashboard recovery did not publish verified reboot completion.')), 2000);
+    try {
+      afterReboot.readManagedProcess(recoveryConfig, legacy);
+      await reconciled.promise;
+      assert.equal(afterReboot.readManagedProcess(recoveryConfig, legacy).terminationConfirmed, true, 'dashboard reads recover legacy checkpoints after a changed boot without a Stop request');
+    } finally { clearTimeout(timeout); unsubscribeReboot(); }
 
     observedBoot = { ...boot, host: 'f'.repeat(64) };
     const otherHost = fixture({ bootIdentity: boot });
     assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, otherHost)).terminationConfirmed, false, 'another host cannot prove cleanup');
     observedBoot = null;
     const unavailable = fixture({ bootIdentity: boot });
-    assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, unavailable)).terminationConfirmed, false, 'a failed boot probe must retain ownership');
+    const unavailableResult = await (await manager()).stopManagedProcess(recoveryConfig, unavailable);
+    assert.equal(unavailableResult.terminationConfirmed, false, 'a failed boot probe must retain ownership');
+    assert.match(unavailableResult.recovery, /boot verification is unavailable/i);
     assert.equal(readMetadata(unavailable).recoveryBootIdentity, undefined);
   } finally {
     for (const value of managers) await value.stopAllManagedProcesses(recoveryConfig);

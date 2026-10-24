@@ -34,7 +34,7 @@ function processRowView(process = {}, now = Date.now(), snapshot = null) {
     startedAgo: process.startedAt ? (timeAgo(process.startedAt, now) || 'now') : '',
     endedAt: process.endedAt || '',
     endedAgo: process.endedAt ? (timeAgo(process.endedAt, now) || 'now') : '',
-    elapsed: durationFor(process, state.active, now),
+    elapsed: state.status === 'orphaned' && !process.endedAt ? 'Duration unconfirmed' : durationFor(process, state.active, now),
     exitCode: process.exitCode,
     error: process.error || '',
     memory: processMemoryView(process, snapshot, now),
