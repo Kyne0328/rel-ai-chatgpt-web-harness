@@ -1883,6 +1883,20 @@ test('monitor startup recovers old lookup failures while preserving Stop, pauses
   });
 });
 
+test('startup recovers an old exhausted discovery 429 without reactivating a user pause', async t => {
+  for (const userPaused of [false, true]) await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, active: false, conversationId: '', state: 'paused',
+      pauseReason: userPaused ? 'user' : '', retryCount: 5,
+      error: 'Automatic continuation stopped after five retries: ChatGPT Web conversation read failed (HTTP 429).' });
+    configureGoalBrowserTransport(async () => ({ ok: true, data: { items: [] } }));
+    try {
+      startGoalMonitor(f.config);
+      assert.equal(f.status().goalActive, !userPaused);
+      assert.equal(f.status().retryCount, userPaused ? 5 : 0);
+    } finally { stopGoalMonitor(); configureGoalBrowserTransport(null); }
+  });
+});
+
 test('durable linking receipts are idempotent, owner scoped and cannot bind after Stop', async t => {
   await withMonitoredGoal(t, async f => {
     const context = { ...f.context, connector: true };
@@ -2125,6 +2139,34 @@ test('incomplete Project catalogues defer bodies, persist metadata progress and 
     assert.equal(discoveryStore.read().scan.cursor, '4');
     const match = await findRecentGoalCommand({ ...deps, nativeTransport: r => fixture.transport(r) });
     assert.equal(match.conversationId, newest.id);
+  });
+});
+
+test('missing Project previews are inspected in bounded resumable batches', async t => {
+  await withMonitoredGoal(t, async f => {
+    const projects = Array.from({ length: 9 }, (_, index) => projectPreview(index + 1, []));
+    const requests = [];
+    const transport = async request => {
+      requests.push(request.path);
+      if (request.path.includes('/conversations?offset=')) return { ok: true, data: { items: [] } };
+      if (request.path.includes('/snorlax/sidebar')) return { ok: true, data: { items: projects, cursor: null } };
+      if (request.path.includes('/gizmos/') && request.path.includes('/conversations?cursor=')) {
+        return { ok: true, data: { items: [], cursor: null } };
+      }
+      throw new Error('Unexpected Project discovery request: ' + request.path);
+    };
+    const discoveryStore = goalDiscoveryStore(f.config, { owner: 'bounded-projects', tunnelId: 'bounded-account' });
+    const deps = { nativeTransport: transport, workId: f.work_id,
+      linkId: 'z'.repeat(32), explicitGoal: true, discoveryStore };
+    const fallbackCount = () => requests.filter(path => path.includes('/gizmos/g-p-')).length;
+    for (const expected of [4, 8]) {
+      await assert.rejects(() => findRecentGoalCommand(deps),
+        error => error.code === 'GOAL_CATALOGUE_INCOMPLETE' && error.deferred
+          && error.retryAt >= Date.now() + 59_000);
+      assert.equal(fallbackCount(), expected, 'one discovery pass must not exhaust the account budget');
+    }
+    assert.equal((await findRecentGoalCommand({ ...deps, nativeTransport: request => transport(request) })).state, 'absent');
+    assert.equal(fallbackCount(), 9, 'resumed discovery must not repeat already inspected Projects');
   });
 });
 

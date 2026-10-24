@@ -928,7 +928,7 @@ async function pollGoal(config, workId, deps = {}) {
 }
 
 function recoverAutomaticDiscovery(config) {
-  const lookupFailure = error => /^(?:The named ChatGPT Project was not found in the connected account\.|No matching work receipt in the ten most recently updated eligible chats\.|(?:Automatic continuation stopped after five retries: )?No matching Goal Mode receipt in the ten most recently updated eligible chats\.)$/.test(error || '');
+  const lookupFailure = error => /^(?:The named ChatGPT Project was not found in the connected account\.|No matching work receipt in the ten most recently updated eligible chats\.|(?:Automatic continuation stopped after five retries: )?No matching Goal Mode receipt in the ten most recently updated eligible chats\.|Automatic continuation stopped after five retries: ChatGPT Web conversation read failed \(HTTP 429\)\.)$/.test(error || '');
   const eligible = record => {
     if (!canMonitorGoal(record) || record.binding || record.state === 'stopped' || record.pauseReason === 'user'
       || !lookupFailure(record.error)) return false;

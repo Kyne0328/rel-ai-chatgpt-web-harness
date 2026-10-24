@@ -311,10 +311,15 @@ function turnState(conversation) {
 }
 
 // Catalogue metadata is shared across the account; conversation bodies are
-// fetched only for the global five candidates. No historical body expansion.
+// fetched only for the five newest candidates. No historical body expansion.
 const RECENT_GOAL_CHATS = 5;
-const CATALOGUE_TTL_MS = 15_000;
+const CATALOGUE_TTL_MS = 60_000;
 const EVIDENCE_TTL_MS = 5_000;
+const MAX_PROJECT_FALLBACK_READS = 4;
+
+function goalDiscoveryFreshAfter(deps) {
+  return Math.max(Number(deps.startedAt || 0), Number(deps.issuedAt || 0)) - 5_000;
+}
 
 function recentChats(items, limit = RECENT_GOAL_CHATS) {
   const unique = new Map();
@@ -334,11 +339,13 @@ function recentChats(items, limit = RECENT_GOAL_CHATS) {
 }
 
 async function latestGoalCatalogue(deps, state) {
-  if (state.catalogue && Date.now() - state.catalogue.at < CATALOGUE_TTL_MS) return state.catalogue.items;
+  if (state.catalogue && Date.now() - state.catalogue.at < CATALOGUE_TTL_MS
+    && state.catalogue.at >= goalDiscoveryFreshAfter(deps)) return state.catalogue.items;
   // Checkpoints cover metadata only. An incomplete Project listing cannot
   // authorize reading the provisional first five conversation bodies.
   const scan = state.scan || { cursor: '', seen: [], items: [], startedAt: Date.now() };
   state.scan = scan;
+  let fallbackReads = 0;
   if (!scan.ordinary) {
     const ordinary = await conversationPage(deps);
     scan.items = recentChats(ordinary.items);
@@ -352,6 +359,15 @@ async function latestGoalCatalogue(deps, state) {
       if (scan.processed?.includes(project.id)) continue;
       const items = listing.previews.filter(item => item.projectId === project.id);
       if (!items.length) {
+        // Large accounts can contain dozens of Projects without sidebar
+        // previews. Bound missing-preview lookups per pass and persist the
+        // existing cursor/processed set, rather than exhausting the account
+        // read budget before any conversation bodies can be inspected.
+        if (fallbackReads >= MAX_PROJECT_FALLBACK_READS) {
+          throw Object.assign(new Error('Continuing bounded Project discovery in the next read window.'),
+            { code: 'GOAL_CATALOGUE_INCOMPLETE', deferred: true, retryAt: Date.now() + READ_WINDOW_MS });
+        }
+        fallbackReads++;
         const chats = await listProjectChats(project.id, '0', deps);
         items.push(...chats.items.map(item => ({ ...item, projectId: project.id })));
       }
@@ -381,9 +397,10 @@ async function sharedGoalEvidence(deps) {
   const scope = accountScope(deps);
   if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil, true, scope.cooldownReason);
   const key = 'latest-five-evidence:' + (deps.discoveryStore?.key || 'fixture');
+  const freshness = goalDiscoveryFreshAfter(deps);
   const cached = scope.discovery.get(key);
   if (cached?.promise) return waitForDiscovery(cached.promise, deps.signal);
-  if (cached?.value && Date.now() < cached.expiresAt) return cached.value;
+  if (cached?.value && Date.now() < cached.expiresAt && cached.at >= freshness) return cached.value;
   const record = { promise: null };
   record.promise = (async () => {
     const claim = deps.discoveryStore?.claim();
@@ -396,7 +413,7 @@ async function sharedGoalEvidence(deps) {
       const entries = [];
       for (const item of candidates) {
         let entry = state.evidence?.find(old => old.id === item.id && old.updated === item.updated
-          && Date.now() - old.at < EVIDENCE_TTL_MS);
+          && Date.now() - old.at < EVIDENCE_TTL_MS && old.at >= freshness);
         if (!entry) {
           try {
             entry = { ...item, at: Date.now(), proof: discoveryEvidence(await getConversation(item.id, shared)) };
@@ -404,7 +421,7 @@ async function sharedGoalEvidence(deps) {
         }
         entries.push(entry);
         // Retain successful reads across a later budget wait or crash recovery.
-        state.evidence = [...entries, ...(state.evidence || []).filter(old => !entries.some(e => e.id === old.id))].slice(0, 5);
+        state.evidence = [...entries, ...(state.evidence || []).filter(old => !entries.some(e => e.id === old.id))].slice(0, RECENT_GOAL_CHATS);
       }
       state.evidence = entries;
       scope.goalIndex = state;
@@ -412,7 +429,7 @@ async function sharedGoalEvidence(deps) {
         throw Object.assign(new Error('Chat discovery lease changed; rechecking account evidence.'),
           { deferred: true, retryAt: Date.now() + 5_000 });
       }
-      scope.discovery.set(key, { value: entries, expiresAt: Date.now() + EVIDENCE_TTL_MS });
+      scope.discovery.set(key, { value: entries, at: Date.now(), expiresAt: Date.now() + EVIDENCE_TTL_MS });
       return entries;
     } catch (error) {
       scope.goalIndex = state;
