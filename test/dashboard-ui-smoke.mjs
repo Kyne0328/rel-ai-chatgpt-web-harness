@@ -125,6 +125,10 @@ const renderIcon = props => renderToStaticMarkup(React.createElement(Icon, props
 assert.equal(renderIcon({ name: 'puzzle' }), renderIcon({ name: 'extensions' }), 'skill and Extensions glyph aliases must resolve to Puzzle');
 assert.notEqual(renderIcon({ name: 'puzzle' }), renderIcon({ name: 'help' }), 'a skill must not silently render the fallback Help glyph');
 assert.equal(renderIcon({ name: 'unknown-future-icon' }), renderIcon({ name: 'help' }), 'unknown external names retain the safe help fallback');
+for (const name of ['chevronDown', 'chevronUp']) {
+  assert.notEqual(renderIcon({ name }), renderIcon({ name: 'help' }), 'plan detail disclosure states must have registered glyphs');
+}
+assert.notEqual(renderIcon({ name: 'chevronUp' }), renderIcon({ name: 'chevronDown' }), 'expanded and collapsed plan details must show distinct disclosure directions');
 for (const item of navigationCommands({ includeExtensions: true })) {
   if (item.icon === 'about') continue;
   assert.notEqual(renderIcon({ name: item.icon }), renderIcon({ name: 'help' }), `${item.label} must have a registered icon`);

@@ -97,6 +97,12 @@ for (const themeName of THEME_NAMES) {
       expectContrast(themeName, foreground, background, 4.5);
     }
   }
+  // Changes renders diff counts directly on default, hovered and selected rows.
+  for (const foreground of ['statusSuccessForeground', 'statusDangerForeground']) {
+    for (const background of ['surfaceSecondary', 'surfaceRaised', 'selectionBackground']) {
+      expectContrast(themeName, foreground, background, 4.5);
+    }
+  }
 }
 
 for (const themeName of THEME_NAMES) {

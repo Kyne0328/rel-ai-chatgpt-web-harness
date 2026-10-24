@@ -32,7 +32,7 @@ export const COLOR_THEMES = Object.freeze({
     actionPrimary: '#15803d', actionPrimaryHover: '#166534', actionPrimaryActive: '#14532d', actionPrimaryForeground: '#ffffff',
     focusRing: '#166534', selectionBackground: '#dcfce7',
     statusInfoForeground: '#0369a1', statusInfoBackground: '#e0f2fe', statusInfoBorder: '#7dd3fc',
-    statusSuccessForeground: '#15803d', statusSuccessBackground: '#dcfce7', statusSuccessBorder: '#86efac',
+    statusSuccessForeground: '#166534', statusSuccessBackground: '#dcfce7', statusSuccessBorder: '#86efac',
     statusWarningForeground: '#b45309', statusWarningBackground: '#fef3c7', statusWarningBorder: '#fde047',
     statusDangerForeground: '#b91c1c', statusDangerBackground: '#fee2e2', statusDangerBorder: '#fca5a5',
     statusNeutralForeground: '#475569', statusNeutralBackground: '#e2e8f0', statusNeutralBorder: '#64748b',
