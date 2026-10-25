@@ -4,6 +4,8 @@ import { setImmediate as yieldTurn } from 'node:timers/promises';
 
 assert.equal(normalizeRouteKey('tasks?task=task-a&tab=changes&file=src%2Fa.js'), 'tasks?task=task-a&tab=changes&file=src%2Fa.js');
 assert.equal(normalizeRouteKey('tasks?task=task-a&tab=invalid'), 'tasks?task=task-a');
+assert.equal(normalizeRouteKey('tasks?task=task-a&tab=validation'), 'tasks?task=task-a', 'removed validation links must fall back to the task overview');
+assert.equal(normalizeRouteKey('tasks?task=task-a&tab=technical'), 'tasks?task=task-a&tab=technical');
 
 const windowRef = new EventTarget();
 const marker = { dataset: { unsavedChanges: 'false' } };

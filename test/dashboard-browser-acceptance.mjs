@@ -192,11 +192,18 @@ try {
   assert.equal(result.taskInteraction.immediate, true, 'Task summary detail must render synchronously on selection before history hydration');
   assert.equal(result.taskInteraction.inspector, true);
   assert.equal(result.taskInteraction.selectedRow, true);
-  assert.deepEqual(result.taskInteraction.tabs, ['overview', 'changes', 'activity', 'validation', 'processes']);
+  assert.deepEqual(result.taskInteraction.tabs, ['overview', 'changes', 'activity', 'processes']);
   assert.ok(result.taskInteraction.detailText.length > 100);
   assert.equal(result.taskInteraction.detailsAvailable, true);
   assert.equal(result.taskInteraction.workSessionId, true);
   assert.ok(result.taskInteraction.eventLinks > 0, JSON.stringify(result.taskInteraction));
+  assert.match(result.taskProcesses.operation, /Read source files/);
+  assert.match(result.taskProcesses.command, /Task development server/);
+  assert.equal(result.taskProcesses.stopAvailable, true);
+  assert.equal(result.taskProcesses.badge, '2');
+  assert.equal(result.taskProcesses.empty, false);
+  assert.equal(result.taskProcesses.validationTab, false);
+  assert.deepEqual(result.taskProcesses.technical, { taskId: true, operations: 0, runtimeBuild: false });
   assert.equal(result.taskSelectionStability.immediate, 'acceptance-running');
   assert.equal(result.taskSelectionStability.afterRefresh.selected, 'acceptance-running', 'live task refresh must preserve the clicked task instead of restoring the old completed deep link');
   assert.equal(result.taskSelectionStability.afterRefresh.routeTask, 'acceptance-running', 'mouse selection must update the task deep link');
@@ -331,7 +338,7 @@ try {
   const standard400 = result.responsive.find(item => item.name === 'css-320-zoom-400');
   assert.equal(standard400.zoomFactor, 4);
   assert.ok(standard400.viewportWidth >= 300 && standard400.viewportWidth <= 320, JSON.stringify(standard400));
-  assert.deepEqual(result.accessibility.map(audit => audit.route).sort(), ['activity', 'goal-mode-connection', 'tasks', 'workspaces']);
+  assert.deepEqual(result.accessibility.map(audit => audit.route).sort(), ['activity', 'goal-mode-connection', 'task-technical', 'tasks', 'workspaces']);
   const seriousAccessibilityViolations = result.accessibility.flatMap(audit => audit.violations
     .filter(violation => ['critical', 'serious'].includes(violation.impact))
     .map(violation => ({ route: audit.route, ...violation })));

@@ -490,8 +490,6 @@ const sessionCssSource = fs.readFileSync(path.join(root, 'src/ui/features/sessio
 
 assert.match(sessionsSource, /sessions-summary-line/, 'Tasks surface must retain a compact user-facing summary in its toolbar');
 assert.match(sessionsSource, /Review its progress, changes, checks, and activity\./, 'Tasks empty inspector must explain what selecting a task reveals');
-assert.match(sessionsSource, /Rel\.AI task ID/);
-assert.match(sessionsSource, /Process ID/);
 assert.match(sessionsSource, /'aria-label': `Copy \$\{label\} \$\{value\}`/);
 assert.doesNotMatch(sessionsSource, /Client task capability|Native MCP tasks|Native task ID/);
 assert.doesNotMatch(sessionsSource, /nativeTasksCard|nativeTaskRow|data-cancel-native-task|bindNativeTaskActions/);

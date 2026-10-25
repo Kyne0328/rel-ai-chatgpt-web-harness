@@ -75,7 +75,7 @@
 .task-detail-header { @apply flex items-start justify-between gap-4; }
 .task-detail-header > div { @apply min-w-0; }
 .task-detail-header-actions { @apply flex shrink-0 flex-wrap items-center justify-end gap-2; }
-.task-detail-header h2 { @apply mt-1 text-lg font-bold leading-tight; scroll-margin-top: 84px; }
+.task-detail-header h2 { @apply mt-1 text-lg font-bold leading-tight; scroll-margin-top: 84px; overflow-wrap: anywhere; }
 .task-detail-header p { @apply mt-1.5 text-[13px] leading-5; color: var(--ui-text-secondary); }
 @container task-inspector (max-width: 700px) {
   .task-detail-header { @apply flex-col; }
@@ -263,28 +263,6 @@
   background: var(--ui-surface-primary);
   color: var(--ui-text-primary);
   border-color: var(--ui-border-default);
-}
-.task-validation-summary-card {
-  padding: 14px;
-  border-radius: var(--radius-lg);
-  background: var(--ui-surface-secondary);
-  border: 1px solid var(--ui-border-subtle);
-}
-.task-validation-summary-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.task-validation-summary-head h3 {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 700;
-}
-.task-validation-summary-head p {
-  margin: 4px 0 0;
-  font-size: 13px;
-  color: var(--ui-text-secondary);
 }
 .task-diff-viewer {
   display: flex;

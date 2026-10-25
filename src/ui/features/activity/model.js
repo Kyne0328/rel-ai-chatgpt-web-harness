@@ -133,6 +133,7 @@ export function filterActivityEntries(entries, filterState = {}, now = Date.now(
         activityMessage(entry),
         entry.path,
         activityFileLocation(entry),
+        ...activityFilePaths(entry),
         entry.resourceUri,
         entry.workspace,
         entry.category,
@@ -190,11 +191,72 @@ export function activityAbsoluteTime(entry) {
 }
 
 export function activityDisplayAction(entry) {
-  return displayText(entry?.title)
-    || displayText(entry?.operation)
+  const title = displayText(entry?.title);
+  if (title && !isGenericSuccess(title)) return title;
+  const action = displayText(entry?.action || entry?.tool?.operation);
+  const goalTitles = {
+    'goal.stop': 'Goal Mode stopped',
+    'goal.pause': 'Goal Mode paused',
+    'goal.resume': 'Goal Mode resumed',
+    'goal.update': 'Goal Mode updated',
+    'goal.status': 'Goal Mode checked'
+  };
+  if (goalTitles[action]) return goalTitles[action];
+  const count = Number(entry?.result?.affectedItemCount || entry?.metadata?.returnedFileCount || entry?.metadata?.changedFileCount);
+  if (Number.isFinite(count) && count > 0 && ['read', 'edit'].includes(action)) {
+    const verb = action === 'read' ? 'Read' : 'Updated';
+    return `${verb} ${count} file${count === 1 ? '' : 's'}`;
+  }
+  return displayText(entry?.operation)
     || displayText(entry?.tool?.operation)
     || displayText(entry?.tool?.title)
-    || activityToolLabel(entry?.tool?.name || entry?.tool || entry?.type);
+    || activityToolLabel(entry?.tool?.name || entry?.tool || action || entry?.type);
+}
+
+export function activityFilePaths(entry) {
+  const files = entry?.metadata?.changedFiles?.length
+    ? entry.metadata.changedFiles : entry?.metadata?.filePaths;
+  const fromMetadata = Array.isArray(files) ? files : [];
+  const action = String(entry?.action || entry?.tool?.name || entry?.tool || '').toLowerCase();
+  const fallback = !fromMetadata.length && (entry?.target?.type === 'file' || /^(read|edit|relai_read|relai_edit)$/.test(action))
+    ? [entry?.target?.workspaceRelativePath || entry?.target?.path || entry?.path] : [];
+  return [...new Set([...fromMetadata, ...fallback].filter(path => typeof path === 'string' && path.trim()).map(path => path.trim()))];
+}
+
+export function activityFileKind(path) {
+  const file = String(path || '').split(/[\\/]/).at(-1).toLowerCase();
+  if (file === '.gitignore' || file === '.gitattributes') return 'Git configuration';
+  if (file === 'dockerfile') return 'Dockerfile';
+  const extension = file.includes('.') ? file.slice(file.lastIndexOf('.')) : '';
+  const kinds = {
+    '.js': 'JavaScript', '.mjs': 'JavaScript', '.cjs': 'JavaScript',
+    '.ts': 'TypeScript', '.mts': 'TypeScript', '.tsx': 'TypeScript React',
+    '.jsx': 'React JSX', '.json': 'JSON', '.jsonc': 'JSON',
+    '.md': 'Markdown', '.mdx': 'Markdown', '.txt': 'Text',
+    '.css': 'CSS', '.scss': 'SCSS', '.html': 'HTML', '.xml': 'XML',
+    '.yml': 'YAML', '.yaml': 'YAML', '.toml': 'TOML',
+    '.py': 'Python', '.sh': 'Shell script', '.ps1': 'PowerShell',
+    '.sql': 'SQL', '.rs': 'Rust', '.go': 'Go', '.java': 'Java',
+    '.c': 'C', '.h': 'C header', '.cpp': 'C++', '.hpp': 'C++ header',
+    '.svg': 'SVG image', '.png': 'PNG image', '.jpg': 'JPEG image', '.jpeg': 'JPEG image',
+    '.pdf': 'PDF', '.docx': 'Word document', '.xlsx': 'Excel workbook',
+    '.pptx': 'PowerPoint', '.zip': 'ZIP archive'
+  };
+  return kinds[extension] || (extension ? `${extension.slice(1).toUpperCase()} file` : 'File');
+}
+
+export function activityDescription(entry) {
+  const paths = activityFilePaths(entry);
+  if (paths.length === 1) return `${activityFileKind(paths[0])} · ${paths[0]}`;
+  if (paths.length > 1) return `${paths.slice(0, 2).join(' · ')}${paths.length > 2 ? ` · +${paths.length - 2} more` : ''}`;
+  const message = activityMessage(entry);
+  const title = activityDisplayAction(entry);
+  return message.replace(/\s+/g, ' ').trim().toLowerCase() === title.replace(/\s+/g, ' ').trim().toLowerCase() || isGenericSuccess(message)
+    ? '' : message;
+}
+
+function isGenericSuccess(text) {
+  return /^(completed successfully|successfully completed)\.?$/i.test(text.trim());
 }
 
 export function activityToolLabel(tool) {

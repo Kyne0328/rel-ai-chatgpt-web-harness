@@ -5,14 +5,14 @@ import { copyText } from '../../clipboard.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
-import { OperationDiagnostics, RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
+import { OperationDiagnostics } from '../../components/operation-diagnostics.js';
 import { formatDuration, timeAgo } from '../../utils.js';
 import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, navigate, replaceRouteParams, routeHref, setWorkspaceFilter, subscribeRoute } from '../../router.js';
 import { activityEventId } from '../../activity-event.js';
 import { orderWorkspacesAlphabetically } from '../../components/workspace-menu.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import { classifyTaskChangedFiles } from '../../../taskSemanticProgress.js';
-import { taskEntityView, workSessionStateView } from '../../task-identity.js';
+import { workSessionStateView } from '../../task-identity.js';
 import { StatusPill as UnifiedStatusPill } from '../../components/pill.js';
 import { statusPillClass } from '../../status-tone.js';
 import { processListView } from '../processes/index.js';
@@ -38,6 +38,7 @@ import {
   taskTraceJsonl,
   taskControlMessage,
   taskProcessGroups,
+  taskRunningOperations,
   taskValidationView
 } from './model.js';
 
@@ -64,7 +65,7 @@ const TASK_HISTORY_URL = '/api/tasks/history';
 const TASK_SESSION_URL = '/api/tasks/session';
 const DETAIL_FILE_PREVIEW = 4;
 const DETAIL_EVENT_PREVIEW = 8;
-const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'runtime', 'runtimeCompatibility', 'managedProcesses']);
+const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'managedProcesses']);
 
 export function createSessionsRoute(useDashboardSlices) {
   return function SessionsRoute() {
@@ -127,7 +128,7 @@ function SessionsPage({ data = {} }) {
   const [detailRefresh, setDetailRefresh] = useState(null);
   const [activityLoading, setActivityLoading] = useState(false);
   const requestedTab = routeParams.get('tab');
-  const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'validation', 'processes', 'technical']), []);
+  const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'processes', 'technical']), []);
   const [activeTab, setActiveTab] = useState(() => validTabs.has(requestedTab) ? requestedTab : 'overview');
   useEffect(() => {
     setActiveTab(validTabs.has(requestedTab) ? requestedTab : 'overview');
@@ -439,8 +440,6 @@ function SessionsPage({ data = {} }) {
             ? h(SessionInspector, {
                 key: selectedId,
                 session: selectedDetail,
-                runtime: data.runtime,
-                runtimeCompatibility: data.runtimeCompatibility,
                 activeTab,
                 setActiveTab: selectTab,
                 olderExpanded,
@@ -597,7 +596,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
+function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -622,7 +621,6 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     headingRef.current?.scrollIntoView({ behavior: 'instant', block: 'start', inline: 'nearest' });
   }, [id]);
 
-  const identities = taskEntityView(session);
   const state = workSessionStateView(session);
   const live = isOngoingSession(session);
   const semantic = semanticProgressFor(session);
@@ -637,9 +635,7 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
   useEffect(() => { setControlKey(''); }, [id]);
   const activeGoal = session.goalMode?.goalActive === true;
   const goalNotice = goalModeNotice(session.goalMode);
-  const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
-
-  const sessionTunnelId = String(session.goalMode?.tunnelId || session.tunnelId || '').trim();
+  const runningOperations = taskRunningOperations(session);
 
   const controlTask = useCallback(async (action, operationId = '') => {
     const key = operationId ? `stop:${operationId}` : action;
@@ -689,12 +685,13 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     finally { setControlKey(''); }
   };
 
+  const ownedProcessCount = taskProcessGroups(managedProcesses, id, session.workspace).owned.length;
   const tabCounts = {
     changes: fileCounts.product + fileCounts.support,
     activity: `${(session.events || []).length}${activityHasMore ? '+' : ''}`,
     activityLabel: `${(session.events || []).length} loaded events${activityHasMore ? '; more history available' : ''}`,
-    processes: taskProcessGroups(managedProcesses, id, session.workspace).owned.length,
-    validation: taskValidationView(session).statusLabel
+    processes: ownedProcessCount + runningOperations.length,
+    processesLabel: `${runningOperations.length} running operations and ${ownedProcessCount} managed commands`
   };
 
   return h('div', { className: 'detail-stack session-detail' },
@@ -787,14 +784,11 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         h('a', { className: 'buttonlike secondary', href: taskActivityHref(session) }, 'Open in Activity')
       )
     ),
-    h('div', { className: 'inspector-panel', id: 'session-panel-validation', role: 'tabpanel', 'aria-labelledby': 'session-tab-validation', tabIndex: 0, hidden: activeTab !== 'validation', 'data-session-panel': 'validation' },
-      activeTab === 'validation' ? h(TaskValidationSection, { session }) : null
-    ),
     h('div', { className: 'inspector-panel', id: 'session-panel-processes', role: 'tabpanel', 'aria-labelledby': 'session-tab-processes', tabIndex: 0, hidden: activeTab !== 'processes', 'data-session-panel': 'processes' },
-      h(TaskProcessesSection, { taskId: id, workspace: session.workspace, managedProcesses, active: activeTab === 'processes' })
+      h(TaskProcessesSection, { session, taskId: id, workspace: session.workspace, managedProcesses, active: activeTab === 'processes', controlKey, onStopOperation: operationId => controlTask('stop', operationId) })
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-technical', role: 'region', 'aria-labelledby': 'session-details-toggle', tabIndex: 0, hidden: activeTab !== 'technical', 'data-session-panel': 'technical' },
-      h(TechnicalDetails, { session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, sessionTunnelId, onStopOperation: operationId => controlTask('stop', operationId) }),
+      h(TechnicalDetails, { session }),
       session.trace?.entries?.length
         ? h('div', { className: 'session-inline-actions' }, h('button', { className: 'secondary', type: 'button', onClick: () => exportTrace(session), 'data-export-task-trace': '' }, 'Export trace (.jsonl)'))
         : null
@@ -807,8 +801,7 @@ function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
     { id: 'overview', label: 'Overview' },
     { id: 'changes', label: 'Changes', badge: counts.changes, countLabel: `${counts.changes || 0} changed files` },
     { id: 'activity', label: 'Activity', badge: counts.activity, countLabel: counts.activityLabel },
-    { id: 'validation', label: 'Validation', badge: ['Not recorded', 'Unavailable'].includes(counts.validation) ? null : counts.validation, countLabel: counts.validation },
-    { id: 'processes', label: 'Processes', badge: counts.processes, countLabel: `${counts.processes || 0} processes started by this task` }
+    { id: 'processes', label: 'Processes', badge: counts.processes, countLabel: counts.processesLabel }
   ];
   const tabIds = tabs.map(t => t.id);
   const onKeyDown = event => {
@@ -835,78 +828,40 @@ function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
       'aria-controls': `session-panel-${tab.id}`,
       tabIndex: activeTab === tab.id || (activeTab === 'technical' && tab.id === 'overview') ? 0 : -1,
       'data-session-tab': tab.id,
-      'aria-label': tab.countLabel ? `${tab.label}: ${tab.countLabel}` : undefined,
+      'aria-description': tab.countLabel,
       title: tab.countLabel ? `${tab.label}: ${tab.countLabel}` : undefined,
       onClick: () => setActiveTab(tab.id)
     },
       h('span', null, tab.label),
+      ' ',
       tab.badge !== undefined && tab.badge !== null && tab.badge !== 0
-        ? h('span', { className: 'task-tab-badge', 'aria-hidden': 'true' }, tab.badge)
+        ? h('span', { className: 'task-tab-badge' }, tab.badge)
         : null
     ))
   );
 }
 
-function TaskValidationSection({ session }) {
-  const { events: validationEvents, statusLabel, tone, checking, isValidationFailed,
-    isValidationPassed, isValidationNotRun } = taskValidationView(session);
-
-  return h('div', { className: 'task-validation-container detail-stack' },
-    h('div', { className: 'task-validation-summary-card' },
-      h('div', { className: 'task-validation-summary-head' },
-        h('div', null,
-          h('h3', null, 'Validation evidence'),
-          h('p', null,
-            checking ? 'Validation commands are currently executing.'
-            : isValidationPassed ? 'All recorded checks passed for this task.'
-            : isValidationFailed ? 'One or more recorded checks failed.'
-            : isValidationNotRun ? 'Validation was explicitly not run for this task.'
-            : 'Validation evidence is not recorded for this task.'
-          )
-        ),
-        h(StatusPill, { state: { status: statusLabel, pillClass: tone }, label: statusLabel })
-      )
-    ),
-    validationEvents.length ? h('section', { className: 'task-detail-section' },
-      h('div', { className: 'task-detail-heading' },
-        h('h3', null, 'Recorded validation checks'),
-        h('span', null, validationEvents.length)
-      ),
-      h('div', { className: 'task-event-list' },
-        ...validationEvents.map(event => h(EventRow, {
-          key: activityEventId(event) || `${eventTimestampValue(event)}:${event.operation || ''}`,
-          event,
-          session
-        }))
-      )
-    ) : h('div', { className: 'inspector-empty compact' },
-      h('strong', null, 'No check receipts recorded'),
-      h('span', null, isValidationNotRun
-        ? 'Recorded task state establishes that validation checks were not run.'
-        : 'Checks run through relai_validate will appear here with outputs and exit codes.')
-    )
-  );
-}
-
-function TaskProcessesSection({ taskId, workspace = '', managedProcesses = [], active = false }) {
+function TaskProcessesSection({ session, taskId, workspace = '', managedProcesses = [], active = false, controlKey = '', onStopOperation }) {
   const [showOther, setShowOther] = useState(false);
   const { owned, other } = taskProcessGroups(managedProcesses, taskId, workspace);
+  const operations = taskRunningOperations(session);
   const relevant = showOther ? [...owned, ...other] : owned;
   const sampleKey = JSON.stringify(relevant.filter(process => ['starting', 'running', 'stopping'].includes(process.status))
     .map(process => [process.processId, process.pid]).sort());
   const processMemory = useProcessMemory(sampleKey, active);
   const rows = processListView({ managedProcesses: relevant, processMemory }).rows;
   const categories = [
-    { title: 'Task-lifecycle processes', processes: owned.filter(process => process.lifecycle === 'task') },
-    { title: 'Persistent processes started by task', processes: owned.filter(process => process.lifecycle === 'persistent') },
-    { title: 'Other processes started by task', processes: owned.filter(process => !['task', 'persistent'].includes(process.lifecycle)) }
+    { title: 'Task commands', processes: owned.filter(process => process.lifecycle === 'task') },
+    { title: 'Persistent commands', processes: owned.filter(process => process.lifecycle === 'persistent') },
+    { title: 'Other task commands', processes: owned.filter(process => !['task', 'persistent'].includes(process.lifecycle)) }
   ];
   const renderProcess = process => h(ProcessRow, { key: process.processId, row: rows.find(row => row.processId === process.processId) });
   if (!active) return null;
   return h('div', { className: 'task-processes-container detail-stack' },
-    !owned.length ? h('div', { className: 'inspector-empty compact' },
-      h('strong', null, 'No processes started by this task'),
-      h('span', null, 'Managed background and interactive processes appear here. Running tool actions are shown in Overview and Details.')) : null,
+    h(CurrentOperations, { session, controlKey, onStopOperation }),
+    !owned.length && !operations.length ? h('div', { className: 'inspector-empty compact' },
+      h('strong', null, 'No running operations or managed commands'),
+      h('span', null, 'Task operations and commands started by this task appear here.')) : null,
     categories.filter(category => category.processes.length).map(category =>
       h('section', { key: category.title, className: 'task-detail-section task-process-group' },
         h('div', { className: 'task-detail-heading' }, h('h3', null, category.title), h('span', null, category.processes.length)),
@@ -1219,30 +1174,23 @@ function EventRow({ event, session, older = false }) {
   );
 }
 
-function TechnicalDetails({ session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, sessionTunnelId, onStopOperation }) {
+function TechnicalDetails({ session }) {
+  const recordedTime = value => {
+    if (!value) return 'Not recorded';
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.toLocaleString() : 'Not recorded';
+  };
   return h('div', { className: 'task-detail-technical is-expanded' },
     h('section', { className: 'task-detail-section' },
-      h('div', { className: 'task-detail-heading' }, h('h3', null, 'Identifiers')),
+      h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task record')),
       h('div', { className: 'task-detail-grid' },
-        h(IdentifierDetail, { label: 'Project', value: session.workspace || 'No project' }),
-        sessionTunnelId ? h(IdentifierDetail, { label: 'Tunnel ID', value: sessionTunnelId }) : null,
-        h(IdentifierDetail, { label: 'Rel.AI task ID', value: identities.logicalTaskId || sessionIdentifier(session) || '—' }),
-        identities.processId ? h(IdentifierDetail, { label: 'Process ID', value: identities.processId }) : null,
-        session.correlation?.conversationId ? h(IdentifierDetail, { label: 'Conversation ID', value: session.correlation.conversationId }) : null
+        h(IdentifierDetail, { label: 'Task ID', value: sessionIdentifier(session) || 'Not recorded' }),
+        h(Detail, { label: 'Started', value: recordedTime(session.startedAt) }),
+        h(Detail, { label: 'Ended', value: recordedTime(session.completedAt || session.endedAt) }),
+        h(Detail, { label: 'Checks', value: taskValidationView(session).statusLabel }),
+        session.endReason ? h(Detail, { label: 'End reason', value: session.endReason }) : null
       )
-    ),
-    h('section', { className: 'task-detail-section' },
-      h('div', { className: 'task-detail-heading' }, h('h3', null, 'Runtime')),
-      h('div', { className: 'task-detail-grid' },
-        h(Detail, { label: 'State', value: state.label }),
-        h(Detail, { label: 'Last action', value: operationValue }),
-        h(Detail, { label: 'Validation', value: session.validation || 'Not recorded' }),
-        h(Detail, { label: 'End reason', value: session.endReason || (state.terminal ? 'completed' : 'still open') }),
-        h(Detail, { label: 'Completion confirmed', value: session.completionKnown ? 'Yes' : 'No' })
-      )
-    ),
-    h(CurrentOperations, { session, controlKey, onStopOperation }),
-    h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility })
+    )
   );
 }
 
@@ -1260,15 +1208,14 @@ function IdentifierDetail({ label, value }) {
 }
 
 function CurrentOperations({ session, controlKey = '', onStopOperation }) {
-  const executable = ['running', 'validating', 'working'].includes(String(session?.status || '')) && Number(session?.activeCalls || 0) > 0;
-  const operations = executable && Array.isArray(session.currentOperations) ? session.currentOperations : [];
+  const operations = taskRunningOperations(session);
   if (!operations.length) return null;
   return h('section', { className: 'task-detail-section' },
-    h('div', { className: 'task-detail-heading' }, h('h3', null, 'Current actions'), h('span', null, operations.length)),
+    h('div', { className: 'task-detail-heading' }, h('h3', null, 'Running operations'), h('span', null, operations.length)),
     h('div', { className: 'task-event-list' }, ...operations.map((operation, index) => {
       const operationId = String(operation.id || operation.operationId || operation.invocationId || '');
       const stopping = Boolean(operation.stopRequestedAt) || controlKey === `stop:${operationId}`;
-      return h('div', { className: 'task-event', key: operationId || `${operation.startedAt || ''}:${index}` },
+      return h('div', { className: 'task-event', 'data-task-operation': operationId, key: operationId || `${operation.startedAt || ''}:${index}` },
         h('span', { 'data-clock-elapsed-start': operation.startedAt || '' }, formatDuration(Date.now() - Number(operation.startedAt || Date.now()), { live: true })),
         h('code', null, operation.label || operation.tool || 'action'),
         h('div', { className: 'task-operation-actions' },

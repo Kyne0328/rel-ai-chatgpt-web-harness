@@ -25,13 +25,13 @@
 .activity-table tbody .activity-time-column { @apply align-top; }
 .activity-message-column { min-width: 0; overflow: hidden; }
 .activity-message-cell { @apply min-w-0 py-1.5; }
-.activity-row-trigger { display: grid; grid-template-columns: 92px minmax(0, 1fr); grid-template-rows: auto auto; min-height: 40px; width: 100%; min-width: 0; column-gap: 8px; row-gap: 2px; align-items: center; justify-content: stretch; justify-items: stretch; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.activity-row-trigger { display: grid; grid-template-columns: 92px minmax(0, 1fr); grid-template-rows: auto auto auto; min-height: 60px; width: 100%; min-width: 0; column-gap: 8px; row-gap: 2px; align-items: center; justify-content: stretch; justify-items: stretch; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .activity-row-trigger:hover .activity-message-copy { color: var(--ui-text-primary); }
-.activity-row-status { grid-column: 1; grid-row: 1 / span 2; align-self: center; justify-self: start; min-width: 0; }
+.activity-row-status { grid-column: 1; grid-row: 1 / span 3; align-self: center; justify-self: start; min-width: 0; }
 .activity-row-status .status-pill { @apply min-h-6 px-1.5 text-[13px]; max-width: 100%; }
 .activity-message-copy { grid-column: 2; grid-row: 1; width: 100%; max-width: 72ch; min-width: 12ch; overflow: hidden; color: var(--ui-text-primary); font-size: 13px; font-weight: 600; line-height: 1.45; white-space: nowrap; text-overflow: ellipsis; }
-.activity-row-meta { grid-column: 2; grid-row: 2; display: flex; min-width: 0; flex-wrap: nowrap; align-items: center; gap: 6px; overflow: hidden; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.45; white-space: nowrap; }
-.activity-row-action { @apply shrink-0 font-semibold; color: var(--ui-text-secondary); }
+.activity-row-meta { grid-column: 2; grid-row: 2; min-width: 0; overflow: hidden; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.45; white-space: nowrap; text-overflow: ellipsis; }
+.activity-row-context { grid-column: 2; grid-row: 3; display: flex; min-width: 0; align-items: center; gap: 8px; color: var(--ui-text-tertiary); font-size: 12px; line-height: 1.4; white-space: nowrap; }
 .activity-row-task, .activity-row-project { min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-row-task { color: var(--ui-text-secondary); }
 .activity-row-project { color: var(--ui-text-tertiary); }
@@ -60,6 +60,11 @@
 .activity-detail-section { @apply grid gap-1.5; }
 .activity-detail-section > h3 { @apply text-[13px] font-bold; color: var(--ui-text-secondary); }
 .activity-detail-section > p { @apply m-0 text-[13px] leading-5; color: var(--ui-text-primary); }
+.activity-detail-files ul { display: grid; gap: 0; max-height: 280px; overflow-y: auto; margin: 0; padding: 0; list-style: none; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); }
+.activity-detail-files li { display: flex; min-width: 0; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; padding: 8px 10px; font-size: 13px; }
+.activity-detail-files li + li { border-top: 1px solid var(--ui-border-subtle); }
+.activity-detail-files code { min-width: 0; overflow-wrap: anywhere; font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12px; color: var(--ui-text-primary); }
+.activity-detail-files li span { color: var(--ui-text-tertiary); white-space: nowrap; }
 .activity-detail-command-head { @apply flex flex-wrap items-center justify-between gap-2; }
 .activity-detail-command-head h3 { @apply text-[13px] font-bold; color: var(--ui-text-secondary); }
 .activity-detail-command pre { margin: 0; max-height: 360px; overflow: auto; padding: var(--filter-inset, 12px); border: 1px solid var(--ui-border-subtle); border-radius: var(--technical-radius, 7px); background: var(--ui-surface-secondary); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
@@ -140,7 +145,7 @@
 
 @media (max-width: 240px) {
   .activity-row-trigger { grid-template-columns: 76px minmax(0, 1fr); column-gap: 4px; }
-  .activity-row-meta { gap: 4px; }
+  .activity-row-context { gap: 4px; }
   .activity-row-task, .activity-row-project { max-width: 16ch; }
   .activity-page .data-table th, .activity-page .data-table td { padding-inline: 4px; }
 }

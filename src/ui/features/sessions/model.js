@@ -68,6 +68,10 @@ export function taskProcessGroups(processes = [], taskId = '', workspace = '') {
   return { owned, other };
 }
 
+export function taskRunningOperations(session = {}) {
+  return isOngoingSession(session) && Array.isArray(session.currentOperations) ? session.currentOperations : [];
+}
+
 export function taskValidationView(session = {}) {
   const events = (Array.isArray(session.events) ? session.events : []).filter(event =>
     event.operation === 'checks' || event.tool?.operation === 'checks'

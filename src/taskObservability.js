@@ -19,7 +19,7 @@ const MAX_METADATA_ITEMS = 100;
 const MAX_TASK_PLAN_STEPS = 50;
 const TASK_PLAN_STEP_STATUSES = new Set(['pending', 'in_progress', 'completed', 'blocked', 'skipped']);
 const ALLOWED_METADATA_KEYS = new Set([
-  'waitMs', 'queueMode', 'queued', 'pathCount', 'matchCount', 'returnedFileCount', 'returnedRangeCount',
+  'waitMs', 'queueMode', 'queued', 'pathCount', 'filePaths', 'matchCount', 'returnedFileCount', 'returnedRangeCount',
   'returnedBytes', 'changedFileCount', 'changedFiles', 'changedFilesTruncated', 'validationStatus', 'validationLevel', 'validationLevelReason',
   'checkCount', 'passedCount', 'failedCount', 'skippedCount', 'exitCode', 'durationMs', 'stdoutBytes', 'stderrBytes',
   'stdoutTruncated', 'stderrTruncated', 'timedOut', 'commit', 'commitHead', 'branch', 'remote', 'processId', 'pid', 'status',
@@ -47,6 +47,11 @@ function titleForTool(tool, details = {}) {
   const titles = {
     [OP.WORK_BEGIN]: workspace ? `Work in ${workspace}` : 'Start logical task',
     [OP.WORK_PLAN]: 'Update task plan',
+    [OP.GOAL_STOP]: 'Stop Goal Mode',
+    [OP.GOAL_PAUSE]: 'Pause Goal Mode',
+    [OP.GOAL_RESUME]: 'Resume Goal Mode',
+    [OP.GOAL_UPDATE]: 'Update Goal Mode',
+    [OP.GOAL_STATUS]: 'Check Goal Mode',
     [OP.SNAPSHOT]: `Inspect repository${suffix}`,
     [OP.READ]: path ? `Read ${displayPath(path)}` : 'Read repository files',
     [OP.SEARCH_TEXT]: 'Search repository',
@@ -114,6 +119,7 @@ function buildToolActivityDetails(name, args = {}, value = null, error = null, o
       ...(value?.timeline ? { timeline: value.timeline } : {}),
       ...(options.metadata || {}),
       pathCount: pathCount(args),
+      filePaths: [OP.READ, OP.EDIT].includes(name) ? requestedFilePaths(args) : undefined,
       matchCount: value?.matchCount,
       returnedFileCount: value?.returnedFileCount,
       returnedRangeCount: value?.returnedRangeCount,
@@ -368,7 +374,20 @@ function terminalTitleForTool(name, args, result, status) {
     const base = titleForTool(name, args) || 'Rel.AI action';
     return `${base} failed`;
   }
-  return cleanText(result?.outcome, 160) || `${titleForTool(name, args) || 'Rel.AI action'} completed`;
+  const completedTitles = {
+    [OP.WORK_BEGIN]: 'Task started',
+    [OP.WORK_PLAN]: 'Task plan updated',
+    [OP.WORK_FINISH]: 'Task completed',
+    [OP.GOAL_STOP]: 'Goal Mode stopped',
+    [OP.GOAL_PAUSE]: 'Goal Mode paused',
+    [OP.GOAL_RESUME]: 'Goal Mode resumed',
+    [OP.GOAL_UPDATE]: 'Goal Mode updated',
+    [OP.GOAL_STATUS]: 'Goal Mode checked'
+  };
+  if (completedTitles[name]) return completedTitles[name];
+  const outcome = cleanText(result?.outcome, 160);
+  if (outcome && outcome !== 'Completed successfully') return outcome;
+  return titleForTool(name, args) || 'Action completed';
 }
 
 function stageForTool(name, status) {
@@ -529,6 +548,16 @@ function pathCount(args = {}) {
   if (Array.isArray(args.ranges)) return args.ranges.length;
   if (Array.isArray(args.edits)) return args.edits.length;
   return args.path ? 1 : 0;
+}
+
+function requestedFilePaths(args = {}) {
+  const paths = [
+    ...(Array.isArray(args.paths) ? args.paths : []),
+    ...(Array.isArray(args.ranges) ? args.ranges.map(item => item?.path) : []),
+    ...(Array.isArray(args.edits) ? args.edits.map(item => item?.path) : []),
+    args.path
+  ];
+  return [...new Set(paths.map(normalizeRelativePath).filter(Boolean))].slice(0, MAX_METADATA_ITEMS);
 }
 
 function resultItemCount(value) {

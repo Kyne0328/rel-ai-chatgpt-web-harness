@@ -1478,6 +1478,13 @@ async function case_task_observability_unit() {
   assert.equal(readCompleted.progress.percentage, 100);
   assert.equal(readCompleted.result.affectedItemCount, 3);
   assert.match(readCompleted.summary, /Read 3 files/);
+  assert.equal(readCompleted.title, 'Read 3 files');
+  assert.deepEqual(readCompleted.metadata.filePaths, ['src/a.js', 'src/b.js', 'src/c.js']);
+  const goalStopped = buildToolActivityDetails('goal.stop', { workspace: 'rel-ai-mcp' }, { ok: true }, null, { phase: 'complete' });
+  assert.equal(goalStopped.title, 'Goal Mode stopped');
+  const fileUpdated = buildToolActivityDetails('edit', { path: 'src/a.js' }, { changedFiles: ['src/a.js'] }, null, { phase: 'complete' });
+  assert.equal(fileUpdated.title, 'Updated 1 file');
+  assert.deepEqual(fileUpdated.metadata.filePaths, ['src/a.js']);
 
   const runningSearch = buildToolActivityDetails('search.text', { queries: ['alpha', 'beta', 'gamma'] }, null, null, {
     phase: 'running',

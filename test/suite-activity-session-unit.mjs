@@ -189,6 +189,34 @@ async function case_activity_model_unit() {
     assert.equal(results.length, 1);
   });
   
+  test('activity rows prioritize distinct actions and file identities', () => {
+    const read = entry({
+      action: 'read',
+      title: 'Read 3 files',
+      summary: 'Read 3 files.',
+      metadata: { filePaths: ['src/a.js', 'src/b.ts', 'docs/README.md'] },
+      target: { type: 'file', workspaceRelativePath: 'src/a.js' }
+    });
+    assert.equal(activityModel.activityDisplayAction(read), 'Read 3 files');
+    assert.deepEqual(activityModel.activityFilePaths(read), ['src/a.js', 'src/b.ts', 'docs/README.md']);
+    assert.equal(activityModel.activityDescription(read), 'src/a.js · src/b.ts · +1 more');
+    assert.equal(activityModel.activityFileKind('docs/README.md'), 'Markdown');
+    assert.equal(activityModel.activityDescription(entry({
+      action: 'read', title: 'Read 1 file', summary: 'Read src/a.js.',
+      target: { type: 'file', workspaceRelativePath: 'src/a.js' }
+    })), 'JavaScript · src/a.js');
+    assert.equal(activityModel.activityDisplayAction(entry({
+      title: 'Completed successfully', action: 'goal.stop', summary: 'Completed successfully'
+    })), 'Goal Mode stopped');
+    assert.equal(activityModel.activityDescription(entry({
+      title: 'Completed successfully', action: 'goal.stop', summary: 'Completed successfully'
+    })), '');
+    assert.deepEqual(activityModel.activityFilePaths(entry({
+      action: 'edit', metadata: { changedFiles: ['src/b.ts'], filePaths: ['src/a.js', 'src/b.ts'] },
+      target: { type: 'file', workspaceRelativePath: 'src/a.js' }
+    })), ['src/b.ts'], 'actual changed files take priority over requested files');
+  });
+
   test('activity messages skip whitespace and always provide visible text', () => {
     assert.equal(activityMessage(entry({ summary: '   ', message: '\n', currentActivity: 'Indexing files' })), 'Indexing files');
     assert.equal(activityMessage(entry({ summary: '', title: '', operation: '', path: '' })), 'No additional details recorded.');
@@ -408,6 +436,7 @@ async function case_task_inspector_lifecycle_unit() {
   const { default: vm } = await import('node:vm');
   const model = await import('../src/ui/features/sessions/model.js');
   const identity = await import('../src/ui/task-identity.js');
+  const { processListView } = await import('../src/ui/features/processes/index.js');
   const source = readFileSync(new URL('../src/ui/features/sessions/react.js', import.meta.url), 'utf8')
     .replace(/^import[\s\S]*?;\n/gm, '')
     .replace(/^export /gm, '');
@@ -435,7 +464,8 @@ async function case_task_inspector_lifecycle_unit() {
       ...model, ...identity, URLSearchParams, encodeURIComponent,
       React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }), lazy: () => 'lazy-feature' },
       memo: component => component,
-      Icon: 'icon', Suspense: 'suspense',
+      Icon: 'icon', Suspense: 'suspense', ProcessRow: 'process-row', OperationDiagnostics: 'operation-diagnostics',
+      processListView, useProcessMemory: () => null, formatDuration: value => String(value),
       useState: initial => {
         const index = cursor++;
         if (!slots[index]) slots[index] = { value: typeof initial === 'function' ? initial() : initial };
@@ -486,7 +516,7 @@ async function case_task_inspector_lifecycle_unit() {
       routeHref: () => '#activity',
       orderWorkspacesAlphabetically: rows => rows
     };
-    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector };', context);
+    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskProcessesSection, CurrentOperations, TechnicalDetails };', context);
     return {
       requests, controls,
       refreshes: () => refreshes,
@@ -515,6 +545,7 @@ async function case_task_inspector_lifecycle_unit() {
   }
   function find(tree, predicate) {
     if (!tree || typeof tree !== 'object') return null;
+    if (Array.isArray(tree)) return tree.map(child => find(child, predicate)).find(Boolean) || null;
     if (predicate(tree)) return tree;
     for (const child of tree.children || []) {
       const found = find(child, predicate);
@@ -531,6 +562,60 @@ async function case_task_inspector_lifecycle_unit() {
   }));
   const data = { tasks: recent, config: { workspaces: [] } };
   const retained = { id: 'retained-old', title: 'Retained task outside bootstrap', workspace: 'app', status: 'completed' };
+
+  {
+    const app = harness();
+    const currentOperations = [{ id: 'operation-without-counter', tool: 'relai_read' }];
+    assert.equal(model.taskRunningOperations({ status: 'running', currentOperations }).length, 1, 'current operations remain visible when the summary omits the call counter');
+    assert.equal(model.taskRunningOperations({ status: 'running', activeCalls: 0, currentOperations }).length, 1, 'a lagging call counter must not hide recorded current operations');
+    const active = { ...retained, id: 'operations-task', status: 'settling', activeCalls: 1,
+      currentOperations: [{ id: 'read-operation', tool: 'relai_read', label: 'Read source', startedAt: Date.now() }] };
+    const managedProcesses = [
+      { processId: 'task-command', workSessionId: active.id, workspaceId: 'app', lifecycle: 'task', status: 'running' },
+      { processId: 'other-command', workSessionId: 'another-task', workspaceId: 'app', status: 'running' }
+    ];
+    let detail = app.render('SessionInspector', { session: active, managedProcesses, activeTab: 'processes' });
+    const tabProps = find(detail, node => node.type?.name === 'SessionTabs').props;
+    assert.equal(tabProps.counts.processes, 2, 'Processes must count task operations and owned commands, excluding other tasks');
+    const tabs = app.render('SessionTabs', tabProps);
+    assert.equal(find(tabs, node => node.props['data-session-tab'] === 'validation'), null);
+    assert.equal(find(detail, node => node.props['data-session-panel'] === 'validation'), null);
+
+    const processes = app.render('TaskProcessesSection', find(detail, node => node.type?.name === 'TaskProcessesSection').props);
+    assert.ok(find(processes, node => node.type === 'process-row' && node.props.row.processId === 'task-command'));
+    assert.equal(find(processes, node => node.type === 'process-row' && node.props.row.processId === 'other-command'), null, 'other project commands stay collapsed');
+    assert.equal(find(processes, node => node.type === 'strong' && node.children.includes('No running operations or managed commands')), null);
+    const operationProps = find(processes, node => node.type?.name === 'CurrentOperations').props;
+    let operations = app.render('CurrentOperations', operationProps);
+    const stop = find(operations, node => node.props['data-stop-task-operation'] === 'read-operation');
+    assert.ok(stop, 'non-command operations must be visible and individually stoppable in Processes');
+    stop.props.onClick();
+    assert.equal(app.controls[0].url, '/api/tasks/control');
+    assert.equal(app.controls[0].payload.work_id, active.id);
+    assert.equal(app.controls[0].payload.operationId, 'read-operation');
+    assert.equal(app.controls[0].payload.action, 'stop');
+    detail = app.render('SessionInspector', { session: active, managedProcesses, activeTab: 'processes' });
+    operations = app.render('CurrentOperations', { ...operationProps, controlKey: find(detail, node => node.type?.name === 'TaskProcessesSection').props.controlKey });
+    assert.equal(find(operations, node => node.props['data-stop-task-operation'] === 'read-operation').props.disabled, true);
+    app.controls[0].resolve({ ok: true, stoppedOperationCount: 1 });
+    await settle();
+
+    const technical = app.render('TechnicalDetails', { session: active });
+    assert.equal(find(technical, node => node.type?.name === 'CurrentOperations'), null, 'Technical must not duplicate operations');
+    assert.equal(find(technical, node => node.type?.name === 'IdentifierDetail').props.label, 'Task ID');
+    assert.equal(find(technical, node => node.props.label === 'Ended').props.value, 'Not recorded', 'missing completion evidence must not imply completion');
+    assert.equal(find(technical, node => node.props.label === 'End reason'), null, 'missing end reasons must not be synthesized');
+    assert.equal(find(technical, node => node.props.label === 'Checks').props.value, 'Not recorded');
+
+    const completed = { ...active, status: 'completed' };
+    assert.equal(app.render('CurrentOperations', { session: completed }), null, 'terminal tasks must hide stale operation snapshots');
+    const operationOnly = app.render('TaskProcessesSection', { session: active, taskId: active.id, active: true });
+    assert.ok(find(operationOnly, node => node.type?.name === 'CurrentOperations'));
+    assert.equal(find(operationOnly, node => node.type === 'strong' && node.children.includes('No running operations or managed commands')), null, 'operation-only tasks must not show an empty state');
+    const empty = app.render('TaskProcessesSection', { session: completed, taskId: active.id, active: true });
+    assert.ok(find(empty, node => node.type === 'strong' && node.children.includes('No running operations or managed commands')));
+    app.dispose();
+  }
 
   {
     const app = harness(retained.id);
@@ -639,6 +724,6 @@ async function case_task_inspector_lifecycle_unit() {
     app.dispose();
   }
 
-  console.log('Task deep-link hydration and goal-control lifecycle tests passed.');
+  console.log('Task inspector, operation controls, deep-link hydration, and goal lifecycle tests passed.');
 }
 await case_task_inspector_lifecycle_unit();

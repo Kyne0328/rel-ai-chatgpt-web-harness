@@ -23,7 +23,10 @@ import { operationDiagnostics } from '../../operation-diagnostics.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import {
   activityAbsoluteTime,
+  activityDescription,
   activityDisplayAction,
+  activityFileKind,
+  activityFilePaths,
   activityFileLocation,
   activityFilterTransition,
   activityMessage,
@@ -124,7 +127,7 @@ function ActivityView({ data = {} }) {
   const rowVirtualizer = useVirtualizer({
     count: filteredEntries.length,
     getScrollElement: () => listPaneRef.current,
-    estimateSize: () => 54,
+    estimateSize: () => 70,
     overscan: 8,
     rangeExtractor: range => {
       const indices = defaultRangeExtractor(range);
@@ -694,10 +697,10 @@ const ActivityRowStatus = memo(function ActivityRowStatus({ value }) {
 const ActivityRow = memo(function ActivityRow({ entry, requested, selected, isNew, taskTitle, project, onSelect, measureElement, virtualIndex }) {
   const group = activityStatusGroup(entry);
   const status = entry.status || (group === 'other' ? 'unknown' : group);
-  const message = activityMessage(entry);
+  const message = activityDisplayAction(entry);
+  const description = activityDescription(entry);
   const timestamp = eventTimestampValue(entry);
   const absoluteTime = activityAbsoluteTime(entry);
-  const action = activityDisplayAction(entry);
   const eventId = activityEventId(entry);
   const className = [
     'activity-data-row',
@@ -728,8 +731,8 @@ const ActivityRow = memo(function ActivityRow({ entry, requested, selected, isNe
         h('span', { className: 'sr-only' }, 'Open activity details: '),
         h('span', { className: 'activity-row-status' }, h(ActivityRowStatus, { value: status })),
         h('span', { className: 'activity-message-copy', title: message }, message),
-        h('span', { className: 'activity-row-meta' },
-          h('span', { className: 'activity-row-action' }, action),
+        description ? h('span', { className: 'activity-row-meta', title: description }, description) : null,
+        h('span', { className: 'activity-row-context' },
           h('span', { className: 'activity-row-task', title: taskTitle }, taskTitle),
           h('span', { className: 'activity-row-project', title: project }, project)
         )
@@ -809,11 +812,19 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
   const stderr = String(entry.stderr ?? entry.result?.stderr ?? entry.metadata?.stderr ?? '');
   const isCommandRun = Boolean(command) || Boolean(stdout) || Boolean(stderr) || entry.action === 'execute' || entry.metadata?.exitCode !== undefined;
   const fileLocation = activityFileLocation(entry);
+  const files = activityFilePaths(entry);
   const error = activityErrorText(entry);
-  const summaryText = distinctActivityText(message, heading) ? message : '';
-  const targetText = distinctActivityText(target, fileLocation) ? target : '';
-  const resultText = distinctActivityText(result, message, heading) ? result : '';
-  const fileLocationText = distinctActivityText(fileLocation, target) ? fileLocation : '';
+  const summaryRepeatsFiles = files.length && (
+    /^(read|updated) \d+ files?\.?$/i.test(message)
+    || (files.length === 1 && /^(read|updated) /i.test(message) && message.replace(/^(read|updated) /i, '').replace(/\.$/, '') === files[0])
+  );
+  const summaryText = distinctActivityText(message, heading)
+    && !(group === 'succeeded' && /^completed successfully\.?$/i.test(message))
+    && !summaryRepeatsFiles ? message : '';
+  const targetText = !files.length && distinctActivityText(target, fileLocation) ? target : '';
+  const resultText = group === 'succeeded' && /^completed successfully\.?$/i.test(result)
+    ? '' : distinctActivityText(result, message, heading) ? result : '';
+  const fileLocationText = !files.length && distinctActivityText(fileLocation, target) ? fileLocation : '';
   const errorText = distinctActivityText(error, message, result) ? error : '';
   const fields = [
     ['Tool', toolName(entry)],
@@ -843,13 +854,14 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
             className: 'section-action',
             href: activityTaskHref(session.id, session.workspace || entry.workspace)
           }, 'Open task'),
-          h('a', {
+          getRouteParams().get('task') !== session.id ? h('a', {
             className: 'section-action',
             href: routeHref('activity', { workspace: session.workspace || entry.workspace, task: session.id, time: 'all', ...activityTaskReturnContext(session.id) })
-          }, 'Task activity')
+          }, 'Filter to this task') : null
         )
       ) : null,
       readableSection('Target', targetText),
+      files.length ? h(ActivityFilesDetail, { entry, files }) : null,
       command ? h(CommandDetail, { command }) : null,
       isCommandRun ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
       isCommandRun ? h(StreamOutputDetail, { title: 'Standard error', output: stderr, stream: 'stderr' }) : null,
@@ -877,6 +889,21 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
         }, copyState === 'success' ? 'Copied' : 'Copy event JSON')
       )
     )
+  );
+}
+
+function ActivityFilesDetail({ entry, files }) {
+  const action = String(entry.action || entry.tool?.name || entry.tool || '').toLowerCase();
+  const succeeded = activityStatusGroup(entry) === 'succeeded';
+  const heading = !succeeded ? 'Files involved'
+    : /^(read|relai_read)$/.test(action) ? 'Files read'
+      : /^(edit|relai_edit)$/.test(action) ? 'Files updated' : 'Files';
+  return h('section', { className: 'activity-detail-section activity-detail-files' },
+    h('h3', null, heading),
+    h('ul', null, files.map(path => h('li', { key: path },
+      h('code', { title: path }, path),
+      h('span', null, activityFileKind(path))
+    )))
   );
 }
 

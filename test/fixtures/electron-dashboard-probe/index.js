@@ -205,7 +205,7 @@ app.whenReady().then(async () => {
       tabs: [...(detail?.querySelectorAll('[data-session-tab]') || [])].map(tab => tab.dataset.sessionTab),
       detailsAvailable: Boolean(detail?.querySelector('[data-session-details]')),
       detailText: detail?.textContent || '',
-      workSessionId: /Rel[.]AI task ID/.test(detail?.textContent || ''),
+      workSessionId: Boolean(detail?.querySelector('[aria-label^="Copy Task ID "]')),
       processId: /Process ID/.test(detail?.textContent || ''),
       eventLinks: detail?.querySelectorAll('.task-event-link').length || 0
     };
@@ -214,6 +214,8 @@ app.whenReady().then(async () => {
   await waitForCapturePaint(win);
   fs.writeFileSync(path.join(screenshotDir, 'task-inspector-desktop.png'), (await win.webContents.capturePage()).toPNG());
   const taskSelectionStability = await exerciseTaskSelectionStability(win);
+  const taskProcesses = await exerciseTaskProcesses(win);
+  accessibility.push(await auditAccessibility(win, axePath, 'task-technical'));
 
   await win.webContents.setZoomFactor(1);
   win.setSize(1600, 900);
@@ -642,6 +644,7 @@ app.whenReady().then(async () => {
     updateModalTransitions,
     taskInteraction,
     taskSelectionStability,
+    taskProcesses,
     activityInteraction,
     activitySelectionStability,
     operationDiagnostics,
@@ -1099,6 +1102,65 @@ async function exerciseTaskSelectionStability(win) {
     routeTask: new URLSearchParams(location.hash.split('?')[1] || '').get('task')
   })`);
   return { immediate, afterRefresh, keyboard, nextId };
+}
+
+async function exerciseTaskProcesses(win) {
+  await win.webContents.executeJavaScript(`(() => {
+    window.__relaiProcessesOriginalFetch = window.fetch;
+    const updateTask = task => task?.id === 'acceptance-running' ? { ...task,
+      status: 'settling', activeCalls: 1,
+      currentOperations: [{ id: 'fixture-read', tool: 'relai_read', label: 'Read source files', startedAt: Date.now() }]
+    } : task;
+    window.fetch = async (...args) => {
+      const response = await window.__relaiProcessesOriginalFetch(...args);
+      const url = String(args[0]);
+      if (!url.includes('/api/dashboard/v10') && !url.includes('/api/tasks/session')) return response;
+      const data = await response.json();
+      if (data.tasks) {
+        data.tasks = data.tasks.map(updateTask);
+        data.managedProcesses = [...(data.managedProcesses || []), {
+          processId: 'fixture-command', workSessionId: 'acceptance-running', workspaceId: 'app',
+          status: 'running', lifecycle: 'task', label: 'Task development server', commandSummary: 'fixture-server',
+          canStop: false, startedAt: new Date().toISOString()
+        }];
+      }
+      if (data.session) data.session = updateTask(data.session);
+      return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+    };
+    location.hash = '#tasks?task=acceptance-running&tab=processes';
+    window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
+  })()`);
+  try {
+    await waitFor(win, `!document.querySelector('#session-panel-processes')?.hidden && document.querySelector('[data-task-operation="fixture-read"]') && document.querySelector('[data-process-id="fixture-command"]')`);
+    const result = await win.webContents.executeJavaScript(`(() => {
+      const panel = document.querySelector('#session-panel-processes');
+      return { operation: panel.querySelector('[data-task-operation="fixture-read"]').textContent,
+        command: panel.querySelector('[data-process-id="fixture-command"]').textContent,
+        stopAvailable: !panel.querySelector('[data-stop-task-operation="fixture-read"]').disabled,
+        badge: document.querySelector('#session-tab-processes .task-tab-badge')?.textContent,
+        empty: Boolean(panel.querySelector('.inspector-empty')),
+        validationTab: Boolean(document.querySelector('#session-tab-validation')) };
+    })()`);
+    await waitForCapturePaint(win);
+    fs.writeFileSync(path.join(screenshotDir, 'task-processes-desktop.png'), (await win.webContents.capturePage()).toPNG());
+    await win.webContents.executeJavaScript(`document.querySelector('[data-session-details]').click()`);
+    await waitFor(win, `!document.querySelector('#session-panel-technical')?.hidden`);
+    result.technical = await win.webContents.executeJavaScript(`(() => {
+      const panel = document.querySelector('#session-panel-technical');
+      return { taskId: Boolean(panel.querySelector('[data-copy-value="acceptance-running"]')),
+        operations: panel.querySelectorAll('[data-task-operation], [data-process-id]').length,
+        runtimeBuild: Boolean(panel.querySelector('[data-runtime-build-identity]')) };
+    })()`);
+    await waitForCapturePaint(win);
+    fs.writeFileSync(path.join(screenshotDir, 'task-technical-desktop.png'), (await win.webContents.capturePage()).toPNG());
+    return result;
+  } finally {
+    await win.webContents.executeJavaScript(`(() => {
+      window.fetch = window.__relaiProcessesOriginalFetch;
+      delete window.__relaiProcessesOriginalFetch;
+      window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
+    })()`);
+  }
 }
 
 async function auditAccessibility(win, runtimePath, route) {
