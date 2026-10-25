@@ -104,7 +104,7 @@ assert.match(sessionsReact, /'aria-label': statusLabel/, 'each durable plan step
 assert.match(sessionsReact, /key: `\$\{String\(step\?\.id \|\| 'step'\)\}:\$\{index\}`/, 'plan rows must keep React keys unique even when optional external step IDs collide');
 assert.match(sessionsReact, /\['completed', 'skipped'\]/, 'plan resolved counts must come from explicit durable step states rather than tool-call history');
 assert.match(sessionsReact, /steps resolved/, 'skipped steps must be described as resolved rather than incorrectly reported as completed');
-assert.match(sessionsReact, /const ordered = orderSessionEvents\(session\.events \|\| \[\]\)/, 'open task Activity must render canonical task events instead of raw audit trace rows');
+assert.match(sessionsReact, /orderSessionEvents\(session\.events \|\| \[\]\)/, 'open task Activity must render canonical task events instead of raw audit trace rows');
 assert.doesNotMatch(sessionsReact, /mergeSessionEvents\(traceEvents/, 'raw audit trace rows must not inflate the user-facing task Activity timeline');
 assert.match(sessionsReact, /data-show-older-events/, 'older task events must expand in the existing trace');
 assert.match(sessionsReact, /data-load-older-task-activity/, 'long-running tasks must offer paged access to activity older than the bounded task snapshot');
@@ -385,9 +385,10 @@ for (const streamId of ['a', 'b']) {
 
 {
   const source = read('src/ui/features/code/react.js');
-  const callbackSource = (name, suffix) => {
+  const callbackSource = name => {
     const start = source.indexOf('  const ' + name + ' = useCallback(');
-    const end = source.indexOf(suffix, start) + suffix.length;
+    const ending = /\n {2}}, \[[^\]]*\]\);/.exec(source.slice(start));
+    const end = ending ? start + ending.index + ending[0].length : -1;
     assert.ok(start >= 0 && end > start);
     return source.slice(start, end);
   };
@@ -396,6 +397,7 @@ for (const streamId of ['a', 'b']) {
   let route = 'code';
   const context = {
     useCallback: fn => fn,
+    mode: 'standalone', activeRef: { current: true }, onSelectFileRef: { current: null }, requestedPathRef: { current: '' },
     workspaceRequestRef: { current: 0 }, diffRequestRef: { current: 0 },
     taskIdRef: { current: 'task-a' }, filePathRef: { current: 'src/a.js' }, pendingDiffPathRef: { current: '' },
     bridge: {
@@ -411,9 +413,9 @@ for (const streamId of ['a', 'b']) {
     setViewerMessage() {}, setViewerTone() {}, replaceRouteParams() {},
     emptyViewerMessage: () => '', messageFor: String
   };
-  vm.runInNewContext(callbackSource('loadDiff', '  }, [bridge]);') + '\n'
-    + callbackSource('showUnavailableFile', '  }, []);') + '\n'
-    + callbackSource('refreshWorkspace', '  }, [bridge, loadDiff, showUnavailableFile]);')
+  vm.runInNewContext(callbackSource('loadDiff') + '\n'
+    + callbackSource('showUnavailableFile') + '\n'
+    + callbackSource('refreshWorkspace')
     + '\n globalThis.load = loadDiff; globalThis.refresh = refreshWorkspace;', context);
   const refresh = context.refresh('task-a');
   await new Promise(resolve => setImmediate(resolve));
@@ -663,7 +665,7 @@ for (const streamId of ['a', 'b']) {
   assert.equal(draft, 'history'); assert.equal(filters.search, 'history');
   const entries = [{ title: 'history event', timestamp: new Date().toISOString() }, { title: 'unrelated', timestamp: new Date().toISOString() }];
   assert.equal(filterActivityEntries(entries, filters, Date.now()).length, 1, 'restored draft and effective list filter must agree');
-  const uiContext = { h: (type, props, ...children) => ({ type, props, children }), Icon: 'icon' };
+  const uiContext = { h: (type, props, ...children) => ({ type, props, children }), Icon: 'icon', FilterChoice: 'filter-choice', TIME_OPTIONS: [] };
   vm.runInNewContext(functionSource(activity, 'hasActiveFilters') + '\n' + functionSource(activity, 'ActivityFilterBar') + '\nglobalThis.render = ActivityFilterBar;', uiContext);
   const tree = uiContext.render({ filterState: filters, searchDraft: draft, filters: [], summary: '', paused: false });
   const nodes = node => typeof node !== 'object' || !node ? [] : [node, ...(node.children || []).flatMap(nodes)];

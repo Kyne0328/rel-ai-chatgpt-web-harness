@@ -19,7 +19,7 @@ const CANONICAL_PATHS = new Set([
 
 const ALLOWED_PARAMS = {
   home: new Set(['workspace']),
-  tasks: new Set(['workspace', 'task', 'search', 'taskStatus']),
+  tasks: new Set(['workspace', 'task', 'search', 'taskStatus', 'tab', 'file']),
   code: new Set(['task', 'file', 'workspace', 'search', 'taskStatus', 'from']),
   browser: new Set(['tunnel']),
   'settings/connection': new Set(['tunnel']),
@@ -92,6 +92,7 @@ function sanitizeValue(key, value) {
   if (key === 'range') return ANALYTICS_RANGES.has(text.toLowerCase()) ? text.toLowerCase() : '';
   if (key === 'start' || key === 'end') return DATE_PATTERN.test(text) ? text : '';
   if (key === 'from') return text === 'tasks' ? text : '';
+  if (key === 'tab') return ['overview', 'changes', 'activity', 'validation', 'processes', 'technical'].includes(text) ? text : '';
   if (key === 'taskStatus' || key === 'returnTaskStatus') return TASK_STATUSES.has(text.toLowerCase()) ? text.toLowerCase() : '';
   if (key === 'status') return STATUSES.has(text.toLowerCase()) ? text.toLowerCase() : '';
   const limit = key === 'search' || key === 'returnSearch' ? 200 : key === 'file' ? 1000 : 160;

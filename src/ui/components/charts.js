@@ -166,7 +166,7 @@ export function AnalyticsTimelineChart({
           maxRotation: 0,
           autoSkip: true,
           maxTicksLimit: 4,
-          font: { size: 12, weight: 600 }
+          font: { size: 13, weight: 600 }
         }
       },
       y: {
@@ -177,7 +177,7 @@ export function AnalyticsTimelineChart({
           color: theme.text,
           maxTicksLimit: 5,
           padding: 8,
-          font: { size: 12, weight: 600 },
+          font: { size: 13, weight: 600 },
           callback: value => formatValue(Number(value) || 0)
         }
       }

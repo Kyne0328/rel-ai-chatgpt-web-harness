@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { once } from 'node:events';
 import path from 'node:path';
 import { createHttpMcpSession } from '../../helpers/http-mcp.mjs';
 import { exerciseUIUXCoverage } from './ui-coverage.js';
@@ -193,6 +194,7 @@ app.whenReady().then(async () => {
     return Boolean(document.querySelector('[data-session-inspector] .session-detail'));
   })()`);
   await waitFor(win, `document.querySelector('[data-session-inspector] .session-detail')`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-session-tab="activity"]')?.click()`);
   await waitFor(win, `document.querySelectorAll('[data-session-inspector] .task-event-link').length > 0`);
   const taskInteraction = await win.webContents.executeJavaScript(`(() => {
     const inspector = document.querySelector('[data-session-inspector]');
@@ -200,7 +202,8 @@ app.whenReady().then(async () => {
     return {
       inspector: Boolean(inspector && detail),
       selectedRow: Boolean(document.querySelector('.task-row.is-selected')),
-      tabs: detail?.querySelectorAll('[data-session-tab]').length || 0,
+      tabs: [...(detail?.querySelectorAll('[data-session-tab]') || [])].map(tab => tab.dataset.sessionTab),
+      detailsAvailable: Boolean(detail?.querySelector('[data-session-details]')),
       detailText: detail?.textContent || '',
       workSessionId: /Rel[.]AI task ID/.test(detail?.textContent || ''),
       processId: /Process ID/.test(detail?.textContent || ''),
@@ -208,6 +211,8 @@ app.whenReady().then(async () => {
     };
   })()`);
   taskInteraction.immediate = taskDetailImmediate;
+  await waitForCapturePaint(win);
+  fs.writeFileSync(path.join(screenshotDir, 'task-inspector-desktop.png'), (await win.webContents.capturePage()).toPNG());
   const taskSelectionStability = await exerciseTaskSelectionStability(win);
 
   await win.webContents.setZoomFactor(1);
@@ -339,20 +344,30 @@ app.whenReady().then(async () => {
   ]) {
     fs.writeFileSync(outputPath, JSON.stringify({ stage: 'responsive-start', scenario: scenario.name }));
     await win.webContents.setZoomFactor(scenario.zoom);
+    const previousSize = win.getSize();
+    const resized = previousSize[0] !== scenario.width || previousSize[1] !== scenario.height
+      ? once(win, 'resize', { signal: AbortSignal.timeout(5000) }) : null;
     win.setSize(scenario.width, scenario.height);
-    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'TAB' });
-    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'TAB' });
+    if (resized) await resized;
+    const contentWidth = win.getContentSize()[0];
+    await waitFor(win, `Math.abs(innerWidth - ${contentWidth / scenario.zoom}) <= 1`);
+    win.focus();
+    win.webContents.focus();
+    await waitFor(win, `document.hasFocus()`);
     await win.webContents.executeJavaScript(`(() => {
       document.documentElement.dataset.theme = ${JSON.stringify(scenario.theme)};
       const row = document.querySelector('.task-row');
       row?.scrollIntoView({ block: 'center', inline: 'nearest' });
       row?.focus();
     })()`);
-    await delay(200);
+    await waitFor(win, `document.activeElement?.matches('.task-row:focus')`);
+    await waitForCapturePaint(win);
     const focusBeforeTab = await win.webContents.executeJavaScript(`document.activeElement?.getAttribute('data-task-id') || document.activeElement?.id || document.activeElement?.tagName || ''`);
     win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'TAB' });
     win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'TAB' });
-    await delay(50);
+    await waitFor(win, `document.hasFocus() && document.activeElement?.matches(':focus') &&
+      (document.activeElement?.getAttribute('data-task-id') || document.activeElement?.id || document.activeElement?.tagName || '') !== ${JSON.stringify(focusBeforeTab)}`);
+    await waitForCapturePaint(win);
     const measurement = await win.webContents.executeJavaScript(`(() => {
       const intersects = element => {
         if (!element) return false;
@@ -398,8 +413,10 @@ app.whenReady().then(async () => {
     if (measurement.viewportWidth <= 760 && measurement.viewportHeight <= 480) {
       await win.webContents.executeJavaScript(`(() => {
         window.__responsiveContentFocus = document.activeElement;
-        document.getElementById('commandPaletteBtn').focus();
       })()`);
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+      await win.webContents.executeJavaScript(`document.getElementById('commandPaletteBtn').focus()`);
       await waitForCapturePaint(win);
       measurement.headerControlFocus = await win.webContents.executeJavaScript(`(() => {
         const button = document.getElementById('commandPaletteBtn'), rect = button.getBoundingClientRect();
@@ -436,6 +453,22 @@ app.whenReady().then(async () => {
           taskDetailVisible: Boolean(rect && rect.bottom > 0 && rect.top < innerHeight)
         };
       })()`));
+      await win.webContents.executeJavaScript(`document.querySelector('#session-tab-overview').focus()`);
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
+      await waitFor(win, `document.activeElement?.id === 'session-tab-processes' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+      Object.assign(measurement, await win.webContents.executeJavaScript(`(() => {
+        const tab = document.getElementById('session-tab-processes');
+        const rect = tab.getBoundingClientRect();
+        const rail = document.querySelector('.inspector-tabs').getBoundingClientRect();
+        const details = document.querySelector('[data-session-details]').getBoundingClientRect();
+        return { taskTabKeyboardVisible: rect.left >= rail.left - 1 && rect.right <= rail.right + 1,
+          taskDetailsAccessible: details.left >= 0 && details.right <= innerWidth,
+          taskInspectorNoOverflow: document.documentElement.scrollWidth <= innerWidth + 1 };
+      })()`));
+      await waitForCapturePaint(win);
+      fs.writeFileSync(path.join(screenshotDir, 'task-inspector-' + scenario.name + '.png'), (await win.webContents.capturePage()).toPNG());
+
     }
     await win.webContents.executeJavaScript(`location.hash = '#activity'`);
     try {
@@ -1270,24 +1303,37 @@ async function exerciseNavigationControls(win, failures) {
   const scenarios = [
     { selector: '.nav a[data-nav-id="home"]', hash: '#home', ready: `document.querySelector('[data-home-react]')` },
     { selector: '.nav a[data-nav-id="tasks"]', hash: '#tasks', ready: `document.querySelector('[data-sessions-react]')` },
-    { selector: '.nav a[data-nav-id="code"]', hash: '#code', ready: `document.querySelector('[data-code-react]')` },
+    { selector: '[data-code-fullscreen-link]', prefix: true, hash: '#code', ready: `document.querySelector('[data-code-react]')` },
     { selector: '.nav a[data-nav-id="workspaces"]', hash: '#workspaces', ready: `document.querySelector('[data-workspaces-react]')` },
     { selector: '.nav a[data-nav-id="activity"]', hash: '#activity', ready: `document.querySelector('.activity-master-detail')` },
     { selector: '.sidebar .nav a[data-nav-id="processes"]', hash: '#processes', ready: `document.querySelector('[data-processes-react="true"]')` },
     { selector: '.sidebar .nav a[data-nav-id="diagnostics"]', hash: '#diagnostics', ready: `document.querySelector('.diagnostic-page')` },
     { selector: '.sidebar .nav a[data-nav-id="tools"]', hash: '#tools', ready: `document.querySelector('[data-tools-react="true"]')` },
     { selector: '.sidebar .nav a[data-nav-id="usage"]', hash: '#usage', ready: `document.querySelector('[data-usage-react="true"]')` },
-    { selector: '.sidebar .nav a[data-nav-id="connection"]', hash: '#settings/connection', ready: `document.querySelector('#__settings-content .connection-page')` },
+    { selector: '.connection-status-link[href="#settings/connection"]', hash: '#settings/connection', ready: `document.querySelector('#__settings-content .connection-page')` },
     { selector: '.settings-navigation a[data-settings-page="preferences"]', hash: '#settings', ready: `document.querySelector('#__settings-content .theme-switch') && !document.querySelector('.settings-loading')` },
     { selector: '.settings-navigation a[data-settings-page="application"]', hash: '#settings/application', ready: `document.querySelector('#__settings-content .application-update-panel') && !document.querySelector('.settings-loading')` },
     { selector: '.settings-navigation a[data-settings-page="about"]', hash: '#settings/about', ready: `document.querySelector('#__settings-content .about-product') && !document.querySelector('.settings-loading')` }
   ];
   const results = [];
   for (const scenario of scenarios) {
+    if (scenario.hash === '#code') {
+      await win.webContents.executeJavaScript(`document.querySelector('.task-row[data-task-id="acceptance-running"]')?.click()`);
+      await waitFor(win, `document.querySelector('#session-tab-changes')`);
+      await win.webContents.executeJavaScript(`document.querySelector('#session-tab-changes').click()`);
+      await waitFor(win, `document.querySelector('[data-code-fullscreen-link]')`);
+    }
+    if (scenario.hash === '#tools') {
+      await win.webContents.executeJavaScript(`(() => { const more = document.querySelector('.sidebar-more'); if (!more.open) more.querySelector('summary').click(); })()`);
+    }
+    win.focus();
+    win.webContents.focus();
+    await waitFor(win, `document.hasFocus()`);
+    await win.webContents.executeJavaScript(`document.querySelector(${JSON.stringify(scenario.selector)})?.scrollIntoView({ block: 'center', inline: 'center' })`);
+    await waitForCapturePaint(win);
     const hitTarget = await win.webContents.executeJavaScript(`(() => {
       const control = document.querySelector(${JSON.stringify(scenario.selector)});
       if (!control) return null;
-      control.scrollIntoView({ block: 'center', inline: 'center' });
       const rect = control.getBoundingClientRect();
       const x = Math.round(rect.left + rect.width / 2);
       const y = Math.round(rect.top + rect.height / 2);
@@ -1299,7 +1345,7 @@ async function exerciseNavigationControls(win, failures) {
     win.webContents.sendInputEvent({ type: 'mouseDown', x: hitTarget.x, y: hitTarget.y, button: 'left', clickCount: 1 });
     win.webContents.sendInputEvent({ type: 'mouseUp', x: hitTarget.x, y: hitTarget.y, button: 'left', clickCount: 1 });
     try {
-      await waitFor(win, `location.hash === ${JSON.stringify(scenario.hash)} && (${scenario.ready})`);
+      await waitFor(win, `${scenario.prefix ? "location.hash.split('?')[0]" : 'location.hash'} === ${JSON.stringify(scenario.hash)} && (${scenario.ready})`);
     } catch (error) {
       const state = await win.webContents.executeJavaScript(`({ hash: location.hash, title: document.title, pageTitle: document.getElementById('pageTitle')?.textContent || '', content: document.getElementById('routeRoot')?.textContent?.slice(0, 300) || '' })`);
       throw new Error(`${error.message} hit=${JSON.stringify(hitTarget)} state=${JSON.stringify(state)} failures=${JSON.stringify(failures)}`, { cause: error });

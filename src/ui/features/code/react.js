@@ -21,6 +21,31 @@ export function createCodeRoute(useDashboardSlices) {
   };
 }
 
+export function TaskDiffViewer({
+  taskId,
+  initialFilePath = '',
+  mode = 'embedded',
+  onSelectFile = null,
+  bridge = null,
+  active = true,
+  changeRevision = null,
+  fullScreenHref = ''
+}) {
+  const activeBridge = bridge || (window.relaiDesktop?.codeWorkspace || HTTP_CODE_BRIDGE);
+  return h(ChangesDesktop, {
+    key: taskId,
+    bridge: activeBridge,
+    selectedTaskId: taskId,
+    requestedFilePath: initialFilePath,
+    mode,
+    onSelectFile,
+    active,
+    changeRevision,
+    fullScreenHref,
+    tasks: []
+  });
+}
+
 function ChangesRoute({ data = {} }) {
   const bridge = window.relaiDesktop?.codeWorkspace || HTTP_CODE_BRIDGE;
   const tasks = useMemo(() => codeTasks(data), [data]);
@@ -31,12 +56,25 @@ function ChangesRoute({ data = {} }) {
     key: routeTask.selectedTaskId,
     bridge,
     tasks,
+    mode: 'standalone',
     ...routeTask
   });
 }
 
-function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, selectTask, returnContext }) {
-  const selectedTask = tasks.find(task => task.id === selectedTaskId) || null;
+function ChangesDesktop({
+  bridge,
+  tasks = [],
+  selectedTaskId,
+  requestedFilePath,
+  selectTask = null,
+  returnContext = null,
+  mode = 'standalone',
+  onSelectFile = null,
+  active = true,
+  changeRevision = null,
+  fullScreenHref = ''
+}) {
+  const selectedTask = (tasks || []).find(task => task.id === selectedTaskId) || null;
   const [workspace, setWorkspace] = useState(null);
   const [workspaceError, setWorkspaceError] = useState('');
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
@@ -56,20 +94,28 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
   const taskIdRef = useRef(selectedTaskId);
   const filePathRef = useRef(filePath);
   const pendingDiffPathRef = useRef('');
+  const onSelectFileRef = useRef(onSelectFile);
+  const requestedPathRef = useRef(requestedFilePath);
+  const activeRef = useRef(active);
+  const editorViewStates = useRef(new Map());
 
   taskIdRef.current = selectedTaskId;
   filePathRef.current = filePath;
+  onSelectFileRef.current = onSelectFile;
+  requestedPathRef.current = requestedFilePath;
+  activeRef.current = active;
 
   const loadDiff = useCallback(async (requestedTask, path, snapshot) => {
     const normalizedTaskId = String(requestedTask || '').trim();
     const normalizedPath = String(path || '').trim();
-    if (!normalizedTaskId || !normalizedPath) return false;
+    if (!normalizedTaskId || !normalizedPath || !activeRef.current) return false;
     const request = ++diffRequestRef.current;
     pendingDiffPathRef.current = normalizedPath;
     if (snapshot?.historyMode === 'unavailable' || snapshot?.historyAvailable === false) {
       filePathRef.current = normalizedPath;
       setFilePath(normalizedPath);
-      replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
+      if (mode === 'standalone') replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
+      else onSelectFileRef.current?.(normalizedPath);
       setDiffFile(null);
       setViewerMessage('This task records the changed file, but its original diff is unavailable because the Git commit could not be verified.');
       setViewerTone('');
@@ -85,20 +131,28 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
       const file = await bridge.diff(normalizedTaskId, normalizedPath);
       if (file?.ok === false) throw new Error(file.error || 'The file diff could not be loaded.');
       if (taskId(file) !== normalizedTaskId || file?.path !== normalizedPath) throw new Error('The returned diff did not match the requested task and file. Try again.');
-      if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId) return false;
-      if (currentRoutePath() !== 'code' || readRequestedTaskId() !== normalizedTaskId) return false;
-      if (readRequestedFilePath() && readRequestedFilePath() !== normalizedPath) return false;
+      if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId || !activeRef.current) return false;
+      if (mode === 'standalone') {
+        if (currentRoutePath() !== 'code' || readRequestedTaskId() !== normalizedTaskId) return false;
+        if (readRequestedFilePath() && readRequestedFilePath() !== normalizedPath) return false;
+      }
       filePathRef.current = normalizedPath;
       setFilePath(normalizedPath);
-      replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
+      if (mode === 'standalone') {
+        replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
+      } else {
+        onSelectFileRef.current?.(normalizedPath);
+      }
       setDiffFile(file);
       setViewerMessage('');
       setViewerTone('');
       return true;
     } catch (error) {
-      if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId) return false;
-      if (currentRoutePath() !== 'code' || readRequestedTaskId() !== normalizedTaskId) return false;
-      if (readRequestedFilePath() && readRequestedFilePath() !== normalizedPath) return false;
+      if (request !== diffRequestRef.current || taskIdRef.current !== normalizedTaskId || !activeRef.current) return false;
+      if (mode === 'standalone') {
+        if (currentRoutePath() !== 'code' || readRequestedTaskId() !== normalizedTaskId) return false;
+        if (readRequestedFilePath() && readRequestedFilePath() !== normalizedPath) return false;
+      }
       setDiffFile(null);
       setViewerMessage(messageFor(error));
       setViewerTone('error');
@@ -106,7 +160,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
     } finally {
       if (request === diffRequestRef.current) pendingDiffPathRef.current = '';
     }
-  }, [bridge]);
+  }, [bridge, mode]);
 
   const showUnavailableFile = useCallback(path => {
     diffRequestRef.current += 1;
@@ -120,20 +174,20 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
 
   const refreshWorkspace = useCallback(async (requestedTask, { refreshCurrent = true } = {}) => {
     const normalizedTaskId = String(requestedTask || '').trim();
-    if (!normalizedTaskId) return;
+    if (!normalizedTaskId || !activeRef.current) return;
     const request = ++workspaceRequestRef.current;
     setWorkspaceLoading(true);
     try {
       const nextWorkspace = await bridge.get(normalizedTaskId);
       if (nextWorkspace?.ok === false) throw new Error(nextWorkspace.error || 'Task changes could not be loaded.');
       if (taskId(nextWorkspace) !== normalizedTaskId) throw new Error('The returned changes did not match the requested task. Try again.');
-      if (request !== workspaceRequestRef.current || taskIdRef.current !== normalizedTaskId) return;
+      if (request !== workspaceRequestRef.current || taskIdRef.current !== normalizedTaskId || !activeRef.current) return;
       setWorkspace(nextWorkspace);
       setWorkspaceError('');
 
       const changedFiles = changedTextFiles(nextWorkspace);
       const currentPath = filePathRef.current;
-      const requestedPath = readRequestedFilePath();
+      const requestedPath = mode === 'standalone' ? readRequestedFilePath() : requestedPathRef.current;
       const currentStillExists = Boolean(currentPath && changedFiles.includes(currentPath));
       if (requestedPath && !changedFiles.includes(requestedPath)) {
         showUnavailableFile(requestedPath);
@@ -172,7 +226,7 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
     } finally {
       if (request === workspaceRequestRef.current && taskIdRef.current === normalizedTaskId) setWorkspaceLoading(false);
     }
-  }, [bridge, loadDiff, showUnavailableFile]);
+  }, [bridge, loadDiff, showUnavailableFile, mode]);
 
   useEffect(() => {
     workspaceRequestRef.current += 1;
@@ -195,8 +249,12 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
   useEffect(() => {
     // Refresh the selected diff when that task's authoritative snapshot changes.
     // A global task revision also includes unrelated tasks and is not a file revision.
-    void refreshWorkspace(selectedTaskId, { refreshCurrent: true });
-  }, [refreshWorkspace, selectedTaskId, selectedTask?.changeRevision]);
+    if (active) void refreshWorkspace(selectedTaskId, { refreshCurrent: true });
+    return () => {
+      workspaceRequestRef.current += 1;
+      diffRequestRef.current += 1;
+    };
+  }, [active, refreshWorkspace, selectedTaskId, selectedTask?.changeRevision, changeRevision]);
 
   const canOpenIde = typeof bridge.editors === 'function' && typeof bridge.openIde === 'function';
 
@@ -224,14 +282,14 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
 
   const changedFiles = useMemo(() => changedTextFiles(workspace), [workspace]);
   useEffect(() => {
-    if (!workspace || !requestedFilePath) return;
+    if (!active || !workspace || !requestedFilePath) return;
     if (!changedFiles.includes(requestedFilePath)) {
       showUnavailableFile(requestedFilePath);
       return;
     }
     if (requestedFilePath === filePathRef.current || requestedFilePath === pendingDiffPathRef.current) return;
     void loadDiff(selectedTaskId, requestedFilePath, workspace);
-  }, [changedFiles, loadDiff, requestedFilePath, selectedTaskId, showUnavailableFile, workspace]);
+  }, [active, changedFiles, loadDiff, requestedFilePath, selectedTaskId, showUnavailableFile, workspace]);
   const visibleFiles = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return changedFiles.filter(file => !normalized || file.toLowerCase().includes(normalized));
@@ -256,7 +314,11 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
 
   const openFile = path => {
     if (!path || path === filePathRef.current) return;
-    replaceRouteParams({ file: path });
+    if (mode === 'standalone') {
+      replaceRouteParams({ file: path });
+    } else if (typeof onSelectFile === 'function') {
+      onSelectFile(path);
+    }
     void loadDiff(selectedTaskId, path, workspace);
   };
 
@@ -270,64 +332,83 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
     });
   }, []);
 
-  return h('div', { className: 'section code-page', 'data-code-react': '' },
-    h('div', { className: 'feature-toolbar code-toolbar' },
-      h('div', { className: 'code-task-control' },
-        h('label', { htmlFor: 'codeTaskSelect' }, 'Task'),
-        h('select', {
-          id: 'codeTaskSelect',
-          'data-code-task': '',
-          value: selectedTaskId,
-          onChange: event => selectTask(event.target.value)
-        },
-          !selectedTask ? h('option', { value: selectedTaskId }, `Requested task · ${selectedTaskId}`) : null,
-          tasks.map(task => h('option', { key: task.id, value: task.id }, task.label))
+  const isEmbedded = mode === 'embedded';
+  return h('div', { className: isEmbedded ? 'task-diff-viewer' : 'section code-page', 'data-code-react': isEmbedded ? undefined : '' },
+    isEmbedded
+      ? h('div', { className: 'task-diff-embedded-toolbar' },
+          h('div', { className: 'code-workspace-meta', 'data-code-meta': '' }, meta),
+          h('div', { className: 'code-toolbar-actions' },
+            h('a', {
+              className: 'buttonlike secondary compact-button',
+              'data-code-fullscreen-link': '',
+              href: fullScreenHref || routeHref('code', { task: selectedTaskId, ...(filePath ? { file: filePath } : {}) })
+            }, h(Icon, { name: 'externalLink', size: 14 }), h('span', null, 'Open changes full screen')),
+            h('button', {
+              className: 'secondary compact-button',
+              type: 'button',
+              'data-code-refresh': '',
+              disabled: workspaceLoading,
+              onClick: () => { void refreshWorkspace(selectedTaskId, { refreshCurrent: true }); }
+            }, workspaceLoading ? 'Loading…' : workspaceError ? 'Retry' : 'Refresh')
+          )
         )
-      ),
-      h('div', { className: 'code-toolbar-actions' },
-        h('a', {
-          className: 'buttonlike secondary',
-          'data-code-task-link': '',
-          href: routeHref('tasks', {
-            workspace: returnContext ? returnContext.workspace : selectedTask?.workspace || workspace?.workspace,
-            task: selectedTaskId,
-            search: returnContext?.search,
-            taskStatus: returnContext?.taskStatus
-          })
-        }, h(Icon, { name: 'chevronLeft' }), h('span', null, 'Task')),
-        canOpenIde ? h(React.Fragment, null,
-          h('select', {
-            'data-code-ide': '',
-            'aria-label': 'Application for project',
-            value: editorId,
-            onChange: event => setEditorId(event.target.value)
-          }, editorLoadFailed
-            ? h('option', { value: '' }, 'IDE unavailable')
-            : editors == null
-              ? h('option', { value: '' }, 'Loading applications…')
-              : editors.map(editor => h('option', { key: editor.id, value: editor.id }, editor.label))),
-          h('button', {
-            className: 'secondary',
-            type: 'button',
-            'data-code-open-ide': '',
-            disabled: ideDisabled,
-            onClick: () => { void openIde(); }
-          }, h(Icon, { name: 'externalLink' }), h('span', null, openingIde ? 'Opening…' : 'IDE'))
-        ) : null,
-        h('button', {
-          className: 'secondary',
-          type: 'button',
-          'data-code-refresh': '',
-          disabled: workspaceLoading,
-          onClick: () => { void refreshWorkspace(selectedTaskId, { refreshCurrent: true }); }
-        }, workspaceLoading ? 'Loading…' : workspaceError ? 'Retry' : 'Refresh')
-      )
-    ),
-    h('div', { className: 'code-workspace-meta', 'data-code-meta': '' }, meta),
+      : h('div', { className: 'feature-toolbar code-toolbar' },
+          h('div', { className: 'code-task-control' },
+            h('label', { htmlFor: 'codeTaskSelect' }, 'Task'),
+            h('select', {
+              id: 'codeTaskSelect',
+              'data-code-task': '',
+              value: selectedTaskId,
+              onChange: event => selectTask?.(event.target.value)
+            },
+              !selectedTask ? h('option', { value: selectedTaskId }, `Requested task · ${selectedTaskId}`) : null,
+              tasks.map(task => h('option', { key: task.id, value: task.id }, task.label))
+            )
+          ),
+          h('div', { className: 'code-toolbar-actions' },
+            h('a', {
+              className: 'buttonlike secondary',
+              'data-code-task-link': '',
+              href: routeHref('tasks', {
+                workspace: returnContext ? returnContext.workspace : selectedTask?.workspace || workspace?.workspace,
+                task: selectedTaskId,
+                search: returnContext?.search,
+                taskStatus: returnContext?.taskStatus
+              })
+            }, h(Icon, { name: 'chevronLeft' }), h('span', null, 'Task')),
+            canOpenIde ? h(React.Fragment, null,
+              h('select', {
+                'data-code-ide': '',
+                'aria-label': 'Application for project',
+                value: editorId,
+                onChange: event => setEditorId(event.target.value)
+              }, editorLoadFailed
+                ? h('option', { value: '' }, 'IDE unavailable')
+                : editors == null
+                  ? h('option', { value: '' }, 'Loading applications…')
+                  : editors.map(editor => h('option', { key: editor.id, value: editor.id }, editor.label))),
+              h('button', {
+                className: 'secondary',
+                type: 'button',
+                'data-code-open-ide': '',
+                disabled: ideDisabled,
+                onClick: () => { void openIde(); }
+              }, h(Icon, { name: 'externalLink' }), h('span', null, openingIde ? 'Opening…' : 'IDE'))
+            ) : null,
+            h('button', {
+              className: 'secondary',
+              type: 'button',
+              'data-code-refresh': '',
+              disabled: workspaceLoading,
+              onClick: () => { void refreshWorkspace(selectedTaskId, { refreshCurrent: true }); }
+            }, workspaceLoading ? 'Loading…' : workspaceError ? 'Retry' : 'Refresh')
+          )
+        ),
+    isEmbedded ? null : h('div', { className: 'code-workspace-meta', 'data-code-meta': '' }, meta),
     workspaceError ? h('p', { className: 'connection-notice bad', role: 'alert', 'data-code-task-error': '' },
       `Changes for task ${selectedTaskId} could not be loaded. ${workspaceError} Use Retry to try again, or return to the task.`
     ) : null,
-    h('div', { className: 'code-workbench' },
+    h('div', { className: ['code-workbench', isEmbedded ? 'code-workbench-embedded' : ''].filter(Boolean).join(' ') },
       h('aside', { className: 'code-explorer', 'aria-label': 'Changed task files' },
         h('div', { className: 'code-explorer-head' },
           h('strong', null, 'Changed files'),
@@ -368,13 +449,13 @@ function ChangesDesktop({ bridge, tasks, selectedTaskId, requestedFilePath, sele
             h('span', { className: 'code-view-state', 'data-code-view-state': '' }, viewState)
           )
         ),
-        h(DiffViewer, { file: diffFile, message: viewerMessage, tone: viewerTone, layout: diffLayout })
+        active ? h(DiffViewer, { file: diffFile, message: viewerMessage, tone: viewerTone, layout: diffLayout, viewStates: editorViewStates }) : null
       )
     )
   );
 }
 
-function DiffViewer({ file, message, tone, layout }) {
+function DiffViewer({ file, message, tone, layout, viewStates }) {
   if (!file) {
     return h('div', {
       className: `code-editor-host code-editor-message${tone ? ` ${tone}` : ''}`,
@@ -382,10 +463,10 @@ function DiffViewer({ file, message, tone, layout }) {
       role: tone === 'error' ? 'alert' : 'status'
     }, message || 'Choose a changed file to review its diff.');
   }
-  return h(MonacoDiffViewer, { file, layout });
+  return h(MonacoDiffViewer, { file, layout, viewStates });
 }
 
-const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout }) {
+const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout, viewStates }) {
   const hostRef = useRef(null);
   const editorRef = useRef(null);
   const monacoRef = useRef(null);
@@ -401,6 +482,7 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout }) {
     let active = true;
     let cleanupResize = () => {};
     let cleanupTheme = () => {};
+    const savedViews = viewStates?.current;
 
     void loadMonaco().then(monaco => {
       if (!active || !hostRef.current) return;
@@ -416,13 +498,15 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout }) {
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
         wordWrap: 'off',
-        fontFamily: '"Cascadia Code", "SFMono-Regular", Consolas, monospace',
+        fontFamily: '"Geist Mono Variable", "Cascadia Code", "SFMono-Regular", Consolas, monospace',
         fontLigatures: true
       });
       editorRef.current = editor;
       cleanupResize = bindEditorResize(editor, hostRef.current);
       cleanupTheme = bindEditorTheme(monaco);
       applyDiffModels(monaco, editor, modelsRef, fileRef.current);
+      const saved = savedViews?.get(fileRef.current?.path);
+      if (saved) editor.restoreViewState(saved);
     }).catch(error => {
       if (!active) return;
       const message = messageFor(error);
@@ -434,12 +518,15 @@ const MonacoDiffViewer = memo(function MonacoDiffViewer({ file, layout }) {
       active = false;
       cleanupResize();
       cleanupTheme();
+      const path = fileRef.current?.path;
+      const saved = editorRef.current?.saveViewState?.();
+      if (path && saved) savedViews?.set(path, saved);
       clearDiffModels(editorRef.current, modelsRef);
       try { editorRef.current?.dispose?.(); } catch {}
       editorRef.current = null;
       monacoRef.current = null;
     };
-  }, []);
+  }, [viewStates]);
 
   useEffect(() => {
     if (!editorRef.current || !monacoRef.current) return;

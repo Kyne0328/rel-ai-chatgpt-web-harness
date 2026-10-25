@@ -8,7 +8,11 @@ import { buildDiagnosticReport } from '../diagnostics.js';
 import { hostResourceDiagnosticSnapshot, refreshHostResourceDiagnostics } from '../hostResourceScheduler.js';
 import { resourceDiagnosticsSnapshot } from '../resourceDiagnostics.js';
 import { cacheStats } from '../sessionCache.js';
-import { sampleManagedProcessMemory } from '../processManager.js';
+import { sampleManagedProcessMemory, probeManagedPtyRuntime } from '../processManager.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { resolveGitExecutable } from '../gitExecutable.js';
+import { makeProcessEnvironment } from '../processEnvironment.js';
 import { clearLocalAnalytics } from '../localAnalytics.js';
 import * as productUx from '../productUx.js';
 import { taskHistoryPersistenceSnapshot } from '../taskHistoryStore.ts';
@@ -43,10 +47,50 @@ interface DiagnosticResetSuccess {
 
 export type DiagnosticResetOutcome = DiagnosticResetFailure | DiagnosticResetSuccess;
 
+const execFileAsync = promisify(execFile);
+interface RuntimeCheck { id: string; title: string; status: string; detail: string; }
+const runtimeCheckCache = new Map<string, { at: number; pending: Promise<RuntimeCheck[]> }>();
+function runtimeChecks(workspacePath = ''): Promise<RuntimeCheck[]> {
+  const previous = runtimeCheckCache.get(workspacePath);
+  if (previous && Date.now() - previous.at < 30000) return previous.pending;
+  const pending = (async () => {
+    const pty = await probeManagedPtyRuntime();
+    const checks: RuntimeCheck[] = [{ id: 'terminal-runtime', title: 'Terminal runtime', status: pty ? 'Passed' : 'Unavailable',
+      detail: pty ? 'Native PTY module loaded by the managed-process runtime.' : 'Native PTY module could not be loaded.' }];
+    try {
+      const git = resolveGitExecutable();
+      if (!git) throw new Error('Git executable could not be found.');
+      const options = { encoding: 'utf8' as const, windowsHide: true, timeout: 3000, maxBuffer: 4096, env: makeProcessEnvironment({}) };
+      const { stdout } = await execFileAsync(git, ['--version'], options);
+      checks.push({ id: 'git-cli', title: 'Git CLI', status: 'Passed', detail: stdout.trim() });
+      if (workspacePath) {
+        try {
+          const result = await execFileAsync(git, ['-C', workspacePath, 'rev-parse', '--is-inside-work-tree'], options);
+          checks.push({ id: 'git-workspace', title: 'Selected project Git working tree', status: result.stdout.trim() === 'true' ? 'Passed' : 'Unavailable', detail: result.stdout.trim() === 'true' ? 'Git verified the selected project working tree.' : 'The selected project is not a Git working tree.' });
+        } catch { checks.push({ id: 'git-workspace', title: 'Selected project Git working tree', status: 'Unavailable', detail: 'Git could not verify the selected project working tree.' }); }
+      }
+    } catch (error) {
+      checks.push({ id: 'git-cli', title: 'Git CLI', status: 'Unavailable', detail: error instanceof Error ? error.message : 'Git probe failed.' });
+    }
+    return checks;
+  })();
+  if (runtimeCheckCache.size >= 100) runtimeCheckCache.clear();
+  runtimeCheckCache.set(workspacePath, { at: Date.now(), pending });
+  return pending;
+}
+
+function tunnelCheck(tunnelId: unknown, state: unknown): RuntimeCheck {
+  const status = String(state || '');
+  return { id: `tunnel:${String(tunnelId || 'primary')}`, title: `Secure MCP Tunnel${tunnelId ? ` · ${String(tunnelId)}` : ''}`,
+    status: status === 'running' ? 'Passed' : ['starting', 'locally_ready', 'authenticating', 'connecting'].includes(status) ? 'Checking'
+      : ['failed', 'degraded'].includes(status) ? 'Failed' : 'Unavailable',
+    detail: status ? `Recorded tunnel state: ${status}` : 'No tunnel runtime status recorded.' };
+}
+
 export async function getDiagnosticsReport(
   options: DiagnosticsRuntimeOptions,
   workspace = '',
-  { includeManagedProcessMemory = false, refreshResources = false }: { includeManagedProcessMemory?: boolean; refreshResources?: boolean } = {}
+  { includeManagedProcessMemory = false, refreshResources = false, includeDesktopChecks = false }: { includeManagedProcessMemory?: boolean; refreshResources?: boolean; includeDesktopChecks?: boolean } = {}
 ): Promise<Record<string, unknown>> {
   const config = readConfig();
   const hostResources = refreshResources ? await refreshHostResourceDiagnostics() : hostResourceDiagnosticSnapshot();
@@ -88,6 +132,12 @@ export async function getDiagnosticsReport(
     ? options.getRuntimeLogs({ limit: 100 })
     : { available: false, count: 0, entries: [] };
   const auditLogs = readAudit(config, { limit: 200, ...(workspace ? { workspace } : {}) });
+  const checks = includeDesktopChecks ? await runtimeChecks(workspace ? config.workspaces?.[workspace]?.path || '' : '') : [];
+  const tunnelChecks = includeDesktopChecks && desktopStatus ? [tunnelCheck(desktopStatus.tunnelId, desktopStatus.tunnelStatus),
+    ...(Array.isArray(desktopStatus.additionalTunnelStatuses) ? desktopStatus.additionalTunnelStatuses.map((value: unknown) => {
+      const peer = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+      return tunnelCheck(peer.tunnelId, peer.enabled === false ? 'disabled' : peer.state);
+    }) : [])] : [];
   return buildDiagnosticReport({
     workspace,
     application: { version: String(desktopStatus?.version || '').trim(), build: buildId },
@@ -95,6 +145,7 @@ export async function getDiagnosticsReport(
     cautionData: productUx.cautionSummary(config, { windowHours: 24, limit: 500 }),
     connection: connectionSummary,
     connectionState,
+    checks: [...checks, ...tunnelChecks],
     tunnelHealth: desktopStatus?.tunnelHealth || null,
     resourceDiagnostics: resourceDiagnosticsSnapshot(hostResources, cacheStats(), managedRoots),
     runtimeLogs,

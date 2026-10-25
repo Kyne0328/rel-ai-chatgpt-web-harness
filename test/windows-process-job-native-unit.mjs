@@ -93,6 +93,7 @@ async function finish(fixture) {
   return { outcome, receipt, stdout: Buffer.concat(fixture.stdout), stderr: Buffer.concat(fixture.stderr) };
 }
 async function record(name, body) {
+  if (process.argv.includes('--console-only') && !name.startsWith('console-')) return;
   if (process.argv.includes('--receipt-only') && !name.startsWith('receipt-')) return;
   if (process.argv.includes('--pty-only') && !name.startsWith('pty-')) return;
   if (process.argv.includes('--companion') && (name.startsWith('verified-assembly-')
@@ -194,6 +195,86 @@ async function heartbeatSize(f) {
   try { return (await fs.stat(path.join(f.directory, 'heartbeat'))).size; } catch { return 0; }
 }
 try {
+  await record('console-hidden-gui-host', async () => {
+    const electron = process.env.RELAI_ELECTRON_BINARY || path.join(repository, 'electron', 'node_modules', 'electron', 'dist', 'electron.exe');
+    const entry = path.join(root, 'console-gui-host.mjs');
+    const nodeHold = path.join(root, 'console-hold.cjs');
+    const psHold = path.join(root, 'console-hold.ps1');
+    await fs.writeFile(nodeHold, 'const fs=require("node:fs");const timer=setInterval(()=>{if(fs.existsSync(process.argv[2])){clearInterval(timer);console.log("console-probe-output");}},20);setTimeout(()=>process.exit(124),20000).unref();');
+    await fs.writeFile(psHold, 'param([string]$Release)\n$end=[DateTime]::UtcNow.AddSeconds(20)\nwhile (-not [IO.File]::Exists($Release) -and [DateTime]::UtcNow -lt $end) { Start-Sleep -Milliseconds 20 }\n[Console]::Out.WriteLine("console-probe-output")');
+    const observer = [
+      'Add-Type -TypeDefinition \'using System;using System.Runtime.InteropServices;public static class RelaiConsoleProbe {',
+      '[DllImport("kernel32.dll",SetLastError=true)]static extern bool AttachConsole(uint pid);',
+      '[DllImport("kernel32.dll")]static extern bool FreeConsole();',
+      '[DllImport("kernel32.dll")]static extern IntPtr GetConsoleWindow();',
+      '[DllImport("user32.dll")]static extern bool IsWindowVisible(IntPtr window);',
+      'public static string Inspect(uint pid){FreeConsole();if(!AttachConsole(pid)){int error=Marshal.GetLastWin32Error();return error==6?"none":"error:"+error;}var window=GetConsoleWindow();bool visible=IsWindowVisible(window);FreeConsole();return visible?"visible":"attached-hidden";}}\';',
+      '[Console]::Out.Write([RelaiConsoleProbe]::Inspect(PROBE_PID))'
+    ].join('\n');
+    const hostCode = `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import path from 'node:path';
+      import {spawn,spawnSync} from 'node:child_process';
+      import {once} from 'node:events';
+      import {prepareWindowsProcessJob} from ${JSON.stringify(new URL('../src/windowsProcessJob.ts', import.meta.url).href)};
+      const root=${JSON.stringify(root)},powershell=${JSON.stringify(powershell)};
+      const companion=${process.argv.includes('--companion')};
+      const cases=[
+        {name:'node',executable:${JSON.stringify(process.execPath)},args:[${JSON.stringify(nodeHold)}]},
+        {name:'powershell',executable:powershell,args:['-NoLogo','-NoProfile','-NonInteractive','-File',${JSON.stringify(psHold)}]},
+        {name:'cmd',executable:path.join(process.env.SystemRoot,'System32','cmd.exe'),args:[]}
+      ];
+      const results=[];
+      for(const target of cases){
+        const release=path.join(root,'release-console-'+target.name);
+        const input={...target,cwd:root,env:process.env,args:[...target.args,release]};
+        if(target.name==='cmd')input.shellCommand=${JSON.stringify('"' + process.execPath + '" "' + nodeHold + '" ')}+'"'+release+'"';
+        const job=await prepareWindowsProcessJob({stateDir:root},input);
+        const executable=companion?job.executable:powershell;
+        const args=companion?job.args:['-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',${JSON.stringify(helper)},'-RequestPath',path.join(job.directory,'request.json'),'-ReceiptPath',path.join(job.directory,'receipt.json'),'-ControlPath',path.join(job.directory,'control.json')];
+        const child=spawn(executable,args,{env:job.environment,windowsHide:true,detached:companion,stdio:['pipe','pipe','pipe']});
+        job.bind(child.pid);let output='',errors='';child.stdout.on('data',value=>output+=value);child.stderr.on('data',value=>errors+=value);
+        const closed=once(child,'close');const deadline=setTimeout(()=>void job.stop('timeout',3000),25000);
+        try{
+          const receipt=await job.waitStarted();
+          const probe=spawnSync(powershell,['-NoLogo','-NoProfile','-NonInteractive','-Command',${JSON.stringify(observer)}.replace('PROBE_PID',String(receipt.rootPid))],{windowsHide:true,encoding:'utf8',timeout:10000,maxBuffer:8192,env:{...process.env,PSModulePath:path.join(path.dirname(powershell),'Modules')}});
+          assert.equal(probe.status,0,probe.stderr||probe.error?.message);
+          assert.ok(['none','attached-hidden'].includes(probe.stdout.trim()),target.name+' must not open a visible console in a GUI host: '+probe.stdout.trim());
+          fs.writeFileSync(release,'release');
+          await closed;
+          assert.equal(job.outcome().exited,true,errors);
+          assert.match(output,/console-probe-output/);
+          results.push({target:target.name,console:probe.stdout.trim(),completionConfirmed:true});
+        }finally{clearTimeout(deadline);fs.writeFileSync(release,'release');if(!job.outcome().exited)await job.stop('stop',3000);await closed;job.cleanup();}
+      }
+      console.log(JSON.stringify(results));
+    `;
+    await fs.writeFile(entry, hostCode);
+    const child = spawn(electron, [entry], { cwd: repository, windowsHide: true,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    ownedHelpers.add(child);
+    const stdout = [], stderr = [];
+    child.stdout.on('data', data => stdout.push(data));
+    child.stderr.on('data', data => stderr.push(data));
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', value => { ownedHelpers.delete(child); resolve(value); });
+    });
+    assert.equal(code, 0, Buffer.concat(stderr).toString());
+    return { targets: JSON.parse(Buffer.concat(stdout).toString()) };
+  });
+  for (const consoleMode of ['visible', 1]) {
+    await record('console-invalid-mode-' + String(consoleMode), async () => {
+      const fixture = await prepare('invalid-console-' + String(consoleMode), process.execPath,
+        ['-e', 'require("node:fs").writeFileSync("must-not-run", "bad")'], { consoleMode });
+      const done = await finish(await launch(fixture));
+      assert.equal(done.receipt.commandStarted, false);
+      assert.match(done.receipt.error, /consoleMode must be hidden or inherit/);
+      await assert.rejects(fs.access(path.join(fixture.directory, 'must-not-run')), { code: 'ENOENT' });
+      return { refusedBeforeExecution: true };
+    });
+  }
 
   for (const companion of [false, true]) {
     const mode = companion ? 'companion' : 'powershell';
@@ -554,7 +635,7 @@ try {
   await record('pty-input-resize-' + control, async () => {
     const { default: pty } = await import('node-pty');
     const script = "const readline=require('readline');console.log('PTY_READY');readline.createInterface({input:process.stdin}).on('line',line=>console.log('PTY_ECHO:'+line+':'+process.stdout.columns+':'+process.stdout.rows));process.on('SIGINT',()=>{console.log('TARGET_SIGINT');process.exit(31)});setTimeout(()=>process.exit(0),12000);";
-    const f = await prepare('pty-' + control, process.execPath, ['-e', script]);
+    const f = await prepare('pty-' + control, process.execPath, ['-e', script], { consoleMode: 'inherit' });
     const companion = process.argv.includes('--companion');
     const child = pty.spawn(companion ? path.join(repository, 'src', 'windows-process-job-host.exe') : powershell,
       companion ? f.argv.slice(f.argv.indexOf('-RequestPath')) : f.argv,

@@ -48,7 +48,12 @@ try {
   const dashboardCookie = String(dashboardLogin.headers.get('set-cookie') || '').split(';')[0];
   assert.match(dashboardCookie, /^relai_dashboard_session=/);
   await dashboardLogin.arrayBuffer();
-  assert.equal((await fetch(`${base}/api/diagnostics`, { headers: { cookie: dashboardCookie } })).status, 200);
+  const diagnosticsResponse = await fetch(`${base}/api/diagnostics`, { headers: { cookie: dashboardCookie } });
+  assert.equal(diagnosticsResponse.status, 200);
+  const diagnosticsReport = await diagnosticsResponse.json();
+  assert.ok(diagnosticsReport.connectionState?.localService?.status, 'diagnostics must carry explicit local service evidence');
+  assert.ok(diagnosticsReport.checks.some(check => check.id === 'git-cli'));
+  assert.ok(diagnosticsReport.checks.some(check => check.id === 'terminal-runtime'));
   const processMemoryResponse = await fetch(`${base}/api/processes/memory`, { headers: { cookie: dashboardCookie } });
   assert.equal(processMemoryResponse.status, 200);
   const processMemory = await processMemoryResponse.json();

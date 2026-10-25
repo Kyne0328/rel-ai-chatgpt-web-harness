@@ -118,6 +118,14 @@ async function exerciseNarrowNavigation(win, waitFor, waitForCapturePaint) {
     await waitFor(win, `document.querySelector('[data-sessions-react]')`);
     await waitForCapturePaint(win);
     for (const route of UIUX_ROUTE_COVERAGE.filter(item => ['processes', 'diagnostics', 'tools', 'usage'].includes(item.route) || item.route.startsWith('settings'))) {
+      if (route.route.startsWith('settings/')) {
+        await win.webContents.executeJavaScript(`(() => {
+          for (const details of document.querySelectorAll('.mobile-nav details, .sidebar details')) details.open = true;
+          const parent = [...document.querySelectorAll('nav a[href="#settings"]')].find(link => link.getBoundingClientRect().width > 0);
+          parent?.click();
+        })()`);
+        await waitFor(win, `document.querySelector('[data-settings-react="preferences"]')`);
+      }
       const found = await win.webContents.executeJavaScript(`(() => {
         for (const details of document.querySelectorAll('.mobile-nav details, .sidebar details')) details.open = true;
         const links = [...document.querySelectorAll('nav a, .sidebar a')].filter(link => link.getAttribute('href') === ${JSON.stringify('#' + route.route)});

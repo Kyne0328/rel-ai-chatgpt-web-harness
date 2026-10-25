@@ -10,7 +10,7 @@ import './styles.css';
 import { flushSync } from 'react-dom';
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { fetchJson } from '../../api.js';
-import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
+import { FilterChoice, filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { OperationDiagnostics } from '../../components/operation-diagnostics.js';
@@ -541,6 +541,7 @@ function ActivityView({ data = {} }) {
       paused,
       onSearch,
       onOpenFilters: openFilters,
+      onTimeChange: timeRange => applyFilters({ ...filterState, timeRange }),
       onClearAll: clearFilters,
       onRemoveFilter: removeFilter,
       onTogglePause: togglePause
@@ -627,6 +628,7 @@ const ActivityFilterBar = memo(function ActivityFilterBar({
   paused,
   onSearch,
   onOpenFilters,
+  onTimeChange,
   onClearAll,
   onRemoveFilter,
   onTogglePause
@@ -645,6 +647,7 @@ const ActivityFilterBar = memo(function ActivityFilterBar({
             onChange: event => onSearch(event.currentTarget.value)
           })
         ),
+        h(FilterChoice, { label: 'Activity time range', value: filterState.timeRange, options: TIME_OPTIONS, onChange: onTimeChange }),
         h('button', {
           type: 'button',
           className: `secondary filter-open-button${filters.length ? ' active' : ''}`,
@@ -788,7 +791,7 @@ function ActivitySpacerRow({ height }) {
   );
 }
 
-function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
+export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
       h('div', { className: 'inspector-empty' }, h('strong', null, 'Select an activity'))

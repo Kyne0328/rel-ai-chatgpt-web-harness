@@ -31,6 +31,7 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
   const [reportState, setReportState] = useState(() => ({ workspace, report: null, error: '' }));
   const report = reportState.workspace === workspace ? reportState.report : null;
   const loadError = reportState.workspace === workspace ? reportState.error : '';
+  const [activeSection, setActiveSection] = useState('all');
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [live, setLive] = useState(false);
   const [busy, setBusy] = useState('');
@@ -222,9 +223,26 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
     } finally { setBusy(''); }
   };
 
+  const SECTIONS = [
+    { id: 'all', label: 'All Details' },
+    { id: 'checks', label: 'Health & Checks' },
+    { id: 'resources', label: 'System Resources' },
+    { id: 'logs', label: 'Logs & Activity' }
+  ];
+
   return h('div', { className: 'settings-content system-content' },
-    h('div', { className: 'diagnostic-page', 'data-diagnostics-react': '' },
+    h('div', { className: 'diagnostic-page', 'data-diagnostics-react': '', 'data-active-section': activeSection },
       h('div', { className: 'section-head diagnostic-page-head' },
+        h('div', { className: 'diagnostic-section-nav', role: 'tablist', 'aria-label': 'Troubleshooting sections' },
+          SECTIONS.map(sec => h('button', {
+            key: sec.id,
+            type: 'button',
+            role: 'tab',
+            className: `diagnostic-section-pill${activeSection === sec.id ? ' active' : ''}`,
+            'aria-selected': activeSection === sec.id ? 'true' : 'false',
+            onClick: () => setActiveSection(sec.id)
+          }, sec.label))
+        ),
         h('div', { className: 'section-head-actions diagnostic-page-actions' },
           h('button', { className: 'secondary', type: 'button', disabled: !report?.reportText || busy === 'copy', onClick: () => void copyReport() },
             h(Icon, { name: 'copy', size: 14 }),
@@ -249,21 +267,29 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
           ) : null
         )
       ),
-      h('div', { id: 'diagnosticFilterHost' },
-        h(DiagnosticFilterBar, { filters: normalizedFilters, sources, summary, live, onChange: next => { captureLogPositions(); setFilters(next); }, onClear: clearFilters, onToggleLive: () => setLive(value => !value) })
-      ),
       h('div', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, liveAnnouncement),
       !report && !loadError ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' }, h('div', { className: 'empty', role: 'status' }, 'Loading troubleshooting info…')) : null,
       loadError ? h(DiagnosticUnavailable, { error: loadError, hasReport: Boolean(report), onRetry: () => void load() }) : null,
       report ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' },
-        h('p', { className: 'settings-help' }, 'Report snapshot: ', h('time', { dateTime: report.generatedAt || '' }, localLogTime(report.generatedAt))),
-        h(DiagnosticMetrics, { findings: report.findings || [] }),
-        h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),
-        report.tunnelHealth ? h(TunnelHealthSummary, { health: report.tunnelHealth }) : null,
-        tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null,
-        h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
-        runtime?.buildIdentity?.buildId && runtime.buildIdentity.buildId !== 'Unknown' ? h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }) : null,
-        h(DiagnosticLogs, { report, view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } })
+        h('div', { className: 'diagnostic-section diagnostic-section-checks' },
+          h('div', { className: 'diagnostic-health-header' },
+            h(DiagnosticMetrics, { findings: report.findings || [], snapshotTime: report.generatedAt })
+          ),
+          h(SystemCheckGrid, { report, onReload: load }),
+          h(DiagnosticFindings, { findings: view.findings, total: view.totalFindings, onReload: load }),
+          report.tunnelHealth ? h(TunnelHealthSummary, { health: report.tunnelHealth }) : null,
+          tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null
+        ),
+        h('div', { className: 'diagnostic-section diagnostic-section-resources' },
+          h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
+          runtime?.buildIdentity?.buildId && runtime.buildIdentity.buildId !== 'Unknown' ? h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }) : null
+        ),
+        h('div', { className: 'diagnostic-section diagnostic-section-logs' },
+          h('div', { id: 'diagnosticFilterHost' },
+            h(DiagnosticFilterBar, { filters: normalizedFilters, sources, summary, live, onChange: next => { captureLogPositions(); setFilters(next); }, onClear: clearFilters, onToggleLive: () => setLive(value => !value) })
+          ),
+          h(DiagnosticLogs, { report, view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } })
+        )
       ) : null
     )
   );
@@ -393,20 +419,45 @@ function diagnosticFilterChips(filters) {
 }
 function hasDiagnosticFilters(filters) { return Boolean(filters.search || filters.scope !== 'all' || filters.severity !== 'all' || filters.source !== 'all'); }
 
-function DiagnosticMetrics({ findings }) {
+function DiagnosticMetrics({ findings, snapshotTime = '' }) {
   const summary = { blocking: 0, warnings: 0, recommendations: 0 };
   for (const finding of findings) {
     if (finding.severity === 'error') summary.blocking += 1;
     else if (finding.severity === 'warning') summary.warnings += 1;
     else summary.recommendations += 1;
   }
-  return h('div', { className: 'diagnostic-metrics', 'data-diagnostic-region': 'metrics' },
-    h(Metric, { label: 'Blocking', count: summary.blocking, severity: 'error' }),
-    h(Metric, { label: 'Warnings', count: summary.warnings, severity: 'warning' }),
-    h(Metric, { label: 'Recommendations', count: summary.recommendations, severity: 'info' })
+  return h('div', { className: 'diagnostic-metrics-wrap' },
+    h('div', { className: 'diagnostic-metrics', 'data-diagnostic-region': 'metrics' },
+      h(Metric, { label: 'Blocking', count: summary.blocking, severity: 'error' }),
+      h(Metric, { label: 'Warnings', count: summary.warnings, severity: 'warning' }),
+      h(Metric, { label: 'Recommendations', count: summary.recommendations, severity: 'info' })
+    ),
+    snapshotTime ? h('div', { className: 'diagnostic-snapshot-meta' },
+      h('span', null, 'Report snapshot: '),
+      h('time', { dateTime: snapshotTime }, localLogTime(snapshotTime))
+    ) : null
   );
 }
+
 function Metric({ label, count, severity }) { return h('div', { className: `diagnostic-metric ${severity}` }, h('span', null, label), h('strong', null, count)); }
+
+
+function SystemCheckGrid({ report = {} }) {
+  const local = report.connectionState?.localService?.status;
+  const checks = [{ id: 'local-service', title: 'Local service',
+    status: local === 'running' ? 'Passed' : local === 'starting' ? 'Checking' : local === 'failed' ? 'Failed' : 'Unavailable',
+    detail: local ? 'Recorded service state: ' + local : 'Local service status is unavailable.' },
+    ...(Array.isArray(report.checks) ? report.checks : [])];
+  return h('div', { className: 'system-check-grid', 'data-diagnostic-region': 'checks' }, checks.map(check => {
+    const tone = check.status === 'Passed' ? 'ok' : check.status === 'Failed' ? 'bad' : check.status === 'Checking' ? 'working' : 'warn';
+    const tunnelParts = String(check.title || '').startsWith('Secure MCP Tunnel · ')
+      ? check.title.split(' · ') : null;
+    return h('div', { className: 'system-check-card ' + tone, key: check.id },
+      h('div', { className: 'system-check-card-head' }, h('strong', { className: 'system-check-title' }, tunnelParts ? tunnelParts[0] : check.title), h(StatusPill, { label: check.status, tone })),
+      tunnelParts ? h('code', { className: 'system-check-id' }, tunnelParts.slice(1).join(' · ')) : null,
+      h('p', { className: 'system-check-detail' }, check.detail));
+  }));
+}
 
 function TunnelHealthSummary({ health = {} }) {
   const components = [
@@ -545,7 +596,13 @@ function tunnelDoctorCheckPresentation(check = {}) {
 
 function DiagnosticFindings({ findings, total, onReload }) {
   if (!findings.length) return total === 0
-    ? h('div', { className: 'diagnostic-clear', 'data-diagnostic-region': 'findings' }, h('strong', null, 'No current problems'), h('span', null, 'Logs below may still contain earlier failures.'))
+    ? h('div', { className: 'diagnostic-clear', 'data-diagnostic-region': 'findings' },
+        h('div', { className: 'diagnostic-clear-main' },
+          h('span', { className: 'status-indicator status-good', 'aria-hidden': 'true' }),
+          h('strong', null, 'No current problems')
+        ),
+        h('span', { className: 'diagnostic-clear-sub' }, 'Logs below may still contain earlier failures.')
+      )
     : h('div', { className: 'diagnostic-log-empty', 'data-diagnostic-region': 'findings' }, h('strong', null, 'No findings match the current filters.'));
   return h('div', { className: 'diagnostic-list', 'data-diagnostic-region': 'findings' }, findings.map(finding => h(DiagnosticFinding, { finding, key: finding.code, onReload })));
 }

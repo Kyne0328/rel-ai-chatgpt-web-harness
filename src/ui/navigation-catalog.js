@@ -31,12 +31,15 @@ export const EXTENSIONS_NAV_ITEM = route(
   'Application'
 );
 
-export const DESKTOP_WORK_NAV_ITEMS = Object.freeze(WORK_NAV_ITEMS.filter(item => item.id !== 'activity'));
+export const DESKTOP_WORK_NAV_ITEMS = Object.freeze(WORK_NAV_ITEMS.filter(item => !['activity', 'code'].includes(item.id)));
 export const DESKTOP_SYSTEM_NAV_ITEMS = Object.freeze([
   SYSTEM_NAV_ITEMS.find(item => item.id === 'processes'),
   WORK_NAV_ITEMS.find(item => item.id === 'activity'),
-  SYSTEM_NAV_ITEMS.find(item => item.id === 'tools'),
-  SYSTEM_NAV_ITEMS.find(item => item.id === 'diagnostics')
+  SYSTEM_NAV_ITEMS.find(item => item.id === 'diagnostics'),
+  SYSTEM_NAV_ITEMS.find(item => item.id === 'usage')
+]);
+export const DESKTOP_SECONDARY_NAV_ITEMS = Object.freeze([
+  SYSTEM_NAV_ITEMS.find(item => item.id === 'tools')
 ]);
 export const MOBILE_PRIMARY_NAV_ITEMS = Object.freeze([
   WORK_NAV_ITEMS.find(item => item.id === 'home'),
@@ -45,7 +48,6 @@ export const MOBILE_PRIMARY_NAV_ITEMS = Object.freeze([
   WORK_NAV_ITEMS.find(item => item.id === 'activity')
 ].filter(Boolean));
 export const MOBILE_MORE_NAV_ITEMS = Object.freeze([
-  WORK_NAV_ITEMS.find(item => item.id === 'code'),
   WORK_NAV_ITEMS.find(item => item.id === 'browser'),
   APPLICATION_NAV_ITEMS[0],
   APPLICATION_NAV_ITEMS[1]
@@ -59,16 +61,14 @@ export const SETTINGS_NAV_ITEMS = Object.freeze([
 ]);
 
 export const DESKTOP_UTILITY_NAV_ITEMS = Object.freeze([
-  SYSTEM_NAV_ITEMS.find(item => item.id === 'usage'),
-  APPLICATION_NAV_ITEMS[1],
-  SETTINGS_NAV_ITEMS.find(item => item.id === 'connection')
+  APPLICATION_NAV_ITEMS[1]
 ]);
 export const DESKTOP_NAV_ITEMS = Object.freeze([
-  ...DESKTOP_WORK_NAV_ITEMS, ...DESKTOP_SYSTEM_NAV_ITEMS, ...DESKTOP_UTILITY_NAV_ITEMS
+  ...DESKTOP_WORK_NAV_ITEMS, ...DESKTOP_SYSTEM_NAV_ITEMS, ...DESKTOP_UTILITY_NAV_ITEMS, ...DESKTOP_SECONDARY_NAV_ITEMS
 ]);
-export const MOBILE_NAV_ITEMS = Object.freeze([...WORK_NAV_ITEMS, ...APPLICATION_NAV_ITEMS]);
+export const MOBILE_NAV_ITEMS = Object.freeze([...WORK_NAV_ITEMS.filter(item => item.id !== 'code'), ...APPLICATION_NAV_ITEMS]);
 
-const ROUTES = new Map([...DESKTOP_NAV_ITEMS, EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => [item.path, item]));
+const ROUTES = new Map([...WORK_NAV_ITEMS, ...DESKTOP_NAV_ITEMS, EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => [item.path, item]));
 
 export function routeMetadata(path) {
   return ROUTES.get(String(path || '').toLowerCase()) || ROUTES.get('home');

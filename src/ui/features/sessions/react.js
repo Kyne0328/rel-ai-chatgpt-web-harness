@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, Suspense } from 'react';
 import { flushSync } from 'react-dom';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { copyText } from '../../clipboard.js';
@@ -15,6 +15,9 @@ import { classifyTaskChangedFiles } from '../../../taskSemanticProgress.js';
 import { taskEntityView, workSessionStateView } from '../../task-identity.js';
 import { StatusPill as UnifiedStatusPill } from '../../components/pill.js';
 import { statusPillClass } from '../../status-tone.js';
+import { processListView } from '../processes/index.js';
+import { ProcessRow, useProcessMemory } from '../processes/react.js';
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import {
   isOngoingSession,
   goalModeNotice,
@@ -32,10 +35,15 @@ import {
   sessionListTimestampValue,
   sessionNeedsAttention,
   sessionsForDisplay,
-  taskTraceJsonl
+  taskTraceJsonl,
+  taskControlMessage,
+  taskProcessGroups,
+  taskValidationView
 } from './model.js';
 
 const h = React.createElement;
+const TaskDiffViewer = React.lazy(() => import('../code/react.js').then(module => ({ default: module.TaskDiffViewer })));
+const TaskEventInspector = React.lazy(() => import('../activity/react.js').then(module => ({ default: module.ActivityInspector })));
 const SESSION_PAGE_SIZE = 50;
 const MOBILE_SESSION_PAGE_SIZE = 12;
 const MOBILE_SESSION_QUERY = '(max-width: 760px)';
@@ -56,7 +64,7 @@ const TASK_HISTORY_URL = '/api/tasks/history';
 const TASK_SESSION_URL = '/api/tasks/session';
 const DETAIL_FILE_PREVIEW = 4;
 const DETAIL_EVENT_PREVIEW = 8;
-const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'runtime', 'runtimeCompatibility']);
+const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'runtime', 'runtimeCompatibility', 'managedProcesses']);
 
 export function createSessionsRoute(useDashboardSlices) {
   return function SessionsRoute() {
@@ -118,7 +126,16 @@ function SessionsPage({ data = {} }) {
   const [hydrationState, setHydrationState] = useState(null);
   const [detailRefresh, setDetailRefresh] = useState(null);
   const [activityLoading, setActivityLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('overview');
+  const requestedTab = routeParams.get('tab');
+  const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'validation', 'processes', 'technical']), []);
+  const [activeTab, setActiveTab] = useState(() => validTabs.has(requestedTab) ? requestedTab : 'overview');
+  useEffect(() => {
+    setActiveTab(validTabs.has(requestedTab) ? requestedTab : 'overview');
+  }, [requestedTab, validTabs]);
+  const selectTab = useCallback(tab => {
+    setActiveTab(tab);
+    replaceRouteParams({ tab: tab === 'overview' ? null : tab });
+  }, []);
   const [olderExpanded, setOlderExpanded] = useState(false);
   const hydrationRequest = useRef(0);
   const selectedSummary = selectedId ? sessionById.get(selectedId) : null;
@@ -134,12 +151,12 @@ function SessionsPage({ data = {} }) {
     if (!id) return;
     // Keep mouse and keyboard selections in the route so a later task-data
     // refresh cannot restore the task from an older deep link.
-    if (getRouteParams().get('task') !== id) replaceRouteParams({ task: id });
+    if (getRouteParams().get('task') !== id) replaceRouteParams({ task: id, tab: null, file: null });
     if (selectedIdRef.current !== id) {
       setHydrated(null);
       setHydrationState(null);
       setDetailRefresh(null);
-      setActiveTab('overview');
+      setActiveTab(getRouteParams().get('tab') || 'overview');
       setOlderExpanded(false);
     }
     setSelectedId(id);
@@ -420,21 +437,24 @@ function SessionsPage({ data = {} }) {
           }) : null,
           selectedDetail
             ? h(SessionInspector, {
+                key: selectedId,
                 session: selectedDetail,
                 runtime: data.runtime,
                 runtimeCompatibility: data.runtimeCompatibility,
                 activeTab,
-                setActiveTab,
+                setActiveTab: selectTab,
                 olderExpanded,
                 setOlderExpanded,
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
                 activityLoading,
                 loadOlderActivity,
-                onControlComplete: refreshSelectedSession
+                onControlComplete: refreshSelectedSession,
+                managedProcesses: data.managedProcesses || [],
+                requestedFilePath: routeParams.get('file') || ''
               })
             : !requestedId ? h('div', { className: 'inspector-empty' },
                 h('strong', null, 'Select a task'),
-                h('span', null, 'View its overview, activity, and technical details here.')
+                h('span', null, 'Review its progress, changes, checks, and activity.')
               ) : null
         )
       )
@@ -577,10 +597,21 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity, onControlComplete }) {
+function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
+  const [changesVisited, setChangesVisited] = useState(() => activeTab === 'changes');
+  const [selectedDiffFile, setSelectedDiffFile] = useState(requestedFilePath);
+
+  useEffect(() => {
+    if (activeTab === 'changes') setChangesVisited(true);
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (requestedFilePath) setSelectedDiffFile(requestedFilePath);
+  }, [requestedFilePath]);
+
   useEffect(() => {
     if (previousId.current === id) return;
     previousId.current = id;
@@ -602,10 +633,14 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     ? (semantic.currentActivity || operationValue || 'Task is open.')
     : (session.summary || session.endReason || sessionDescription(session, false, operationValue, semantic));
   const [controlKey, setControlKey] = useState('');
+  const [controlNotice, setControlNotice] = useState('');
   useEffect(() => { setControlKey(''); }, [id]);
   const activeGoal = session.goalMode?.goalActive === true;
   const goalNotice = goalModeNotice(session.goalMode);
   const runningOperations = live && Array.isArray(session.currentOperations) ? session.currentOperations : [];
+
+  const sessionTunnelId = String(session.goalMode?.tunnelId || session.tunnelId || '').trim();
+
   const controlTask = useCallback(async (action, operationId = '') => {
     const key = operationId ? `stop:${operationId}` : action;
     if (action === 'cancel') {
@@ -629,13 +664,9 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         toast(result.error || 'The task action could not be completed.', { variant: 'error' });
         return;
       }
-      toast(action === 'goal_stop'
-        ? 'Goal stopped. The task is unchanged.'
-        : action === 'cancel'
-        ? (result.status === 'cancelled' ? 'Task cancelled.' : 'Task cancellation requested.')
-        : result.stoppedOperationCount
-          ? `Stop requested for ${result.stoppedOperationCount} running action${result.stoppedOperationCount === 1 ? '' : 's'}.`
-          : 'No matching running action needed to be stopped.', { variant: 'success' });
+      const message = taskControlMessage(action, result);
+      setControlNotice(message);
+      toast(message, { variant: result.processCleanup?.complete === false ? 'warn' : 'success' });
       requestDashboardRefresh();
       // Off-page tasks may remain absent from the refreshed summary list.
       onControlComplete?.(id);
@@ -658,10 +689,19 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
     finally { setControlKey(''); }
   };
 
+  const tabCounts = {
+    changes: fileCounts.product + fileCounts.support,
+    activity: `${(session.events || []).length}${activityHasMore ? '+' : ''}`,
+    activityLabel: `${(session.events || []).length} loaded events${activityHasMore ? '; more history available' : ''}`,
+    processes: taskProcessGroups(managedProcesses, id, session.workspace).owned.length,
+    validation: taskValidationView(session).statusLabel
+  };
+
   return h('div', { className: 'detail-stack session-detail' },
     h('header', { className: 'task-detail-header' },
       h('div', null,
-        h('h2', { ref: headingRef, tabIndex: -1 }, session.title || operationValue)
+        h('h2', { ref: headingRef, tabIndex: -1 }, session.title || operationValue),
+        h('p', { className: 'task-project-context' }, 'Project: ', h('strong', null, session.workspace || 'No project'))
       ),
       h('div', { className: 'task-detail-header-actions' },
         h(StatusPill, { state }),
@@ -684,7 +724,16 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
         }, controlKey === 'cancel' ? 'Cancelling…' : 'Cancel task') : null
       )
     ),
-    h(SessionTabs, { activeTab, setActiveTab }),
+    controlNotice ? h('p', { className: 'connection-notice', role: 'status' }, controlNotice) : null,
+    h('div', { className: 'inspector-navigation' },
+      h(SessionTabs, { activeTab, setActiveTab, counts: tabCounts }),
+      h('button', {
+        id: 'session-details-toggle', type: 'button', className: 'secondary task-details-toggle',
+        'data-session-details': '', 'aria-controls': 'session-panel-technical',
+        'aria-expanded': activeTab === 'technical',
+        onClick: () => setActiveTab(activeTab === 'technical' ? 'overview' : 'technical')
+      }, 'Details')
+    ),
     h('div', { className: 'inspector-panel', id: 'session-panel-overview', role: 'tabpanel', 'aria-labelledby': 'session-tab-overview', tabIndex: 0, hidden: activeTab !== 'overview', 'data-session-panel': 'overview' },
       h('div', { className: 'task-detail-current' },
         live ? h('strong', null, currentTitle) : null,
@@ -716,14 +765,36 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
       h(ChangedFilesSection, { files: session.changedFiles || [], session }),
       h(OriginalRequest, { objective: session.objective })
     ),
+    h('div', { className: 'inspector-panel', id: 'session-panel-changes', role: 'tabpanel', 'aria-labelledby': 'session-tab-changes', tabIndex: 0, hidden: activeTab !== 'changes', 'data-session-panel': 'changes' },
+      changesVisited ? h(Suspense, {
+        fallback: h('div', { className: 'code-editor-message', role: 'status' }, 'Loading diff viewer…')
+      }, h(TaskDiffViewer, {
+        taskId: id,
+        initialFilePath: selectedDiffFile,
+        fullScreenHref: taskChangesHref(id, selectedDiffFile),
+        mode: 'embedded',
+        active: activeTab === 'changes',
+        changeRevision: session.changeRevision,
+        onSelectFile: path => {
+          setSelectedDiffFile(path);
+          replaceRouteParams({ tab: 'changes', file: path });
+        }
+      })) : null
+    ),
     h('div', { className: 'inspector-panel', id: 'session-panel-activity', role: 'tabpanel', 'aria-labelledby': 'session-tab-activity', tabIndex: 0, hidden: activeTab !== 'activity', 'data-session-panel': 'activity' },
-      h(TaskTraceSection, { session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }),
+      activeTab === 'activity' ? h(TaskTraceSection, { session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) : null,
       h('div', { className: 'session-inline-actions' },
         h('a', { className: 'buttonlike secondary', href: taskActivityHref(session) }, 'Open in Activity')
       )
     ),
-    h('div', { className: 'inspector-panel', id: 'session-panel-technical', role: 'tabpanel', 'aria-labelledby': 'session-tab-technical', tabIndex: 0, hidden: activeTab !== 'technical', 'data-session-panel': 'technical' },
-      h(TechnicalDetails, { session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, onStopOperation: operationId => controlTask('stop', operationId) }),
+    h('div', { className: 'inspector-panel', id: 'session-panel-validation', role: 'tabpanel', 'aria-labelledby': 'session-tab-validation', tabIndex: 0, hidden: activeTab !== 'validation', 'data-session-panel': 'validation' },
+      activeTab === 'validation' ? h(TaskValidationSection, { session }) : null
+    ),
+    h('div', { className: 'inspector-panel', id: 'session-panel-processes', role: 'tabpanel', 'aria-labelledby': 'session-tab-processes', tabIndex: 0, hidden: activeTab !== 'processes', 'data-session-panel': 'processes' },
+      h(TaskProcessesSection, { taskId: id, workspace: session.workspace, managedProcesses, active: activeTab === 'processes' })
+    ),
+    h('div', { className: 'inspector-panel', id: 'session-panel-technical', role: 'region', 'aria-labelledby': 'session-details-toggle', tabIndex: 0, hidden: activeTab !== 'technical', 'data-session-panel': 'technical' },
+      h(TechnicalDetails, { session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, sessionTunnelId, onStopOperation: operationId => controlTask('stop', operationId) }),
       session.trace?.entries?.length
         ? h('div', { className: 'session-inline-actions' }, h('button', { className: 'secondary', type: 'button', onClick: () => exportTrace(session), 'data-export-task-trace': '' }, 'Export trace (.jsonl)'))
         : null
@@ -731,33 +802,119 @@ function SessionInspector({ session, runtime, runtimeCompatibility, activeTab, s
   );
 }
 
-function SessionTabs({ activeTab, setActiveTab }) {
-  const tabs = ['overview', 'activity', 'technical'];
+function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
+  const tabs = [
+    { id: 'overview', label: 'Overview' },
+    { id: 'changes', label: 'Changes', badge: counts.changes, countLabel: `${counts.changes || 0} changed files` },
+    { id: 'activity', label: 'Activity', badge: counts.activity, countLabel: counts.activityLabel },
+    { id: 'validation', label: 'Validation', badge: ['Not recorded', 'Unavailable'].includes(counts.validation) ? null : counts.validation, countLabel: counts.validation },
+    { id: 'processes', label: 'Processes', badge: counts.processes, countLabel: `${counts.processes || 0} processes started by this task` }
+  ];
+  const tabIds = tabs.map(t => t.id);
   const onKeyDown = event => {
-    const current = tabs.indexOf(activeTab);
+    const current = Math.max(0, tabIds.indexOf(activeTab));
     let next = null;
-    if (event.key === 'ArrowLeft') next = (current - 1 + tabs.length) % tabs.length;
-    else if (event.key === 'ArrowRight') next = (current + 1) % tabs.length;
+    if (event.key === 'ArrowLeft') next = (current - 1 + tabIds.length) % tabIds.length;
+    else if (event.key === 'ArrowRight') next = (current + 1) % tabIds.length;
     else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = tabs.length - 1;
+    else if (event.key === 'End') next = tabIds.length - 1;
     if (next == null) return;
     event.preventDefault();
-    setActiveTab(tabs[next]);
-    event.currentTarget.querySelector(`[data-session-tab="${tabs[next]}"]`)?.focus({ preventScroll: true });
+    setActiveTab(tabIds[next]);
+    event.currentTarget.querySelector(`[data-session-tab="${tabIds[next]}"]`)?.focus({ preventScroll: true });
+    event.currentTarget.querySelector(`[data-session-tab="${tabIds[next]}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   };
   return h('div', { className: 'inspector-tabs', role: 'tablist', 'aria-label': 'Task details', onKeyDown },
     ...tabs.map(tab => h('button', {
-      key: tab,
-      className: `inspector-tab${activeTab === tab ? ' is-active' : ''}`,
-      id: `session-tab-${tab}`,
+      key: tab.id,
+      className: `inspector-tab${activeTab === tab.id ? ' is-active' : ''}`,
+      id: `session-tab-${tab.id}`,
       type: 'button',
       role: 'tab',
-      'aria-selected': activeTab === tab ? 'true' : 'false',
-      'aria-controls': `session-panel-${tab}`,
-      tabIndex: activeTab === tab ? 0 : -1,
-      'data-session-tab': tab,
-      onClick: () => setActiveTab(tab)
-    }, tab.charAt(0).toUpperCase() + tab.slice(1)))
+      'aria-selected': activeTab === tab.id ? 'true' : 'false',
+      'aria-controls': `session-panel-${tab.id}`,
+      tabIndex: activeTab === tab.id || (activeTab === 'technical' && tab.id === 'overview') ? 0 : -1,
+      'data-session-tab': tab.id,
+      'aria-label': tab.countLabel ? `${tab.label}: ${tab.countLabel}` : undefined,
+      title: tab.countLabel ? `${tab.label}: ${tab.countLabel}` : undefined,
+      onClick: () => setActiveTab(tab.id)
+    },
+      h('span', null, tab.label),
+      tab.badge !== undefined && tab.badge !== null && tab.badge !== 0
+        ? h('span', { className: 'task-tab-badge', 'aria-hidden': 'true' }, tab.badge)
+        : null
+    ))
+  );
+}
+
+function TaskValidationSection({ session }) {
+  const { events: validationEvents, statusLabel, tone, checking, isValidationFailed,
+    isValidationPassed, isValidationNotRun } = taskValidationView(session);
+
+  return h('div', { className: 'task-validation-container detail-stack' },
+    h('div', { className: 'task-validation-summary-card' },
+      h('div', { className: 'task-validation-summary-head' },
+        h('div', null,
+          h('h3', null, 'Validation evidence'),
+          h('p', null,
+            checking ? 'Validation commands are currently executing.'
+            : isValidationPassed ? 'All recorded checks passed for this task.'
+            : isValidationFailed ? 'One or more recorded checks failed.'
+            : isValidationNotRun ? 'Validation was explicitly not run for this task.'
+            : 'Validation evidence is not recorded for this task.'
+          )
+        ),
+        h(StatusPill, { state: { status: statusLabel, pillClass: tone }, label: statusLabel })
+      )
+    ),
+    validationEvents.length ? h('section', { className: 'task-detail-section' },
+      h('div', { className: 'task-detail-heading' },
+        h('h3', null, 'Recorded validation checks'),
+        h('span', null, validationEvents.length)
+      ),
+      h('div', { className: 'task-event-list' },
+        ...validationEvents.map(event => h(EventRow, {
+          key: activityEventId(event) || `${eventTimestampValue(event)}:${event.operation || ''}`,
+          event,
+          session
+        }))
+      )
+    ) : h('div', { className: 'inspector-empty compact' },
+      h('strong', null, 'No check receipts recorded'),
+      h('span', null, isValidationNotRun
+        ? 'Recorded task state establishes that validation checks were not run.'
+        : 'Checks run through relai_validate will appear here with outputs and exit codes.')
+    )
+  );
+}
+
+function TaskProcessesSection({ taskId, workspace = '', managedProcesses = [], active = false }) {
+  const [showOther, setShowOther] = useState(false);
+  const { owned, other } = taskProcessGroups(managedProcesses, taskId, workspace);
+  const relevant = showOther ? [...owned, ...other] : owned;
+  const sampleKey = JSON.stringify(relevant.filter(process => ['starting', 'running', 'stopping'].includes(process.status))
+    .map(process => [process.processId, process.pid]).sort());
+  const processMemory = useProcessMemory(sampleKey, active);
+  const rows = processListView({ managedProcesses: relevant, processMemory }).rows;
+  const categories = [
+    { title: 'Task-lifecycle processes', processes: owned.filter(process => process.lifecycle === 'task') },
+    { title: 'Persistent processes started by task', processes: owned.filter(process => process.lifecycle === 'persistent') },
+    { title: 'Other processes started by task', processes: owned.filter(process => !['task', 'persistent'].includes(process.lifecycle)) }
+  ];
+  const renderProcess = process => h(ProcessRow, { key: process.processId, row: rows.find(row => row.processId === process.processId) });
+  if (!active) return null;
+  return h('div', { className: 'task-processes-container detail-stack' },
+    !owned.length ? h('div', { className: 'inspector-empty compact' },
+      h('strong', null, 'No processes started by this task'),
+      h('span', null, 'Managed background and interactive processes appear here. Running tool actions are shown in Overview and Details.')) : null,
+    categories.filter(category => category.processes.length).map(category =>
+      h('section', { key: category.title, className: 'task-detail-section task-process-group' },
+        h('div', { className: 'task-detail-heading' }, h('h3', null, category.title), h('span', null, category.processes.length)),
+        category.processes.map(renderProcess))),
+    other.length ? h('details', { className: 'task-other-processes', onToggle: event => setShowOther(event.currentTarget.open) },
+      h('summary', null, h(Icon, { name: showOther ? 'chevronDown' : 'chevronRight', size: 14 }), `Other project processes (${other.length})`),
+      showOther ? other.map(renderProcess) : null) : null,
+    h('a', { className: 'buttonlike secondary', href: routeHref('processes') }, 'View all running commands')
   );
 }
 
@@ -985,32 +1142,44 @@ function OriginalRequest({ objective }) {
 }
 
 function TaskTraceSection({ session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) {
-  const ordered = orderSessionEvents(session.events || []);
-  if (!ordered.length) return h('div', { className: 'inspector-empty compact' },
-    h('strong', null, 'No activity recorded'),
-    h('span', null, 'Task activity will appear here as Rel.AI tools run.')
-  );
-  const visible = ordered.slice(0, DETAIL_EVENT_PREVIEW);
-  const hidden = ordered.slice(DETAIL_EVENT_PREVIEW);
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState(null);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const scrollRef = useRef(null);
+  const ordered = useMemo(() => orderSessionEvents(session.events || []), [session.events]);
+  const matched = ordered.filter(event => !search || [event.title, event.summary, event.command, event.tool?.name || event.tool, event.operation]
+    .some(value => String(value || '').toLowerCase().includes(search.toLowerCase())));
+  const visible = olderExpanded || search ? matched : matched.slice(0, DETAIL_EVENT_PREVIEW);
+  const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => scrollRef.current,
+    estimateSize: () => 110, overscan: 4, enabled: visible.length > 30,
+    getItemKey: index => activityEventId(visible[index]) || index,
+    rangeExtractor: range => [...new Set([...defaultRangeExtractor(range), Math.min(focusedIndex, visible.length - 1)])].filter(index => index >= 0).sort((a, b) => a - b) });
+  const item = (event, index) => h('div', { className: 'task-event-with-inspect', 'data-event-index': index,
+    onFocus: () => setFocusedIndex(index) },
+    h(EventRow, { event, session, older: index >= DETAIL_EVENT_PREVIEW }),
+    h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setSelected(event), 'aria-label': 'Inspect ' + (event.title || event.operation || 'event') }, 'Inspect'));
   return h('section', { className: 'task-detail-section' },
-    h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task activity'), h('span', null, ordered.length)),
-    h('p', { className: 'task-detail-note' }, 'The raw trace is available under Technical.'),
-    h('div', { className: 'task-event-list' },
-      ...visible.map(event => h(EventRow, { key: activityEventId(event) || `${eventTimestampValue(event)}:${event.operation || event.tool || ''}`, event, session })),
-      hidden.length && !olderExpanded
-        ? h('button', { className: 'secondary task-event-more', type: 'button', onClick: () => setOlderExpanded(true), 'data-show-older-events': '' }, `Show ${hidden.length} older event${hidden.length === 1 ? '' : 's'}`)
-        : null,
-      ...(olderExpanded ? hidden.map(event => h(EventRow, { key: activityEventId(event) || `${eventTimestampValue(event)}:${event.operation || event.tool || ''}`, event, session, older: true })) : []),
-      olderExpanded && activityHasMore
-        ? h('button', {
-            className: 'secondary task-event-more',
-            type: 'button',
-            disabled: activityLoading,
-            onClick: loadOlderActivity,
-            'data-load-older-task-activity': ''
-          }, activityLoading ? 'Loading…' : 'Load older activity')
-        : null
-    )
+    h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task activity'), h('span', null, `${ordered.length} loaded${activityHasMore ? ' · more available' : ''}`)),
+    h('input', { type: 'search', value: search, 'aria-label': 'Search task activity', placeholder: 'Search task activity', onChange: event => { setSearch(event.target.value); setFocusedIndex(0); scrollRef.current?.scrollTo(0, 0); } }),
+    !matched.length ? h('p', null, ordered.length ? 'No matching events.' : 'No activity recorded.') : null,
+    h('div', { className: 'task-event-scroll', ref: scrollRef, tabIndex: 0, 'aria-label': 'Task execution events', onKeyDown: event => {
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || !visible.length) return;
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1 : Math.max(0, Math.min(visible.length - 1, focusedIndex + (event.key === 'ArrowDown' ? 1 : -1)));
+      flushSync(() => setFocusedIndex(next));
+      virtual.scrollToIndex(next, { align: 'auto' });
+      requestAnimationFrame(() => scrollRef.current?.querySelector('[data-event-index="' + next + '"] a')?.focus());
+    } }, visible.length > 30 ? h('div', { style: { height: virtual.getTotalSize(), position: 'relative' } },
+      virtual.getVirtualItems().map(row => h('div', { key: row.key, ref: virtual.measureElement, 'data-index': row.index,
+        style: { position: 'absolute', width: '100%', top: 0, transform: 'translateY(' + row.start + 'px)' } }, item(visible[row.index], row.index))))
+      : visible.map((event, index) => h('div', { key: activityEventId(event) || index }, item(event, index)))),
+    !olderExpanded && ordered.length > DETAIL_EVENT_PREVIEW ? h('button', { type: 'button', className: 'secondary', 'data-show-older-events': '', onClick: () => setOlderExpanded(true) }, 'Show ' + (ordered.length - DETAIL_EVENT_PREVIEW) + ' older events') : null,
+    (olderExpanded || !ordered.length) && activityHasMore ? h('button', { type: 'button', className: 'secondary', 'data-load-older-task-activity': '', disabled: activityLoading, onClick: loadOlderActivity }, activityLoading ? 'Loading…' : 'Load older activity') : null,
+    selected ? h('div', { className: 'task-event-inspection' },
+      h('button', { type: 'button', className: 'secondary', onClick: () => setSelected(null) }, 'Close event details'),
+      h(Suspense, { fallback: h('p', { role: 'status' }, 'Loading event details…') }, h(TaskEventInspector, { entry: selected,
+        sessionIndex: new Map([[sessionIdentifier(session), session]]), copyState: '',
+        onCopy: () => { void copyText(JSON.stringify(selected.safeCopy || selected, null, 2)); } }))) : null
   );
 }
 
@@ -1050,11 +1219,13 @@ function EventRow({ event, session, older = false }) {
   );
 }
 
-function TechnicalDetails({ session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, onStopOperation }) {
+function TechnicalDetails({ session, runtime, runtimeCompatibility, identities, state, operationValue, controlKey, sessionTunnelId, onStopOperation }) {
   return h('div', { className: 'task-detail-technical is-expanded' },
     h('section', { className: 'task-detail-section' },
       h('div', { className: 'task-detail-heading' }, h('h3', null, 'Identifiers')),
       h('div', { className: 'task-detail-grid' },
+        h(IdentifierDetail, { label: 'Project', value: session.workspace || 'No project' }),
+        sessionTunnelId ? h(IdentifierDetail, { label: 'Tunnel ID', value: sessionTunnelId }) : null,
         h(IdentifierDetail, { label: 'Rel.AI task ID', value: identities.logicalTaskId || sessionIdentifier(session) || '—' }),
         identities.processId ? h(IdentifierDetail, { label: 'Process ID', value: identities.processId }) : null,
         session.correlation?.conversationId ? h(IdentifierDetail, { label: 'Conversation ID', value: session.correlation.conversationId }) : null
@@ -1065,7 +1236,7 @@ function TechnicalDetails({ session, runtime, runtimeCompatibility, identities, 
       h('div', { className: 'task-detail-grid' },
         h(Detail, { label: 'State', value: state.label }),
         h(Detail, { label: 'Last action', value: operationValue }),
-        h(Detail, { label: 'Validation', value: session.validation || 'not run' }),
+        h(Detail, { label: 'Validation', value: session.validation || 'Not recorded' }),
         h(Detail, { label: 'End reason', value: session.endReason || (state.terminal ? 'completed' : 'still open') }),
         h(Detail, { label: 'Completion confirmed', value: session.completionKnown ? 'Yes' : 'No' })
       )

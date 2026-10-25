@@ -333,7 +333,15 @@ try {
   });
   const abortTimer = setTimeout(() => abort.abort(), 50);
   try { await assert.rejects(disconnected, error => error.name === 'AbortError'); } finally { clearTimeout(abortTimer); }
-  const survived = await tool('relai_work', { ...taskArgs, action: 'result', operationId: second.operationId });
+  // A connector result read waits at most five seconds; it may legitimately
+  // return running while native startup/execution is still settling. Keep
+  // retrieving this same operation, without resubmitting its command.
+  const settlementDeadline = Date.now() + 30000;
+  let survived;
+  do {
+    survived = await tool('relai_work', { ...taskArgs, action: 'result', operationId: second.operationId });
+    assert.equal(survived.backgroundOperation.operationId, second.operationId);
+  } while (survived.backgroundOperation.status === 'running' && Date.now() < settlementDeadline);
   assert.equal(survived.backgroundOperation.status, 'completed', 'HTTP retrieval disconnect must leave the existing execution running');
   assert.equal(survived.backgroundOperation.result.stdout, 'survived-disconnect\n');
   await tool('relai_work', { ...taskArgs, action: 'plan', steps: [{ id: 'verify', title: 'Verify HTTP result retrieval', status: 'completed' }] });

@@ -47,9 +47,41 @@ export function sessionIdentifier(session = {}) {
   return String(session.id || session.taskId || session.work_id || '').trim();
 }
 
+export function taskControlMessage(action, result = {}) {
+  if (action === 'goal_stop') return 'Goal stopped. The task is unchanged.';
+  if (action === 'cancel') {
+    const task = result.status === 'cancelled' ? 'Task cancelled.' : 'Task cancellation requested.';
+    return result.processCleanup?.complete === false ? `${task} Process cleanup remains unconfirmed.` : task;
+  }
+  return result.stoppedOperationCount ? `Stop requested for ${result.stoppedOperationCount} running action${result.stoppedOperationCount === 1 ? '' : 's'}.` : 'No matching running action needed to be stopped.';
+}
+
 export function isOngoingSession(session = {}) {
   const state = workSessionStateView(session);
   return state.active === true || state.open === true;
+}
+
+export function taskProcessGroups(processes = [], taskId = '', workspace = '') {
+  const owned = processes.filter(process => taskId && process.workSessionId === taskId);
+  const other = processes.filter(process => !owned.includes(process) && workspace
+    && (process.workspaceId === workspace || process.workspace === workspace));
+  return { owned, other };
+}
+
+export function taskValidationView(session = {}) {
+  const events = (Array.isArray(session.events) ? session.events : []).filter(event =>
+    event.operation === 'checks' || event.tool?.operation === 'checks'
+    || (event.tool?.name || event.tool) === 'relai_validate' || event.validation || event.title === 'Validation');
+  const explicit = session.validation || session.validationPlan?.status || session.validationStatus || '';
+  const isValidationFailed = explicit === 'failed' || session.status === 'validation_failed';
+  const isValidationPassed = explicit === 'passed';
+  const isValidationNotRun = explicit === 'not_run';
+  const checking = isOngoingSession(session) && (session.status === 'validating'
+    || events.some(event => event.status === 'running' || event.active));
+  const statusLabel = checking ? 'Checking' : isValidationFailed ? 'Failed' : isValidationPassed ? 'Passed'
+    : isValidationNotRun ? 'Not run' : explicit === 'unavailable' ? 'Unavailable' : 'Not recorded';
+  const tone = checking ? 'working' : isValidationFailed ? 'bad' : isValidationPassed ? 'good' : 'neutral';
+  return { events, statusLabel, tone, checking, isValidationFailed, isValidationPassed, isValidationNotRun };
 }
 
 export function orderSessionsForDisplay(sessions = []) {
@@ -127,7 +159,7 @@ export function mergeSessionDetail(previous = {}, summary = {}, data = {}) {
   const taskId = sessionIdentifier(summary) || sessionIdentifier(previous);
   const liveEvents = (Array.isArray(data?.auditTail?.entries) ? data.auditTail.entries : [])
     .filter(event => String(event?.taskId || event?.sessionId || '').trim() === taskId);
-  const events = mergeSessionEvents(previous.events || [], liveEvents);
+  const events = mergeSessionEvents(mergeSessionEvents(previous.events || [], summary.events || []), liveEvents);
   return {
     ...previous,
     ...(summary || {}),

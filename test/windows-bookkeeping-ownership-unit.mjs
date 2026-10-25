@@ -228,6 +228,10 @@ try {
     async function prepare(executable,args,extra={}){const j=await prepareWindowsProcessJob(config,{executable,args,cwd:root,env,...extra});const r=JSON.parse(fs.readFileSync(path.join(j.directory,'request.json'),'utf8'));assert.equal(r.environment,undefined);assert.equal(r.environmentTransportKey,'REL_AI_JOB_ENV_'+r.nonce);assert.equal(j.environment.REL_AI_FIXTURE,undefined);const payload=JSON.parse(j.environment[r.environmentTransportKey]);assert.equal(payload.nonce,r.nonce);assert.equal(new Map(payload.entries).get('REL_AI_FIXTURE'),'target-only');count++;return{j,r};}
     try{
     const direct=await prepare(process.execPath,['-e','process.exit(0)','spaces and quote "','unicode ā','']);
+    assert.equal(direct.r.consoleMode, 'hidden', 'background launch defaults to explicit console suppression');
+    const interactive = await prepare(process.execPath, ['-e', 'process.exit(0)'], { consoleMode: 'inherit' });
+    assert.equal(interactive.r.consoleMode, 'inherit', 'PTY launch preserves inherited console behavior');
+    await assert.rejects(prepareWindowsProcessJob(config, { executable: process.execPath, args: [], env, consoleMode: 'invalid' }), /consoleMode/);
     assert.equal(direct.r.executable.toLowerCase(),process.execPath.toLowerCase());assert.deepEqual(direct.r.args,['-e','process.exit(0)','spaces and quote "','unicode ā','']);
     const cmd=path.join(root,'literal.cmd');fs.writeFileSync(cmd,'@echo off\r\nexit /b 0\r\n');const batch=await prepare(cmd,['spaces and quote "']);assert.match(batch.r.executable,/cmd.exe$/i);assert.equal(batch.r.windowsVerbatimArguments,true);
     const shebang=path.join(root,'literal-script.js');fs.writeFileSync(shebang,'#!/usr/bin/env node\nprocess.exit(0)');const script=await prepare(shebang,[]);assert.match(script.r.executable,/node.exe$/i);assert.equal(script.r.args[0],shebang);

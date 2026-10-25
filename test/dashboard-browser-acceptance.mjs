@@ -187,8 +187,9 @@ try {
   assert.equal(result.taskInteraction.immediate, true, 'Task summary detail must render synchronously on selection before history hydration');
   assert.equal(result.taskInteraction.inspector, true);
   assert.equal(result.taskInteraction.selectedRow, true);
-  assert.equal(result.taskInteraction.tabs, 3);
+  assert.deepEqual(result.taskInteraction.tabs, ['overview', 'changes', 'activity', 'validation', 'processes']);
   assert.ok(result.taskInteraction.detailText.length > 100);
+  assert.equal(result.taskInteraction.detailsAvailable, true);
   assert.equal(result.taskInteraction.workSessionId, true);
   assert.ok(result.taskInteraction.eventLinks > 0, JSON.stringify(result.taskInteraction));
   assert.equal(result.taskSelectionStability.immediate, 'acceptance-running');
@@ -291,6 +292,11 @@ try {
     assert.equal(scenario.activityMessageVisible, true, `${scenario.name} hides the Activity message at scroll position zero`);
     assert.ok(scenario.activityMessageText.length > 0, `${scenario.name} renders an empty Activity message`);
     assert.equal(scenario.activityScrollLeft, 0, `${scenario.name} moved Activity away from its initial position`);
+    if (scenario.taskTabKeyboardVisible !== undefined && scenario.viewportWidth >= 300) {
+      assert.equal(scenario.taskTabKeyboardVisible, true, `${scenario.name} must reveal the keyboard-selected task tab`);
+      assert.equal(scenario.taskDetailsAccessible, true, `${scenario.name} must retain access to Details`);
+      assert.equal(scenario.taskInspectorNoOverflow, true, `${scenario.name} task inspector must not overflow the document`);
+    }
     assert.equal(scenario.reducedMotion, true);
     assert.equal(scenario.forcedColorsSupported, true, `${scenario.name} Chromium build lacks forced-color-adjust support`);
     assert.ok(Number.isFinite(scenario.devicePixelRatio) && scenario.devicePixelRatio >= 1);

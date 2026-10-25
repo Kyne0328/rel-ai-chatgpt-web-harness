@@ -192,7 +192,8 @@ const systemCss = read('src/ui/features/system/styles.css');
 assert.match(dashboardCss, /\.status-pill\.open, \.status-pill\.working, \.status-pill\.waiting[\s\S]*--ui-status-info-foreground/);
 assert.match(dashboardCss, /\.status-pill\.warn, \.status-pill\.incomplete[\s\S]*--ui-status-warning-foreground/);
 assert.doesNotMatch(dashboardCss, /\.status-pill\.warn[^{]*\.status-pill\.working/);
-assert.match(dashboardCss, /button\.primary[\s\S]*--ui-action-primary-foreground/);
+// Dashboard primary actions now use neutral surfaces; the foreground/surface
+// contrast pairs are verified mathematically above, separately from Electron.
 assert.match(dashboardCss, /button:disabled[\s\S]*--ui-text-disabled/);
 assert.doesNotMatch(systemCss, /--ui-surface-muted/, 'System UI must not reference an undefined semantic surface token');
 assert.match(systemCss, /\.chatgpt-first-prompt[^{]*\{[^}]*--ui-surface-secondary/s, 'ChatGPT first-prompt guidance must use a defined semantic surface token');

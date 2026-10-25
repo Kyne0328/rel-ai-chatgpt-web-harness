@@ -1,7 +1,7 @@
 @reference "tailwindcss";
 
 @layer components {
-.workspace-focus-chip { @apply max-w-48 justify-between gap-2 text-[11px] font-semibold; color: var(--ui-action-primary); background: var(--ui-surface-raised); }
+.workspace-focus-chip { @apply max-w-48 justify-between gap-2 text-[13px] font-semibold; color: var(--ui-action-primary); background: var(--ui-surface-raised); }
 .workspace-focus-chip > span:first-child { @apply min-w-0 truncate; }
 .workspace-focus-chip > span:last-child { @apply shrink-0 text-[15px] leading-none; }
 .workspace-toolbar button[data-add-workspace], .workspace-empty-state button[data-add-workspace] {
@@ -11,19 +11,19 @@
 .workspace-grid { @apply grid gap-3; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .workspace-direct-access { @apply flex items-center justify-between gap-4 rounded-lg border px-3 py-2; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
 .workspace-direct-access-copy { @apply min-w-0; }
-.workspace-direct-access-copy strong { @apply block text-[12px]; color: var(--ui-text-secondary); }
-.workspace-direct-access-copy p { @apply m-0 mt-0.5 max-w-4xl text-[11px] leading-5; color: var(--ui-text-tertiary); }
-.workspace-status-summary { @apply flex flex-wrap items-center gap-x-5 gap-y-1 rounded-lg border px-3 py-2 text-[12px]; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); color: var(--ui-text-secondary); }
+.workspace-direct-access-copy strong { @apply block text-[13px]; color: var(--ui-text-secondary); }
+.workspace-direct-access-copy p { @apply m-0 mt-0.5 max-w-4xl text-[13px] leading-5; color: var(--ui-text-tertiary); }
+.workspace-status-summary { @apply flex flex-wrap items-center gap-x-5 gap-y-1 rounded-lg border px-3 py-2 text-[13px]; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); color: var(--ui-text-secondary); }
 .workspace-status-summary strong { @apply mr-1 text-[13px]; color: var(--ui-text-primary); }
 .workspace-status-summary .attention, .workspace-status-summary .attention strong { color: var(--ui-status-danger-foreground); }
 .workspace-card { @apply flex min-w-0 flex-col; }
 .workspace-card-head { @apply flex items-start justify-between gap-4 border-b px-4 py-3; border-color: var(--ui-border-subtle); }
 .workspace-identity { @apply min-w-0; }
 .workspace-identity strong { @apply block text-[15px]; }
-.workspace-path { @apply mt-1 flex min-w-0 text-[11px]; color: var(--ui-text-tertiary); }
+.workspace-path { @apply mt-1 flex min-w-0 text-[13px]; color: var(--ui-text-tertiary); }
 .workspace-path-prefix { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-path-tail { flex: 0 0 auto; white-space: nowrap; }
-.workspace-warning { @apply flex items-center justify-between gap-3 px-4 py-3 text-[12px]; background: var(--ui-status-danger-background); color: var(--ui-status-danger-foreground); border-bottom: 1px solid color-mix(in srgb, var(--ui-status-danger-foreground) 28%, transparent); }
+.workspace-warning { @apply flex items-center justify-between gap-3 px-4 py-3 text-[13px]; background: var(--ui-status-danger-background); color: var(--ui-status-danger-foreground); border-bottom: 1px solid color-mix(in srgb, var(--ui-status-danger-foreground) 28%, transparent); }
 .workspace-readiness { @apply grid min-w-0 gap-0; grid-template-columns: minmax(0,1.35fr) minmax(180px,.65fr); border-bottom: 1px solid var(--ui-border-default); }
 .workspace-readiness.compact { grid-template-columns: 1fr; }
 .workspace-readiness.compact .workspace-readiness-facts { border-left: 0; }
@@ -32,20 +32,20 @@
 .workspace-readiness.bad .workspace-readiness-icon { background: var(--ui-status-danger-background); color: var(--ui-status-danger-foreground); border-color: color-mix(in srgb, var(--ui-status-danger-foreground) 28%, transparent); }
 .workspace-readiness-copy { @apply min-w-0; }
 .workspace-readiness-copy strong { @apply block text-[13px]; }
-.workspace-readiness-copy p { @apply mt-1 text-[12px] leading-5; color: var(--ui-text-secondary); }
-.workspace-readiness-kicker { @apply mb-1 block text-[11px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
+.workspace-readiness-copy p { @apply mt-1 text-[13px] leading-5; color: var(--ui-text-secondary); }
+.workspace-readiness-kicker { @apply mb-1 block text-[13px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
 .workspace-readiness-facts { @apply grid m-0; grid-template-columns: 1fr; border-left: 1px solid var(--ui-border-default); }
 .workspace-readiness-fact { @apply m-0 p-4; border-left: 1px solid var(--ui-border-subtle); }
 .workspace-readiness-fact:first-child { border-left: 0; }
-.workspace-readiness-fact dt { @apply flex items-center gap-2 text-[11px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
+.workspace-readiness-fact dt { @apply flex items-center gap-2 text-[13px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
 .workspace-readiness-fact dt i { @apply size-1.5 rounded-full; background: var(--ui-status-warning-foreground); }
 .workspace-readiness-fact.good dt i { background: var(--ui-status-success-foreground); }
 .workspace-readiness-fact.bad dt i { background: var(--ui-status-danger-foreground); }
 .workspace-readiness-fact.neutral dt i { background: var(--ui-text-tertiary); }
 .workspace-readiness-fact dd { @apply m-0 mt-2; }
-.workspace-readiness-fact dd strong { @apply block text-[12px]; }
-.workspace-readiness-fact dd small { @apply mt-1 block text-[11px] leading-5; color: var(--ui-text-secondary); }
-.workspace-notice { @apply flex flex-wrap gap-2 border-b px-4 py-3 text-[12px]; background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground); border-color: color-mix(in srgb, var(--ui-status-warning-foreground) 25%, transparent); }
+.workspace-readiness-fact dd strong { @apply block text-[13px]; }
+.workspace-readiness-fact dd small { @apply mt-1 block text-[13px] leading-5; color: var(--ui-text-secondary); }
+.workspace-notice { @apply flex flex-wrap gap-2 border-b px-4 py-3 text-[13px]; background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground); border-color: color-mix(in srgb, var(--ui-status-warning-foreground) 25%, transparent); }
 .workspace-actions { @apply flex flex-wrap items-center gap-2; padding: 12px var(--card-inset); }
 .workspace-actions > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .workspace-identity strong { overflow-wrap: anywhere; }
@@ -56,19 +56,19 @@
 .workspace-empty-state { @apply grid min-h-72 place-items-center rounded-xl p-8 text-center; background: var(--ui-surface-primary); border: 1px dashed var(--ui-border-default); }
 .workspace-empty-state > * { @apply max-w-xl; }
 .workspace-empty-state strong { @apply mt-3 block text-lg; }
-.workspace-empty-state p { @apply my-3 text-[12px]; color: var(--ui-text-secondary); }
+.workspace-empty-state p { @apply my-3 text-[13px]; color: var(--ui-text-secondary); }
 .workspace-empty-mark { @apply grid size-12 place-items-center rounded-xl text-2xl; background: var(--ui-surface-raised); color: var(--ui-action-primary); }
 .workspace-card-focused { outline: 2px solid var(--ui-action-primary); outline-offset: 3px; }
 
 .ws-project-form { @apply gap-3; }
 .ws-project-name-section, .ws-source-section, .ws-project-details-section { @apply grid gap-2; }
-.ws-form-label, .ws-source-heading { @apply block text-[12px] font-semibold; color: var(--ui-text-primary); }
+.ws-form-label, .ws-source-heading { @apply block text-[13px] font-semibold; color: var(--ui-text-primary); }
 .ws-project-name-field { @apply flex items-center overflow-hidden; min-height: var(--control-height); border-radius: var(--control-radius); border: 1px solid var(--ui-border-control); background: var(--ui-surface-primary); }
 .ws-project-name-field:focus-within { border-color: var(--ui-action-primary); box-shadow: 0 0 0 1px var(--ui-action-primary); }
 .ws-project-name-field input { @apply min-w-0 flex-1 border-0 bg-transparent px-2.5; min-height: calc(var(--control-height) - 2px); outline: none; }
 .ws-folder-icon { @apply grid shrink-0 place-items-center; color: var(--ui-text-tertiary); }
 .ws-project-name-field > .ws-folder-icon { @apply ml-3; }
-.ws-form-help { @apply text-[12px] leading-6; color: var(--ui-text-secondary); }
+.ws-form-help { @apply text-[13px] leading-6; color: var(--ui-text-secondary); }
 .ws-source-heading { @apply mt-1; }
 .ws-source-folder-box { @apply overflow-hidden; border-radius: var(--card-radius); border: 1px solid var(--ui-border-default); background: var(--ui-surface-primary); transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease; }
 .ws-source-folder-box.is-drop-active { border-color: var(--ui-action-primary); background: color-mix(in srgb, var(--ui-action-primary) 7%, var(--ui-surface-primary)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-action-primary) 16%, transparent); }
@@ -77,31 +77,31 @@
 .ws-source-folder-copy { @apply grid min-w-0; max-width: 65ch; }
 .ws-source-folder-title { @apply flex min-w-0 items-center gap-2; }
 .ws-source-folder-copy strong { @apply truncate text-[13px] font-medium; }
-.ws-source-folder-copy small { @apply truncate text-[12px]; color: var(--ui-text-secondary); }
-.ws-source-primary { @apply shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[.04em]; background: var(--ui-surface-secondary); color: var(--ui-text-tertiary); }
+.ws-source-folder-copy small { @apply truncate text-[13px]; color: var(--ui-text-secondary); }
+.ws-source-primary { @apply shrink-0 rounded px-1.5 py-0.5 text-[13px] font-bold uppercase tracking-[.04em]; background: var(--ui-surface-secondary); color: var(--ui-text-tertiary); }
 .ws-source-folder-actions { @apply flex shrink-0 items-center gap-1; }
-.ws-source-folder-change, .ws-source-folder-remove { @apply min-h-11 rounded-lg px-2.5 text-[12px] font-medium; color: var(--ui-text-secondary); }
+.ws-source-folder-change, .ws-source-folder-remove { @apply min-h-11 rounded-lg px-2.5 text-[13px] font-medium; color: var(--ui-text-secondary); }
 .ws-source-folder-change:hover, .ws-source-folder-remove:hover { background: var(--ui-surface-secondary); color: var(--ui-text-primary); }
-.ws-source-folder-add, .ws-source-folder-empty { @apply flex min-h-11 w-full items-center justify-center gap-2 border-t px-4 py-2.5 text-[12px] font-medium; border-color: var(--ui-border-subtle); color: var(--ui-text-secondary); }
+.ws-source-folder-add, .ws-source-folder-empty { @apply flex min-h-11 w-full items-center justify-center gap-2 border-t px-4 py-2.5 text-[13px] font-medium; border-color: var(--ui-border-subtle); color: var(--ui-text-secondary); }
 .ws-source-folder-empty { @apply min-h-24 flex-col border-t-0; font-weight: 400; }
 .ws-source-folder-add:hover, .ws-source-folder-empty:hover { background: var(--ui-surface-secondary); color: var(--ui-text-primary); }
 .ws-source-manual { @apply border-t p-3; border-color: var(--ui-border-subtle); }
 .ws-source-manual-only { @apply border-t-0; }
-.ws-source-manual label { @apply mb-1.5 block text-[11px] font-semibold; color: var(--ui-text-secondary); }
+.ws-source-manual label { @apply mb-1.5 block text-[13px] font-semibold; color: var(--ui-text-secondary); }
 .ws-source-manual .ws-form-help { @apply mt-1 block; }
-.ws-source-drop-hint { @apply flex min-h-10 items-center justify-center gap-2 border-t px-3 text-[11px] font-medium; border-color: var(--ui-border-subtle); color: var(--ui-text-tertiary); background: var(--ui-surface-secondary); }
+.ws-source-drop-hint { @apply flex min-h-10 items-center justify-center gap-2 border-t px-3 text-[13px] font-medium; border-color: var(--ui-border-subtle); color: var(--ui-text-tertiary); background: var(--ui-surface-secondary); }
 .ws-form-path { @apply min-w-0 w-full; }
 textarea.ws-form-path { @apply min-h-24 resize-y; }
-.ws-form-status { @apply min-h-6 text-[12px] leading-5; }
+.ws-form-status { @apply min-h-6 text-[13px] leading-5; }
 .ws-form-status.success { color: var(--ui-status-success-foreground); }
 .ws-form-status.warn { color: var(--ui-status-warning-foreground); }
 .ws-form-status.error { color: var(--ui-status-danger-foreground); }
-.ws-form-conflict { @apply rounded-lg px-3 py-2 text-[12px] leading-5; background: var(--ui-status-danger-background); border: 1px solid color-mix(in srgb, var(--ui-status-danger-foreground) 38%, transparent); color: var(--ui-status-danger-foreground); }
+.ws-form-conflict { @apply rounded-lg px-3 py-2 text-[13px] leading-5; background: var(--ui-status-danger-background); border: 1px solid color-mix(in srgb, var(--ui-status-danger-foreground) 38%, transparent); color: var(--ui-status-danger-foreground); }
 .ws-project-details-box { @apply overflow-hidden; border-radius: var(--card-radius); border: 1px solid var(--ui-border-default); background: var(--ui-surface-primary); }
-.workspace-repair-copy { @apply text-[12px] leading-5; color: var(--ui-text-secondary); }
+.workspace-repair-copy { @apply text-[13px] leading-5; color: var(--ui-text-secondary); }
 .workspace-repair-identity { @apply grid gap-1 rounded-lg p-3; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
-.workspace-repair-identity span { @apply text-[11px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
-.workspace-repair-identity small { @apply truncate text-[11px]; color: var(--ui-text-secondary); }
+.workspace-repair-identity span { @apply text-[13px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
+.workspace-repair-identity small { @apply truncate text-[13px]; color: var(--ui-text-secondary); }
 }
 
 @media (max-width: 1700px) {
@@ -128,8 +128,8 @@ textarea.ws-form-path { @apply min-h-24 resize-y; }
 
 @layer components {
   .workspace-operational > * { min-width: 0; display: grid; gap: 3px; }
-  .workspace-operational span { color: var(--ui-text-tertiary); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
-  .workspace-operational strong { min-width: 0; overflow-wrap: anywhere; font-size: 12px; line-height: 1.4; }
+  .workspace-operational span { color: var(--ui-text-tertiary); font-size: 13px; font-weight: 700; letter-spacing: .04em; }
+  .workspace-operational strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.4; }
 }
 
 @media (max-width: 1250px) {
@@ -140,11 +140,11 @@ textarea.ws-form-path { @apply min-h-24 resize-y; }
 .workspace-analytics-mini { @apply grid gap-2 rounded-lg border px-3 py-2.5; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
 .workspace-analytics-mini[hidden] { display: none; }
 .workspace-analytics-head { @apply flex items-center justify-between gap-2; }
-.workspace-analytics-head span { @apply text-[11px] font-semibold uppercase tracking-[.04em]; color: var(--ui-text-tertiary); }
-.workspace-analytics-head small { @apply text-[11px]; color: var(--ui-text-tertiary); }
+.workspace-analytics-head span { @apply text-[13px] font-semibold uppercase tracking-[.04em]; color: var(--ui-text-tertiary); }
+.workspace-analytics-head small { @apply text-[13px]; color: var(--ui-text-tertiary); }
 .workspace-analytics-metrics { @apply grid gap-2; grid-template-columns: repeat(3,minmax(0,1fr)); }
 .workspace-analytics-metrics > div { @apply grid min-w-0 gap-0.5; }
-.workspace-analytics-metrics span { @apply text-[11px]; overflow-wrap: anywhere; color: var(--ui-text-tertiary); }
+.workspace-analytics-metrics span { @apply text-[13px]; overflow-wrap: anywhere; color: var(--ui-text-tertiary); }
 .workspace-analytics-metrics strong { @apply text-[13px] font-bold; overflow-wrap: anywhere; color: var(--ui-text-primary); }
 .workspace-analytics-sparkline { position: relative; width: 100%; height: 30px; }
 .workspace-analytics-sparkline-empty { display: block; height: 30px; }

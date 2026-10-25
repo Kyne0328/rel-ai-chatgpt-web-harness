@@ -3,6 +3,18 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createNodeMemorySampler, resourceDiagnosticsSnapshot } from '../src/resourceDiagnostics.js';
 import { buildDiagnosticReport } from '../src/diagnostics.js';
+
+const explicitChecks = buildDiagnosticReport({
+  connectionState: { localService: { status: 'running' }, publicEndpoint: { status: 'available' } },
+  checks: [
+    { id: 'git-cli', title: 'Git CLI', status: 'Unavailable', detail: 'No probe result' },
+    { id: 'tunnel:healthy', title: 'Healthy tunnel', status: 'Passed', detail: 'Recorded running' },
+    { id: 'tunnel:failed', title: 'Failing peer', status: 'Failed', detail: 'Recorded failed' }
+  ]
+});
+assert.equal(explicitChecks.connectionState.localService.status, 'running');
+assert.deepEqual(explicitChecks.checks.map(check => check.status), ['Unavailable', 'Passed', 'Failed']);
+assert.deepEqual(buildDiagnosticReport({}).checks, [], 'missing probes never synthesize successful checks');
 import { hostResourceDiagnosticSnapshot } from '../src/hostResourceScheduler.js';
 import { ResourceDiagnostics } from '../src/ui/features/settings/resource-diagnostics.js';
 
@@ -111,6 +123,12 @@ assert.match(report.reportText, /not evidence of a memory leak/);
 const render = value => renderToStaticMarkup(React.createElement(ResourceDiagnostics, { resources: value, onRefresh: () => {} }));
 const markup = render(report.resourceDiagnostics);
 assert.match(markup, /System resources/);
+assert.match(markup, /role="meter" aria-label="Physical memory used"[^>]*aria-valuenow="88"/);
+assert.match(markup, /role="meter" aria-label="Heavy commands and checks active"[^>]*aria-valuenow="50"/);
+assert.match(markup, /role="img" aria-label="Service memory: 3 samples/);
+assert.doesNotMatch(render({ host: { pressure: { stale: true, physicalAvailableBytes: 1, physicalTotalBytes: 2 } } }), /role="meter" aria-label="Physical memory used"/);
+assert.doesNotMatch(render({ host: { pressure: { stale: false, physicalAvailableBytes: 3, physicalTotalBytes: 2 } } }), /role="meter" aria-label="Physical memory used"/);
+
 const admissionGroup = markup.match(/<div\b[^>]*aria-label="Resource admission lanes"[^>]*>/)?.[0] || '';
 assert.match(admissionGroup, /\brole="group"/, 'Resource admission lanes must expose a naming-supported semantic group');
 assert.doesNotMatch(markup, /reservation|reserve floor|Commit admission|Recent pressure decisions/);

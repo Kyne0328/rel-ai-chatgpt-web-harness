@@ -29,6 +29,7 @@ app.whenReady().then(async () => {
 
   try {
     await win.loadURL(targetUrl);
+    await win.webContents.executeJavaScript(require('axe-core').source);
     const result = await win.webContents.executeJavaScript(`(async () => {
       const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
       const until = async (predicate, label) => {
@@ -66,7 +67,7 @@ app.whenReady().then(async () => {
         if (id === 'missing-detail-task') return respond({ ok: false, error: 'Work session not found.' }, 404);
         if (id === 'summary-error-task') return respond({ ok: false, error: 'Summary details temporarily unavailable.' }, 503);
         const summary = snapshot.tasks.find(task => task.work_id === id);
-        return summary ? respond({ ok: true, session: { ...summary, events: activityEntries.filter(entry => entry.taskId === id) } }) : respond({ ok: false, error: 'Work session not found.' }, 404);
+        return summary ? respond({ ok: true, session: { ...summary, events: summary.events?.length ? summary.events : activityEntries.filter(entry => entry.taskId === id) } }) : respond({ ok: false, error: 'Work session not found.' }, 404);
       };
       history.replaceState(null, '', '#code?task=probe-task&file=src%2Fnew.js');
       const host = document.createElement('div');
@@ -135,6 +136,7 @@ app.whenReady().then(async () => {
       const positionAfterLiveUpdate = liveEditor?.getPosition?.() || null;
       const result = {
         editorPresent: Boolean(editorBefore),
+        mobileTasksParentActive: document.querySelector('.mobile-nav [data-nav-id="tasks"]')?.getAttribute('aria-current') === 'page',
         inlineDiffEditor: Boolean(document.querySelector('.monaco-diff-editor')),
         readOnly,
         saveButtonPresent: Boolean(document.querySelector('[data-code-save]')),
@@ -379,8 +381,64 @@ app.whenReady().then(async () => {
       await wait(0);
       await wait(0);
       result.lateTaskDetailsIgnored = document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task';
+      const inspectorTask = { work_id: 'probe-task', title: 'Inspector regression task', workspace: 'app', status: 'running', changeRevision: 1,
+        changedFiles: ['src/example.js', 'src/new.js'], validation: 'not_run',
+        events: Array.from({ length: 400 }, (_, index) => ({ eventId: 'inspector-' + index, timestamp: new Date(Date.now() - index * 1000).toISOString(), tool: 'relai_read', title: 'Inspector event ' + index, summary: 'Recorded event ' + index, status: 'succeeded', taskId: 'probe-task', workspace: 'app' })) };
+      snapshot = { ...snapshot, tasks: [inspectorTask],
+        managedProcesses: [
+          { processId: 'proc-task-owned', workSessionId: 'probe-task', workspaceId: 'app', lifecycle: 'task', status: 'running', label: 'Task command', pid: 123 },
+          { processId: 'proc-persistent', workSessionId: 'probe-task', workspaceId: 'app', lifecycle: 'persistent', status: 'running', label: 'Persistent server', pid: 124 },
+          { processId: 'proc-other', workSessionId: 'another-task', workspaceId: 'app', lifecycle: 'persistent', status: 'orphaned', label: 'Other service', canStop: false, recovery: 'Recorded recovery guidance' }
+        ],
+        auditTail: { entries: Array.from({ length: 25 }, (_, index) => ({ id: 'dock-' + index, ts: Date.now() + index, tool: 'relai_read', summary: 'Dock event ' + index, status: 'succeeded' })) },
+        taskActivity: { state: 'working', activeCalls: 1, activeTaskCount: 1, tasks: [{ ...inspectorTask, currentActivity: 'Inspecting recorded evidence' }] } };
+      listeners.forEach(listener => listener());
+      location.hash = '#tasks?workspace=app&task=probe-task&tab=changes&file=src%2Fnew.js&search=Inspector&taskStatus=open';
+      await until(() => document.querySelector('#session-tab-changes')?.getAttribute('aria-selected') === 'true' && document.querySelector('.task-diff-viewer .monaco-diff-editor') && document.querySelector('[data-code-file-heading]')?.textContent === 'src/new.js', 'embedded Changes deep link');
+      result.inspectorFullScreenHref = document.querySelector('[data-code-fullscreen-link]')?.getAttribute('href');
+      result.inspectorHeaderHasNoIds = !document.querySelector('.task-detail-header')?.textContent.includes('probe-task');
+      const inspectorEditor = () => window.monaco.editor.getEditors().find(editor => editor.getModel()?.getValue()?.includes('function greet'));
+      document.querySelector('.task-diff-viewer .code-layout-button:last-child').click();
+      inspectorEditor()?.setPosition({ lineNumber: 3, column: 5 });
+      document.querySelector('#session-tab-activity').click();
+      await until(() => !document.querySelector('#session-panel-changes .monaco-diff-editor'), 'hidden editor disposal');
+      const readsWhileHidden = window.relaiCodeProbe.taskRequests().length;
+      snapshot = { ...snapshot, tasks: [{ ...inspectorTask, title: 'Updated inspector title' }] };
+      listeners.forEach(listener => listener());
+      await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'Updated inspector title', 'hidden task update');
+      result.inspectorHiddenReadsStable = window.relaiCodeProbe.taskRequests().length === readsWhileHidden;
+      document.querySelector('#session-tab-changes').click();
+      await until(() => document.querySelector('.task-diff-viewer .monaco-diff-editor') && inspectorEditor(), 'editor remount');
+      result.inspectorDiffRestored = document.querySelector('[data-code-file-heading]')?.textContent === 'src/new.js'
+        && document.querySelector('.code-layout-button:last-child')?.getAttribute('aria-pressed') === 'true'
+        && inspectorEditor().getPosition()?.lineNumber === 3;
+      document.querySelector('#session-tab-processes').click();
+      await until(() => document.querySelector('#session-panel-processes [data-process-id="proc-persistent"]'), 'attributed task processes');
+      result.inspectorProcessBadge = document.querySelector('#session-tab-processes .task-tab-badge')?.textContent;
+      result.inspectorOtherProcessesCollapsed = !document.querySelector('[data-process-id="proc-other"]') && !document.querySelector('.task-other-processes')?.open;
+      document.querySelector('.task-other-processes summary').click();
+      await until(() => document.querySelector('[data-process-id="proc-other"]'), 'other project processes disclosure');
+      const groups = [...document.querySelectorAll('#session-panel-processes .task-process-group')];
+      result.inspectorProcessGroups = groups.map(group => ({ title: group.querySelector('h3').textContent, ids: [...group.querySelectorAll('[data-process-id]')].map(row => row.dataset.processId) }));
+      result.inspectorProcessState = document.querySelector('[data-process-id="proc-persistent"] .status-pill')?.textContent;
+      result.inspectorOrphanRecovery = document.querySelector('[data-process-id="proc-other"]')?.textContent.includes('Recorded recovery guidance')
+        && !document.querySelector('[data-process-id="proc-other"] [data-stop-process]');
+      document.querySelector('#session-tab-activity').click();
+      await until(() => document.querySelector('[data-show-older-events]'), 'task activity expansion');
+      document.querySelector('[data-show-older-events]').click();
+      await until(() => document.querySelectorAll('#session-panel-activity [data-event-index]').length > 8, 'virtual task activity');
+      result.inspectorVirtualRows = document.querySelectorAll('#session-panel-activity [data-event-index]').length;
+      location.hash = '#tasks?task=probe-task&tab=technical';
+      await until(() => document.querySelector('[data-session-details]')?.getAttribute('aria-expanded') === 'true' && !document.querySelector('#session-panel-technical')?.hidden, 'retained technical deep link');
+      result.inspectorDetailsLinkWorks = document.querySelector('#session-panel-technical')?.textContent.includes('probe-task');
+      document.querySelector('.runtime-dock-btn').click();
+      await until(() => document.querySelector('.runtime-dock'), 'runtime dock');
+      result.dockNewestEvent = document.querySelector('.runtime-dock-item:not(.active-executing) .runtime-dock-summary')?.textContent;
+      result.dockCurrentTask = document.querySelector('.active-executing')?.textContent.includes('Inspecting recorded evidence');
       location.hash = '#home';
       await wait(50);
+      const dockAudit = await axe.run(document.querySelector('.runtime-dock-btn'), { runOnly: { type: 'rule', values: ['label-content-name-mismatch', 'button-name'] } });
+      result.dockAccessibility = dockAudit.violations.map(violation => violation.id);
       return result;
     })()`);
     result.cspErrors = cspErrors;

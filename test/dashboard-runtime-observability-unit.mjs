@@ -12,6 +12,7 @@ import {
 import { taskProgressView } from '../src/ui/components/task-progress.js';
 import { activeTaskList } from '../src/ui/features/home/index.js';
 import { processListView } from '../src/ui/features/processes/index.js';
+import { mergeSessionDetail, taskControlMessage, taskProcessGroups, taskValidationView } from '../src/ui/features/sessions/model.js';
 
 const persistentProcess = processStateView({
   processId: 'proc-persistent',
@@ -169,7 +170,7 @@ const processRenderContext = {
   postJson: async (...args) => { processStopRequests.push(args); return { ok: true }; },
   requestDashboardRefresh: () => { processRefreshes += 1; }
 };
-vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace('export function createProcessesRoute', 'function createProcessesRoute')
+vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace(/^export /gm, '')
   + '\nglobalThis.renderProcesses = createProcessesRoute; globalThis.renderProcessRow = ProcessRow;', processRenderContext);
 const restartedProcessTree = processRenderContext.renderProcesses(() => ({
   managedProcesses: [{ processId: 'restart-survivor', status: 'unknown_after_restart', pid: 456, label: 'Restart survivor' }]
@@ -261,11 +262,11 @@ async function exerciseProcessMemoryLifecycle() {
     },
     fetchJson(url, options) { return new Promise(resolve => requests.push({ url, options, resolve })); }
   };
-  vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace('export function createProcessesRoute', 'function createProcessesRoute')
+  vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace(/^export /gm, '')
     + '\nglobalThis.readMemory = useProcessMemory;', context);
-  const render = (key = '[["memory-root",321]]') => {
+  const render = (key = '[["memory-root",321]]', enabled = true) => {
     cursor = 0;
-    const value = context.readMemory(key);
+    const value = context.readMemory(key, enabled);
     while (effects.length) effects.shift()();
     return value;
   };
@@ -301,6 +302,11 @@ async function exerciseProcessMemoryLifecycle() {
   slots.length = 0;
   render('[]');
   assert.equal(requests.length, 3);
+  assert.equal(timers.size, 0);
+  slots.forEach(slot => slot?.cleanup?.());
+  slots.length = 0;
+  render('[["memory-root",321]]', false);
+  assert.equal(requests.length, 3, 'inactive inspector tabs must not sample process memory');
   assert.equal(timers.size, 0);
   slots.forEach(slot => slot?.cleanup?.());
 }
@@ -370,7 +376,7 @@ async function exerciseProcessOutputFollow(newestFirst) {
     },
     URLSearchParams
   };
-  vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace('export function createProcessesRoute', 'function createProcessesRoute')
+  vm.runInNewContext(processesSource.replace(/^import .*;\n/gm, '').replace(/^export /gm, '')
     + '\nglobalThis.renderOutput = OutputBlock;', context);
   const render = totalBytes => {
     props = {
@@ -419,7 +425,7 @@ const cssSource = fs.readFileSync(path.join(root, 'src/ui/styles/app.css'), 'utf
 const sessionCssSource = fs.readFileSync(path.join(root, 'src/ui/features/sessions/styles.css'), 'utf8');
 
 assert.match(sessionsSource, /sessions-summary-line/, 'Tasks surface must retain a compact user-facing summary in its toolbar');
-assert.match(sessionsSource, /View its overview, activity, and technical details here\./, 'Tasks empty inspector must explain what selecting a task reveals');
+assert.match(sessionsSource, /Review its progress, changes, checks, and activity\./, 'Tasks empty inspector must explain what selecting a task reveals');
 assert.match(sessionsSource, /Rel\.AI task ID/);
 assert.match(sessionsSource, /Process ID/);
 assert.match(sessionsSource, /'aria-label': `Copy \$\{label\} \$\{value\}`/);
@@ -430,7 +436,10 @@ assert.match(sessionsSource, /className: 'task-plan-active-dot'/, 'the active pl
 assert.doesNotMatch(sessionsSource, /status === 'in_progress' \? 'circleDot'/, 'the active plan step must not stack a circle-dot icon inside the animated marker');
 assert.match(sessionsSource, /data-stop-task-operations/);
 assert.match(sessionsSource, /data-cancel-task/);
-assert.match(sessionsSource, /Task cancellation requested\./, 'task cancellation UI must distinguish requested cancellation from confirmed terminal cancellation');
+assert.equal(taskControlMessage('cancel', { status: 'running' }), 'Task cancellation requested.');
+assert.equal(taskControlMessage('cancel', { status: 'cancelled', processCleanup: { complete: false } }), 'Task cancelled. Process cleanup remains unconfirmed.');
+assert.equal(taskControlMessage('cancel', { status: 'cancelled', processCleanup: { complete: true } }), 'Task cancelled.');
+assert.deepEqual(mergeSessionDetail({ events: [{ eventId: 'old', summary: 'Earlier' }] }, { id: 'task', events: [{ eventId: 'new', summary: 'Current' }] }).events.map(event => event.eventId).sort(), ['new', 'old'], 'current task evidence must not disappear behind cached detail events');
 assert.match(sessionsSource, /\/api\/tasks\/control/);
 assert.match(processesSource, /data-stop-process/);
 assert.match(processesSource, /: 'Stop'/);
@@ -461,5 +470,23 @@ assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress\s*\{[^}]*box-sh
 assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{[^}]*opacity:\s*0[^}]*animation:\s*task-plan-heartbeat/s, 'active plan heartbeat must have an invisible resting state');
 assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{\s*display:\s*none;/, 'reduced-motion users must not receive the active plan heartbeat');
 assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)/);
+
+
+// Task badges and process groups use durable ownership, including old records
+// without lifecycle metadata. Shared-project activity cannot become task-owned.
+const scopedProcesses = [
+  { processId: 'owned', workSessionId: 'task-a', workspaceId: 'app', lifecycle: 'persistent' },
+  { processId: 'legacy', workSessionId: 'task-a', workspace: 'app' },
+  { processId: 'other', workSessionId: 'task-b', workspaceId: 'app' },
+  { processId: 'unrelated', workSessionId: 'task-b', workspaceId: 'elsewhere' }
+];
+assert.deepEqual(taskProcessGroups(scopedProcesses, 'task-a', 'app').owned.map(p => p.processId), ['owned', 'legacy']);
+assert.deepEqual(taskProcessGroups(scopedProcesses, 'task-a', 'app').other.map(p => p.processId), ['other']);
+assert.equal(taskProcessGroups([{ processId: 'unassigned' }]).owned.length, 0);
+for (const [validation, expected] of [['passed', 'Passed'], ['failed', 'Failed'], ['not_run', 'Not run'], ['unavailable', 'Unavailable'], ['', 'Not recorded']]) {
+  assert.equal(taskValidationView({ validation }).statusLabel, expected);
+}
+assert.equal(taskValidationView({ status: 'validating' }).statusLabel, 'Checking');
+assert.equal(taskValidationView({ validation: 'passed', events: [{ tool: 'relai_read' }, { tool: 'relai_validate' }] }).events.length, 1);
 
 console.log('Dashboard work-session, process, accessibility, and missing-field observability contracts passed.');

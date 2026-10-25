@@ -102,12 +102,14 @@ try {
   assert.equal(result.diagnostics.applied.liveTailPressed, 'false');
   assert.deepEqual(result.diagnostics.applied.reportActions, ['Copy report', 'Export support information']);
   assert.match(result.tools.applied.chip, /Validate/);
-  assert.equal(result.tools.applied.badge, 'Filters (1)');
+  assert.match(result.tools.applied.badge, /Validate/);
   assert.match(result.tools.applied.summary, /tools shown/);
   assert.ok(result.tools.applied.visibleCards > 0);
   assert.equal(result.tools.capabilityRemoved, true);
   assert.equal(result.tools.searchCleared, true);
   assert.equal(result.tools.emptyState, true);
+  assert.equal(result.tools.keyboardNavigation, true);
+  assert.equal(result.tools.mobileFallback, true);
   assert.deepEqual(result.settings.themes.map(item => item.preference), ['dark', 'light', 'system']);
   assert.deepEqual(result.settings.themeSwitchLabels, ['Follow system appearance', 'Dark theme', 'Light theme']);
   assert.equal(result.settings.themeSwitchIconsUseSvg, true);

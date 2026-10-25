@@ -1,11 +1,11 @@
 {
   "protocol": 1,
   "runtime": "nativeaot-win-x64",
-  "nativeSourceSha256": "e8953e4bb074e83dbab5abf69e6eae5ba90031197f401cea2446fdf95719c978",
-  "hostSourceSha256": "de7bee57027540351dcc9bbff748cc7d2b9c130af28c1023403f51bcc6db2eb0",
+  "nativeSourceSha256": "8f80d8024f587a99f91bdaa715af55dc47f50d71688d1f5e6651cb42c63c6563",
+  "hostSourceSha256": "97973205a3f5c9f1a0c36e209dcc130333137772b605d5ec2bd5a114a710ae7b",
   "projectSourceSha256": "bc8608908ae38e3c0fe3b68a54ed2f3ce7dee0180702a045adef5f4dd85cc9f9",
-  "binarySha256": "47f949907d31dea53265de7494fdf63fc9a6c9b11465eefb03955d0322a8f7d5",
-  "binaryBytes": 2063360,
+  "binarySha256": "bc26fc6559d59221b2e7e39bb9e71903c3ed53b334f746963ca5d69cf75fe784",
+  "binaryBytes": 2063872,
   "provenance": {
     "fallback": {
       "compilerVersion": "14.8.10001.0 built by: bd501acdc000004",

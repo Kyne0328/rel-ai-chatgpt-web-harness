@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { fetchJson } from '../../api.js';
-import { filterRadioField, openFilterDrawer } from '../../components/filter-drawer.js';
+import { FilterChoice } from '../../components/filter-drawer.js';
 import {
   TOOL_CAPABILITIES,
   TOOL_CAPABILITY_IDS,
@@ -51,27 +51,6 @@ export function createToolsRoute() {
       : loadState.status === 'loading'
         ? 'Loading tool catalog…'
         : `${visible.length} of ${tools.length} tools shown`;
-    const openFilters = () => openFilterDrawer({
-      title: 'Tool filters',
-      value: { capability },
-      resetValue: { capability: 'all' },
-      renderFields(fields, draft) {
-        const options = TOOL_CAPABILITIES.map(item => ({
-          value: item.id,
-          label: `${item.label} (${capabilityCount(tools, item.id)})`
-        }));
-        fields.appendChild(filterRadioField({
-          key: 'capability',
-          label: 'Capability',
-          value: draft.capability,
-          options,
-          onChange: value => { draft.capability = value; }
-        }));
-      },
-      onApply(draft) {
-        setCapability(TOOL_CAPABILITY_IDS.has(draft.capability) ? draft.capability : 'all');
-      }
-    });
 
     return h('div', { className: 'settings-content system-content', 'data-tools-react': 'true' },
       h('div', { className: 'section tools-section' },
@@ -82,7 +61,8 @@ export function createToolsRoute() {
           onSearch: setSearch,
           onCapabilityClear: () => setCapability('all'),
           onClearAll: () => { setSearch(''); setCapability('all'); },
-          onOpenFilters: openFilters
+          filterOptions: TOOL_CAPABILITIES.map(item => ({ value: item.id, label: item.label + " (" + capabilityCount(tools, item.id) + ")" })),
+          onCapabilityChange: next => setCapability(TOOL_CAPABILITY_IDS.has(next) ? next : "all")
         }),
         h('div', { id: 'toolsBody', className: 'tools-grid' },
           loadState.status === 'loading'
@@ -107,7 +87,7 @@ export function createToolsRoute() {
   };
 }
 
-function ToolsFilterBar({ search, capability, summary, onSearch, onCapabilityClear, onClearAll, onOpenFilters }) {
+function ToolsFilterBar({ search, capability, summary, onSearch, onCapabilityClear, onClearAll, filterOptions, onCapabilityChange }) {
   const filters = capability === 'all' ? [] : [{ label: 'Capability', value: capabilityLabel(capability), onRemove: onCapabilityClear }];
   return h('div', { id: 'toolsToolbar' },
     h('section', { className: 'filter-bar', 'aria-label': 'List filters' },
@@ -119,12 +99,7 @@ function ToolsFilterBar({ search, capability, summary, onSearch, onCapabilityCle
             onChange: event => onSearch(event.target.value)
           })
         ),
-        h('button', {
-          type: 'button',
-          className: `secondary filter-open-button${filters.length ? ' active' : ''}`,
-          'aria-label': filters.length ? `Open filters. ${filters.length} active` : 'Open filters',
-          onClick: onOpenFilters
-        }, filters.length ? `Filters (${filters.length})` : 'Filters')
+        h(FilterChoice, { label: 'Tool capability filter', value: capability, options: filterOptions, onChange: onCapabilityChange })
       ),
       filters.length ? h('div', { className: 'filter-chip-list', 'aria-label': 'Active filters' },
         filters.map(filter => h('button', {

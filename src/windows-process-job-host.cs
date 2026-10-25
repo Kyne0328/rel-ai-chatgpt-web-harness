@@ -216,7 +216,13 @@ public static class RelAiJobController {
             object argv0 = Get(request, "argv0"), verbatim = Get(request, "windowsVerbatimArguments");
             if (argv0 != null && !(argv0 is string)) throw new ArgumentException("argv0 must be a string");
             if (verbatim != null && !(verbatim is bool)) throw new ArgumentException("windowsVerbatimArguments must be a boolean");
-            owner.Start(executable, targetArgs, cwd, raw as string, argv0 as string, verbatim != null && (bool)verbatim, environment);
+            object consoleMode = Get(request, "consoleMode");
+            if (consoleMode != null && (!(consoleMode is string)
+                || ((string)consoleMode != "hidden" && (string)consoleMode != "inherit")))
+                throw new ArgumentException("consoleMode must be hidden or inherit");
+            // Missing mode retains protocol-1 compatibility with existing PTYs.
+            owner.Start(executable, targetArgs, cwd, raw as string, argv0 as string, verbatim != null && (bool)verbatim, environment,
+                String.Equals(consoleMode as string, "hidden", StringComparison.Ordinal));
             Mark("targetStarted");
             UpdateFacts(); WriteReceipt();
             bool lastRootExited = (bool)receipt["rootExited"];

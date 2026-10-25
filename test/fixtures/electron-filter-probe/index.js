@@ -253,22 +253,27 @@ app.whenReady().then(async () => {
     })()`);
 
     await win.webContents.executeJavaScript(`location.hash = '#tools'`);
-    await waitFor(win, `document.querySelector('#toolsToolbar .filter-open-button') && document.querySelectorAll('.tool-card').length > 0`);
+    await waitFor(win, `document.querySelector('#toolsToolbar .filter-choice-trigger') && document.querySelectorAll('.tool-card').length > 0`);
     const tools = await win.webContents.executeJavaScript(`(async () => {
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       const search = document.querySelector('#toolsToolbar .filter-search-input');
       const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       inputValueSetter?.call(search, 'relai'); search.dispatchEvent(new Event('input', { bubbles: true })); await delay(30);
-      document.querySelector('#toolsToolbar .filter-open-button').click(); await delay(30);
-      const drawer = document.querySelector('.filter-drawer');
-      const validate = drawer.querySelector('input[type="radio"][value="validate"]');
+      document.querySelector('#toolsToolbar .filter-choice-trigger').click(); await delay(30);
+      const popover = document.querySelector('.filter-choice-popover');
+      if (!popover || document.querySelector('#__relai-drawer-backdrop')) throw new Error('Simple tool filters must open an anchored menu without a modal backdrop.');
+      const choices = [...popover.querySelectorAll('[role="menuitemradio"]')];
+      let keyboardNavigation = document.activeElement === popover.querySelector('[aria-checked="true"]');
+      popover.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+      keyboardNavigation = keyboardNavigation && document.activeElement === choices.at(-1);
+      popover.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+      keyboardNavigation = keyboardNavigation && document.activeElement === choices[0];
+      const validate = [...popover.querySelectorAll('[role="menuitemradio"]')].find(button => /Validate/.test(button.textContent));
       validate.click();
-      await new Promise(resolve => requestAnimationFrame(() => resolve()));
-      [...document.querySelector('.filter-drawer').querySelectorAll('button')].find(button => /Apply filters/.test(button.textContent))?.click();
       await new Promise(resolve => requestAnimationFrame(() => resolve()));
       const applied = {
         chip: document.querySelector('#toolsToolbar [aria-label^="Remove Capability filter"]')?.getAttribute('aria-label') || '',
-        badge: document.querySelector('#toolsToolbar .filter-open-button')?.textContent.trim() || '',
+        badge: document.querySelector('#toolsToolbar .filter-choice-trigger')?.textContent.trim() || '',
         summary: document.querySelector('#toolsToolbar .filter-summary')?.textContent.trim() || '',
         visibleCards: document.querySelectorAll('.tool-card').length
       };
@@ -280,8 +285,15 @@ app.whenReady().then(async () => {
       inputValueSetter?.call(emptySearch, 'no-tool-match-acceptance'); emptySearch.dispatchEvent(new Event('input', { bubbles: true })); await delay(60);
       const emptyState = /No matching tools/.test(document.querySelector('#toolsBody')?.textContent || '');
       document.querySelector('#toolsToolbar .filter-clear-button')?.click();
-      return { applied, capabilityRemoved, searchCleared: cleared, emptyState };
+      return { applied, capabilityRemoved, searchCleared: cleared, emptyState, keyboardNavigation };
     })()`);
+
+    win.setSize(420, 760);
+    await win.webContents.executeJavaScript(`document.querySelector('#toolsToolbar .filter-choice-trigger').click()`);
+    await waitFor(win, `document.querySelector('.filter-drawer input[type="radio"]')`);
+    tools.mobileFallback = await win.webContents.executeJavaScript(`Boolean(document.querySelector('#__relai-drawer-backdrop') && document.querySelector('.filter-drawer input[type="radio"]'))`);
+    await win.webContents.executeJavaScript(`document.querySelector('#__relai-drawer-backdrop').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    win.setSize(1200, 900);
 
     await win.webContents.executeJavaScript(`location.hash = '#settings'`);
     await waitFor(win, `document.querySelector('.settings-content .theme-switch') && !document.querySelector('.settings-rail')`);

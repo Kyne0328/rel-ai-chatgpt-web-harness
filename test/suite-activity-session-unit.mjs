@@ -433,8 +433,9 @@ async function case_task_inspector_lifecycle_unit() {
     };
     const context = {
       ...model, ...identity, URLSearchParams, encodeURIComponent,
-      React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
+      React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }), lazy: () => 'lazy-feature' },
       memo: component => component,
+      Icon: 'icon', Suspense: 'suspense',
       useState: initial => {
         const index = cursor++;
         if (!slots[index]) slots[index] = { value: typeof initial === 'function' ? initial() : initial };

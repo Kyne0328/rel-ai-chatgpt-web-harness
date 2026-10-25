@@ -51,7 +51,7 @@ export function createProcessesRoute(useDashboardSlices) {
   };
 }
 
-function useProcessMemory(sampleKey) {
+export function useProcessMemory(sampleKey, enabled = true) {
   const [sample, setSample] = useState(null);
   useEffect(() => {
     const timestamps = (sample?.roots || []).map(root => Date.parse(root.sampledAt || '')).filter(Number.isFinite);
@@ -66,7 +66,7 @@ function useProcessMemory(sampleKey) {
     const refresh = async () => {
       const request = ++generation;
       setSample(null);
-      if (disposed || document.visibilityState === 'hidden' || sampleKey === '[]') return;
+      if (disposed || !enabled || document.visibilityState === 'hidden' || sampleKey === '[]') return;
       let delay = 5000;
       try {
         const response = await fetchJson('/api/processes/memory', { cache: 'no-store', pauseTimeoutWhenHidden: false });
@@ -94,11 +94,11 @@ function useProcessMemory(sampleKey) {
       window.clearTimeout(timer);
       document.removeEventListener('visibilitychange', visibilityChanged);
     };
-  }, [sampleKey]);
-  return sample;
+  }, [sampleKey, enabled]);
+  return enabled ? sample : null;
 }
 
-const ProcessRow = memo(function ProcessRow({ row }) {
+export const ProcessRow = memo(function ProcessRow({ row }) {
   const [stopState, setStopState] = useState('idle');
   const [stopError, setStopError] = useState('');
   const stop = async () => {

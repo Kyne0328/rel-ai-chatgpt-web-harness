@@ -45,24 +45,17 @@ The checklist has one current action, supports dismissal, persists completion st
 
 `src/ui/navigation-catalog.js` is the source of route labels, descriptions, groups, icons, and command-palette destinations.
 
-### Work
+### Desktop navigation
 
-1. Overview — `#home`
-2. Tasks — `#tasks`
-3. Changes — `#code`
-4. Projects — `#workspaces`
-5. Activity — `#activity`
+Work contains Overview (`#home`), Tasks (`#tasks`), Browser (`#browser`), and Projects (`#workspaces`). System contains global Running commands (`#processes`), Activity (`#activity`), Troubleshooting (`#diagnostics`), and Analytics (`#usage`).
 
-### Application
+Settings remains at the bottom. Its Connection page is also reachable from the live topbar status. More contains the ChatGPT tools catalogue and, only when enabled, Extensions. Opening a secondary destination expands More and marks the destination current. The footer identifies the application surface without implying connection health.
 
-1. System — opens at `#processes` and owns Running commands (`#processes`), Troubleshooting (`#diagnostics`), ChatGPT tools (`#tools`), and Analytics (`#usage`).
-2. Settings — opens at `#settings` and owns Connection (`#settings/connection`), Preferences (`#settings`), App (`#settings/application`), and About (`#settings/about`).
-
-System and Settings use the primary sidebar accordions rather than duplicating those destinations in an in-page settings rail. Direct hashes remain canonical for contextual navigation.
+Changes remains a canonical full-screen route at `#code`, available from the task's Changes panel and quick navigation. It preserves task/file context and highlights Tasks in the sidebar. Connection remains canonical at `#settings/connection`, with Settings highlighted for all its subpages.
 
 ### Mobile navigation
 
-The compact navigation keeps the top-level destinations available in the desktop navigation model; System subpages remain reachable through their owning surface and the command palette.
+The compact navigation retains Overview, Tasks, Projects, and Activity. More offers Browser, System destinations, Settings pages, and optional Extensions. Full-screen Changes is reached through the selected task; all existing deep links and quick-navigation destinations remain valid.
 
 ## Route policy
 
@@ -136,9 +129,21 @@ The disclosure may open automatically when an unhealthy layer needs attention.
 
 ## Shared filter system
 
-Activity, Tools, and Diagnostics use the shared filter bar/drawer components. Search remains visible, filters open in a drawer or narrow-screen sheet, active filters render as removable chips, Clear all resets the current view, and result summaries use live status semantics.
+Search remains visible. Simple choices such as tool capability and Activity time range use anchored menus with immediate selection; below 640px they use the shared filter drawer. Complex Activity and Diagnostics filters retain the drawer and narrow-screen sheet. Active filters render as removable chips, Clear all resets the current view, and result summaries use live status semantics.
 
 Feature-specific filters remain owned by their feature rather than duplicated in global state.
+
+## Task evidence and runtime dock
+
+Tasks retains the master-detail inspector with Overview, Changes, Activity, Validation, and Processes tabs. A separate Details control opens identifiers, runtime information, running-operation diagnostics, and trace export; existing `tab=technical` links open this secondary panel. The header prioritizes the task title, status, and project. Activity badges disclose loaded history and whether more exists, Validation shows the recorded outcome, and Processes counts only task-owned entries. The Tasks route accepts validated `tab` and `file` parameters; standalone Changes remains canonical at `#code`. Embedded diffs validate task and file identity without requiring the Changes route. Inactive diff editors are disposed while their file, layout, selection, and scroll state are retained.
+
+Process attribution uses durable `workSessionId` and lifecycle fields. Task-bound and persistent processes started by the task are separate from other managed workspace processes, which remain collapsed until requested. Older task-owned records without lifecycle metadata remain visible in their own group. The inspector reuses Running commands status, recovery, Stop controls, and identity-verified memory readings; optional sampling stops on hidden documents and inactive tabs.
+
+The optional runtime dock consumes the canonical store only while open and reuses the dashboard event connection. It shows the latest bounded activity tail and managed process states. Local dashboard diagnostics display cached, explicit Git and PTY probes and individual tunnel states. Missing evidence is never promoted to success.
+
+## Resource diagnostics
+
+System resources uses physical-memory and file-cache gauges, a bounded service-memory chart plotted against recorded sample timestamps, and active/capacity work bars. Missing or stale measurements remain unknown; charts add no polling or inferred process-family totals. Sample data, attribution limits, and detailed metrics remain under Technical resource details. Health check badges stay within their cards, with long tunnel identifiers wrapping on a separate line.
 
 ## Overview hierarchy
 

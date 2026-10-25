@@ -54,6 +54,15 @@ function buildDiagnosticReport(input = {}) {
     application,
     summary: countFindings(ordered),
     findings: ordered,
+    connectionState: input.connectionState ? {
+      localService: { status: String(input.connectionState.localService?.status || '') },
+      publicEndpoint: { status: String(input.connectionState.publicEndpoint?.status || '') }
+    } : null,
+    checks: (Array.isArray(input.checks) ? input.checks : []).slice(0, 100).map(check => ({
+      id: sanitizeText(check.id, 240), title: sanitizeText(check.title, 300),
+      status: ['Passed', 'Failed', 'Checking', 'Unavailable', 'Not run'].includes(check.status) ? check.status : 'Unavailable',
+      detail: sanitizeText(check.detail, 1000)
+    })),
     tunnelHealth: normalizeTunnelHealth(input.tunnelHealth),
     resourceDiagnostics: normalizeResourceDiagnostics(input.resourceDiagnostics),
     logs: { runtime, failedActivity }

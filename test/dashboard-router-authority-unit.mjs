@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
+import { normalizeRouteKey } from '../src/contracts/dashboard-route.js';
 import { setImmediate as yieldTurn } from 'node:timers/promises';
+
+assert.equal(normalizeRouteKey('tasks?task=task-a&tab=changes&file=src%2Fa.js'), 'tasks?task=task-a&tab=changes&file=src%2Fa.js');
+assert.equal(normalizeRouteKey('tasks?task=task-a&tab=invalid'), 'tasks?task=task-a');
 
 const windowRef = new EventTarget();
 const marker = { dataset: { unsavedChanges: 'false' } };

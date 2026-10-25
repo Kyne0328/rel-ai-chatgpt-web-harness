@@ -4,13 +4,13 @@
   display: block;
   margin-bottom: 4px;
   color: var(--ui-action-primary);
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
   letter-spacing: .1em;
   line-height: 1.5;
   text-transform: uppercase;
 }
-.desktop-setup-checklist .card-head p { margin-top: 4px; color: var(--ui-text-secondary); font-size: 12px; line-height: 1.45; }
+.desktop-setup-checklist .card-head p { margin-top: 4px; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.45; }
 .desktop-setup-intro {
   padding: 12px 16px;
   border-top: 1px solid var(--ui-border-subtle);
@@ -43,7 +43,7 @@
   border: 1px solid var(--ui-border-default);
   border-radius: 999px;
   color: var(--ui-text-secondary);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 800;
 }
 .desktop-setup-item.current .desktop-setup-index { border-color: var(--ui-action-primary); color: var(--ui-action-primary); }
@@ -54,14 +54,14 @@
 .desktop-setup-state {
   flex: 0 0 auto;
   color: var(--ui-text-tertiary);
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 800;
   letter-spacing: .06em;
   text-transform: uppercase;
 }
 .desktop-setup-item.current .desktop-setup-state { color: var(--ui-action-primary); }
 .desktop-setup-item.done .desktop-setup-state { color: var(--ui-status-success-foreground); }
-.desktop-setup-item p { margin-top: 4px; color: var(--ui-text-secondary); font-size: 12px; line-height: 1.55; }
+.desktop-setup-item p { margin-top: 4px; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.55; }
 .desktop-chatgpt-guide {
   margin-top: 12px;
   padding: 12px;
@@ -78,8 +78,8 @@
   border-radius: var(--radius-md);
   background: var(--ui-surface-secondary);
 }
-.desktop-first-request span { color: var(--ui-text-tertiary); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-.desktop-first-request code { overflow-wrap: anywhere; white-space: normal; color: var(--ui-text-secondary); font-size: 12px; line-height: 1.6; }
+.desktop-first-request span { color: var(--ui-text-tertiary); font-size: 13px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.desktop-first-request code { overflow-wrap: anywhere; white-space: normal; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.6; }
 @media (max-width: 640px) {
   .desktop-setup-head { gap: 10px; }
   .desktop-setup-item { grid-template-columns: auto minmax(0, 1fr); }

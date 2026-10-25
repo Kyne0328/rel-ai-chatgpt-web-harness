@@ -159,9 +159,13 @@ export async function exerciseSharedControlCoverage({ win, waitFor, waitForCaptu
       check(theme + ': busy disabled control stays unavailable with progress feedback',
         colorsEqual(busy, baseline) && colorsEqual(busyPressed, baseline) && busy.cursor === 'progress' && busyPressed.transform === 'none',
         { busy, busyPressed });
+      win.focus();
+      win.webContents.focus();
+      await waitFor(win, `document.hasFocus()`);
       await evaluate(`document.getElementById('shared-focus-before').focus()`);
       key('Tab');
-      await waitFor(win, `document.activeElement?.id === 'shared-focus'`);
+      await waitFor(win, `document.activeElement?.id === 'shared-focus' && document.activeElement.matches(':focus-visible')`);
+      await paint();
       const focus = await styleOf('shared-focus');
       check(theme + ': keyboard focus has a visible outline and normal 44px target',
         focus.focusVisible && focus.outlineWidth >= 2 && focus.outlineStyle !== 'none' && focus.outlineColor === tokens.outlineColor && focus.height >= 44, focus);

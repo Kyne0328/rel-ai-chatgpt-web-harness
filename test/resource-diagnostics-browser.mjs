@@ -68,6 +68,17 @@ try {
   await panel.waitFor({ state: 'visible' });
   await page.waitForFunction(() => document.querySelector('[data-diagnostic-region="resources"]')?.textContent.includes('Memory readings available'));
   assert.equal(await panel.locator('[data-resource-technical]').evaluate(element => element.open), false);
+  assert.equal(await panel.getByRole('meter', { name: 'Physical memory used', exact: true }).getAttribute('aria-valuenow'), '75');
+  assert.equal(await panel.getByRole('meter', { name: 'Heavy commands and checks active', exact: true }).getAttribute('aria-valuenow'), '50');
+  assert.equal(await panel.getByRole('img', { name: /Service memory: 3 samples/ }).count(), 1);
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
+  await capture(page, 'resources-overview-dark');
+  const overview = path.join(screenshotDir, 'resource-panel-dark.png');
+  await panel.screenshot({ path: overview });
+  screenshots.push(overview);
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
+  await capture(page, 'resources-overview-light');
+
   assert.doesNotMatch(await panel.innerText(), /Minimum heavy-work reservation|Bounded memory observations/);
   await panel.getByText('Technical resource details', { exact: true }).click();
   assert.doesNotMatch(await panel.innerText(), /Minimum heavy-work reservation|Startup slot released/);
@@ -111,12 +122,13 @@ try {
   assert.match(await panel.innerText(), /Memory readings unavailable/);
   assert.doesNotMatch(await panel.innerText(), /Memory readings available/);
   assert.match(await panel.innerText(), /stale or unavailable/);
+  assert.equal(await panel.getByRole('meter', { name: 'Physical memory used', exact: true }).count(), 0, 'stale host values never fill a current memory gauge');
   assert.match(await panel.innerText(), /Stale sample/);
   assert.equal(await panel.locator('[data-managed-root-id="root-high"]').locator('.resource-diagnostics-metrics > div').filter({ has: page.getByText('Private bytes', { exact: true }) }).locator('dd').innerText(), 'Unknown');
   assert.doesNotMatch(await panel.locator('[data-managed-root-id="root-high"]').innerText(), /128.0 MiB/);
 
   await refreshTo('unknown');
-  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('Memory readings are informational'));
+  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('Snapshot'));
   assert.equal(await metricText(page, 'Available physical memory'), 'Unknown');
   assert.equal(await metricText(page, 'Commit headroom'), 'Unknown');
   assert.equal(await metricText(page, 'Pages read in / second'), 'Unknown');
@@ -124,7 +136,7 @@ try {
   assert.doesNotMatch(await panel.innerText(), /NaN|undefined/);
 
   await refreshTo('pressured');
-  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('Memory readings are informational'));
+  await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('Snapshot'));
   assert.match(await panel.innerText(), /Memory readings available/);
   assert.doesNotMatch(await panel.innerText(), /Waiting for memory headroom/);
   const quietCount = requestCount;
@@ -141,6 +153,8 @@ try {
       const measured = await geometry(page, name);
       assert.equal(measured.horizontalOverflow, false, JSON.stringify(measured));
       assert.equal(measured.metricsContained, true, JSON.stringify(measured));
+      assert.equal(measured.checkBadgesContained, true, JSON.stringify(measured));
+      assert.equal(measured.checkIdsContained, true, JSON.stringify(measured));
       const refresh = panel.getByRole('button', { name: 'Refresh resources', exact: true });
       await refresh.focus();
       assert.equal(await refresh.evaluate(element => {
@@ -163,7 +177,11 @@ try {
   await page.unroute(routePattern);
   const realResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/diagnostics');
   await panel.getByRole('button', { name: 'Refresh resources', exact: true }).click();
-  const actual = await (await realResponse).json();
+  const response = await realResponse;
+  await response.finished();
+  const responseText = await response.text();
+  assert.ok(responseText, JSON.stringify({ status: response.status(), failure: response.request().failure(), url: response.url(), serverError }));
+  const actual = JSON.parse(responseText);
   assert.equal(actual.ok, true);
   assert.equal(actual.resourceDiagnostics.node.scope, 'current-node-process');
   assert.ok(actual.resourceDiagnostics.node.current.rssBytes > 0);
@@ -215,6 +233,11 @@ async function geometry(page, name) {
     return {
       name: label, viewportWidth: innerWidth,
       horizontalOverflow: document.documentElement.scrollWidth > innerWidth + 1,
+      checkBadgesContained: [...document.querySelectorAll('.system-check-card .status-pill')].every(badge => {
+        const card = badge.closest('.system-check-card').getBoundingClientRect(), box = badge.getBoundingClientRect();
+        return box.left >= card.left && box.right <= card.right && box.top >= card.top && box.bottom <= card.bottom;
+      }),
+      checkIdsContained: [...document.querySelectorAll('.system-check-id')].every(id => id.scrollWidth <= id.clientWidth + 1),
       metricsContained: [...panel.querySelectorAll('dl, dt, dd')].every(element => {
         const box = element.getBoundingClientRect();
         return box.left >= rect.left - 1 && box.right <= rect.right + 1;
@@ -257,10 +280,14 @@ function resourceFixture(state) {
   const memory = { sampledAtMs: now, rssBytes: 128 * 1024 ** 2, heapUsedBytes: 32 * 1024 ** 2, heapTotalBytes: 64 * 1024 ** 2, heapLimitBytes: 2 * 1024 ** 3, externalBytes: 16 * 1024 ** 2, arrayBuffersBytes: 8 * 1024 ** 2 };
   return buildDiagnosticReport({
     connection: { token: 'set', tunnelId: 'fixture' },
-    connectionState: { publicEndpoint: { status: 'ready' } },
+    connectionState: { localService: { status: 'running' }, publicEndpoint: { status: 'ready' } },
+    checks: ['a', 'b'].map(value => ({ id: 'tunnel:' + value, title: 'Secure MCP Tunnel · tunnel_' + value.repeat(96), status: 'Passed', detail: 'Recorded tunnel state: running' })),
     resourceDiagnostics: {
       host: { pressure, lanes: { heavy: { active: 1, limit: 2, queued: state === 'pressured' ? 3 : 0 } }, queues: { heavy: { oldestWaitMs: 20_000, blockedReason: state === 'pressured' ? 'Waiting for an execution slot' : '', maxQueued: 32, maxQueuedPerOwner: 8 } } },
-      node: { available: true, scope: 'current-node-process', pid: 123, current: memory, ageMs: 0, samples: [memory], sampling: { intervalMs: 5_000, maxSamples: 60 }, trend: { status: 'observed', sampleCount: 3, durationMs: 10_000, baselineAtMs: now - 10_000, baseline: memory, slopeBytesPerMinute: { rssBytes: 0, heapUsedBytes: 0, externalBytes: 0 } } },
+      node: { available: true, scope: 'current-node-process', pid: 123, current: memory, ageMs: 0, samples: [
+        { ...memory, sampledAtMs: now - 10000, rssBytes: 96 * 1024 ** 2 },
+        { ...memory, sampledAtMs: now - 5000, rssBytes: 112 * 1024 ** 2 }, memory
+      ], sampling: { intervalMs: 5_000, maxSamples: 60 }, trend: { status: 'observed', sampleCount: 3, durationMs: 10_000, baselineAtMs: now - 10_000, baseline: memory, slopeBytesPerMinute: { rssBytes: 0, heapUsedBytes: 0, externalBytes: 0 } } },
 
       managedRoots: {
         scope: 'managed_roots_only', totalRootCount: 3, omittedRootCount: 0, sampledRootCount: unknown ? 0 : 2,

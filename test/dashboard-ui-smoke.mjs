@@ -73,9 +73,12 @@ assert.deepEqual(
   'flat desktop and grouped mobile navigation must keep the same reachable destinations'
 );
 assert.deepEqual(MOBILE_PRIMARY_NAV_ITEMS.map(item => item.id), ['home', 'tasks', 'workspaces', 'activity']);
-assert.deepEqual(MOBILE_MORE_NAV_ITEMS.map(item => item.id), ['code', 'browser', 'system', 'settings']);
+assert.deepEqual(MOBILE_MORE_NAV_ITEMS.map(item => item.id), ['browser', 'system', 'settings']);
 assert.equal(new Set(desktopNavIds).size, desktopNavIds.length, 'primary navigation destinations must be unique');
-for (const required of ['home', 'tasks', 'workspaces', 'activity', 'browser', 'processes', 'tools', 'diagnostics', 'usage', 'settings', 'connection']) assert.ok(desktopNavIds.includes(required), `${required} must remain reachable`);
+for (const required of ['home', 'tasks', 'workspaces', 'activity', 'browser', 'processes', 'tools', 'diagnostics', 'usage', 'settings']) assert.ok(desktopNavIds.includes(required), `${required} must remain reachable`);
+assert.ok(!desktopNavIds.includes('code') && !desktopNavIds.includes('connection'), 'Changes and Connection stay contextual rather than duplicating sidebar entries');
+assert.equal(routeMetadata('code').id, 'code', 'full-screen Changes must retain its canonical route metadata');
+assert.ok(navigationCommands().some(item => item.id === 'code'), 'full-screen Changes remains discoverable through quick navigation');
 assert.ok(!desktopNavIds.includes('extensions'), 'Extensions must stay out of normal navigation while the feature is experimental');
 assert.ok(DESKTOP_NAV_ITEMS.every(item => String(item.label || '').trim()), 'every navigation destination must have a label');
 assert.equal(DESKTOP_NAV_ITEMS.find(item => item.id === 'processes')?.href, '#processes');

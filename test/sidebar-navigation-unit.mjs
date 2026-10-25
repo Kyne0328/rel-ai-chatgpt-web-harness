@@ -83,13 +83,29 @@ try {
     const markup = renderToStaticMarkup(React.createElement(DesktopSidebar, {
       collapsed, extensionsEnabled: false, route: { path: 'processes', owner: 'system' }, toggleSidebar() {}
     }));
-    assert.doesNotMatch(markup, /<details/);
+    assert.match(markup, /<details class="sidebar-more"/);
+    assert.doesNotMatch(markup, /project access|live status|class="dot"/);
     const ids = [...markup.matchAll(/data-nav-id="([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(ids, DESKTOP_NAV_ITEMS.map(item => item.id));
     assert.match(markup, /aria-label="System navigation"/);
     assert.match(markup, /aria-label="Utilities navigation"/);
     assert.match(markup, /data-nav-id="processes"[^>]*aria-current="page"/);
   }
+  for (const [route, enabled, current] of [
+    [{ path: 'tools', owner: 'system' }, false, 'tools'],
+    [{ path: 'extensions', owner: 'extensions' }, true, 'extensions'],
+    [{ path: 'settings/connection', owner: 'settings' }, false, 'settings'],
+    [{ path: 'code', owner: 'code' }, false, 'tasks']
+  ]) {
+    const markup = renderToStaticMarkup(React.createElement(DesktopSidebar, {
+      collapsed: false, extensionsEnabled: enabled, route, toggleSidebar() {}
+    }));
+    assert.match(markup, new RegExp(`data-nav-id="${current}"[^>]*aria-current="page"`));
+    assert.doesNotMatch(markup, /data-nav-id="(?:connection|code)"/);
+    if (['tools', 'extensions'].includes(current)) assert.match(markup, /<details class="sidebar-more" open=""/);
+    assert.equal(markup.includes('data-nav-id="extensions"'), enabled);
+  }
+
 } finally {
   if (previousDocument === undefined) delete globalThis.document;
   else globalThis.document = previousDocument;

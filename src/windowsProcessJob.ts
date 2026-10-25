@@ -51,6 +51,7 @@ interface JobInput {
   readonly env: Record<string, string | undefined>;
   readonly shellCommand?: string;
   readonly durableOutput?: boolean;
+  readonly consoleMode?: 'hidden' | 'inherit';
 }
 
 interface NormalizedCommand {
@@ -252,6 +253,8 @@ export class WindowsProcessJob {
 }
 
 export async function prepareWindowsProcessJob(config: Record<string, unknown>, input: JobInput, parentDirectory?: string): Promise<WindowsProcessJob> {
+  if (input.consoleMode !== undefined && input.consoleMode !== 'hidden' && input.consoleMode !== 'inherit')
+    throw new Error('Windows job consoleMode must be hidden or inherit.');
   if (Reflect.has(process, 'permission')) throw Object.assign(
     new Error('Native Windows job launch is unavailable under the Node permission model; caller code was not executed.'),
     { code: 'WINDOWS_JOB_PERMISSION_MODEL_UNSUPPORTED', executed: false }
@@ -276,6 +279,7 @@ export async function prepareWindowsProcessJob(config: Record<string, unknown>, 
       ? prepareWslExecutionScope(executable, normalized.commandArguments, directory, nonce) : null;
     fs.writeFileSync(path.join(directory, 'request.json'), JSON.stringify({
       protocol: PROTOCOL, nonce, jobName: 'Local\\RelAiJob-' + nonce, executable, args: guest?.args || normalized?.commandArguments || [], cwd,
+      consoleMode: input.consoleMode || 'hidden',
       ...(guest ? { guestScope: guest.identity } : {}),
       ...(input.durableOutput ? { durableOutput: true } : {}),
       environmentTransportKey: 'REL_AI_JOB_ENV_' + nonce,

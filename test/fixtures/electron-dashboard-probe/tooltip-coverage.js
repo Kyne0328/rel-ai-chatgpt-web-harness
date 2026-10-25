@@ -120,6 +120,9 @@ export async function exerciseTooltipCoverage({ win, waitFor, waitForCapturePain
       window.__tooltipActiveTrigger = trigger;
     })()`);
     await waitForCapturePaint(win);
+    win.focus();
+    win.webContents.focus();
+    await waitFor(win, `document.hasFocus()`);
     await win.webContents.executeJavaScript(`window.__tooltipActiveTrigger.focus()`);
     await waitFor(win, `(() => { const popup = document.getElementById(window.__tooltipActiveTrigger.getAttribute('aria-describedby')); return popup && !popup.hidden && getComputedStyle(popup).visibility === 'visible' && popup.getBoundingClientRect().width > 0; })()`);
     await waitForCapturePaint(win);

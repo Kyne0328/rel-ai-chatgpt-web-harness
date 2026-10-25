@@ -8,6 +8,40 @@
 .overview-hero-compact .overview-copy { max-width: 760px; }
 .overview-hero-compact .overview-title { margin-top: 4px; font-size: clamp(22px, 3vw, 30px); }
 .overview-hero-compact .overview-description { margin-top: 6px; }
+.overview-hero-healthy {
+  padding: 14px 20px;
+  background: var(--ui-surface-primary);
+  border: 1px solid color-mix(in srgb, var(--ui-status-success-foreground) 30%, var(--ui-border-default));
+  border-radius: 10px;
+}
+.overview-healthy-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.status-indicator.status-good {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background-color: var(--ui-status-success-foreground);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-status-success-foreground) 22%, transparent);
+  flex-shrink: 0;
+}
+.overview-healthy-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.overview-healthy-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ui-text-primary);
+}
+.overview-healthy-desc {
+  font-size: 13px;
+  color: var(--ui-text-secondary);
+}
 @media (max-width: 640px) {
   .overview-hero-compact { align-items: stretch; flex-direction: column; }
   .overview-hero-compact > a { width: 100%; }
@@ -18,7 +52,7 @@
 .overview-grid-two { grid-template-columns: repeat(2, minmax(0,1fr)); }
 .summary-metrics { @apply gap-0 overflow-hidden rounded-lg; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); }
 .summary-metrics .metric { @apply rounded-none border-0 border-r p-4 last:border-r-0; border-color: var(--ui-border-default); }
-.metric-label { @apply text-[12px] font-semibold uppercase tracking-[.06em] leading-5; color: var(--ui-text-secondary); }
+.metric-label { @apply text-[13px] font-semibold uppercase tracking-[.06em] leading-5; color: var(--ui-text-secondary); }
 .metric-value { @apply mt-1 text-2xl font-extrabold; }
 .metric-sub { @apply mt-1 text-[13px] leading-6; color: var(--ui-text-secondary); max-width: 65ch; }
 .metric.good .metric-value { color: var(--ui-status-success-foreground); }
@@ -36,7 +70,7 @@
 .overview-hero.warn { border-color: color-mix(in srgb, var(--ui-status-warning-foreground) 30%, var(--ui-border-default)); }
 .overview-hero.bad { border-color: color-mix(in srgb, var(--ui-status-danger-foreground) 30%, var(--ui-border-default)); }
 .overview-copy { @apply relative z-10 max-w-4xl; }
-.overview-kicker { @apply mb-2 text-[12px] font-bold uppercase tracking-[.08em]; color: var(--ui-action-primary); }
+.overview-kicker { @apply mb-2 text-[13px] font-bold uppercase tracking-[.08em]; color: var(--ui-action-primary); }
 .overview-title { @apply max-w-4xl text-[clamp(28px,3vw,42px)] font-extrabold leading-[1.08]; }
 .overview-description { @apply mt-3 text-[15px] leading-7; color: var(--ui-text-secondary); max-width: 65ch; }
 .overview-actions { @apply mt-5 flex flex-wrap gap-2; }
@@ -65,9 +99,9 @@
 .task-overview-copy h3 { @apply text-[15px]; }
 .task-overview-copy p { @apply mt-1 text-[13px] leading-6; color: var(--ui-text-secondary); }
 .task-overview-summary { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-.task-overview-meta { @apply flex flex-col items-end gap-1 text-[12px]; color: var(--ui-text-secondary); }
+.task-overview-meta { @apply flex flex-col items-end gap-1 text-[13px]; color: var(--ui-text-secondary); }
 .task-overview-meta strong { @apply text-[14px]; color: var(--ui-text-primary); }
-.task-overview-link { @apply inline-flex min-h-11 items-center text-[12px] font-semibold; color: var(--ui-action-primary); }
+.task-overview-link { @apply inline-flex min-h-11 items-center text-[13px] font-semibold; color: var(--ui-action-primary); }
 .task-overview-multiple-head { @apply flex min-w-0 items-end justify-between gap-4; }
 .task-overview-multiple-head > div { @apply min-w-0; }
 .task-overview-multiple-head .overview-kicker { @apply mb-1; }
@@ -76,9 +110,9 @@
 .overview-active-task-row { @apply grid min-h-13 items-center gap-3 border-b py-2.5; grid-template-columns: minmax(0,1fr) auto; border-color: var(--ui-border-subtle); }
 .overview-active-task-copy { @apply grid min-w-0 gap-0.5; }
 .overview-active-task-copy strong { @apply truncate text-[13px] font-semibold; color: var(--ui-text-primary); }
-.overview-active-task-copy > span { @apply truncate text-[11px]; color: var(--ui-text-secondary); }
+.overview-active-task-copy > span { @apply truncate text-[13px]; color: var(--ui-text-secondary); }
 .overview-active-task-row .status-pill { @apply justify-self-end; }
-.overview-active-task-more { @apply inline-flex min-h-11 items-center text-[12px] font-semibold; color: var(--ui-action-primary); }
+.overview-active-task-more { @apply inline-flex min-h-11 items-center text-[13px] font-semibold; color: var(--ui-action-primary); }
 .attention-list { @apply p-0; }
 .attention-item { @apply grid min-h-16 items-center gap-3 border-b px-4 py-3 last:border-b-0; grid-template-columns: auto minmax(0,1fr) auto; border-color: var(--ui-border-subtle); }
 .attention-icon { @apply size-2 rounded-full; background: var(--ui-status-warning-foreground); }
@@ -87,10 +121,10 @@
 .attention-copy { @apply mt-0.5 text-[13px] leading-6; color: var(--ui-text-secondary); }
 .compact-workspace-list { @apply p-0; }
 .compact-workspace { @apply flex min-h-14 items-center justify-between gap-3 border-b px-4 py-3 last:border-b-0; border-color: var(--ui-border-subtle); }
-.compact-workspace-path { @apply mt-0.5 max-w-[520px] text-[12px] leading-5; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
+.compact-workspace-path { @apply mt-0.5 max-w-[520px] text-[13px] leading-5; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
 .activity-row { @apply grid min-h-12 items-center gap-3 border-b px-1 py-2 last:border-b-0; grid-template-columns: 72px minmax(0,1fr) auto; border-color: var(--ui-border-subtle); }
-.activity-time { @apply text-[12px]; color: var(--ui-text-secondary); }
-.activity-name { @apply text-[12px]; }
+.activity-time { @apply text-[13px]; color: var(--ui-text-secondary); }
+.activity-name { @apply text-[13px]; }
 
 .home-analytics-card { @apply overflow-hidden; }
 .home-analytics-head { @apply items-center gap-4; }
@@ -98,39 +132,39 @@
 .home-analytics-head .compact-button { min-height: 44px; }
 .home-analytics-title-row { @apply flex min-w-0 items-center gap-2; }
 .home-analytics-title-icon { @apply shrink-0; color: var(--ui-action-primary); }
-.home-analytics-title-row > span { @apply shrink-0 rounded-full px-2 py-1 text-[11px] font-semibold; color: var(--ui-action-primary); background: var(--ui-surface-raised); }
+.home-analytics-title-row > span { @apply shrink-0 rounded-full px-2 py-1 text-[13px] font-semibold; color: var(--ui-action-primary); background: var(--ui-surface-raised); }
 .home-analytics-link { @apply inline-flex items-center gap-1; }
 .home-analytics-body { @apply grid; }
 .home-analytics-metrics { @apply grid; grid-template-columns: repeat(4,minmax(0,1fr)); border-top: 1px solid var(--ui-border-subtle); border-bottom: 1px solid var(--ui-border-subtle); background: var(--ui-surface-secondary); }
 .home-analytics-card.compact-summary .home-analytics-metrics,
 .home-analytics-card.compact-summary .home-analytics-loading { grid-template-columns: repeat(3,minmax(0,1fr)); }
 .home-analytics-metric { @apply grid min-w-0 gap-1 border-r px-4 py-4 last:border-r-0; border-color: var(--ui-border-subtle); }
-.home-analytics-metric-label { @apply flex min-w-0 items-center gap-1.5 text-[12px] font-semibold uppercase tracking-[.05em]; color: var(--ui-text-secondary); }
+.home-analytics-metric-label { @apply flex min-w-0 items-center gap-1.5 text-[13px] font-semibold uppercase tracking-[.05em]; color: var(--ui-text-secondary); }
 .home-analytics-metric-label > .ui-icon { @apply shrink-0; }
 .home-analytics-metric > strong { @apply text-[22px] font-extrabold tracking-[-.02em]; overflow-wrap: anywhere; color: var(--ui-text-primary); }
 .home-analytics-metric.good > strong { color: var(--ui-status-success-foreground); }
-.home-analytics-metric > small { @apply text-[11px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
+.home-analytics-metric > small { @apply text-[13px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
 .home-analytics-pulse { @apply grid gap-3 px-4 pb-3 pt-4; }
 .home-analytics-pulse-head { @apply flex items-end justify-between gap-4; }
 .home-analytics-pulse-head > div { @apply grid min-w-0 gap-0.5; }
-.home-analytics-pulse-head span { @apply text-[11px] font-semibold uppercase tracking-[.05em]; color: var(--ui-text-tertiary); }
-.home-analytics-pulse-head strong { @apply text-[12px] font-semibold; overflow-wrap: anywhere; color: var(--ui-text-primary); }
-.home-analytics-pulse-head small { @apply shrink-0 text-[11px]; color: var(--ui-text-tertiary); }
+.home-analytics-pulse-head span { @apply text-[13px] font-semibold uppercase tracking-[.05em]; color: var(--ui-text-tertiary); }
+.home-analytics-pulse-head strong { @apply text-[13px] font-semibold; overflow-wrap: anywhere; color: var(--ui-text-primary); }
+.home-analytics-pulse-head small { @apply shrink-0 text-[13px]; color: var(--ui-text-tertiary); }
 .home-analytics-chart { @apply overflow-hidden rounded-lg border px-3 pb-2 pt-1; border-color: var(--ui-border-subtle); background: var(--ui-surface-secondary); }
 .home-analytics-chart.compact { @apply rounded-none border-x-0 border-t-0 px-4 pb-3 pt-2; }
-.home-analytics-chart-readout { @apply flex min-h-10 items-baseline gap-2 border-b pb-2 text-[12px]; border-color: var(--ui-border-subtle); }
+.home-analytics-chart-readout { @apply flex min-h-10 items-baseline gap-2 border-b pb-2 text-[13px]; border-color: var(--ui-border-subtle); }
 .home-analytics-chart-readout > span { color: var(--ui-text-secondary); }
 .home-analytics-chart-readout > strong { @apply text-[13px] font-bold; color: var(--ui-text-primary); }
-.home-analytics-chart-readout > small { @apply ml-auto text-[11px]; color: var(--ui-text-secondary); }
+.home-analytics-chart-readout > small { @apply ml-auto text-[13px]; color: var(--ui-text-secondary); }
 .home-analytics-chart-canvas { position: relative; width: 100%; height: 112px; }
 .home-analytics-chart.compact .home-analytics-chart-canvas { height: 96px; }
 .home-analytics-chart.compact .home-analytics-chart-canvas:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
 .home-analytics-chart.compact .sparkline-active-guide { stroke: var(--ui-action-primary); stroke-width: 1.5; stroke-dasharray: 2 2; opacity: .72; }
-.home-analytics-scale { @apply flex items-center justify-between text-[11px] font-medium; color: var(--ui-text-tertiary); }
+.home-analytics-scale { @apply flex items-center justify-between text-[13px] font-medium; color: var(--ui-text-tertiary); }
 .home-analytics-chart.compact .home-analytics-scale { @apply mt-1; }
 .home-analytics-pulse-empty { @apply grid min-h-[112px] place-items-center rounded-xl border border-dashed text-[13px]; color: var(--ui-text-secondary); border-color: var(--ui-border-subtle); }
 .home-analytics-pulse-empty.compact { @apply min-h-11 rounded-none border-x-0 border-t-0; }
-.home-analytics-foot { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t px-4 py-2 text-[11px]; color: var(--ui-text-tertiary); border-color: var(--ui-border-subtle); }
+.home-analytics-foot { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t px-4 py-2 text-[13px]; color: var(--ui-text-tertiary); border-color: var(--ui-border-subtle); }
 .home-analytics-foot.bad { color: var(--ui-status-danger-foreground); background: var(--ui-status-danger-background); border-color: var(--ui-status-danger-border); }
 .home-analytics-foot a { @apply font-semibold; color: inherit; }
 .home-analytics-loading { @apply grid gap-0; grid-template-columns: repeat(4,minmax(0,1fr)); border-top: 1px solid var(--ui-border-subtle); }
@@ -138,7 +172,7 @@
 
 .overview-grid-compact { grid-template-columns: repeat(3,minmax(0,1fr)); }
 .attention-card { border-color: color-mix(in srgb, var(--ui-status-warning-foreground) 28%, var(--ui-border-default)); }
-.metric-meta { @apply mt-1 text-[12px] leading-5; color: var(--ui-text-secondary); }
+.metric-meta { @apply mt-1 text-[13px] leading-5; color: var(--ui-text-secondary); }
 }
 
 @media (max-width: 760px) {

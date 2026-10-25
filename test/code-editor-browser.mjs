@@ -51,6 +51,29 @@ try {
   assert.equal(code, 0, `Code editor browser probe failed. stdout=${stdout} stderr=${stderr} probe=${probeOutput}`);
   const result = JSON.parse(probeOutput);
   assert.equal(result.error, undefined, result.error);
+  assert.equal(result.inspectorHiddenReadsStable, true, 'a hidden Changes tab must not refetch when the task summary updates');
+  assert.equal(result.inspectorDiffRestored, true, 'file, diff layout and editor position survive inactive tabs');
+  assert.deepEqual(result.inspectorProcessGroups, [
+    { title: 'Task-lifecycle processes', ids: ['proc-task-owned'] },
+    { title: 'Persistent processes started by task', ids: ['proc-persistent'] }
+  ]);
+  assert.equal(result.inspectorProcessState, 'Running');
+  assert.equal(result.inspectorProcessBadge, '2', 'only task-owned processes contribute to the task badge');
+  assert.equal(result.inspectorOtherProcessesCollapsed, true, 'other task processes must be disclosed separately');
+  assert.equal(result.inspectorDetailsLinkWorks, true, 'existing Technical deep links open secondary Details');
+  assert.equal(result.inspectorHeaderHasNoIds, true);
+  assert.equal(result.mobileTasksParentActive, true, 'full-screen Changes belongs to Tasks on mobile navigation');
+  const fullScreenParams = new URLSearchParams(result.inspectorFullScreenHref.split('?')[1]);
+  assert.equal(result.inspectorFullScreenHref.split('?')[0], '#code');
+  assert.equal(fullScreenParams.get('task'), 'probe-task');
+  assert.equal(fullScreenParams.get('file'), 'src/new.js');
+  assert.equal(fullScreenParams.get('search'), 'Inspector');
+  assert.equal(fullScreenParams.get('taskStatus'), 'open');
+  assert.equal(result.inspectorOrphanRecovery, true);
+  assert.ok(result.inspectorVirtualRows > 8 && result.inspectorVirtualRows < 100, 'loaded task events have a bounded rendered window');
+  assert.equal(result.dockNewestEvent, 'Dock event 24');
+  assert.equal(result.dockCurrentTask, true);
+  assert.deepEqual(result.dockAccessibility, [], 'the dock control must have an accessible name matching its visible label');
   assert.equal(result.editorPresent, true, 'Monaco editor must render');
   assert.equal(result.inlineDiffEditor, true, 'the Changes surface must render task changes with Monaco diff rendering');
   assert.equal(result.readOnly, true, 'the rendered task diff must be read-only');

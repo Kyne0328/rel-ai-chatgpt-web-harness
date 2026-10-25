@@ -3,21 +3,24 @@
 .code-page { min-height: 0; }
 .code-toolbar { align-items: end; }
 .code-task-control { display: grid; min-width: min(480px, 48vw); gap: 5px; }
-.code-task-control label { color: var(--ui-text-tertiary); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.code-task-control label { color: var(--ui-text-tertiary); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
 .code-task-control select, .code-toolbar-actions select, .code-explorer-head input { border: 1px solid var(--ui-border-control); border-radius: var(--radius-md); background: var(--ui-surface-secondary); }
 .code-task-control select { width: 100%; padding-inline: 10px; }
 .code-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .code-toolbar-actions select { max-width: 190px; padding-inline: 8px; }
-.code-workspace-meta { margin: -4px 0 10px; color: var(--ui-text-tertiary); font-size: 12px; }
+.code-workspace-meta { margin: -4px 0 10px; color: var(--ui-text-tertiary); font-size: 13px; }
+.task-diff-embedded-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.task-diff-embedded-toolbar .code-workspace-meta { margin: 0; }
 .code-workbench { display: grid; grid-template-columns: minmax(210px, 280px) minmax(0, 1fr); min-height: 620px; height: calc(100dvh - 220px); overflow: hidden; border: 1px solid var(--ui-border-default); border-radius: var(--radius-lg); background: var(--ui-surface-primary); box-shadow: var(--shadow-sm); }
+.code-workbench.code-workbench-embedded { min-height: 480px; height: 560px; max-height: calc(100dvh - 260px); }
 .code-explorer { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--ui-border-subtle); background: var(--ui-surface-secondary); }
 .code-explorer-head { display: grid; gap: 8px; padding: 12px; border-bottom: 1px solid var(--ui-border-subtle); }
-.code-explorer-head strong { font-size: 12px; }
+.code-explorer-head strong { font-size: 13px; }
 .code-explorer-head input { width: 100%; padding-inline: 9px; }
 .code-file-list { min-height: 0; flex: 1; overflow: auto; padding: 6px; }
 .code-file-tree, .code-file-tree ul { margin: 0; padding: 0; list-style: none; }
 .code-file-tree ul { margin-left: 11px; padding-left: 8px; border-left: 1px solid var(--ui-border-subtle); }
-.code-tree-folder-label { display: flex; min-width: 0; min-height: 32px; align-items: center; gap: 4px; padding: 2px 5px; color: var(--ui-text-tertiary); font-size: 11px; font-weight: 650; cursor: pointer; user-select: none; border-radius: var(--radius-sm); transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
+.code-tree-folder-label { display: flex; min-width: 0; min-height: 32px; align-items: center; gap: 4px; padding: 2px 5px; color: var(--ui-text-tertiary); font-size: 13px; font-weight: 650; cursor: pointer; user-select: none; border-radius: var(--radius-sm); transition: color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
 .code-tree-folder-label:hover { color: var(--ui-text-primary); background: var(--ui-surface-raised); }
 .code-tree-folder-label:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 1px; color: var(--ui-text-primary); }
 .code-tree-folder-label .ui-icon { flex: none; }
@@ -25,26 +28,26 @@
 .code-file-row { display: grid; width: 100%; min-height: 44px; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 6px; padding: 4px 6px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--ui-text-secondary); text-align: left; cursor: pointer; transition: all var(--dur-fast) var(--ease); }
 .code-file-row:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .code-file-row.active { background: var(--ui-selection-background); color: var(--ui-text-primary); box-shadow: inset 2px 0 0 var(--ui-action-primary); }
-.code-file-marker { display: inline-grid; width: 24px; height: 20px; place-items: center; border: 1px solid var(--ui-status-neutral-border); border-radius: var(--radius-sm); background: var(--ui-status-neutral-background); color: var(--ui-status-neutral-foreground); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", Consolas, monospace; font-size: 12px; font-weight: 700; line-height: 1; text-align: center; }
+.code-file-marker { display: inline-grid; width: 24px; height: 20px; place-items: center; border: 1px solid var(--ui-status-neutral-border); border-radius: var(--radius-sm); background: var(--ui-status-neutral-background); color: var(--ui-status-neutral-foreground); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", Consolas, monospace; font-size: 13px; font-weight: 700; line-height: 1; text-align: center; }
 .code-file-marker.status-info { border-color: var(--ui-status-info-border); background: var(--ui-status-info-background); color: var(--ui-status-info-foreground); }
 .code-file-marker.status-success { border-color: var(--ui-status-success-border); background: var(--ui-status-success-background); color: var(--ui-status-success-foreground); }
 .code-file-marker.status-warning { border-color: var(--ui-status-warning-border); background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground); }
 .code-file-marker.status-danger { border-color: var(--ui-status-danger-border); background: var(--ui-status-danger-background); color: var(--ui-status-danger-foreground); }
-.code-file-name { min-width: 0; overflow: hidden; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.code-file-stats { display: inline-flex; align-items: center; gap: 5px; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.code-file-name { min-width: 0; overflow: hidden; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.code-file-stats { display: inline-flex; align-items: center; gap: 5px; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .code-file-stats .additions { color: var(--ui-status-success-foreground); }
 .code-file-stats .deletions { color: var(--ui-status-danger-foreground); }
-.code-file-empty { padding: 14px 10px; color: var(--ui-text-tertiary); font-size: 12px; }
+.code-file-empty { padding: 14px 10px; color: var(--ui-text-tertiary); font-size: 13px; }
 .code-editor-pane { display: flex; min-width: 0; min-height: 0; flex-direction: column; }
 .code-editor-toolbar { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 14px; border-bottom: 1px solid var(--ui-border-subtle); background: var(--ui-surface-primary); }
-.code-file-heading { min-width: 0; overflow: hidden; color: var(--ui-text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.code-file-heading { min-width: 0; overflow: hidden; color: var(--ui-text-secondary); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .code-view-controls { display: flex; min-width: 0; flex: 0 0 auto; align-items: center; gap: 9px; }
-.code-keyboard-hint { color: var(--ui-text-tertiary); font-size: 11px; white-space: nowrap; }
-.code-keyboard-hint kbd { padding: 2px 5px; border: 1px solid var(--ui-border-default); border-radius: 4px; background: var(--ui-surface-secondary); color: var(--ui-text-secondary); font-family: inherit; font-size: 11px; }
+.code-keyboard-hint { color: var(--ui-text-tertiary); font-size: 13px; white-space: nowrap; }
+.code-keyboard-hint kbd { padding: 2px 5px; border: 1px solid var(--ui-border-default); border-radius: 4px; background: var(--ui-surface-secondary); color: var(--ui-text-secondary); font-family: inherit; font-size: 13px; }
 .code-diff-layout { display: flex; align-items: center; gap: 4px; }
 .code-layout-button { min-height: 44px; padding-inline: 9px; border-radius: var(--radius-md); transition: all var(--dur-fast) var(--ease); }
 .code-layout-button.active { border-color: color-mix(in srgb, var(--ui-action-primary) 48%, var(--ui-border-default)); background: var(--ui-selection-background); color: var(--ui-text-primary); box-shadow: var(--shadow-sm); }
-.code-view-state { flex: 0 0 auto; color: var(--ui-text-tertiary); font-size: 11px; }
+.code-view-state { flex: 0 0 auto; color: var(--ui-text-tertiary); font-size: 13px; }
 .code-editor-host { min-width: 0; min-height: 0; flex: 1; overflow: hidden; background: var(--ui-canvas); }
 .code-editor-message { display: grid; place-items: center; padding: 30px; color: var(--ui-text-tertiary); text-align: center; }
 .code-editor-message.error { color: var(--ui-status-danger-foreground); }
@@ -54,8 +57,8 @@
 .code-diff-fallback.is-unified .code-diff-column:last-child { border-bottom: 0; }
 .code-diff-column { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--ui-border-subtle); }
 .code-diff-column:last-child { border-right: 0; }
-.code-diff-column > strong { padding: 8px 12px; border-bottom: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-size: 11px; }
-.code-diff-column pre { min-height: 0; flex: 1; overflow: auto; margin: 0; padding: 14px; white-space: pre; color: var(--ui-text-primary); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 12px; line-height: 1.5; }
+.code-diff-column > strong { padding: 8px 12px; border-bottom: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-size: 13px; }
+.code-diff-column pre { min-height: 0; flex: 1; overflow: auto; margin: 0; padding: 14px; white-space: pre; color: var(--ui-text-primary); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 13px; line-height: 1.5; }
 @media (max-width: 900px) {
   .code-toolbar { align-items: stretch; flex-direction: column; }
   .code-task-control { min-width: 0; }

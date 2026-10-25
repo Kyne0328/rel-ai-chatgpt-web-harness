@@ -54,7 +54,7 @@
   }
 
   .extensions-kpi-path {
-    @apply text-xs font-mono truncate max-w-[140px];
+    @apply text-[13px] font-mono truncate max-w-[140px];
   }
 
   .extensions-kpi-icon {
@@ -92,7 +92,7 @@
   }
 
   .extensions-kpi-label {
-    @apply truncate text-[11px] font-semibold uppercase tracking-wider mt-0.5;
+    @apply truncate text-[13px] font-semibold uppercase tracking-wider mt-0.5;
     color: var(--ui-text-tertiary);
   }
 
@@ -134,7 +134,7 @@
   }
 
   .extensions-tab-badge {
-    @apply rounded-full px-2 py-0.5 text-[11px] font-bold leading-none;
+    @apply rounded-full px-2 py-0.5 text-[13px] font-bold leading-none;
     background: var(--ui-surface-raised);
     color: var(--ui-text-secondary);
   }
@@ -211,7 +211,7 @@
   }
 
   .extensions-filter-pill {
-    @apply inline-flex items-center justify-center gap-1.5 border px-3 py-2 text-[12px] font-medium transition-colors cursor-pointer;
+    @apply inline-flex items-center justify-center gap-1.5 border px-3 py-2 text-[13px] font-medium transition-colors cursor-pointer;
     min-height: var(--control-height);
     border-radius: var(--selection-radius);
     border-color: var(--ui-border-control);
@@ -233,14 +233,14 @@
   }
 
   .extensions-filter-summary {
-    @apply flex flex-wrap items-center justify-between gap-2 border-t pt-2 text-[12px];
+    @apply flex flex-wrap items-center justify-between gap-2 border-t pt-2 text-[13px];
     border-color: var(--ui-border-subtle);
     color: var(--ui-text-secondary);
     overflow-wrap: anywhere;
   }
 
   .extensions-filter-reset {
-    @apply text-xs cursor-pointer border-0 bg-transparent px-2 py-2;
+    @apply text-[13px] cursor-pointer border-0 bg-transparent px-2 py-2;
     min-height: var(--control-height);
     color: var(--ui-action-primary);
     font: inherit;
@@ -321,21 +321,21 @@
   }
 
   .extension-version-tag {
-    @apply rounded-md border px-1.5 py-0.5 font-mono text-[11px] font-medium leading-none;
+    @apply rounded-md border px-1.5 py-0.5 font-mono text-[13px] font-medium leading-none;
     border-color: var(--ui-border-subtle);
     background: var(--ui-surface-raised);
     color: var(--ui-text-secondary);
   }
 
   .extension-id-badge {
-    @apply mt-1 block font-mono text-[11px] leading-4;
+    @apply mt-1 block font-mono text-[13px] leading-4;
     overflow-wrap: anywhere;
     color: var(--ui-text-tertiary);
   }
 
   /* Status Badges */
   .extension-status-chip {
-    @apply inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-semibold leading-5;
+    @apply inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[13px] font-semibold leading-5;
     overflow-wrap: anywhere;
   }
 
@@ -378,7 +378,7 @@
 
   /* Tags & Properties */
   .extension-tags-row {
-    @apply flex min-w-0 flex-wrap items-center gap-1.5 text-[12px];
+    @apply flex min-w-0 flex-wrap items-center gap-1.5 text-[13px];
     overflow-wrap: anywhere;
   }
 
@@ -397,7 +397,7 @@
   }
 
   .extension-publisher-pill {
-    @apply flex flex-wrap items-center gap-1 text-[12px];
+    @apply flex flex-wrap items-center gap-1 text-[13px];
     color: var(--ui-text-tertiary);
   }
 
@@ -413,7 +413,7 @@
   }
 
   .extension-permissions-header {
-    @apply flex flex-wrap items-center justify-between gap-1 text-[12px] font-semibold;
+    @apply flex flex-wrap items-center justify-between gap-1 text-[13px] font-semibold;
     color: var(--ui-text-tertiary);
   }
 
@@ -422,7 +422,7 @@
   }
 
   .extension-permission-item {
-    @apply flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-all;
+    @apply flex items-center gap-1 rounded-md border px-2 py-0.5 text-[13px] font-medium transition-all;
     border-color: var(--ui-border-subtle);
     background: var(--ui-surface-raised);
     color: var(--ui-text-secondary);
@@ -435,7 +435,7 @@
 
   /* Warning / Notice Box */
   .extension-alert-box {
-    @apply flex items-start gap-2.5 rounded-lg border p-2.5 text-[12px] leading-relaxed;
+    @apply flex items-start gap-2.5 rounded-lg border p-2.5 text-[13px] leading-relaxed;
     border-color: var(--ui-status-warning-border);
     background: var(--ui-status-warning-background);
     color: var(--ui-status-warning-foreground);
@@ -526,7 +526,7 @@
   }
 
   .extension-detail-cell-label {
-    @apply text-[11px] font-semibold uppercase tracking-wider;
+    @apply text-[13px] font-semibold uppercase tracking-wider;
     color: var(--ui-text-tertiary);
   }
 
@@ -543,19 +543,19 @@
   }
 
   .extension-files-table {
-    @apply w-full text-left text-[12px];
+    @apply w-full text-left text-[13px];
     border-collapse: collapse;
   }
 
   .extension-files-table th {
-    @apply px-3 py-2 font-semibold uppercase tracking-wider text-[10px];
+    @apply px-3 py-2 font-semibold uppercase tracking-wider text-[13px];
     background: var(--ui-surface-raised);
     color: var(--ui-text-tertiary);
     border-bottom: 1px solid var(--ui-border-subtle);
   }
 
   .extension-files-table td {
-    @apply px-3 py-2 border-b font-mono text-[11px];
+    @apply px-3 py-2 border-b font-mono text-[13px];
     border-color: var(--ui-border-subtle);
     color: var(--ui-text-secondary);
   }
@@ -586,7 +586,7 @@
 
   .extensions-source-add-copy p,
   .extensions-source-card-heading p {
-    @apply mt-1 text-[12px] leading-relaxed;
+    @apply mt-1 text-[13px] leading-relaxed;
     color: var(--ui-text-secondary);
   }
 
@@ -595,7 +595,7 @@
   }
 
   .extensions-source-form label {
-    @apply text-[12px] font-semibold;
+    @apply text-[13px] font-semibold;
     color: var(--ui-text-primary);
   }
 
@@ -629,7 +629,7 @@
 
   .extensions-source-help,
   .extensions-source-error {
-    @apply text-[11px] leading-relaxed;
+    @apply text-[13px] leading-relaxed;
   }
 
   .extensions-source-help {
@@ -666,7 +666,7 @@
   }
 
   .extensions-source-badge {
-    @apply rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider;
+    @apply rounded-full border px-2 py-0.5 text-[13px] font-semibold uppercase tracking-wider;
     border-color: var(--ui-border-subtle);
     background: var(--ui-surface-secondary);
     color: var(--ui-text-secondary);
@@ -679,7 +679,7 @@
   }
 
   .extensions-source-meta {
-    @apply flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px];
+    @apply flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[13px];
     color: var(--ui-text-tertiary);
   }
 
@@ -694,7 +694,7 @@
 
   .extensions-source-status,
   .extensions-source-installed-count {
-    @apply rounded-full border px-2 py-1 text-[11px] font-semibold;
+    @apply rounded-full border px-2 py-1 text-[13px] font-semibold;
   }
 
   .extensions-source-status.ok {
@@ -736,7 +736,7 @@
   }
 
   .developer-template-button {
-    @apply inline-flex max-w-full items-center gap-2 border px-3 py-2 text-[12px] font-medium transition-colors cursor-pointer bg-transparent;
+    @apply inline-flex max-w-full items-center gap-2 border px-3 py-2 text-[13px] font-medium transition-colors cursor-pointer bg-transparent;
     min-height: var(--control-height);
     border-radius: var(--selection-radius);
     border-color: transparent;
@@ -763,7 +763,7 @@
   }
 
   .developer-code-header {
-    @apply flex flex-wrap items-center justify-between gap-2 border-b px-3 py-1.5 text-[12px] font-mono;
+    @apply flex flex-wrap items-center justify-between gap-2 border-b px-3 py-1.5 text-[13px] font-mono;
     border-color: var(--ui-border-subtle);
     background: var(--ui-surface-secondary);
     color: var(--ui-text-tertiary);
@@ -777,7 +777,7 @@
   }
 
   .developer-copy-code-btn {
-    @apply flex items-center gap-1.5 border px-3 py-2 text-[12px] font-medium transition-colors cursor-pointer;
+    @apply flex items-center gap-1.5 border px-3 py-2 text-[13px] font-medium transition-colors cursor-pointer;
     min-height: var(--control-height);
     border-radius: var(--control-radius);
     border-color: var(--ui-border-control);
@@ -802,7 +802,7 @@
   }
 
   .developer-step-number {
-    @apply flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-bold;
+    @apply flex h-6 w-6 items-center justify-center rounded-full text-[13px] font-bold;
     background: var(--ui-action-primary);
     color: var(--ui-action-primary-foreground);
   }
@@ -813,7 +813,7 @@
   }
 
   .developer-step-desc {
-    @apply text-[12px] leading-relaxed;
+    @apply text-[13px] leading-relaxed;
     color: var(--ui-text-secondary);
   }
 

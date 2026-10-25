@@ -611,7 +611,8 @@ async function startManagedProcess(workspace: ManagedWorkspace, config: ManagedP
         record.bootIdentity = await loadManagedProcessBootIdentity();
         record.windowsJob = await prepareWindowsProcessJob(config, {
           executable: invocation.processExecutable, args: invocation.processArgv,
-          cwd: cwd.absolutePath, env: childEnvironment
+          cwd: cwd.absolutePath, env: childEnvironment,
+          consoleMode: record.pty ? 'inherit' : 'hidden'
         }, directory);
         record.windowsJobDirectory = path.basename(record.windowsJob.directory);
         record.windowsJobOwned = true;
@@ -3077,6 +3078,11 @@ function loadNodePty(): Promise<NodePtyApi> {
     throw error;
   });
   return nodePtyPromise;
+}
+
+export async function probeManagedPtyRuntime(): Promise<boolean> {
+  try { return typeof (await loadNodePty()).spawn === 'function'; }
+  catch { return false; }
 }
 
 async function importNodePty(): Promise<NodePtyApi> {

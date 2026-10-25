@@ -4,6 +4,9 @@ import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { taskProgressView } from '../../components/task-progress.js';
 import { toast } from '../../components/toast.js';
+import { confirmAction } from '../../components/confirm-dialog.js';
+import { postJson, requestDashboardRefresh } from '../../api.js';
+import { taskControlMessage } from '../sessions/model.js';
 import { routeMetadata } from '../../navigation-catalog.js';
 import { getWorkspaceFilter, routeHref } from '../../router.js';
 import { workSessionStateView } from '../../task-identity.js';
@@ -45,6 +48,18 @@ function HomeView({ data = {} }) {
 }
 
 function ConnectionHero({ state }) {
+  if (state.tone === 'good') {
+    return h('section', { className: 'overview-hero overview-hero-compact overview-hero-healthy good', 'data-home-live-connection': '' },
+      h('div', { className: 'overview-healthy-summary' },
+        h('span', { className: 'status-indicator status-good', 'aria-hidden': 'true' }),
+        h('div', { className: 'overview-healthy-text' },
+          h('strong', { className: 'overview-healthy-title' }, state.title || 'ChatGPT can work on your projects.'),
+          state.description ? h('span', { className: 'overview-healthy-desc' }, state.description) : null
+        )
+      ),
+      h('a', { className: 'buttonlike secondary compact-button', href: state.actionHref || routeMetadata('settings/connection').href }, state.actionLabel || 'View connection')
+    );
+  }
   return h('section', { className: `overview-hero overview-hero-compact ${state.tone}`, 'data-home-live-connection': '' },
     h('div', { className: 'overview-copy' },
       state.kicker ? h('div', { className: 'overview-kicker' }, state.kicker) : null,
@@ -84,7 +99,9 @@ function TaskActivityCard({ model }) {
       ),
       multipleTasks ? null : h('div', { className: 'task-overview-meta' },
         h('span', null, model.activityLabel),
-        h('strong', { 'data-clock-elapsed-start': startedAt }, formatDuration(Date.now() - startedAtMs, { live: true }))
+        h('strong', { 'data-clock-elapsed-start': startedAt }, formatDuration(Date.now() - startedAtMs, { live: true })),
+        model.detailsHref ? h('a', { className: 'task-overview-link', href: model.detailsHref }, 'View task') : null,
+        h(HomeTaskControls, { key: task.id || task.taskId || task.work_id, task })
       )
     );
   }
@@ -102,6 +119,27 @@ function TaskActivityCard({ model }) {
       model.detailsHref ? h('a', { className: 'task-overview-link', href: model.detailsHref }, 'View task') : null
     )
   );
+}
+
+function HomeTaskControls({ task }) {
+  const [busy, setBusy] = useState('');
+  const id = String(task.id || task.taskId || task.work_id || '');
+  const control = async action => {
+    if (!id || busy) return;
+    if (action === 'cancel' && !await confirmAction({ title: 'Cancel task?', message: 'Cancel this task and stop its current actions?', detail: 'Persistent background processes can continue. Review Running commands for their status.', confirmLabel: 'Cancel task', danger: true })) return;
+    setBusy(action);
+    try {
+      const result = await postJson('/api/tasks/control', { action, work_id: id }, { timeout: 10000, pauseTimeoutWhenHidden: false });
+      if (result?.ok === false) throw new Error(result.error || 'Task control failed.');
+      toast(taskControlMessage(action, result), { variant: result.processCleanup?.complete === false ? 'warn' : 'success' });
+      requestDashboardRefresh();
+    } catch (error) { toast(String(error?.message || error), { variant: 'error' }); }
+    finally { setBusy(''); }
+  };
+  if (!id || workSessionStateView(task).terminal) return null;
+  return h('div', { className: 'task-overview-controls' },
+    task.goalMode?.goalActive ? h('button', { type: 'button', className: 'secondary compact-button', disabled: Boolean(busy), onClick: () => { void control('goal_stop'); } }, busy === 'goal_stop' ? 'Stopping…' : 'Stop Goal') : null,
+    h('button', { type: 'button', className: 'secondary compact-button danger', disabled: Boolean(busy), onClick: () => { void control('cancel'); } }, busy === 'cancel' ? 'Requesting…' : 'Cancel task'));
 }
 
 function ActiveTasksSummary({ tasks = [] }) {
@@ -147,6 +185,8 @@ function taskActivityModel(activity = {}, persistedTask = null) {
       title = `${activeTasks.length} active ${pluralLabel(activeTasks.length, 'task')}`;
       description = `${activeCalls} ${pluralLabel(activeCalls, 'active action')} across ${activeTaskLocation(activeTasks)}.`;
     }
+    const taskId = String(task.id || task.taskId || task.work_id || '').trim();
+    const detailsHref = taskId ? routeHref('tasks', { workspace: task.workspace || '', task: taskId }) : '';
     return {
       active: true,
       attention,
@@ -158,6 +198,7 @@ function taskActivityModel(activity = {}, persistedTask = null) {
       stage,
       activity: activityText,
       location,
+      detailsHref,
       activityLabel: attention
         ? `Action required · ${statusLabel(task.status)}`
         : waiting
