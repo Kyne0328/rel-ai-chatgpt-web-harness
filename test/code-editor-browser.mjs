@@ -59,7 +59,7 @@ try {
   ]);
   assert.equal(result.inspectorProcessState, 'Running');
   assert.equal(result.inspectorProcessBadge, '2', 'only task-owned processes contribute to the task badge');
-  assert.equal(result.inspectorOtherProcessesCollapsed, true, 'other task processes must be disclosed separately');
+  assert.equal(result.inspectorOtherProcessesHidden, true, 'unrelated project processes must be absent from task details');
   assert.equal(result.inspectorDetailsLinkWorks, true, 'existing Technical deep links open secondary Details');
   assert.equal(result.inspectorHeaderHasNoIds, true);
   assert.equal(result.mobileTasksParentActive, true, 'full-screen Changes belongs to Tasks on mobile navigation');
@@ -69,8 +69,9 @@ try {
   assert.equal(fullScreenParams.get('file'), 'src/new.js');
   assert.equal(fullScreenParams.get('search'), 'Inspector');
   assert.equal(fullScreenParams.get('taskStatus'), 'open');
-  assert.equal(result.inspectorOrphanRecovery, true);
-  assert.ok(result.inspectorVirtualRows > 8 && result.inspectorVirtualRows < 100, 'loaded task events have a bounded rendered window');
+  assert.equal(result.inspectorProjectProcessesLink, true, 'project-wide process inspection remains available via Running Commands');
+  assert.ok(result.inspectorRecentRows > 0 && result.inspectorRecentRows <= 8, 'Tasks render only the latest eight activity events');
+  assert.equal(result.inspectorPreviewRemoved, true, 'Task Activity must have one event action and a full Activity link');
   assert.equal(result.inspectorSingleScroll, true, 'task activity must share the outer task inspector scrollbar');
   assert.equal(result.runtimeDockRemoved, true, 'redundant Runtime dock and shortcut must be absent');
   assert.equal(result.editorPresent, true, 'Monaco editor must render');
@@ -94,11 +95,8 @@ try {
   assert.deepEqual(result.historicalDiffUnavailable, {
     recordedFileVisible: true, contextPreserved: true, noRawIpcError: true, currentFileOnly: true
   }, 'older tasks with no verified commit must retain file navigation without attempting an unsafe diff');
-  assert.deepEqual(result.taskFileHrefs, [
-    '#code?task=probe-task&file=src%2Fexample.js&from=tasks',
-    '#code?task=probe-task&file=src%2Fnew.js&from=tasks'
-  ], 'task project-file items must link to their exact file in Changes');
-  assert.equal(result.scopedTaskFileHref, '#code?workspace=app&task=probe-task&file=src%2Fexample.js&from=tasks&search=Changes+viewer&taskStatus=open', 'Task links must retain the bounded project, query and status context');
+  assert.deepEqual(result.taskFileHrefs, ['#code?task=probe-task&from=tasks'], 'Overview must offer one route to Changes instead of a duplicate file list');
+  assert.equal(result.scopedTaskFileHref, '#code?workspace=app&task=probe-task&from=tasks&search=Changes+viewer&taskStatus=open', 'Changes navigation must retain project, search and task-status context');
   assert.equal(result.filteredTaskReturnHref, '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open');
   assert.deepEqual(result.restoredTaskContext, { search: 'Changes viewer', status: 'open', workspace: 'app', selected: 'probe-task', scopeExplained: true }, 'returning from Changes must restore filters and task selection with honest loaded-history scope');
   const taskActivityParams = new URLSearchParams(result.scopedTaskActivityHref.split('?')[1]);

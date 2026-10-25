@@ -1,6 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, Suspense } from 'react';
 import { flushSync } from 'react-dom';
-import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { copyText } from '../../clipboard.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
@@ -13,7 +12,6 @@ import { activityEventId } from '../../activity-event.js';
 import { orderWorkspacesAlphabetically } from '../../components/workspace-menu.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import { activityDescription, activityDisplayAction } from '../activity/model.js';
-import { classifyTaskChangedFiles } from '../../../taskSemanticProgress.js';
 import { workSessionStateView } from '../../task-identity.js';
 import { StatusPill as UnifiedStatusPill } from '../../components/pill.js';
 import { statusPillClass } from '../../status-tone.js';
@@ -25,7 +23,6 @@ import {
   mergeSessionDetail,
   mergeSessionEvents,
   operationForTool,
-  orderChangedFiles,
   orderSessionEvents,
   semanticFileCounts,
   semanticProgressFor,
@@ -45,7 +42,6 @@ import {
 
 const h = React.createElement;
 const TaskDiffViewer = React.lazy(() => import('../code/react.js').then(module => ({ default: module.TaskDiffViewer })));
-const TaskEventInspector = React.lazy(() => import('../activity/react.js').then(module => ({ default: module.ActivityInspector })));
 const SESSION_PAGE_SIZE = 50;
 const MOBILE_SESSION_PAGE_SIZE = 12;
 const MOBILE_SESSION_QUERY = '(max-width: 760px)';
@@ -61,10 +57,8 @@ function chatLinkLabel(goal) {
   return goal.nextAttemptAt ? `${label} Next check: ${new Date(goal.nextAttemptAt).toLocaleTimeString()}.` : label;
 }
 const TASK_HISTORY_PAGE_SIZE = 100;
-const TASK_ACTIVITY_PAGE_SIZE = 200;
 const TASK_HISTORY_URL = '/api/tasks/history';
 const TASK_SESSION_URL = '/api/tasks/session';
-const DETAIL_FILE_PREVIEW = 4;
 const DETAIL_EVENT_PREVIEW = 8;
 const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'managedProcesses']);
 
@@ -127,9 +121,8 @@ function SessionsPage({ data = {} }) {
   const [hydrated, setHydrated] = useState(null);
   const [hydrationState, setHydrationState] = useState(null);
   const [detailRefresh, setDetailRefresh] = useState(null);
-  const [activityLoading, setActivityLoading] = useState(false);
   const requestedTab = routeParams.get('tab');
-  const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'processes', 'technical']), []);
+  const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'processes']), []);
   const [activeTab, setActiveTab] = useState(() => validTabs.has(requestedTab) ? requestedTab : 'overview');
   useEffect(() => {
     setActiveTab(validTabs.has(requestedTab) ? requestedTab : 'overview');
@@ -138,11 +131,12 @@ function SessionsPage({ data = {} }) {
     setActiveTab(tab);
     replaceRouteParams({ tab: tab === 'overview' ? null : tab });
   }, []);
-  const [olderExpanded, setOlderExpanded] = useState(false);
   const hydrationRequest = useRef(0);
   const selectedSummary = selectedId ? sessionById.get(selectedId) : null;
   const selectedSummaryHasTrace = Array.isArray(selectedSummary?.trace?.entries);
-  const offPageTaskSource = selectedSummary ? null : data.tasks;
+  const selectedSummaryAvailable = Boolean(selectedSummary);
+  const selectedSummaryRef = useRef(selectedSummary);
+  selectedSummaryRef.current = selectedSummary;
   const selectedHydrationCacheTtl = selectedSummary && isOngoingSession(selectedSummary) ? 1000 : 60_000;
   const selectedHydratedSession = hydrated?.id === selectedId ? hydrated.session : null;
   const selectedDetail = selectedId === requestedId && (selectedSummary || selectedHydratedSession)
@@ -158,11 +152,10 @@ function SessionsPage({ data = {} }) {
       setHydrated(null);
       setHydrationState(null);
       setDetailRefresh(null);
-      setActiveTab(getRouteParams().get('tab') || 'overview');
-      setOlderExpanded(false);
+      setActiveTab(validTabs.has(getRouteParams().get('tab')) ? getRouteParams().get('tab') : 'overview');
     }
     setSelectedId(id);
-  }, []);
+  }, [validTabs]);
 
   const refreshSelectedSession = useCallback(id => {
     if (selectedIdRef.current === id) setDetailRefresh({ id });
@@ -185,17 +178,19 @@ function SessionsPage({ data = {} }) {
     if (!selectedId) return undefined;
     const request = ++hydrationRequest.current;
     const forceRefresh = detailRefresh?.id === selectedId;
+    const summary = selectedSummaryRef.current;
     if (selectedSummaryHasTrace && !forceRefresh) {
-      setHydrated({ id: selectedId, session: selectedSummary });
+      setHydrated({ id: selectedId, session: summary });
       setHydrationState({ id: selectedId, status: 'ready' });
       return undefined;
     }
     let cancelled = false;
-    setHydrationState({ id: selectedId, status: 'loading' });
+    setHydrationState(previous => previous?.id === selectedId && previous.status === 'ready'
+      ? previous : { id: selectedId, status: 'loading' });
     void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}`, {
       cacheTtlMs: selectedHydrationCacheTtl,
       // Off-page detail has no live summary to supersede a cached response.
-      ...(forceRefresh || !selectedSummary ? { cache: 'no-store' } : {})
+      ...(forceRefresh || !summary ? { cache: 'no-store' } : {})
     })
       .then(response => {
         if (cancelled || request !== hydrationRequest.current) return;
@@ -224,9 +219,7 @@ function SessionsPage({ data = {} }) {
           return {
             id: selectedId,
             session,
-            activity: sameTask && previous.activity?.pagingStarted === true
-              ? previous.activity
-              : { ...(response.activity || {}), pagingStarted: false }
+            activity: response.activity || {}
           };
         });
       })
@@ -239,7 +232,7 @@ function SessionsPage({ data = {} }) {
       cancelled = true;
       hydrationRequest.current += 1;
     };
-  }, [detailRefresh, offPageTaskSource, selectedHydrationCacheTtl, selectedId, selectedSummary, selectedSummaryHasTrace]);
+  }, [detailRefresh, selectedHydrationCacheTtl, selectedId, selectedSummaryAvailable, selectedSummaryHasTrace]);
 
   useEffect(() => {
     if (!selectedId || hydrated?.id !== selectedId) return;
@@ -257,38 +250,6 @@ function SessionsPage({ data = {} }) {
       };
     });
   }, [data?.auditTail?.entries, hydrated?.id, selectedId]);
-
-  const loadOlderActivity = useCallback(async () => {
-    if (activityLoading || hydrated?.id !== selectedId || hydrated?.activity?.hasMore !== true || !hydrated.activity.nextCursor) return;
-    setActivityLoading(true);
-    try {
-      const params = new URLSearchParams({
-        task: selectedId,
-        activityOnly: '1',
-        activityLimit: String(TASK_ACTIVITY_PAGE_SIZE),
-        activityCursor: JSON.stringify(hydrated.activity.nextCursor)
-      });
-      const response = await fetchJson(`${TASK_SESSION_URL}?${params.toString()}`, { pauseTimeoutWhenHidden: false });
-      if (response?.ok === false || !Array.isArray(response?.activity?.entries)) {
-        throw new Error(response?.error || 'Older task activity could not be loaded.');
-      }
-      setHydrated(previous => previous?.id === selectedId
-        ? {
-            ...previous,
-            session: {
-              ...previous.session,
-              events: mergeSessionEvents(previous.session?.events || [], response.activity.entries)
-            },
-            activity: { ...(response.activity.page || {}), pagingStarted: true }
-          }
-        : previous);
-      setOlderExpanded(true);
-    } catch (error) {
-      toast(error instanceof Error ? error.message : String(error), { variant: 'error' });
-    } finally {
-      setActivityLoading(false);
-    }
-  }, [activityLoading, hydrated, selectedId]);
 
   const showMoreVisible = useCallback(() => {
     setVisibleByScope(previous => {
@@ -443,12 +404,9 @@ function SessionsPage({ data = {} }) {
                 session: selectedDetail,
                 activeTab,
                 setActiveTab: selectTab,
-                olderExpanded,
-                setOlderExpanded,
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
                 activityTotalCount: hydrated?.id === selectedId ? hydrated?.activity?.totalCount : undefined,
-                activityLoading,
-                loadOlderActivity,
+                technicalRequested: requestedTab === 'technical',
                 onControlComplete: refreshSelectedSession,
                 managedProcesses: data.managedProcesses || [],
                 requestedFilePath: routeParams.get('file') || ''
@@ -598,7 +556,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityTotalCount, activityLoading, loadOlderActivity, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
+function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, activityTotalCount, technicalRequested = false, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -727,13 +685,7 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
     ),
     controlNotice ? h('p', { className: 'connection-notice', role: 'status' }, controlNotice) : null,
     h('div', { className: 'inspector-navigation' },
-      h(SessionTabs, { activeTab, setActiveTab, counts: tabCounts }),
-      h('button', {
-        id: 'session-details-toggle', type: 'button', className: 'secondary task-details-toggle',
-        'data-session-details': '', 'aria-controls': 'session-panel-technical',
-        'aria-expanded': activeTab === 'technical',
-        onClick: () => setActiveTab(activeTab === 'technical' ? 'overview' : 'technical')
-      }, 'Details')
+      h(SessionTabs, { activeTab, setActiveTab, counts: tabCounts })
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-overview', role: 'tabpanel', 'aria-labelledby': 'session-tab-overview', tabIndex: 0, hidden: activeTab !== 'overview', 'data-session-panel': 'overview' },
       h('div', { className: 'task-detail-current' },
@@ -763,8 +715,20 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
       ),
       h(AttentionSection, { session }),
       h(FailureHistorySection, { session }),
-      h(ChangedFilesSection, { files: session.changedFiles || [], session }),
-      h(OriginalRequest, { objective: session.objective })
+      fileCounts.product + fileCounts.support > 0 ? h('section', { className: 'task-detail-section task-files-summary' },
+        h('div', { className: 'task-detail-heading' },
+          h('h3', null, 'Files'),
+          h('a', { className: 'section-action', href: taskChangesHref(id) }, 'View changes')
+        )
+      ) : null,
+      h(OriginalRequest, { objective: session.objective }),
+      h('details', { key: id + ':' + technicalRequested, className: 'task-detail-technical', 'data-session-details': '', open: technicalRequested },
+        h('summary', null, 'Technical details'),
+        h(TechnicalDetails, { session }),
+        session.trace?.entries?.length
+          ? h('button', { className: 'secondary compact-button', type: 'button', onClick: () => exportTrace(session), 'data-export-task-trace': '' }, 'Export trace (.jsonl)')
+          : null
+      )
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-changes', role: 'tabpanel', 'aria-labelledby': 'session-tab-changes', tabIndex: 0, hidden: activeTab !== 'changes', 'data-session-panel': 'changes' },
       changesVisited ? h(Suspense, {
@@ -783,20 +747,12 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
       })) : null
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-activity', role: 'tabpanel', 'aria-labelledby': 'session-tab-activity', tabIndex: 0, hidden: activeTab !== 'activity', 'data-session-panel': 'activity' },
-      activeTab === 'activity' ? h(TaskTraceSection, { session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) : null,
-      h('div', { className: 'session-inline-actions' },
-        h('a', { className: 'buttonlike secondary', href: taskActivityHref(session) }, 'Open in Activity')
-      )
+      activeTab === 'activity' ? h(TaskTraceSection, { session, activityHasMore, activityTotalCount }) : null
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-processes', role: 'tabpanel', 'aria-labelledby': 'session-tab-processes', tabIndex: 0, hidden: activeTab !== 'processes', 'data-session-panel': 'processes' },
       h(TaskProcessesSection, { session, taskId: id, workspace: session.workspace, managedProcesses, active: activeTab === 'processes', controlKey, onStopOperation: operationId => controlTask('stop', operationId) })
     ),
-    h('div', { className: 'inspector-panel', id: 'session-panel-technical', role: 'region', 'aria-labelledby': 'session-details-toggle', tabIndex: 0, hidden: activeTab !== 'technical', 'data-session-panel': 'technical' },
-      h(TechnicalDetails, { session }),
-      session.trace?.entries?.length
-        ? h('div', { className: 'session-inline-actions' }, h('button', { className: 'secondary', type: 'button', onClick: () => exportTrace(session), 'data-export-task-trace': '' }, 'Export trace (.jsonl)'))
-        : null
-    )
+
   );
 }
 
@@ -830,7 +786,7 @@ function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
       role: 'tab',
       'aria-selected': activeTab === tab.id ? 'true' : 'false',
       'aria-controls': `session-panel-${tab.id}`,
-      tabIndex: activeTab === tab.id || (activeTab === 'technical' && tab.id === 'overview') ? 0 : -1,
+      tabIndex: activeTab === tab.id ? 0 : -1,
       'data-session-tab': tab.id,
       'aria-description': tab.countLabel,
       title: tab.countLabel ? `${tab.label}: ${tab.countLabel}` : undefined,
@@ -846,10 +802,9 @@ function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
 }
 
 function TaskProcessesSection({ session, taskId, workspace = '', managedProcesses = [], active = false, controlKey = '', onStopOperation }) {
-  const [showOther, setShowOther] = useState(false);
-  const { owned, other } = taskProcessGroups(managedProcesses, taskId, workspace);
+  const { owned } = taskProcessGroups(managedProcesses, taskId, workspace);
   const operations = taskRunningOperations(session);
-  const relevant = showOther ? [...owned, ...other] : owned;
+  const relevant = owned;
   const sampleKey = JSON.stringify(relevant.filter(process => ['starting', 'running', 'stopping'].includes(process.status))
     .map(process => [process.processId, process.pid]).sort());
   const processMemory = useProcessMemory(sampleKey, active);
@@ -870,9 +825,6 @@ function TaskProcessesSection({ session, taskId, workspace = '', managedProcesse
       h('section', { key: category.title, className: 'task-detail-section task-process-group' },
         h('div', { className: 'task-detail-heading' }, h('h3', null, category.title), h('span', null, category.processes.length)),
         category.processes.map(renderProcess))),
-    other.length ? h('details', { className: 'task-other-processes', onToggle: event => setShowOther(event.currentTarget.open) },
-      h('summary', null, h(Icon, { name: showOther ? 'chevronDown' : 'chevronRight', size: 14 }), `Other project processes (${other.length})`),
-      showOther ? other.map(renderProcess) : null) : null,
     h('a', { className: 'buttonlike secondary', href: routeHref('processes') }, 'View all running commands')
   );
 }
@@ -993,36 +945,6 @@ function FailureHistorySection({ session }) {
   );
 }
 
-function ChangedFilesSection({ files, session }) {
-  const classified = classifyTaskChangedFiles(orderChangedFiles(files));
-  return h(React.Fragment, null,
-    h(ChangedFileGroup, { title: 'Project files', files: classified.productFiles, session }),
-    h(ChangedFileGroup, { title: 'Support artifacts', files: classified.supportArtifacts })
-  );
-}
-
-function ChangedFileGroup({ title, files, session = null }) {
-  const [expanded, setExpanded] = useState(false);
-  const ordered = orderChangedFiles(files);
-  if (!ordered.length) return null;
-  const hiddenCount = Math.max(0, ordered.length - DETAIL_FILE_PREVIEW);
-  const visible = expanded ? ordered : ordered.slice(0, DETAIL_FILE_PREVIEW);
-  const moreControl = hiddenCount
-    ? session
-      ? h('a', { className: 'task-file-more', href: taskChangesHref(sessionIdentifier(session)) }, `View all ${ordered.length} in Changes`)
-      : h('button', {
-          className: 'task-file-more',
-          type: 'button',
-          'aria-expanded': expanded ? 'true' : 'false',
-          onClick: () => setExpanded(value => !value)
-        }, expanded ? 'Show fewer files' : `Show ${hiddenCount} more file${hiddenCount === 1 ? '' : 's'}`)
-    : null;
-  return h('section', { className: 'task-detail-section' },
-    h('div', { className: 'task-detail-heading' }, h('h3', null, title), h('span', null, ordered.length)),
-    h(FileList, { files: visible, session, moreControl })
-  );
-}
-
 function taskActivityHref(session, eventParams = {}) {
   const params = getRouteParams();
   const taskId = sessionIdentifier(session);
@@ -1049,22 +971,6 @@ function taskChangesHref(taskId, file) {
   });
 }
 
-function FileList({ files, session = null, moreControl = null }) {
-  const taskId = session ? sessionIdentifier(session) : '';
-  const rows = files.map(file => {
-    if (!taskId) return h('li', { key: file }, h('code', null, file));
-    return h('li', { className: 'task-file-link-row', key: file },
-      h('a', {
-        className: 'task-file-link',
-        href: taskChangesHref(taskId, file),
-        'aria-label': `Open ${file} in Changes`
-      }, h('code', null, file))
-    );
-  });
-  if (moreControl) rows.push(h('li', { className: 'task-file-more-row', key: 'more-files' }, moreControl));
-  return h('ul', { className: 'task-file-list' }, ...rows);
-}
-
 function OriginalRequest({ objective }) {
   if (!objective) return null;
   return h('details', { className: 'task-detail-section task-original-request' },
@@ -1073,94 +979,28 @@ function OriginalRequest({ objective }) {
   );
 }
 
-function TaskTraceSection({ session, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity }) {
-  const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState(null);
-  const [focusedIndex, setFocusedIndex] = useState(0);
-  const scrollRef = useRef(null);
-  const [scrollElement, setScrollElement] = useState(null);
-  const [scrollMargin, setScrollMargin] = useState(0);
-  const ordered = useMemo(() => orderSessionEvents(session.events || []), [session.events]);
-  const matched = ordered.filter(event => !search || [event.title, event.summary, event.command, event.tool?.name || event.tool, event.operation]
-    .some(value => String(value || '').toLowerCase().includes(search.toLowerCase())));
-  const visible = olderExpanded || search ? matched : matched.slice(0, DETAIL_EVENT_PREVIEW);
-  const virtual = useVirtualizer({
-    count: visible.length,
-    getScrollElement: () => scrollElement,
-    estimateSize: () => 110, overscan: 4, enabled: visible.length > 30, scrollMargin,
-    getItemKey: index => activityEventId(visible[index]) || index,
-    rangeExtractor: range => [...new Set([...defaultRangeExtractor(range), Math.min(focusedIndex, visible.length - 1)])]
-      .filter(index => index >= 0).sort((a, b) => a - b)
-  });
-  useEffect(() => {
-    const list = scrollRef.current;
-    const scroller = list?.closest('.session-inspector');
-    if (!scroller) return undefined;
-    setScrollElement(scroller);
-    const measure = () => {
-      const offset = list.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-      setScrollMargin(previous => Math.abs(previous - offset) > 1 ? offset : previous);
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(scroller);
-    return () => observer.disconnect();
-  }, [visible.length, search, session.id, olderExpanded]);
-  const visibleVirtualRows = virtual.getVirtualItems();
-  // Keep the start of the timeline available even when it begins below the
-  // inspector's current viewport; the outer inspector owns all scrolling.
-  const virtualRows = new Map(visibleVirtualRows.map(row => [row.index, row]));
-  if (visible.length > 30) {
-    for (let index = 0; index < Math.min(12, visible.length); index += 1) {
-      if (!virtualRows.has(index)) virtualRows.set(index, {
-        index, key: activityEventId(visible[index]) || index, start: scrollMargin + index * 110
-      });
-    }
-  }
-  const rowsToRender = [...virtualRows.values()].sort((a, b) => a.index - b.index);
-  const item = (event, index) => h('div', { className: 'task-event-with-inspect', 'data-event-index': index,
-    onFocus: () => setFocusedIndex(index) },
-    h(EventRow, { event, session, older: index >= DETAIL_EVENT_PREVIEW }),
-    h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setSelected(event), 'aria-label': 'Preview ' + (event.title || event.operation || 'event') }, 'Preview'));
-  return h('section', { className: 'task-detail-section' },
-    h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task activity'), h('span', null, `${ordered.length} loaded${activityHasMore ? ' · more available' : ''}`)),
-    h('input', { type: 'search', value: search, 'aria-label': 'Search task activity', placeholder: 'Search task activity', onChange: event => { setSearch(event.target.value); setFocusedIndex(0); } }),
-    !matched.length ? h('p', null, ordered.length ? 'No matching events.' : 'No activity recorded.') : null,
-    h('div', { className: 'task-event-scroll', ref: scrollRef, role: 'list',
-      'aria-label': 'Task execution events', tabIndex: 0,
-      onKeyDown: event => {
-        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || !visible.length) return;
-        event.preventDefault();
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1
-          : Math.max(0, Math.min(visible.length - 1, focusedIndex + (event.key === 'ArrowDown' ? 1 : -1)));
-        flushSync(() => setFocusedIndex(next));
-        if (visible.length > 30) virtual.scrollToIndex(next, { align: 'auto' });
-        requestAnimationFrame(() => scrollRef.current?.querySelector('[data-event-index="' + next + '"] a')?.focus());
-      }
-    }, visible.length > 30 ? h('div', { style: {
-      position: 'relative', height: Math.max(0, virtual.getTotalSize() - scrollMargin) || visible.length * 110
-    } }, rowsToRender.map(row => h('div', {
-      key: row.key, ref: virtual.measureElement, 'data-index': row.index, role: 'listitem',
-      style: { position: 'absolute', width: '100%', top: 0,
-        transform: 'translateY(' + (row.start - scrollMargin) + 'px)' }
-    }, item(visible[row.index], row.index))))
-      : visible.map((event, index) => h('div', { role: 'listitem', key: activityEventId(event) || index }, item(event, index)))),
-    !olderExpanded && ordered.length > DETAIL_EVENT_PREVIEW ? h('button', { type: 'button', className: 'secondary', 'data-show-older-events': '', onClick: () => setOlderExpanded(true) }, 'Show ' + (ordered.length - DETAIL_EVENT_PREVIEW) + ' older events') : null,
-    (olderExpanded || !ordered.length) && activityHasMore ? h('button', { type: 'button', className: 'secondary', 'data-load-older-task-activity': '', disabled: activityLoading, onClick: loadOlderActivity }, activityLoading ? 'Loading…' : 'Load older activity') : null,
-    selected ? h('div', { className: 'task-event-inspection' },
-      h('button', { type: 'button', className: 'secondary', onClick: () => setSelected(null) }, 'Close event details'),
-      h(Suspense, { fallback: h('p', { role: 'status' }, 'Loading event details…') }, h(TaskEventInspector, { entry: selected,
-        sessionIndex: new Map([[sessionIdentifier(session), session]]), copyState: '',
-        onCopy: () => { void copyText(JSON.stringify(selected.safeCopy || selected, null, 2)); } }))) : null
+function TaskTraceSection({ session, activityHasMore = false, activityTotalCount }) {
+  const ordered = orderSessionEvents(session.events || []);
+  const recent = ordered.slice(0, DETAIL_EVENT_PREVIEW);
+  const total = Number.isFinite(activityTotalCount) ? Math.max(activityTotalCount, ordered.length) : ordered.length;
+  return h('section', { className: 'task-detail-section task-activity-summary' },
+    h('div', { className: 'task-detail-heading' },
+      h('h3', null, 'Recent activity'),
+      h('span', null, `${total} recorded${activityHasMore ? ' · more available' : ''}`)
+    ),
+    recent.length ? h('div', { className: 'task-event-scroll', role: 'list', 'aria-label': 'Recent task activity' },
+      recent.map((event, index) => h('div', { role: 'listitem', key: activityEventId(event) || index },
+        h(EventRow, { event, session })))
+    ) : h('p', { className: 'task-detail-note' }, 'No activity recorded.'),
+    h('a', { className: 'section-action task-activity-view-all', href: taskActivityHref(session) }, 'View all activity')
   );
 }
 
-function EventRow({ event, session, older = false }) {
+function EventRow({ event, session }) {
   const operation = activityDisplayAction(event);
   const description = activityDescription(event);
   const timestamp = eventTimestampValue(event);
   const status = event.status || (event.ok === false ? 'failed' : 'succeeded');
-  const command = String(event.command || '').trim();
   const durationMs = event.durationMs != null && Number.isFinite(Number(event.durationMs))
     ? Number(event.durationMs)
     : (event.elapsedMs != null && Number.isFinite(Number(event.elapsedMs)) ? Number(event.elapsedMs) : null);
@@ -1175,15 +1015,13 @@ function EventRow({ event, session, older = false }) {
   return h('a', {
     className: 'task-event task-event-link',
     'data-task-event-link': '',
-    'data-task-older-event': older ? '' : undefined,
     href,
     'aria-label': `Open ${operation} event in Activity`
   },
     h('span', { 'data-clock-relative': timestamp }, timeAgo(timestamp)),
     h('span', { className: 'task-event-copy' },
       h('strong', { title: operation }, operation),
-      description ? h('small', { title: description }, description) : null,
-      command ? h('small', { className: 'task-event-command' }, h('span', null, 'Command'), h('code', null, command)) : null
+      description ? h('small', { title: description }, description) : null
     ),
     h('div', { className: 'task-event-meta' },
       durationLabel ? h('span', { className: 'task-event-duration', 'aria-label': `Duration: ${durationLabel}` }, durationLabel) : null,
@@ -1198,7 +1036,7 @@ function TechnicalDetails({ session }) {
     const date = new Date(value);
     return Number.isFinite(date.getTime()) ? date.toLocaleString() : 'Not recorded';
   };
-  return h('div', { className: 'task-detail-technical is-expanded' },
+  return h('div', { className: 'task-technical-record' },
     h('section', { className: 'task-detail-section' },
       h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task record')),
       h('div', { className: 'task-detail-grid' },

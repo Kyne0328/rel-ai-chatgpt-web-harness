@@ -60,12 +60,9 @@
 .session-list-footer span { @apply text-[13px]; color: var(--ui-text-secondary); }
 
 .session-detail { @apply gap-3; }
-.inspector-navigation { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; position: sticky; top: -18px; z-index: var(--z-sticky); margin: 0 -18px 14px; padding: 10px 18px; background: var(--ui-surface-primary); border-bottom: 1px solid var(--ui-border-default); }
+.inspector-navigation { display: block; gap: 8px; align-items: center; position: sticky; top: -18px; z-index: var(--z-sticky); margin: 0 -18px 14px; padding: 10px 18px; background: var(--ui-surface-primary); border-bottom: 1px solid var(--ui-border-default); }
 .inspector-tabs { display: flex; min-width: 0; gap: 4px; overflow-x: auto; scrollbar-width: thin; padding: 3px; }
-.task-details-toggle { min-height: 44px; }
 .task-project-context { overflow-wrap: anywhere; }
-.task-other-processes { border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); padding: 10px; }
-.task-other-processes > summary { gap: 8px; cursor: pointer; min-height: 44px; display: flex; align-items: center; font-size: 13px; font-weight: 600; }
 .inspector-tab { flex: 0 0 auto; white-space: nowrap; min-height: 44px; padding: 0 10px; border-radius: var(--radius-md); color: var(--ui-text-secondary); background: transparent; border: 1px solid transparent; font-size: 13px; font-weight: 600; cursor: pointer; transition: all var(--dur-fast) var(--ease); }
 .inspector-tab:hover { color: var(--ui-text-primary); background: var(--ui-surface-secondary); }
 .inspector-tab.is-active { color: var(--ui-text-primary); background: var(--ui-surface-raised); border-color: var(--ui-border-default); box-shadow: var(--shadow-sm); }
@@ -167,19 +164,15 @@
 .task-event code { @apply min-w-0 truncate text-[13px]; color: var(--ui-text-secondary); }
 .task-operation-actions { @apply flex items-center justify-end gap-2; }
 .task-operation-actions button { @apply min-h-9; }
-.task-event-copy .task-event-command { @apply mt-1 grid gap-1 text-[13px] font-normal; overflow: visible; white-space: normal; }
-.task-event-command > span { @apply font-semibold; color: var(--ui-text-tertiary); }
-.task-event-command code { @apply block break-all px-2 py-1.5 text-[13px] leading-5; font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; border-radius: var(--radius-md); overflow: visible; text-overflow: clip; white-space: pre-wrap; background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .task-event-link:hover { background: var(--ui-surface-raised); border-color: var(--ui-border-default); box-shadow: var(--shadow-sm); }
 .task-event-meta { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .task-event-duration { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: var(--radius-sm); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .task-event-more { @apply min-h-10 w-full justify-center; }
 
 .task-detail-technical { @apply border-t pt-3; border-color: var(--ui-border-default); }
-.task-detail-technical.is-expanded { border-top: 0; padding-top: 0; }
 .task-detail-technical > summary { @apply flex min-h-11 cursor-pointer items-center text-[13px] font-semibold; color: var(--ui-text-secondary); }
-.task-detail-technical > .task-detail-grid { @apply mt-2; }
-.task-detail-technical > .task-detail-section { @apply mt-3; }
+.task-detail-technical > .task-technical-record { margin-top: 8px; }
+.task-detail-technical > button { margin-top: 8px; }
 .task-detail-workflow { @apply mt-2 grid gap-1 p-3; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
 .task-detail-workflow strong { @apply text-[13px] font-bold; color: var(--ui-text-primary); }
 .task-detail-workflow span { @apply text-[13px] leading-5; color: var(--ui-text-secondary); }
@@ -266,15 +259,10 @@
 }
 
 .task-event-scroll { display: grid; min-width: 0; gap: 0; }
-.task-event-with-inspect { display: flex; align-items: stretch; gap: 8px; padding-bottom: 6px; }
-.task-event-with-inspect > button { flex: 0 0 auto; align-self: center; }
 .task-event-link:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
-.task-event-with-inspect .task-event { min-width: 0; flex: 1; }
 @container task-inspector (max-width: 520px) {
   .task-event { grid-template-columns: 62px minmax(0,1fr); }
   .task-event-meta { grid-column: 2; justify-content: flex-start; }
-  .task-event-with-inspect { gap: 4px; }
-  .task-event-with-inspect > button { padding-inline: 8px; }
 }
-.task-event-inspection .activity-inspector { border: 1px solid var(--ui-border-default); min-width: 0; }
+.task-activity-view-all { display: inline-flex; align-self: flex-start; margin-top: 6px; }
 .task-processes-container .process-row { min-width: 0; }

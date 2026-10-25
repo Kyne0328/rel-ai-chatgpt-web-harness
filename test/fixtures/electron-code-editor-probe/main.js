@@ -267,14 +267,14 @@ app.whenReady().then(async () => {
       location.hash = '#tasks?task=probe-task';
       for (let attempt = 0; attempt < 20 && !document.querySelector('[data-task-id="probe-task"]'); attempt += 1) await wait(25);
       document.querySelector('[data-task-id="probe-task"]')?.click();
-      for (let attempt = 0; attempt < 20 && !document.querySelector('.task-file-link'); attempt += 1) await wait(25);
-      result.taskFileHrefs = [...document.querySelectorAll('.task-file-link')].map(link => link.getAttribute('href') || '');
+      for (let attempt = 0; attempt < 20 && !document.querySelector('.task-files-summary a'); attempt += 1) await wait(25);
+      result.taskFileHrefs = [...document.querySelectorAll('.task-files-summary a')].map(link => link.getAttribute('href') || '');
       result.editorCountAfterUnmount = window.monaco?.editor?.getEditors?.().length || 0;
       result.modelCountAfterUnmount = window.monaco?.editor?.getModels?.().length || 0;
       location.hash = '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open';
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[aria-label="Task status filter"]')?.value === 'open' && document.querySelector('.task-file-link')?.hash.includes('from=tasks'), 'task filter route hydration');
-      result.scopedTaskFileHref = document.querySelector('.task-file-link').getAttribute('href');
-      document.querySelector('.task-file-link').click();
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[aria-label="Task status filter"]')?.value === 'open' && document.querySelector('.task-files-summary a')?.hash.includes('from=tasks'), 'task filter route hydration');
+      result.scopedTaskFileHref = document.querySelector('.task-files-summary a').getAttribute('href');
+      document.querySelector('.task-files-summary a').click();
       await until(() => document.querySelector('[data-code-task-link]')?.hash.includes('search=Changes+viewer'), 'contextual return link');
       result.filteredTaskReturnHref = document.querySelector('[data-code-task-link]').getAttribute('href');
       document.querySelector('[data-code-task-link]').click();
@@ -287,7 +287,7 @@ app.whenReady().then(async () => {
         scopeExplained: document.querySelector('[data-task-search-scope]')?.textContent.includes('loaded tasks') === true
       };
       document.querySelector('#session-tab-activity').click();
-      const taskActivityLink = () => document.querySelector('#session-panel-activity .session-inline-actions a');
+      const taskActivityLink = () => document.querySelector('#session-panel-activity .task-activity-view-all');
       const activityTaskLink = () => document.querySelector('.activity-session-actions a[href^="#tasks"]');
       await until(() => taskActivityLink(), 'task Activity link');
       result.scopedTaskActivityHref = taskActivityLink().getAttribute('href');
@@ -302,6 +302,8 @@ app.whenReady().then(async () => {
       await until(() => new URLSearchParams(location.hash.split('?')[1]).get('search') === 'Activity return context', 'independent Activity search');
       result.activityTaskReturnHref = activityTaskLink().getAttribute('href');
       activityTaskLink().click();
+      await until(() => document.querySelector('#session-tab-activity'), 'returned task Activity tab');
+      document.querySelector('#session-tab-activity').click();
       await until(() => taskActivityLink(), 'returned task activity link');
       taskActivityLink().click();
       await until(() => document.querySelector('.activity-row-trigger'), 'returned Activity rows');
@@ -317,8 +319,9 @@ app.whenReady().then(async () => {
         selected: document.querySelector('.task-row.is-selected')?.dataset.taskId
       };
       location.hash = '#tasks?task=probe-task&search=Changes+viewer&taskStatus=open';
-      await until(() => document.querySelector('[aria-label="Project filter"]')?.value === '' && taskActivityLink()?.hash.includes('returnSearch=Changes+viewer'), 'all-projects Tasks Activity context');
+      await until(() => document.querySelector('[aria-label="Project filter"]')?.value === '' && document.querySelector('#session-tab-activity'), 'all-projects Tasks Activity context');
       document.querySelector('#session-tab-activity').click();
+      await until(() => taskActivityLink()?.hash.includes('returnSearch=Changes+viewer'), 'all-projects task Activity deep link');
       taskActivityLink().click();
       await until(() => document.querySelector('.activity-row-trigger'), 'all-projects origin task activity');
       document.querySelector('.activity-row-trigger').click();
@@ -340,8 +343,8 @@ app.whenReady().then(async () => {
         selectedTaskVisible: document.querySelector('.task-detail-header h2')?.textContent === 'Changes viewer probe'
       };
       location.hash = '#tasks?task=probe-task';
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === '' && document.querySelector('.task-file-link')?.hash.includes('from=tasks'), 'all projects task route');
-      document.querySelector('.task-file-link').click();
+      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === '' && document.querySelector('.task-files-summary a')?.hash.includes('from=tasks'), 'all projects task route');
+      document.querySelector('.task-files-summary a').click();
       await until(() => document.querySelector('[data-code-task-link]'), 'all projects return link');
       result.allProjectsReturnHref = document.querySelector('[data-code-task-link]').getAttribute('href');
       location.hash = '#tasks?task=retry-detail-task';
@@ -419,24 +422,22 @@ app.whenReady().then(async () => {
       document.querySelector('#session-tab-processes').click();
       await until(() => document.querySelector('#session-panel-processes [data-process-id="proc-persistent"]'), 'attributed task processes');
       result.inspectorProcessBadge = document.querySelector('#session-tab-processes .task-tab-badge')?.textContent;
-      result.inspectorOtherProcessesCollapsed = !document.querySelector('[data-process-id="proc-other"]') && !document.querySelector('.task-other-processes')?.open;
-      document.querySelector('.task-other-processes summary').click();
-      await until(() => document.querySelector('[data-process-id="proc-other"]'), 'other project processes disclosure');
+      result.inspectorOtherProcessesHidden = !document.querySelector('[data-process-id="proc-other"]') && !document.querySelector('.task-other-processes');
       const groups = [...document.querySelectorAll('#session-panel-processes .task-process-group')];
       result.inspectorProcessGroups = groups.map(group => ({ title: group.querySelector('h3').textContent, ids: [...group.querySelectorAll('[data-process-id]')].map(row => row.dataset.processId) }));
       result.inspectorProcessState = document.querySelector('[data-process-id="proc-persistent"] .status-pill')?.textContent;
-      result.inspectorOrphanRecovery = document.querySelector('[data-process-id="proc-other"]')?.textContent.includes('Recorded recovery guidance')
-        && !document.querySelector('[data-process-id="proc-other"] [data-stop-process]');
+      result.inspectorProjectProcessesLink = Boolean(document.querySelector('.task-processes-container a[href^="#processes"]'));
       document.querySelector('#session-tab-activity').click();
-      await until(() => document.querySelector('[data-show-older-events]'), 'task activity expansion');
-      document.querySelector('[data-show-older-events]').click();
-      await until(() => document.querySelectorAll('#session-panel-activity [data-event-index]').length > 8, 'virtual task activity');
-      result.inspectorVirtualRows = document.querySelectorAll('#session-panel-activity [data-event-index]').length;
+      await until(() => document.querySelectorAll('#session-panel-activity .task-event-link').length > 0, 'recent task activity');
+      result.inspectorRecentRows = document.querySelectorAll('#session-panel-activity .task-event-link').length;
+      result.inspectorPreviewRemoved = !document.querySelector('#session-panel-activity button, .task-event-inspection')
+        && Boolean(document.querySelector('#session-panel-activity .task-activity-view-all'))
+        && Boolean(document.querySelector('#session-panel-activity .task-event-link[href*="event="]'));
       result.inspectorSingleScroll = getComputedStyle(document.querySelector('.session-inspector')).overflowY === 'auto'
         && getComputedStyle(document.querySelector('.task-event-scroll')).overflowY !== 'auto';
       location.hash = '#tasks?task=probe-task&tab=technical';
-      await until(() => document.querySelector('[data-session-details]')?.getAttribute('aria-expanded') === 'true' && !document.querySelector('#session-panel-technical')?.hidden, 'retained technical deep link');
-      result.inspectorDetailsLinkWorks = document.querySelector('#session-panel-technical')?.textContent.includes('probe-task');
+      await until(() => !document.querySelector('#session-panel-overview')?.hidden && document.querySelector('[data-session-details]')?.open, 'retained technical deep link');
+      result.inspectorDetailsLinkWorks = document.querySelector('[data-session-details]')?.textContent.includes('probe-task');
       result.runtimeDockRemoved = !document.querySelector('.runtime-dock-btn, .runtime-dock');
       return result;
     })()`);

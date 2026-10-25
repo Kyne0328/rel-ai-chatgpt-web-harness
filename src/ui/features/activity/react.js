@@ -810,7 +810,6 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
   const command = String(entry.command || '').trim();
   const stdout = String(entry.stdout ?? entry.result?.stdout ?? entry.metadata?.stdout ?? '');
   const stderr = String(entry.stderr ?? entry.result?.stderr ?? entry.metadata?.stderr ?? '');
-  const isCommandRun = Boolean(command) || Boolean(stdout) || Boolean(stderr) || entry.action === 'execute' || entry.metadata?.exitCode !== undefined;
   const fileLocation = activityFileLocation(entry);
   const files = activityFilePaths(entry);
   const error = activityErrorText(entry);
@@ -863,8 +862,8 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
       readableSection('Target', targetText),
       files.length ? h(ActivityFilesDetail, { entry, files }) : null,
       command ? h(CommandDetail, { command }) : null,
-      isCommandRun ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
-      isCommandRun ? h(StreamOutputDetail, { title: 'Standard error', output: stderr, stream: 'stderr' }) : null,
+      stdout.trim() ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
+      stderr.trim() ? h(StreamOutputDetail, { title: 'Standard error', output: stderr, stream: 'stderr' }) : null,
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
       readableSection('Error', errorText, 'activity-detail-error'),
@@ -957,11 +956,9 @@ function StreamOutputDetail({ title, output, stream = 'stdout' }) {
         onClick: () => { void copyStream(); }
       }, copied ? 'Copied' : `Copy ${title.toLowerCase()}`) : null
     ),
-    formatted
-      ? h('pre', { tabIndex: 0, 'aria-label': `${title} output` },
-          h('code', null, formatted)
-        )
-      : h('p', { className: 'muted activity-stream-empty' }, `No ${title.toLowerCase()} recorded.`)
+    h('pre', { tabIndex: 0, 'aria-label': `${title} output` },
+      h('code', null, formatted)
+    )
   );
 }
 

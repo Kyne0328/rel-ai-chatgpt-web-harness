@@ -468,7 +468,8 @@ app.whenReady().then(async () => {
         const tab = document.getElementById('session-tab-processes');
         const rect = tab.getBoundingClientRect();
         const rail = document.querySelector('.inspector-tabs').getBoundingClientRect();
-        const details = document.querySelector('[data-session-details]').getBoundingClientRect();
+        document.querySelector('#session-tab-overview').click();
+        const details = document.querySelector('[data-session-details] summary').getBoundingClientRect();
         return { taskTabKeyboardVisible: rect.left >= rail.left - 1 && rect.right <= rail.right + 1,
           taskDetailsAccessible: details.left >= 0 && details.right <= innerWidth,
           taskInspectorNoOverflow: document.documentElement.scrollWidth <= innerWidth + 1 };
@@ -1062,14 +1063,28 @@ async function exerciseTaskSelectionStability(win) {
   })()`);
   // Confirm that an aggregate refresh actually changes task data before checking
   // selection. A timer alone could pass without exercising the live-data effect.
+  await waitFor(win, `!document.querySelector('[data-task-detail-state="loading"]') && Boolean(document.querySelector('#session-panel-activity .task-activity-view-all'))`);
   await win.webContents.executeJavaScript(`(() => {
     window.__relaiSelectionOriginalFetch = window.fetch;
+    window.__relaiSelectionExtraDetailReads = 0;
+    window.__relaiSelectionLoadingInsertions = 0;
+    const inspector = document.querySelector('[data-session-inspector]');
+    inspector.scrollTop = Math.min(80, Math.max(0, inspector.scrollHeight - inspector.clientHeight));
+    window.__relaiSelectionInitialScroll = inspector.scrollTop;
+    window.__relaiSelectionMutationObserver = new MutationObserver(() => {
+      if (inspector.querySelector('[data-task-detail-state="loading"]')) window.__relaiSelectionLoadingInsertions += 1;
+    });
+    window.__relaiSelectionMutationObserver.observe(inspector, { childList: true, subtree: true });
     window.fetch = async (...args) => {
+      if (String(args[0]).includes('/api/tasks/session')) window.__relaiSelectionExtraDetailReads += 1;
       const response = await window.__relaiSelectionOriginalFetch(...args);
       if (!String(args[0]).includes('/api/dashboard/v10')) return response;
       const data = await response.json();
       data.tasks = data.tasks.map(task => task.id === 'acceptance-completed'
-        ? { ...task, title: 'Completed task after selection refresh' } : task);
+        ? { ...task, title: 'Completed task after selection refresh' }
+        : task.id === 'acceptance-running'
+          ? { ...task, toolCallCount: 92, currentActivity: 'Reading source files from a tool call' }
+          : task);
       return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
     };
     window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
@@ -1079,7 +1094,12 @@ async function exerciseTaskSelectionStability(win) {
   const afterRefresh = await win.webContents.executeJavaScript(`(() => {
     window.fetch = window.__relaiSelectionOriginalFetch;
     delete window.__relaiSelectionOriginalFetch;
+    window.__relaiSelectionMutationObserver.disconnect();
     return {
+      toolUpdateExtraDetailReads: window.__relaiSelectionExtraDetailReads,
+      toolUpdateLoadingInsertions: window.__relaiSelectionLoadingInsertions,
+      toolUpdateScrollUnchanged: document.querySelector('[data-session-inspector]')?.scrollTop === window.__relaiSelectionInitialScroll,
+      toolUpdateVisible: document.querySelector('[data-task-id="acceptance-running"]')?.textContent.includes('92 tool calls'),
       selected: document.querySelector('.task-row.is-selected')?.dataset.taskId || '',
       routeTask: new URLSearchParams(location.hash.split('?')[1] || '').get('task'),
       activeTab: document.querySelector('[data-session-tab][aria-selected="true"]')?.dataset.sessionTab || ''
@@ -1143,10 +1163,10 @@ async function exerciseTaskProcesses(win) {
     })()`);
     await waitForCapturePaint(win);
     fs.writeFileSync(path.join(screenshotDir, 'task-processes-desktop.png'), (await win.webContents.capturePage()).toPNG());
-    await win.webContents.executeJavaScript(`document.querySelector('[data-session-details]').click()`);
-    await waitFor(win, `!document.querySelector('#session-panel-technical')?.hidden`);
+    await win.webContents.executeJavaScript(`document.querySelector('#session-tab-overview').click(); document.querySelector('[data-session-details] summary').click()`);
+    await waitFor(win, `document.querySelector('[data-session-details]')?.open`);
     result.technical = await win.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('#session-panel-technical');
+      const panel = document.querySelector('[data-session-details]');
       return { taskId: Boolean(panel.querySelector('[data-copy-value="acceptance-running"]')),
         operations: panel.querySelectorAll('[data-task-operation], [data-process-id]').length,
         runtimeBuild: Boolean(panel.querySelector('[data-runtime-build-identity]')) };

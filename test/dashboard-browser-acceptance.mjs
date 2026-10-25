@@ -208,6 +208,10 @@ try {
   assert.equal(result.taskSelectionStability.afterRefresh.selected, 'acceptance-running', 'live task refresh must preserve the clicked task instead of restoring the old completed deep link');
   assert.equal(result.taskSelectionStability.afterRefresh.routeTask, 'acceptance-running', 'mouse selection must update the task deep link');
   assert.equal(result.taskSelectionStability.afterRefresh.activeTab, 'activity', 'live task refresh must preserve the inspector tab');
+  assert.equal(result.taskSelectionStability.afterRefresh.toolUpdateVisible, true, 'a tool-call update must reach the selected task');
+  assert.equal(result.taskSelectionStability.afterRefresh.toolUpdateExtraDetailReads, 0, 'tool-call summaries must not restart task detail hydration');
+  assert.equal(result.taskSelectionStability.afterRefresh.toolUpdateLoadingInsertions, 0, 'tool-call updates must not inject a loading notice above the inspector');
+  assert.equal(result.taskSelectionStability.afterRefresh.toolUpdateScrollUnchanged, true, 'tool-call updates must preserve the inspector scroll position');
   assert.equal(result.taskSelectionStability.keyboard.routeTask, result.taskSelectionStability.nextId, 'keyboard selection must update the task deep link');
   assert.equal(result.taskSelectionStability.keyboard.focused, result.taskSelectionStability.nextId, 'changing task parameters must preserve keyboard focus in the task list');
   assert.equal(result.clock.changed, true, `the live task clock did not advance without interaction: ${JSON.stringify(result.clock)}`);
