@@ -162,7 +162,8 @@ async function case_activity_model_unit() {
       linked: true
     });
     assert.equal(activitySessionView(entry({ taskId: 'missing-session' }), sessions).title, 'Task missing-');
-    assert.equal(activitySessionView(entry({ taskId: '', sessionId: '' }), sessions).title, 'Direct activity');
+    assert.equal(activitySessionView(entry({ taskId: '', sessionId: '' }), sessions).title, 'Project activity');
+    assert.equal(activitySessionView(entry({ taskId: '', sessionId: '', workspace: '' }), sessions).title, 'Direct activity');
   });
   
   test('activity search can match a resolved work-session title', () => {

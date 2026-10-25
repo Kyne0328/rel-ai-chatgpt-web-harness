@@ -642,21 +642,11 @@ function DesktopSidebar({ collapsed, extensionsEnabled, route, toggleSidebar }) 
     h('div', { className: 'sidebar-utilities secondary-nav' },
       h('div', { className: 'sidebar-group-label' }, 'Utilities'),
       h('nav', { className: 'nav', 'aria-label': 'Utilities navigation' },
-        DESKTOP_UTILITY_NAV_ITEMS.map(item => h(NavLink, {
+        [...DESKTOP_UTILITY_NAV_ITEMS, ...DESKTOP_SECONDARY_NAV_ITEMS].map(item => h(NavLink, {
           key: item.id, item,
-          active: item.id === 'settings'
-            ? route.owner === 'settings'
-            : route.path === item.path
-        }))
-      ),
-      h('details', { className: 'sidebar-more', open: DESKTOP_SECONDARY_NAV_ITEMS.some(item => item.path === route.path) || route.path === 'extensions' ? true : undefined },
-        h('summary', { title: 'More navigation', 'aria-label': 'More navigation' },
-          h(Icon, { className: 'nav-icon', name: 'more' }), h('span', { className: 'nav-label' }, 'More')
-        ),
-        h('nav', { className: 'nav', 'aria-label': 'More navigation' },
-          DESKTOP_SECONDARY_NAV_ITEMS.map(item => h(NavLink, { key: item.id, item, active: route.path === item.path })),
-          extensionsEnabled ? h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }) : null
-        )
+          active: item.id === 'settings' ? route.owner === 'settings' : route.path === item.path
+        })),
+        extensionsEnabled ? h(NavLink, { item: EXTENSIONS_NAV_ITEM, active: route.owner === EXTENSIONS_NAV_ITEM.id }) : null
       )
     ),
     h('div', { className: 'sidebar-note' },

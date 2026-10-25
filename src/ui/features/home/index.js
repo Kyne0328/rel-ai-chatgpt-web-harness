@@ -51,7 +51,9 @@ export function resolveBridgeState({ findings = [], workspaces = [], connectionS
       actionHref: routeHref('workspaces', { workspace: finding.workspace, focus: 1 })
     };
   }
-  if (connection.tone !== 'ok') return connectionBanner;
+  // An active MCP request is ordinary usage, not a connection warning.
+  // Genuine service/tunnel failures and actionable findings remain above this check.
+  if (connection.tone !== 'ok' && connectionState?.mcpClient?.status !== 'active') return connectionBanner;
   if (findings.some(item => item?.severity === 'error')) {
     return {
       tone: 'bad',

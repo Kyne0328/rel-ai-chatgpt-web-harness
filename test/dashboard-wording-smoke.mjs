@@ -16,6 +16,10 @@ const readyConnectionState = {
   mcpClient: { status: 'idle' },
   dashboardUpdates: { status: 'live' }
 };
+const activeReadyState = resolveBridgeState({ connectionState: { ...readyConnectionState, mcpClient: { status: 'active' } } });
+assert.equal(activeReadyState.tone, 'good', 'routine ChatGPT activity must not expand the connection warning banner');
+const activeFailedState = resolveBridgeState({ connectionState: { ...readyConnectionState, publicEndpoint: { status: 'unavailable' }, mcpClient: { status: 'active' } } });
+assert.equal(activeFailedState.tone, 'bad', 'an active request must not conceal a failed tunnel');
 const warningState = resolveBridgeState({
   findings: [{ severity: 'warning', code: 'audit_stale', message: 'Audit activity is stale.' }],
   connectionState: readyConnectionState

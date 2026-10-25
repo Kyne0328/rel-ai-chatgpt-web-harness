@@ -88,7 +88,7 @@ export async function exerciseTooltipCoverage({ win, waitFor, waitForCapturePain
       window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
     })()`);
     // Activity derives a stable hashed DOM identity rather than exposing source IDs.
-    const diagnosticTrigger = `[...document.querySelectorAll('.activity-row-trigger')].find(button => button.querySelector('.activity-message-copy')?.textContent === 'Tooltip diagnostics fixture')`;
+    const diagnosticTrigger = `[...document.querySelectorAll('.activity-row-trigger')].find(button => button.textContent?.includes('Tooltip diagnostics fixture'))`;
     await waitFor(win, diagnosticTrigger);
     await win.webContents.executeJavaScript(`(${diagnosticTrigger}).click()`);
     await waitFor(win, `document.querySelector('.operation-diagnostics-help-trigger')`);

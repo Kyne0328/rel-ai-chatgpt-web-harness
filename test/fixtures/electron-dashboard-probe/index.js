@@ -1419,9 +1419,6 @@ async function exerciseNavigationControls(win, failures) {
       await win.webContents.executeJavaScript(`document.querySelector('#session-tab-changes').click()`);
       await waitFor(win, `document.querySelector('[data-code-fullscreen-link]')`);
     }
-    if (scenario.hash === '#tools') {
-      await win.webContents.executeJavaScript(`(() => { const more = document.querySelector('.sidebar-more'); if (!more.open) more.querySelector('summary').click(); })()`);
-    }
     win.focus();
     win.webContents.focus();
     await waitFor(win, `document.hasFocus()`);

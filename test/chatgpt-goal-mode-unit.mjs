@@ -1863,6 +1863,18 @@ test('automatic linking stays resumable after five misses and binds a delayed re
   });
 });
 
+test('stopped and user-paused goals do not report idle chat discovery as an error', async t => {
+  await withMonitoredGoal(t, async f => {
+    for (const [state, pauseReason] of [['stopped', 'user'], ['paused', 'user'], ['finished', '']]) {
+      f.patchGoal({ binding: null, active: false, state, pauseReason,
+        error: 'Waiting for the task receipt; chat discovery will continue automatically.' });
+      assert.equal(f.status().chatLink.state, 'inactive', state);
+    }
+    f.patchGoal({ state: 'paused', pauseReason: '', error: 'Automatic continuation stopped after five retries.' });
+    assert.equal(f.status().chatLink.state, 'needs_attention', 'unexpected retry exhaustion must still be actionable');
+  });
+});
+
 test('monitor startup recovers old lookup failures while preserving Stop, pauses and uncertain sends', async t => {
   for (const state of ['needs_user', 'stopped', 'paused', 'uncertain']) await withMonitoredGoal(t, async f => {
     const now = Date.now();

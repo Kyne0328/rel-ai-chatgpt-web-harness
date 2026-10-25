@@ -15,3 +15,15 @@
 .operation-diagnostics-help-trigger { display: grid; width: 32px; height: 32px; min-width: 32px; min-height: 32px; place-items: center; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--ui-text-tertiary); font-size: 13px; font-weight: 700; line-height: 1; cursor: help; }
 .operation-diagnostics-help-trigger:hover, .operation-diagnostics-help-trigger:focus-visible { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .operation-diagnostics-help-trigger:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 1px; }
+.runtime-build-identity { padding: 0 16px 12px; background: var(--ui-surface-primary); }
+.runtime-build-identity > summary { display: flex; min-height: 48px; align-items: center; flex-wrap: wrap; gap: 8px 16px; font-size: 13px; color: var(--ui-text-primary); }
+.runtime-build-summary { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ui-text-tertiary); }
+.runtime-build-content { display: grid; gap: 14px; padding: 8px 0 4px; }
+.runtime-build-content > section { display: grid; gap: 10px; }
+.runtime-build-content h4 { font-size: 13px; font-weight: 650; }
+.runtime-build-identity .operation-diagnostics-facts { margin: 0; gap: 14px 18px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+.runtime-build-identity .operation-diagnostics-facts dt { font-size: 12px; }
+.runtime-build-identity .operation-diagnostics-facts dd { margin-top: 3px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.runtime-build-identifiers { border-top: 1px solid var(--ui-border-subtle); }
+.runtime-build-identifiers > summary { min-height: 44px; font-size: 13px; }
+.runtime-build-identity .operation-diagnostics-help-trigger { justify-self: start; }

@@ -83,7 +83,7 @@ try {
     const markup = renderToStaticMarkup(React.createElement(DesktopSidebar, {
       collapsed, extensionsEnabled: false, route: { path: 'processes', owner: 'system' }, toggleSidebar() {}
     }));
-    assert.match(markup, /<details class="sidebar-more"/);
+    assert.doesNotMatch(markup, /sidebar-more/, 'desktop Utilities should show its few destinations directly');
     assert.doesNotMatch(markup, /project access|live status|class="dot"/);
     const ids = [...markup.matchAll(/data-nav-id="([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(ids, DESKTOP_NAV_ITEMS.map(item => item.id));
@@ -102,7 +102,7 @@ try {
     }));
     assert.match(markup, new RegExp(`data-nav-id="${current}"[^>]*aria-current="page"`));
     assert.doesNotMatch(markup, /data-nav-id="(?:connection|code)"/);
-    if (['tools', 'extensions'].includes(current)) assert.match(markup, /<details class="sidebar-more" open=""/);
+    if (['tools', 'extensions'].includes(current)) assert.match(markup, /aria-label="Utilities navigation"/);
     assert.equal(markup.includes('data-nav-id="extensions"'), enabled);
   }
 

@@ -251,16 +251,6 @@
 
   .sidebar-navigation { @apply min-h-0 flex-1 overflow-y-auto; scrollbar-gutter: stable; }
   .sidebar-utilities { @apply shrink-0; max-height: 45vh; overflow-y: auto; }
-  .sidebar-more > summary { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 10px; border-radius: var(--radius-md); cursor: pointer; color: var(--ui-text-secondary); font-size: 13px; font-weight: 600; list-style: none; }
-  .sidebar-more > summary::-webkit-details-marker { display: none; }
-  .sidebar-more > summary:hover { color: var(--ui-text-primary); background: var(--ui-surface-secondary); }
-  .sidebar-more[open] > summary { background: var(--ui-surface-secondary); }
-  .sidebar-more nav { padding-left: 8px; }
-  :root[data-sidebar="collapsed"] .sidebar-more > summary { justify-content: center; }
-  :root[data-sidebar="collapsed"] .sidebar-more nav { padding-left: 0; }
-  :root[data-sidebar="collapsed"] .sidebar-more > summary:focus-visible { flex-direction: column; gap: 4px; padding-block: 6px; }
-  :root[data-sidebar="collapsed"] .sidebar-more > summary:focus-visible .nav-label { display: block; }
-
   .nav, .secondary-nav { @apply flex flex-col gap-0.5; }
   .secondary-nav { @apply mt-3 border-t pt-3; border-color: var(--ui-border-subtle); }
   .sidebar-group-label { @apply px-2 text-[13px] font-bold uppercase tracking-[.08em]; color: var(--ui-text-tertiary); }

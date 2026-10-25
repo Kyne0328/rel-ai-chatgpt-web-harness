@@ -165,10 +165,11 @@
 .task-file-more:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); }
 .task-file-more:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
 .task-event-list { @apply grid gap-1; }
-.task-event { @apply grid min-w-0 items-center gap-3 px-2.5 py-2 text-left; grid-template-columns: 72px minmax(0,1fr) auto; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-primary); text-decoration: none; transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
+.task-event { @apply grid min-w-0 items-center gap-3 px-3 py-3 text-left; grid-template-columns: 70px minmax(0,1fr) auto; border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-primary); text-decoration: none; transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
 .task-event > span { @apply whitespace-nowrap text-[13px]; color: var(--ui-text-tertiary); }
-.task-event-copy { @apply grid min-w-0 gap-0.5; }
-.task-event-copy small { @apply truncate text-[13px] font-normal; color: var(--ui-text-tertiary); }
+.task-event-copy { @apply grid min-w-0 gap-1; }
+.task-event-copy > strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 650; color: var(--ui-text-primary); }
+.task-event-copy small { @apply truncate text-[13px] font-normal; color: var(--ui-text-secondary); }
 .task-event code { @apply min-w-0 truncate text-[13px]; color: var(--ui-text-secondary); }
 .task-operation-actions { @apply flex items-center justify-end gap-2; }
 .task-operation-actions button { @apply min-h-9; }
@@ -271,7 +272,15 @@
 }
 
 .task-event-scroll { max-height: 55vh; min-height: 80px; overflow: auto; contain: layout; }
-.task-event-with-inspect { display: flex; align-items: center; gap: 8px; padding-bottom: 6px; }
+.task-event-with-inspect { display: flex; align-items: stretch; gap: 8px; padding-bottom: 6px; }
+.task-event-with-inspect > button { flex: 0 0 auto; align-self: center; }
+.task-event-link:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
 .task-event-with-inspect .task-event { min-width: 0; flex: 1; }
+@container task-inspector (max-width: 520px) {
+  .task-event { grid-template-columns: 62px minmax(0,1fr); }
+  .task-event-meta { grid-column: 2; justify-content: flex-start; }
+  .task-event-with-inspect { gap: 4px; }
+  .task-event-with-inspect > button { padding-inline: 8px; }
+}
 .task-event-inspection .activity-inspector { border: 1px solid var(--ui-border-default); min-width: 0; }
 .task-processes-container .process-row { min-width: 0; }

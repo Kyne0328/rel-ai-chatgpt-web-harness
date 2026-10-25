@@ -11,6 +11,7 @@ import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, navigate, replace
 import { activityEventId } from '../../activity-event.js';
 import { orderWorkspacesAlphabetically } from '../../components/workspace-menu.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
+import { activityDescription, activityDisplayAction } from '../activity/model.js';
 import { classifyTaskChangedFiles } from '../../../taskSemanticProgress.js';
 import { workSessionStateView } from '../../task-identity.js';
 import { StatusPill as UnifiedStatusPill } from '../../components/pill.js';
@@ -736,7 +737,7 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
         live ? h('strong', null, currentTitle) : null,
         h('span', null, currentCopy)
       ),
-      session.goalMode?.chatLink ? h('div', { className: 'detail-stack', 'data-chat-link': '' },
+      session.goalMode?.chatLink && session.goalMode.chatLink.state !== 'inactive' ? h('div', { className: 'detail-stack', 'data-chat-link': '' },
         h('p', { role: 'status' }, chatLinkLabel(session.goalMode)),
         session.goalMode.chatLink.state === 'linked' && session.goalMode.tunnelId
           && typeof window.relaiDesktop?.browser?.goalLoginStart === 'function'
@@ -1112,7 +1113,7 @@ function TaskTraceSection({ session, olderExpanded, setOlderExpanded, activityHa
   const item = (event, index) => h('div', { className: 'task-event-with-inspect', 'data-event-index': index,
     onFocus: () => setFocusedIndex(index) },
     h(EventRow, { event, session, older: index >= DETAIL_EVENT_PREVIEW }),
-    h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setSelected(event), 'aria-label': 'Inspect ' + (event.title || event.operation || 'event') }, 'Inspect'));
+    h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setSelected(event), 'aria-label': 'Preview ' + (event.title || event.operation || 'event') }, 'Preview'));
   return h('section', { className: 'task-detail-section' },
     h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task activity'), h('span', null, `${ordered.length} loaded${activityHasMore ? ' · more available' : ''}`)),
     h('input', { type: 'search', value: search, 'aria-label': 'Search task activity', placeholder: 'Search task activity', onChange: event => { setSearch(event.target.value); setFocusedIndex(0); scrollRef.current?.scrollTo(0, 0); } }),
@@ -1139,7 +1140,8 @@ function TaskTraceSection({ session, olderExpanded, setOlderExpanded, activityHa
 }
 
 function EventRow({ event, session, older = false }) {
-  const operation = event.title || event.tool?.operation || event.operation || operationForTool(event.tool?.name || event.tool);
+  const operation = activityDisplayAction(event);
+  const description = activityDescription(event);
   const timestamp = eventTimestampValue(event);
   const status = event.status || (event.ok === false ? 'failed' : 'succeeded');
   const command = String(event.command || '').trim();
@@ -1163,8 +1165,8 @@ function EventRow({ event, session, older = false }) {
   },
     h('span', { 'data-clock-relative': timestamp }, timeAgo(timestamp)),
     h('span', { className: 'task-event-copy' },
-      h('code', { title: event.tool?.name || event.tool || '' }, operation),
-      event.summary ? h('small', null, event.summary) : null,
+      h('strong', { title: operation }, operation),
+      description ? h('small', { title: description }, description) : null,
       command ? h('small', { className: 'task-event-command' }, h('span', null, 'Command'), h('code', null, command)) : null
     ),
     h('div', { className: 'task-event-meta' },

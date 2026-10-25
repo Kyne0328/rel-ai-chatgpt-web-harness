@@ -590,7 +590,9 @@ function publicGoal(goal) {
     chatLink: { state: goal.pauseReason === 'binding_invalid' ? 'needs_attention' : goal.binding ? 'linked'
       : goal.authRequired || goal.state === 'needs_auth' ? 'waiting_for_account'
         : goal.state === 'rate_limited' ? 'rate_limited'
-          : goal.active ? 'finding_chat' : 'needs_attention',
+          : goal.active ? 'finding_chat'
+            : ['stopped', 'finished', 'cancelled', 'completed_unverified'].includes(goal.state)
+              || (goal.state === 'paused' && goal.pauseReason === 'user') ? 'inactive' : 'needs_attention',
       ...(goal.state === 'rate_limited' ? { rateLimitReason: goal.rateLimitReason || 'upstream' } : {}),
       ...(goal.binding ? { version: goal.binding.version, verifiedAt: goal.binding.verifiedAt,
         conversationUrl: 'https://chatgpt.com/c/' + goal.conversationId } : {}) },
@@ -688,7 +690,7 @@ function deferGoalDiscovery(config, goal, deps, error = null) {
     nextAttemptAt: error?.status === 401 ? 0 : error?.retryAt ? Math.max(Number(error.retryAt), Date.now() + 1_000)
       : Date.now() + (RETRY_DELAYS_MS[count] || DISCOVERY_RETRY_MS),
     authRequired: error?.status === 401,
-    error: error ? detectionError(error) : 'Waiting for the task receipt; chat discovery will continue automatically.',
+    error: error ? detectionError(error) : '',
     updatedAt: Date.now() });
 }
 

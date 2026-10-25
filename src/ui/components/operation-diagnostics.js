@@ -58,11 +58,22 @@ export function OperationDiagnostics({ operation, live = false }) {
 export function RuntimeBuildIdentity({ runtime, compatibility }) {
   const view = runtimeBuildDiagnostics(runtime, compatibility);
   const help = `${view.parityReason} Cached parity applies only to the recorded source snapshot; historical events may have used another build.`;
+  const basicFields = new Set(['Build ID', 'Source revision', 'Built at', 'Runtime started']);
+  const compatibilityFields = new Set(['Dirty source', 'Release metadata', 'Source/build parity', 'Parity checked']);
+  const renderFacts = facts => h('dl', { className: 'operation-diagnostics-facts' }, ...facts.map(([label, value]) => h('div', { key: label },
+    h('dt', null, label), h('dd', null, value)
+  )));
   return h('details', { className: 'operation-diagnostics runtime-build-identity', 'data-runtime-build-identity': '' },
-    h('summary', null, 'Runtime details'),
-    h('dl', { className: 'operation-diagnostics-facts' }, ...view.facts.map(([label, value]) => h('div', { key: label },
-      h('dt', null, label), h('dd', null, value)
-    ))),
-    h(DiagnosticHelp, { label: 'About runtime details' }, help)
+    h('summary', null, 'Runtime details', h('span', { className: 'runtime-build-summary' }, `Build ${view.buildId.slice(0, 12)}`)),
+    h('div', { className: 'runtime-build-content' },
+      h('section', null, h('h4', null, 'Current build'),
+        renderFacts(view.facts.filter(([label]) => basicFields.has(label)))),
+      h('section', null, h('h4', null, 'Source and compatibility'),
+        renderFacts(view.facts.filter(([label]) => compatibilityFields.has(label)))),
+      h('details', { className: 'runtime-build-identifiers' },
+        h('summary', null, 'Technical identifiers'),
+        renderFacts(view.facts.filter(([label]) => !basicFields.has(label) && !compatibilityFields.has(label)))),
+      h(DiagnosticHelp, { label: 'About runtime details' }, help)
+    )
   );
 }
