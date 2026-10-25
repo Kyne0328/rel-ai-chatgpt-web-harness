@@ -478,6 +478,51 @@ async function verifyWindowsJobRecovery() {
   const readMetadata = item => JSON.parse(fs.readFileSync(path.join(item.directory, 'metadata.json'), 'utf8'));
   try {
     const m = await manager();
+    const startupLegacy = fixture();
+    await m.initializeManagedProcessRecovery(recoveryConfig);
+    assert.deepEqual(readMetadata(startupLegacy).recoveryBootIdentity, boot, 'startup must checkpoint legacy records without a dashboard read or Stop request');
+    assert.equal(fs.existsSync(path.join(startupLegacy.jobDirectory, 'control.json')), false, 'startup recovery must not signal historical PIDs');
+    const archival = fixture({ bootIdentity: boot });
+    assert.equal(m.readManagedProcess(recoveryConfig, archival).canArchiveRecovery, true);
+    const archivalRecord = m.activeProcessesForWorkSession(recoveryConfig, 'recovery', 'recovery-session').find(item => item.processId === archival.processId);
+    let archivalReleases = 0;
+    archivalRecord.hostResourceRelease = () => { archivalReleases++; };
+    await assert.rejects(m.setManagedProcessRecoveryArchived(recoveryConfig, { ...archival, archived: true, expectedArchivedAt: '' }), { code: 'PROCESS_ACCESS_DENIED' });
+    const archived = await m.setManagedProcessRecoveryArchived(recoveryConfig, { ...archival, archived: true, expectedArchivedAt: '' }, { internal: true });
+    assert.equal(archived.ok, true);
+    assert.equal(archived.status, 'orphaned');
+    assert.equal(archived.terminationConfirmed, false);
+    assert.ok(archived.recoveryArchivedAt);
+    assert.equal(archivalReleases, 0, 'archival must not release unresolved capacity');
+    assert.equal(fs.existsSync(path.join(archival.jobDirectory, 'receipt.json')), true, 'archival preserves native evidence');
+    assert.equal(fs.existsSync(path.join(archival.jobDirectory, 'control.json')), false, 'archival never signals the old controller');
+    assert.equal((await manager()).readManagedProcess(recoveryConfig, archival).recoveryArchivedAt, archived.recoveryArchivedAt, 'archival survives application restarts');
+    await assert.rejects(m.setManagedProcessRecoveryArchived(recoveryConfig, { ...archival, archived: false, expectedArchivedAt: '' }, { internal: true }), { code: 'PROCESS_STATE_CHANGED' });
+    const restored = await m.setManagedProcessRecoveryArchived(recoveryConfig, { ...archival, archived: false, expectedArchivedAt: archived.recoveryArchivedAt }, { internal: true });
+    assert.equal(restored.recoveryArchivedAt, undefined);
+    assert.equal(restored.status, 'orphaned');
+    assert.equal(archivalReleases, 0);
+    assert.equal(readMetadata(archival).recoveryArchivedAt, undefined);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(archival.directory, 'recovery-visibility.json'), 'utf8')).archivedAt, '', 'restore must persist without rewriting lifecycle metadata');
+    fs.writeFileSync(path.join(archival.directory, 'recovery-visibility.json'), 'corrupt visibility preference');
+    assert.equal((await manager()).readManagedProcess(recoveryConfig, archival).recoveryArchivedAt, undefined, 'corrupt visibility preferences must leave recovery records visible');
+    archivalRecord.executionInspection = { status: 'running', reason: 'verified owned container' };
+    const liveSnapshot = m.readManagedProcess(recoveryConfig, archival);
+    assert.equal(liveSnapshot.canArchiveRecovery, false, 'verified live workloads cannot be archived as obsolete');
+    await assert.rejects(m.setManagedProcessRecoveryArchived(recoveryConfig, { ...archival, archived: true, expectedArchivedAt: '' }, { internal: true }), { code: 'INVALID_PROCESS_STATE' });
+    archivalRecord.executionInspection = { status: 'unknown', reason: 'missing legacy identity' };
+    m.readManagedProcess(recoveryConfig, archival);
+    const archiveMkdir = fs.promises.mkdir;
+    fs.promises.mkdir = async (target, ...args) => {
+      if (target === archival.directory) throw Object.assign(new Error('Archive persistence denied'), { code: 'EACCES' });
+      return archiveMkdir(target, ...args);
+    };
+    try {
+      await assert.rejects(m.setManagedProcessRecoveryArchived(recoveryConfig, { ...archival, archived: true, expectedArchivedAt: '' }, { internal: true }),
+        error => error.code === 'DURABLE_STATE_WRITE_FAILED' && error.details.fsCode === 'EACCES');
+      assert.equal(m.readManagedProcess(recoveryConfig, archival).recoveryArchivedAt, undefined, 'failed persistence must not hide the record');
+      assert.equal(archivalReleases, 0);
+    } finally { fs.promises.mkdir = archiveMkdir; }
     const late = fixture();
     assert.equal(m.readManagedProcess(recoveryConfig, late).status, 'orphaned');
     const record = m.activeProcessesForWorkSession(recoveryConfig, 'recovery', 'recovery-session').find(item => item.processId === late.processId);
@@ -498,6 +543,8 @@ async function verifyWindowsJobRecovery() {
       const resolved = m.readManagedProcess(recoveryConfig, late);
       assert.equal(resolved.status, 'exited', 'a cached orphan must reconcile a late exact native completion receipt');
       assert.equal(resolved.terminationConfirmed, true);
+      assert.equal(resolved.exitCode, 0, 'exact final native receipts retain their observed root exit outcome');
+      assert.notEqual(resolved.exitOutcomeKnown, false);
       assert.equal(resolved.error, undefined);
       assert.equal(resolved.terminationError, undefined);
       assert.equal(releases, 1, 'late completion releases retained capacity exactly once');
@@ -533,10 +580,15 @@ async function verifyWindowsJobRecovery() {
       assert.ok(fs.existsSync(path.join(failedPersistence.jobDirectory, 'receipt.json')), 'failed terminal persistence must retain native completion proof');
     } finally { fs.promises.mkdir = mkdir; }
 
-    const previousBoot = fixture({ bootIdentity: { ...boot, boot: 'd'.repeat(64) } });
+    const previousBoot = fixture({ bootIdentity: { ...boot, boot: 'd'.repeat(64) }, exitCode: 0 });
     const resolvedBoot = await m.stopManagedProcess(recoveryConfig, previousBoot);
     assert.equal(resolvedBoot.status, 'stopped', 'a verified kernel reboot settles jobs from the same host');
     assert.equal(resolvedBoot.terminationConfirmed, true);
+    assert.equal(resolvedBoot.exitCode, null, 'reboot proof must not carry an unverified legacy exit code forward');
+    assert.equal(resolvedBoot.exitOutcomeKnown, false);
+    assert.equal(resolvedBoot.durationKnown, false, 'recovery time is not an observed process exit time');
+    assert.equal(readMetadata(previousBoot).exitCode, null, 'unknown exit outcome must be durable');
+    assert.equal((await manager()).readManagedProcess(recoveryConfig, previousBoot).exitOutcomeKnown, false, 'restarting the app must preserve the unknown exit outcome');
     assert.equal(fs.existsSync(path.join(previousBoot.jobDirectory, 'control.json')), false, 'reboot recovery must never signal an old PID or helper');
 
     const sameBoot = fixture({ bootIdentity: boot });
@@ -561,9 +613,13 @@ async function verifyWindowsJobRecovery() {
     assert.equal(noControl.canStop, false);
 
     const legacy = fixture();
-    assert.equal((await m.stopManagedProcess(recoveryConfig, legacy)).terminationConfirmed, false);
+    const legacyPending = await m.stopManagedProcess(recoveryConfig, legacy);
+    assert.equal(legacyPending.terminationConfirmed, false);
+    assert.match(legacyPending.recovery, /checkpoint/i);
+    assert.match(legacyPending.recovery, /Restarting (?:only )?Rel\.AI/i);
     assert.deepEqual(readMetadata(legacy).recoveryBootIdentity, boot, 'legacy recovery saves a checkpoint before trusting a later reboot');
     assert.equal((await (await manager()).stopManagedProcess(recoveryConfig, legacy)).terminationConfirmed, false, 'app restart on the same boot cannot settle a legacy job');
+    assert.deepEqual(readMetadata(legacy).recoveryBootIdentity, boot, 'app restarts must preserve the original recovery checkpoint');
     observedBoot = { ...boot, boot: 'e'.repeat(64) };
     const afterReboot = await manager();
     const reconciled = Promise.withResolvers();
@@ -572,9 +628,10 @@ async function verifyWindowsJobRecovery() {
     });
     const timeout = setTimeout(() => reconciled.reject(new Error('Dashboard recovery did not publish verified reboot completion.')), 2000);
     try {
-      afterReboot.readManagedProcess(recoveryConfig, legacy);
+      await afterReboot.initializeManagedProcessRecovery(recoveryConfig);
       await reconciled.promise;
       assert.equal(afterReboot.readManagedProcess(recoveryConfig, legacy).terminationConfirmed, true, 'dashboard reads recover legacy checkpoints after a changed boot without a Stop request');
+      assert.equal(fs.existsSync(path.join(legacy.jobDirectory, 'control.json')), false, 'reboot reconciliation never signals old controllers');
     } finally { clearTimeout(timeout); unsubscribeReboot(); }
 
     observedBoot = { ...boot, host: 'f'.repeat(64) };
@@ -586,6 +643,9 @@ async function verifyWindowsJobRecovery() {
     assert.equal(unavailableResult.terminationConfirmed, false, 'a failed boot probe must retain ownership');
     assert.match(unavailableResult.recovery, /boot verification is unavailable/i);
     assert.equal(readMetadata(unavailable).recoveryBootIdentity, undefined);
+    const unavailableLegacy = fixture();
+    await (await manager()).initializeManagedProcessRecovery(recoveryConfig);
+    assert.equal(readMetadata(unavailableLegacy).recoveryBootIdentity, undefined, 'an unavailable boot identity cannot produce a legacy checkpoint');
   } finally {
     for (const value of managers) await value.stopAllManagedProcesses(recoveryConfig);
     hooks.deregister();

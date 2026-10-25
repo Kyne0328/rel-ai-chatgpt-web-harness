@@ -2,7 +2,7 @@
 
 @layer components {
 /* Managed process runtime */
-.processes-card .card-head p { margin: .35rem 0 0; color: var(--ui-text-secondary); }
+.processes-card .card-head p, .processes-recovery-card .card-head p { margin: .35rem 0 0; color: var(--ui-text-secondary); }
 .process-row { padding: .75rem .9rem; border-top: 1px solid var(--ui-border-subtle); transition: background-color var(--dur-fast) var(--ease); }
 .process-row:first-child { border-top: 0; }
 .process-row:hover { background: var(--ui-surface-secondary); }

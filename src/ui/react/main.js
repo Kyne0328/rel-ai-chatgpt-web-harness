@@ -490,7 +490,7 @@ function RuntimeDock({ activeTab = 'events', onSelectTab, onClose }) {
   const data = useDashboardSlices(DOCK_STORE_KEYS);
   const auditEntries = Array.isArray(data.auditTail?.entries) ? data.auditTail.entries.slice(-20).reverse() : [];
   const managedProcesses = Array.isArray(data.managedProcesses) ? data.managedProcesses : [];
-  const activeProcesses = managedProcesses.filter(p => !['stopped', 'exited', 'failed'].includes(String(p?.status || '').toLowerCase()));
+  const activeProcesses = managedProcesses.filter(p => processStateView(p).active);
   const activeTask = classifyTaskActivity(data.taskActivity).primaryTask;
 
   useEffect(() => {

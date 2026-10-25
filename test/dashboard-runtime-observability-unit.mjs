@@ -189,7 +189,26 @@ assert.ok(processNodes.some(node => node?.props?.['data-process-id'] === 'restar
 assert.ok(processNodes.some(node => node?.props?.['data-stop-process'] === true && node.props.disabled === false), 'a restart-unknown process must retain its enabled Stop action');
 assert.ok(processNodes.includes('Unknown after restart'), 'the renderer must disclose uncertain restart state');
 assert.ok(processNodes.some(node => typeof node === 'string' && /Stop the process if it is still running/.test(node)), 'the renderer must retain restart recovery guidance');
-assert.ok(processNodes.includes('0 running · 1 needs attention'), 'uncertain processes must not be counted as running or finished');
+assert.ok(processNodes.includes('0 running'), 'uncertain processes must not be counted as running');
+assert.ok(processNodes.includes('1 unresolved'));
+const recoverySection = processNodes.find(node => node?.props?.['data-process-recovery-list'] === true);
+assert.ok(recoverySection, 'uncertain records must have a dedicated recovery section');
+const activeSection = processNodes.find(node => node?.props?.['data-process-list'] === true);
+const sectionNodes = node => {
+  const values = [];
+  const visit = value => { if (!value) return; if (Array.isArray(value)) return value.forEach(visit); values.push(value); if (typeof value === 'object') (value.children || []).forEach(visit); };
+  visit(node);
+  return values;
+};
+assert.ok(sectionNodes(recoverySection).some(node => node?.props?.['data-process-id'] === 'restart-survivor'));
+assert.equal(sectionNodes(activeSection).some(node => node?.props?.['data-process-id'] === 'restart-survivor'), false, 'historical recovery records must not appear in the active list');
+
+const recoveredRow = processListView({ managedProcesses: [{ processId: 'verified-reboot', status: 'stopped',
+  startedAt: '2026-10-17T00:00:00Z', endedAt: '2026-10-25T00:00:00Z', exitCode: 0,
+  exitOutcomeKnown: false, durationKnown: false, recovery: 'Cleanup verified; original exit outcome unknown.' }] }).rows[0];
+assert.equal(recoveredRow.exitCode, null, 'a stale zero must not imply successful execution');
+assert.equal(recoveredRow.elapsed, 'Duration unconfirmed');
+assert.match(recoveredRow.recoveryNote, /exit outcome unknown/);
 
 const noControllerTree = processRenderContext.renderProcesses(() => ({
   managedProcesses: [{ processId: 'missing-controller', status: 'orphaned', canStop: false,
@@ -222,6 +241,27 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(processStopRequests[0]?.[0], '/api/processes/stop');
 assert.equal(processStopRequests[0]?.[1]?.processId, 'restart-survivor', 'Stop must target the displayed process through the existing backend endpoint');
 assert.equal(processRefreshes, 1);
+
+const archiveData = { managedProcesses: [{ processId: 'archive-legacy', status: 'orphaned', canStop: false,
+  canArchiveRecovery: true, metadataRevision: 'archive-revision', label: 'Obsolete bridge' }] };
+const archiveTree = processRenderContext.renderProcesses(() => archiveData)();
+processNodes.splice(0);
+visitProcessNode(archiveTree);
+assert.equal(processNodes.some(node => node?.props?.['data-stop-process']), false);
+processNodes.find(node => node?.props?.['data-archive-recovery']).props.onClick();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(processStopRequests.at(-1)[0], '/api/processes/recovery');
+assert.deepEqual(JSON.parse(JSON.stringify(processStopRequests.at(-1)[1])), { processId: 'archive-legacy', archived: true, expectedArchivedAt: '' });
+const archivedTree = processRenderContext.renderProcesses(() => ({ managedProcesses: [{ ...archiveData.managedProcesses[0], recoveryArchivedAt: '2026-10-25T00:00:00Z' }] }))();
+processNodes.splice(0);
+visitProcessNode(archivedTree);
+assert.equal(processNodes.some(node => node?.props?.['data-process-recovery-list']), false, 'archived records leave the current Recovery list');
+assert.ok(processNodes.some(node => node?.props?.['data-archived-recovery']));
+assert.ok(processNodes.includes('Restore record'));
+assert.ok(processNodes.some(node => typeof node === 'string' && node.includes('Cleanup remains unconfirmed')));
+processNodes.find(node => node?.props?.['data-archive-recovery']).props.onClick();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(processStopRequests.at(-1)[1].archived, false);
 
 const commandTree = processRenderContext.renderProcesses(() => ({
   managedProcesses: [{ processId: 'service-stays-running', status: 'running', label: 'Service' }],

@@ -6,7 +6,7 @@ import { initializeStateDatabase, maintainStateDatabase } from '../stateDatabase
 import { initializeTelemetry } from '../telemetry.js';
 import { startGoalMonitor, stopGoalMonitor } from '../chatgptGoalMode.js';
 import { startAutomaticMutationRecovery } from '../mutationAutoRecovery.js';
-import { currentMutationBootIdentity } from '../mutationBootIdentity.js';
+import { initializeManagedProcessRecovery } from '../processManager.js';
 import { stopFallbackExecutionsForShutdown, verifyFallbackDurabilityForShutdown } from '../mcp/fallbackExecutions.js';
 
 export interface RelaiCoreRuntimeOptions {
@@ -39,6 +39,7 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
   let shutdownPromise: Promise<CoreShutdownResult> | null = null;
   let recoveryMonitor: ReturnType<typeof startAutomaticMutationRecovery> | null = null;
   let bootWarmup: ReturnType<typeof setImmediate> | null = null;
+  let processRecovery: Promise<void> = Promise.resolve();
 
   function start(): Record<string, unknown> {
     if (startup) return startup;
@@ -48,9 +49,14 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
     // Install mutation barriers synchronously only for uncertain workspaces.
     recoveryMonitor = isolated ? null : startAutomaticMutationRecovery(config);
     const mutationRecovery = recoveryMonitor?.initial || null;
-    // Prewarm the native per-boot identity asynchronously before the first writer.
+    // Warm boot identity and checkpoint historical processes off the startup path.
     if (!isolated) {
-      bootWarmup = setImmediate(() => { bootWarmup = null; void currentMutationBootIdentity(); });
+      bootWarmup = setImmediate(() => {
+        bootWarmup = null;
+        processRecovery = initializeManagedProcessRecovery(config).catch(error => {
+          if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] managed process recovery:', error);
+        });
+      });
       bootWarmup.unref?.();
     }
     const knowledgeStarted = performance.now();
@@ -85,7 +91,7 @@ export function createRelaiCoreRuntime(options: RelaiCoreRuntimeOptions = {}): R
     stopGoalMonitor();
     if (bootWarmup) clearImmediate(bootWarmup);
     recoveryMonitor?.stop();
-    shutdownPromise = shutdownCoreRuntime(config, { stopManagedProcessesOnShutdown });
+    shutdownPromise = processRecovery.then(() => shutdownCoreRuntime(config, { stopManagedProcessesOnShutdown }));
     return shutdownPromise;
   }
 

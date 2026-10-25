@@ -168,11 +168,16 @@ export class WindowsProcessJob {
     return { directory: this.directory, nonce: this.nonce };
   }
 
+  hasQueryableIdentity(): boolean {
+    const receipt = this.receipt();
+    return receipt?.jobName === 'Local\\RelAiJob-' + this.nonce && receipt.killOnClose === true;
+  }
+
   async inspect(): Promise<{ status: 'running' | 'stopped' | 'unknown'; reason: string }> {
     if (this.outcome().exited) return { status: 'stopped', reason: 'verified-native-receipt' };
     const receipt = this.receipt();
     const name = 'Local\\RelAiJob-' + this.nonce;
-    if (receipt?.jobName !== name || receipt.killOnClose !== true)
+    if (!receipt || !this.hasQueryableIdentity())
       return { status: 'unknown', reason: 'The original controller did not retain a queryable Windows job identity.' };
     try {
       const args = path.extname(this.executable).toLowerCase() === '.exe' && !this.args.includes('-File')

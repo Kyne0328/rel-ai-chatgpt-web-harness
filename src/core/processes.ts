@@ -1,5 +1,5 @@
 import { readConfig } from '../config.js';
-import { readManagedProcessLogRange, sampleManagedProcessMemory, stopManagedProcess } from '../processManager.js';
+import { readManagedProcessLogRange, sampleManagedProcessMemory, stopManagedProcess, setManagedProcessRecoveryArchived } from '../processManager.js';
 import { commandActivityControl, readCommandActivityOutput } from '../commandActivity.js';
 import { controlDashboardTask } from './dashboard-actions.ts';
 import { cancelFallbackExecution } from '../mcp/fallbackExecutions.js';
@@ -18,6 +18,10 @@ export function readCoreCommandOutput(operationId: string, options: ProcessOutpu
 
 export function readCoreManagedProcessMemory() {
   return sampleManagedProcessMemory(readConfig(), { limit: 20 }, { internal: true });
+}
+
+export function setCoreProcessRecoveryArchived(processId: string, archived: boolean, expectedArchivedAt: string): Promise<Record<string, unknown>> {
+  return setManagedProcessRecoveryArchived(readConfig(), { processId, archived, expectedArchivedAt }, { internal: true });
 }
 
 type ProcessOutputStream = 'stdout' | 'stderr';

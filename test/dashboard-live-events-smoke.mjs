@@ -180,6 +180,32 @@ try {
   const commandsSnapshot = await (await fetch(`http://127.0.0.1:${address.port}/api/dashboard/v10`, { headers: { cookie: dashboardCookie } })).json();
   assert.equal(commandsSnapshot.commandOperations[0].status, 'completed', 'aggregate reconnect snapshot must agree with live command receipts');
 
+  const recoveryId = 'proc_dashboardarchivefixture0001';
+  const recoveryDirectory = path.join(sandbox, 'processes', recoveryId);
+  fs.mkdirSync(recoveryDirectory, { recursive: true });
+  fs.writeFileSync(path.join(recoveryDirectory, 'metadata.json'), JSON.stringify({ schemaVersion: 4,
+    runtimeId: 'historical-runtime', processId: recoveryId, workspaceId: '', lifecycle: 'persistent',
+    status: 'orphaned', pid: 2000000000, windowsJobOwned: true, terminationConfirmed: false,
+    startedAt: new Date().toISOString(), endedAt: '', label: 'Historical recovery fixture' }));
+  const manager = await import('../src/processManager.js');
+  manager.readManagedProcess({ stateDir: sandbox }, { processId: recoveryId });
+  await manager.initializeManagedProcessRecovery({ stateDir: sandbox });
+  assert.equal(manager.readManagedProcess({ stateDir: sandbox }, { processId: recoveryId }).canArchiveRecovery, true);
+  const archiveUrl = `http://127.0.0.1:${address.port}/api/processes/recovery`;
+  const archiveRequest = { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ processId: recoveryId, archived: true, expectedArchivedAt: '' }) };
+  assert.notEqual((await fetch(archiveUrl, archiveRequest)).status, 200, 'archival requires dashboard authentication');
+  const archivedRecord = await (await fetch(archiveUrl, { ...archiveRequest, headers: { ...archiveRequest.headers, cookie: dashboardCookie } })).json();
+  assert.equal(archivedRecord.ok, true);
+  assert.equal(archivedRecord.status, 'orphaned');
+  assert.equal(archivedRecord.terminationConfirmed, false);
+  assert.ok(archivedRecord.recoveryArchivedAt);
+  const restoredRecord = await (await fetch(archiveUrl, { ...archiveRequest,
+    headers: { ...archiveRequest.headers, cookie: dashboardCookie },
+    body: JSON.stringify({ processId: recoveryId, archived: false, expectedArchivedAt: archivedRecord.recoveryArchivedAt }) })).json();
+  assert.equal(restoredRecord.ok, true);
+  assert.equal(restoredRecord.recoveryArchivedAt, undefined);
+
   fs.appendFileSync(auditPath, `${JSON.stringify({ ts: new Date().toISOString(), event: 'tool_call', tool: 'relai_read', workspace: 'test', ok: true })}\n`);
   const finishStart = beginConnectorToolCall({
     scopeId: 'dashboard-live-events-test', tool: 'relai_work', internalOperation: 'work.begin',

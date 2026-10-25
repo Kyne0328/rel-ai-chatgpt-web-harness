@@ -1,4 +1,4 @@
-import { readCoreCommandOutput, stopCoreCommandOperation, readCoreManagedProcessMemory, readCoreManagedProcessOutput, stopCoreManagedProcess } from '../core/processes.ts';
+import { readCoreCommandOutput, stopCoreCommandOperation, readCoreManagedProcessMemory, readCoreManagedProcessOutput, stopCoreManagedProcess, setCoreProcessRecoveryArchived } from '../core/processes.ts';
 import { readJsonBody, sendJson } from './io.ts';
 import type { HttpRouteContext } from './types.ts';
 
@@ -56,4 +56,15 @@ function optionalNonNegativeInteger(value: string | null, label: string): number
   return parsed;
 }
 
-export { handleApiProcessMemory, handleApiProcessOutput, handleApiProcessStop };
+async function handleApiProcessRecovery(ctx: HttpRouteContext): Promise<void> {
+  try {
+    const payload = await readJsonBody(ctx.req, ctx.options.maxBodyBytes);
+    const processId = String(payload.processId || '').trim();
+    if (!processId || typeof payload.expectedArchivedAt !== 'string' || typeof payload.archived !== 'boolean') throw new Error('processId, expectedArchivedAt and archived are required.');
+    sendJson(ctx.res, 200, await setCoreProcessRecoveryArchived(processId, payload.archived, payload.expectedArchivedAt));
+  } catch (error) {
+    sendJson(ctx.res, 200, { ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+export { handleApiProcessMemory, handleApiProcessOutput, handleApiProcessStop, handleApiProcessRecovery };

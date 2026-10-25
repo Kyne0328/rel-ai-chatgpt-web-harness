@@ -186,6 +186,7 @@ interface ManagedProcessRecord extends GenericRecord {
   windowsJobOwned?: boolean;
   bootIdentity?: ManagedProcessBootIdentity | null;
   recoveryBootIdentity?: ManagedProcessBootIdentity | null;
+  recoveryArchivedAt?: string;
   windowsControllerUnavailable?: boolean;
   windowsRecovery?: string;
   executionInspection?: { status: string; reason: string };
@@ -1325,6 +1326,41 @@ function listManagedProcesses(config: ManagedProcessConfig, args: ManagedProcess
   return createManagedProcessList(items);
 }
 
+async function setManagedProcessRecoveryArchived(config: ManagedProcessConfig,
+  args: { processId: unknown; archived: boolean; expectedArchivedAt: string }, context: ManagedProcessContext = {}): Promise<ManagedProcessDto> {
+  if (context.internal !== true) throw taskError('PROCESS_ACCESS_DENIED', 'Recovery archival requires the authenticated local dashboard.');
+  const record = requireProcess(config, args.processId);
+  if (args.expectedArchivedAt !== (record.recoveryArchivedAt || '')) {
+    throw taskError('PROCESS_STATE_CHANGED', 'The recovery visibility changed. Refresh before changing it again.');
+  }
+  if (args.archived && !canArchiveProcessRecovery(record)) {
+    throw taskError('INVALID_PROCESS_STATE', 'Only unresolved historical records with an unavailable controller can be archived.');
+  }
+  const archivedAt = args.archived ? record.recoveryArchivedAt || new Date().toISOString() : '';
+  // A separate view preference cannot overwrite concurrent native completion
+  // metadata or release capacity. Failure leaves the visible record unchanged.
+  await writeJsonAtomicAsync(path.join(processDirectory(config, record.processId), 'recovery-visibility.json'),
+    { schemaVersion: 1, processId: record.processId, archivedAt }, { mode: 0o600, backup: true, durable: true });
+  record.recoveryArchivedAt = archivedAt;
+  notifyProcessState(record);
+  return { ...processSnapshot(record), ok: true };
+}
+
+function canArchiveProcessRecovery(record: ManagedProcessRecord): boolean {
+  return record.status === 'orphaned' && record.windowsControllerUnavailable === true
+    && record.terminationConfirmed !== true && record.executionInspection?.status !== 'running';
+}
+
+function readArchivedRecovery(directory: string, processId: string): string {
+  try {
+    const file = path.join(directory, 'recovery-visibility.json');
+    if (fs.statSync(file).size > 4096) return '';
+    const value = JSON.parse(fs.readFileSync(file, 'utf8')) as GenericRecord;
+    return value.schemaVersion === 1 && value.processId === processId && typeof value.archivedAt === 'string'
+      && Number.isFinite(Date.parse(value.archivedAt)) ? value.archivedAt : '';
+  } catch { return ''; }
+}
+
 interface ManagedRootMemoryTarget {
   readonly processId: string;
   readonly pid: number | null;
@@ -1763,12 +1799,13 @@ function normalizeWorkspaceReference(value: unknown): string {
 }
 
 function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotOptions = {}): ManagedProcessDto & GenericRecord {
+  const recoveredWithoutExit = ['verified_windows_reboot', 'verified_execution_stopped'].includes(record.signal || '');
   const nativeReceipt = record.windowsJob?.receipt();
   if (nativeReceipt) {
     if (Number.isSafeInteger(nativeReceipt.rootPid) && Number(nativeReceipt.rootPid) > 0) record.windowsRootPid = Number(nativeReceipt.rootPid);
     if (/^win32:\d{1,20}$/.test(String(nativeReceipt.rootCreationIdentity || ''))) record.windowsRootCreationIdentity = String(nativeReceipt.rootCreationIdentity);
     record.rootExitConfirmed ||= nativeReceipt.rootExited === true;
-    if (nativeReceipt.rootExited === true && typeof nativeReceipt.rootExitCode === 'number') record.exitCode = nativeReceipt.rootExitCode;
+    if (!recoveredWithoutExit && nativeReceipt.rootExited === true && typeof nativeReceipt.rootExitCode === 'number') record.exitCode = nativeReceipt.rootExitCode;
   }
   const result: ManagedProcessDto & GenericRecord = {
     ok: !['failed', 'orphaned'].includes(record.status),
@@ -1789,11 +1826,15 @@ function processSnapshot(record: ManagedProcessRecord, options: ProcessSnapshotO
     ...(record.terminationError ? { terminationError: record.terminationError } : {}),
     ...(record.windowsControllerUnavailable && record.status === 'orphaned'
       ? { canStop: false, recovery: record.windowsRecovery } : {}),
+    canArchiveRecovery: canArchiveProcessRecovery(record),
+    ...(record.recoveryArchivedAt ? { recoveryArchivedAt: record.recoveryArchivedAt } : {}),
+    ...(recoveredWithoutExit ? { exitOutcomeKnown: false, durationKnown: false,
+      recovery: 'Cleanup was verified after recovery. The original command exit outcome and running duration were not observed.' } : {}),
 
     workSessionId: record.workSessionId || null,
     startedAt: record.startedAt,
     endedAt: record.endedAt || null,
-    exitCode: record.exitCode,
+    exitCode: recoveredWithoutExit ? null : record.exitCode,
     signal: record.signal || null,
     stdoutBytes: Number(record.stdoutBytes || 0),
     stderrBytes: Number(record.stderrBytes || 0),
@@ -1836,6 +1877,7 @@ function processMetadataRevision(record: ManagedProcessRecord): string {
     record.terminationError,
     record.windowsControllerUnavailable === true,
     record.windowsRecovery || '',
+    record.recoveryArchivedAt || '',
     Number(record.stdoutDroppedBytes || 0),
     Number(record.stderrDroppedBytes || 0),
     record.pty === true,
@@ -1852,7 +1894,8 @@ function finishRecord(config: ManagedProcessConfig, record: ManagedProcessRecord
     const confirmed = record.terminationConfirmed === true || record.windowsJob?.outcome().exited === true;
     record.terminationConfirmed = confirmed;
     record.rootExitConfirmed = receipt?.rootExited === true || record.rootExitConfirmed;
-    if (typeof receipt?.rootExitCode === 'number') fields = { ...fields, exitCode: receipt.rootExitCode };
+    if (!['verified_windows_reboot', 'verified_execution_stopped'].includes(record.signal || '')
+      && typeof receipt?.rootExitCode === 'number') fields = { ...fields, exitCode: receipt.rootExitCode };
     if (!confirmed) record.terminationError = 'Native Windows job completion was not confirmed; managed ownership is retained.';
   } else {
     record.rootExitConfirmed = true;
@@ -2263,6 +2306,7 @@ function readMetadata(config: ManagedProcessConfig, processId: string): ManagedP
       windowsJobOwned: metadata.windowsJobOwned === true || Boolean(metadata.windowsJobDirectory),
       bootIdentity: parseManagedProcessBootIdentity(metadata.bootIdentity),
       recoveryBootIdentity: parseManagedProcessBootIdentity(metadata.recoveryBootIdentity),
+      recoveryArchivedAt: readArchivedRecovery(directory, processId),
       windowsJobDirectory: /^job-[a-zA-Z0-9]+$/.test(String(metadata.windowsJobDirectory || '')) ? String(metadata.windowsJobDirectory) : '',
       windowsJob: /^job-[a-zA-Z0-9]+$/.test(String(metadata.windowsJobDirectory || ''))
         ? restoreWindowsProcessJob(path.join(directory, String(metadata.windowsJobDirectory)), Number(metadata.pid) || null) : null,
@@ -2535,6 +2579,7 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
     record.terminationError = '';
     record.windowsControllerUnavailable = false;
     if (!record.persistenceFailureHandled) record.error = '';
+    if (nativeComplete) record.signal = receipt?.stopReason || '';
     if (rebooted && !nativeComplete) record.signal = 'verified_windows_reboot';
     if (inspected && !nativeComplete) record.signal = 'verified_execution_stopped';
     const exitCode = receipt?.rootExitCode;
@@ -2542,7 +2587,7 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
       status: nativeComplete
         ? receipt?.stopReason ? 'stopped' : (exitCode === 0 && !receipt?.error ? 'exited' : 'failed')
         : 'stopped',
-      ...(typeof exitCode === 'number' ? { exitCode } : {})
+      exitCode: typeof exitCode === 'number' ? exitCode : null
     });
     safePersistMetadata(config, record);
     return;
@@ -2582,7 +2627,9 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
         ? 'Windows boot verification is unavailable. Reopen Rel.AI to retry verification.'
         : previous && previous.host !== boot.host
           ? 'This recovery record belongs to another computer. Reopen Rel.AI on the original computer to verify cleanup.'
-          : record.executionInspection?.reason || 'Rel.AI is inspecting the original execution container. A missing final receipt does not require a Windows restart.';
+          : !record.windowsJob?.hasQueryableIdentity()
+            ? `${record.bootIdentity ? 'This older process has no queryable Windows job identity.' : 'Rel.AI saved a Windows boot checkpoint for this older process.'} Cleanup remains unconfirmed. A later Windows restart on this computer lets Rel.AI verify it stopped. Restarting only Rel.AI does not establish this proof.`
+            : record.executionInspection?.reason || 'Rel.AI is inspecting the original execution container. A missing final receipt does not require a Windows restart.';
     const changed = record.status !== 'orphaned' || record.terminationError !== reason || record.windowsRecovery !== recovery;
     record.status = 'orphaned';
     record.endedAt = '';
@@ -2595,6 +2642,13 @@ function reconcileWindowsJobRecord(config: ManagedProcessConfig, record: Managed
       notifyProcessState(record);
     }
   }
+}
+
+async function initializeManagedProcessRecovery(config: ManagedProcessConfig): Promise<void> {
+  // Checkpoint historical Windows records on service startup, including when
+  // no dashboard is opened. This reads evidence; it never signals old PIDs.
+  await loadManagedProcessBootIdentity();
+  hydrateProcessMetadata(config);
 }
 
 function hydrateProcessMetadata(config: ManagedProcessConfig): void {
@@ -3132,6 +3186,7 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 }
 
 export {
+  initializeManagedProcessRecovery,
   activeProcessesForWorkSession,
   cleanupTaskManagedProcesses,
   listManagedProcesses,
@@ -3141,6 +3196,7 @@ export {
   readManagedProcess,
   readManagedProcessLogRange,
   sampleManagedProcessMemory,
+  setManagedProcessRecoveryArchived,
   startManagedProcess,
   stopAllManagedProcesses,
   stopManagedProcess,
