@@ -23,6 +23,7 @@ try {
   const started = structuredContentOf(await client.waitFor(2));
   assert.ok(started.work_id);
   assert.equal(started.goalMode, undefined); // Preserve existing begin output contract.
+  assert.equal(started.resourceLink, undefined, 'stdio work must not create ChatGPT linking receipts');
 
   client.call(3, 'relai_work', { action: 'goal_status', work_id: started.work_id });
   const status = structuredContentOf(await client.waitFor(3));

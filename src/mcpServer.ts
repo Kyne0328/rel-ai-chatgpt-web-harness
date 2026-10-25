@@ -13,6 +13,7 @@ import { listResources, readResource, resourceCacheHint } from './resources.js';
 import { getPublicToolSchemas, getToolSurfaceManifest } from './tools/schema.ts';
 import { LOCAL_DEVELOPER_MODE } from './mcp/localDeveloperMode.js';
 import { ARTIFACT_RESOURCE_TEMPLATE } from './artifactResources.js';
+import { CHAT_LINK_RESOURCE_TEMPLATE } from './chatgptChatLink.js';
 
 interface RelaiMcpServerOptions {
   config?: Record<string, unknown>;
@@ -91,6 +92,13 @@ function createRelaiMcpServer(options: RelaiMcpServerOptions = {}): McpServer {
       principal: options.principal || context?.http?.authInfo
     })
   );
+  server.registerResource('Rel.AI Chat Linking Receipt',
+    new ResourceTemplate(CHAT_LINK_RESOURCE_TEMPLATE, { list: undefined }),
+    { description: 'Read the returned receipt once in the originating Goal/Loop chat.',
+      mimeType: 'application/json', cacheHint: { ttlMs: 0, cacheScope: 'private' } },
+    async (uri: URL, _variables: Record<string, string>, context: any) => readResource(uri.href, {
+      principal: options.principal || context?.http?.authInfo
+    }));
   return server as McpServer;
 }
 

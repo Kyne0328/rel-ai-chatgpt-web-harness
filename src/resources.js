@@ -8,6 +8,7 @@ import { packageMetadata as pkg } from './packageMetadata.js';
 import { MCP_PROTOCOL_VERSION } from './mcp/protocol.js';
 import { LOCAL_DEVELOPER_MODE } from './mcp/localDeveloperMode.js';
 import { isArtifactResourceUri, readArtifactResource } from './artifactResources.js';
+import { parseChatLinkResource, readChatLinkResource } from './chatgptChatLink.js';
 
 const MIME_JSON = 'application/json';
 const MIME_MARKDOWN = 'text/markdown';
@@ -46,6 +47,7 @@ function listResources(config = readConfig()) {
 
 async function readResource(uri, options = {}) {
   const config = readConfig();
+  if (parseChatLinkResource(uri)) return readChatLinkResource(config, uri, options);
   if (isArtifactResourceUri(uri)) return readArtifactResource(config, uri, options);
   const parsed = parseRelaiUri(uri);
   if (parsed.kind === 'server' && parsed.name === 'config') return contents(uri, MIME_JSON, publicConfigSummary(config), config);

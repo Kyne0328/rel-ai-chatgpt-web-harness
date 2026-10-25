@@ -812,6 +812,7 @@ async function case_packaged_runtime_dependencies_unit() {
     fs.copyFileSync(path.join(repo, 'src/extensions/toolBundle.js'), path.join(staging, 'toolBundle.mjs'));
     await import(pathToFileURL(path.join(staging, 'toolBundle.mjs')).href);
     fs.copyFileSync(path.join(repo, 'src/chatgptConversationReader.js'), path.join(staging, 'chatgptConversationReader.mjs'));
+    fs.copyFileSync(path.join(repo, 'src/chatgptChatLink.js'), path.join(staging, 'chatgptChatLink.js'));
     const probe = path.join(staging, 'probe.mjs');
     const worker = path.join(staging, 'worker.mjs');
     fs.writeFileSync(worker, 'export default value => value + 1;');

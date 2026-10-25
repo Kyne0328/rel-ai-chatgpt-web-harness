@@ -1,6 +1,7 @@
 // Stream-projected view of ChatGPT conversations. Never retain response history,
 // attachment bodies, or unrelated metadata in Goal Mode.
 import { JSONParser } from '@streamparser/json';
+import { parseChatLinkResource } from './chatgptChatLink.js';
 
 const MAX_TRANSFER_BYTES = 256 * 1024 * 1024; // Wire safety bound, not RAM buffering.
 const MAX_NODES = 100_000;
@@ -11,9 +12,10 @@ const MAX_CONTINUATION_CHARS = 8192;
 const MAX_RECEIPT_CHARS = 1024 * 1024;
 const PATHS = [
   '$.current_node', '$.mapping.*.parent', '$.mapping.*.message.id',
-  '$.mapping.*.message.author.role', '$.mapping.*.message.create_time',
+  '$.mapping.*.message.author.role', '$.mapping.*.message.author.name', '$.mapping.*.message.create_time',
   '$.mapping.*.message.status', '$.mapping.*.message.end_turn',
-  '$.mapping.*.message.content.parts.*'
+  '$.mapping.*.message.content.parts.*', '$.mapping.*.message.content.text',
+  '$.mapping.*.message.metadata.invoked_resource.resource_uri'
 ];
 
 // Opaque host session IDs cannot identify a Web chat. Retain only exact work
@@ -94,6 +96,25 @@ function conversationProjection() {
       if (['user', 'assistant', 'tool', 'system'].includes(value)) message.author.role = value;
       return;
     }
+    if (stack.length === 5 && stack[4]?.key === 'author' && key === 'name') {
+      if (value === 'api_tool.read_resource') message.author.name = value;
+      return;
+    }
+    if (stack.length === 6 && stack[4]?.key === 'metadata' && stack[5]?.key === 'invoked_resource'
+      && key === 'resource_uri') {
+      const receipt = parseChatLinkResource(value);
+      if (receipt) message.content.resourceReceipt = receipt;
+      return;
+    }
+    // Some hosts store JSON tool results in code.text instead of text.parts.
+    if (stack.length === 5 && stack[4]?.key === 'content' && key === 'text') {
+      const receipts = workReceipts(value);
+      if (receipts.length) {
+        message.content.workReceipts = receipts;
+        message.content.workIds = [...new Set(receipts.map(receipt => receipt.workId))];
+      }
+      return;
+    }
     if (stack.length === 6 && stack[4]?.key === 'content' && stack[5]?.key === 'parts'
       && Number.isSafeInteger(key) && key >= 0) {
       const parts = message.content.parts;
@@ -154,6 +175,17 @@ async function readConversationProjection(response) {
   if (!parser.isEnded) parser.end();
   if (!result.current_node || !result.mapping[result.current_node]) {
     throw new Error('ChatGPT conversation has no verifiable active branch.');
+  }
+  for (const node of Object.values(result.mapping)) {
+    const message = node.message;
+    const receipt = message?.content?.resourceReceipt;
+    if (!receipt) continue;
+    // A model's prose or a tool-call argument is not a completed resource read.
+    if (message.author.role === 'tool' && message.author.name === 'api_tool.read_resource'
+      && message.status === 'finished_successfully') {
+      message.content.workReceipts = [...(message.content.workReceipts || []), receipt].slice(0, 8);
+    }
+    delete message.content.resourceReceipt;
   }
   return result;
 }

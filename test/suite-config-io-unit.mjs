@@ -156,6 +156,26 @@ async function case_artifact_resource_unit() {
     const tamperedUri = `${resourceLink.uri.slice(0, -1)}${resourceLink.uri.endsWith('A') ? 'B' : 'A'}`;
     const tampered = await client.request('resources/read', { uri: tamperedUri });
     assert.ok(tampered.body.error, 'tampered artifact tokens must be rejected');
+
+    const goal = await client.request('tools/call', { name: 'relai_work', arguments: {
+      action: 'begin', workspace: 'artifact', mode: 'goal', title: 'Resource reference linking',
+      steps: [{ title: 'Verify the private linking resource', status: 'in_progress' }]
+    } });
+    assert.equal(goal.body.result?.isError, false, JSON.stringify(goal.body));
+    const started = goal.body.result.structuredContent;
+    const receiptLink = goal.body.result.content.find(item => item.type === 'resource_link');
+    assert.ok(receiptLink?.uri?.startsWith('relai://chat-link/'), JSON.stringify(goal.body));
+    const linkedReceipt = await client.request('resources/read', { uri: receiptLink.uri });
+    assert.equal(linkedReceipt.body.error, undefined, JSON.stringify(linkedReceipt.body));
+    assert.equal(ReadResourceResultSchema.safeParse(linkedReceipt.body.result).success, true);
+    assert.deepEqual(JSON.parse(linkedReceipt.body.result.contents[0].text), {
+      work_id: started.work_id, chat_link: started.chat_link
+    });
+    const pending = await client.request('tools/call', { name: 'relai_work', arguments: {
+      action: 'goal_status', work_id: started.work_id
+    } });
+    assert.equal(pending.body.result?.content.find(item => item.type === 'resource_link')?.uri, receiptLink.uri,
+      'pending connector goals must reissue the original receipt reference');
   
   } finally {
     if (client) await client.close().catch(() => {});

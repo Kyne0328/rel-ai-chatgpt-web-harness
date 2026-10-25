@@ -42,6 +42,12 @@ function compactPublicInputSchema(name, inputSchema, catalogTool) {
   // valid fields (for example batched search queries) or collapse a tool to an
   // untyped argument object.
   const schema = importSafeInputSchema(inputSchema || {});
+  // Flatten enum unions for clients that otherwise import only the final action's
+  // narrower enum (for example goal_update hiding begin's normal mode).
+  if (schema.properties) schema.properties = Object.fromEntries(Object.entries(schema.properties).map(([key, value]) => {
+    if (!Array.isArray(value.anyOf) || !value.anyOf.every(branch => branch.type === 'string' && Array.isArray(branch.enum))) return [key, value];
+    return [key, { type: 'string', enum: [...new Set(value.anyOf.flatMap(branch => branch.enum))] }];
+  }));
   let discoverySchema = name === 'relai_edit' ? hideInternalEditTransportFields(schema) : schema;
   if (INFERRED_ACTION_TOOLS.has(name) && Array.isArray(discoverySchema.required)) {
     discoverySchema = { ...discoverySchema, required: discoverySchema.required.filter(field => field !== 'action') };

@@ -221,9 +221,9 @@ async function listGoalProjects(deps = {}, initialCursor = '', maxPages = MAX_SI
       const record = item?.gizmo || item;
       const id = String(record?.gizmo?.id || record?.id || '');
       if (!PROJECT_ID.test(id) || projects.some(project => project.id === id)) continue;
-      projects.push({ id, name: String(record?.gizmo?.name || record?.gizmo?.display_name
+      projects.push({ id, name: String(record?.gizmo?.display?.name || record?.gizmo?.name || record?.gizmo?.display_name
         || record?.name || record?.display_name || record?.title || '').trim() });
-      const recentChats = record?.conversations?.items;
+      const recentChats = item?.conversations?.items;
       if (Array.isArray(recentChats)) for (const conversation of recentChats) {
         if (UUID.test(String(conversation?.id || ''))) previews.push({
           id: conversation.id, update_time: conversation.update_time, projectId: id

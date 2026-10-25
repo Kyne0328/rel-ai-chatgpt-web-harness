@@ -17,6 +17,10 @@ import { recordTaskActivityEvent, clearTaskHistory } from '../src/taskHistorySto
 import { HANDLERS } from '../src/tools/handlers.js';
 import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { serializeConnectorResult } from '../src/tools/connector.js';
+import { chatLinkResource, readChatLinkResource } from '../src/chatgptChatLink.js';
+import { toolResult } from '../src/mcp/results.js';
+import { getPublicToolSchemas } from '../src/tools/schema.js';
+import { createStdioPrincipal, principalFingerprint } from '../src/mcp/principal.ts';
 
 const ID = 'b5b9731a-8496-4a92-9b44-55d080038c7d';
 const OTHER = 'ca32ef5a-77b0-49f0-983d-b39c12c45ff2';
@@ -829,9 +833,9 @@ test('Project Goal Mode discovers an opaque-host conversation without a URL from
     requests.push(url);
     if (url.includes('/backend-api/conversations?')) return response({ items: [] });
     if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: projectId }, conversations: {
+      gizmo: { gizmo: { id: projectId } }, conversations: {
         items: [{ id: ID, update_time: new Date().toISOString() }]
-      } }
+      }
     }], cursor: null });
     if (url.endsWith('/conversation/' + ID)) return response(conversationWithReceipt(ID, workId, 'do a goal mode test'));
     throw new Error('Unexpected ChatGPT request: ' + url);
@@ -853,7 +857,7 @@ test('Project Goal Mode refuses missing or off-branch work receipts', async () =
   const fetch = async url => {
     if (url.includes('/backend-api/conversations?')) return response({ items: [] });
     if (url.includes('/gizmos/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: projectId }, conversations: { items: [{ id: ID, update_time: Date.now() / 1000 }] } }
+      gizmo: { gizmo: { id: projectId } }, conversations: { items: [{ id: ID, update_time: Date.now() / 1000 }] }
     }], cursor: null });
     if (url.includes('/gizmos/' + projectId + '/conversations')) return response({ items: [], cursor: null });
     return response(tree);
@@ -1815,9 +1819,9 @@ test('versioned linking refuses duplicate recent receipts and never selects a fi
       items: [{ id: ID, update_time: new Date().toISOString() }], has_more: false
     });
     if (url.includes('/snorlax/sidebar')) return response({ items: [{
-      gizmo: { gizmo: { id: project }, conversations: {
+      gizmo: { gizmo: { id: project } }, conversations: {
         items: [{ id: OTHER, update_time: new Date().toISOString() }]
-      } }
+      }
     }] });
     return response(linkedConversation(url.endsWith(ID) ? ID : OTHER, workId, link));
   };
@@ -2059,8 +2063,8 @@ function discoveryFixture({ ordinary = [], pages = [], trees = {} } = {}) {
   return { requests, transport, trees };
 }
 function projectPreview(index, items) {
-  return { gizmo: { gizmo: { id: 'g-p-' + String(index).padStart(32, '0'), name: 'Project ' + index },
-    conversations: { items } } };
+  return { gizmo: { gizmo: { id: 'g-p-' + String(index).padStart(32, '0'), display: { name: 'Project ' + index } } },
+    conversations: { items } };
 }
 function rankedChat(index, updated) {
   return { id: '30000000-0000-4000-8000-' + String(index).padStart(12, '0'), update_time: updated };
@@ -2287,4 +2291,110 @@ test('a second discovery transport waits for the account lease and then reuses t
     assert.equal((await findRecentGoalCommand({ ...deps, nativeTransport: r => fixture.transport(r) })).state, 'matched');
     assert.equal(fixture.requests.length, before + 1);
   });
+});
+
+test('code.text receipts survive projection while empty host results cannot authorize linking', async () => {
+  const workId = 'code-result', link = { version: 1, link_id: 'j'.repeat(32) };
+  const tree = linkedConversation(ID, workId, link);
+  tree.mapping.receipt.message.content = { content_type: 'code', language: 'json',
+    text: JSON.stringify({ work_id: workId, chat_link: link }) };
+  const deps = { workId, linkId: link.link_id, explicitGoal: true, conversationCorrelation: ID,
+    nativeTransport: async () => ({ ok: true, data: await readConversationProjection(response(tree)) }) };
+  assert.equal((await findRecentGoalCommand(deps)).state, 'matched');
+  tree.mapping.receipt.message.content.text = '';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+});
+
+function resourceLinkedConversation(id, workId, link) {
+  const tree = linkedConversation(id, workId, link);
+  tree.mapping.receipt.message = { id: 'resource-read', author: { role: 'tool', name: 'api_tool.read_resource' },
+    status: 'finished_successfully', create_time: Date.now() / 1000,
+    content: { content_type: 'text', parts: [''] },
+    metadata: { invoked_resource: { resource_uri: chatLinkResource(workId, link.link_id).uri }, can_save: false } };
+  return tree;
+}
+
+test('redacted resource reads link only exact successful tool references on the active branch', async () => {
+  const workId = 'reference-result', link = { version: 1, link_id: 'k'.repeat(32) };
+  const original = resourceLinkedConversation(ID, workId, link);
+  for (const variant of ['valid', 'assistant', 'user', 'wrong tool', 'failed', 'wrong link', 'off branch']) {
+    const tree = structuredClone(original);
+    if (variant === 'assistant' || variant === 'user') tree.mapping.receipt.message.author.role = variant;
+    if (variant === 'wrong tool') tree.mapping.receipt.message.author.name = 'api_tool.call_tool';
+    if (variant === 'failed') tree.mapping.receipt.message.status = 'in_progress';
+    if (variant === 'wrong link') tree.mapping.receipt.message.metadata.invoked_resource.resource_uri = chatLinkResource(workId, 'z'.repeat(32)).uri;
+    if (variant === 'off branch') tree.mapping.a.parent = 'u';
+    const deps = { workId, linkId: link.link_id, explicitGoal: true, conversationCorrelation: ID,
+      nativeTransport: async () => ({ ok: true, data: await readConversationProjection(response(tree)) }) };
+    const result = await findRecentGoalCommand(deps);
+    assert.equal(result.state, variant === 'valid' ? 'matched' : 'absent', variant);
+    if (variant === 'valid') assert.equal(result.receiptMessageId, 'resource-read');
+  }
+  const fixture = discoveryFixture({ ordinary: [rankedChat(1, 2000), rankedChat(2, 1999)], trees: {
+    [rankedChat(1).id]: resourceLinkedConversation(ID, workId, link),
+    [rankedChat(2).id]: resourceLinkedConversation(OTHER, workId, link)
+  } });
+  assert.equal((await findRecentGoalCommand({ workId, linkId: link.link_id, explicitGoal: true,
+    nativeTransport: fixture.transport })).state, 'ambiguous');
+});
+
+test('chat receipt resources enforce owner, tunnel and grant and reissue for pending goals', async t => {
+  await withMonitoredGoal(t, async f => {
+    const principal = createStdioPrincipal();
+    const context = { ...f.context, principal, connector: true };
+    f.patchGoal({ owner: principalFingerprint(principal), binding: null, conversationId: '' });
+    const link = ensureChatLink(f.config, f.work_id, context);
+    const uri = chatLinkResource(f.work_id, link.link_id).uri;
+    const result = await readChatLinkResource(f.config, uri, context);
+    assert.equal(JSON.parse(result.contents[0].text).chat_link.link_id, link.link_id);
+    await assert.rejects(() => readChatLinkResource(f.config, uri, { principal: createStdioPrincipal() }), /unavailable/);
+    await assert.rejects(() => readChatLinkResource(f.config, uri.replace(link.link_id, 'z'.repeat(32)), context), /unavailable/);
+    f.patchGoal({ tunnelId: 'tunnel_different_account' });
+    await assert.rejects(() => readChatLinkResource(f.config, uri, context), /unavailable/);
+    f.patchGoal({ tunnelId: '' });
+    const status = goalStatus(f.config, { work_id: f.work_id }, context);
+    assert.equal(status.resourceLink.uri, uri);
+    assert.equal(toolResult(status).content.find(c => c.type === 'resource_link').uri, uri);
+    stopGoal(f.config, { work_id: f.work_id }, context);
+    assert.equal(goalStatus(f.config, { work_id: f.work_id }, context).resourceLink, undefined);
+  });
+  await withMonitoredGoal(t, async f => {
+    const context = { ...f.context, principal: { clientId: 'client-without-grant' }, connector: true };
+    f.patchGoal({ owner: principalFingerprint(context.principal), binding: null, conversationId: '' });
+    const link = ensureChatLink(f.config, f.work_id, context);
+    await assert.rejects(() => readChatLinkResource(f.config, chatLinkResource(f.work_id, link.link_id).uri, context), /authorization grant/);
+  });
+});
+
+test('resource receipt discovery binds a Project goal and continues once without replay', async t => {
+  await withMonitoredGoal(t, async f => {
+    const link = ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
+    f.patchGoal({ binding: null, conversationId: '', conversationCorrelation: 'opaque', observedNode: '', stableSince: 0 });
+    const chat = rankedChat(1, 2000);
+    const tree = resourceLinkedConversation(chat.id, f.work_id, link);
+    const fixture = discoveryFixture({ ordinary: [rankedChat(2, 1000)],
+      pages: [[projectPreview(1, [chat])]], trees: { [chat.id]: tree } });
+    const sends = [];
+    const nativeTransport = async request => {
+      if (request.action === 'continue') { sends.push(request); return { ok: true, accepted: true }; }
+      return fixture.transport(request);
+    };
+    await pollGoal(f.config, f.work_id, { nativeTransport });
+    assert.equal(f.status().chatLink.state, 'linked');
+    assert.equal(loadGoal(f.config, f.work_id).chatgptProjectId, projectPreview(1, []).gizmo.gizmo.id);
+    t.mock.timers.tick(31000);
+    await pollGoal(f.config, f.work_id, { nativeTransport });
+    await pollGoal(f.config, f.work_id, { nativeTransport });
+    assert.equal(sends.length, 1);
+    assert.equal(f.status().continuationCount, 1);
+    tree.mapping.a.parent = 'u';
+    await pollGoal(f.config, f.work_id, { nativeTransport });
+    assert.equal(f.status().state, 'needs_user');
+    assert.equal(sends.length, 1);
+  });
+});
+
+test('public work mode discovery preserves normal, goal and loop across action unions', () => {
+  assert.deepEqual(getPublicToolSchemas().find(tool => tool.name === 'relai_work').inputSchema.properties.mode,
+    { type: 'string', enum: ['normal', 'goal', 'loop'] });
 });

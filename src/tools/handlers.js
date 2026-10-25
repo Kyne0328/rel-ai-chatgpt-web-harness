@@ -13,6 +13,7 @@ import { completeTask } from './completion.js';
 import { cancelTask, stopTaskOperations } from './cancellation.js';
 import { activateGoal, goalStatus, stopGoal, pauseGoal, resumeGoal, updateGoal } from '../chatgptGoalMode.js';
 import { acceptNormalWorkMode, ensureChatLink, loadGoal } from '../chatgptGoalState.js';
+import { chatLinkResource } from '../chatgptChatLink.js';
 import { validateWorkMode } from '../goalCommands.js';
 import { relaiSearch } from '../bridge/search.js';
 import { relaiCodeInspect } from '../bridge/codeIntelligence.js';
@@ -73,7 +74,9 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   return {
     ...task,
     modeAcknowledgement,
-    ...(chatLink ? { chat_link: chatLink } : {}),
+    ...(chatLink ? { chat_link: chatLink,
+      resourceLink: chatLinkResource(task.work_id, chatLink.link_id),
+      nextAction: 'Read the returned chat linking receipt resource once in this originating chat. Do not display its URI or ask the user for a URL. Then continue the work.' } : {}),
     plan: progress?.plan || current?.plan,
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
     ...(recovered ? { bootstrap: { recoveredTask: compactSessionSummary(recovered) } } : {})

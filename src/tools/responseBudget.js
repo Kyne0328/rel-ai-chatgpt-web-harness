@@ -46,6 +46,7 @@ function boundResponsePayload(value, maxBytes) {
   if (result.modeAcknowledgement) compact.modeAcknowledgement = result.modeAcknowledgement;
   if (result.chat_link?.version === 1 && /^[A-Za-z0-9_-]{32}$/.test(result.chat_link.link_id)) {
     compact.chat_link = { version: 1, link_id: result.chat_link.link_id };
+    if (result.resourceLink) compact.resourceLink = result.resourceLink;
   }
   for (const key of ['work_id', 'operationId', 'kind', 'errorCode']) if (result[key] !== undefined) compact[key] = utf8Head(result[key], 160);
   const alias = typeof result.workspace === 'object' ? result.workspace?.alias : result.workspace;

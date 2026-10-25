@@ -14,6 +14,7 @@ import { principalFingerprint } from './mcp/principal.ts';
 import { principalTunnelId } from './mcp/tunnelIdentity.js';
 import { hasChatLinkReceipt, chatgptCredentials, hasGoalBrowserTransport, getConversation, findRecentGoalCommand, latestGoalCommand, initiatingGoalCommand, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
 import { goalMessageExists } from './chatgptConversationReader.js';
+import { chatLinkResource } from './chatgptChatLink.js';
 
 const DETECTION_PREFIX = 'chatgpt_goal_detection:';
 const RATE_LIMIT_PREFIX = 'chatgpt_goal_rate_limit:';
@@ -241,7 +242,7 @@ function resumeGoal(config, args, context) {
   if (monitorConfig && getStateDir(monitorConfig) === getStateDir(config)) {
     setImmediate(() => { if (monitorConfig) runGoalBackground(monitorConfig, goal.workId, 'poll'); });
   }
-  return publicGoal(resumed);
+  return callerGoal(config, resumed, context);
 }
 
 function updateGoal(config, args, context) {
@@ -260,7 +261,7 @@ function updateGoal(config, args, context) {
     nextAttemptAt: 0, updatedAt: Date.now()
   }), { reactivate: true });
   invalidateGoalPoll(goal.workId);
-  return publicGoal(updated);
+  return callerGoal(config, updated, context);
 }
 
 // This only consumes exact leading commands in the latest verified user turn.
@@ -474,12 +475,12 @@ function activateGoal(config, args, context) {
     nextAttemptAt: existing?.active ? Number(existing.nextAttemptAt || 0) : 0,
     error: '', challenge: null, updatedAt: Date.now()
   }, { reactivate: true, activationContext: context });
-  return publicGoal(goal);
+  return callerGoal(config, goal, context);
 }
 
 function goalStatus(config, args, context) {
   const goal = requireOwnedGoal(config, args, context);
-  const result = publicGoal(goal);
+  const result = callerGoal(config, goal, context);
   const task = statusForTask(config, goal);
   if (goal.mode === 'loop' && !isTerminalTaskStatus(task?.status)
     && resolvedGoalPlan(task) === 'finished') return { ...result,
@@ -599,6 +600,15 @@ function publicGoal(goal) {
     ...(goal.authRequired ? { authRequired: true } : {}),
     ...(goal.nextAttemptAt ? { nextAttemptAt: goal.nextAttemptAt } : {}),
     ...(goal.challenge ? { challenge: goal.challenge } : {}) };
+}
+
+function callerGoal(config, goal, context) {
+  const result = publicGoal(goal);
+  if (!context?.connector || !goal.active || goal.binding) return result;
+  const link = readChatLink(config, goal);
+  if (!link) return result;
+  return { ...result, resourceLink: chatLinkResource(goal.workId, link.linkId),
+    nextAction: 'Read the returned chat linking receipt resource once in this originating chat. Do not display its URI or ask the user for a URL. Then continue the work.' };
 }
 
 function statusForTask(config, goal) {
