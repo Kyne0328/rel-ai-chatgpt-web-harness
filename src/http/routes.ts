@@ -31,6 +31,7 @@ const NOT_FOUND_PAYLOAD = {
     extensionsActionApi: 'POST /api/extensions',
     updateWorkspacesApi: 'POST /api/workspaces',
     workspacePreflightApi: 'GET /api/workspace/preflight?workspace=...',
+    workspaceRecoveryApi: 'POST /api/workspace/mutation-recovery',
     events: 'GET /events',
     streamableHttp: `POST /mcp (MCP ${MCP_PROTOCOL_VERSION}; Authentication: private Bearer token)`
   }
@@ -105,6 +106,7 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
 const POST_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/onboarding/complete': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleOnboardingComplete') },
   '/api/workspaces': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleApiWorkspaces') },
+  '/api/workspace/mutation-recovery': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleWorkspaceMutationRecovery') },
   '/api/diagnostics/reset': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnosticsReset') },
   '/api/telemetry': { auth: authDashboard, handler: lazyRoute(loadDashboardTelemetry, 'handleApiTelemetryAction') },
   '/api/extensions': { auth: authDashboard, handler: lazyRoute(loadDashboardExtensions, 'handleApiExtensionsAction') },

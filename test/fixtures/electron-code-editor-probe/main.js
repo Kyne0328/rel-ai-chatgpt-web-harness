@@ -437,14 +437,7 @@ app.whenReady().then(async () => {
       location.hash = '#tasks?task=probe-task&tab=technical';
       await until(() => document.querySelector('[data-session-details]')?.getAttribute('aria-expanded') === 'true' && !document.querySelector('#session-panel-technical')?.hidden, 'retained technical deep link');
       result.inspectorDetailsLinkWorks = document.querySelector('#session-panel-technical')?.textContent.includes('probe-task');
-      document.querySelector('.runtime-dock-btn').click();
-      await until(() => document.querySelector('.runtime-dock'), 'runtime dock');
-      result.dockNewestEvent = document.querySelector('.runtime-dock-item:not(.active-executing) .runtime-dock-summary')?.textContent;
-      result.dockCurrentTask = document.querySelector('.active-executing')?.textContent.includes('Inspecting recorded evidence');
-      location.hash = '#home';
-      await wait(50);
-      const dockAudit = await axe.run(document.querySelector('.runtime-dock-btn'), { runOnly: { type: 'rule', values: ['label-content-name-mismatch', 'button-name'] } });
-      result.dockAccessibility = dockAudit.violations.map(violation => violation.id);
+      result.runtimeDockRemoved = !document.querySelector('.runtime-dock-btn, .runtime-dock');
       return result;
     })()`);
     result.cspErrors = cspErrors;

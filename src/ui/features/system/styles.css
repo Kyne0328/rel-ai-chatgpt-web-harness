@@ -257,59 +257,10 @@
 
 
 
-/* Modern De-cluttered Troubleshooting Page Layout */
-.diagnostic-section-nav {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px;
-  background: var(--ui-surface-secondary);
-  border: 1px solid var(--ui-border-default);
-  border-radius: 8px;
-  width: fit-content;
-}
-.diagnostic-section-pill {
-  padding: 5px 12px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ui-text-secondary);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 120ms ease;
-}
-.diagnostic-section-pill:hover {
-  color: var(--ui-text-primary);
-  background: var(--ui-surface-raised);
-}
-.diagnostic-section-pill.active {
-  color: var(--ui-text-primary);
-  background: var(--ui-surface-primary);
-  border-color: var(--ui-border-default);
-  box-shadow: var(--ui-shadow-window);
-}
-
 .diagnostic-section {
   display: flex;
   flex-direction: column;
   gap: 14px;
-}
-
-/* Visibility based on active section */
-.diagnostic-page[data-active-section="checks"] .diagnostic-section-resources,
-.diagnostic-page[data-active-section="checks"] .diagnostic-section-logs {
-  display: none;
-}
-
-.diagnostic-page[data-active-section="resources"] .diagnostic-section-checks,
-.diagnostic-page[data-active-section="resources"] .diagnostic-section-logs {
-  display: none;
-}
-
-.diagnostic-page[data-active-section="logs"] .diagnostic-section-checks,
-.diagnostic-page[data-active-section="logs"] .diagnostic-section-resources {
-  display: none;
 }
 
 /* Cleaner, more compact metrics and health header */

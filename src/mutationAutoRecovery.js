@@ -13,6 +13,7 @@ import { canonicalWorkspaceAuthority, bindWorkspaceOperationIdentity, blockWorks
 import { listMutationProcessRecords, notifyRecoveryChange, onMutationProcessRecoveryChange } from './mutationProcessOwnership.js';
 
 const hash = text => crypto.createHash('sha256').update(text).digest('hex');
+let activeRecoveryRequest = null;
 const MAX_RECORD_BYTES = 65536;
 const MAX_RECORDS = 1000;
 const entryKey = e => hash(e.authority) + '--' + e.filename;
@@ -82,6 +83,7 @@ async function inventory(config, alias, directory, authorities, state) {
     const e = { authority: record.authority, filename,
       ...safeFile(record.file), bootIdentity: record.bootIdentity || null,
       nativeJob: record.nativeJob || null, nativeCgroup: record.nativeCgroup || null, pid: record.pid,
+      processGroupId: record.processGroupId || 0,
       taskId: record.taskId || '', operationId: record.operationId || '', phase: record.phase };
     const key = entryKey(e);
     if (keys.has(key)) throw new Error('Duplicate mutation records.');
@@ -297,6 +299,70 @@ async function reconcileWorkspaceMutationRecords(config, alias, workspacePath, b
   if (remaining.length && boot) await reconcileLegacy(config, state, legacyRoot, boot, remaining, observations);
   return { released, pending: remaining.length > 0, ...pendingState() };
 }
+
+// Explicitly accepted risk is NOT a claim that the execution finished.
+// Retain authenticated, independently checked evidence and the original
+// process markers in a private archive; never override a known live process.
+async function archiveUnverifiedWorkspaceMutations(config, alias, workspacePath, bootIdentity) {
+  const state = path.resolve(getStateDir(config));
+  const authority = canonicalWorkspaceAuthority(workspacePath);
+  const physical = fs.realpathSync.native(path.resolve(workspacePath));
+  const authorities = [...new Set([authority, 'path:' + (process.platform === 'win32' ? physical.toLowerCase() : physical)])];
+  const entries = await inventory(config, alias, workspacePath, authorities, state);
+  const workspaceRoot = path.join(state, 'mutation-auto-recovery', hash(authority));
+  const legacyRoot = path.join(workspaceRoot, 'legacy');
+  const checkpointPresent = fs.existsSync(path.join(legacyRoot, 'checkpoint.json'));
+  if (!entries.length) {
+    if (checkpointPresent) throw new Error('Checkpoint still requires recovery; no verified active records were found.');
+    return { overridden: 0, riskAccepted: false };
+  }
+  const boot = bootIdentity === undefined ? await currentMutationBootIdentity() : bootIdentity;
+  const observations = await inspectRecoveryEntries(config, entries, boot);
+  // Reuse the normal checkpoint validation before any risk-accepted archive.
+  if (checkpointPresent) {
+    if (!boot) throw new Error('Recovery checkpoint has no verifiable boot identity.');
+    await reconcileLegacy(config, state, legacyRoot, boot, entries, observations);
+  }
+  if ([...observations.values()].some(result => result.status === 'running')) {
+    const error = new Error('An owned execution is still running. Stop it before requesting an unverified override.');
+    error.code = 'WORKSPACE_MUTATION_PROCESS_RUNNING';
+    throw error;
+  }
+  if (!checkpointPresent) safeDir(workspaceRoot, true);
+  const root = checkpointPresent ? legacyRoot
+    : path.join(workspaceRoot, 'operator-overrides', 'override-' + crypto.randomBytes(12).toString('hex'));
+  if (!checkpointPresent) safeDir(path.dirname(root), true);
+  safeDir(root, true);
+  if (process.platform === 'win32' && !await privatelyOwnedWindowsPaths([root]))
+    throw new Error('Recovery override directory ACL could not be verified.');
+  // Persist consent before changing a recovery record. The entry is not
+  // overwriteable by a later automatic recovery and remains on disk.
+  const authorization = path.join(root, 'owner-authorization.json');
+  if (fs.existsSync(authorization)) {
+    if (!checkpointPresent) throw new Error('Unexpected existing override authorization.');
+    const earlier = readJsonFile(authorization);
+    if (earlier?.authority !== authority || earlier?.decision !== 'unverified-owner-override')
+      throw new Error('Previous override authorization cannot be verified.');
+  } else {
+    writeJsonAtomic(authorization, {
+      version: 1, decision: 'unverified-owner-override', authority,
+      workspace: alias, acceptedAt: new Date().toISOString(),
+      entries: entries.map(entry => ({ record: entryKey(entry), digest: entry.digest }))
+    }, { mode: 0o600 });
+  }
+  let overridden = 0;
+  for (const item of entries) {
+    if (await archiveOne(state, root, item, 'owner-authorized-unverified')) overridden++;
+  }
+  const remaining = await inventory(config, alias, workspacePath, authorities, state);
+  if (remaining.length) throw new Error('Recovery override was interrupted; remaining records stay protected.');
+  if (checkpointPresent) {
+    const completed = path.join(workspaceRoot, 'completed-owner-override-' + crypto.randomBytes(12).toString('hex'));
+    fs.renameSync(legacyRoot, completed);
+  }
+  return { overridden, riskAccepted: overridden > 0 };
+}
+
 function mutationAutoRecoveryCheckpointInvalid(config, alias, workspacePath = '') {
   workspacePath ||= config?.workspaces?.[alias]?.path || '';
   if (!workspacePath) return false;
@@ -327,7 +393,7 @@ function mutationAutoRecoveryCheckpointInvalid(config, alias, workspacePath = ''
       if (fs.existsSync(archived)) {
         const audit = readJsonFile(path.join(root, 'audit-' + key + '.json'));
         if (audit?.digest !== item.digest || !['verified-checkpoint-boot', 'verified-record-boot', 'verified-native-job-zero', 'verified-linux-cgroup-empty',
-          'verified-native-job-destroyed', 'verified-native-job-membership', 'verified-wsl-distribution-stopped', 'verified-wsl-guest-boot', 'verified-wsl-cgroup-empty'].includes(audit.evidence)) return true;
+          'verified-native-job-destroyed', 'verified-native-job-membership', 'verified-posix-group-empty', 'owner-authorized-unverified', 'verified-wsl-distribution-stopped', 'verified-wsl-guest-boot', 'verified-wsl-cgroup-empty'].includes(audit.evidence)) return true;
       }
     }
     if (fs.existsSync(path.join(root, 'archive'))) {
@@ -431,6 +497,29 @@ function startAutomaticMutationRecovery(config, options = {}) {
     return group.running;
   };
 
+  const requestCheck = async alias => {
+    const workspace = config.workspaces?.[alias];
+    if (!workspace?.path) throw new Error('Project is not configured.');
+    const group = trackWorkspace(alias, workspace);
+    return group ? recheck(group) : { released: 0, pending: false, errors: [] };
+  };
+  requestCheck.override = async alias => {
+    const workspace = config.workspaces?.[alias];
+    if (!workspace?.path) throw new Error('Project is not configured.');
+    const group = trackWorkspace(alias, workspace);
+    if (!group) return { overridden: 0, riskAccepted: false, pending: false };
+    if (group.running) await group.running;
+    if (group.timer) { clearTimeout(group.timer); group.timer = null; }
+    const operation = archiveUnverifiedWorkspaceMutations(config, alias, workspace.path, options.bootIdentity);
+    group.running = operation.finally(() => { group.running = null; });
+    let settlement;
+    try { settlement = await group.running; }
+    catch (error) { void recheck(group); throw error; }
+    const refreshed = await recheck(group);
+    return { ...refreshed, ...settlement };
+  };
+  activeRecoveryRequest = requestCheck;
+
   // An idle service has one lightweight event listener but no timers or scans.
   // Newly uncertain commands join the monitor synchronously before verification.
   unsubscribe = onMutationProcessRecoveryChange(change => {
@@ -460,6 +549,7 @@ function startAutomaticMutationRecovery(config, options = {}) {
     pendingCount: () => [...groups.values()].filter(group => group.pending).length,
     stop() {
       stopped = true;
+      if (activeRecoveryRequest === requestCheck) activeRecoveryRequest = null;
       unsubscribe();
       for (const group of groups.values()) {
         if (group.timer) clearTimeout(group.timer);
@@ -469,4 +559,14 @@ function startAutomaticMutationRecovery(config, options = {}) {
   };
 }
 
-export { mutationAutoRecoveryCheckpointInvalid, recoverMutationRecordsAtStartup, startAutomaticMutationRecovery };
+async function verifyWorkspaceMutationRecovery(config, alias, options = {}) {
+  if (!alias || !Object.hasOwn(config.workspaces || {}, alias)) throw new Error('Project is not configured.');
+  if (!activeRecoveryRequest) throw new Error('Recovery monitor is unavailable. Restart the Rel.AI service to resume automatic checks.');
+  if (options.override === true) {
+    if (options.acknowledgement !== alias) throw new Error('Type the exact project name to accept the unverified recovery risk.');
+    return activeRecoveryRequest.override(alias);
+  }
+  return activeRecoveryRequest(alias);
+}
+
+export { mutationAutoRecoveryCheckpointInvalid, recoverMutationRecordsAtStartup, startAutomaticMutationRecovery, verifyWorkspaceMutationRecovery };

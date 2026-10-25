@@ -25,3 +25,10 @@ Use the current repository, failing logs, tests, CI configuration and Git state 
 - Do not rerun expensive passing suites without a new change or concrete reason.
 - Report observed failure, root cause, corrective change, exact validation result and any checks not reproduced. Distinguish runner/tool failures from repository failures.
 - Review only task-owned changes; never commit unrelated working-tree state. Do not push or publish without a request.
+
+## Implementation and verification workflow
+
+For engineering changes, use the current repository as the source of truth. Inspect the directly relevant implementation and tests first, then complete coherent production changes, tests, generated files and docs before running a validation phase.
+Prefer one final validation phase (affected tests, necessary parent CI commands, typecheck/lint/build as applicable, and scoped Git diff review) rather than testing after every edit. Do not rerun expensive passing checks without a new mutation or concrete failure.
+If final checks fail, fix the demonstrated issue and rerun the failed check and required parent validation only. Intermediate checks remain appropriate for destructive operations, untrusted inputs, uncertain process outcomes, and other safety-critical actions.
+Never make unverified success claims; preserve behavioral assertions and repository integrity. Do not commit or push without explicit instruction.

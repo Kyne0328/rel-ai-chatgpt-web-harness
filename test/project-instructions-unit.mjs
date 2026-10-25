@@ -29,6 +29,7 @@ try {
   const empty = readProjectInstructions(workspace);
   assert.deepEqual(empty.sources, []);
   assert.equal(empty.content, '');
+  assert.match(empty.engineeringWorkflow, /final validation phase/);
   assert.equal(empty.truncated, false);
   assert.match(empty.securityBoundary, /not authorization/i);
 

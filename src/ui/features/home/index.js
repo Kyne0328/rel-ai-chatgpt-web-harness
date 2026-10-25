@@ -54,6 +54,17 @@ export function resolveBridgeState({ findings = [], workspaces = [], connectionS
   // An active MCP request is ordinary usage, not a connection warning.
   // Genuine service/tunnel failures and actionable findings remain above this check.
   if (connection.tone !== 'ok' && connectionState?.mcpClient?.status !== 'active') return connectionBanner;
+  const blockedProject = findings.find(item => item?.code === 'workspace_mutation_blocked' && item.workspace);
+  if (blockedProject) {
+    return {
+      tone: 'bad',
+      kicker: 'Project changes blocked',
+      title: `Recovery required for ${blockedProject.workspace}`,
+      description: 'The connection is working. Rel.AI is checking that a previous project command has stopped.',
+      actionLabel: 'Verify project recovery',
+      actionHref: routeHref('workspaces', { workspace: blockedProject.workspace })
+    };
+  }
   if (findings.some(item => item?.severity === 'error')) {
     return {
       tone: 'bad',

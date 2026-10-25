@@ -3,7 +3,7 @@ import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
-import { postJson } from '../../api.js';
+import { postJson, requestDashboardRefresh } from '../../api.js';
 import { getRouteParams, getWorkspaceFilter, replaceRouteParams, routeHref } from '../../router.js';
 import { analyticsRangeScope } from '../usage/range-model.js';
 import { loadAnalyticsModels } from '../usage/data.js';
@@ -150,6 +150,9 @@ function ProjectFileAccessStatus({ enabled }) {
 
 const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, view, workspace, onEdit, onRepair }) {
   const [folderBusy, setFolderBusy] = useState(false);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState('');
+  const [overrideName, setOverrideName] = useState('');
   const repository = repositorySummary(view.operational);
   const pathParts = splitWorkspacePath(view.path);
   const notices = [];
@@ -161,6 +164,27 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
     setFolderBusy(false);
     if (result?.ok === false) toast(result.error || 'Folder opening is only available in the desktop app.', { variant: 'warn' });
     event.currentTarget?.focus?.();
+  };
+  const verifyRecovery = async (override = false) => {
+    if (recoveryBusy) return;
+    setRecoveryBusy(true);
+    try {
+      const result = await postJson('/api/workspace/mutation-recovery', {
+        workspace: view.alias,
+        ...(override ? { action: 'override', acknowledgement: overrideName } : {})
+      }, { pauseTimeoutWhenHidden: false });
+      if (result?.ok === false) throw new Error(result.error || 'Process recovery check failed.');
+      const message = result.blocked ? 'Still protected: termination could not be verified.'
+        : result.riskAccepted ? 'Project reopened by owner override. Termination was not verified.'
+          : 'Project changes are available.';
+      if (!result.blocked) setOverrideName('');
+      setRecoveryMessage(message);
+      toast(message, { variant: result.blocked ? 'warn' : 'success' });
+      // Refresh the projection after proof-backed recovery; never clear the lock in the UI.
+      requestDashboardRefresh();
+    } catch (error) {
+      toast(String(error?.message || error), { variant: 'error' });
+    } finally { setRecoveryBusy(false); }
   };
   return h('article', { className: 'workspace-card workspace-card-detailed', 'data-workspace-card': view.alias },
     h('header', { className: 'workspace-card-head' },
@@ -175,7 +199,19 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
     ),
     view.mutationBlock ? h('div', { className: 'workspace-warning', role: 'status', 'data-workspace-mutation-block': view.alias },
       h('span', null, view.mutationBlock.message),
-      h('a', { className: 'buttonlike secondary', href: '#diagnostics' }, 'Review diagnostics')
+      h('button', { type: 'button', className: 'secondary', disabled: recoveryBusy,
+        onClick: () => { void verifyRecovery(); } }, recoveryBusy ? 'Checking…' : 'Verify recovery'),
+      recoveryMessage ? h('small', { role: 'status' }, recoveryMessage) : null,
+      h('details', { className: 'workspace-recovery-override' },
+        h('summary', null, 'Still blocked? Resolve manually'),
+        h('p', null, 'Last resort: Rel.AI archives the original recovery records and logs, but cannot prove all descendants stopped. Changes may conflict with an old process.'),
+        h('label', null, 'Type the project name to accept that risk',
+          h('input', { type: 'text', value: overrideName, autoComplete: 'off',
+            onChange: event => setOverrideName(event.target.value), placeholder: view.alias })),
+        h('button', { type: 'button', className: 'secondary',
+          disabled: recoveryBusy || overrideName !== view.alias,
+          onClick: () => { void verifyRecovery(true); } }, 'Accept risk and unlock')
+      )
     ) : null,
     view.healthWarning ? h('div', { className: 'workspace-warning' },
       h('span', null, view.healthWarning),

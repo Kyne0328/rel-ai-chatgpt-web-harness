@@ -893,7 +893,6 @@ function DurationDetail({ session, live }) {
 function PlanSection({ plan }) {
   const steps = Array.isArray(plan?.steps) ? plan.steps : [];
   const [expandedSteps, setExpandedSteps] = useState(() => new Set());
-  const [planFilter, setPlanFilter] = useState('all');
 
   if (!steps.length) {
     return h('section', { className: 'task-detail-section task-plan-section', 'data-task-plan': '', 'data-task-plan-missing': '' },
@@ -905,8 +904,6 @@ function PlanSection({ plan }) {
     );
   }
   const resolved = steps.filter(step => ['completed', 'skipped'].includes(String(step?.status || ''))).length;
-  const inProgressCount = steps.filter(step => String(step?.status || '') === 'in_progress').length;
-  const completedCount = steps.filter(step => String(step?.status || '') === 'completed').length;
 
   const toggleStep = stepKey => {
     setExpandedSteps(prev => {
@@ -917,30 +914,8 @@ function PlanSection({ plan }) {
     });
   };
 
-  const filteredSteps = steps.filter(step => {
-    const status = String(step?.status || 'pending');
-    if (planFilter === 'in_progress') return status === 'in_progress';
-    if (planFilter === 'completed') return status === 'completed';
-    return true;
-  });
-
-  const filterChipsBar = h('div', { className: 'task-plan-filter-bar', role: 'group', 'aria-label': 'Filter plan steps' },
-    [
-      { id: 'all', label: `All (${steps.length})` },
-      { id: 'in_progress', label: `In Progress (${inProgressCount})` },
-      { id: 'completed', label: `Completed (${completedCount})` }
-    ].map(chip => h('button', {
-      key: chip.id,
-      type: 'button',
-      className: `task-plan-filter-chip${planFilter === chip.id ? ' active' : ''}`,
-      'aria-pressed': planFilter === chip.id,
-      onClick: () => setPlanFilter(chip.id)
-    }, chip.label))
-  );
-
   const list = h('ol', { className: 'task-plan-list' },
-    filteredSteps.length
-      ? filteredSteps.map((step, index) => {
+    steps.map((step, index) => {
           const status = String(step?.status || 'pending');
           const stepKey = String(step?.id || `step-${index}`);
           const hasDetail = Boolean(step?.detail);
@@ -978,14 +953,12 @@ function PlanSection({ plan }) {
             )
           );
         })
-      : h('li', { className: 'task-plan-empty-filter' }, 'No plan steps match this filter.')
   );
   return h('section', { className: 'task-detail-section task-plan-section', 'data-task-plan': '' },
     h('div', { className: 'task-detail-heading' },
       h('h3', null, 'Plan'),
       h('span', { 'aria-label': `${resolved} of ${steps.length} steps resolved` }, `${resolved}/${steps.length}`)
     ),
-    filterChipsBar,
     list
   );
 }

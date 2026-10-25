@@ -4,6 +4,7 @@ import {
   completeDashboardOnboarding,
   createDashboardEventSubscription,
   dashboardConnection,
+  dashboardVerifyWorkspaceMutation,
   dashboardLogs,
   dashboardOnboardingStatus,
   dashboardReleaseNotes,
@@ -21,6 +22,24 @@ import { ERROR_CODES, errorPayload } from '../contracts/errors.ts';
 import { handleOpenFolder, handlePickFolder, handleTaskControl, handleWorkspaceChecks } from './dashboardActions.ts';
 import { createSseWriter, readJsonBody, sendJson, sendSse } from './io.ts';
 import type { HttpRouteContext, HttpServerOptions } from './types.ts';
+
+async function handleWorkspaceMutationRecovery(ctx: HttpRouteContext): Promise<void> {
+  try {
+    const request = await readJsonBody(ctx.req, ctx.options.maxBodyBytes) as Record<string, unknown>;
+    const alias = String(request?.workspace || '').trim();
+    if (request?.force === true) {
+      sendJson(ctx.res, 400, { ok: false, error: 'Unsafe forced unlock is not supported. Process termination must be verified.' });
+      return;
+    }
+    const override = request?.action === 'override';
+    const result = await dashboardVerifyWorkspaceMutation(alias, override
+      ? { override: true, acknowledgement: String(request?.acknowledgement || '') } : {});
+    sendJson(ctx.res, result.ok === false ? 404 : 200, result);
+  } catch (error) {
+    const status = (error as { code?: string })?.code === 'WORKSPACE_MUTATION_PROCESS_RUNNING' ? 409 : 503;
+    sendJson(ctx.res, status, { ok: false, error: errorMessage(error) });
+  }
+}
 
 function handleApiTools(ctx: HttpRouteContext): void {
   try {
@@ -206,6 +225,7 @@ function parseCursor(value: string | null): Record<string, unknown> | null {
 
 export {
   handleApiTools,
+  handleWorkspaceMutationRecovery,
   handleOnboardingStatus,
   handleConnection,
   handleDashboardV10,

@@ -95,7 +95,7 @@ async function repoSnapshot(workspace: BridgeWorkspace, config: BridgeConfig, ar
     truncated: tree.truncated,
     hints: projectHints(Object.keys(manifests)),
     ...(git ? { git } : {}),
-    recommendedFlow: ["Use the minimum tool calls needed", "relai_search when the code location is unknown; adaptive context is included by default", "relai_read only when a wider range or complete file is needed before editing", "relai_edit for coherent repository changes; validation is explicit evidence chosen by the agent", "Use work_id only when durable task attribution, recovery, or task-scoped ownership is useful"],
+    recommendedFlow: ["Use the minimum tool calls needed", "relai_search when the code location is unknown; adaptive context is included by default", "relai_read only when a wider range or complete file is needed before editing", "relai_edit for coherent repository changes; implement related code and tests first, then validate together at the end (except essential safety checks); after a failed check rerun the affected scope", "Use work_id only when durable task attribution, recovery, or task-scoped ownership is useful"],
     writeGuidance: workspaceWriteGuidance(),
     operationJournal: summarizeOperations(config, workspace, args.journalLimit || 10)
   };

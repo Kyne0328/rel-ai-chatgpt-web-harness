@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { runWithMutationProcessOwnership, recordCurrentMutationProcess, listMutationProcessRecords, workspaceMutationSafetySummary, notifyRecoveryChange, markCurrentMutationProcessUncertain } from '../src/mutationProcessOwnership.js';
 import { assertNoRecoveredMutationProcess } from '../src/tools/execution.js';
-import { recoverMutationRecordsAtStartup, startAutomaticMutationRecovery } from '../src/mutationAutoRecovery.js';
+import { recoverMutationRecordsAtStartup, startAutomaticMutationRecovery, verifyWorkspaceMutationRecovery } from '../src/mutationAutoRecovery.js';
+import { inspectPosixMutationGroup } from '../src/executionRecovery.js';
 import { runWorkspaceOperation, workspaceMutationBlockSummary, onWorkspaceMutationBlockChange } from '../src/workspaceOperationQueue.js';
 import { currentMutationBootIdentity } from '../src/mutationBootIdentity.js';
 import { registerHooks } from 'node:module';
@@ -28,6 +29,24 @@ function scenario() {
   return { config, file, folder };
 }
 try {
+  // A missing parent PID is not proof. Only an absent authenticated POSIX
+  // process group can settle a containerless execution safely.
+  for (const platform of ['linux', 'darwin']) {
+    const boot = { platform, host: 'host-one', boot: 'boot-one' };
+    const record = { pid: 424242, processGroupId: 424242, bootIdentity: boot };
+    let probes = 0;
+    const absent = (pid, signal) => { probes++; assert.equal(pid, -424242); assert.equal(signal, 0);
+      throw Object.assign(new Error('no process group'), { code: 'ESRCH' }); };
+    assert.equal((await inspectPosixMutationGroup(record, boot, absent, platform)).reason, 'verified-posix-group-empty');
+    assert.equal(probes, 1);
+    assert.equal((await inspectPosixMutationGroup(record, boot, () => {}, platform)).status, 'running');
+    const forbidden = () => { throw Object.assign(new Error('not allowed'), { code: 'EPERM' }); };
+    assert.equal((await inspectPosixMutationGroup(record, boot, forbidden, platform)).status, 'running');
+    assert.equal((await inspectPosixMutationGroup({ ...record, processGroupId: 0 }, boot, absent, platform)).status, 'unknown');
+    assert.equal((await inspectPosixMutationGroup(record, { ...boot, host: 'different' }, absent, platform)).status, 'unknown');
+    assert.equal((await inspectPosixMutationGroup(record, { ...boot, boot: 'next-boot' }, absent, platform)).reason, 'verified-record-boot');
+    assert.equal((await inspectPosixMutationGroup(record, boot, absent, 'win32')).status, 'unknown');
+  }
   if (process.platform === 'win32') {
     const moduleUrl = new URL('../src/executionRecovery.js?wsl-contract', import.meta.url).href;
     const facade = 'data:text/javascript,' + encodeURIComponent(`
@@ -278,6 +297,52 @@ try {
     assert.deepEqual(await monitor.initial, { released: 0, pending: 0, errors: [] });
     assert.equal(workspaceMutationBlockSummary('alpha', folder), null);
     monitor.stop();
+  }
+  // A user-initiated verification must recheck the same owner, never force-clear it.
+  {
+    const { config, file, folder } = scenario();
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...record, bootIdentity: base }));
+    const monitor = startAutomaticMutationRecovery(config, { bootIdentity: base, retryMs: [300000] });
+    try {
+      assert.equal((await monitor.initial).pending, 1);
+      const checked = await verifyWorkspaceMutationRecovery(config, 'alpha');
+      assert.equal(checked.pending, true);
+      assert.equal(workspaceMutationBlockSummary('alpha', folder)?.blocked, true);
+      await assert.rejects(() => verifyWorkspaceMutationRecovery(config, 'missing'), /not configured/);
+    } finally { monitor.stop(); }
+  }
+  // An explicitly accepted, unverified settlement preserves original evidence
+  // and never pretends to have verified termination.
+  {
+    const { config, file, folder } = scenario();
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fs.writeFileSync(file, JSON.stringify({ ...record, bootIdentity: base }));
+    const monitor = startAutomaticMutationRecovery(config, { bootIdentity: base, retryMs: [300000] });
+    try {
+      assert.equal((await monitor.initial).pending, 1);
+      await assert.rejects(() => verifyWorkspaceMutationRecovery(config, 'alpha', {
+        override: true, acknowledgement: 'wrong-project'
+      }), /exact project name/);
+      assert.equal(workspaceMutationBlockSummary('alpha', folder)?.blocked, true);
+      const result = await verifyWorkspaceMutationRecovery(config, 'alpha', {
+        override: true, acknowledgement: 'alpha'
+      });
+      assert.equal(result.overridden, 1);
+      assert.equal(result.riskAccepted, true);
+      assert.equal(workspaceMutationBlockSummary('alpha', folder), null);
+      assert.deepEqual(listMutationProcessRecords(config, 'alpha', folder), []);
+      const authority = fs.readdirSync(path.join(config.stateDir, 'mutation-auto-recovery'))[0];
+      const completed = fs.readdirSync(path.join(config.stateDir, 'mutation-auto-recovery', authority))
+        .find(name => name.startsWith('completed-owner-override-'));
+      assert.ok(completed, 'checkpoint and original records must be retained in the completed override archive');
+      const archivedRoot = path.join(config.stateDir, 'mutation-auto-recovery', authority, completed);
+      assert.equal(fs.readdirSync(path.join(archivedRoot, 'archive')).length, 1);
+      const entryAudit = fs.readdirSync(archivedRoot).find(name => name.startsWith('audit-'));
+      assert.equal(JSON.parse(fs.readFileSync(path.join(archivedRoot, entryAudit))).evidence, 'owner-authorized-unverified');
+      assert.equal(JSON.parse(fs.readFileSync(path.join(archivedRoot, 'owner-authorization.json'))).decision, 'unverified-owner-override');
+      assert.equal(await runWorkspaceOperation('alpha', () => 'resumed', { scope: 'mutation' }), 'resumed');
+    } finally { monitor.stop(); }
   }
   // Startup blocks mutation admission synchronously, before verification yields.
   {

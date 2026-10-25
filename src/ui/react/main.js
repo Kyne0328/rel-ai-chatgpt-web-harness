@@ -17,11 +17,11 @@ import * as AlertDialog from '@radix-ui/react-alert-dialog';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Icon } from '../components/icons.js';
 import { OverlayFrame } from '../components/overlay-frame.js';
+import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import { toast } from '../components/toast.js';
 import { StatusPill } from '../components/pill.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary } from '../connection-state.js';
 import { DEVELOPER_FEATURE_CHANGE_EVENT, DEVELOPER_FEATURES, readDeveloperFeatureEnabled } from '../developer-mode.js';
-import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import {
   DESKTOP_WORK_NAV_ITEMS,
   DESKTOP_SYSTEM_NAV_ITEMS,
@@ -39,9 +39,7 @@ import {
 import { getOverlaySnapshot, removeToastOverlay, subscribeOverlay } from '../overlay-store.js';
 import { getUiPreferences, setThemePreference } from '../preferences.js';
 import { normalizeRouteKey } from '../route-policy.js';
-import { getRouteSnapshot, initRouter, routeHref, subscribeRoute } from '../router.js';
-import { timeAgo } from '../utils.js';
-import { processStateView, workSessionStateView } from '../task-identity.js';
+import { getRouteSnapshot, initRouter, subscribeRoute } from '../router.js';
 export { initConnectorRefreshModal } from '../connector-refresh-modal.js';
 export { initUpdateAvailableModal } from '../update-available-modal.js';
 export { applyLiveEvent, getSnapshot, init, patchLocalConnection, subscribe } from '../store.js';
@@ -50,7 +48,6 @@ if (import.meta.env?.DEV) void import('../styles/app.css');
 
 const h = React.createElement;
 const SHELL_STORE_KEYS = Object.freeze(['ok', 'config', 'connectionState', 'taskActivity', 'live', 'tasks']);
-const DOCK_STORE_KEYS = Object.freeze(['taskActivity', 'auditTail', 'managedProcesses']);
 const DashboardStoreContext = createContext(null);
 const reactRouteComponents = new Map();
 const reactRoutePreloads = new Map();
@@ -307,18 +304,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   const paletteOpener = useRef(null);
   const previousRoutePath = useRef(route.path);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
-  const [dockOpen, setDockOpen] = useState(() => {
-    try { return localStorage.getItem('relai_dock_open') === '1'; } catch { return false; }
-  });
-  const [dockTab, setDockTab] = useState('events');
-  const toggleDock = useCallback(() => {
-    setDockOpen(prev => {
-      const next = !prev;
-      try { localStorage.setItem('relai_dock_open', next ? '1' : '0'); } catch {}
-      return next;
-    });
-  }, []);
-
   useEffect(() => {
     document.title = `${route.title} · Rel.AI MCP`;
     setMobileMoreOpen(false);
@@ -337,12 +322,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
 
   useEffect(() => {
     const onKeyDown = event => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'j') {
-        if (event.defaultPrevented || document.querySelector('#__relai-modal-backdrop, #__relai-drawer-backdrop')) return;
-        event.preventDefault();
-        toggleDock();
-        return;
-      }
       if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'k') return;
       event.preventDefault();
       if (document.querySelector('#__relai-modal-backdrop, #__relai-drawer-backdrop')) return;
@@ -351,7 +330,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [toggleDock]);
+  }, []);
 
   useEffect(() => {
     const refreshExtensionsFlag = event => {
@@ -435,18 +414,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
               h('span', { className: 'command-trigger-label' }, 'Quick navigation '),
               h('kbd', { 'aria-hidden': 'true' }, shortcut)
             ),
-            h('button', {
-              className: `secondary command-trigger runtime-dock-btn${dockOpen ? ' active' : ''}`,
-              type: 'button',
-              'aria-expanded': dockOpen ? 'true' : 'false',
-              'aria-label': /Mac|iPhone|iPad/.test(navigator.platform || '') ? 'Runtime ⌘J — toggle execution dock' : 'Runtime Ctrl J — toggle execution dock',
-              title: `Toggle runtime dock (${/Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘J' : 'Ctrl+J'})`,
-              onClick: toggleDock
-            },
-              h(Icon, { name: 'terminal' }),
-              h('span', { className: 'command-trigger-label' }, 'Runtime '),
-              h('kbd', { 'aria-hidden': 'true' }, /Mac|iPhone|iPad/.test(navigator.platform || '') ? '⌘J' : 'Ctrl J')
-            ),
             h(UpdateStatusPill),
             h(StatusPill, {
               id: 'connectionStatus',
@@ -460,16 +427,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
           )
         ),
         h(RecoveryNotice, { recovery: ui.recovery }),
-        h(RouteOutlet, { route, routeState: ui.routeState }),
-        dockOpen ? h(RuntimeDock, {
-          activeTab: dockTab,
-          onSelectTab: setDockTab,
-          onClose: () => {
-            setDockOpen(false);
-            document.querySelector('.runtime-dock-btn')?.focus({ preventScroll: true });
-            try { localStorage.setItem('relai_dock_open', '0'); } catch {}
-          }
-        }) : null
+        h(RouteOutlet, { route, routeState: ui.routeState })
       )
     ),
     h(CommandPalette, {
@@ -486,123 +444,6 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   );
 }
 
-
-function RuntimeDock({ activeTab = 'events', onSelectTab, onClose }) {
-  const data = useDashboardSlices(DOCK_STORE_KEYS);
-  const auditEntries = Array.isArray(data.auditTail?.entries) ? data.auditTail.entries.slice(-20).reverse() : [];
-  const managedProcesses = Array.isArray(data.managedProcesses) ? data.managedProcesses : [];
-  const activeProcesses = managedProcesses.filter(p => processStateView(p).active);
-  const activeTask = classifyTaskActivity(data.taskActivity).primaryTask;
-
-  useEffect(() => {
-    const handleKey = event => {
-      if (event.key === 'Escape' && !event.defaultPrevented && event.target.closest?.('.runtime-dock')) {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose]);
-
-  return h('aside', { className: 'runtime-dock', 'aria-label': 'Runtime execution dock', role: 'region' },
-    h('div', { className: 'runtime-dock-header' },
-      h('div', { className: 'runtime-dock-tabs', role: 'tablist', 'aria-label': 'Runtime views', onKeyDown: event => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault();
-        const next = event.key === 'Home' ? 'events' : event.key === 'End' ? 'processes' : activeTab === 'events' ? 'processes' : 'events';
-        onSelectTab(next);
-        event.currentTarget.querySelector(`#runtime-tab-${next}`)?.focus();
-      } },
-        h('button', {
-          type: 'button',
-          role: 'tab',
-          id: 'runtime-tab-events',
-          tabIndex: activeTab === 'events' ? 0 : -1,
-          'aria-controls': 'runtime-dock-panel',
-          className: `runtime-dock-tab${activeTab === 'events' ? ' active' : ''}`,
-          'aria-selected': activeTab === 'events' ? 'true' : 'false',
-          onClick: () => onSelectTab('events')
-        },
-          'Live Events',
-          auditEntries.length ? h('span', { className: 'task-tab-badge' }, auditEntries.length) : null
-        ),
-        h('button', {
-          type: 'button',
-          role: 'tab',
-          id: 'runtime-tab-processes',
-          tabIndex: activeTab === 'processes' ? 0 : -1,
-          'aria-controls': 'runtime-dock-panel',
-          className: `runtime-dock-tab${activeTab === 'processes' ? ' active' : ''}`,
-          'aria-selected': activeTab === 'processes' ? 'true' : 'false',
-          onClick: () => onSelectTab('processes')
-        },
-          'Active Processes',
-          activeProcesses.length ? h('span', { className: 'task-tab-badge' }, activeProcesses.length) : null
-        )
-      ),
-      h('div', { className: 'runtime-dock-actions' },
-        activeTab === 'events'
-          ? h('a', { className: 'section-action', href: routeHref('activity') }, 'View all activity →')
-          : h('a', { className: 'section-action', href: routeHref('processes') }, 'View all processes →'),
-        h('button', {
-          type: 'button',
-          className: 'runtime-dock-close',
-          'aria-label': 'Close runtime dock',
-          onClick: onClose
-        }, h(Icon, { name: 'close', size: 14 }))
-      )
-    ),
-    h('div', { className: 'runtime-dock-body', id: 'runtime-dock-panel', role: 'tabpanel', 'aria-labelledby': `runtime-tab-${activeTab}`, tabIndex: 0 },
-      activeTab === 'events'
-        ? h(RuntimeDockEvents, { entries: auditEntries, activeTask })
-        : h(RuntimeDockProcesses, { processes: activeProcesses })
-    )
-  );
-}
-
-function RuntimeDockEvents({ entries = [], activeTask = null }) {
-  if (!entries.length && !activeTask) {
-    return h('div', { className: 'runtime-dock-empty' }, 'No live tool execution events recorded in this session.');
-  }
-  return h('div', { className: 'runtime-dock-list' },
-    activeTask ? h('div', { className: 'runtime-dock-item active-executing' },
-      h('span', { className: 'runtime-dock-status status-working', 'aria-hidden': 'true' }),
-      h('strong', { className: 'runtime-dock-tool' }, activeTask.lastTool || activeTask.tool?.name || 'Active task'),
-      h('span', { className: 'runtime-dock-summary' }, activeTask.currentActivity || activeTask.title || 'Executing…'),
-      h('span', { className: 'runtime-dock-time' }, workSessionStateView(activeTask).label)
-    ) : null,
-    entries.map((entry, idx) => {
-      const time = entry.ts || entry.timestamp || '';
-      const statusTone = entry.status === 'succeeded' || entry.status === 'ok' ? 'status-ok' : entry.status === 'failed' || entry.status === 'error' ? 'status-error' : 'status-neutral';
-      return h('div', { className: 'runtime-dock-item', key: entry.id || `${entry.ts}-${idx}` },
-        h('span', { className: `runtime-dock-status ${statusTone}`, 'aria-hidden': 'true' }),
-        h('code', { className: 'runtime-dock-tool' }, entry.tool?.name || entry.tool || entry.source || 'tool'),
-        h('span', { className: 'runtime-dock-summary' }, entry.summary || entry.message || entry.action || '—'),
-        h('span', { className: 'runtime-dock-time', 'data-clock-relative': time }, timeAgo(time))
-      );
-    })
-  );
-}
-
-function RuntimeDockProcesses({ processes = [] }) {
-  if (!processes.length) {
-    return h('div', { className: 'runtime-dock-empty' }, 'No background child processes currently active.');
-  }
-  return h('div', { className: 'runtime-dock-list' },
-    processes.map((proc, idx) => {
-      const state = processStateView(proc);
-      const pidText = proc.pid ? `PID ${proc.pid}` : '';
-      const key = proc.processId || proc.id || `${proc.pid}-${idx}`;
-      return h('div', { className: 'runtime-dock-item', key },
-        h('span', { className: `runtime-dock-status ${state.active ? 'status-working' : 'status-error'}`, 'aria-hidden': 'true' }),
-        h('strong', { className: 'runtime-dock-tool' }, proc.label || proc.commandSummary || 'Managed process'),
-        h('span', { className: 'runtime-dock-summary' }, pidText ? `${pidText} · ${proc.workspace || 'managed'}` : proc.workspace || 'managed'),
-        h('span', { className: 'runtime-dock-time' }, state.label)
-      );
-    })
-  );
-}
 
 function DesktopSidebar({ collapsed, extensionsEnabled, route, toggleSidebar }) {
   const surface = document.documentElement.dataset.surface || 'browser';

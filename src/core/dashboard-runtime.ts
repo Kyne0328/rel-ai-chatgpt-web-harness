@@ -2,6 +2,8 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 
 import { readAudit } from '../audit.js';
+import { verifyWorkspaceMutationRecovery } from '../mutationAutoRecovery.js';
+import { workspaceMutationSafetySummary } from '../mutationProcessOwnership.js';
 import { dashboardGoalStatus } from '../chatgptGoalMode.js';
 import * as configEditor from '../configEditor.js';
 import { ensureConfig, getConfigPath, readConfig } from '../config.js';
@@ -238,6 +240,18 @@ async function clearDashboardWorkspaceLocalData(config: JsonRecord, workspace: s
   }, { transaction: true });
   removeWorkspaceLocalAnalytics(config, workspace);
   clearWorkspaceValidationAffinity(config, workspace);
+}
+
+export async function dashboardVerifyWorkspaceMutation(alias: string, options: { override?: boolean; acknowledgement?: string } = {}): Promise<JsonRecord> {
+  const config = readConfig();
+  if (!alias || !Object.hasOwn(config.workspaces || {}, alias)) {
+    return { ok: false, error: 'Project is not configured.' };
+  }
+  const report = await verifyWorkspaceMutationRecovery(config, alias, options);
+  const block = workspaceMutationSafetySummary(config, alias, config.workspaces[alias].path);
+  return { ok: true, workspace: alias, released: report.released, overridden: report.overridden || 0,
+    riskAccepted: report.riskAccepted === true, blocked: Boolean(block),
+    message: block?.message || (report.riskAccepted ? 'Project reopened by owner override; execution termination was not verified.' : 'Project changes are available.') };
 }
 
 export async function dashboardTaskCodeWorkspace(taskId: string): Promise<JsonRecord> {

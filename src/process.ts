@@ -701,7 +701,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       }
       if (timeoutMs > 0) windowsTimeoutTimer = setTimeout(() => requestWindowsTermination('timeout'), timeoutMs);
     }
-    const mutationProcessRecorded = Boolean(recordCurrentMutationProcess(subprocess.pid, mutationProcessFile));
+    const mutationProcessRecorded = Boolean(recordCurrentMutationProcess(subprocess.pid, mutationProcessFile, execaOptions.detached ? subprocess.pid : 0));
     durableOutput = windowsJob && mutationProcessFile ? observeDurableProcessOutput(windowsJob.directory,
       (stream: string, buffer: Buffer) => {
         if (stream === 'stdout') { stdoutBytes += buffer.length; stdoutBuffer.append(buffer); }

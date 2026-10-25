@@ -91,7 +91,7 @@ function attachCurrentMutationProcessCgroup(reference, preparedFile) {
   return true;
 }
 
-function recordCurrentMutationProcess(pidValue, preparedFile = null) {
+function recordCurrentMutationProcess(pidValue, preparedFile = null, processGroupId = 0) {
   const current = ownershipContext.getStore();
   const pid = Number(pidValue);
   if (!current || !Number.isSafeInteger(pid) || pid <= 0) return null;
@@ -111,6 +111,7 @@ function recordCurrentMutationProcess(pidValue, preparedFile = null) {
     authorityStatus: current.authority ? 'bound' : 'unbound',
     ...(current.concurrentValidation ? { concurrentValidation: true } : {}),
     pid,
+    ...(process.platform !== 'win32' && processGroupId === pid ? { processGroupId: pid } : {}),
     phase: 'active',
     terminationUncertain: true,
     startedAt: new Date().toISOString()

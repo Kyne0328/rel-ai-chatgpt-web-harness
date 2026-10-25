@@ -419,6 +419,7 @@ function findingId(value) {
 }
 
 function normalizeHealthCode(value) {
+  if (value === 'workspace_mutation_blocked') return value;
   if (value === 'workspace_unavailable') return ERROR_CODES.WORKSPACE_UNAVAILABLE;
   return ERROR_CODES.CONFIGURATION_INVALID;
 }

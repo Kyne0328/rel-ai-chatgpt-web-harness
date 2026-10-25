@@ -101,12 +101,6 @@
 .task-detail-section > h3, .task-detail-heading h3 { @apply text-[13px] font-bold; }
 .task-detail-heading { @apply flex items-center justify-between gap-3; }
 .task-detail-heading > span { @apply inline-flex min-h-7 min-w-7 items-center justify-center rounded-full px-2 text-[13px] font-semibold; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); color: var(--ui-text-secondary); }
-.task-plan-filter-bar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 2px; }
-.task-plan-filter-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 2px 10px; border: 1px solid var(--ui-border-control); border-radius: var(--radius-md); background: var(--ui-surface-secondary); color: var(--ui-text-secondary); font-size: 13px; font-weight: 600; cursor: pointer; transition: all var(--dur-fast) var(--ease); }
-.task-plan-filter-chip:hover { background: var(--ui-surface-raised); color: var(--ui-text-primary); border-color: var(--ui-border-default); }
-.task-plan-filter-chip.active { background: var(--ui-selection-background); color: var(--ui-text-primary); border-color: color-mix(in srgb, var(--ui-action-primary) 38%, transparent); font-weight: 600; }
-.task-plan-filter-chip:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 1px; }
-.task-plan-empty-filter { padding: 12px; font-size: 13px; color: var(--ui-text-tertiary); text-align: center; list-style: none; }
 .task-plan-list { @apply m-0 grid list-none gap-1.5 p-0; }
 .task-plan-step { @apply relative grid min-w-0 items-start gap-2 px-2.5 py-2; grid-template-columns: 22px minmax(0,1fr); border-radius: var(--radius-md); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); transition: all var(--dur-fast) var(--ease); }
 .task-plan-header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }

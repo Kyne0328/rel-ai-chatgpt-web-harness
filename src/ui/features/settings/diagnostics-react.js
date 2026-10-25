@@ -31,7 +31,6 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
   const [reportState, setReportState] = useState(() => ({ workspace, report: null, error: '' }));
   const report = reportState.workspace === workspace ? reportState.report : null;
   const loadError = reportState.workspace === workspace ? reportState.error : '';
-  const [activeSection, setActiveSection] = useState('all');
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [live, setLive] = useState(false);
   const [busy, setBusy] = useState('');
@@ -223,26 +222,9 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
     } finally { setBusy(''); }
   };
 
-  const SECTIONS = [
-    { id: 'all', label: 'All Details' },
-    { id: 'checks', label: 'Health & Checks' },
-    { id: 'resources', label: 'System Resources' },
-    { id: 'logs', label: 'Logs & Activity' }
-  ];
-
   return h('div', { className: 'settings-content system-content' },
-    h('div', { className: 'diagnostic-page', 'data-diagnostics-react': '', 'data-active-section': activeSection },
+    h('div', { className: 'diagnostic-page', 'data-diagnostics-react': '' },
       h('div', { className: 'section-head diagnostic-page-head' },
-        h('div', { className: 'diagnostic-section-nav', role: 'tablist', 'aria-label': 'Troubleshooting sections' },
-          SECTIONS.map(sec => h('button', {
-            key: sec.id,
-            type: 'button',
-            role: 'tab',
-            className: `diagnostic-section-pill${activeSection === sec.id ? ' active' : ''}`,
-            'aria-selected': activeSection === sec.id ? 'true' : 'false',
-            onClick: () => setActiveSection(sec.id)
-          }, sec.label))
-        ),
         h('div', { className: 'section-head-actions diagnostic-page-actions' },
           h('button', { className: 'secondary', type: 'button', disabled: !report?.reportText || busy === 'copy', onClick: () => void copyReport() },
             h(Icon, { name: 'copy', size: 14 }),

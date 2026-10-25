@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { restoreWindowsProcessJob } from './windowsProcessJob.ts';
 import { validateLinuxMutationCgroup, linuxMutationCgroupEmpty } from './linuxMutationCgroup.js';
 import { getStateDir } from './statePaths.js';
+import { currentMutationBootIdentity } from './mutationBootIdentity.js';
 import { privatelyOwnedWindowsPaths } from './mutationWindowsStateAcl.js';
 
 const execFileAsync = promisify(execFile);
@@ -100,18 +101,38 @@ async function inspectStoppedWsl(request, job) {
   return unknown('The owned WSL cgroup cannot be inspected.');
 }
 
-// One recovery contract for every execution owner. Recorded status and absent
-// root PIDs never substitute for kernel containment or execution-host evidence.
+// For POSIX commands launched as detached session leaders, a missing process
+// group proves that the launcher and members still in that group have exited.
+// A missing root PID alone is not proof: descendants may still be running.
+// Legacy records with no group identity remain protected.
+async function inspectPosixMutationGroup(record, boot = undefined, signal = process.kill, platform = process.platform) {
+  const currentBoot = boot === undefined ? await currentMutationBootIdentity() : boot;
+  const group = Number(record?.processGroupId || 0);
+  if (!['linux', 'darwin'].includes(platform) || !Number.isSafeInteger(group) || group <= 0
+    || group !== Number(record?.pid) || !currentBoot || !record?.bootIdentity
+    || record.bootIdentity.platform !== currentBoot.platform || record.bootIdentity.host !== currentBoot.host) {
+    return unknown('Process group ownership cannot be verified.');
+  }
+  if (record.bootIdentity.boot !== currentBoot.boot) return { status: 'stopped', reason: 'verified-record-boot' };
+  try {
+    signal(-group, 0);
+    return { status: 'running', reason: 'verified-posix-group-present' };
+  } catch (error) {
+    if (error?.code === 'ESRCH') return { status: 'stopped', reason: 'verified-posix-group-empty' };
+    if (error?.code === 'EPERM') return { status: 'running', reason: 'verified-posix-group-present' };
+    return unknown('Process group inspection failed.');
+  }
+}
+
+// Native containers remain authoritative. The group fallback covers macOS
+// and Linux hosts without delegated cgroup v2.
 async function inspectOwnedExecution(config, record) {
   try {
     if (record.nativeCgroup) {
-      return linuxMutationCgroupEmpty(record.nativeCgroup)
-        ? { status: 'stopped', reason: 'verified-linux-cgroup-empty' }
-        : validateLinuxMutationCgroup(record.nativeCgroup)
-          ? { status: 'running', reason: 'verified-linux-cgroup-populated' }
-          : unknown('The owned Linux cgroup cannot be inspected.');
+      if (linuxMutationCgroupEmpty(record.nativeCgroup)) return { status: 'stopped', reason: 'verified-linux-cgroup-empty' };
+      if (validateLinuxMutationCgroup(record.nativeCgroup)) return { status: 'running', reason: 'verified-linux-cgroup-populated' };
     }
-    if (!record.nativeJob) return unknown('This older execution has no independently queryable process container.');
+    if (!record.nativeJob) return inspectPosixMutationGroup(record);
     const directory = await nativeJobDirectory(config, record.nativeJob);
     if (!directory) return unknown('The native job reference cannot be verified.');
     const request = JSON.parse(fs.readFileSync(path.join(directory, 'request.json'), 'utf8'));
@@ -135,4 +156,4 @@ async function inspectOwnedExecution(config, record) {
   } catch (error) { return unknown(`Execution inspection failed: ${String(error.message || error)}`); }
 }
 
-export { inspectOwnedExecution };
+export { inspectOwnedExecution, inspectPosixMutationGroup };

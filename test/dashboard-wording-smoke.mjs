@@ -33,6 +33,13 @@ const errorState = resolveBridgeState({
 });
 assert.equal(errorState.tone, 'bad', 'error health findings must still block readiness');
 assert.equal(errorState.kicker, 'Needs attention');
+const mutationBlockedState = resolveBridgeState({
+  findings: [{ severity: 'error', code: 'workspace_mutation_blocked', workspace: 'one-ui-peridot' }],
+  connectionState: readyConnectionState
+});
+assert.equal(mutationBlockedState.actionLabel, 'Verify project recovery');
+assert.equal(mutationBlockedState.actionHref, '#workspaces?workspace=one-ui-peridot');
+assert.match(mutationBlockedState.description, /connection is working/i);
 const missingProjectState = resolveBridgeState({
   workspaces: [{ alias: 'deleted-project', path: 'C:/projects/deleted-project' }],
   findings: [{ severity: 'error', code: 'workspace_unavailable', workspace: 'deleted-project', message: "Workspace 'deleted-project' path does not exist: C:/projects/deleted-project" }],
@@ -105,6 +112,21 @@ if (!dashboardLogin.ok) {
 }
 const dashboardCookie = String(dashboardLogin.headers.get('set-cookie') || '').split(';')[0];
 await dashboardLogin.arrayBuffer();
+const recoveryUrl = `http://127.0.0.1:${port}/api/workspace/mutation-recovery`;
+const recoveryBody = JSON.stringify({ workspace: 'unconfigured-test-project' });
+const unauthenticatedRecovery = await fetch(recoveryUrl, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: recoveryBody
+});
+assert.equal(unauthenticatedRecovery.status, 401, 'project mutation recovery must require dashboard authorization');
+const forcedRecovery = await fetch(recoveryUrl, {
+  method: 'POST', headers: { cookie: dashboardCookie, 'content-type': 'application/json' },
+  body: JSON.stringify({ workspace: 'unconfigured-test-project', force: true })
+});
+assert.equal(forcedRecovery.status, 400, 'project mutation recovery must not permit a forced unlock');
+const unknownRecovery = await fetch(recoveryUrl, {
+  method: 'POST', headers: { cookie: dashboardCookie, 'content-type': 'application/json' }, body: recoveryBody
+});
+assert.equal(unknownRecovery.status, 404, 'recovery must not accept unconfigured project identities');
 const dashboardUrl = `http://127.0.0.1:${port}/api/dashboard/v10`;
 const dashboardResponse = await fetch(dashboardUrl, { headers: { cookie: dashboardCookie } });
 if (!dashboardResponse.ok) {

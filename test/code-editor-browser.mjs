@@ -72,9 +72,7 @@ try {
   assert.equal(result.inspectorOrphanRecovery, true);
   assert.ok(result.inspectorVirtualRows > 8 && result.inspectorVirtualRows < 100, 'loaded task events have a bounded rendered window');
   assert.equal(result.inspectorSingleScroll, true, 'task activity must share the outer task inspector scrollbar');
-  assert.equal(result.dockNewestEvent, 'Dock event 24');
-  assert.equal(result.dockCurrentTask, true);
-  assert.deepEqual(result.dockAccessibility, [], 'the dock control must have an accessible name matching its visible label');
+  assert.equal(result.runtimeDockRemoved, true, 'redundant Runtime dock and shortcut must be absent');
   assert.equal(result.editorPresent, true, 'Monaco editor must render');
   assert.equal(result.inlineDiffEditor, true, 'the Changes surface must render task changes with Monaco diff rendering');
   assert.equal(result.readOnly, true, 'the rendered task diff must be read-only');

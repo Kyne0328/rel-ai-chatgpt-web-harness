@@ -25,6 +25,7 @@ function compactProjectInstructions(value) {
   return prune({
     sources,
     content,
+    ...(value.engineeringWorkflow ? { engineeringWorkflow: String(value.engineeringWorkflow) } : {}),
     truncated: value.truncated === true ? true : undefined,
     ...(sources.length > 1 && value.precedence ? { precedence: String(value.precedence) } : {}),
     ...(String(value.targetPath || '.') !== '.' ? { targetPath: String(value.targetPath) } : {}),
