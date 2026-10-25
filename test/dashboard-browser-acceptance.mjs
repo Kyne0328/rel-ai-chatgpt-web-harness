@@ -100,6 +100,11 @@ try {
   assert.doesNotMatch(result.initialHydration.during.loadingText, /Loading Rel\.AI|Checking your connection/i, JSON.stringify(result.initialHydration));
   assert.ok(result.initialHydration.after.workspaceCount >= 1, JSON.stringify(result.initialHydration));
   assert.equal(result.initialHydration.after.falseEmpty, false, JSON.stringify(result.initialHydration));
+  assert.deepEqual(result.errorStateInteractions, {
+    pageErrorLabel: 'Page error',
+    retryError: 'Fixture recovery failed.',
+    connectionErrorLabel: 'Connection error'
+  }, 'page and connection failures must use accurate labels and reject failed recovery actions visibly');
   assert.ok(result.initial.rowCount >= 9);
   for (const label of ['queued', 'planning', 'running', 'blocked', 'validating', 'completed', 'failed', 'cancelled']) {
     assert.ok(result.initial.rowText.some(text => text.toLowerCase().includes(label)), `Missing rendered state: ${label}`);

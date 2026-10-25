@@ -289,6 +289,7 @@ app.whenReady().then(async () => {
     })()`);
 
     win.setSize(420, 760);
+    await waitFor(win, `innerWidth <= 420`);
     await win.webContents.executeJavaScript(`document.querySelector('#toolsToolbar .filter-choice-trigger').click()`);
     await waitFor(win, `document.querySelector('.filter-drawer input[type="radio"]')`);
     tools.mobileFallback = await win.webContents.executeJavaScript(`Boolean(document.querySelector('#__relai-drawer-backdrop') && document.querySelector('.filter-drawer input[type="radio"]'))`);
@@ -546,7 +547,7 @@ app.whenReady().then(async () => {
     await win.webContents.setZoomFactor(1);
     for (const requestedWidth of [980, 760, 520, 420]) {
       win.setContentSize(requestedWidth, 760);
-      await delay(180);
+      await waitFor(win, `Math.abs(innerWidth - ${requestedWidth}) <= 2`);
       await win.webContents.executeJavaScript(`location.hash = '#activity'`);
       await waitFor(win, `document.querySelector('#__activity-filter-bar .filter-open-button')`);
       const measurement = await win.webContents.executeJavaScript(`(() => {

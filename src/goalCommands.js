@@ -29,12 +29,13 @@ function parseGoalCommand(message) {
 }
 
 function validateWorkMode(args = {}) {
-  if (!['normal', 'goal', 'loop'].includes(args.mode)) throw new Error('Work begin requires mode: normal, goal, or loop.');
+  const mode = args.mode === undefined ? 'normal' : args.mode;
+  if (!['normal', 'goal', 'loop'].includes(mode)) throw new Error('Work mode must be normal, goal, or loop.');
   const monitoringOptions = ['strategy', 'successCriteria', 'brief', 'conversationUrl', 'chatgptProjectName']
     .some(key => args[key] !== undefined);
-  if (args.mode === 'normal' && monitoringOptions || args.goal === true && args.mode !== 'goal'
-    || args.mode !== 'normal' && args.goal === false) throw new Error('Conflicting work mode and Goal/Loop options.');
-  return args.mode;
+  if (mode === 'normal' && monitoringOptions || args.goal === true && mode !== 'goal'
+    || mode !== 'normal' && args.goal === false) throw new Error('Conflicting work mode and Goal/Loop options.');
+  return mode;
 }
 
 export { parseGoalCommand, validateWorkMode };

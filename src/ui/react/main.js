@@ -236,6 +236,7 @@ export function showShellDashboardState(options = {}) {
     routeState: {
       id: ++sequence,
       kind: options.kind === 'error' ? 'error' : 'loading',
+      errorLabel: String(options.errorLabel || ''),
       title: String(options.title || ''),
       description: String(options.description || ''),
       primaryLabel: String(options.primaryLabel || ''),
@@ -909,13 +910,17 @@ function retryActiveRoute() {
   return undefined;
 }
 
-function DashboardState({ kind = 'loading', title, description, primaryLabel = '', primaryBusyLabel = '', onPrimary = null, secondaryLabel = '', secondaryBusyLabel = '', onSecondary = null, diagnosticsHref = '' }) {
+function DashboardState({ kind = 'loading', errorLabel = '', title, description, primaryLabel = '', primaryBusyLabel = '', onPrimary = null, secondaryLabel = '', secondaryBusyLabel = '', onSecondary = null, diagnosticsHref = '' }) {
   const [busy, setBusy] = useState('');
+  const [actionError, setActionError] = useState('');
   const loading = kind === 'loading';
   const run = async (key, action) => {
     if (busy || typeof action !== 'function') return;
     setBusy(key);
-    try { await action(); } finally { setBusy(''); }
+    setActionError('');
+    try { await action(); }
+    catch (error) { setActionError(error instanceof Error ? error.message : 'The action failed. Try again.'); }
+    finally { setBusy(''); }
   };
   if (loading) {
     return h('div', {
@@ -939,9 +944,10 @@ function DashboardState({ kind = 'loading', title, description, primaryLabel = '
     className: 'dashboard-state',
     role: 'alert'
   }, h('div', { className: 'dashboard-state-card' },
-    h(StatusPill, { label: 'Connection error', tone: 'bad' }),
+    h(StatusPill, { label: errorLabel || 'Page error', tone: 'bad' }),
     h('h2', null, title),
     h('p', null, description),
+    actionError ? h('p', { role: 'alert' }, actionError) : null,
     h('div', { className: 'dashboard-state-actions' },
       onPrimary ? h('button', { className: 'primary', type: 'button', disabled: Boolean(busy), onClick: () => { void run('primary', onPrimary); } }, busy === 'primary' ? primaryBusyLabel : primaryLabel) : null,
       onSecondary ? h('button', { className: 'secondary', type: 'button', disabled: Boolean(busy), onClick: () => { void run('secondary', onSecondary); } }, busy === 'secondary' ? secondaryBusyLabel : secondaryLabel) : null,

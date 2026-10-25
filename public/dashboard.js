@@ -240,6 +240,7 @@ function showDashboardFailure(title, description, data = {}) {
   const canRelaunch = typeof window.relaiDesktop?.relaunchApp === 'function';
   showShellDashboardState({
     kind: 'error',
+    errorLabel: 'Connection error',
     title,
     description,
     primaryLabel: recovery.label,

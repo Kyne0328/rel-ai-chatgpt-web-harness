@@ -1103,7 +1103,7 @@ test('Goal Mode reuses relai_work and is opt-in on begin', () => {
   assert.ok(begin);
   assert.equal(begin.properties.goal.type, 'boolean');
   assert.equal(begin.required.includes('goal'), false);
-  assert.equal(begin.required.includes('mode'), true);
+  assert.equal(begin.required.includes('mode'), false, 'ordinary tasks must not require selecting Goal/Loop Mode');
   assert.deepEqual(begin.properties.mode.enum, ['normal', 'goal', 'loop']);
   assert.ok(branches.some(branch => branch.properties?.action?.const === 'goal_status'));
   assert.ok(branches.some(branch => branch.properties?.action?.const === 'goal_stop'));
@@ -1996,17 +1996,21 @@ test('legacy linked tasks verify an exact old receipt without resetting continua
 });
 
 
-test('explicit work mode is required and normal connector work never discovers chats', async t => {
+test('omitted work mode defaults to normal and never discovers chats', async t => {
   await withMonitoredGoal(t, async f => {
     withStateDatabase(f.config, db => db.prepare('DELETE FROM state_meta WHERE key=?').run('chatgpt_goal:' + f.work_id), { transaction: true });
-    for (const args of [{}, { goal: true }, { mode: 'normal', goal: true }, { mode: 'loop', goal: true }, { mode: 'goal', goal: false }]) {
+    for (const args of [{ goal: true }, { mode: 'normal', goal: true }, { mode: 'loop', goal: true }, { mode: 'goal', goal: false }, { mode: 'unknown' }]) {
       assert.throws(() => validateWorkMode(args), /mode|Conflicting/);
     }
+    assert.equal(validateWorkMode({}), 'normal');
+    assert.equal(validateWorkMode({ mode: 'normal' }), 'normal');
+    assert.equal(validateWorkMode({ mode: 'goal' }), 'goal');
+    assert.equal(validateWorkMode({ mode: 'loop' }), 'loop');
     let reads = 0;
     configureGoalBrowserTransport(async () => { reads++; throw new Error('Normal work cannot contact ChatGPT'); });
     try {
       const result = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(f.config,
-        { mode: 'normal', goal: false, title: 'Ordinary work' }, { ...f.context, connector: true }));
+        { title: 'Ordinary work' }, { ...f.context, connector: true }));
       assert.deepEqual(result.modeAcknowledgement, { requested: 'normal', effective: 'normal', readiness: 'ready' });
       assert.equal(result.chat_link, undefined);
       startGoalMonitor(f.config);

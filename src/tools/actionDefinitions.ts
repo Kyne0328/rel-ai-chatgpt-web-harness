@@ -196,8 +196,8 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_work',
-    title: 'Manage Goal Work',
-    description: 'Tasks: begin with mode:normal|goal|loop and non-empty steps; verify modeAcknowledgement. Normal never scans chats. Reuse work_id and update plans. status/history/context recover facts; result retrieves operationId. stop(operationId) stops a command; cancel stops the task. Finish after settlement; projectless utilities run taskless.',
+    title: 'Manage Rel.AI Tasks',
+    description: 'Tasks: begin with non-empty steps; omit mode for ordinary work (defaults normal). Use mode:goal or mode:loop ONLY when the user explicitly requests automatic Goal/Loop monitoring, not because work is complex or lengthy. Normal mode never scans chats, and finish closes the task. For active Loop Mode, finish only records an iteration; complete closes it. Reuse work_id and update plans. status/history/context recover facts; result retrieves operationId. stop(operationId) stops a command; cancel stops the task. Projectless utilities run taskless.',
     // stop/cancel can terminate running work; the aggregate descriptor covers every action.
     annotations: annotations(false, true, false, false),
     behavior: { taskScope: 'optional', executionClass: 'always_immediate' },

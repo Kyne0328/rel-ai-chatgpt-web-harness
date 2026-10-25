@@ -210,7 +210,10 @@ assert.match(editSchema.inputSchema.properties.content.description, /staged inte
 assert.match(editSchema.inputSchema.properties.updateText.description, /One logical patch can contain repository-wide changes/i);
 assert.deepEqual(editSchema.inputSchema.properties.stage.enum, ['start', 'append', 'commit', 'abort'], 'canonical executable schema must retain the internal staged transport lifecycle');
 
+await valid('relai_work', { action: 'begin', workspace: 'repo' });
 await valid('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo' });
+assert.deepEqual(publicSchemaByName.get('relai_work').inputSchema.properties.mode.enum, ['normal', 'goal', 'loop'], 'public connector discovery must expose ordinary normal mode alongside explicit Goal/Loop');
+assert.ok(!schemaByName.get('relai_work').inputSchema.oneOf.find(branch => branch.properties?.action?.const === 'begin').required.includes('mode'), 'begin must not require a mode to create normal work');
 await valid('relai_work', { mode: 'normal', action: 'begin', workspace: 'repo', steps: [{ id: 'goal', title: 'Complete goal', status: 'in_progress' }] });
 await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'planned' });
 await invalid('relai_work', { action: 'begin', workspace: 'repo', mode: 'direct' });

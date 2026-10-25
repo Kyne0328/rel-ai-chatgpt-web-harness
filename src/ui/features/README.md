@@ -47,14 +47,14 @@ Geometry is role-based in `styles/app.css`:
 
 | Role | Token / contract |
 | --- | --- |
-| Normal action and field | `--control-height` = 44px, `--control-radius` = 7px |
+| Normal action and field | `--control-height` = 44px, `--control-radius` = 8px |
 | Dense desktop action | `--control-height-dense` = 36px; explicit `.dense-button`, 44px for coarse pointers |
 | Compact action copy | `.compact-button` reduces padding/type only; its target remains 44px |
-| Card and composite container | `--card-radius` = 10px, `--card-inset` = 16px |
-| Dialog or drawer | `--overlay-radius` = 13px, `--overlay-inset` = 20px |
+| Card and composite container | `--card-radius` = 12px, `--card-inset` = 16px |
+| Dialog or drawer | `--overlay-radius` = 16px, `--overlay-inset` = 20px |
 | Search/filter container | `--filter-inset` = 12px, `--stack-gap` = 12px |
-| Selection control | `--selection-radius` = 7px; use semantic selection/action colors |
-| Technical output | `--technical-font-size` = 12px, `--technical-line-height` = 1.6, `--technical-radius` = 7px |
+| Selection control | `--selection-radius` = 8px; use semantic selection/action colors |
+| Technical output | `--technical-font-size` = 13px, `--technical-line-height` = 1.6, `--technical-radius` = 8px |
 | Noninteractive status | `--status-height` = 36px; explicit `.status-pill-compact` = 24px |
 | Text hierarchy | `--text-page-title`, `--text-section-title`, `--text-card-title`, `--text-metric`, `--text-metric-compact` |
 

@@ -285,7 +285,7 @@
   }
   .mobile-nav { @apply hidden; }
   .topbar {
-    @apply sticky top-0 mb-4 flex min-h-[64px] items-center justify-between gap-6 px-0 py-2;
+    @apply sticky top-0 mb-4 flex shrink-0 min-h-[64px] items-center justify-between gap-6 px-0 py-2;
     z-index: var(--z-topbar);
     background: var(--ui-canvas);
     border-bottom: 1px solid var(--ui-border-subtle);

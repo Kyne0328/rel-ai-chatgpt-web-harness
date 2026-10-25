@@ -78,9 +78,10 @@ try {
   }
 
   resetToolActivity();
-  const plainReadTask = await callTool('relai_work', { mode: 'normal',
+  const plainReadTask = await callTool('relai_work', {
     action: 'begin', workspace: 'plain', bootstrap: 'none'
   }, { publicHttpOnly: true });
+  assert.equal(plainReadTask.modeAcknowledgement.effective, 'normal', 'omitted mode must create an ordinary task');
   const plainReadCompletion = await callTool('relai_work', {
     action: 'finish', workspace: 'plain', work_id: plainReadTask.work_id,
     summary: 'Read-only non-Git task completed.'

@@ -416,6 +416,9 @@ app.whenReady().then(async () => {
       })()`);
       win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Tab' });
       win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Tab' });
+      // Electron input events are asynchronous; finish Tab navigation before
+      // checking whether programmatic focus stays on Quick navigation.
+      await waitFor(win, `document.activeElement !== window.__responsiveContentFocus`);
       await win.webContents.executeJavaScript(`document.getElementById('commandPaletteBtn').focus()`);
       await waitForCapturePaint(win);
       measurement.headerControlFocus = await win.webContents.executeJavaScript(`(() => {
@@ -424,6 +427,8 @@ app.whenReady().then(async () => {
         const bottom = getComputedStyle(nav).display === 'none' ? innerHeight : Math.min(innerHeight, navRect.top);
         const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         return { focused: document.activeElement === button, focusVisible: button.matches(':focus-visible'),
+          activeElement: document.activeElement?.id || document.activeElement?.className || document.activeElement?.tagName || '',
+          documentFocused: document.hasFocus(), buttonConnected: button.isConnected,
           left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, contentBottom: bottom,
           contained: rect.left >= 0 && rect.right <= innerWidth + 1 && rect.top >= 0 && rect.bottom <= bottom + 1,
           unobscured: Boolean(hit && button.contains(hit)) };
@@ -581,6 +586,34 @@ app.whenReady().then(async () => {
   }
 
   const uiuxCoverage = await exerciseUIUXCoverage({ win, axePath, screenshotDir, auditAccessibility, waitFor, waitForCapturePaint });
+
+  // Exercise the mounted production error route and an async recovery failure.
+  await win.webContents.executeJavaScript(`(async () => {
+    const { showShellDashboardState } = await import('/public/dashboard-react.js');
+    showShellDashboardState({
+      kind: 'error',
+      title: 'Fixture route failure',
+      description: 'The route failed to render.',
+      primaryLabel: 'Retry page',
+      onPrimary: async () => { throw new Error('Fixture recovery failed.'); }
+    });
+  })()`);
+  await waitFor(win, `document.querySelector('.dashboard-state-card h2')?.textContent === 'Fixture route failure'`);
+  const pageErrorLabel = await win.webContents.executeJavaScript(`document.querySelector('.dashboard-state-card .status-pill')?.textContent.trim()`);
+  await win.webContents.executeJavaScript(`document.querySelector('.dashboard-state-actions button')?.click()`);
+  await waitFor(win, `document.querySelector('.dashboard-state-card [role="alert"]')?.textContent === 'Fixture recovery failed.'`);
+  const retryError = await win.webContents.executeJavaScript(`document.querySelector('.dashboard-state-card [role="alert"]')?.textContent`);
+  await win.webContents.executeJavaScript(`(async () => {
+    const { showShellDashboardState } = await import('/public/dashboard-react.js');
+    showShellDashboardState({ kind: 'error', errorLabel: 'Connection error', title: 'Fixture connection failure' });
+  })()`);
+  await waitFor(win, `document.querySelector('.dashboard-state-card h2')?.textContent === 'Fixture connection failure'`);
+  const connectionErrorLabel = await win.webContents.executeJavaScript(`document.querySelector('.dashboard-state-card .status-pill')?.textContent.trim()`);
+  await win.webContents.executeJavaScript(`(async () => {
+    const { clearShellDashboardState } = await import('/public/dashboard-react.js');
+    clearShellDashboardState();
+  })()`);
+  const errorStateInteractions = { pageErrorLabel, retryError, connectionErrorLabel };
   const fontFaces = await win.webContents.executeJavaScript(`Promise.all(['Geist Variable', 'Geist Mono Variable'].map(async family => {
     const faces = await document.fonts.load('400 15px "' + family + '"', 'Rel.AI');
     return { family, loaded: faces.length > 0 && faces.every(face => face.status === 'loaded') };
@@ -593,6 +626,7 @@ app.whenReady().then(async () => {
     fontFaces,
     fontCacheRecovery,
     uiuxCoverage,
+    errorStateInteractions,
     initialHydration,
     initial,
     liveToolUpdate,
