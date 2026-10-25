@@ -8,7 +8,7 @@ import { runProcess } from './process.js';
 import { parseGitStatus } from './repo/gitStatus.js';
 import { collectOptionsFromWorkspace, createCollectionPathFilter, isSecretPath, looksBinary, resolveSafePath } from './safety.js';
 import { readTaskHistorySessionRecord } from './taskHistoryStore.ts';
-import { readTaskIntegrity, taskOwnedChangedFiles } from './taskIntegrity.ts';
+import { readTaskIntegrity, taskCommitOwnership } from './taskIntegrity.ts';
 
 const MAX_DIFF_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_CHANGED_FILES = 500;
@@ -19,10 +19,18 @@ const HISTORICAL_LOG_LIMIT = 200;
 async function describeTaskCodeWorkspace(config, payload = {}) {
   const context = resolveTaskCodeContext(config, payload.taskId);
   const live = await listLiveTaskChanges(config, context);
-  const historical = live.changedFiles.length
-    ? null
-    : await listHistoricalTaskChanges(config, context);
-  const changes = historical || live;
+  const historical = await listHistoricalTaskChanges(config, context, live.changedFiles);
+  const changes = live.changedFiles.length && historical?.changedFiles.length
+    ? {
+        changedFiles: [...live.changedFiles, ...historical.changedFiles].slice(0, MAX_CHANGED_FILES),
+        changedFileStatuses: { ...historical.changedFileStatuses, ...live.changedFileStatuses },
+        historyMode: 'mixed',
+        historyAvailable: historical.historyAvailable,
+        commitHeads: historical.commitHeads,
+        commitSource: historical.commitSource,
+        truncated: live.truncated || historical.truncated || live.changedFiles.length + historical.changedFiles.length > MAX_CHANGED_FILES
+      }
+    : historical || live;
   return {
     ok: true,
     work_id: context.taskId,
@@ -54,22 +62,24 @@ async function readTaskCodeDiff(config, payload = {}) {
     return readLiveTaskDiff(config, context, requestedPath);
   }
 
-  const historical = await historicalCommitContext(config, context);
+  const historical = await historicalCommitContext(config, context, historicalTaskFiles(context).filter(file => !live.changedFiles.includes(file)));
   if (historical.commitHeads.length) {
     return readHistoricalTaskDiff(config, context, requestedPath, historical);
   }
 
-  const recorded = historicalTaskFiles(context);
-  if (recorded.includes(requestedPath)) {
-    // Current content is not evidence of the task's original diff.
-    const current = await readOptionalTextFile(context.executionPath, requestedPath);
-    return { ok: true, work_id: context.taskId, workspace: context.baseWorkspace.alias,
-      path: current.path, content: current.content, sha256: current.sha256, exists: current.exists,
-      baseAvailable: false, historyMode: 'unavailable', historyAvailable: false,
-      language: viewerLanguage(current.path), readOnly: true, writable: false };
-  }
+  return readUnverifiedTaskFile(context, requestedPath);
+}
 
-  throw new Error(`The selected file is not recorded as a change for this task: ${requestedPath}`);
+async function readUnverifiedTaskFile(context, requestedPath) {
+  if (!historicalTaskFiles(context).includes(requestedPath)) {
+    throw new Error(`The selected file is not recorded as a change for this task: ${requestedPath}`);
+  }
+  // Current content must never be represented as an earlier task revision.
+  const current = await readOptionalTextFile(context.executionPath, requestedPath);
+  return { ok: true, work_id: context.taskId, workspace: context.baseWorkspace.alias,
+    path: current.path, content: current.content, sha256: current.sha256, exists: current.exists,
+    baseAvailable: false, historyMode: 'unavailable', historyAvailable: false,
+    language: viewerLanguage(current.path), readOnly: true, writable: false };
 }
 
 function resolveTaskCodeContext(config, taskIdValue) {
@@ -101,12 +111,13 @@ function resolveTaskCodeContext(config, taskIdValue) {
 }
 
 async function listLiveTaskChanges(config, context) {
-  const repositoryChanges = await repositoryChangedEntries(config, context.executionPath, taskOwnedChangedFiles(config, context.taskId, context.taskWorkspaceAlias));
-  const ownedChanges = new Set(
-    taskOwnedChangedFiles(config, context.taskId, context.taskWorkspaceAlias)
-      .map(normalizePath)
-      .filter(Boolean)
-  );
+  // Historical task-owned paths are not necessarily current uncommitted work.
+  const ownership = taskCommitOwnership(config, context.taskId);
+  const conflicts = new Set(ownership.conflictingFiles);
+  const ownedChanges = new Set(ownership.ownedFiles.map(normalizePath)
+    .filter(file => file && !conflicts.has(file)));
+  const repositoryChanges = ownedChanges.size
+    ? await repositoryChangedEntries(config, context.executionPath, [...ownedChanges]) : [];
   const changedEntries = repositoryChanges
     .filter(entry => ownedChanges.has(entry.path))
     .filter(entry => isSelectableChangeEntry(context.executionPath, entry))
@@ -115,7 +126,7 @@ async function listLiveTaskChanges(config, context) {
   const lineStats = await gitLineStats(config, context.executionPath, ['diff', '--no-ext-diff', '--numstat', 'HEAD'], changedFiles);
   return {
     changedFiles,
-    changedFileStatuses: Object.fromEntries(changedEntries.map(entry => [entry.path, { ...changeStatus(entry), ...lineStats[entry.path] }])),
+    changedFileStatuses: Object.fromEntries(changedEntries.map(entry => [entry.path, { ...changeStatus(entry), ...lineStats[entry.path], historyMode: 'live' }])),
     historyMode: 'live',
     historyAvailable: true,
     commitHeads: [],
@@ -124,15 +135,16 @@ async function listLiveTaskChanges(config, context) {
   };
 }
 
-async function listHistoricalTaskChanges(config, context) {
-  const taskFiles = historicalTaskFiles(context);
+async function listHistoricalTaskChanges(config, context, liveFiles = []) {
+  const live = new Set(liveFiles);
+  const taskFiles = historicalTaskFiles(context).filter(file => !live.has(file));
   if (!taskFiles.length) return null;
   const historical = await historicalCommitContext(config, context, taskFiles);
   if (!historical.commitHeads.length) {
     return {
       changedFiles: taskFiles,
       changedFileStatuses: Object.fromEntries(taskFiles.map(file => [file, {
-        code: '?', label: 'Historical change', tone: 'neutral'
+        code: '?', label: 'Recorded file (diff unverified)', tone: 'neutral', historyMode: 'unavailable'
       }])),
       historyMode: 'unavailable',
       historyAvailable: false,
@@ -144,14 +156,15 @@ async function listHistoricalTaskChanges(config, context) {
 
   const entries = await historicalChangedEntries(config, context, historical.commitHeads, taskFiles);
   const entryByPath = new Map(entries.map(entry => [entry.path, entry]));
-  const changedFiles = taskFiles.filter(file => entryByPath.has(file));
-  if (!changedFiles.length) return null;
-  const lineStats = await historicalLineStats(config, context, historical.commitHeads, changedFiles);
+  const verifiedFiles = taskFiles.filter(file => entryByPath.has(file));
+  const lineStats = verifiedFiles.length ? await historicalLineStats(config, context, historical.commitHeads, verifiedFiles) : {};
   return {
-    changedFiles,
-    changedFileStatuses: Object.fromEntries(changedFiles.map(file => [file, { ...changeStatus(entryByPath.get(file)), ...lineStats[file] }])),
-    historyMode: 'committed',
-    historyAvailable: true,
+    changedFiles: taskFiles,
+    changedFileStatuses: Object.fromEntries(taskFiles.map(file => [file, entryByPath.has(file)
+      ? { ...changeStatus(entryByPath.get(file)), ...lineStats[file], historyMode: 'committed' }
+      : { code: '?', label: 'Recorded file (diff unverified)', tone: 'neutral', historyMode: 'unavailable' }])),
+    historyMode: verifiedFiles.length === taskFiles.length ? 'committed' : 'mixed',
+    historyAvailable: verifiedFiles.length > 0,
     commitHeads: historical.commitHeads,
     commitSource: historical.source,
     truncated: false
@@ -319,11 +332,7 @@ async function readHistoricalTaskDiff(config, context, requestedPath, historical
     touching.push(head);
     if (!firstEntry) firstEntry = entry;
   }
-  if (!touching.length) {
-    const error = new Error('Rel.AI found the task commit history, but this file is not part of those commits.');
-    error.code = 'TASK_DIFF_HISTORY_UNAVAILABLE';
-    throw error;
-  }
+  if (!touching.length) return readUnverifiedTaskFile(context, requestedPath);
 
   const firstHead = touching[0];
   const lastHead = touching.at(-1);

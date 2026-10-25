@@ -188,6 +188,21 @@ try {
   assert.equal(unicodeDiff.content.replaceAll('\r\n', '\n'), 'café from agent\n');
   assert.equal(unicodeDiff.historyMode, 'committed');
 
+  const changedAgain = await callTool('relai_edit', {
+    workspace: 'app', work_id: taskId, path: 'beta.txt', content: 'beta revised before completion\n'
+  }, context);
+  assert.equal(changedAgain.ok, true);
+  const mixed = await describeTaskCodeWorkspace(config, { taskId });
+  assert.equal(mixed.historyMode, 'mixed', 'dirty and previously committed task files should remain visible together');
+  assert.deepEqual(new Set(mixed.changedFiles), new Set(['alpha.txt', 'beta.txt', 'café.txt']));
+  assert.equal(mixed.changedFileStatuses['beta.txt'].historyMode, 'live');
+  assert.equal(mixed.changedFileStatuses['alpha.txt'].historyMode, 'committed');
+  assert.equal((await readTaskCodeDiff(config, { taskId, path: 'alpha.txt' })).historyMode, 'committed');
+  assert.equal((await readTaskCodeDiff(config, { taskId, path: 'beta.txt' })).historyMode, 'live');
+  await callTool('relai_edit', {
+    workspace: 'app', work_id: taskId, path: 'beta.txt', content: 'beta from agent\n'
+  }, context);
+
   const completed = await callTool('relai_validate', {
     action: 'checks',
     workspace: 'app',
@@ -210,7 +225,13 @@ try {
   assert.equal(completedDiff.baseContent.replaceAll('\r\n', '\n'), 'beta baseline\n');
   assert.equal(completedDiff.content.replaceAll('\r\n', '\n'), 'beta from agent\n');
 
-  console.log('Task Changes viewer live and committed read-only diff behavior passed.');
+  fs.writeFileSync(path.join(repo, 'alpha.txt'), 'unrelated later edit\n');
+  const unchangedHistory = await describeTaskCodeWorkspace(config, { taskId });
+  assert.equal(unchangedHistory.historyMode, 'committed', 'a later unowned working-tree change must not be attributed to the completed task');
+  assert.equal((await readTaskCodeDiff(config, { taskId, path: 'alpha.txt' })).historyMode, 'committed');
+  git('restore', '--', 'alpha.txt');
+
+  console.log('Task Changes viewer live, mixed and committed read-only diff behavior passed.');
 } finally {
   await repositoryIntelligence.shutdown();
   await flushAuditWrites();

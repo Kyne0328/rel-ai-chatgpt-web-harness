@@ -241,7 +241,7 @@ function listRecentSessionEvents(directory: string, limit = MAX_HISTORY_QUERY_SE
   return listRecentSessionEventPage(directory, { limit }).items;
 }
 
-function listRecentSessionEventPage(directory: string, options: EventPageOptions = {}): { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean } {
+function listRecentSessionEventPage(directory: string, options: EventPageOptions = {}): { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean; totalCount?: number } {
   const config = configForDirectory(directory);
   migrateLegacyTaskHistory(config);
   return withStateDatabase(config, (db: DatabaseSync) => {
@@ -304,6 +304,7 @@ function listRecentSessionEventPage(directory: string, options: EventPageOptions
       LIMIT ?
     `).all(...parameters) as unknown as TaskHistoryEventRow[];
     const hasMore = rows.length > pageSize;
+    const totalCount = taskIdFilter ? Number((db.prepare('SELECT COUNT(*) AS total FROM task_history_events WHERE task_id=?').get(taskIdFilter) as { total: number }).total) : undefined;
     const pageRows = rows.slice(0, pageSize);
     const items = pageRows.flatMap(row => {
       try {
@@ -332,9 +333,10 @@ function listRecentSessionEventPage(directory: string, options: EventPageOptions
         taskId: String(last.task_id || last.id || ''),
         eventIndex: Number(last.event_index || 0)
       } : null,
-      hasMore
+      hasMore,
+      ...(totalCount !== undefined ? { totalCount } : {})
     };
-  }, { readonly: true }) as { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean };
+  }, { readonly: true }) as { items: Record<string, any>[]; cursor: EventPageCursor | null; hasMore: boolean; totalCount?: number };
 }
 
 function parseSessionRows(db: DatabaseSync, rows: TaskHistoryRow[], readonly = false, invalidRows?: string[]): StoredTaskSession[] {

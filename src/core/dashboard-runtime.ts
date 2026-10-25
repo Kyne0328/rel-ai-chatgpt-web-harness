@@ -264,7 +264,8 @@ export function dashboardTaskSession(taskId: string, request: JsonRecord = {}): 
     entries: activityPage.entries,
     page: {
       hasMore: activityPage.hasMore,
-      nextCursor: activityPage.cursor
+      nextCursor: activityPage.cursor,
+      totalCount: activityPage.totalCount ?? activityPage.entries.length
     }
   };
   if (request.activityOnly === true) return { ok: true, activity };

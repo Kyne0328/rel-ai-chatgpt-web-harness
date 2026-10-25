@@ -787,8 +787,10 @@ function workspaceMeta(workspace, error) {
     const head = shortCommit(workspace.commitHead);
     parts.push(head ? `Committed changes · ${head}` : 'Committed changes');
     if (workspace.commitSource === 'inferred') parts.push('Recovered from Git history');
+  } else if (workspace.historyMode === 'mixed') {
+    parts.push('Current and recorded task files');
   } else if (workspace.historyMode === 'unavailable') {
-    parts.push('Historical diff unavailable');
+    parts.push('Recorded task files · original diffs unverified');
   } else {
     parts.push('Current task changes');
   }

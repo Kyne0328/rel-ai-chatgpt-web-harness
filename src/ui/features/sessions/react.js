@@ -446,6 +446,7 @@ function SessionsPage({ data = {} }) {
                 olderExpanded,
                 setOlderExpanded,
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
+                activityTotalCount: hydrated?.id === selectedId ? hydrated?.activity?.totalCount : undefined,
                 activityLoading,
                 loadOlderActivity,
                 onControlComplete: refreshSelectedSession,
@@ -597,7 +598,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityLoading, loadOlderActivity, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
+function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, setOlderExpanded, activityHasMore, activityTotalCount, activityLoading, loadOlderActivity, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -689,8 +690,10 @@ function SessionInspector({ session, activeTab, setActiveTab, olderExpanded, set
   const ownedProcessCount = taskProcessGroups(managedProcesses, id, session.workspace).owned.length;
   const tabCounts = {
     changes: fileCounts.product + fileCounts.support,
-    activity: `${(session.events || []).length}${activityHasMore ? '+' : ''}`,
-    activityLabel: `${(session.events || []).length} loaded events${activityHasMore ? '; more history available' : ''}`,
+    activity: Number.isFinite(activityTotalCount) ? Math.max(activityTotalCount, (session.events || []).length) : (session.events || []).length,
+    activityLabel: Number.isFinite(activityTotalCount)
+      ? `${Math.max(activityTotalCount, (session.events || []).length)} recorded events; ${(session.events || []).length} loaded${activityHasMore ? ', more available' : ''}`
+      : `${(session.events || []).length} loaded events${activityHasMore ? '; more history available' : ''}`,
     processes: ownedProcessCount + runningOperations.length,
     processesLabel: `${runningOperations.length} running operations and ${ownedProcessCount} managed commands`
   };

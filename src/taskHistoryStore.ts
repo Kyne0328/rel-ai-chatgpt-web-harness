@@ -436,7 +436,7 @@ function readTaskHistoryPage(config: TaskHistoryConfig, options: TaskHistoryPage
   }
 }
 
-function readRecentTaskHistoryEventsPage(config: TaskHistoryConfig, options: ActivityHistoryPageOptions = {}): { entries: HistoryEvent[]; cursor: EventPageCursor | null; hasMore: boolean } {
+function readRecentTaskHistoryEventsPage(config: TaskHistoryConfig, options: ActivityHistoryPageOptions = {}): { entries: HistoryEvent[]; cursor: EventPageCursor | null; hasMore: boolean; totalCount?: number } {
   try {
     const directory = getTaskHistoryDir(config);
     if (clearingDirectories.has(directory)) return { entries: [], cursor: null, hasMore: false };
@@ -450,7 +450,8 @@ function readRecentTaskHistoryEventsPage(config: TaskHistoryConfig, options: Act
         .map((event: HistoryEvent) => sanitizeActivityEventRecord(event) as HistoryEvent)
         .filter((event: HistoryEvent | null): event is HistoryEvent => Boolean(event)),
       cursor: page.cursor,
-      hasMore: page.hasMore
+      hasMore: page.hasMore,
+      ...(page.totalCount !== undefined ? { totalCount: page.totalCount } : {})
     };
   } catch (error) {
     if (process.env.REL_AI_MCP_DEBUG) console.error('[rel-ai-mcp] task history event page read:', error);

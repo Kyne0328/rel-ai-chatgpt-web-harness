@@ -70,6 +70,12 @@ try {
       assert.equal((await inspectOwnedExecution(config, record)).status, 'running', 'a surviving guest descendant retains the owner');
       fixture.populated = 0;
       assert.equal((await inspectOwnedExecution(config, record)).status, 'stopped', 'empty guest scope confirms termination');
+      request.args = ['--exec', 'python3', 'owned-fixture.py'];
+      delete request.guestScope;
+      fs.writeFileSync(path.join(directory, 'request.json'), JSON.stringify(request));
+      fixture.running = [];
+      assert.equal((await inspectOwnedExecution(config, record)).status, 'stopped',
+        'a WSL execution without explicit distribution recovers when the distribution is stopped');
       fs.writeFileSync(path.join(directory, 'receipt.json'), JSON.stringify({ ...receipt, helperPid: process.pid }));
       assert.equal((await inspectOwnedExecution(config, { ...record, pid: process.pid })).status, 'unknown', 'a live or reused launcher PID cannot authorize legacy release');
       fs.writeFileSync(path.join(directory, 'receipt.json'), JSON.stringify(receipt));

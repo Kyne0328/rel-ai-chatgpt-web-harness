@@ -45,9 +45,6 @@ async function inspectStoppedWsl(request, job) {
     if (['-d', '--distribution'].includes(args[index])) { distribution = args[index + 1] || ''; break; }
     if (args[index].startsWith('--distribution=')) { distribution = args[index].slice(15); break; }
   }
-  if (!distribution) return unknown('The original WSL distribution identity was not retained.');
-  // An active original launcher could still start guest code after this probe.
-  // Never signal/reuse its PID, and never start a distro just to inspect it.
   const receipt = job.receipt();
   if (!receipt || !pidAbsent(receipt.helperPid) || !pidAbsent(receipt.rootPid))
     return unknown('The original WSL launcher has not been confirmed stopped.');
@@ -59,8 +56,28 @@ async function inspectStoppedWsl(request, job) {
     return stdout.toString('utf16le').replace(/^\uFEFF/u, '').split(/[\r\n]+/u).map(name => name.trim().toLowerCase()).filter(Boolean);
   };
   const registered = await names(false);
-  if (!registered.includes(distribution.toLowerCase())) return unknown('The recorded WSL distribution cannot be identified in the current account.');
+  if (!distribution) {
+    if (registered.length === 1) {
+      distribution = registered[0];
+    } else if (registered.length > 1) {
+      try {
+        const { stdout } = await execFileAsync(executable, ['--list'], {
+          windowsHide: true, encoding: 'buffer', timeout: 5000, maxBuffer: 65536
+        });
+        const text = stdout.toString('utf16le').replace(/^\uFEFF/u, '');
+        for (const line of text.split(/[\r\n]+/u)) {
+          const match = /^\s*([^\r\n(]+?)\s*\(\s*default\s*\)/iu.exec(line);
+          if (match) { distribution = match[1].trim(); break; }
+        }
+      } catch {}
+    }
+  }
   const running = await names(true);
+  if (running.length === 0 && registered.length > 0 && (!distribution || registered.includes(distribution.toLowerCase()))) {
+    return { status: 'stopped', reason: 'verified-wsl-distribution-stopped' };
+  }
+  if (!distribution) return unknown('The original WSL distribution identity was not retained.');
+  if (!registered.includes(distribution.toLowerCase())) return unknown('The recorded WSL distribution cannot be identified in the current account.');
   if (!running.includes(distribution.toLowerCase())) return { status: 'stopped', reason: 'verified-wsl-distribution-stopped' };
   if (!request.guestScope || request.guestScope.nonce !== request.nonce)
     return unknown('The original WSL distribution is running, but this older execution has no independently queryable guest scope.');

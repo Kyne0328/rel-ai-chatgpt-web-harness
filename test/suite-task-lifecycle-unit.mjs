@@ -772,6 +772,7 @@ async function case_task_history_store_unit() {
     const longTaskFirstPage = readRecentTaskHistoryEventsPage(config, { taskId: 'long-task', limit: 200 });
     assert.equal(longTaskFirstPage.entries.length, 200, 'Task activity must return the newest retained page for one long-running task');
     assert.equal(longTaskFirstPage.hasMore, true);
+    assert.equal(longTaskFirstPage.totalCount, 251, 'task activity count must represent all indexed events, not a loaded page');
     assert.equal(longTaskFirstPage.entries[0]?.eventId, 'long-event-250');
     const longTaskSecondPage = readRecentTaskHistoryEventsPage(config, {
       taskId: 'long-task',
@@ -779,6 +780,7 @@ async function case_task_history_store_unit() {
       cursor: longTaskFirstPage.cursor
     });
     assert.equal(longTaskSecondPage.entries.length, 51, 'Task activity pagination must retain events that rolled out of the bounded task snapshot');
+    assert.equal(longTaskSecondPage.totalCount, 251, 'the indexed total should remain stable across page cursors');
     assert.equal(longTaskSecondPage.hasMore, false);
     assert.equal(longTaskSecondPage.entries.at(-1)?.eventId, 'long-event-0');
 
