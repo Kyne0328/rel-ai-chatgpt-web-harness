@@ -17,6 +17,8 @@ import { callTool as rawCallTool } from '../src/tools.js';
 import { getToolActivity, resetToolActivity } from '../src/toolActivity.js';
 import { relaiStatus } from '../src/tools/status.js';
 import { runWorkspaceOperation } from '../src/workspaceOperationQueue.js';
+import { commandActivities, commandActivityControl, readCommandActivityOutput, onCommandActivityChange } from '../src/commandActivity.js';
+import { stopCoreCommandOperation } from '../src/core/processes.ts';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-work-stop-fallback-'));
 const workspace = path.join(temp, 'workspace');
@@ -143,7 +145,7 @@ try {
   const donePath = path.join(workspace, 'queue-done');
   const firstArgs = {
     work_id: queueTask.work_id, workspace: 'app', executable: process.execPath,
-    argv: ['-e', "const fs=require('node:fs');fs.writeFileSync(process.argv[1],'started');const t=setInterval(()=>{if(fs.existsSync(process.argv[2])){clearInterval(t);fs.writeFileSync(process.argv[3],'done')}},10)", startedPath, releasePath, donePath],
+    argv: ['-e', "const fs=require('node:fs');console.log('command live output');fs.writeFileSync(process.argv[1],'started');const t=setInterval(()=>{if(fs.existsSync(process.argv[2])){clearInterval(t);fs.writeFileSync(process.argv[3],'done')}},10)", startedPath, releasePath, donePath],
     timeoutMs: 5000
   };
   const secondArgs = {
@@ -171,6 +173,25 @@ try {
   }
   assert.equal(fs.existsSync(startedPath), true, 'first real command must start');
   assert.equal(fallbackExecutionStatus(secondId).phase, 'queued', 'conflicting second command must wait in the resource queue');
+  const commands = commandActivities(queueConfig);
+  assert.equal(commands.find(command => command.operationId === firstId).status, 'running');
+  assert.equal(commands.find(command => command.operationId === secondId).status, 'queued');
+  assert.equal(commands.find(command => command.operationId === firstId).workId, queueTask.work_id);
+  assert.equal(commands.find(command => command.operationId === firstId).taskTitle, 'Same-task resource queue');
+  await new Promise((resolve, reject) => {
+    let timer;
+    const check = () => {
+      if (!commandActivities(queueConfig).find(command => command.operationId === firstId)?.stdoutTail.includes('command live output')) return;
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    };
+    const unsubscribe = onCommandActivityChange(check);
+    timer = setTimeout(() => { unsubscribe(); reject(new Error('Running command output did not reach the dashboard projection.')); }, 4000);
+    check();
+  });
+  assert.ok(commands.find(command => command.operationId === firstId).commandSummary.includes('command live output'));
+  assert.throws(() => commandActivityControl({ stateDir: path.join(temp, 'other') }, firstId), /Unknown command/);
   const activeQueueTask = getToolActivity().tasks.find(task => task.id === queueTask.work_id);
   const activeOperationIds = activeQueueTask.currentOperations.map(operation => operation.id || operation.operationId);
   assert.deepEqual(new Set(activeOperationIds), new Set([firstId, secondId]), 'live activity and background control must use the same operation identities');
@@ -184,10 +205,66 @@ try {
   await Promise.all(records.map(record => record.record.promise));
   assert.equal(fallbackExecutionStatus(firstId).result.exitCode, 0);
   assert.equal(fallbackExecutionStatus(secondId).result.exitCode, 0, 'queued command must start automatically after the first command releases its resource lock');
+  assert.equal(commandActivities(queueConfig).find(command => command.operationId === firstId).status, 'completed');
+  assert.match(readCommandActivityOutput(queueConfig, firstId, { stream: 'stdout' }).range.text, /command live output/);
+  assert.match(readCommandActivityOutput(queueConfig, secondId, { stream: 'stdout' }).range.text, /queued command completed/);
+  assert.throws(() => commandActivityControl(queueConfig, firstId), /cannot be stopped/);
   const queueStatus = await callTool('relai_work', { action: 'status', work_id: queueTask.work_id });
   assert.equal(queueStatus.backgroundOperations.length, 2);
   const finishedQueue = await callTool('relai_work', { action: 'finish', work_id: queueTask.work_id, summary: 'Both queued commands completed.' });
   assert.equal(finishedQueue.completionKnown, true);
+
+  // The dashboard must cancel the selected queued operation, preserving its
+  // sibling and the task. Hold admission deterministically without a child.
+  const stopTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none', title: 'Dashboard exact command stop' });
+  let releaseCommandQueue;
+  let commandQueueReady;
+  const commandQueueAdmitted = new Promise(resolve => { commandQueueReady = resolve; });
+  const commandQueue = runWorkspaceOperation('app', async () => {
+    commandQueueReady();
+    await new Promise(resolve => { releaseCommandQueue = resolve; });
+  }, { mode: 'write', scope: 'workspace' });
+  await commandQueueAdmitted;
+  const stoppedCommands = [];
+  let independentCommandId;
+  try {
+    for (const label of ['selected', 'sibling']) {
+      const response = await submit(`dashboard-${label}`, { workspace: 'app', work_id: stopTask.work_id,
+        executable: process.execPath, argv: ['-e', `console.log('${label}')`], timeoutMs: 5000 });
+      stoppedCommands.push(response.body.result.structuredContent.operationId);
+    }
+    const outcome = await stopCoreCommandOperation(stoppedCommands[0]);
+    assert.equal(outcome.ok, true);
+    assert.ok(outcome.stoppedOperationIds.includes(stoppedCommands[0]));
+    assert.equal(fallbackExecutionStatus(stoppedCommands[1]).status, 'running');
+    assert.notEqual(getToolActivity().tasks.find(item => item.id === stopTask.work_id)?.status, 'cancelled');
+    const independent = await submit('dashboard-independent', { workspace: 'app', independent: true,
+      executable: process.execPath, argv: ['-e', "console.log('independent')"], timeoutMs: 5000 });
+    independentCommandId = independent.body.result.structuredContent.operationId;
+    assert.ok(independentCommandId, JSON.stringify(independent.body));
+    await new Promise((resolve, reject) => {
+      let timer;
+      const check = () => {
+        if (!commandActivities(queueConfig).some(command => command.operationId === independentCommandId)) return;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      };
+      const unsubscribe = onCommandActivityChange(check);
+      timer = setTimeout(() => { unsubscribe(); reject(new Error('Independent command admission was not projected.')); }, 4000);
+      check();
+    });
+    assert.equal(commandActivities(queueConfig).find(command => command.operationId === independentCommandId).workId, '');
+    assert.equal((await stopCoreCommandOperation(independentCommandId)).stopping, true);
+    assert.equal(fallbackExecutionStatus(stoppedCommands[1]).status, 'running', 'independent Stop must not cancel a different task or workspace execution');
+  } finally {
+    releaseCommandQueue();
+    await commandQueue;
+    await Promise.all(stoppedCommands.map(id => callTool('relai_work', { action: 'result', work_id: stopTask.work_id, operationId: id })));
+    if (independentCommandId) await callTool('relai_work', { action: 'result', workspace: 'app', operationId: independentCommandId });
+  }
+  assert.equal(commandActivities(queueConfig).find(command => command.operationId === stoppedCommands[0]).status, 'cancelled');
+  assert.equal(commandActivities(queueConfig).find(command => command.operationId === independentCommandId).status, 'cancelled');
 
   // Hold a writer without creating a running fallback record. Compact status
   // must remain responsive for missing, unknown, and terminal operation IDs.

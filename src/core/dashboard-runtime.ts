@@ -32,6 +32,7 @@ import { describeTaskCodeWorkspace, readTaskCodeDiff } from '../taskCodeWorkspac
 import { getToolActivity, onToolActivity } from '../toolActivity.js';
 import { getToolMetadata } from '../tools.js';
 import { managedProcessStateRevision, onManagedProcessChange } from '../processManager.js';
+import { commandActivities, commandActivityRevision, onCommandActivityChange } from '../commandActivity.js';
 import { onWorkspaceStateChange, workspaceStateRevision } from '../workspaceState.js';
 import {
   buildDashboardConnectionProjection,
@@ -452,16 +453,19 @@ export function createDashboardEventSubscription(
   const unsubscribeWorkspace = onWorkspaceStateChange((event: { version: number; alias: string; state: WorkspaceStateDto }) => {
     sendDomain(DASHBOARD_LIVE_EVENTS.WORKSPACE_UPDATED, 'workspace', event.version, createWorkspaceUpdatePayload(event.alias, event.state));
   });
-  const unsubscribeProcess = onManagedProcessChange((event) => {
+  const sendProcesses = (): void => {
     try {
       const config = readConfigCached();
-      sendDomain(DASHBOARD_LIVE_EVENTS.PROCESS_UPDATED, 'process', event.revision, {
-        managedProcesses: dashboardManagedProcesses(config)
+      sendDomain(DASHBOARD_LIVE_EVENTS.PROCESS_UPDATED, 'process', Number(managedProcessStateRevision()) + commandActivityRevision(), {
+        managedProcesses: dashboardManagedProcesses(config),
+        commandOperations: commandActivities(config)
       });
     } catch (error) {
       sink.onError(error);
     }
-  });
+  };
+  const unsubscribeProcess = onManagedProcessChange(sendProcesses);
+  const unsubscribeCommands = onCommandActivityChange(sendProcesses);
   const unsubscribeDiagnostics = typeof options.onRuntimeLogChange === 'function'
     ? options.onRuntimeLogChange((change: JsonRecord) => sendDomain(DASHBOARD_LIVE_EVENTS.DIAGNOSTICS_UPDATED, 'diagnostics', Number(change.revision || 0), { change }))
     : () => {};
@@ -473,6 +477,7 @@ export function createDashboardEventSubscription(
       unsubscribeDesktopStatus();
       unsubscribeWorkspace();
       unsubscribeProcess();
+      unsubscribeCommands();
       unsubscribeDiagnostics();
       taskEvents.close();
     }
@@ -520,7 +525,9 @@ function dashboardSourceRevision(options: DashboardRuntimeOptions = {}, configOv
     taskActivityRevision(taskActivity),
     desktopStatusRevision(desktopStatus),
     String(mcpConnectionManager.snapshot().revision),
-    String(workspaceStateRevision())
+    String(workspaceStateRevision()),
+    String(managedProcessStateRevision()),
+    String(commandActivityRevision())
   ].join('|');
   return crypto.createHash('sha256').update(signature).digest('base64url');
 }
@@ -602,7 +609,7 @@ function dashboardLiveMetadata(
   revisions.task = Number(taskActivity?.revision || 0);
   revisions.connection = connectionLiveRevision(connectionSnapshot, desktopStatus);
   revisions.workspace = Number(workspaceStateRevision() || 0);
-  revisions.process = Number(managedProcessStateRevision() || 0);
+  revisions.process = Number(managedProcessStateRevision() || 0) + commandActivityRevision();
   revisions.diagnostics = Number(runtimeLogs?.revision || 0);
   return { streamId: DASHBOARD_EVENT_STREAM_ID, revisions };
 }

@@ -13,6 +13,7 @@ import { taskProgressView } from '../src/ui/components/task-progress.js';
 import { activeTaskList } from '../src/ui/features/home/index.js';
 import { processListView } from '../src/ui/features/processes/index.js';
 import { mergeSessionDetail, taskControlMessage, taskProcessGroups, taskValidationView } from '../src/ui/features/sessions/model.js';
+import { routeHref } from '../src/ui/router.js';
 
 const persistentProcess = processStateView({
   processId: 'proc-persistent',
@@ -166,6 +167,7 @@ const processRenderContext = {
   Icon: () => null,
   StatusPill: ({ label }) => label,
   processListView,
+  routeHref,
   confirmAction: async () => true,
   postJson: async (...args) => { processStopRequests.push(args); return { ok: true }; },
   requestDashboardRefresh: () => { processRefreshes += 1; }
@@ -220,6 +222,28 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(processStopRequests[0]?.[0], '/api/processes/stop');
 assert.equal(processStopRequests[0]?.[1]?.processId, 'restart-survivor', 'Stop must target the displayed process through the existing backend endpoint');
 assert.equal(processRefreshes, 1);
+
+const commandTree = processRenderContext.renderProcesses(() => ({
+  managedProcesses: [{ processId: 'service-stays-running', status: 'running', label: 'Service' }],
+  commandOperations: [
+    { operationId: 'queued-command', workId: 'command-task', taskTitle: 'Build project', workspace: 'app',
+      commandSummary: 'node build.js', status: 'queued', canStop: true, startedAt: '2026-10-25T00:00:00Z' },
+    { operationId: 'running-command', workspace: 'app', commandSummary: 'node check.js', status: 'running', canStop: true,
+      stdoutTail: 'checking live output', stdoutBytes: 20, stderrTail: '', startedAt: '2026-10-25T00:00:00Z' }
+  ]
+}))();
+processNodes.splice(0);
+visitProcessNode(commandTree);
+assert.ok(processNodes.includes('2 running · 1 queued'));
+assert.ok(processNodes.includes('checking live output'));
+assert.ok(processNodes.some(node => node?.type === 'a' && node.children?.includes('Build project') && node.props.href === routeHref('tasks', { workspace: 'app', task: 'command-task' })));
+const queuedArticle = processNodes.find(node => node?.props?.['data-process-id'] === 'command:queued-command');
+processNodes.splice(0);
+visitProcessNode(queuedArticle);
+processNodes.find(node => node?.props?.['data-stop-process'] === true).props.onClick();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(processStopRequests.at(-1)[1].operationId, 'queued-command');
+assert.equal(Object.hasOwn(processStopRequests.at(-1)[1], 'processId'), false, 'command Stop must never use the managed-service control identity');
 
 // The visible Commands route samples through the authenticated endpoint,
 // expires observations, ignores hidden/unmounted responses, and has no idle poll.

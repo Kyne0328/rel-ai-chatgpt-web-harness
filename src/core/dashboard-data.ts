@@ -17,6 +17,7 @@ import { runtimeCompatibility } from '../runtimeCompatibility.js';
 import { mcpConnectionManager } from '../mcp/connectionManager.js';
 import { readMcpAuthenticationStatus } from '../mcp/authenticationStatus.js';
 import { activeFallbackWorkIds } from '../mcp/fallbackExecutions.js';
+import { commandActivities } from '../commandActivity.js';
 import { getOnboardingStatus } from '../onboardingState.js';
 type JsonRecord = Record<string, unknown>;
 interface DashboardTaskActivity extends JsonRecord {
@@ -104,7 +105,8 @@ function buildDashboardPayload(
     auditTail,
     tasks,
     workspaceStates,
-    managedProcesses: dashboardManagedProcesses(config)
+    managedProcesses: dashboardManagedProcesses(config),
+    commandOperations: commandActivities(config)
   };
 }
 

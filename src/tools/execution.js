@@ -4,7 +4,7 @@ import { createOperationTimeline } from '../operationTimeline.js';
 import { principalFingerprint, principalForContext, principalKind } from '../mcp/principal.ts';
 import { PRINCIPAL_KIND } from '../mcp/contracts.ts';
 
-import { combineAbortSignals } from '../abortSignals.ts';
+import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.ts';
 import { hasAgentCancellationHandle } from '../executionControl.js';
 import { isClearlyReadOnlyExec } from '../executionClassification.js';
 import { resolveWorkspace } from '../config.js';
@@ -25,6 +25,7 @@ import {
 } from '../performanceObservability.js';
 import { maybeStartSession } from './session.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
+import { beginCommandActivity } from '../commandActivity.js';
 
 const DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 30_000;
 const WORK_FINISH_QUEUE_TIMEOUT_MS = 2_000;
@@ -34,6 +35,13 @@ const MUTATION_WATCHDOG_TERMINATION_GRACE_MS = 15_000;
 async function executeToolCall({ config, name, executionName = name, effectiveArgs, context, requestTaskContext = null, finishActivity, definition, started, workspaceOverride = null }) {
   let sessionStart = { started: false, alias: '' };
   let timeline;
+  const commandActivity = executionName === OP.EXEC ? beginCommandActivity(config, {
+    operationId: finishActivity.operationId,
+    workId: finishActivity.taskId || '',
+    taskTitle: requestTaskContext?.session?.title || '',
+    workspace: workspaceOverride?.alias || effectiveArgs?.workspace || '', args: effectiveArgs, startedAtMs: started,
+    cancellable: Boolean(finishActivity.taskId || context?.fallbackOperationId)
+  }) : null;
   const queuePrincipal = principalForContext(context, context?.publicHttpOnly === true);
   const queuePrincipalFingerprint = principalKind(queuePrincipal) === PRINCIPAL_KIND.CONNECTOR_ANONYMOUS
     ? '' : principalFingerprint(queuePrincipal);
@@ -87,6 +95,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
         acceptedAtMs: started,
         deadlineKind: deadlineAtMs > 0 ? 'operation' : 'admission',
         onUpdate: snapshot => {
+          commandActivity?.phase(snapshot);
           updateCurrentToolActivity({ metadata: { timeline: snapshot } });
           updateFallbackExecutionPhase(context?.fallbackOperationId, snapshot.phase, config, snapshot);
         }
@@ -106,6 +115,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           signal,
           resultWaitSignal: context?.resultWaitSignal,
           onOperationPhase: event => timeline.transition(event.phase, event),
+          onOperationOutput: commandActivity ? (stream, chunk) => commandActivity.output(stream, chunk) : undefined,
           ...(deadlineAtMs > 0 ? { deadlineAtMs } : {}),
           beforeNativeMutation: workspace && taskId ? (paths, options) => captureNativeMutationPaths(config, taskId, workspace.alias, paths, options) : undefined,
           principal: queuePrincipal,
@@ -291,8 +301,12 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       error.deadlineKind = error.timeline.deadlineKind;
       error.terminationCertainty = error.terminationCertainty || error.timeline.terminationCertainty;
     }
+    const abortSignal = finishActivity?.signal?.aborted ? finishActivity.signal : context?.signal;
+    commandActivity?.finish({ ...error?.handlerResult,
+      cancelled: abortSignal?.aborted === true && !isTimeoutAbort(abortSignal) }, error);
     throw error;
   });
+  commandActivity?.finish(value);
   return { value: value && typeof value === 'object' && !Array.isArray(value) ? { ...value, timeline: timeline?.snapshot() } : value, sessionStart, timeline };
 }
 

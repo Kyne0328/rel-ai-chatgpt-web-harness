@@ -65,7 +65,10 @@ export function applyLiveEvent(type, payload = {}) {
   if (type === 'task.updated') applyTaskDelta(payload);
   else if (type === 'connection.updated') applyConnectionDelta(payload);
   else if (type === 'workspace.updated') applyWorkspaceDelta(payload);
-  else if (type === 'process.updated') _state.managedProcesses = Array.isArray(payload.managedProcesses) ? payload.managedProcesses : [];
+  else if (type === 'process.updated') {
+    _state.managedProcesses = Array.isArray(payload.managedProcesses) ? payload.managedProcesses : [];
+    _state.commandOperations = Array.isArray(payload.commandOperations) ? payload.commandOperations : [];
+  }
 
   commit();
   return { accepted: true, state: _state, domain };

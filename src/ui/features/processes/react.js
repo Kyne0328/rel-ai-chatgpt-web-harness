@@ -5,9 +5,10 @@ import { StatusPill } from '../../components/pill.js';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { processListView, processStopResult } from './index.js';
+import { routeHref } from '../../router.js';
 
 const h = React.createElement;
-const PROCESS_STORE_KEYS = Object.freeze(['managedProcesses']);
+const PROCESS_STORE_KEYS = Object.freeze(['managedProcesses', 'commandOperations']);
 const PROCESS_OUTPUT_CHUNK_BYTES = 256 * 1024;
 
 export function createProcessesRoute(useDashboardSlices) {
@@ -24,7 +25,7 @@ export function createProcessesRoute(useDashboardSlices) {
     const rows = model.rows.filter(row => !row.state.terminal);
     const attentionCount = rows.filter(row => !row.state.active).length;
     const recentRows = model.rows.filter(row => row.state.terminal).slice(0, 5);
-    const count = `${model.running} running${attentionCount ? ` · ${attentionCount} ${attentionCount === 1 ? 'needs' : 'need'} attention` : ''}`;
+    const count = `${model.running} running${model.queued ? ` · ${model.queued} queued` : ''}${attentionCount ? ` · ${attentionCount} ${attentionCount === 1 ? 'needs' : 'need'} attention` : ''}`;
     const recentLabel = model.finished > recentRows.length
       ? `Recently ended · latest ${recentRows.length}`
       : `Recently ended · ${recentRows.length}`;
@@ -102,20 +103,22 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
   const [stopState, setStopState] = useState('idle');
   const [stopError, setStopError] = useState('');
   const stop = async () => {
-    if (stopState === 'loading' || row.stopProcessId == null) return;
+    if (stopState === 'loading' || (row.stopProcessId == null && !row.operationId)) return;
     const confirmed = await confirmAction({
-      title: 'Stop background process?',
+      title: row.operationId ? 'Stop command?' : 'Stop background process?',
       message: 'Are you sure you want to terminate "' + row.label + '"?',
-      detail: 'Rel.AI will request a stop, allow up to 3 seconds for a graceful exit, then try to end remaining subprocesses. Unsaved work may be lost. The process status will show whether stopping was confirmed.',
-      confirmLabel: 'Stop process',
+      detail: row.operationId ? 'Stop only this command. Other commands and its task remain open. The status will update when execution settles.' : 'Rel.AI will request a stop, allow up to 3 seconds for a graceful exit, then try to end remaining subprocesses. Unsaved work may be lost. The process status will show whether stopping was confirmed.',
+      confirmLabel: row.operationId ? 'Stop command' : 'Stop process',
       danger: true
     });
     if (!confirmed) return;
     setStopState('loading');
     setStopError('');
     try {
-      const result = await postJson('/api/processes/stop', { processId: row.stopProcessId, graceMs: 3000 }, { timeout: 10000 });
-      const outcome = processStopResult(result);
+      const result = await postJson('/api/processes/stop', row.operationId ? { operationId: row.operationId } : { processId: row.stopProcessId, graceMs: 3000 }, { timeout: 10000 });
+      const outcome = row.operationId
+        ? { status: result?.ok === false ? 'error' : 'requested', message: result?.ok === false ? result.error || 'Stop could not be requested.' : '' }
+        : processStopResult(result);
       setStopState(outcome.status);
       setStopError(outcome.message);
     } catch (error) {
@@ -125,7 +128,7 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
       requestDashboardRefresh();
     }
   };
-  const stopText = stopState === 'loading' ? 'Stopping…' : stopState === 'success' ? 'Stopped' : stopState === 'error' ? 'Try again' : 'Stop';
+  const stopText = stopState === 'loading' || stopState === 'requested' ? 'Stopping…' : stopState === 'success' ? 'Stopped' : stopState === 'error' ? 'Try again' : 'Stop';
   const state = row.state;
 
   return h('article', {
@@ -139,11 +142,12 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
           h('strong', null, row.label),
           h(StatusPill, { label: state.label, tone: state.pillClass }),
           row.memory ? h('span', { className: 'process-gauge-badge memory', title: `Root working set · sampled ${row.memory.sampledAt}. Descendants are not included.` }, `RAM ${formatBytes(row.memory.workingSetBytes)}`) : (
-            state.active ? h('span', { className: 'process-gauge-badge', title: 'A current, identity-verified memory reading is unavailable for this process.' }, 'RAM unavailable') : null
+            state.active && !row.operationId ? h('span', { className: 'process-gauge-badge', title: 'A current, identity-verified memory reading is unavailable for this process.' }, 'RAM unavailable') : null
           )
         ),
         h('div', { className: 'process-meta' },
           h('span', null, row.project),
+          row.operationId ? (row.taskId ? h('a', { href: routeHref('tasks', { workspace: row.project, task: row.taskId }) }, row.taskTitle) : h('span', null, row.taskTitle)) : null,
           row.startedAt ? h('span', null, 'Started ', h('span', { 'data-clock-relative': row.startedAt }, row.startedAgo)) : null,
           state.terminal && row.exitCode != null ? h('span', null, `Exit code ${row.exitCode}`) : null
         )
@@ -151,7 +155,7 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
       h('div', { className: 'process-actions' },
         h('span', { className: 'process-elapsed' },
           state.active && row.startedAt
-            ? h(React.Fragment, null, 'Running for ', h('span', { 'data-clock-elapsed-start': row.startedAt }, row.elapsed))
+            ? h(React.Fragment, null, state.status === 'queued' ? 'Queued for ' : 'Running for ', h('span', { 'data-clock-elapsed-start': row.startedAt }, row.elapsed))
             : h(React.Fragment, null,
                 row.elapsed,
                 row.endedAt ? ' · ' : null,
@@ -164,7 +168,7 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
           'data-stop-process': true,
           'data-focus-key': `process-stop-${row.processId}`,
           'aria-label': `Stop ${row.label}`,
-          disabled: stopState === 'loading' || stopState === 'success',
+          disabled: stopState === 'loading' || stopState === 'success' || stopState === 'requested',
           onClick: () => { void stop(); }
         }, stopText) : null,
         state.status === 'stopping' ? h('span', { className: 'process-stop-state', role: 'status' }, 'Stopping…') : null
@@ -181,25 +185,25 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
           state.recovery !== row.error ? h('div', null, state.recovery) : null
         )
       : null,
-    h(ProcessOutput, { processId: row.processId, output: row.output, active: state.active })
+    h(ProcessOutput, { processId: row.processId, operationId: row.operationId, output: row.output, active: state.active })
   );
 });
 
-function ProcessOutput({ processId, output, active = false }) {
+function ProcessOutput({ processId, operationId, output, active = false }) {
   const stdoutVisible = output.stdout.trim() || output.stdoutMeta.totalBytes > 0;
   const stderrVisible = output.stderr.trim() || output.stderrMeta.totalBytes > 0;
   return h('details', { className: 'process-output', open: active && output.hasOutput },
     h('summary', null, active ? 'Live output' : 'Recent output'),
     output.hasOutput
       ? h(React.Fragment, null,
-          stdoutVisible ? h(OutputBlock, { processId, stream: 'stdout', value: output.stdout, meta: output.stdoutMeta, active }) : null,
-          stderrVisible ? h(OutputBlock, { processId, stream: 'stderr', value: output.stderr, meta: output.stderrMeta, active }) : null
+          stdoutVisible ? h(OutputBlock, { processId, operationId, stream: 'stdout', value: output.stdout, meta: output.stdoutMeta, active }) : null,
+          stderrVisible ? h(OutputBlock, { processId, operationId, stream: 'stderr', value: output.stderr, meta: output.stderrMeta, active }) : null
         )
       : h('div', { className: 'process-output-empty', role: 'status' }, output.message)
   );
 }
 
-function OutputBlock({ processId, stream, value, meta, active }) {
+function OutputBlock({ processId, operationId, stream, value, meta, active }) {
   const [history, setHistory] = useState(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [error, setError] = useState('');
@@ -222,6 +226,7 @@ function OutputBlock({ processId, stream, value, meta, active }) {
     const remaining = Math.max(0, meta.totalBytes - offset);
     if (!remaining) return undefined;
     void readProcessOutputRange(processId, stream, {
+      operationId,
       offset,
       maxBytes: Math.min(PROCESS_OUTPUT_CHUNK_BYTES, remaining)
     }).then(range => {
@@ -242,7 +247,7 @@ function OutputBlock({ processId, stream, value, meta, active }) {
       if (!cancelled) setError(errorMessage(nextError));
     });
     return () => { cancelled = true; };
-  }, [history, meta.totalBytes, processId, stream]);
+  }, [history, meta.totalBytes, processId, operationId, stream]);
 
   const loadEarlier = async () => {
     if (loadingEarlier || !canLoadEarlier) return;
@@ -250,6 +255,7 @@ function OutputBlock({ processId, stream, value, meta, active }) {
     setError('');
     try {
       const range = await readProcessOutputRange(processId, stream, {
+        operationId,
         beforeOffset: startOffset,
         maxBytes: PROCESS_OUTPUT_CHUNK_BYTES
       });
@@ -310,9 +316,9 @@ function OutputBlock({ processId, stream, value, meta, active }) {
   );
 }
 
-async function readProcessOutputRange(processId, stream, { offset, beforeOffset, maxBytes }) {
+async function readProcessOutputRange(processId, stream, { operationId, offset, beforeOffset, maxBytes }) {
   const params = new URLSearchParams({
-    processId,
+    ...(operationId ? { operationId } : { processId }),
     stream,
     maxBytes: String(maxBytes)
   });

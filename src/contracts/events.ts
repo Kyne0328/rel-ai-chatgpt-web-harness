@@ -60,6 +60,7 @@ export interface WorkspaceUpdatedEvent extends DashboardLiveEnvelope {
 export interface ProcessUpdatedEvent extends DashboardLiveEnvelope {
   domain: 'process';
   managedProcesses: ManagedProcessDto[];
+  commandOperations?: Record<string, unknown>[];
 }
 
 export interface DiagnosticsUpdatedEvent extends DashboardLiveEnvelope {

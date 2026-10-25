@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { beginCommandActivity } from '../src/commandActivity.js';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -143,6 +144,41 @@ try {
   assert.equal(ready.ok, true);
   assert.equal(ready.streamId, initial.live.streamId, 'SSE ready must identify the same stream as the HTML bootstrap');
   assert.deepEqual(Object.keys(ready.revisions).sort(), ['connection', 'diagnostics', 'process', 'task', 'workspace']);
+
+  const command = beginCommandActivity({ stateDir: sandbox }, { operationId: 'dashboard-command-receipt',
+    workId: 'dashboard-command-task', taskTitle: 'Read project', workspace: 'test',
+    args: { executable: 'node', argv: ['read.js', '--token', 'private-command-secret'] } });
+  command.phase({ phase: 'spawned', executed: true });
+  command.output('stdout', Buffer.from('live command stdout'));
+  const processEvent = JSON.parse((await stream.nextType('process.updated')).data);
+  assert.ok(processEvent.revision > ready.revisions.process);
+  assert.equal(processEvent.commandOperations[0].operationId, 'dashboard-command-receipt');
+  assert.equal(processEvent.commandOperations[0].status, 'running');
+  assert.equal(processEvent.commandOperations[0].stdoutTail, 'live command stdout');
+  assert.ok(!JSON.stringify(processEvent).includes('private-command-secret'), 'command display must redact secrets');
+  const store = await import('../src/ui/store.js');
+  store.init(initial);
+  assert.equal(store.applyLiveEvent('process.updated', processEvent).accepted, true);
+  assert.equal(store.getSnapshot().commandOperations[0].operationId, 'dashboard-command-receipt');
+  const outputUrl = `http://127.0.0.1:${address.port}/api/processes/output?operationId=dashboard-command-receipt&stream=stdout`;
+  assert.notEqual((await fetch(outputUrl)).status, 200, 'command output requires the existing dashboard authentication');
+  const output = await (await fetch(outputUrl, { headers: { cookie: dashboardCookie } })).json();
+  assert.equal(output.range.text, 'live command stdout');
+  command.output('stdout', Buffer.alloc(70 * 1024, 'x'));
+  const retained = await (await fetch(`${outputUrl}&offset=0&maxBytes=1024`, { headers: { cookie: dashboardCookie } })).json();
+  assert.ok(retained.range.retainedFromOffset > 0, 'live output storage must remain bounded');
+  assert.equal(retained.range.offset, retained.range.retainedFromOffset);
+  assert.equal(retained.range.text.length, 1024);
+  assert.equal(retained.range.truncatedBefore, true, 'output eviction must be disclosed');
+  command.finish({ exitCode: 0, commandSucceeded: true, terminationConfirmed: true });
+  const endedCommandEvent = JSON.parse((await stream.nextType('process.updated')).data);
+  assert.ok(endedCommandEvent.revision > processEvent.revision);
+  assert.equal(endedCommandEvent.commandOperations[0].status, 'completed');
+  store.applyLiveEvent('process.updated', endedCommandEvent);
+  assert.equal(store.getSnapshot().commandOperations[0].status, 'completed');
+  assert.equal(store.applyLiveEvent('process.updated', processEvent).accepted, false, 'stale command events must not revive ended work');
+  const commandsSnapshot = await (await fetch(`http://127.0.0.1:${address.port}/api/dashboard/v10`, { headers: { cookie: dashboardCookie } })).json();
+  assert.equal(commandsSnapshot.commandOperations[0].status, 'completed', 'aggregate reconnect snapshot must agree with live command receipts');
 
   fs.appendFileSync(auditPath, `${JSON.stringify({ ts: new Date().toISOString(), event: 'tool_call', tool: 'relai_read', workspace: 'test', ok: true })}\n`);
   const finishStart = beginConnectorToolCall({

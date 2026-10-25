@@ -105,6 +105,7 @@ interface RunProcessOptions {
   readonly preserveOutputWhitespace?: boolean;
   readonly outputFinalizationTimeoutMs?: unknown;
   readonly onPhase?: (event: ProcessPhaseEvent) => void;
+  readonly onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
 }
 
 /** Process outcomes are part of the exported process API contract. */
@@ -705,6 +706,7 @@ async function runProcess(command: string, args: readonly string[] = [], options
       (stream: string, buffer: Buffer) => {
         if (stream === 'stdout') { stdoutBytes += buffer.length; stdoutBuffer.append(buffer); }
         else { stderrBytes += buffer.length; stderrBuffer.append(buffer); }
+        try { options.onOutput?.(stream === 'stdout' ? 'stdout' : 'stderr', buffer); } catch {}
       }, async () => {
         await Promise.all([stdoutSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES), stderrSpill.waitForLowWatermark(OUTPUT_SPILL_LOW_WATER_BYTES)]);
       }) : null;
@@ -714,12 +716,14 @@ async function runProcess(command: string, args: readonly string[] = [], options
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       stdoutBytes += buffer.length;
       stdoutBuffer.append(buffer);
+      try { options.onOutput?.('stdout', buffer); } catch {}
       stdoutBackpressure.observe();
     });
     subprocess.stderr?.on('data', (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       stderrBytes += buffer.length;
       stderrBuffer.append(buffer);
+      try { options.onOutput?.('stderr', buffer); } catch {}
       stderrBackpressure.observe();
     });
 

@@ -334,6 +334,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
       signal,
       resourceClass: context.resourceClass === 'light' ? undefined : 'heavy',
       onPhase: event => context.onOperationPhase?.(event),
+      onOutput: context.onOperationOutput,
       resourceOwner: workspace.alias,
       outputSpillTaskId: outputSpillOwner({
         taskId: context.taskId || args.work_id,

@@ -25,6 +25,7 @@ export interface DashboardPayloadDto {
   tasks: TaskDto[];
   workspaceStates: Record<string, WorkspaceStateDto>;
   managedProcesses: ManagedProcessDto[];
+  commandOperations?: Record<string, unknown>[];
   connectionState: ConnectionStateDto;
   snapshot: DashboardSnapshotDto;
   live?: DashboardLiveMetadataDto;

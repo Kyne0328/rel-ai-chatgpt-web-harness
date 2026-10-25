@@ -14,10 +14,27 @@ export function processStopResult(result) {
 
 export function processListView(data = {}, now = Date.now()) {
   const processes = orderProcesses(data.managedProcesses || []);
-  const rows = processes.map(process => processRowView(process, now, data.processMemory));
-  const running = rows.filter(row => row.state.active).length;
+  const rows = [...processes.map(process => processRowView(process, now, data.processMemory)),
+    ...(data.commandOperations || []).map(command => commandRowView(command, now))];
+  rows.sort((a, b) => Number(b.state.active) - Number(a.state.active) || timestamp(b) - timestamp(a));
+  const running = rows.filter(row => row.state.active && row.state.status !== 'queued').length;
+  const queued = rows.filter(row => row.state.status === 'queued').length;
   const finished = rows.filter(row => row.state.terminal).length;
-  return { rows, running, finished };
+  return { rows, running, queued, finished };
+}
+
+function commandRowView(command, now) {
+  const terminal = ['completed', 'cancelled', 'failed'].includes(command.status);
+  const active = ['queued', 'running', 'stopping'].includes(command.status);
+  const label = { queued: 'Queued', running: 'Running', stopping: 'Stopping', completed: 'Completed', cancelled: 'Stopped', failed: 'Failed', unknown: 'Cleanup unconfirmed' }[command.status] || 'Unknown';
+  const row = processRowView({ ...command, processId: `command:${command.operationId}` }, now);
+  return { ...row, operationId: command.operationId, stopProcessId: null, taskId: command.workId,
+    taskTitle: command.taskTitle || command.workId || 'Independent command',
+    label: 'Command',
+    state: { status: command.status, label, terminal, active,
+      canStop: active && command.status !== 'stopping' && command.canStop === true,
+      pillClass: active ? 'working' : command.status === 'failed' ? 'bad' : '',
+      recovery: command.error || '' } };
 }
 
 function processRowView(process = {}, now = Date.now(), snapshot = null) {
