@@ -105,23 +105,12 @@ function ChangesDesktop({
   requestedPathRef.current = requestedFilePath;
   activeRef.current = active;
 
-  const loadDiff = useCallback(async (requestedTask, path, snapshot) => {
+  const loadDiff = useCallback(async (requestedTask, path) => {
     const normalizedTaskId = String(requestedTask || '').trim();
     const normalizedPath = String(path || '').trim();
     if (!normalizedTaskId || !normalizedPath || !activeRef.current) return false;
     const request = ++diffRequestRef.current;
     pendingDiffPathRef.current = normalizedPath;
-    if (snapshot?.historyMode === 'unavailable' || snapshot?.historyAvailable === false) {
-      filePathRef.current = normalizedPath;
-      setFilePath(normalizedPath);
-      if (mode === 'standalone') replaceRouteParams({ task: normalizedTaskId, file: normalizedPath });
-      else onSelectFileRef.current?.(normalizedPath);
-      setDiffFile(null);
-      setViewerMessage('This task records the changed file, but its original diff is unavailable because the Git commit could not be verified.');
-      setViewerTone('');
-      pendingDiffPathRef.current = '';
-      return false;
-    }
     if (normalizedPath !== filePathRef.current) {
       setDiffFile(null);
       setViewerMessage('Loading file diff…');
@@ -296,7 +285,7 @@ function ChangesDesktop({
   }, [changedFiles, query]);
   const fileTree = useMemo(() => buildFileTree(visibleFiles), [visibleFiles]);
   const meta = workspaceMeta(workspace, workspaceError);
-  const viewState = workspace?.historyMode === 'unavailable' ? 'Recorded files only' : 'Read-only diff';
+  const viewState = workspace?.historyMode === 'unavailable' ? 'Current files only' : 'Read-only diff';
   const ideDisabled = openingIde || !editorId || !editors?.length;
 
   const openIde = async () => {
@@ -462,6 +451,12 @@ function DiffViewer({ file, message, tone, layout, viewStates }) {
       'data-code-editor': '',
       role: tone === 'error' ? 'alert' : 'status'
     }, message || 'Choose a changed file to review its diff.');
+  }
+  if (file.historyMode === 'unavailable') {
+    return h('section', { className: 'code-editor-host code-historical-fallback', 'data-code-editor': '' },
+      h('p', { role: 'status' }, 'Original task diff unavailable. This is the current file, not its historical version.'),
+      file.exists ? h('pre', { tabIndex: 0 }, h('code', null, file.content))
+        : h('p', null, 'This file no longer exists in the project.'));
   }
   return h(MonacoDiffViewer, { file, layout, viewStates });
 }

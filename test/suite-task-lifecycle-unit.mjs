@@ -1512,6 +1512,11 @@ async function case_task_observability_unit() {
     ...execCompleted
   });
   assert.equal(execEvent.command, exactCommand, 'activity events must retain the visible exec command');
+  const outputEvent = createActivityEvent({ ...buildToolActivityDetails('exec', { command: 'node test' }, {
+    exitCode: 1, commandSucceeded: false, stdout: 'stdout line 1\nstdout line 2\n', stderr: 'stderr line 1\n'
+  }, null, { phase: 'complete' }), eventId: 'exec-stream-1', taskId: 'task-command-1' });
+  assert.equal(outputEvent.stdout, 'stdout line 1\nstdout line 2\n');
+  assert.equal(outputEvent.stderr, 'stderr line 1\n');
   
   const secretCommand = buildToolActivityDetails('exec', { command: 'npm test --token super-secret OPENAI_API_KEY=also-secret' }, { exitCode: 0 }, null, { phase: 'complete' });
   assert.doesNotMatch(secretCommand.command, /super-secret|also-secret/);

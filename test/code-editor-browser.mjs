@@ -54,8 +54,8 @@ try {
   assert.equal(result.inspectorHiddenReadsStable, true, 'a hidden Changes tab must not refetch when the task summary updates');
   assert.equal(result.inspectorDiffRestored, true, 'file, diff layout and editor position survive inactive tabs');
   assert.deepEqual(result.inspectorProcessGroups, [
-    { title: 'Task-lifecycle processes', ids: ['proc-task-owned'] },
-    { title: 'Persistent processes started by task', ids: ['proc-persistent'] }
+    { title: 'Task commands', ids: ['proc-task-owned'] },
+    { title: 'Persistent commands', ids: ['proc-persistent'] }
   ]);
   assert.equal(result.inspectorProcessState, 'Running');
   assert.equal(result.inspectorProcessBadge, '2', 'only task-owned processes contribute to the task badge');
@@ -71,6 +71,7 @@ try {
   assert.equal(fullScreenParams.get('taskStatus'), 'open');
   assert.equal(result.inspectorOrphanRecovery, true);
   assert.ok(result.inspectorVirtualRows > 8 && result.inspectorVirtualRows < 100, 'loaded task events have a bounded rendered window');
+  assert.equal(result.inspectorSingleScroll, true, 'task activity must share the outer task inspector scrollbar');
   assert.equal(result.dockNewestEvent, 'Dock event 24');
   assert.equal(result.dockCurrentTask, true);
   assert.deepEqual(result.dockAccessibility, [], 'the dock control must have an accessible name matching its visible label');
@@ -93,7 +94,7 @@ try {
   assert.equal(result.unavailableTaskRecovered, true, 'Retry must load the same requested task after a transient failure');
   assert.deepEqual(result.retainedTaskWithoutSummaries, ['retained-task'], 'an explicit retained task must be resolvable when the aggregate has no tasks');
   assert.deepEqual(result.historicalDiffUnavailable, {
-    recordedFileVisible: true, contextPreserved: true, noRawIpcError: true, noUnverifiedDiffRequest: true
+    recordedFileVisible: true, contextPreserved: true, noRawIpcError: true, currentFileOnly: true
   }, 'older tasks with no verified commit must retain file navigation without attempting an unsafe diff');
   assert.deepEqual(result.taskFileHrefs, [
     '#code?task=probe-task&file=src%2Fexample.js&from=tasks',

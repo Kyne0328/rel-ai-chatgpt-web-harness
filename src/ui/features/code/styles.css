@@ -51,6 +51,9 @@
 .code-editor-host { min-width: 0; min-height: 0; flex: 1; overflow: hidden; background: var(--ui-canvas); }
 .code-editor-message { display: grid; place-items: center; padding: 30px; color: var(--ui-text-tertiary); text-align: center; }
 .code-editor-message.error { color: var(--ui-status-danger-foreground); }
+.code-historical-fallback { display: flex; flex-direction: column; gap: 12px; padding: 16px; overflow: auto; }
+.code-historical-fallback > p { margin: 0; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.5; }
+.code-historical-fallback > pre { flex: 1; min-height: 0; margin: 0; padding: 12px; overflow: auto; white-space: pre; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); font-size: 12px; line-height: 1.6; }
 .code-diff-fallback { display: grid; height: 100%; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: hidden; }
 .code-diff-fallback.is-unified { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); }
 .code-diff-fallback.is-unified .code-diff-column { border-right: 0; border-bottom: 1px solid var(--ui-border-subtle); }

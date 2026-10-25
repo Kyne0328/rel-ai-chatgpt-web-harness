@@ -344,6 +344,8 @@ function createActivityEvent(details = {}) {
     ...(details.result && Object.values(details.result).some(value => value !== undefined && value !== '') ? { result: compactObject(details.result) } : {}),
     ...(details.error ? { error: normalizeActivityError(details.error) } : {}),
     ...(details.command ? { command: redactCommandForDisplay(details.command) } : {}),
+    ...(details.stdout != null ? { stdout: sanitizeStreamText(details.stdout) } : {}),
+    ...(details.stderr != null ? { stderr: sanitizeStreamText(details.stderr) } : {}),
     metadata: sanitizeActivityMetadata(details.metadata || {}) || {}
   };
 }

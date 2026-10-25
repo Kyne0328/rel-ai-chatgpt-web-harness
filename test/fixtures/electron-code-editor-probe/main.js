@@ -255,12 +255,12 @@ app.whenReady().then(async () => {
       result.retainedTaskWithoutSummaries = [...document.querySelectorAll('[data-code-task] option')].map(option => option.value);
       location.hash = '#code?task=historical-task&file=src%2Fretained.js';
       await until(() => document.querySelector('[data-code-task]')?.value === 'historical-task'
-        && document.querySelector('[data-code-editor]')?.textContent.includes('original diff is unavailable'), 'historical task recorded files');
+        && document.querySelector('[data-code-editor]')?.textContent.includes('Original task diff unavailable'), 'historical task current file fallback');
       result.historicalDiffUnavailable = {
         recordedFileVisible: Boolean(document.querySelector('[data-code-file="src/retained.js"]')),
         contextPreserved: new URLSearchParams(location.hash.split('?')[1]).get('file') === 'src/retained.js',
         noRawIpcError: !document.querySelector('[data-code-editor][role="alert"]'),
-        noUnverifiedDiffRequest: window.relaiCodeProbe.historicalDiffRequests() === 0
+        currentFileOnly: window.relaiCodeProbe.historicalDiffRequests() === 1
       };
       snapshot = { ...snapshot, tasks: aggregateTasks };
       listeners.forEach(listener => listener());
@@ -301,8 +301,12 @@ app.whenReady().then(async () => {
       setInputValue(activitySearch, 'Activity return context');
       await until(() => new URLSearchParams(location.hash.split('?')[1]).get('search') === 'Activity return context', 'independent Activity search');
       result.activityTaskReturnHref = activityTaskLink().getAttribute('href');
-      document.querySelector('.activity-session-actions a[href^="#activity"]').click();
-      await until(() => !new URLSearchParams(location.hash.split('?')[1]).has('search') && new URLSearchParams(location.hash.split('?')[1]).get('returnSearch') === 'Changes viewer', 'Task activity retains origin context');
+      activityTaskLink().click();
+      await until(() => taskActivityLink(), 'returned task activity link');
+      taskActivityLink().click();
+      await until(() => document.querySelector('.activity-row-trigger'), 'returned Activity rows');
+      document.querySelector('.activity-row-trigger').click();
+      await until(() => activityTaskLink(), 'returned Activity task link');
       result.activityNestedReturnHref = activityTaskLink().getAttribute('href');
       activityTaskLink().click();
       await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[data-task-id="probe-task"].is-selected'), 'Tasks Activity Tasks roundtrip');
@@ -428,6 +432,8 @@ app.whenReady().then(async () => {
       document.querySelector('[data-show-older-events]').click();
       await until(() => document.querySelectorAll('#session-panel-activity [data-event-index]').length > 8, 'virtual task activity');
       result.inspectorVirtualRows = document.querySelectorAll('#session-panel-activity [data-event-index]').length;
+      result.inspectorSingleScroll = getComputedStyle(document.querySelector('.session-inspector')).overflowY === 'auto'
+        && getComputedStyle(document.querySelector('.task-event-scroll')).overflowY !== 'auto';
       location.hash = '#tasks?task=probe-task&tab=technical';
       await until(() => document.querySelector('[data-session-details]')?.getAttribute('aria-expanded') === 'true' && !document.querySelector('#session-panel-technical')?.hidden, 'retained technical deep link');
       result.inspectorDetailsLinkWorks = document.querySelector('#session-panel-technical')?.textContent.includes('probe-task');

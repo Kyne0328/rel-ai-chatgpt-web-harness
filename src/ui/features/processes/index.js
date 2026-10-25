@@ -26,15 +26,16 @@ export function processListView(data = {}, now = Date.now()) {
 function commandRowView(command, now) {
   const terminal = ['completed', 'cancelled', 'failed'].includes(command.status);
   const active = ['queued', 'running', 'stopping'].includes(command.status);
-  const label = { queued: 'Queued', running: 'Running', stopping: 'Stopping', completed: 'Completed', cancelled: 'Stopped', failed: 'Failed', unknown: 'Cleanup unconfirmed' }[command.status] || 'Unknown';
+  const label = { queued: 'Queued', running: 'Running', stopping: 'Stopping', completed: 'Completed', cancelled: 'Stopped', failed: 'Failed', unknown: 'Outcome unverified' }[command.status] || 'Unknown';
   const row = processRowView({ ...command, processId: `command:${command.operationId}` }, now);
-  return { ...row, operationId: command.operationId, stopProcessId: null, taskId: command.workId,
+  return { ...row, elapsed: command.status === 'unknown' ? 'Completion unverified' : row.elapsed,
+    operationId: command.operationId, stopProcessId: null, taskId: command.workId,
     taskTitle: command.taskTitle || command.workId || 'Independent command',
     label: 'Command',
     state: { status: command.status, label, terminal, active,
       canStop: active && command.status !== 'stopping' && command.canStop === true,
       pillClass: active ? 'working' : command.status === 'failed' ? 'bad' : '',
-      recovery: command.error || '' } };
+      recovery: command.error || (command.status === 'unknown' ? 'The command ended, but process cleanup could not be confirmed.' : '') } };
 }
 
 function processRowView(process = {}, now = Date.now(), snapshot = null) {

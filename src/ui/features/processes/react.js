@@ -225,18 +225,22 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
     archiveError ? h('div', { className: 'process-output-error', role: 'alert' }, archiveError) : null,
     row.recoveryArchived ? h('div', { className: 'process-output-notice' }, 'Archived record. Cleanup remains unconfirmed; automatic recovery checks and ownership protections remain in effect.') : null,
     h('div', { className: 'process-command-summary' }, h('code', null, row.commandSummary)),
-    row.recoveryNote ? h('div', { className: 'process-output-notice', role: 'status' }, row.recoveryNote) : null,
-    row.error || ['failed', 'orphaned', 'unknown'].includes(state.status)
-      ? h('div', { className: `connection-notice ${state.status === 'failed' ? 'bad' : 'warn'} process-recovery` },
-          h('strong', null, row.error || state.label),
-          state.recovery !== row.error ? h('div', null, state.recovery) : null
-        )
-      : null,
+    state.status === 'failed'
+      ? h('div', { className: 'connection-notice bad process-recovery' }, h('strong', null, row.error || 'Process failed'),
+          state.recovery !== row.error ? h('div', null, state.recovery) : null)
+      : row.recoveryNote || row.error || ['orphaned', 'unknown'].includes(state.status)
+        ? h('details', { className: 'process-recovery-details' },
+            h('summary', null, 'Why the outcome is unverified'),
+            h('p', null, row.error || row.recoveryNote || state.recovery),
+            state.recovery && state.recovery !== row.error && state.recovery !== row.recoveryNote
+              ? h('p', null, state.recovery) : null)
+        : null,
     h(ProcessOutput, { processId: row.processId, operationId: row.operationId, output: row.output, active: state.active })
   );
 });
 
 function ProcessOutput({ processId, operationId, output, active = false }) {
+  if (!active && !output.hasOutput) return null;
   const stdoutVisible = output.stdout.trim() || output.stdoutMeta.totalBytes > 0;
   const stderrVisible = output.stderr.trim() || output.stderrMeta.totalBytes > 0;
   return h('details', { className: 'process-output', open: active && output.hasOutput },

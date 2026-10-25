@@ -59,7 +59,9 @@ contextBridge.exposeInMainWorld('relaiDesktop', {
     diff: async (taskId, requestedPath) => {
       if (taskId === 'historical-task') {
         historicalDiffRequests++;
-        throw new Error('Old task diff has no verified commit.');
+        return { ok: true, work_id: taskId, workspace: 'app', path: requestedPath,
+          content: content, exists: true, baseAvailable: false,
+          historyMode: 'unavailable', historyAvailable: false, language: 'javascript', readOnly: true };
       }
       const requestedContent = content;
       const requestedRevision = revision;

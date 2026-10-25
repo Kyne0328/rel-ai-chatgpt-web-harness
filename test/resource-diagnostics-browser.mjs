@@ -82,23 +82,32 @@ try {
   assert.doesNotMatch(await panel.innerText(), /Minimum heavy-work reservation|Bounded memory observations/);
   await panel.getByText('Technical resource details', { exact: true }).click();
   assert.doesNotMatch(await panel.innerText(), /Minimum heavy-work reservation|Startup slot released/);
-  assert.match(await metricText(page, 'Available physical memory'), /4.00 GiB/);
+  const hostDetails = panel.locator('[data-resource-host-details]');
+  assert.equal(await hostDetails.evaluate(element => element.open), false, 'advanced host readings should stay collapsed');
+  await hostDetails.locator('summary').click();
+  assert.match(await metricText(page, 'Commit used / limit'), /GiB/);
   assert.equal(await metricText(page, 'Pages read in / second'), '12.5');
   assert.equal(await metricText(page, 'Page disk reads / second'), '3.0');
 
-  const disclosure = panel.locator('summary', { hasText: 'Current Node process memory' });
+  const disclosure = panel.locator('[data-resource-node-details] > summary');
   await disclosure.focus();
   await disclosure.press('Enter');
   assert.equal(await disclosure.evaluate(element => element.parentElement.open), true);
   await page.evaluate(() => { window.__resourcePanel = document.querySelector('[data-diagnostic-region="resources"]'); });
+  const cacheTrend = panel.locator('[data-resource-cache-trend] > summary');
+  assert.equal(await cacheTrend.evaluate(element => element.parentElement.open), false, 'cache and history details should stay collapsed');
+  await cacheTrend.click();
   assert.match(await panel.innerText(), /File-read cache budget/);
   assert.match(await panel.innerText(), /not a leak assessment/);
+  await panel.getByText('Memory interpretation', { exact: true }).click();
   assert.match(await panel.innerText(), /Full process-family memory: unmeasured/);
   const rootDisclosure = panel.locator('summary', { hasText: 'Managed process roots' });
   await rootDisclosure.focus();
   await rootDisclosure.press('Enter');
   assert.equal(await rootDisclosure.evaluate(element => element.parentElement.open), true);
   assert.deepEqual(await panel.locator('[data-managed-root-id]').evaluateAll(elements => elements.map(element => element.dataset.managedRootId)), ['root-high', 'root-low', 'root-unknown']);
+  assert.equal(await panel.locator('[data-managed-root-id="root-high"]').evaluate(element => element.open), false, 'each managed process should show a concise row by default');
+  await panel.locator('[data-managed-root-id="root-high"] > summary').click();
   assert.match(await panel.innerText(), /Detached descendants remain unknown/);
   results.push(await geometry(page, 'desktop-1280'));
   await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
@@ -129,7 +138,7 @@ try {
 
   await refreshTo('unknown');
   await page.waitForFunction(() => document.querySelector('.resource-diagnostics-reason')?.textContent.includes('Snapshot'));
-  assert.equal(await metricText(page, 'Available physical memory'), 'Unknown');
+  assert.match(await panel.locator('[aria-label="Physical memory"] .resource-stat-value').innerText(), /Unknown/);
   assert.equal(await metricText(page, 'Commit headroom'), 'Unknown');
   assert.equal(await metricText(page, 'Pages read in / second'), 'Unknown');
   assert.match(await panel.innerText(), /Memory readings are informational/);
@@ -156,6 +165,7 @@ try {
       assert.equal(measured.checkBadgesContained, true, JSON.stringify(measured));
       assert.equal(measured.checkIdsContained, true, JSON.stringify(measured));
       const refresh = panel.getByRole('button', { name: 'Refresh resources', exact: true });
+      await page.keyboard.press('Tab');
       await refresh.focus();
       assert.equal(await refresh.evaluate(element => {
         const style = getComputedStyle(element);

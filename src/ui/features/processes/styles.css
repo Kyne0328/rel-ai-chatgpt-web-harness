@@ -59,6 +59,10 @@
 .process-command-summary { display: grid; gap: .35rem; margin-top: .8rem; }
 .process-command-summary code { overflow-wrap: anywhere; white-space: pre-wrap; padding: var(--filter-inset, 12px); border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-primary); font-size: var(--technical-font-size, 12px); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; }
 .process-independent, .process-recovery { margin-top: .8rem; }
+.process-recovery-details { margin-top: 8px; border-top: 1px solid var(--ui-border-subtle); }
+.process-recovery-details > summary { display: flex; min-height: 44px; align-items: center; cursor: pointer; color: var(--ui-text-secondary); font-size: 13px; font-weight: 600; }
+.process-recovery-details > p { margin: 0 0 8px; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.process-recovery-details > summary:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
 .process-output-empty { margin-top: .65rem; padding: var(--filter-inset, 12px); border: 1px dashed var(--ui-border-default); border-radius: var(--radius-md); color: var(--ui-text-secondary); font-size: var(--technical-font-size, 12px); line-height: var(--technical-line-height, 1.6); }
 .recent-processes { border-top: 1px solid var(--ui-border-default); }
 .recent-processes > summary { @apply flex min-h-11 cursor-pointer items-center px-4 py-2 text-[13px] font-semibold; color: var(--ui-text-secondary); background: var(--ui-surface-secondary); }

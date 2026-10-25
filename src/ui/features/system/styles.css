@@ -127,6 +127,11 @@
 .resource-diagnostics .resource-diagnostics-reason { margin: -4px 0 0; }
 .resource-diagnostics-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px 20px; margin: 0; }
 .resource-diagnostics-metrics > div { min-width: 0; }
+.resource-detail-group .resource-diagnostics-metrics > div,
+.resource-subsection > .resource-diagnostics-metrics > div { padding: 12px; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-secondary); }
+.resource-detail-group .resource-diagnostics-metrics { gap: 8px; }
+.resource-detail-group { background: transparent; border: 0; padding: 4px 0 12px; }
+.resource-detail-group .resource-diagnostics-note { color: var(--ui-text-tertiary); }
 .resource-diagnostics-metrics dt { @apply text-[13px]; line-height: 1.45; color: var(--ui-text-tertiary); }
 .resource-diagnostics-metrics dd { @apply text-[13px] font-semibold; margin: 4px 0 0; line-height: 1.5; color: var(--ui-text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .resource-diagnostics-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 8px; }
@@ -146,13 +151,14 @@
 .resource-subsection > h4 { margin-top: 18px; }
 .resource-subsection > .resource-diagnostics-details { margin-inline: 12px; }
 .resource-details-count { display: inline-flex; min-width: 24px; justify-content: center; padding: 1px 7px; border: 1px solid var(--ui-border-default); border-radius: 999px; color: var(--ui-text-secondary); background: var(--ui-surface-secondary); font-size: 12px; }
-.resource-root-heading { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
-.resource-root-heading h4 { margin: 0; color: var(--ui-text-primary); }
-.resource-root-verification { font-size: 12px; font-weight: 650; color: var(--ui-text-secondary); }
+.resource-managed-list { display: grid; gap: 8px; margin: 10px 0; }
+.resource-diagnostics-root > summary { justify-content: space-between; gap: 12px; }
+.resource-root-name { min-width: 0; overflow-wrap: anywhere; font-weight: 650; }
+.resource-root-verification { flex-shrink: 0; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--ui-text-secondary); }
 .resource-root-verification.verified { color: var(--ui-status-success-foreground); }
-.resource-diagnostics-root { gap: 14px; padding: 14px; }
+.resource-diagnostics-root { min-width: 0; padding: 0 12px 12px; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-secondary); }
 .resource-diagnostics-root .resource-diagnostics-metrics { grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); }
-.resource-diagnostics-root .resource-diagnostics-note { margin: 0; }
+.resource-diagnostics-root .resource-diagnostics-note { margin: 10px 0 0; }
 .resource-diagnostics-note { max-width: 108ch; }
 @media (max-width: 680px) {
   .resource-detail-group { padding: 12px; }

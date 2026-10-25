@@ -42,6 +42,11 @@ const processSummary = processListView({
   ]
 });
 assert.equal(processSummary.running, 0);
+const unresolvedCommand = processListView({ commandOperations: [{ operationId: 'check-1', status: 'unknown', commandSummary: 'node --check file.js', startedAt: '2026-10-25T13:00:00Z', endedAt: '2026-10-25T13:00:00Z' }] }).rows[0];
+assert.equal(unresolvedCommand.state.label, 'Outcome unverified');
+assert.equal(unresolvedCommand.elapsed, 'Completion unverified');
+assert.equal(unresolvedCommand.state.terminal, false);
+assert.equal(unresolvedCommand.output.hasOutput, false);
 assert.equal(processSummary.finished, 1, 'orphaned processes must not be counted as finished');
 const uncertainTiming = processListView({ managedProcesses: [{
   processId: 'unknown-duration', status: 'orphaned', startedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString()

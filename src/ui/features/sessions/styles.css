@@ -271,7 +271,7 @@
   gap: 6px;
 }
 
-.task-event-scroll { max-height: 55vh; min-height: 80px; overflow: auto; contain: layout; }
+.task-event-scroll { display: grid; min-width: 0; gap: 0; }
 .task-event-with-inspect { display: flex; align-items: stretch; gap: 8px; padding-bottom: 6px; }
 .task-event-with-inspect > button { flex: 0 0 auto; align-self: center; }
 .task-event-link:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }

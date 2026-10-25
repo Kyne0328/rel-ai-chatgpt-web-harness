@@ -61,9 +61,12 @@ async function readTaskCodeDiff(config, payload = {}) {
 
   const recorded = historicalTaskFiles(context);
   if (recorded.includes(requestedPath)) {
-    const error = new Error('This older task records the changed file, but Rel.AI cannot safely identify the Git commit that contains its final diff.');
-    error.code = 'TASK_DIFF_HISTORY_UNAVAILABLE';
-    throw error;
+    // Current content is not evidence of the task's original diff.
+    const current = await readOptionalTextFile(context.executionPath, requestedPath);
+    return { ok: true, work_id: context.taskId, workspace: context.baseWorkspace.alias,
+      path: current.path, content: current.content, sha256: current.sha256, exists: current.exists,
+      baseAvailable: false, historyMode: 'unavailable', historyAvailable: false,
+      language: viewerLanguage(current.path), readOnly: true, writable: false };
   }
 
   throw new Error(`The selected file is not recorded as a change for this task: ${requestedPath}`);

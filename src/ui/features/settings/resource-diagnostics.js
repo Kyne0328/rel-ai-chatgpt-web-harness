@@ -74,33 +74,35 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
       }) : h('p', { className: 'resource-diagnostics-note' }, 'Lane limits are unavailable.')),
       h('details', { className: 'resource-diagnostics-details', 'data-resource-technical': '' },
         h('summary', null, 'Technical resource details'),
-      h('div', { className: 'resource-detail-group' },
-        h('h4', null, 'Host memory'),
-        h('p', { className: 'resource-diagnostics-note' }, 'Memory readings are informational.'),
-        h('p', { className: 'resource-diagnostics-note' },
-          `Source: ${pressure.source || 'unknown'} · ${sampleAge(pressure.ageMs)}`,
-          pressure.error ? ` · ${pressure.error}` : ''),
-      h('dl', { className: 'resource-diagnostics-metrics' },
-        metric('Available physical memory', bytes(pressure.physicalAvailableBytes)),
-        metric('Total physical memory', bytes(pressure.physicalTotalBytes)),
-        metric('Commit used / limit', `${bytes(pressure.commitUsedBytes)} / ${bytes(pressure.commitLimitBytes)}`),
-        metric('Commit headroom', bytes(pressure.commitAvailableBytes)),
-        metric('Pages read in / second', rate(pressure.pagesInputPerSecond)),
-        metric('Page disk reads / second', rate(pressure.pageReadsPerSecond))
-      ),
-      pressure.pagingMeaning ? h('p', { className: 'resource-diagnostics-note' }, pressure.pagingMeaning) : null
-      ),
-      h('details', { className: 'resource-diagnostics-details resource-subsection' },
+        h('details', { className: 'resource-diagnostics-details resource-subsection', 'data-resource-host-details': '' },
+          h('summary', null, 'Host memory and paging'),
+          h('div', { className: 'resource-detail-group' },
+            h('p', { className: 'resource-diagnostics-note' }, 'Memory readings are informational.'),
+            h('p', { className: 'resource-diagnostics-note' },
+              `Source: ${pressure.source || 'unknown'} · ${sampleAge(pressure.ageMs)}`,
+              pressure.error ? ` · ${pressure.error}` : ''),
+            h('dl', { className: 'resource-diagnostics-metrics' },
+              metric('Commit used / limit', `${bytes(pressure.commitUsedBytes)} / ${bytes(pressure.commitLimitBytes)}`),
+              metric('Commit headroom', bytes(pressure.commitAvailableBytes)),
+              metric('Pages read in / second', rate(pressure.pagesInputPerSecond)),
+              metric('Page disk reads / second', rate(pressure.pageReadsPerSecond))),
+            pressure.pagingMeaning ? h('p', { className: 'resource-diagnostics-note' }, pressure.pagingMeaning) : null
+          )
+        ),
+      h('details', { className: 'resource-diagnostics-details resource-subsection', 'data-resource-node-details': '' },
         h('summary', null, 'Current Node process memory'),
         h('p', { className: 'resource-diagnostics-note' }, `PID ${count(node.pid)} · ${sampleAge(node.ageMs)}${node.available === true ? '' : ' · Measurement unavailable'}`),
         node.error ? h('p', { className: 'resource-diagnostics-note' }, node.error) : null,
         h('dl', { className: 'resource-diagnostics-metrics' },
-          metric('Resident memory (RSS)', bytes(current.rssBytes)),
           metric('Heap used / allocated', `${bytes(current.heapUsedBytes)} / ${bytes(current.heapTotalBytes)}`),
           metric('V8 heap limit', bytes(current.heapLimitBytes)),
           metric('External memory', bytes(current.externalBytes)),
           metric('ArrayBuffers (included in external)', bytes(current.arrayBuffersBytes))),
-        node.interpretation ? h('p', { className: 'resource-diagnostics-note' }, node.interpretation) : null,
+        h('details', { className: 'resource-diagnostics-details resource-subsection' },
+          h('summary', null, 'Memory interpretation'),
+          node.interpretation ? h('p', { className: 'resource-diagnostics-note' }, node.interpretation) : null,
+          h('p', { className: 'resource-diagnostics-note' }, `Full process-family memory: unmeasured. ${resources?.children?.reason || 'No process-family memory probe is run by this snapshot.'}`)
+        ),
         samples.length ? h('details', { className: 'resource-diagnostics-details resource-subsection' },
           h('summary', null, `Memory history data (${samples.length} samples)`),
           h('div', { className: 'resource-history-data' }, h('table', null,
@@ -108,7 +110,9 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
             h('thead', null, h('tr', null, h('th', { scope: 'col' }, 'Time'), h('th', { scope: 'col' }, 'Resident memory'))),
             h('tbody', null, samples.map((sample, index) => h('tr', { key: index },
               h('td', null, sampleTime(sample.sampledAtMs)), h('td', null, bytes(sample.rssBytes)))))))) : null,
-        h('h4', null, 'File-read cache budget'),
+        h('details', { className: 'resource-diagnostics-details resource-subsection', 'data-resource-cache-trend': '' },
+          h('summary', null, 'Cache and memory trend'),
+          h('h4', null, 'File-read cache budget'),
         h('dl', { className: 'resource-diagnostics-metrics' },
           metric('Retained text / byte budget', `${bytes(fileReadCache.retainedBytes)} / ${bytes(fileReadCache.maxRetainedBytes)}`),
           metric('Text / metadata entries', `${count(fileReadCache.entries)} / ${count(fileReadCache.metadataEntries)}`),
@@ -125,7 +129,7 @@ export function ResourceDiagnostics({ resources = {}, onRefresh }) {
             metric('Heap change per minute', signedRate(trend.slopeBytesPerMinute?.heapUsedBytes)),
             metric('External change per minute', signedRate(trend.slopeBytesPerMinute?.externalBytes))))
           : h('p', { className: 'resource-diagnostics-note' }, 'Trend unavailable: at least three successful samples spanning ten seconds are required.'),
-        h('p', { className: 'resource-diagnostics-note' }, `Full process-family memory: unmeasured. ${resources?.children?.reason || 'No process-family memory probe is run by this snapshot.'}`)
+        )
       ),
       h(ManagedRootMemory, { snapshot: resources?.managedRoots })
       )
@@ -174,14 +178,13 @@ function ManagedRootMemory({ snapshot = {} }) {
   return h('details', { className: 'resource-diagnostics-details' },
     h('summary', null, 'Managed process roots', h('span', { className: 'resource-details-count' }, roots.length)),
     h('p', { className: 'resource-diagnostics-note' },
-      `${roots.length} shown of ${count(value.totalRootCount)} authorized managed roots · ${sampleAge(value.cacheAgeMs)}${stale ? ' · Stale sample; refresh to verify identity again.' : ''}`),
-    roots.length ? h('p', { className: 'resource-diagnostics-note' }, 'Ranked by measured root private bytes, with unknown values last. This is a bounded list of Rel.AI-managed roots, not all OS processes or a complete process-family total. Detached descendants remain unknown.') : null,
-    roots.length ? h('div', { className: 'resource-diagnostics-lanes' }, roots.map(root => h('section', {
-      className: 'resource-diagnostics-lane resource-diagnostics-root', key: root.processId || root.pid, 'data-managed-root-id': root.processId || ''
+      `${roots.length} of ${count(value.totalRootCount)} managed roots · ${sampleAge(value.cacheAgeMs)}. Detached descendants remain unknown.${stale ? ' Stale sample; refresh to verify identity again.' : ''}`),
+    roots.length ? h('div', { className: 'resource-managed-list' }, roots.map(root => h('details', {
+      className: 'resource-diagnostics-details resource-diagnostics-root', key: root.processId || root.pid, 'data-managed-root-id': root.processId || ''
     },
-      h('div', { className: 'resource-root-heading' },
-        h('h4', null, root.label || `Managed PID ${count(root.pid)}`),
-        h('span', { className: `resource-root-verification${measured(root) ? ' verified' : ''}` }, measured(root) ? 'Measured' : 'Not measured')
+      h('summary', null,
+        h('span', { className: 'resource-root-name' }, root.label || `Managed PID ${count(root.pid)}`),
+        h('span', { className: `resource-root-verification${measured(root) ? ' verified' : ''}` }, measured(root) ? bytes(root.privateBytes) : 'Memory unavailable')
       ),
       h('dl', { className: 'resource-diagnostics-metrics' },
         metric('PID', count(root.pid)),

@@ -150,7 +150,7 @@ assert.match(render(null), /Memory readings unavailable/);
 assert.match(render(null), /Trend unavailable/);
 assert.match(render({ host: { pressure: { state: 'normal', stale: true } } }), /Memory readings unavailable/);
 assert.doesNotMatch(render({ host: { pressure: { state: 'normal', stale: true } } }), /Memory readings available/);
-assert.match(render({ host: { pressure: { state: 'normal', stale: false, physicalAvailableBytes: 0 } } }), /0\.0 MiB/);
+assert.match(render({ host: { pressure: { state: 'normal', stale: false, physicalAvailableBytes: 0, physicalTotalBytes: 8 * 1024 ** 3 } } }), /0\.0 MiB/);
 
 
 const measuredRoot = (processId, privateBytes, extra = {}) => ({

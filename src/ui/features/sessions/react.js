@@ -1,5 +1,6 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, Suspense } from 'react';
 import { flushSync } from 'react-dom';
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { copyText } from '../../clipboard.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
@@ -18,7 +19,6 @@ import { StatusPill as UnifiedStatusPill } from '../../components/pill.js';
 import { statusPillClass } from '../../status-tone.js';
 import { processListView } from '../processes/index.js';
 import { ProcessRow, useProcessMemory } from '../processes/react.js';
-import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import {
   isOngoingSession,
   goalModeNotice,
@@ -1102,33 +1102,73 @@ function TaskTraceSection({ session, olderExpanded, setOlderExpanded, activityHa
   const [selected, setSelected] = useState(null);
   const [focusedIndex, setFocusedIndex] = useState(0);
   const scrollRef = useRef(null);
+  const [scrollElement, setScrollElement] = useState(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
   const ordered = useMemo(() => orderSessionEvents(session.events || []), [session.events]);
   const matched = ordered.filter(event => !search || [event.title, event.summary, event.command, event.tool?.name || event.tool, event.operation]
     .some(value => String(value || '').toLowerCase().includes(search.toLowerCase())));
   const visible = olderExpanded || search ? matched : matched.slice(0, DETAIL_EVENT_PREVIEW);
-  const virtual = useVirtualizer({ count: visible.length, getScrollElement: () => scrollRef.current,
-    estimateSize: () => 110, overscan: 4, enabled: visible.length > 30,
+  const virtual = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => scrollElement,
+    estimateSize: () => 110, overscan: 4, enabled: visible.length > 30, scrollMargin,
     getItemKey: index => activityEventId(visible[index]) || index,
-    rangeExtractor: range => [...new Set([...defaultRangeExtractor(range), Math.min(focusedIndex, visible.length - 1)])].filter(index => index >= 0).sort((a, b) => a - b) });
+    rangeExtractor: range => [...new Set([...defaultRangeExtractor(range), Math.min(focusedIndex, visible.length - 1)])]
+      .filter(index => index >= 0).sort((a, b) => a - b)
+  });
+  useEffect(() => {
+    const list = scrollRef.current;
+    const scroller = list?.closest('.session-inspector');
+    if (!scroller) return undefined;
+    setScrollElement(scroller);
+    const measure = () => {
+      const offset = list.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      setScrollMargin(previous => Math.abs(previous - offset) > 1 ? offset : previous);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [visible.length, search, session.id, olderExpanded]);
+  const visibleVirtualRows = virtual.getVirtualItems();
+  // Keep the start of the timeline available even when it begins below the
+  // inspector's current viewport; the outer inspector owns all scrolling.
+  const virtualRows = new Map(visibleVirtualRows.map(row => [row.index, row]));
+  if (visible.length > 30) {
+    for (let index = 0; index < Math.min(12, visible.length); index += 1) {
+      if (!virtualRows.has(index)) virtualRows.set(index, {
+        index, key: activityEventId(visible[index]) || index, start: scrollMargin + index * 110
+      });
+    }
+  }
+  const rowsToRender = [...virtualRows.values()].sort((a, b) => a.index - b.index);
   const item = (event, index) => h('div', { className: 'task-event-with-inspect', 'data-event-index': index,
     onFocus: () => setFocusedIndex(index) },
     h(EventRow, { event, session, older: index >= DETAIL_EVENT_PREVIEW }),
     h('button', { type: 'button', className: 'secondary compact-button', onClick: () => setSelected(event), 'aria-label': 'Preview ' + (event.title || event.operation || 'event') }, 'Preview'));
   return h('section', { className: 'task-detail-section' },
     h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task activity'), h('span', null, `${ordered.length} loaded${activityHasMore ? ' · more available' : ''}`)),
-    h('input', { type: 'search', value: search, 'aria-label': 'Search task activity', placeholder: 'Search task activity', onChange: event => { setSearch(event.target.value); setFocusedIndex(0); scrollRef.current?.scrollTo(0, 0); } }),
+    h('input', { type: 'search', value: search, 'aria-label': 'Search task activity', placeholder: 'Search task activity', onChange: event => { setSearch(event.target.value); setFocusedIndex(0); } }),
     !matched.length ? h('p', null, ordered.length ? 'No matching events.' : 'No activity recorded.') : null,
-    h('div', { className: 'task-event-scroll', ref: scrollRef, tabIndex: 0, 'aria-label': 'Task execution events', onKeyDown: event => {
-      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || !visible.length) return;
-      event.preventDefault();
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1 : Math.max(0, Math.min(visible.length - 1, focusedIndex + (event.key === 'ArrowDown' ? 1 : -1)));
-      flushSync(() => setFocusedIndex(next));
-      virtual.scrollToIndex(next, { align: 'auto' });
-      requestAnimationFrame(() => scrollRef.current?.querySelector('[data-event-index="' + next + '"] a')?.focus());
-    } }, visible.length > 30 ? h('div', { style: { height: virtual.getTotalSize(), position: 'relative' } },
-      virtual.getVirtualItems().map(row => h('div', { key: row.key, ref: virtual.measureElement, 'data-index': row.index,
-        style: { position: 'absolute', width: '100%', top: 0, transform: 'translateY(' + row.start + 'px)' } }, item(visible[row.index], row.index))))
-      : visible.map((event, index) => h('div', { key: activityEventId(event) || index }, item(event, index)))),
+    h('div', { className: 'task-event-scroll', ref: scrollRef, role: 'list',
+      'aria-label': 'Task execution events', tabIndex: 0,
+      onKeyDown: event => {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || !visible.length) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? visible.length - 1
+          : Math.max(0, Math.min(visible.length - 1, focusedIndex + (event.key === 'ArrowDown' ? 1 : -1)));
+        flushSync(() => setFocusedIndex(next));
+        if (visible.length > 30) virtual.scrollToIndex(next, { align: 'auto' });
+        requestAnimationFrame(() => scrollRef.current?.querySelector('[data-event-index="' + next + '"] a')?.focus());
+      }
+    }, visible.length > 30 ? h('div', { style: {
+      position: 'relative', height: Math.max(0, virtual.getTotalSize() - scrollMargin) || visible.length * 110
+    } }, rowsToRender.map(row => h('div', {
+      key: row.key, ref: virtual.measureElement, 'data-index': row.index, role: 'listitem',
+      style: { position: 'absolute', width: '100%', top: 0,
+        transform: 'translateY(' + (row.start - scrollMargin) + 'px)' }
+    }, item(visible[row.index], row.index))))
+      : visible.map((event, index) => h('div', { role: 'listitem', key: activityEventId(event) || index }, item(event, index)))),
     !olderExpanded && ordered.length > DETAIL_EVENT_PREVIEW ? h('button', { type: 'button', className: 'secondary', 'data-show-older-events': '', onClick: () => setOlderExpanded(true) }, 'Show ' + (ordered.length - DETAIL_EVENT_PREVIEW) + ' older events') : null,
     (olderExpanded || !ordered.length) && activityHasMore ? h('button', { type: 'button', className: 'secondary', 'data-load-older-task-activity': '', disabled: activityLoading, onClick: loadOlderActivity }, activityLoading ? 'Loading…' : 'Load older activity') : null,
     selected ? h('div', { className: 'task-event-inspection' },
