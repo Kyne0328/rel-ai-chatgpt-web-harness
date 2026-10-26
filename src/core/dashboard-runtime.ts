@@ -169,7 +169,20 @@ export async function updateDashboardWorkspace(payload: JsonRecord): Promise<Jso
   }
   if (deleting || renaming) assertDashboardWorkspaceIdle(previousWorkspace, current, renaming ? 'rename' : 'delete');
   if (deleting && payload.forgetLocalData !== false) {
-    await clearDashboardWorkspaceLocalData(current, originalAlias);
+    // A concurrent WAL writer may briefly hold state storage. Retry only this
+    // idempotent cleanup, yielding rather than blocking the service thread.
+    const retryUntil = performance.now() + 1500;
+    for (;;) {
+      try {
+        await clearDashboardWorkspaceLocalData(current, originalAlias);
+        break;
+      } catch (error) {
+        const busy = (Number((error as { errcode?: number })?.errcode) & 0xff) === 5
+          || (error as { code?: string })?.code === 'SQLITE_BUSY';
+        if (!busy || performance.now() >= retryUntil) throw error;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
     // Cleanup yields to other settings/workspace mutations. Apply only this
     // removal to their latest persisted configuration, never the old snapshot.
     current = checkedDashboardWorkspaceRemovalConfig(current, originalAlias);

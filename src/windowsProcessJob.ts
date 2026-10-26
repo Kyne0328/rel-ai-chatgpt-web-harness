@@ -253,7 +253,7 @@ export class WindowsProcessJob {
 
   cleanup(): boolean {
     if (!this.outcome().exited) return false;
-    try { fs.rmSync(this.directory, { recursive: true, force: true }); return true; } catch { return false; }
+    try { fs.rmSync(this.directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); return true; } catch { return false; }
   }
 }
 

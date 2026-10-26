@@ -589,7 +589,9 @@ async function case_knip_production_model_unit() {
     '@opentelemetry/api',
     '@opentelemetry/exporter-trace-otlp-http',
     '@opentelemetry/resources',
-    '@opentelemetry/sdk-trace-node',
+    '@opentelemetry/sdk-trace',
+    '@opentelemetry/context-async-hooks',
+    '@opentelemetry/core',
     '@opentelemetry/semantic-conventions'
   ]) assert.ok(dependencyModel.includes(`'${dependency}'`), `dependency model must include ${dependency}`);
   

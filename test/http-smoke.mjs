@@ -151,7 +151,7 @@ try {
   assert.equal(discovery.body.result?._meta?.[SERVER_INFO_META_KEY]?.version, expectedVersion, 'HTTP discovery must report the canonical package version');
   const serverInstructions = discovery.body.result?.instructions || '';
   assert.match(serverInstructions, /work_id is durable task attribution/i);
-  assert.match(serverInstructions, /meaningful project goal/i);
+  assert.match(serverInstructions, /meaningful project tasks/i);
   assert.match(serverInstructions, /begin relai_work.*non-empty steps/i);
   assert.match(serverInstructions, /carry work_id/i);
   assert.match(serverInstructions, /Projectless one-shot utility\/control work runs taskless/i);

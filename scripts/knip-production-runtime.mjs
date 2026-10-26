@@ -5,7 +5,9 @@ import '@modelcontextprotocol/server';
 import '@opentelemetry/api';
 import '@opentelemetry/exporter-trace-otlp-http';
 import '@opentelemetry/resources';
-import '@opentelemetry/sdk-trace-node';
+import '@opentelemetry/sdk-trace';
+import '@opentelemetry/context-async-hooks';
+import '@opentelemetry/core';
 import '@opentelemetry/semantic-conventions';
 // Model exact APIs consumed across Electron's dynamic resource-import boundary.
 import { forgetPersistentBrowserSite, persistentBrowserProfileDirectories, readPersistentBrowserSites } from '../src/browser/browserProfile.ts';

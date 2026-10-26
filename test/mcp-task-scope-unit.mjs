@@ -14,7 +14,7 @@ for (const name of ['workspaceList', 'workspaceInspect', 'workspaceTree', 'works
 }
 const instructions = connectorInstructions({ workspaces: { repo: { path: '/repo' } } });
 assert.match(instructions, /work_id is durable task attribution/i);
-assert.match(instructions, /meaningful project goal.*begin relai_work.*non-empty steps.*carry work_id/i);
+assert.match(instructions, /meaningful project tasks.*begin relai_work.*non-empty steps.*carry work_id/i);
 assert.match(instructions, /Projectless one-shot utility\/control work runs taskless/i);
 assert.match(instructions, /taskless calls may also handle isolated resource\/recovery\/observation/i);
 assert.match(instructions, /path\/resource ownership/i);
@@ -26,4 +26,4 @@ assert.match(instructions, /Results are authoritative evidence; report only chec
 assert.match(instructions, /agent chooses actions and validation/i);
 assert.match(instructions, /validation is factual evidence, not execution permission/i);
 
-console.log('MCP SDK boundary keeps meaningful Rel.AI goals durable while preserving explicit taskless recovery/resource work.');
+console.log('MCP SDK boundary keeps meaningful Rel.AI tasks durable without auto-selecting Goal Mode.');

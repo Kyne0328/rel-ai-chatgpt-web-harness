@@ -4,8 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { diag, DiagLogLevel } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
-import { SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { SimpleSpanProcessor, TracerProvider } from '@opentelemetry/sdk-trace';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 
 try {
@@ -63,13 +62,13 @@ diag.setLogger({
 }, DiagLogLevel.ERROR);
 
 const exporter = new OTLPTraceExporter({ url: `${base}/v1/traces`, headers: ingestHeaders });
-const provider = new NodeTracerProvider({
+const provider = new TracerProvider({
   resource: resourceFromAttributes({
     'service.name': 'rel-ai-mcp-live-smoke',
     'service.version': '1.1.4',
     'relai.telemetry.mode': 'diagnostics'
   }),
-  spanProcessors: [new SimpleSpanProcessor(exporter)]
+  spanProcessors: [new SimpleSpanProcessor({ exporter })]
 });
 const span = provider.getTracer('relai-telemetry-live-smoke', '1.1.4').startSpan('relai.telemetry.live_smoke');
 span.setAttribute('relai.smoke', true);

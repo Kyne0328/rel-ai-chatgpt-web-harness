@@ -7,7 +7,8 @@ assert.ok(PUBLIC_MCP_SERVER_INSTRUCTIONS.startsWith(STATIC_CONTEXT), 'server ins
 assert.ok(Buffer.byteLength(STATIC_CONTEXT, 'utf8') < 2000, 'static context must remain small');
 assert.doesNotMatch(STATIC_CONTEXT, /changelog|previous fix|release history|example:/i, 'static context must not accumulate project history or examples');
 assert.match(STATIC_CONTEXT, /work_id/);
-assert.match(STATIC_CONTEXT, /meaningful project goal.*begin relai_work.*non-empty steps.*first project operation.*carry work_id/i, 'durable project goals must start with plan-backed attribution');
+assert.match(STATIC_CONTEXT, /meaningful project tasks.*begin relai_work.*non-empty steps.*carry work_id/i, 'durable project tasks must start with plan-backed attribution');
+assert.match(STATIC_CONTEXT, /omit mode \(normal default\).*explicitly requests Goal\/Loop/i, 'ordinary work must not automatically select Goal or Loop Mode');
 assert.match(STATIC_CONTEXT, /Projectless one-shot utility\/control work runs taskless/i, 'projectless utility/control work must remain taskless');
 assert.match(STATIC_CONTEXT, /taskless calls may also handle isolated resource\/recovery\/observation/i, 'low-level recovery/resource operations must remain taskless-capable');
 assert.match(STATIC_CONTEXT, /authorization/i);

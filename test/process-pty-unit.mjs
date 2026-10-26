@@ -169,7 +169,8 @@ try {
   const exited = await waitFor(snapshot => snapshot.stdout.text.includes('TARGET_SIGINT')
     && snapshot.status === 'failed' && snapshot.exitCode === 31, 10000);
   assert.equal(exited.rootExitConfirmed, true);
-  assertNativeCleanup(exited, 31);
+  // Terminal status can precede asynchronous metadata persistence and job-directory cleanup.
+  // The idempotent stop below waits for those durable cleanup steps before asserting them.
   const repeatedStop = await stopManagedProcess(config, { processId, graceMs: 0 }, context);
   assert.equal(repeatedStop.duplicate, true, 'terminal Ctrl+C completion remains confirmed on repeated stop');
   assert.equal(repeatedStop.exitCode, 31);

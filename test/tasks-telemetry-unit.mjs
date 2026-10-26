@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { TracerProvider } from '@opentelemetry/sdk-trace';
 import { context as traceContext, propagation, trace } from '@opentelemetry/api';
 import { runMcpRequestSpan } from '../src/core/mcp-runtime.ts';
 import { queuedDiagnosticFailures, retainFailedDiagnosticBatch, acknowledgeDiagnosticFailures, clearQueuedDiagnosticFailures } from '../src/diagnosticRetrySpool.ts';
@@ -112,11 +112,11 @@ try {
   });
   const previousUsageEndpoint = process.env.REL_AI_MAINTAINER_USAGE_ENDPOINT;
   const previousDiagnosticsEndpoint = process.env.REL_AI_MAINTAINER_DIAGNOSTICS_ENDPOINT;
-  const originalRegister = NodeTracerProvider.prototype.register;
+  const originalRegister = trace.setGlobalTracerProvider;
   let diagnosticProvider;
-  NodeTracerProvider.prototype.register = function (...args) {
-    diagnosticProvider = this;
-    return Reflect.apply(originalRegister, this, args);
+  trace.setGlobalTracerProvider = function (provider) {
+    if (provider instanceof TracerProvider) diagnosticProvider = provider;
+    return Reflect.apply(originalRegister, trace, [provider]);
   };
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -299,7 +299,7 @@ try {
     await shutdownTelemetry();
     assert.equal(requests.length, requestsBeforeDisabledShutdown, 'disabled shutdown must discard queued spans without export');
   } finally {
-    NodeTracerProvider.prototype.register = originalRegister;
+    trace.setGlobalTracerProvider = originalRegister;
     if (previousUsageEndpoint == null) delete process.env.REL_AI_MAINTAINER_USAGE_ENDPOINT;
     else process.env.REL_AI_MAINTAINER_USAGE_ENDPOINT = previousUsageEndpoint;
     if (previousDiagnosticsEndpoint == null) delete process.env.REL_AI_MAINTAINER_DIAGNOSTICS_ENDPOINT;

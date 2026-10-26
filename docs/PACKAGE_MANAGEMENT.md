@@ -25,7 +25,7 @@ Dependabot checks both `/` and `/electron` weekly. Compatible minor and patch up
 
 `web-tree-sitter` is pinned to `0.27.0` and validated against the vendored grammar set under `vendor/tree-sitter/`. Most grammars are sourced from `tree-sitter-wasm` 2.0.1; QL, SystemRDL, and TLA+ are supplemental builds from their recorded npm grammar packages because that bundle does not contain them. Tree-sitter runtime upgrades must refresh the vendored WASM binaries and provenance manifest together and pass `npm run verify:tree-sitter-assets`; do not update the runtime independently of its grammar assets.
 
-The repository compiler uses TypeScript 7, but `typescript-lsp-runtime` intentionally aliases TypeScript 6.0.3 because the current `typescript-language-server` 6.0.1 integration requires the legacy `lib/tsserver.js` entry point. TypeScript 7 removed that entry point, so moving this compatibility runtime to TypeScript 7 requires a language-server migration rather than a package-only update.
+Rel.AI uses TypeScript 7 for both compiler checks and its native LSP server (`tsc --lsp`). The old `tsserver.js` language-server wrapper and TypeScript 6 compatibility runtime have been removed. The boundary checker uses Babel's TypeScript parser for syntax-only validation without a legacy TypeScript runtime.
 
 ## Security gates
 

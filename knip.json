@@ -25,8 +25,7 @@
       ],
       "ignoreDependencies": [
         "monaco-editor",
-        "pyright",
-        "typescript-language-server"
+        "pyright"
       ]
     },
     "electron": {

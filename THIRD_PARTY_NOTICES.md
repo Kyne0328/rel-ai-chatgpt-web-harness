@@ -45,7 +45,7 @@ The Windows x64 process-ownership companion includes the .NET NativeAOT runtime
 Rel.AI bundles a pinned build of `openai/tunnel-client` for the supported Secure MCP Tunnel connection.
 
 - Upstream: <https://github.com/openai/tunnel-client>
-- Pinned release: `v0.0.15`
+- Pinned release: `v0.0.18`
 - License recorded by Rel.AI: Apache-2.0
 - Reproducibility metadata: `vendor/tunnel-client/manifest.json`
 

@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { installLocalExtension, removeExtension } from '../src/extensions/registry.js';
 import { managedExtensionCommandPath, managedExtensionCommandMetadataPath } from '../src/extensions/paths.js';
-import { discoverSkills } from '../src/skillDiscovery.js';
+import { discoverSkillInventory } from '../src/skillDiscovery.js';
 import { recoverInterruptedExtensionInstalls } from '../src/extensions/installTransaction.js';
 
 const observe = process.argv.includes('--observe');
@@ -223,8 +223,15 @@ try {
     }
     const metrics = {};
     const started = performance.now();
-    const skills = discoverSkills({ path: repo }, { userRoot: path.join(root, 'absent-user-skills'), metrics });
-    console.log(JSON.stringify({ case: '500-skill-work-budget', returned: skills.length, metrics, durationMs: performance.now() - started }));
+    const deadline = Date.now() + 60_000;
+    let inventory;
+    do {
+      inventory = discoverSkillInventory({ path: repo }, { userRoot: path.join(root, 'absent-user-skills'), metrics });
+      if (!inventory.discovery.resumable) break;
+    } while (!inventory.discovery.complete && Date.now() < deadline);
+    console.log(JSON.stringify({ case: '500-skill-work-budget', returned: inventory.skills.length, metrics, durationMs: performance.now() - started }));
+    check(() => assert.equal(inventory.discovery.complete, true, 'the resumable inventory must eventually complete without exceeding each page budget'));
+    const skills = inventory.skills;
     check(() => assert.equal(skills.length, 100));
     check(() => assert.ok(metrics.skillMetadataReads <= 100, 'a full high-priority result set must stop unnecessary metadata reads'));
   }

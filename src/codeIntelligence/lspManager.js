@@ -20,14 +20,13 @@ const sessions = new Map();
 
 const BUNDLED_ROOT = fileURLToPath(new URL('../../node_modules/', import.meta.url));
 const PROVIDERS = Object.freeze([
-  provider('typescript-language-server', {
+  provider('typescript-native', {
     '.js': 'javascript', '.mjs': 'javascript', '.cjs': 'javascript', '.jsx': 'javascriptreact',
     '.ts': 'typescript', '.tsx': 'typescriptreact'
   }, {
     manifests: ['package.json', 'tsconfig.json', 'jsconfig.json'],
     executable: process.execPath,
-    argv: [path.join(BUNDLED_ROOT, 'typescript-language-server', 'lib', 'cli.mjs'), '--stdio'],
-    initializationOptions: { tsserver: { fallbackPath: path.join(BUNDLED_ROOT, 'typescript-lsp-runtime', 'lib', 'tsserver.js') } }
+    argv: [path.join(BUNDLED_ROOT, 'typescript', 'bin', 'tsc'), '--lsp', '--stdio']
   }),
   provider('pyright', { '.py': 'python', '.pyi': 'python' }, {
     manifests: ['pyproject.toml', 'requirements.txt', 'setup.py', 'Pipfile'],
@@ -258,6 +257,12 @@ class LspSession {
 
   async diagnostics(relativePath, options = {}) {
     const document = await this.open(relativePath, options);
+    if (this.capabilities?.diagnosticProvider) {
+      const report = await this.request('textDocument/diagnostic', {
+        textDocument: { uri: document.uri }
+      }, options);
+      return { uri: document.uri, diagnostics: Array.isArray(report?.items) ? report.items : [] };
+    }
     return this.waitForDiagnostics(document.uri, relativePath, options);
   }
 

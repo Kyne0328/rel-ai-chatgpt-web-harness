@@ -28,7 +28,7 @@ try {
     action: 'definition', path: 'src/use.ts', line: 2, column: 22, maxResults: 20
   });
   assert.equal(definition.ok, true);
-  assert.equal(definition.intelligence.primary, 'typescript-language-server');
+  assert.equal(definition.intelligence.primary, 'typescript-native');
   assert.equal(definition.intelligence.authority, 'language-server');
   assert.ok(definition.definitions.length > 0);
 
@@ -37,13 +37,13 @@ try {
   });
   assert.equal(hover.ok, true);
   assert.match(hover.hover?.text || '', /add/);
-  assert.equal(hover.intelligence.primary, 'typescript-language-server');
+  assert.equal(hover.intelligence.primary, 'typescript-native');
 
   const references = await relaiCodeInspect(workspace, config, {
     action: 'references', path: 'src/math.ts', line: 1, column: 17, maxResults: 20
   });
   assert.equal(references.ok, true);
-  assert.equal(references.intelligence.primary, 'typescript-language-server');
+  assert.equal(references.intelligence.primary, 'typescript-native');
   assert.ok(references.items.some(item => item.path === 'src/use.ts'));
 
   const diagnostics = await relaiCodeInspect(workspace, config, {
@@ -51,7 +51,7 @@ try {
   });
   assert.equal(diagnostics.ok, true);
   assert.equal(diagnostics.diagnosticsExecuted, true);
-  assert.equal(diagnostics.intelligence.primary, 'typescript-language-server');
+  assert.equal(diagnostics.intelligence.primary, 'typescript-native');
   assert.ok(diagnostics.diagnosticCount > 0);
   assert.ok(diagnostics.diagnostics.some(item => item.path === 'src/bad.ts' && item.severity === 'error' && /not assignable/i.test(item.message)));
 
@@ -60,7 +60,7 @@ try {
   });
   assert.equal(rename.ok, true);
   assert.equal(rename.plannerPath, 'semantic:rename');
-  assert.equal(rename.semantic.provider, 'typescript-language-server');
+  assert.equal(rename.semantic.provider, 'typescript-native');
   assert.deepEqual(rename.changedFiles.sort(), ['src/math.ts', 'src/use.ts']);
   assert.match(fs.readFileSync(path.join(root, 'src', 'math.ts'), 'utf8'), /function sum\(/);
   assert.match(fs.readFileSync(path.join(root, 'src', 'use.ts'), 'utf8'), /import \{ sum \}/);
@@ -99,7 +99,7 @@ try {
     action: 'definition', path: 'source:2/src/use.ts', line: 2, column: 29, maxResults: 20
   });
   assert.equal(secondaryDefinition.ok, true);
-  assert.equal(secondaryDefinition.intelligence.primary, 'typescript-language-server');
+  assert.equal(secondaryDefinition.intelligence.primary, 'typescript-native');
   assert.ok(secondaryDefinition.definitions.length > 0);
   assert.ok(secondaryDefinition.definitions.every(item => item.path.startsWith('source:2/')),
     'language-server locations from secondary roots must keep their virtual source identity');
@@ -112,9 +112,9 @@ try {
   );
 
   const servers = new Map(repositoryIntelligence.languageServers(workspace).map(item => [`${item.source || 1}:${item.id}`, item]));
-  assert.equal(servers.get('1:typescript-language-server')?.available, true);
+  assert.equal(servers.get('1:typescript-native')?.available, true);
   assert.equal(servers.get('1:pyright')?.available, true);
-  assert.equal(servers.get('2:typescript-language-server')?.available, true);
+  assert.equal(servers.get('2:typescript-native')?.available, true);
 
   console.log('Hybrid LSP intelligence and Rel.AI-controlled semantic rename passed.');
 } finally {

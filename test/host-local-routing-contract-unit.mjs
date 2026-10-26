@@ -24,7 +24,7 @@ for (const hostOwned of ['Public-web research', 'host files/apps']) {
   assert.match(STATIC_CONTEXT, new RegExp(escapeRegExp(hostOwned), 'i'), `${hostOwned} must remain host-owned`);
 }
 
-for (const localOwned of ['files/repos', 'Git', 'CLI/processes', 'LAN/intranet', 'apps', 'browser sessions', 'uploads/downloads']) {
+for (const localOwned of ['files/repos', 'Git', 'CLI/processes', 'LAN/VPN', 'apps', 'browsers', 'file transfer']) {
   assert.match(STATIC_CONTEXT, new RegExp(escapeRegExp(localOwned), 'i'), `${localOwned} must remain inside the Rel.AI local boundary`);
 }
 
@@ -73,7 +73,7 @@ const decisions = [
   ['Check Gmail', /AI-host plugin\/connector/i, null],
   ['Run tests in C:\\repo', /CLI\/processes/i, null],
   ['Read D:\\contract.pdf', /files\/repos/i, null],
-  ['Open our internal 192.168.x.x dashboard', /LAN\/intranet/i, /Local browser.*localhost\/LAN\/intranet\/VPN/i],
+  ['Open our internal 192.168.x.x dashboard', /LAN\/VPN/i, /Local browser.*localhost\/LAN\/intranet\/VPN/i],
   ['Save a host-generated artifact into the local workspace', /Rel\.AI structured local/i, /host file import/i],
   ['Change a setting in a native desktop application', /\bapps\b/i, /Structured local OS actions/i]
 ];

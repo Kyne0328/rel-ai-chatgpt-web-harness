@@ -265,6 +265,4 @@ function parseSafeShellTokens(command) {
   return tokens.length > 0 ? tokens : null;
 }
 
-const simpleShellCommandTokens = parseSafeShellTokens;
-
-export { isClearlyReadOnlyExec, simpleShellCommandTokens };
+export { isClearlyReadOnlyExec };

@@ -1,7 +1,7 @@
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import type * as OpenTelemetryApi from '@opentelemetry/api';
-import type { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import type { TracerProvider } from '@opentelemetry/sdk-trace';
 import { readJsonFile, writeJsonAtomic } from './durableState.ts';
 import { packageMetadata as pkg } from './packageMetadata.js';
 import { getStateDir } from './stateLayout.js';
@@ -16,7 +16,7 @@ const TELEMETRY_IDENTITY_SCHEMA_VERSION = 2;
 const USAGE_REPORT_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const USAGE_RETRY_MS = 5 * 60 * 1000;
 const USAGE_REQUEST_TIMEOUT_MS = 5000;
-let diagnosticsProvider: NodeTracerProvider | null = null;
+let diagnosticsProvider: TracerProvider | null = null;
 let usageHeartbeat: ReturnType<typeof setTimeout> | null = null;
 let usageRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let usageRequestPromise: Promise<boolean> | null = null;
@@ -218,7 +218,7 @@ async function reportInstallationPresenceRuntime(config: TelemetryConfig, endpoi
 async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEndpoint: string): Promise<boolean> {
   const [api, sdk, exporterModule, resources, conventions] = await Promise.all([
     import('@opentelemetry/api'),
-    import('@opentelemetry/sdk-trace-node'),
+    import('@opentelemetry/sdk-trace'),
     import('@opentelemetry/exporter-trace-otlp-http'),
     import('@opentelemetry/resources'),
     import('@opentelemetry/semantic-conventions')
@@ -277,8 +277,8 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
       },
       shutdown: () => baseExporter.shutdown()
     };
-    const batchProcessor = new sdk.BatchSpanProcessor(diagnosticsExporter);
-    diagnosticsProvider = new sdk.NodeTracerProvider({
+    const batchProcessor = new sdk.BatchSpanProcessor({ exporter: diagnosticsExporter });
+    diagnosticsProvider = new sdk.TracerProvider({
       resource: resources.resourceFromAttributes({
         [conventions.ATTR_SERVICE_VERSION]: pkg.version,
         [conventions.ATTR_SERVICE_NAME]: 'rel-ai-mcp',
@@ -302,7 +302,14 @@ async function initializeTelemetryRuntime(config: TelemetryConfig, diagnosticsEn
         shutdown: () => batchProcessor.shutdown()
       }]
     });
-    diagnosticsProvider.register();
+    const [{ AsyncLocalStorageContextManager }, { CompositePropagator, W3CBaggagePropagator, W3CTraceContextPropagator }] = await Promise.all([
+      import('@opentelemetry/context-async-hooks'), import('@opentelemetry/core')
+    ]);
+    api.trace.setGlobalTracerProvider(diagnosticsProvider);
+    api.context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+    api.propagation.setGlobalPropagator(new CompositePropagator({
+      propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()]
+    }));
     initializedDiagnosticsEndpoint = diagnosticsEndpoint;
     initializedSampleRatio = sampleRatio;
     scheduleDiagnosticReplay(config, 1_000);
@@ -536,6 +543,12 @@ async function shutdownTelemetry(): Promise<void> {
   try {
     await currentDiagnostics?.shutdown();
   } finally {
+    if (currentDiagnostics) {
+      const api = await import('@opentelemetry/api');
+      api.trace.disable();
+      api.context.disable();
+      api.propagation.disable();
+    }
     runtimeDiagnosticsEnabledOverride = null;
   }
 }

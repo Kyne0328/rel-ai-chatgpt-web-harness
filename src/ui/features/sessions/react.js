@@ -135,6 +135,8 @@ function SessionsPage({ data = {} }) {
   const selectedSummary = selectedId ? sessionById.get(selectedId) : null;
   const selectedSummaryHasTrace = Array.isArray(selectedSummary?.trace?.entries);
   const selectedSummaryAvailable = Boolean(selectedSummary);
+  // An off-page task has no summary of its own; a dashboard refresh must recheck its retained detail.
+  const offPageRefresh = selectedSummaryAvailable ? null : data.tasks;
   const selectedSummaryRef = useRef(selectedSummary);
   selectedSummaryRef.current = selectedSummary;
   const selectedHydrationCacheTtl = selectedSummary && isOngoingSession(selectedSummary) ? 1000 : 60_000;
@@ -232,7 +234,7 @@ function SessionsPage({ data = {} }) {
       cancelled = true;
       hydrationRequest.current += 1;
     };
-  }, [detailRefresh, selectedHydrationCacheTtl, selectedId, selectedSummaryAvailable, selectedSummaryHasTrace]);
+  }, [detailRefresh, offPageRefresh, selectedHydrationCacheTtl, selectedId, selectedSummaryAvailable, selectedSummaryHasTrace]);
 
   useEffect(() => {
     if (!selectedId || hydrated?.id !== selectedId) return;

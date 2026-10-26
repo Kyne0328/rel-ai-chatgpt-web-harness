@@ -67,7 +67,11 @@ const requiredFiles = [
   resourcePath('node_modules', '@opentelemetry', 'api', 'package.json'),
   resourcePath('node_modules', '@opentelemetry', 'exporter-trace-otlp-http', 'package.json'),
   resourcePath('node_modules', '@opentelemetry', 'resources', 'package.json'),
-  resourcePath('node_modules', '@opentelemetry', 'sdk-trace-node', 'package.json'),
+  resourcePath('node_modules', '@opentelemetry', 'sdk-trace', 'package.json'),
+  resourcePath('node_modules', '@opentelemetry', 'context-async-hooks', 'package.json'),
+  resourcePath('node_modules', '@opentelemetry', 'core', 'package.json'),
+  resourcePath('node_modules', 'typescript', 'bin', 'tsc'),
+  resourcePath('node_modules', '@typescript', `typescript-${platform}-${targetArch}`, 'lib', platform === 'win32' ? 'tsc.exe' : 'tsc'),
   resourcePath('node_modules', '@opentelemetry', 'semantic-conventions', 'package.json'),
   resourcePath('node_modules', '@hono', 'node-server', 'package.json'),
   resourcePath('node_modules', 'hono', 'package.json'),
@@ -191,10 +195,7 @@ for (const [key, relativePath] of [['search', zoektSearchRelativePath], ['index'
     assert.equal(help.status, 0, `Packaged Zoekt ${key} binary must execute successfully.`);
   }
 }
-const packagedTypeScript = collectFiles(path.join(resourcesRoot, 'node_modules')).filter(file => {
-  if (!/\.(?:ts|cts|mts)$/i.test(file)) return false;
-  return !/(?:^|\/)node_modules\/typescript-lsp-runtime\/lib\/lib(?:\.[^/]+)?\.d\.ts$/i.test(file);
-});
+const packagedTypeScript = collectFiles(path.join(resourcesRoot, 'node_modules')).filter(file => /\.(?:ts|cts|mts)$/i.test(file));
 assert.deepEqual(packagedTypeScript, [], 'Packaged runtime dependencies must exclude TypeScript sources and non-runtime declarations.');
 
 const forbiddenPackagedPaths = [

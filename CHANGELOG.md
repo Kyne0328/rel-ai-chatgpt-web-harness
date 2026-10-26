@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Migrate desktop, tracing, filesystem watcher, language transport, and code intelligence to their current major releases.** Update Electron 45, OpenTelemetry SDK 3, Chokidar 6, vscode-jsonrpc 10, and TypeScript 7's native LSP. Replace the retired tracing provider and legacy JavaScript tsserver wrapper, preserve telemetry consent and startup behavior, and update native runtime packaging for supported desktop platforms.
+
+- **Update the bundled OpenAI Secure MCP Tunnel client to v0.0.18.** Refresh verified full-distribution archives and release evidence for Windows, Linux, and macOS. Retain Rel.AI's existing API-key configuration while incorporating upstream v0.0.17 startup-discovery recovery, namespaced tunnel identifiers, cloudflared updates, and v0.0.18 optional diagnostics and authentication support.
+
 - **Recover legacy managed processes without claiming an unobserved success.** Check retained native completion and container evidence, checkpoint older Windows records automatically at startup, and settle them after a verified later boot on the same computer. Recovery based on cleanup evidence keeps the original exit outcome and running duration unknown. Unresolved records appear in a separate Recovery section with specific guidance; missing controllers do not expose an ineffective Stop action.
 - **Archive obsolete recovery records without erasing uncertainty.** The authenticated desktop dashboard can archive and restore historical records whose controller is unavailable. Archival survives restarts, retains logs and native evidence, and leaves cleanup checks and ownership protections intact; it never marks a command successful or releases an unverified process lock.
 

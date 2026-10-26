@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import * as ts from 'typescript-lsp-runtime';
+import { parse } from '@babel/parser';
 
 const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs', '.ts', '.tsx']);
 const IMPORT_PATTERN = /\b(?:import|export)\s+(?:type\s+)?(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]|\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
@@ -124,24 +124,21 @@ function checkImport(file, specifier) {
 function checkTypedBoundaryAny(file, text) {
   if (!TYPED_BOUNDARY_PREFIXES.some(prefix => file.startsWith(prefix))) return;
   if (!file.endsWith('.ts') && !file.endsWith('.tsx')) return;
-  const sourceFile = ts.createSourceFile(
-    file,
-    text,
-    ts.ScriptTarget.Latest,
-    true,
-    file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  );
-  let found = false;
-  const visit = node => {
-    if (found) return;
-    if (node.kind === ts.SyntaxKind.AnyKeyword) {
-      found = true;
+  const tree = parse(text, { sourceType: 'module', plugins: file.endsWith('.tsx') ? ['typescript', 'jsx'] : ['typescript'] });
+  const pending = [tree];
+  while (pending.length) {
+    const node = pending.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (node.type === 'TSAnyKeyword') {
+      add(file, '<type:any>', 'typed contracts/Core/HTTP boundaries may not use explicit any');
       return;
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  if (found) add(file, '<type:any>', 'typed contracts/Core/HTTP boundaries may not use explicit any');
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'parent' || !value || typeof value !== 'object') continue;
+      if (Array.isArray(value)) pending.push(...value);
+      else pending.push(value);
+    }
+  }
 }
 
 function checkTypescriptFacade(file) {
