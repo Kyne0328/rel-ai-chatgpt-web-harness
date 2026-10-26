@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { availablePort } from './helpers/available-port.mjs';
 import { activeToolCount } from './helpers/tool-surface.mjs';
 import { overviewWorkspaceStatus, resolveBridgeState } from '../src/ui/features/home/index.js';
+import { workspaceCardView } from '../src/ui/features/workspaces/model.js';
 
 const readyConnectionState = {
   localService: { status: 'running' },
@@ -32,7 +33,13 @@ const errorState = resolveBridgeState({
   connectionState: readyConnectionState
 });
 assert.equal(errorState.tone, 'bad', 'error health findings must still block readiness');
-assert.equal(errorState.kicker, 'Needs attention');
+assert.equal(errorState.kicker, 'System needs attention');
+assert.equal(errorState.actionHref, '#diagnostics');
+const matchingBlock = { blocked: true, message: 'Process cleanup remains unverified.' };
+const projectCard = workspaceCardView({ alias: 'app', operational: { exists: true } }, { ok: true },
+  { severity: 'error', code: 'workspace_mutation_blocked', workspace: 'app', mutationBlock: matchingBlock });
+assert.equal(projectCard.ready, false, 'Projects must not show Ready while Overview reports a mutation block');
+assert.equal(projectCard.mutationBlock, matchingBlock);
 const mutationBlockedState = resolveBridgeState({
   findings: [{ severity: 'error', code: 'workspace_mutation_blocked', workspace: 'one-ui-peridot' }],
   connectionState: readyConnectionState

@@ -116,9 +116,10 @@ assert.match(sessionsReact, /\['completed', 'skipped'\]/, 'plan resolved counts 
 assert.match(sessionsReact, /steps resolved/, 'skipped steps must be described as resolved rather than incorrectly reported as completed');
 assert.match(sessionsReact, /orderSessionEvents\(session\.events \|\| \[\]\)/, 'open task Activity must render canonical task events instead of raw audit trace rows');
 assert.doesNotMatch(sessionsReact, /mergeSessionEvents\(traceEvents/, 'raw audit trace rows must not inflate the user-facing task Activity timeline');
-assert.match(sessionsReact, /recent = ordered.slice\(0, DETAIL_EVENT_PREVIEW\)/, 'task-level Activity must remain a bounded recent summary');
+assert.match(sessionsReact, /recent = ordered.slice\(0, visibleCount\)/, 'task-level Activity must expand incrementally');
 assert.match(sessionsReact, /View all activity/, 'full event history remains accessible through Activity');
-assert.doesNotMatch(sessionsReact, /TaskEventInspector|data-show-older-events|data-load-older-task-activity|setSelected\(event\)/, 'Task Activity must not duplicate the full inspector or paging controls');
+assert.match(sessionsReact, /data-load-more-task-activity/, 'Task Activity must offer inline View more activity');
+assert.doesNotMatch(sessionsReact, /TaskEventInspector|setSelected\(event\)/, 'Task Activity must not duplicate the full event inspector');
 assert.match(sessionsReact, /event: activityEventId\(event\)/, 'task event links must deep-link into the exact Activity event');
 assert.match(sessionsReact, /data-session-details/, 'task technical record remains accessible as a secondary disclosure');
 assert.doesNotMatch(sessionsReact, /task-other-processes/, 'task Processes must not show unrelated project processes');

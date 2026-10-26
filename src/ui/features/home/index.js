@@ -65,12 +65,15 @@ export function resolveBridgeState({ findings = [], workspaces = [], connectionS
       actionHref: routeHref('workspaces', { workspace: blockedProject.workspace })
     };
   }
-  if (findings.some(item => item?.severity === 'error')) {
+  const otherError = findings.find(item => item?.severity === 'error');
+  if (otherError) {
     return {
       tone: 'bad',
-      kicker: 'Needs attention',
-      title: 'Rel.AI is connected, but a problem needs attention.',
-      description: 'Resolve the problem before Rel.AI makes project changes.'
+      kicker: 'System needs attention',
+      title: 'Rel.AI needs attention.',
+      description: String(otherError.message || 'Review the current health finding.'),
+      actionLabel: 'Open troubleshooting',
+      actionHref: routeHref('diagnostics', { workspace: otherError.workspace || '' })
     };
   }
   if (findings.some(item => item?.severity === 'warning')) {

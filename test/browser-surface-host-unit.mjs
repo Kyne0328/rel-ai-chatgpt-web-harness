@@ -443,6 +443,9 @@ for (const scenario of ['recover', 'reload-failure', 'repeat-crash', 'close-duri
   await host.startGoalLogin();
   const goalSession = pathSessions.get(path.resolve(directory));
   goalSession.authenticated = true;
+  for (let check = 0; check < 10; check++) {
+    assert.equal((await host.getGoalLoginStatus()).state, 'signed_in');
+  }
   for (let read = 0; read < 30; read++) {
     assert.equal((await host.goalProtocolRequest({ path: '/backend-api/conversations' })).ok, true);
   }

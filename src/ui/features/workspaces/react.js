@@ -50,11 +50,12 @@ function WorkspacesView({ data = {} }) {
     () => new Map((Array.isArray(health.workspaces) ? health.workspaces : []).map(item => [item.alias, item])),
     [health.workspaces]
   );
-  const views = useMemo(
-    () => workspaces.map(workspace => workspaceCardView(workspace, healthByAlias.get(workspace.alias))),
-    [workspaces, healthByAlias]
-  );
   const findings = useMemo(() => actionableFindings(health), [health]);
+  const views = useMemo(
+    () => workspaces.map(workspace => workspaceCardView(workspace, healthByAlias.get(workspace.alias),
+      findings.find(finding => finding.workspace === workspace.alias && finding.severity === 'error'))),
+    [workspaces, healthByAlias, findings]
+  );
   const availableCount = views.filter(view => view.ready).length;
   const [modal, setModal] = useState(null);
   const analyticsAliases = useMemo(() => views.map(view => view.alias), [views]);

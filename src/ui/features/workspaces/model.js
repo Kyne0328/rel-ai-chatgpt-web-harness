@@ -53,10 +53,12 @@ export function orderedWorkspaces(workspaces, workspaceFilter = '') {
   return selected ? [selected, ...all.filter(workspace => workspace !== selected)] : all;
 }
 
-export function workspaceCardView(workspace = {}, health = null) {
+export function workspaceCardView(workspace = {}, health = null, finding = null) {
   const operational = workspace.operational || {};
-  const mutationBlock = operational.mutationBlock?.blocked ? operational.mutationBlock : null;
-  const healthWarning = health?.ok === false ? health.error || 'Project unavailable' : '';
+  const mutationBlock = operational.mutationBlock?.blocked ? operational.mutationBlock
+    : finding?.code === 'workspace_mutation_blocked' ? finding.mutationBlock || { blocked: true, message: finding.message } : null;
+  const healthWarning = health?.ok === false ? health.error || 'Project unavailable'
+    : finding?.code === 'workspace_unavailable' ? finding.message || 'Project unavailable' : '';
   const available = !healthWarning && operational.exists !== false;
   const active = Boolean(operational.currentActivity || workspace.sessionPolicy?.sessionActive);
   return {

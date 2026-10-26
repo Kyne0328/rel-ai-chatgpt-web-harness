@@ -1,5 +1,6 @@
 import React, { memo, useEffect, useMemo, useState } from 'react';
 import './styles.css';
+import '../../components/command-console.css';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
@@ -224,7 +225,10 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
     ) : null,
     archiveError ? h('div', { className: 'process-output-error', role: 'alert' }, archiveError) : null,
     row.recoveryArchived ? h('div', { className: 'process-output-notice' }, 'Archived record. Cleanup remains unconfirmed; automatic recovery checks and ownership protections remain in effect.') : null,
-    h('div', { className: 'process-command-summary' }, h('code', null, row.commandSummary)),
+    h('section', { className: 'process-command-summary command-console', 'data-console-kind': 'command' },
+      h('div', { className: 'command-console-heading' }, h('strong', null, 'Command')),
+      h('pre', { tabIndex: 0, 'aria-label': 'Command' }, h('code', null, row.commandSummary))
+    ),
     state.status === 'failed'
       ? h('div', { className: 'connection-notice bad process-recovery' }, h('strong', null, row.error || 'Process failed'),
           state.recovery !== row.error ? h('div', null, state.recovery) : null)
@@ -337,8 +341,8 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
   };
 
   const shownBytes = Math.max(0, nextOffset - startOffset);
-  return h('div', { className: 'process-output-block' },
-    h('div', { className: 'process-output-block-head' },
+  return h('div', { className: 'process-output-block command-console', 'data-console-kind': stream },
+    h('div', { className: 'process-output-block-head command-console-heading' },
       h('span', null, stream),
       h('small', null, `${formatBytes(shownBytes)} shown of ${formatBytes(meta.totalBytes)}`)
     ),

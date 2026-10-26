@@ -1,0 +1,28 @@
+@reference "tailwindcss";
+
+@layer components {
+  .command-console { min-width: 0; display: grid; gap: 8px; padding: 12px; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); border-radius: var(--radius-lg); }
+  .command-console-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; }
+  .command-console-heading > strong, .command-console-heading > h3, .command-console-heading > span:first-child { margin: 0; color: var(--ui-text-secondary); font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .command-console-heading small { color: var(--ui-text-tertiary); font-size: 12px; }
+  .command-console pre, .command-console.process-command-summary pre, .command-console.activity-detail-command pre, .command-console.activity-detail-stream pre, .command-console.process-output-block pre {
+    width: 100%; max-width: 100%; min-height: 0; margin: 0; padding: 12px; overflow: auto;
+    border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md);
+    background: var(--ui-surface-primary); color: var(--ui-text-primary);
+    font-family: 'Geist Mono Variable', 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: var(--technical-font-size, 12px); line-height: var(--technical-line-height, 1.6);
+    white-space: pre; overflow-wrap: normal; word-break: normal; tab-size: 2;
+    scrollbar-gutter: stable;
+  }
+  .command-console[data-console-kind="command"] pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .command-console[data-console-kind="stderr"] { border-color: var(--ui-status-danger-border); }
+  .command-console[data-console-kind="stderr"] .command-console-heading > strong,
+  .command-console[data-console-kind="stderr"] .command-console-heading > h3,
+  .command-console[data-console-kind="stderr"] .command-console-heading > span:first-child { color: var(--ui-status-danger-foreground); }
+  .command-console pre:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: 2px; }
+  .command-console button { min-height: 32px; }
+  @media (max-width: 600px) {
+    .command-console { padding: 9px; }
+    .command-console pre, .command-console.process-output-block pre { padding: 10px; }
+  }
+}

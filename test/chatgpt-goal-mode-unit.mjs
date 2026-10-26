@@ -13,7 +13,7 @@ import { goalDiscoveryStore, ensureChatLink, readChatLink, commitGoalBinding, no
 import { withStateDatabase, stateDatabasePath } from '../src/stateDatabase.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { beginConnectorToolCall, getToolActivity, resetToolActivity, runWithToolActivity, requestCurrentTaskCancellation, onToolActivity } from '../src/toolActivity.js';
-import { recordTaskActivityEvent, clearTaskHistory } from '../src/taskHistoryStore.ts';
+import { recordTaskActivityEvent, clearTaskHistory, readTaskHistorySessionRecord } from '../src/taskHistoryStore.ts';
 import { HANDLERS } from '../src/tools/handlers.js';
 import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { serializeConnectorResult } from '../src/tools/connector.js';
@@ -1433,8 +1433,11 @@ test('429 stops all reads for that account until Retry-After without affecting a
     return calls.length === 1 ? { ok: false, status: 429, retryAfterMs: 180_000 }
       : { ok: true, data: conversation(ID) };
   };
-  const deps = { nativeTransport: transport, tunnelId: 'limited-account' };
+  const limits = [];
+  const deps = { nativeTransport: transport, tunnelId: 'limited-account', onRateLimit: limit => limits.push(limit) };
   await assert.rejects(() => getConversation(ID, deps), e => e.status === 429 && e.retryAt === Date.now() + 180_000);
+  assert.equal(limits[0].endpoint, 'conversation_detail', 'rate limits retain only the safe endpoint category');
+  assert.equal(limits[0].at, Date.now());
   await assert.rejects(() => getConversation(OTHER, deps), e => e.status === 429 && e.deferred === true);
   assert.equal(calls.length, 1, 'another task must not send a request during the cooldown');
   await getConversation(ID, { ...deps, tunnelId: 'other-account' });
@@ -1899,6 +1902,33 @@ test('monitor startup recovers old lookup failures while preserving Stop, pauses
   });
 });
 
+test('stale unlinked inactive goals stop account discovery but preserve their tasks and can resume', async t => {
+  await withMonitoredGoal(t, async f => {
+    const now = Date.now();
+    const old = now - 2 * 24 * 60 * 60_000;
+    recordTaskActivityEvent(f.config, { task: { ...f.task(), status: 'inactive', state: 'inactive',
+      lastActivityAt: old, updatedAt: new Date(old).toISOString(), activeCalls: 0 } });
+    resetToolActivity();
+    f.patchGoal({ binding: null, conversationId: '', active: true, state: 'rate_limited',
+      createdAt: old, resumedAt: 0, nextAttemptAt: now + 40 * 60_000 });
+    let reads = 0;
+    configureGoalBrowserTransport(async () => { reads += 1; throw new Error('Unexpected account read'); });
+    try {
+      startGoalMonitor(f.config);
+      assert.equal(f.status().goalActive, false);
+      assert.equal(f.status().state, 'paused');
+      assert.equal(loadGoal(f.config, f.work_id).pauseReason, 'stale_unlinked');
+      assert.equal(readTaskHistorySessionRecord(f.config, f.work_id)?.status, 'inactive',
+        'stale discovery must not complete or cancel unfinished work');
+      assert.equal(reads, 0);
+      stopGoalMonitor();
+      f.patchGoal({ active: true, state: 'rate_limited', resumedAt: now });
+      startGoalMonitor(f.config);
+      assert.equal(f.status().goalActive, true, 'a new activation window must remain eligible for linking');
+    } finally { stopGoalMonitor(); configureGoalBrowserTransport(null); }
+  });
+});
+
 test('startup recovers an old exhausted discovery 429 without reactivating a user pause', async t => {
   for (const userPaused of [false, true]) await withMonitoredGoal(t, async f => {
     f.patchGoal({ binding: null, active: false, conversationId: '', state: 'paused',
@@ -2133,6 +2163,38 @@ test('cached discovery survives transport restart but freshly rejects an off-bra
   });
 });
 
+test('duplicate ordinary and Project listings retain the Project association', async () => {
+  const chat = rankedChat(1, 2000), link = { version: 1, link_id: 'q'.repeat(32) };
+  const fixture = discoveryFixture({ ordinary: [chat],
+    pages: [[projectPreview(1, [{ ...chat, update_time: new Date(2000_000).toISOString() }])]],
+    trees: { [chat.id]: linkedConversation(chat.id, 'duplicate-project', link) } });
+  const match = await findRecentGoalCommand({ workId: 'duplicate-project', linkId: link.link_id,
+    explicitGoal: true, nativeTransport: fixture.transport });
+  assert.equal(match.conversationId, chat.id);
+  assert.equal(match.projectId, projectPreview(1, []).gizmo.gizmo.id);
+  assert.equal(fixture.requests.filter(r => r.path.includes('/conversation/')).length, 2,
+    'one candidate read and a fresh binding verification');
+});
+
+test('pending goals reuse candidate reads within the account read window', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const chats = Array.from({ length: 5 }, (_, i) => rankedChat(i + 1, 2000 - i));
+  const fixture = discoveryFixture({ ordinary: chats });
+  const transport = async request => {
+    const result = await fixture.transport(request);
+    if (request.path.includes('/conversation/')) t.mock.timers.tick(1000);
+    return result;
+  };
+  for (let i = 0; i < 8; i++) {
+    const result = await findRecentGoalCommand({ workId: 'waiting-' + i, linkId: 'p'.repeat(32),
+      explicitGoal: true, nativeTransport: transport });
+    assert.equal(result.state, 'absent');
+    t.mock.timers.tick(6000);
+  }
+  assert.equal(fixture.requests.filter(r => r.path.includes('/conversation/')).length, 5,
+    'pending tasks must not each repeat the same five reads and exhaust the account budget');
+});
+
 test('negative evidence expires even when listing timestamps have not changed', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const chat = rankedChat(1, 2000), link = { version: 1, link_id: 'u'.repeat(32) };
@@ -2141,7 +2203,7 @@ test('negative evidence expires even when listing timestamps have not changed', 
   assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
   fixture.trees[chat.id] = linkedConversation(chat.id, deps.workId, link);
   assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
-  t.mock.timers.tick(5001);
+  t.mock.timers.tick(60_001);
   assert.equal((await findRecentGoalCommand(deps)).state, 'matched');
 });
 

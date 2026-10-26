@@ -3,10 +3,10 @@
 @layer components {
 /* Managed process runtime */
 .processes-card .card-head p, .processes-recovery-card .card-head p { margin: .35rem 0 0; color: var(--ui-text-secondary); }
-.process-row { padding: .75rem .9rem; border-top: 1px solid var(--ui-border-subtle); transition: background-color var(--dur-fast) var(--ease); }
-.process-row:first-child { border-top: 0; }
-.process-row:hover { background: var(--ui-surface-secondary); }
-.process-row.active { box-shadow: inset 3px 0 0 var(--ui-action-primary); background: var(--ui-selection-background); }
+.process-row { margin: 8px; padding: .85rem .9rem; border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-lg); background: var(--ui-surface-primary); transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease); }
+.process-row:first-child { border-top: 1px solid var(--ui-border-subtle); }
+.process-row:hover { border-color: var(--ui-border-default); background: var(--ui-surface-secondary); }
+.process-row.active { border-inline-start: 3px solid var(--ui-action-primary); background: var(--ui-selection-background); }
 .process-row-head, .process-title-line, .process-actions, .process-meta { display: flex; align-items: center; gap: .65rem; }
 .process-row-head { justify-content: space-between; align-items: flex-start; }
 .process-identity { min-width: 0; }
@@ -57,7 +57,7 @@
 .process-elapsed, .process-stop-state { color: var(--ui-text-secondary); font-size: 13px; }
 .process-relationship { margin-top: .8rem; }
 .process-command-summary { display: grid; gap: .35rem; margin-top: .8rem; }
-.process-command-summary code { overflow-wrap: anywhere; white-space: pre-wrap; padding: var(--filter-inset, 12px); border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); background: var(--ui-surface-primary); font-size: var(--technical-font-size, 12px); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; }
+.process-command-summary code { font-size: inherit; font-family: inherit; }
 .process-independent, .process-recovery { margin-top: .8rem; }
 .process-recovery-details { margin-top: 8px; border-top: 1px solid var(--ui-border-subtle); }
 .process-recovery-details > summary { display: flex; min-height: 44px; align-items: center; cursor: pointer; color: var(--ui-text-secondary); font-size: 13px; font-weight: 600; }

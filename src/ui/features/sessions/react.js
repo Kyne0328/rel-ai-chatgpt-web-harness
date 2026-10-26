@@ -60,7 +60,8 @@ const TASK_HISTORY_PAGE_SIZE = 100;
 const TASK_HISTORY_URL = '/api/tasks/history';
 const TASK_SESSION_URL = '/api/tasks/session';
 const DETAIL_EVENT_PREVIEW = 8;
-const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'managedProcesses']);
+const DETAIL_EVENT_INCREMENT = 20;
+const SESSION_SLICES = Object.freeze(['config', 'tasks', 'auditTail', 'managedProcesses', 'commandOperations']);
 
 export function createSessionsRoute(useDashboardSlices) {
   return function SessionsRoute() {
@@ -121,6 +122,7 @@ function SessionsPage({ data = {} }) {
   const [hydrated, setHydrated] = useState(null);
   const [hydrationState, setHydrationState] = useState(null);
   const [detailRefresh, setDetailRefresh] = useState(null);
+  const [technicalExpandedId, setTechnicalExpandedId] = useState('');
   const requestedTab = routeParams.get('tab');
   const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'processes']), []);
   const [activeTab, setActiveTab] = useState(() => validTabs.has(requestedTab) ? requestedTab : 'overview');
@@ -132,6 +134,7 @@ function SessionsPage({ data = {} }) {
     replaceRouteParams({ tab: tab === 'overview' ? null : tab });
   }, []);
   const hydrationRequest = useRef(0);
+  const activityPageLoading = useRef(false);
   const selectedSummary = selectedId ? sessionById.get(selectedId) : null;
   const selectedSummaryHasTrace = Array.isArray(selectedSummary?.trace?.entries);
   const selectedSummaryAvailable = Boolean(selectedSummary);
@@ -154,6 +157,7 @@ function SessionsPage({ data = {} }) {
       setHydrated(null);
       setHydrationState(null);
       setDetailRefresh(null);
+      setTechnicalExpandedId('');
       setActiveTab(validTabs.has(getRouteParams().get('tab')) ? getRouteParams().get('tab') : 'overview');
     }
     setSelectedId(id);
@@ -181,6 +185,11 @@ function SessionsPage({ data = {} }) {
     const request = ++hydrationRequest.current;
     const forceRefresh = detailRefresh?.id === selectedId;
     const summary = selectedSummaryRef.current;
+    // The list summary already supports Overview and Changes. Avoid fetching
+    // large retained task details on each selection; fetch for Activity,
+    // technical disclosure, direct off-page links and explicit refreshes.
+    if (summary && !forceRefresh && activeTab !== 'activity'
+      && requestedTab !== 'technical' && technicalExpandedId !== selectedId) return undefined;
     if (selectedSummaryHasTrace && !forceRefresh) {
       setHydrated({ id: selectedId, session: summary });
       setHydrationState({ id: selectedId, status: 'ready' });
@@ -234,7 +243,8 @@ function SessionsPage({ data = {} }) {
       cancelled = true;
       hydrationRequest.current += 1;
     };
-  }, [detailRefresh, offPageRefresh, selectedHydrationCacheTtl, selectedId, selectedSummaryAvailable, selectedSummaryHasTrace]);
+  }, [activeTab, detailRefresh, offPageRefresh, requestedTab, selectedHydrationCacheTtl,
+    selectedId, selectedSummaryAvailable, selectedSummaryHasTrace, technicalExpandedId]);
 
   useEffect(() => {
     if (!selectedId || hydrated?.id !== selectedId) return;
@@ -252,6 +262,32 @@ function SessionsPage({ data = {} }) {
       };
     });
   }, [data?.auditTail?.entries, hydrated?.id, selectedId]);
+
+  const loadMoreActivity = useCallback(async () => {
+    const taskId = selectedIdRef.current;
+    const page = hydrated?.id === taskId ? hydrated.activity : null;
+    if (!taskId || !page?.hasMore || !page.nextCursor || activityPageLoading.current) return false;
+    activityPageLoading.current = true;
+    try {
+      const params = new URLSearchParams({
+        task: taskId, activityOnly: '1', activityLimit: '200',
+        activityCursor: JSON.stringify(page.nextCursor)
+      });
+      const response = await fetchJson(`${TASK_SESSION_URL}?${params.toString()}`, { cache: 'no-store', pauseTimeoutWhenHidden: false });
+      if (response?.ok === false || !Array.isArray(response?.activity?.entries)) {
+        throw new Error(response?.error || 'Older task activity could not be loaded.');
+      }
+      if (selectedIdRef.current !== taskId) return false;
+      setHydrated(previous => previous?.id !== taskId ? previous : {
+        ...previous,
+        activity: response.activity.page,
+        session: { ...previous.session, events: mergeSessionEvents(previous.session.events || [], response.activity.entries) }
+      });
+      return true;
+    } finally {
+      activityPageLoading.current = false;
+    }
+  }, [hydrated]);
 
   const showMoreVisible = useCallback(() => {
     setVisibleByScope(previous => {
@@ -407,10 +443,13 @@ function SessionsPage({ data = {} }) {
                 activeTab,
                 setActiveTab: selectTab,
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
+                onLoadMoreActivity: loadMoreActivity,
                 activityTotalCount: hydrated?.id === selectedId ? hydrated?.activity?.totalCount : undefined,
                 technicalRequested: requestedTab === 'technical',
+                onTechnicalOpen: setTechnicalExpandedId,
                 onControlComplete: refreshSelectedSession,
                 managedProcesses: data.managedProcesses || [],
+                commandOperations: data.commandOperations || [],
                 requestedFilePath: routeParams.get('file') || ''
               })
             : !requestedId ? h('div', { className: 'inspector-empty' },
@@ -424,10 +463,9 @@ function SessionsPage({ data = {} }) {
 }
 
 function TaskDetailFeedback({ taskId, state, hasDetail, onRetry }) {
-  if (state.status === 'ready') return null;
+  if (state.status === 'ready' || (state.status === 'loading' && hasDetail)) return null;
   const loading = state.status === 'loading';
-  const title = loading
-    ? hasDetail ? 'Loading full task details…' : 'Loading task…'
+  const title = loading ? 'Loading task…'
     : state.status === 'unavailable' ? 'Task details unavailable' : 'Could not load task details';
   return h('div', {
     className: hasDetail ? 'connection-notice' : 'inspector-empty',
@@ -558,7 +596,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, activityTotalCount, technicalRequested = false, onControlComplete, managedProcesses = [], requestedFilePath = '' }) {
+function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, activityTotalCount, onLoadMoreActivity, technicalRequested = false, onTechnicalOpen, onControlComplete, managedProcesses = [], commandOperations = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -648,14 +686,18 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
   };
 
   const ownedProcessCount = taskProcessGroups(managedProcesses, id, session.workspace).owned.length;
+  const taskCommands = commandOperations.filter(command => String(command.workId || '') === id);
+  const commandIds = new Set(taskCommands.map(command => String(command.operationId || '')));
+  const otherOperations = taskRunningOperations(session).filter(operation =>
+    !commandIds.has(String(operation.id || operation.operationId || operation.invocationId || '')));
   const tabCounts = {
     changes: fileCounts.product + fileCounts.support,
     activity: Number.isFinite(activityTotalCount) ? Math.max(activityTotalCount, (session.events || []).length) : (session.events || []).length,
     activityLabel: Number.isFinite(activityTotalCount)
       ? `${Math.max(activityTotalCount, (session.events || []).length)} recorded events; ${(session.events || []).length} loaded${activityHasMore ? ', more available' : ''}`
       : `${(session.events || []).length} loaded events${activityHasMore ? '; more history available' : ''}`,
-    processes: ownedProcessCount + runningOperations.length,
-    processesLabel: `${runningOperations.length} running operations and ${ownedProcessCount} managed commands`
+    processes: ownedProcessCount + taskCommands.length + otherOperations.length,
+    processesLabel: `${taskCommands.length + otherOperations.length} task operations and ${ownedProcessCount} managed commands`
   };
 
   return h('div', { className: 'detail-stack session-detail' },
@@ -724,7 +766,8 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
         )
       ) : null,
       h(OriginalRequest, { objective: session.objective }),
-      h('details', { key: id + ':' + technicalRequested, className: 'task-detail-technical', 'data-session-details': '', open: technicalRequested },
+      h('details', { key: id + ':' + technicalRequested, className: 'task-detail-technical', 'data-session-details': '', open: technicalRequested,
+        onToggle: event => { if (event.currentTarget.open) onTechnicalOpen?.(id); } },
         h('summary', null, 'Technical details'),
         h(TechnicalDetails, { session }),
         session.trace?.entries?.length
@@ -749,10 +792,12 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
       })) : null
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-activity', role: 'tabpanel', 'aria-labelledby': 'session-tab-activity', tabIndex: 0, hidden: activeTab !== 'activity', 'data-session-panel': 'activity' },
-      activeTab === 'activity' ? h(TaskTraceSection, { session, activityHasMore, activityTotalCount }) : null
+      activeTab === 'activity' ? h(TaskTraceSection, { session, activityHasMore, activityTotalCount, onLoadMoreActivity }) : null
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-processes', role: 'tabpanel', 'aria-labelledby': 'session-tab-processes', tabIndex: 0, hidden: activeTab !== 'processes', 'data-session-panel': 'processes' },
-      h(TaskProcessesSection, { session, taskId: id, workspace: session.workspace, managedProcesses, active: activeTab === 'processes', controlKey, onStopOperation: operationId => controlTask('stop', operationId) })
+      h(TaskProcessesSection, { session, taskId: id, workspace: session.workspace, managedProcesses,
+        commandOperations: taskCommands, active: activeTab === 'processes', controlKey,
+        onStopOperation: operationId => controlTask('stop', operationId) })
     ),
 
   );
@@ -803,14 +848,16 @@ function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
   );
 }
 
-function TaskProcessesSection({ session, taskId, workspace = '', managedProcesses = [], active = false, controlKey = '', onStopOperation }) {
+function TaskProcessesSection({ session, taskId, workspace = '', managedProcesses = [], commandOperations = [], active = false, controlKey = '', onStopOperation }) {
   const { owned } = taskProcessGroups(managedProcesses, taskId, workspace);
-  const operations = taskRunningOperations(session);
+  const represented = new Set(commandOperations.map(command => String(command.operationId || '')));
+  const operations = taskRunningOperations(session).filter(operation =>
+    !represented.has(String(operation.id || operation.operationId || operation.invocationId || '')));
   const relevant = owned;
   const sampleKey = JSON.stringify(relevant.filter(process => ['starting', 'running', 'stopping'].includes(process.status))
     .map(process => [process.processId, process.pid]).sort());
   const processMemory = useProcessMemory(sampleKey, active);
-  const rows = processListView({ managedProcesses: relevant, processMemory }).rows;
+  const rows = processListView({ managedProcesses: relevant, commandOperations, processMemory }).rows;
   const categories = [
     { title: 'Task commands', processes: owned.filter(process => process.lifecycle === 'task') },
     { title: 'Persistent commands', processes: owned.filter(process => process.lifecycle === 'persistent') },
@@ -819,8 +866,12 @@ function TaskProcessesSection({ session, taskId, workspace = '', managedProcesse
   const renderProcess = process => h(ProcessRow, { key: process.processId, row: rows.find(row => row.processId === process.processId) });
   if (!active) return null;
   return h('div', { className: 'task-processes-container detail-stack' },
-    h(CurrentOperations, { session, controlKey, onStopOperation }),
-    !owned.length && !operations.length ? h('div', { className: 'inspector-empty compact' },
+    h(CurrentOperations, { session, controlKey, onStopOperation, excludedOperationIds: represented }),
+    commandOperations.length ? h('section', { className: 'task-detail-section task-process-group' },
+      h('div', { className: 'task-detail-heading' }, h('h3', null, 'Command executions'), h('span', null, commandOperations.length)),
+      commandOperations.map(command => h(ProcessRow, { key: `command:${command.operationId}`,
+        row: rows.find(row => row.operationId === command.operationId) }))) : null,
+    !owned.length && !commandOperations.length && !operations.length ? h('div', { className: 'inspector-empty compact' },
       h('strong', null, 'No running operations or managed commands'),
       h('span', null, 'Task operations and commands started by this task appear here.')) : null,
     categories.filter(category => category.processes.length).map(category =>
@@ -981,10 +1032,34 @@ function OriginalRequest({ objective }) {
   );
 }
 
-function TaskTraceSection({ session, activityHasMore = false, activityTotalCount }) {
+function TaskTraceSection({ session, activityHasMore = false, activityTotalCount, onLoadMoreActivity }) {
+  const [visibleCount, setVisibleCount] = useState(DETAIL_EVENT_PREVIEW);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const ordered = orderSessionEvents(session.events || []);
-  const recent = ordered.slice(0, DETAIL_EVENT_PREVIEW);
+  const recent = ordered.slice(0, visibleCount);
   const total = Number.isFinite(activityTotalCount) ? Math.max(activityTotalCount, ordered.length) : ordered.length;
+  const hasBuffered = ordered.length > visibleCount;
+  const canLoadMore = activityHasMore && typeof onLoadMoreActivity === 'function';
+  const showMore = async () => {
+    if (loadingMore) return;
+    setLoadError('');
+    if (hasBuffered) {
+      setVisibleCount(count => count + DETAIL_EVENT_INCREMENT);
+      return;
+    }
+    if (!canLoadMore) return;
+    setLoadingMore(true);
+    try {
+      const loaded = await onLoadMoreActivity();
+      if (!loaded) throw new Error('Older activity is not available yet.');
+      setVisibleCount(count => count + DETAIL_EVENT_INCREMENT);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
   return h('section', { className: 'task-detail-section task-activity-summary' },
     h('div', { className: 'task-detail-heading' },
       h('h3', null, 'Recent activity'),
@@ -994,6 +1069,12 @@ function TaskTraceSection({ session, activityHasMore = false, activityTotalCount
       recent.map((event, index) => h('div', { role: 'listitem', key: activityEventId(event) || index },
         h(EventRow, { event, session })))
     ) : h('p', { className: 'task-detail-note' }, 'No activity recorded.'),
+    hasBuffered || canLoadMore ? h('button', {
+      className: 'secondary compact-button task-activity-show-more', type: 'button',
+      'data-load-more-task-activity': '', disabled: loadingMore, 'aria-busy': loadingMore,
+      onClick: () => { void showMore(); }
+    }, loadingMore ? 'Loading…' : 'View more activity') : null,
+    loadError ? h('p', { className: 'task-detail-note', role: 'alert' }, loadError) : null,
     h('a', { className: 'section-action task-activity-view-all', href: taskActivityHref(session) }, 'View all activity')
   );
 }
@@ -1065,8 +1146,9 @@ function IdentifierDetail({ label, value }) {
   );
 }
 
-function CurrentOperations({ session, controlKey = '', onStopOperation }) {
-  const operations = taskRunningOperations(session);
+function CurrentOperations({ session, controlKey = '', onStopOperation, excludedOperationIds = new Set() }) {
+  const operations = taskRunningOperations(session).filter(operation =>
+    !excludedOperationIds.has(String(operation.id || operation.operationId || operation.invocationId || '')));
   if (!operations.length) return null;
   return h('section', { className: 'task-detail-section' },
     h('div', { className: 'task-detail-heading' }, h('h3', null, 'Running operations'), h('span', null, operations.length)),

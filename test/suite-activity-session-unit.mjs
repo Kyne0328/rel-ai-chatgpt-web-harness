@@ -465,6 +465,7 @@ async function case_task_inspector_lifecycle_unit() {
       ...model, ...identity, URLSearchParams, encodeURIComponent,
       React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }), lazy: () => 'lazy-feature' },
       memo: component => component,
+      activityEventId: event => event.eventId || '',
       Icon: 'icon', Suspense: 'suspense', ProcessRow: 'process-row', OperationDiagnostics: 'operation-diagnostics',
       processListView, useProcessMemory: () => null, formatDuration: value => String(value),
       useState: initial => {
@@ -517,7 +518,7 @@ async function case_task_inspector_lifecycle_unit() {
       routeHref: () => '#activity',
       orderWorkspacesAlphabetically: rows => rows
     };
-    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskProcessesSection, CurrentOperations, TechnicalDetails };', context);
+    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskProcessesSection, CurrentOperations, TechnicalDetails, TaskTraceSection };', context);
     return {
       requests, controls,
       refreshes: () => refreshes,
@@ -585,6 +586,16 @@ async function case_task_inspector_lifecycle_unit() {
     const processes = app.render('TaskProcessesSection', find(detail, node => node.type?.name === 'TaskProcessesSection').props);
     assert.ok(find(processes, node => node.type === 'process-row' && node.props.row.processId === 'task-command'));
     assert.equal(find(processes, node => node.type === 'process-row' && node.props.row.processId === 'other-command'), null, 'other project commands stay collapsed');
+    const commandOperations = [{ operationId: 'read-operation', workId: active.id, workspace: 'app', status: 'running',
+      commandSummary: 'node build.js', stdoutTail: 'Build running', stdoutBytes: 13, canStop: true }];
+    const commandDetail = app.render('SessionInspector', { session: active, managedProcesses, commandOperations, activeTab: 'processes' });
+    assert.equal(find(commandDetail, node => node.type?.name === 'SessionTabs').props.counts.processes, 2,
+      'one command receipt and its running-operation snapshot must count once');
+    const commandProcesses = app.render('TaskProcessesSection', find(commandDetail, node => node.type?.name === 'TaskProcessesSection').props);
+    assert.ok(find(commandProcesses, node => node.type === 'process-row' && node.props.row.operationId === 'read-operation'),
+      'Tasks must show the same stdout/stderr-capable command row as Running commands');
+    assert.equal(app.render('CurrentOperations', find(commandProcesses, node => node.type?.name === 'CurrentOperations').props), null,
+      'the matching operation snapshot must not duplicate a command execution');
     assert.equal(find(processes, node => node.type === 'strong' && node.children.includes('No running operations or managed commands')), null);
     const operationProps = find(processes, node => node.type?.name === 'CurrentOperations').props;
     let operations = app.render('CurrentOperations', operationProps);
@@ -722,6 +733,63 @@ async function case_task_inspector_lifecycle_unit() {
     assert.equal(app.controls.length, 2, 'reactivated off-page goals must remain stoppable');
     app.controls[1].resolve({ ok: false, error: 'Fixture stop failure' });
     await settle();
+    app.dispose();
+  }
+
+  {
+    const app = harness();
+    let events = Array.from({ length: 29 }, (_, index) => ({ eventId: `event-${index}`, timestamp: new Date(1700000000000 + index * 1000).toISOString(), tool: 'relai_read' }));
+    let hasMore = true;
+    let olderRequests = 0;
+    const props = () => ({ session: { ...retained, events }, activityHasMore: hasMore, activityTotalCount: 35,
+      onLoadMoreActivity: async () => {
+        olderRequests += 1;
+        events = [...events, ...Array.from({ length: 6 }, (_, index) => ({ eventId: `older-${index}`, timestamp: new Date(1699999000000 + index * 1000).toISOString(), tool: 'relai_read' }))];
+        hasMore = false;
+        return true;
+      } });
+    const countVisible = tree => find(tree, node => node.props.role === 'list')?.children.flat().length || 0;
+    let trace = app.render('TaskTraceSection', props());
+    assert.equal(countVisible(trace), 8, 'task Activity starts with its compact preview');
+    const more = () => find(trace, node => Object.hasOwn(node.props, 'data-load-more-task-activity'));
+    assert.ok(more(), 'View more activity is available inside the task');
+    more().props.onClick();
+    trace = app.render('TaskTraceSection', props());
+    assert.equal(countVisible(trace), 28, 'View more expands buffered events without a fetch');
+    more().props.onClick();
+    trace = app.render('TaskTraceSection', props());
+    assert.equal(countVisible(trace), 29);
+    assert.equal(olderRequests, 0);
+    more().props.onClick();
+    await settle();
+    trace = app.render('TaskTraceSection', props());
+    assert.equal(olderRequests, 1, 'older pages are fetched only after buffered entries are shown');
+    assert.equal(countVisible(trace), 35, 'older pages appear in the task after loading');
+    assert.equal(more(), null, 'View more disappears when all entries are visible');
+    assert.ok(find(trace, node => node.type === 'a' && node.children.includes('View all activity')),
+      'the full Activity link remains available');
+    app.dispose();
+  }
+
+  {
+    const app = harness(retained.id);
+    app.render('SessionsPage', { data });
+    const cursor = { timestamp: 1700000000000, id: 'page-1' };
+    app.requests[0].resolve({ ok: true, session: { ...retained, events: [{ eventId: 'first', timestamp: '2026-10-25T10:00:00Z' }] },
+      activity: { hasMore: true, nextCursor: cursor, totalCount: 2 } });
+    await settle();
+    let page = app.render('SessionsPage', { data });
+    const loading = inspector(page).props.onLoadMoreActivity();
+    assert.equal(app.requests.length, 2);
+    const url = new URL(app.requests[1].url, 'http://localhost');
+    assert.equal(url.searchParams.get('activityOnly'), '1', 'older Activity uses the lightweight endpoint');
+    assert.deepEqual(JSON.parse(url.searchParams.get('activityCursor')), cursor);
+    app.requests[1].resolve({ ok: true, activity: { entries: [{ eventId: 'older', timestamp: '2026-10-24T10:00:00Z' }],
+      page: { hasMore: false, nextCursor: null, totalCount: 2 } } });
+    assert.equal(await loading, true);
+    page = app.render('SessionsPage', { data });
+    assert.equal(inspector(page).props.session.events.length, 2, 'older events are merged into retained task detail');
+    assert.equal(inspector(page).props.activityHasMore, false);
     app.dispose();
   }
 

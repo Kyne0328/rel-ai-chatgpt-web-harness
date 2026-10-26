@@ -64,7 +64,8 @@ function healthMonitor(config, _args = {}) {
   checkFile(findings, "config", getConfigPath(), false);
 
   const staleHours = Number(config.productUx?.staleHours || 24);
-  checkStaleFile(findings, "audit", config.auditLogPath, staleHours);
+  // An idle audit log is normal when no actions were recorded. Age alone is
+  // not evidence that projects or the connection need attention.
   const aliases = Object.keys(config.workspaces || {}).sort(compareText);
   const workspaces = aliases.map((alias) => {
     const mutationBlock = workspaceMutationSafetySummary(config, alias, config.workspaces?.[alias]?.path || '');
@@ -92,26 +93,6 @@ function healthMonitor(config, _args = {}) {
     findings: orderedFindings
   };
 }
-
-function checkStaleFile(findings, name, file, staleHours) {
-  if (!file || !fs.existsSync(file)) return;
-  try {
-    const stat = fs.statSync(file);
-    const ageHours = (Date.now() - stat.mtimeMs) / 3600000;
-    if (ageHours > staleHours) {
-      findings.push({
-        severity: "warning",
-        code: `${name}_stale`,
-        message: `${name} has not changed for ${Math.floor(ageHours)} hours.`,
-        modifiedAt: stat.mtime.toISOString()
-      });
-    }
-  } catch (error) {
-    findings.push({ severity: "warning", code: `${name}_stat_failed`, message: error instanceof Error ? error.message : String(error) });
-  }
-}
-
-
 
 
 async function doctorFix(config, args = {}) {

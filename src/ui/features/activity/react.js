@@ -7,6 +7,7 @@ import React, {
   useState
 } from 'react';
 import './styles.css';
+import '../../components/command-console.css';
 import { flushSync } from 'react-dom';
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import { fetchJson } from '../../api.js';
@@ -920,8 +921,9 @@ function CommandDetail({ command }) {
       toast('Clipboard access failed.', { variant: 'error' });
     }
   };
-  return h('section', { className: 'activity-detail-section activity-detail-command', 'data-activity-command': '' },
-    h('div', { className: 'activity-detail-command-head' },
+  return h('section', { className: 'activity-detail-section activity-detail-command command-console',
+    'data-activity-command': '', 'data-console-kind': 'command' },
+    h('div', { className: 'activity-detail-command-head command-console-heading' },
       h('h3', null, 'Command'),
       h('button', { type: 'button', className: 'secondary compact-button', onClick: () => { void copyCommand(); } }, copied ? 'Copied' : 'Copy command')
     ),
@@ -945,10 +947,10 @@ function StreamOutputDetail({ title, output, stream = 'stdout' }) {
     }
   };
   return h('section', {
-    className: `activity-detail-section activity-detail-stream activity-stream-${stream}`,
-    'data-activity-stream': stream
+    className: `activity-detail-section activity-detail-stream activity-stream-${stream} command-console`,
+    'data-activity-stream': stream, 'data-console-kind': stream
   },
-    h('div', { className: 'activity-detail-stream-head' },
+    h('div', { className: 'activity-detail-stream-head command-console-heading' },
       h('h3', null, title),
       formatted ? h('button', {
         type: 'button',

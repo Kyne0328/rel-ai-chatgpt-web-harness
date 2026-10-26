@@ -19,6 +19,7 @@ import { chatLinkResource } from './chatgptChatLink.js';
 const DETECTION_PREFIX = 'chatgpt_goal_detection:';
 const RATE_LIMIT_PREFIX = 'chatgpt_goal_rate_limit:';
 const DISCOVERY_RETRY_MS = 120_000;
+const STALE_UNLINKED_IDLE_MS = 24 * 60 * 60_000;
 const SETTLE_MS = 30_000;
 const UNFINISHED_TURN_IDLE_MS = 4 * 60_000 + 30_000;
 const RETRY_DELAYS_MS = [5_000, 5_000, 10_000, 15_000, 20_000];
@@ -136,7 +137,8 @@ function coordinatedGoalDeps(config, record, deps) {
       const old = row ? JSON.parse(row.value) : {};
       db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
         .run(key, JSON.stringify({ until: Math.max(old.until || 0, value.until), count: value.count,
-          reason: value.until >= (old.until || 0) ? value.reason : old.reason || 'upstream' }));
+          reason: value.until >= (old.until || 0) ? value.reason : old.reason || 'upstream',
+          endpoint: value.endpoint, lastAt: value.at }));
     }, { transaction: true }) };
 }
 
@@ -235,7 +237,7 @@ function resumeGoal(config, args, context) {
   const resumed = mutateGoal(config, goal.workId, current => ({ ...current,
     ...(switching ? { conversationId, binding: null, observedNode: '', stableSince: 0,
       pendingNode: '', pendingPrompt: '', pendingOutcome: 'not_sent' } : {}),
-    active: true, state: 'monitoring', nextAttemptAt: 0, error: '', pauseReason: '',
+    active: true, state: 'monitoring', resumedAt: Date.now(), nextAttemptAt: 0, error: '', pauseReason: '',
     retryCount: 0, helperFailureCount: 0, noProgressCount: 0, objectiveAchieved: false, updatedAt: Date.now()
   }), { reactivate: true, expectedRevision: goal.revision });
   invalidateGoalPoll(goal.workId);
@@ -457,7 +459,7 @@ function activateGoal(config, args, context) {
   }
   const goal = saveGoal(config, {
     ...(existing || {}), ...goalConfiguration(args, existing), workId, owner, workspace: String(task.workspace || ''),
-    createdAt: existing?.createdAt || Date.now(),
+    createdAt: existing?.createdAt || Date.now(), resumedAt: Date.now(),
     objective, conversationId, active: true, state: 'linking', objectiveAchieved: false,
     ...(switchingConversation ? { binding: null } : {}),
     lastCommandId: existing?.lastCommandId || '', commandResolutionPending: existing ? existing.commandResolutionPending === true : true,
@@ -802,6 +804,7 @@ async function pollGoal(config, workId, deps = {}) {
     deps = coordinatedGoalDeps(config, goal, deps);
     if (goal.pendingNode && !goal.pendingOutcome) goal = saveGoal(config, { ...goal, pendingOutcome: pendingOutcome(goal) });
     const task = statusForTask(config, goal);
+    if (!pauseStaleUnlinkedGoal(config, goal)?.active) return;
     const terminalState = terminalGoalState(task);
     if (terminalState) {
       const unverified = task?.status === 'completed' && goal.strategy === 'adaptive' && !goal.objectiveAchieved;
@@ -939,6 +942,25 @@ async function pollGoal(config, workId, deps = {}) {
   }
 }
 
+// Unlinked inactive tasks cannot be continued from an unverified chat. An old
+// discovery request must not keep scanning the account indefinitely. Preserve
+// the work session and its plan; an explicit Goal resume starts a fresh window.
+function pauseStaleUnlinkedGoal(config, goal, now = Date.now()) {
+  if (!goal.active || goal.binding || goal.conversationId
+    || (goal.pendingNode && !['accepted', 'not_sent'].includes(pendingOutcome(goal)))) return goal;
+  if (now - Math.max(Number(goal.createdAt || 0), Number(goal.resumedAt || 0)) < STALE_UNLINKED_IDLE_MS) return goal;
+  const task = statusForTask(config, goal);
+  if (task?.status !== 'inactive' || Number(task.activeCalls || 0) > 0) return goal;
+  const lastActivity = task.lastActivityAt || task.updatedAt || task.createdAt;
+  const activityAt = typeof lastActivity === 'number' ? lastActivity : Date.parse(String(lastActivity || '')) || 0;
+  if (now - activityAt < STALE_UNLINKED_IDLE_MS) return goal;
+  return mutateGoal(config, goal.workId, current => current.active && !current.binding ? {
+    ...current, active: false, state: 'paused', pauseReason: 'stale_unlinked', nextAttemptAt: 0,
+    error: 'Chat linking stopped after a day of inactivity without a verified conversation. Resume Goal Mode to try again.',
+    updatedAt: now
+  } : null, { expectedRevision: goal.revision }) || goal;
+}
+
 function recoverAutomaticDiscovery(config) {
   const lookupFailure = error => /^(?:The named ChatGPT Project was not found in the connected account\.|No matching work receipt in the ten most recently updated eligible chats\.|(?:Automatic continuation stopped after five retries: )?No matching Goal Mode receipt in the ten most recently updated eligible chats\.|Automatic continuation stopped after five retries: ChatGPT Web conversation read failed \(HTTP 429\)\.)$/.test(error || '');
   const eligible = record => {
@@ -964,7 +986,7 @@ function startGoalMonitor(config) {
   if (timer) return;
   monitorConfig = config;
   recoverAutomaticDiscovery(config);
-  for (const goal of listGoals(config)) scheduleGoalRetry(config, goal);
+  for (const goal of listGoals(config)) scheduleGoalRetry(config, pauseStaleUnlinkedGoal(config, goal));
   timer = setInterval(() => {
     try {
       const goals = listGoals(config).sort((a, b) => {

@@ -641,7 +641,7 @@ function createBrowserSurfaceHost(options = {}) {
     const metadata = { ok: true, available: true, browserOpen,
       ...(account.tunnelId ? { tunnelId: account.tunnelId, label: account.label, enabled: account.enabled } : {}) };
     try {
-      const rateLimit = goalReadAdmission(account, true);
+      const rateLimit = goalReadAdmission(account);
       if (rateLimit) {
         const cached = goalProtocolAuth.get(account.directory);
         if (rateLimit.status === 429 && cached?.result?.ok && Date.now() < cached.expiresAt) {

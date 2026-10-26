@@ -55,8 +55,13 @@ function protocolFailure(path, status, retryAfterMs = 0) {
     : path.startsWith('/backend-api/sentinel/chat-requirements') ? 'chat requirements'
       : path === '/backend-api/f/conversation' ? 'message submission' : 'conversation read';
   const httpStatus = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
+  const endpoint = path.startsWith('/backend-api/gizmos/snorlax/sidebar') ? 'project_sidebar'
+    : path.startsWith('/backend-api/gizmos/') ? 'project_chats'
+      : path.startsWith('/backend-api/conversations') ? 'chat_catalogue'
+        : path.startsWith('/backend-api/conversation/') ? 'conversation_detail'
+          : path.startsWith('/backend-api/f/conversation') ? 'message_submission' : 'chat_requirements';
   return Object.assign(new Error(`ChatGPT Web ${stage} failed (HTTP ${httpStatus || 'unknown'}).`), {
-    status: httpStatus, stage, retryAfterMs
+    status: httpStatus, stage, endpoint, retryAfterMs
   });
 }
 
@@ -123,7 +128,8 @@ function rememberRateLimit(error, deps) {
     scope.cooldownUntil = Date.now() + delay;
     scope.cooldownReason = error.rateLimitReason === 'read_budget' ? 'read_budget' : 'upstream';
   }
-  try { deps.onRateLimit?.({ until: scope.cooldownUntil, count: scope.rateLimits, reason: scope.cooldownReason }); } catch {}
+  try { deps.onRateLimit?.({ until: scope.cooldownUntil, count: scope.rateLimits,
+    reason: scope.cooldownReason, endpoint: error.endpoint || 'unknown', at: Date.now() }); } catch {}
   return Object.assign(error, { retryAt: scope.cooldownUntil });
 }
 
@@ -314,7 +320,10 @@ function turnState(conversation) {
 // fetched only for the five newest candidates. No historical body expansion.
 const RECENT_GOAL_CHATS = 5;
 const CATALOGUE_TTL_MS = 60_000;
-const EVIDENCE_TTL_MS = 5_000;
+// Pending tasks share one candidate scan per account read window. A five-second
+// cache can expire during the scan itself and exhaust the 30-read budget when
+// several unlinked goals retry. Binding still requires an uncached branch read.
+const EVIDENCE_TTL_MS = READ_WINDOW_MS;
 const MAX_PROJECT_FALLBACK_READS = 4;
 
 function goalDiscoveryFreshAfter(deps) {
@@ -332,8 +341,11 @@ function recentChats(items, limit = RECENT_GOAL_CHATS) {
         { code: 'GOAL_CATALOGUE_INVALID', deferred: true, retryAt: Date.now() + CATALOGUE_TTL_MS });
     }
     const previous = unique.get(item.id);
-    if (!previous || updated > previous.updated) unique.set(item.id, { id: item.id, updated,
-      ...(item.projectId ? { projectId: item.projectId } : {}) });
+    const projectId = item.projectId || previous?.projectId;
+    // Ordinary listings can include Project chats too. Keep their membership
+    // when duplicate timestamps tie or a newer ordinary entry has no Project ID.
+    unique.set(item.id, { id: item.id, updated: Math.max(updated, previous?.updated || 0),
+      ...(projectId ? { projectId } : {}) });
   }
   return [...unique.values()].sort((a, b) => b.updated - a.updated || a.id.localeCompare(b.id)).slice(0, limit);
 }
