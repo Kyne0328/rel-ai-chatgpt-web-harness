@@ -140,7 +140,8 @@ async function collectFilesystemSearchTree(root, options, signal, deadline) {
   if (signal?.aborted) throw searchAbortError(signal);
   const remainingMs = Math.max(1, deadline - Date.now());
   const worker = new Worker(new URL('./filesystemSearchCollectorWorker.js', import.meta.url), {
-    workerData: { root, options }
+    workerData: { root, options },
+    resourceLimits: { maxOldGenerationSizeMb: 256 }
   });
   return new Promise((resolve, reject) => {
     let settled = false;

@@ -35,7 +35,7 @@ const MUTATION_WATCHDOG_TERMINATION_GRACE_MS = 15_000;
 async function executeToolCall({ config, name, executionName = name, effectiveArgs, context, requestTaskContext = null, finishActivity, definition, started, workspaceOverride = null }) {
   let sessionStart = { started: false, alias: '' };
   let timeline;
-  const commandActivity = executionName === OP.EXEC ? beginCommandActivity(config, {
+  const commandActivity = executionName === OP.EXEC && finishActivity ? beginCommandActivity(config, {
     operationId: finishActivity.operationId,
     workId: finishActivity.taskId || '',
     taskTitle: requestTaskContext?.session?.title || '',

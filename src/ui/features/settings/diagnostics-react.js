@@ -28,9 +28,10 @@ export function createDiagnosticsRoute(useDashboardSlices) {
 }
 
 function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
-  const [reportState, setReportState] = useState(() => ({ workspace, report: null, error: '' }));
+  const [reportState, setReportState] = useState(() => ({ workspace, report: null, error: '', desktopLogs: null }));
   const report = reportState.workspace === workspace ? reportState.report : null;
   const loadError = reportState.workspace === workspace ? reportState.error : '';
+  const desktopLogs = reportState.workspace === workspace ? reportState.desktopLogs : null;
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [live, setLive] = useState(false);
   const [busy, setBusy] = useState('');
@@ -82,13 +83,15 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
         if (!isCurrent()) return null;
         if (silent) captureLogPositions();
         reportRef.current = result;
-        setReportState({ workspace, report: result, error: '' });
+        setReportState({ workspace, report: result, error: '', desktopLogs: null });
         return result;
       } catch (error) {
+        // The diagnostics API runs inside the service that may have crashed.
+        const fallbackLogs = await loadDesktopRuntimeLogs();
         if (!isCurrent()) return null;
         const previous = silent ? reportRef.current : null;
         reportRef.current = previous;
-        setReportState({ workspace, report: previous, error: messageOf(error) });
+        setReportState({ workspace, report: previous, error: fallbackLogs ? 'Local service is unavailable.' : messageOf(error), desktopLogs: fallbackLogs });
         if (silent) setLive(false);
         return null;
       } finally {
@@ -102,7 +105,7 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
     const generation = ++requestGenerationRef.current;
     workspaceRef.current = workspace;
     reportRef.current = null;
-    setReportState({ workspace, report: null, error: '' });
+    setReportState({ workspace, report: null, error: '', desktopLogs: null });
     setTunnelDoctor(null);
     void load();
     return () => {
@@ -251,7 +254,7 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
       ),
       h('div', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, liveAnnouncement),
       !report && !loadError ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' }, h('div', { className: 'empty', role: 'status' }, 'Loading troubleshooting info…')) : null,
-      loadError ? h(DiagnosticUnavailable, { error: loadError, hasReport: Boolean(report), onRetry: () => void load() }) : null,
+      loadError ? h(DiagnosticUnavailable, { error: loadError, hasReport: Boolean(report), desktopLogs, onRetry: () => void load() }) : null,
       report ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' },
         h('div', { className: 'diagnostic-section diagnostic-section-checks' },
           h('div', { className: 'diagnostic-health-header' },
@@ -655,11 +658,29 @@ function LogRow({ entry }) {
 function localLogTime(value) { const timestamp = Date.parse(String(value || '')); return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString(undefined, { hour12: false }) : 'Unknown time'; }
 function levelLabel(level) { return level === 'error' ? 'Error' : level === 'warning' ? 'Warning' : level === 'debug' ? 'Debug' : 'Info'; }
 
-function DiagnosticUnavailable({ error, hasReport = false, onRetry }) {
-  return h('div', { id: hasReport ? 'diagnosticRefreshError' : 'diagnosticSummary', className: 'diagnostic-summary', role: 'alert' }, h('div', { className: 'diagnostic-clear diagnostic-unavailable' },
-    h('strong', null, hasReport ? 'Troubleshooting refresh failed' : 'Troubleshooting info unavailable'), h('span', null, error), h('small', null, hasReport ? 'Showing an earlier snapshot. Retry to check current conditions.' : 'Refresh the dashboard or restart the Rel.AI connection.'),
-    h('div', { className: 'connection-actions' }, h('button', { className: 'secondary', type: 'button', onClick: onRetry }, 'Retry'), h('a', { className: 'buttonlike secondary', href: '#settings/connection' }, 'Connection'))
-  ));
+function DiagnosticUnavailable({ error, hasReport = false, desktopLogs = null, onRetry }) {
+  const entries = Array.isArray(desktopLogs?.entries) ? desktopLogs.entries : [];
+  const errors = entries.filter(entry => ['error', 'warning'].includes(entry.level));
+  const visible = (errors.length ? errors : entries).slice(-40);
+  return h('div', { id: hasReport ? 'diagnosticRefreshError' : 'diagnosticSummary', className: 'diagnostic-summary' },
+    h('div', { className: 'diagnostic-clear diagnostic-unavailable', role: 'alert' },
+      h('strong', null, desktopLogs ? 'Local service unavailable' : hasReport ? 'Troubleshooting refresh failed' : 'Troubleshooting info unavailable'),
+      h('span', null, error),
+      h('small', null, desktopLogs ? 'Showing recent desktop logs while the service reconnects.' : hasReport ? 'Showing an earlier snapshot. Retry to check current conditions.' : 'Refresh the dashboard or restart the Rel.AI connection.'),
+      h('div', { className: 'connection-actions' }, h('button', { className: 'secondary', type: 'button', onClick: onRetry }, 'Retry'), h('a', { className: 'buttonlike secondary', href: '#settings/connection' }, 'Connection'))
+    ),
+    desktopLogs ? h(LogPanel, { keyName: 'desktop-fallback', title: 'Recent desktop log', entries: visible,
+      emptyText: 'No recent app messages were recorded.', available: true,
+      subtitle: 'Saved by the desktop app; full diagnostics are temporarily unavailable.', registerLog: () => {} }) : null
+  );
+}
+
+async function loadDesktopRuntimeLogs() {
+  if (typeof window.relaiDesktop?.getRuntimeLogs !== 'function') return null;
+  try {
+    const logs = await window.relaiDesktop.getRuntimeLogs();
+    return logs?.available === true && Array.isArray(logs.entries) ? logs : null;
+  } catch { return null; }
 }
 
 function applyRuntimeLogDelta(runtime = {}, change = {}) {

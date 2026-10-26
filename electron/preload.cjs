@@ -58,6 +58,7 @@ if (surface === 'dashboard') {
     getNotificationPreferences: () => ipcRenderer.invoke('desktop:notification-preferences:get'),
     setNotificationPreferences: patch => ipcRenderer.invoke('desktop:notification-preferences:set', patch),
     exportDiagnosticState: report => ipcRenderer.invoke('desktop:diagnostics:export', report),
+    getRuntimeLogs: () => ipcRenderer.invoke('desktop:diagnostics:runtime-logs'),
     openDiagnosticsFolder: () => ipcRenderer.invoke('desktop:diagnostics:open-folder'),
     runTunnelDoctor: () => ipcRenderer.invoke('desktop:diagnostics:tunnel-doctor'),
     getLocalDataUsage: () => ipcRenderer.invoke('desktop:local-data:get'),

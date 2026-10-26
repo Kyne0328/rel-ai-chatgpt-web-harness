@@ -397,7 +397,7 @@ try {
       jobComplete: true, cleanupConfirmed: true, activeProcesses: 0,
       commandStarted: true, rootExited: true
     }));
-    notifyRecoveryChange();
+    // The helper writes this receipt independently; no in-process notification is required.
     await recovered;
     assert.equal(monitor.pendingCount(), 0);
     assert.equal(fs.existsSync(file), false);

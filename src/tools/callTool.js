@@ -144,7 +144,7 @@ async function callToolObserved(name, args = {}, context = {}) {
     }
     if (requestedTaskId && operationName !== OP.WORK_BEGIN) {
       knownTask = await assertKnownTask(config, requestedTaskId, '', operationName, effectivePrincipal, effectiveArgs, {
-        trustedLocalTaskControl, signal: context.signal, deadlineAtMs: context.deadlineAtMs,
+        trustedLocalTaskControl, signal: context?.signal, deadlineAtMs: context?.deadlineAtMs,
         onOwnerVerified: session => { taskOwnerVerified = true; verifiedTaskSession = session; }
       }).catch(error => { throw taskAdmissionReadError(error, context); });
       taskOwnerVerified = Boolean(knownTask);
@@ -925,7 +925,7 @@ async function resolveFallbackExecutionScope(config, name, args = {}, context = 
   const resolved = resolveExecutableToolCall(name, args, config);
   if (!resolved) throw new Error(`Unknown tool '${name}'.`);
   const operationName = resolved.operationName;
-  const principal = principalForContext(context, Boolean(context.publicHttpOnly));
+  const principal = principalForContext(context, Boolean(context?.publicHttpOnly));
   assertAuthorizedToolCall({ principal, operationName, workspace: '' });
   let workspace = String(args.workspace || '').trim();
   const taskId = normalizeTaskId(args.work_id);
@@ -933,7 +933,7 @@ async function resolveFallbackExecutionScope(config, name, args = {}, context = 
   let knownTask = null;
   if (taskId && operationName !== OP.WORK_BEGIN) {
     knownTask = await assertKnownTask(config, taskId, '', operationName, principal, args, {
-      signal: context.signal, deadlineAtMs: context.deadlineAtMs
+      signal: context?.signal, deadlineAtMs: context?.deadlineAtMs
     }).catch(error => { throw taskAdmissionReadError(error, context); });
     if (!workspace) workspace = String(knownTask?.workspace || '');
   }

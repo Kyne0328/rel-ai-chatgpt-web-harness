@@ -55,5 +55,14 @@ await executeToolCall({
 });
 assert.equal(internalContext.resourceClass, 'light');
 assert.equal(internalContext.mutationTrackingRequired, false);
+await executeToolCall({
+  config: {}, name: OP.EXEC, executionName: OP.EXEC,
+  effectiveArgs: { command: 'jadx -d out app.apk', readOnly: true }, context: {},
+  definition: { handler: async (_config, _args, context) => { internalContext = context; return { ok: true }; } },
+  started: Date.now()
+});
+assert.equal(internalContext.resourceClass, 'heavy');
+assert.equal(internalContext.mutationTrackingRequired, true,
+  'readOnly intent cannot disable mutation tracking for a command that creates files');
 assert.equal(pendingWorkspaceOperations(), 0);
 console.log('resource execution routing passed');

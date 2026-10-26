@@ -366,7 +366,10 @@ function repositoryWorkerClient(databaseFile) {
   const existing = workerClients.get(databaseFile);
   if (existing && !existing.closed) return existing;
 
-  const worker = new Worker(new URL('./indexWorker.js', import.meta.url));
+  // A runaway index must fail in its worker, not exhaust the MCP service heap.
+  const worker = new Worker(new URL('./indexWorker.js', import.meta.url), {
+    resourceLimits: { maxOldGenerationSizeMb: 512 }
+  });
   worker.unref();
   const pending = new Map();
   let nextJobId = 1;

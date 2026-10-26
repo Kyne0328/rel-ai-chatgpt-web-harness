@@ -429,6 +429,44 @@ function startAutomaticMutationRecovery(config, options = {}) {
   let stopped = false;
   let unsubscribe = () => {};
 
+  const wakeGroup = group => {
+    if (stopped || !group.pending || group.timer?.eventWake) return;
+    if (group.running) {
+      group.receiptWakePending = true;
+      return;
+    }
+    if (group.timer) clearTimeout(group.timer);
+    group.timer = setTimeout(() => { group.timer = null; void recheck(group); }, 250);
+    group.timer.eventWake = true;
+    group.timer.unref?.();
+  };
+
+  // Windows job helpers write the final receipt in a different process.
+  // Watch only retained jobs; the existing retry timer remains the fallback.
+  const watchNativeReceipts = (group, records) => {
+    if (process.platform !== 'win32') return;
+    const parent = path.resolve(getStateDir(config), 'process-jobs').toLowerCase();
+    group.receiptWatchers ||= new Map();
+    for (const record of records) {
+      if (!record.nativeJob?.directory) continue;
+      const directory = path.resolve(record.nativeJob.directory);
+      if (path.dirname(directory).toLowerCase() !== parent
+        || !path.basename(directory).startsWith('job-')
+        || group.receiptWatchers.has(directory)) continue;
+      try {
+        const watcher = fs.watch(directory, { persistent: false }, (_event, filename) => {
+          if (filename && String(filename).toLowerCase() !== 'receipt.json') return;
+          wakeGroup(group);
+        });
+        watcher.on('error', () => {
+          watcher.close();
+          group.receiptWatchers.delete(directory);
+        });
+        group.receiptWatchers.set(directory, watcher);
+      } catch { /* Retry polling covers missing or unwatchable directories. */ }
+    }
+  };
+
   const trackWorkspace = (alias, workspace) => {
     if (!workspace?.path) return null;
     try {
@@ -444,6 +482,7 @@ function startAutomaticMutationRecovery(config, options = {}) {
         groups.set(authority, group);
       }
       if (!group.members.some(member => member.alias === alias)) group.members.push({ alias, path: workspace.path });
+      watchNativeReceipts(group, records);
       return group;
     } catch (error) {
       const existing = groups.get('unverified:' + alias);
@@ -486,6 +525,8 @@ function startAutomaticMutationRecovery(config, options = {}) {
       if (!pending) {
         for (const [key, value] of groups) if (value === group) groups.delete(key);
         if (group.timer) { clearTimeout(group.timer); group.timer = null; }
+        for (const watcher of group.receiptWatchers?.values() || []) watcher.close();
+        group.receiptWatchers?.clear();
         if (group.owner?.created) clearOwnedWorkspaceMutationBlock(group.alias, group.owner.token);
       } else if (!stopped) {
         const delay = retryMs[Math.min(group.attempt++, retryMs.length - 1)];
@@ -493,7 +534,13 @@ function startAutomaticMutationRecovery(config, options = {}) {
         group.timer.unref?.();
       }
       return { released, pending, errors };
-    })().finally(() => { group.running = null; });
+    })().finally(() => {
+      group.running = null;
+      if (group.receiptWakePending && group.pending) {
+        group.receiptWakePending = false;
+        wakeGroup(group);
+      }
+    });
     return group.running;
   };
 
@@ -531,11 +578,8 @@ function startAutomaticMutationRecovery(config, options = {}) {
     }
     for (const group of groups.values()) {
       if (group === newlyTracked) continue;
-      if (!group.pending || group.timer?.eventWake || Date.now() < (group.nextEventAt || 0)) continue;
-      if (group.timer) clearTimeout(group.timer);
-      group.timer = setTimeout(() => { group.timer = null; void recheck(group); }, 250);
-      group.timer.eventWake = true;
-      group.timer.unref?.();
+      if (!group.pending || Date.now() < (group.nextEventAt || 0)) continue;
+      wakeGroup(group);
     }
   });
 
@@ -554,6 +598,8 @@ function startAutomaticMutationRecovery(config, options = {}) {
       for (const group of groups.values()) {
         if (group.timer) clearTimeout(group.timer);
         group.timer = null;
+        for (const watcher of group.receiptWatchers?.values() || []) watcher.close();
+        group.receiptWatchers?.clear();
       }
     }
   };

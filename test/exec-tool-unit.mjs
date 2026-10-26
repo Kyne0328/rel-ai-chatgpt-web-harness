@@ -254,6 +254,86 @@ try {
   assert.equal(isClearlyReadOnlyExec({ command: 'rg --pre formatter pattern src' }), false, 'ripgrep pre-processors can execute arbitrary commands and must remain mutation-tracked');
   assert.equal(isClearlyReadOnlyExec({ command: 'diff --output patch.txt package.json package.json' }), false, 'diff output files must remain mutation-tracked');
   assert.equal(isClearlyReadOnlyExec({ command: 'npm test' }), false, 'test runners are not provably read-only and must remain mutation-tracked');
+
+  // Quoted arguments without shell control or redirection must be recognized as read-only
+  assert.equal(isClearlyReadOnlyExec({ command: 'grep "rel-ai" package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: "grep 'rel-ai' package.json" }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'find . -name "*.java"' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: "find . -name '*.ts'" }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'git log -n 5 --grep="fix"' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'ls "src"' }), true);
+
+  // Zero-argument inspection commands
+  assert.equal(isClearlyReadOnlyExec({ command: 'pwd' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'ls' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'dir' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'whoami' }), true);
+
+  // Expanded inspection executables and safe flags
+  assert.equal(isClearlyReadOnlyExec({ command: 'file package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'strings package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'stat package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'tree src' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'tree -o out.txt src' }), false);
+  assert.equal(isClearlyReadOnlyExec({ command: 'xxd package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'xxd -r hex.txt' }), false);
+  assert.equal(isClearlyReadOnlyExec({ command: 'hexdump package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'jq . package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'yq . package.json' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'yq -i . package.json' }), false);
+  assert.equal(isClearlyReadOnlyExec({ command: 'yq --inplace=true . package.json' }), false);
+  assert.equal(isClearlyReadOnlyExec({ command: 'javap -c Main' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'dexdump classes.dex' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'zipinfo archive.zip' }), true);
+
+  // Archive inspection
+  assert.equal(isClearlyReadOnlyExec({ command: 'unzip -l archive.zip' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'unzip -v archive.zip' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'unzip archive.zip' }), false);
+  assert.equal(isClearlyReadOnlyExec({ command: 'unzip -d out archive.zip' }), false);
+  assert.equal(isClearlyReadOnlyExec({ command: 'tar -tf archive.tar.gz' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'tar -xf archive.tar.gz' }), false);
+  assert.equal(isClearlyReadOnlyExec({ command: 'tar -tf archive.tar.gz --checkpoint-action=exec=touch' }), false,
+    'tar listing with an execution hook must use the mutation lane');
+  assert.equal(isClearlyReadOnlyExec({ command: 'tar -tf archive.tar.gz -I sh' }), false,
+    'custom decompression programs execute commands');
+  assert.equal(isClearlyReadOnlyExec({ command: 'tar -tf archive.tar.gz -i' }), true,
+    'ordinary ignore-zeroes listing remains read-only');
+  assert.equal(isClearlyReadOnlyExec({ command: '7z l archive.7z' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: '7z x archive.7z' }), false);
+
+  // Device inspection
+  assert.equal(isClearlyReadOnlyExec({ command: 'fastboot devices' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'fastboot getvar all' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'fastboot flash boot boot.img' }), false);
+
+  // Runtimes and tools version inspection
+  assert.equal(isClearlyReadOnlyExec({ command: 'python --version' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'python3 -V' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'java -version' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'go version' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'cargo --version' }), true);
+
+  // WSL command unwrapping
+  assert.equal(isClearlyReadOnlyExec({ command: 'wsl -l' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'wsl --status' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'wsl -d Ubuntu grep pattern file' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'wsl -d Ubuntu -- grep pattern file' }), true);
+  assert.equal(isClearlyReadOnlyExec({ command: 'wsl -d Ubuntu rm -rf /' }), false);
+
+  // A caller's readOnly hint must never authorize bypassing the mutation lane.
+  for (const command of [
+    'jadx -d out app.apk',
+    'python -c "print(1)"',
+    'echo ok; git add .',
+    'git status; git reset --hard',
+    'jadx app.apk > log.txt'
+  ]) {
+    assert.equal(isClearlyReadOnlyExec({ command, readOnly: true }), false,
+      `readOnly cannot bypass mutation tracking: ${command}`);
+  }
+  assert.equal(isClearlyReadOnlyExec({ command: 'git status', readOnly: true }), true,
+    'safe inspection remains in the read lane regardless of hints');
   const directReadOnly = await execCall({ executable: process.execPath, argv: ['--version'] });
   assert.equal(directReadOnly.commandSucceeded, true);
 

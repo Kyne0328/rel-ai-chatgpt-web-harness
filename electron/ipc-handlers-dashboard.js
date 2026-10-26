@@ -69,8 +69,9 @@ function registerUpdaterIpc({ ipc, channels, getUpdateStatus, checkForUpdates, d
   ipc.handle(channels.DESKTOP_UPDATE_INSTALL, 'Update install', (_event, options) => installUpdate(options));
 }
 
-function registerDiagnosticsIpc({ ipc, channels, exportDiagnosticState, openDiagnosticsFolder, runTunnelDoctor }) {
+function registerDiagnosticsIpc({ ipc, channels, exportDiagnosticState, getDiagnosticRuntimeLogs, openDiagnosticsFolder, runTunnelDoctor }) {
   ipc.handle(channels.DESKTOP_DIAGNOSTICS_EXPORT, 'Diagnostic export', (_event, report) => exportDiagnosticState(report));
+  ipc.handle(channels.DESKTOP_DIAGNOSTICS_RUNTIME_LOGS, 'Desktop app log', () => getDiagnosticRuntimeLogs());
   ipc.handle(channels.DESKTOP_DIAGNOSTICS_OPEN_FOLDER, 'Diagnostics folder', () => openDiagnosticsFolder());
   ipc.handle(channels.DESKTOP_DIAGNOSTICS_TUNNEL_DOCTOR, 'Secure MCP Tunnel diagnostics', () => runTunnelDoctor());
 }

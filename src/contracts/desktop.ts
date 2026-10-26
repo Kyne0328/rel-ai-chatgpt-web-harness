@@ -132,6 +132,7 @@ export interface DesktopIpcRequestMap {
   'desktop:update:download': [];
   'desktop:update:install': [options?: { deferIfBusy?: boolean }];
   'desktop:diagnostics:export': [report: DiagnosticReportDto];
+  'desktop:diagnostics:runtime-logs': [];
   'desktop:diagnostics:open-folder': [];
   'desktop:diagnostics:tunnel-doctor': [];
   'desktop:local-data:get': [];
@@ -174,6 +175,7 @@ export interface DesktopIpcResponseMap {
   'desktop:lifecycle:acknowledge-connector-refresh': Record<string, unknown>;
   'desktop:analytics:local': Record<string, unknown>;
   'desktop:diagnostics:export': Record<string, unknown>;
+  'desktop:diagnostics:runtime-logs': Record<string, unknown>;
   'desktop:diagnostics:tunnel-doctor': Record<string, unknown>;
   [channel: string]: unknown;
 }
@@ -244,6 +246,7 @@ export const DESKTOP_IPC = Object.freeze({
   DESKTOP_UPDATE_DOWNLOAD: 'desktop:update:download',
   DESKTOP_UPDATE_INSTALL: 'desktop:update:install',
   DESKTOP_DIAGNOSTICS_EXPORT: 'desktop:diagnostics:export',
+  DESKTOP_DIAGNOSTICS_RUNTIME_LOGS: 'desktop:diagnostics:runtime-logs',
   DESKTOP_DIAGNOSTICS_OPEN_FOLDER: 'desktop:diagnostics:open-folder',
   DESKTOP_DIAGNOSTICS_TUNNEL_DOCTOR: 'desktop:diagnostics:tunnel-doctor',
   DESKTOP_LOCAL_DATA_GET: 'desktop:local-data:get',
@@ -330,6 +333,7 @@ export const DESKTOP_IPC_INPUT_CONTRACT = Object.freeze({
   [DESKTOP_IPC.DESKTOP_UPDATE_DOWNLOAD]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_UPDATE_INSTALL]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_DIAGNOSTICS_EXPORT]: input('handle', ['dashboard'], 'reject'),
+  [DESKTOP_IPC.DESKTOP_DIAGNOSTICS_RUNTIME_LOGS]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_DIAGNOSTICS_OPEN_FOLDER]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_DIAGNOSTICS_TUNNEL_DOCTOR]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_LOCAL_DATA_GET]: input('handle', ['dashboard'], 'reject'),

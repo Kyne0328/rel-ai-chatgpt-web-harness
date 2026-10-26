@@ -111,6 +111,7 @@ function registerIpcHandlers(deps) {
     ipc,
     channels: DESKTOP_IPC,
     exportDiagnosticState: deps.exportDiagnosticState,
+    getDiagnosticRuntimeLogs: deps.getDiagnosticRuntimeLogs,
     openDiagnosticsFolder: deps.openDiagnosticsFolder,
     runTunnelDoctor: deps.runTunnelDoctor
   });

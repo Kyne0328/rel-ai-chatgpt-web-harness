@@ -184,9 +184,28 @@ function createServiceProcessClient(options = {}) {
 
   function bindChild(utility) {
     utility.on('message', message => handleMessage(utility, message));
+    utility.on('error', error => handleFatalError(utility, error));
     utility.on('exit', code => handleExit(utility, code));
     utility.stdout?.on('data', chunk => logChunk(chunk, 'info'));
     utility.stderr?.on('data', chunk => logChunk(chunk, 'warning'));
+  }
+
+  function handleFatalError(utility, error = {}) {
+    if (utility !== child) return;
+    // Fatal V8 reports can contain process arguments and private paths.
+    // Keep only numeric heap measurements, not the raw diagnostic report.
+    let heap = null;
+    if (typeof error.report === 'string' && error.report.length <= 2_000_000) {
+      try { heap = JSON.parse(error.report)?.javascriptHeap; } catch {}
+    }
+    const details = {};
+    for (const field of ['usedMemory', 'totalMemory', 'memoryLimit', 'availableMemory']) {
+      if (Number.isFinite(heap?.[field]) && heap[field] >= 0) details[field] = heap[field];
+    }
+    onLog('Local service encountered a fatal runtime error.', {
+      level: 'error', source: 'local-service', code: 'local_service_fatal_error',
+      ...(Object.keys(details).length ? { details } : {})
+    });
   }
 
   function handleMessage(utility, message = {}) {

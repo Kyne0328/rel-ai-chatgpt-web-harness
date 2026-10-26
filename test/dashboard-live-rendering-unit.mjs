@@ -56,6 +56,19 @@ function exerciseTunnelDoctorPresentation(result) {
   return context.tunnelDoctorPresentation(result);
 }
 
+async function exerciseDesktopLogFallback(getRuntimeLogs) {
+  const context = { window: getRuntimeLogs ? { relaiDesktop: { getRuntimeLogs } } : {} };
+  vm.runInNewContext(`${functionSource(diagnostics, 'loadDesktopRuntimeLogs')}\nglobalThis.loadDesktopRuntimeLogs = loadDesktopRuntimeLogs;`, context);
+  return context.loadDesktopRuntimeLogs();
+}
+
+assert.equal((await exerciseDesktopLogFallback(async () => ({ available: true, entries: [{ level: 'error', message: 'Heap out of memory' }] }))).entries[0].message,
+  'Heap out of memory', 'desktop logs remain available when the diagnostics HTTP service is offline');
+assert.equal(await exerciseDesktopLogFallback(async () => { throw new Error('IPC is unavailable'); }), null,
+  'an unavailable desktop bridge must retain the normal diagnostics error state');
+assert.equal(await exerciseDesktopLogFallback(null), null,
+  'browser-only dashboards must not require Electron IPC');
+
 function exerciseTunnelDoctorCheckPresentation(check) {
   const context = {};
   vm.runInNewContext(`

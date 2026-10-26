@@ -1136,6 +1136,7 @@ async function case_ipc_channel_contract_unit() {
     downloadUpdate: () => ({ ok: true }),
     installUpdate: () => ({ ok: true }),
     exportDiagnosticState: value => ({ ok: true, value }),
+    getDiagnosticRuntimeLogs: () => ({ available: true, entries: [{ level: 'error', message: 'Service exited unexpectedly.' }] }),
     openDiagnosticsFolder: () => ({ ok: true }),
     runTunnelDoctor: () => ({ ok: true, result: 'pass' }),
     getTaskCodeWorkspace: value => ({ ok: true, value }),
@@ -1160,6 +1161,8 @@ async function case_ipc_channel_contract_unit() {
   }
   
   const additionalTunnel = { tunnelId: 'tunnel_additional123', enabled: false };
+  const offlineLogs = await handles.get(DESKTOP_IPC.DESKTOP_DIAGNOSTICS_RUNTIME_LOGS)(eventFor(windows.dashboard));
+  assert.equal(offlineLogs.entries[0].message, 'Service exited unexpectedly.', 'desktop diagnostics must remain readable independently of the service');
   const savedTunnel = await handles.get(DESKTOP_IPC.DESKTOP_TUNNEL_SAVE)(eventFor(windows.dashboard), additionalTunnel);
   assert.deepEqual(savedTunnel, { ok: true, connection: additionalTunnel });
   assert.deepEqual(calls.at(-1), ['saveAdditionalTunnel', additionalTunnel]);

@@ -116,6 +116,17 @@ const initialContextMessages = child.sent.filter(message => message.type === 'co
 assert.equal(initialContextMessages.length, 1, 'service startup must send the retained desktop context only once');
 assert.equal(initialContextMessages[0].context.status?.serverRunning, false);
 
+child.emit('error', {
+  type: 'FatalError', location: 'C:\\private\\path',
+  report: JSON.stringify({ javascriptHeap: { usedMemory: 123, memoryLimit: 456 },
+    environmentVariables: { SECRET: 'must-never-log' } })
+});
+const fatalLog = logs.find(entry => entry.options.code === 'local_service_fatal_error');
+assert.ok(fatalLog, 'fatal V8 errors must be observed without crashing Electron');
+assert.deepEqual(fatalLog.options.details, { usedMemory: 123, memoryLimit: 456 });
+assert.equal(JSON.stringify(fatalLog).includes('must-never-log'), false);
+assert.equal(JSON.stringify(fatalLog).includes('private'), false);
+
 child.emit('message', {
   type: 'activity',
   event: {
