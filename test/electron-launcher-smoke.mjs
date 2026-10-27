@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { assertRuntimeResourceMappings } from '../scripts/packaged-runtime-parity.mjs';
+import { assertElectronRuntimeCoverage, assertRuntimeResourceMappings } from '../scripts/packaged-runtime-parity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const utils = await import(pathToFileURL(path.join(root, 'electron', 'launcher-utils.js')).href);
@@ -19,6 +19,17 @@ assert.throws(() => normalizeTunnelId('not-a-tunnel'), /must start with tunnel_/
 
 const electronPkg = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
 const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const electronRoot = path.join(root, 'electron');
+const electronRuntimeFiles = assertElectronRuntimeCoverage({ electronRoot, electronPackage: electronPkg });
+assert.throws(() => assertElectronRuntimeCoverage({
+  electronRoot, electronPackage: electronPkg,
+  asarEntries: new Set(electronRuntimeFiles.filter(file => file !== 'startup-splash.js'))
+}), /Packaged ASAR is missing Electron runtime source: startup-splash.js/,
+'A packaged ASAR missing a desktop module must fail verification');
+assert.throws(() => assertElectronRuntimeCoverage({
+  electronRoot, electronPackage: { build: { ...electronPkg.build, files: electronPkg.build.files.filter(file => file !== 'startup-splash.js') } }
+}), /Electron files allowlist omits runtime source: startup-splash.js/,
+'New desktop modules must not silently fall outside the explicit allowlist');
 assert.equal(electronPkg.build.nsis.runAfterFinish, true, 'fresh Windows installs must offer to launch Rel.AI immediately so first-run setup is visible');
 const srcResource = electronPkg.build.extraResources.find(item => item.from === '../src');
 assert.ok(srcResource, 'Electron packaging must include the backend source runtime.');

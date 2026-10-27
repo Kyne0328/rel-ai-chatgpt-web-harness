@@ -7,7 +7,7 @@ import { listPackage } from '@electron/asar';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { electronPlatformSpec, normalizeElectronArch, normalizeElectronPlatform } from './electron-platform.mjs';
 import { resolvePackagedDirectory } from './packaged-directory.mjs';
-import { assertPackagedRuntimeParity } from './packaged-runtime-parity.mjs';
+import { assertElectronRuntimeCoverage, assertPackagedRuntimeParity } from './packaged-runtime-parity.mjs';
 import { BUNDLE_INVENTORY_NAME, verifyBundleInventory } from './dashboard-bundle-inventory.mjs';
 import { buildIdFromFingerprint, normalizeBuildProvenance } from '../src/buildProvenance.js';
 import { assertPackagedSevenZipExecutable } from './packaged-seven-zip.mjs';
@@ -126,12 +126,13 @@ assertPackagedSevenZipExecutable(resourcesRoot, platform, targetArch);
 
 const asarPath = path.join(resourcesRoot, 'app.asar');
 const asarEntries = new Set(listPackage(asarPath).map(entry => entry.replaceAll('\\', '/').replace(/^\//, '')));
+const electronPackage = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
+assertElectronRuntimeCoverage({ electronRoot: path.join(root, 'electron'), electronPackage, asarEntries });
 for (const relativePath of ['preload.cjs', 'chatgpt-goal-helper.js', 'startup-background.js', 'secure-tunnel-runtime.js', 'tunnel-credentials.js', 'service-process.js', 'service-process-client.js', 'runtime-log-snapshot.js', 'service-activity-projection.js', 'renderer/app.css', 'renderer/color-tokens.css', 'renderer/status.html', 'renderer/wizard.html']) {
   assert.ok(asarEntries.has(relativePath), `Packaged ASAR is missing: ${relativePath}`);
 }
 
 const rootPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-const electronPackage = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
 const runtimeParity = assertPackagedRuntimeParity({ sourceRoot: root, resourcesRoot, rootPackage, electronPackage, platform });
 verifyBundleInventory(path.join(resourcesRoot, 'public'), JSON.parse(fs.readFileSync(path.join(resourcesRoot, 'public', BUNDLE_INVENTORY_NAME), 'utf8')));
 const packagedPackage = JSON.parse(fs.readFileSync(path.join(resourcesRoot, 'package.json'), 'utf8')); 

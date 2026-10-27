@@ -148,4 +148,25 @@ function assertPackagedRuntimeParity(options) {
   return results;
 }
 
-export { assertRuntimeResourceMappings, assertPackagedRuntimeParity };
+// Guard desktop modules and renderer assets independently of the hand-maintained
+// Electron files allowlist. New source files must be packaged, not just their imports.
+function assertElectronRuntimeCoverage({ electronRoot, electronPackage, asarEntries }) {
+  const fileEntries = electronPackage.build?.files || [];
+  const literalEntries = new Set(fileEntries.filter(value =>
+    typeof value === 'string' && !value.startsWith('!') && !value.includes('*')));
+  const modules = fs.readdirSync(electronRoot, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /\.(?:js|cjs|mjs)$/.test(entry.name))
+    .map(entry => entry.name);
+  const renderer = collectTree(path.join(electronRoot, 'renderer'))
+    .filter(file => !file.endsWith('.map'))
+    .map(file => `renderer/${file}`);
+  const runtimeFiles = [...modules, ...renderer, 'build/icon.png', 'build/update-status-helper.ps1'];
+  for (const file of runtimeFiles) {
+    const included = file.startsWith('renderer/') ? fileEntries.includes('renderer/**') : literalEntries.has(file);
+    assert.ok(included, `Electron files allowlist omits runtime source: ${file}`);
+    if (asarEntries) assert.ok(asarEntries.has(file), `Packaged ASAR is missing Electron runtime source: ${file}`);
+  }
+  return runtimeFiles.sort();
+}
+
+export { assertRuntimeResourceMappings, assertPackagedRuntimeParity, assertElectronRuntimeCoverage };

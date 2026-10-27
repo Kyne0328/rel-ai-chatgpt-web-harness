@@ -325,7 +325,6 @@
           "@simple-git/args-pathspec/**",
           "@simple-git/argv-parser/**",
           "@sindresorhus/merge-streams/**",
-          "ajv/**",
           "fast-deep-equal/**",
           "fast-uri/**",
           "json-schema-traverse/**",
