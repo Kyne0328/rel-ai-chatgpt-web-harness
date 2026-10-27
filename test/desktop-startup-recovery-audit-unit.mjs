@@ -138,6 +138,50 @@ routeInitialWindow({ firstLaunch: false, openedAtLogin: true });
 assert.equal(configuredLaunches[0]?.background, false, 'the first-ever configured launch must open the dashboard instead of staying hidden');
 assert.equal(configuredLaunches[1]?.background, true, 'later launch-at-login starts must continue running in the background');
 
+// A foreground startup shows progress, while login/background starts stay silent.
+const launchSource = desktopHostSource.slice(
+  desktopHostSource.indexOf('  async function launchConfiguredDesktop(launchOptions = {}) {'),
+  desktopHostSource.indexOf('  async function relaunchApplication() {')
+);
+async function exerciseLaunch(options, listening) {
+  const events = [];
+  const context = {
+    startupSplash: {
+      show() { events.push('splash'); },
+      update(value) { events.push(value); },
+      hide() { events.push('dismiss'); }
+    },
+    startServer: async () => { events.push('start-service'); return { serverRunning: listening }; },
+    serviceRuntime: { isListening: () => listening, waitUntilListening: async () => ({ serverRunning: listening }) },
+    showDashboardWindow: async () => { events.push('dashboard'); },
+    recoveryWindowManager: {
+      show() { events.push('recovery'); },
+      hide() { events.push('hide-recovery'); }
+    },
+    serviceProcessClient: { markOnboardingHandoff: async () => {} },
+    desktopPower: { getStatus: () => ({}) },
+    taskActivityBlockReason: () => '',
+    currentStatus: { serverRunning: listening },
+    runtimeLogs: { append() {} },
+    ERROR_CODES: { DASHBOARD_UNAVAILABLE: 'dashboard', LOCAL_SERVICE_START_FAILED: 'service' },
+    stopServer: async () => {},
+    desktopStatusFailure: () => ({}),
+    setStatus: () => {},
+    formatError: error => String(error)
+  };
+  const launch = runInNewContext(launchSource + '\nlaunchConfiguredDesktop', context);
+  await launch(options);
+  return events;
+}
+const visibleLaunch = await exerciseLaunch({}, true);
+assert.deepEqual(visibleLaunch.slice(0, 3), ['splash', 'Starting local service…', 'start-service']);
+assert.deepEqual(visibleLaunch.slice(-2), ['Opening dashboard…', 'dashboard']);
+const quietLaunch = await exerciseLaunch({ background: true }, true);
+assert.ok(!quietLaunch.includes('splash'), 'launch-at-login must not open a splash');
+assert.ok(!quietLaunch.includes('dashboard'), 'launch-at-login must remain background-only');
+const failedLaunch = await exerciseLaunch({}, false);
+assert.deepEqual(failedLaunch.slice(-2), ['dismiss', 'recovery'], 'recovery must replace the splash on startup failure');
+
 // Reopening a stopped service must recover regardless of the retained window.
 const focusSource = desktopHostSource.slice(
   desktopHostSource.indexOf('  function focusActiveWindow() {'),

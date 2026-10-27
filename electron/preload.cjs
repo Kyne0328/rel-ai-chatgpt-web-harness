@@ -80,6 +80,10 @@ if (surface === 'dashboard') {
     onWindowState: callback => subscribe('desktop:window-state', callback, 'Window-state'),
     onUpdateStatus: callback => subscribe('desktop:update-status', callback, 'Update-status')
   });
+} else if (surface === 'splash') {
+  contextBridge.exposeInMainWorld('relaiSplash', {
+    onStatus: callback => subscribe('startup:status', callback, 'Startup-status')
+  });
 } else if (surface === 'pulse') {
   contextBridge.exposeInMainWorld('relaiPulse', {
     openDashboard: () => ipcRenderer.invoke('url:open-dashboard'),

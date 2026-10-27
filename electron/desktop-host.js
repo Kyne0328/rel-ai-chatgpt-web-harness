@@ -25,6 +25,7 @@ import { createSecureTunnelRuntime } from './secure-tunnel-runtime.js';
 import { createDesktopServiceRuntime } from './service-runtime.js';
 import { createServiceProcessClient } from './service-process-client.js';
 import { createSetupWindowManager } from './setup-window.js';
+import { createStartupSplashManager } from './startup-splash.js';
 import { createShutdownCoordinator } from './shutdown-coordinator.js';
 import { clearUpdateInstallMarker, createUpdateInstallMarker, markUpdateInstallPhase, updateInstallTiming } from './update-install-marker.js';
 import { launchUpdateStatusHelper } from './update-status-helper.js';
@@ -135,6 +136,15 @@ async function createDesktopHost(options = {}) {
     onReady: hydrateRecoveryWindow,
     onSecurityError: error => runtimeLogs.append(error.message, { level: 'warning', source: 'electron-security' })
   });
+  const startupSplash = createStartupSplashManager({
+    BrowserWindow,
+    iconPath,
+    preloadPath,
+    rendererUrl: localRendererUrl('splash.html'),
+    installProtocol: sessionProtocol => installLocalProtocol(sessionProtocol, rendererRoot),
+    isQuitting: () => isQuitting,
+    onError: error => runtimeLogs.append(error.message, { level: 'warning', source: 'startup-splash' })
+  });
   const setupWindowManager = createSetupWindowManager({
     BrowserWindow,
     iconPath,
@@ -197,6 +207,7 @@ async function createDesktopHost(options = {}) {
     onError: error => setStatus({ error: formatError(error), errorCode: ERROR_CODES.UNKNOWN }),
     onLoadError: error => {
       setStatus({ error: formatError(error), errorCode: ERROR_CODES.DASHBOARD_UNAVAILABLE });
+      startupSplash.hide();
       recoveryWindowManager.show();
     },
     onRendererGone: (error, details) => runtimeLogs.append(formatError(error), {
@@ -1112,6 +1123,7 @@ async function createDesktopHost(options = {}) {
 
   async function showDashboardWindow(routeHash = '', windowOptions = {}) {
     await dashboardWindowManager.open(routeHash, windowOptions);
+    startupSplash.hide();
     taskbarCompletionBadge.clear();
     recoveryWindowManager.hide();
   }
@@ -1180,23 +1192,35 @@ async function createDesktopHost(options = {}) {
       if (restartBlock) throw new Error(restartBlock);
     }
     try {
+      if (!launchOptions.background && !launchOptions.restart && !launchOptions.firstRun) {
+        try {
+          startupSplash.show();
+          startupSplash.update('Starting local service…');
+        } catch (error) {
+          startupSplash.hide();
+          runtimeLogs.append(`Startup splash unavailable: ${formatError(error)}`, { level: 'warning', source: 'startup-splash' });
+        }
+      }
       if (launchOptions.restart) await stopServer({ silent: true, preserveDashboard: true });
       const pendingStart = startServer();
       const status = launchOptions.background
         ? await pendingStart
         : await serviceRuntime.waitUntilListening(0);
       if (!serviceRuntime.isListening()) {
+        startupSplash.hide();
         recoveryWindowManager.show();
         return status;
       }
       if (!launchOptions.background) {
         if (launchOptions.firstRun) await serviceProcessClient.markOnboardingHandoff();
+        startupSplash.update('Opening dashboard…');
         await showDashboardWindow('');
       } else {
         recoveryWindowManager.hide();
       }
       return currentStatus;
     } catch (error) {
+      startupSplash.hide();
       if (currentStatus.errorCode !== ERROR_CODES.DASHBOARD_UNAVAILABLE) {
         setStatus(desktopStatusFailure(
           ERROR_CODES.LOCAL_SERVICE_START_FAILED,

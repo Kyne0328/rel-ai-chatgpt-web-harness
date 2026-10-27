@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Show a branded startup splash for foreground desktop launches.** Animate the existing Rel.AI logo and a lightweight progress light while the local service and dashboard initialize; display actual startup stages, dismiss immediately on dashboard readiness or recovery, and preserve silent launch-at-login and reduced-motion settings.
+
 - **Migrate desktop, tracing, filesystem watcher, language transport, and code intelligence to their current major releases.** Update Electron 45, OpenTelemetry SDK 3, Chokidar 6, vscode-jsonrpc 10, and TypeScript 7's native LSP. Replace the retired tracing provider and legacy JavaScript tsserver wrapper, preserve telemetry consent and startup behavior, and update native runtime packaging for supported desktop platforms.
 
 - **Update the bundled OpenAI Secure MCP Tunnel client to v0.0.18.** Refresh verified full-distribution archives and release evidence for Windows, Linux, and macOS. Retain Rel.AI's existing API-key configuration while incorporating upstream v0.0.17 startup-discovery recovery, namespaced tunnel identifiers, cloudflared updates, and v0.0.18 optional diagnostics and authentication support.

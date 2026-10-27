@@ -46,6 +46,7 @@
         "renderer/status.js!",
         "renderer/wizard.js!",
         "renderer/pulse.js!",
+        "renderer/splash.js!",
         "build/after-pack.js!",
         "scripts/verify-fuses.js!"
       ],
