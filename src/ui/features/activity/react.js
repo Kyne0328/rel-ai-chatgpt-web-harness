@@ -15,6 +15,7 @@ import { FilterChoice, filterRadioField, filterSelectField, openFilterDrawer } f
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
 import { OperationDiagnostics } from '../../components/operation-diagnostics.js';
+import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
 import { toast } from '../../components/toast.js';
 import { copyText } from '../../clipboard.js';
 import { getRouteParams, getWorkspaceFilter, navigate, replaceRouteParams, routeHref } from '../../router.js';
@@ -796,6 +797,7 @@ function ActivitySpacerRow({ height }) {
 }
 
 export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
+  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
       h('div', { className: 'inspector-empty' }, h('strong', null, 'Select an activity'))
@@ -868,7 +870,7 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
       readableSection('Error', errorText, 'activity-detail-error'),
-      h('details', { className: 'activity-detail-technical', open: group === 'active' || Boolean(operationDiagnostics(entry).warning) },
+      technicalDetailsEnabled ? h('details', { className: 'activity-detail-technical', open: group === 'active' || Boolean(operationDiagnostics(entry).warning) },
         h('summary', null, 'Technical details'),
         h(OperationDiagnostics, { key: activityEventId(entry), operation: entry, live: group === 'active' }),
         h('div', { className: 'activity-detail-fields' },
@@ -887,7 +889,7 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
           'data-state': copyState === 'success' ? 'success' : undefined,
           onClick: onCopy
         }, copyState === 'success' ? 'Copied' : 'Copy event JSON')
-      )
+      ) : null
     )
   );
 }

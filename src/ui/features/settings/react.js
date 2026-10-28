@@ -8,6 +8,7 @@ import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection, tunnelRuntimeView } from '../../connection-state.js';
 import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
+import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath, getRouteSnapshot, subscribeRoute } from '../../router.js';
 import { SETTINGS_NAV_ITEMS } from '../../navigation-catalog.js';
@@ -1054,7 +1055,7 @@ function BrowserDataSettings() {
         !model.loading && !model.error && developmentSites.length
           ? h('details', { className: 'browser-development-sites' },
             h('summary', null,
-              h('span', null, 'Development sites'),
+              h('span', null, 'Local sites'),
               h('small', null, `${developmentSites.length} ${developmentSites.length === 1 ? 'site' : 'sites'}`)
             ),
             h('div', { className: 'browser-development-sites-body' },
@@ -1256,7 +1257,7 @@ function DeveloperOptions({ enabledFeatures, onChange }) {
   return h('details', { className: 'settings-advanced developer-options' },
     h('summary', null, 'Developer options'),
     h('div', { className: 'settings-panel-body' },
-      h('p', { className: 'settings-help' }, 'Enable only the experimental features you want to use.'),
+      h('p', { className: 'settings-help' }, 'Enable only the developer features you need. These options can expose internal implementation details.'),
       DEVELOPER_FEATURE_FLAGS.map(feature => h(ToggleRow, {
         key: feature.id,
         label: feature.label,
@@ -1818,11 +1819,12 @@ function QuitRow() {
 }
 
 function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime = {}, runtimeCompatibility = {} }) {
+  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
   const repositoryUrl = validatedGitHubUrl(metadata.repositoryUrl);
   const developer = metadata.developer || {};
   const developerUrl = validatedGitHubUrl(developer.profileUrl);
-  const buildId = buildIdOf(buildStatus);
-  const runtimeNotice = runtimeCompatibilityNotice(runtime, repositoryRuntime, runtimeCompatibility);
+  const buildId = technicalDetailsEnabled ? buildIdOf(buildStatus) : '';
+  const runtimeNotice = technicalDetailsEnabled ? runtimeCompatibilityNotice(runtime, repositoryRuntime, runtimeCompatibility) : null;
   const developerUnlockRef = useRef({ count: 0, startedAt: 0 });
   const onBuildClick = () => {
     if (readDeveloperOptionsUnlocked()) return;

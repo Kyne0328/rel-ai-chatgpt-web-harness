@@ -4,6 +4,7 @@ import { copyText } from '../../clipboard.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
 import { RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
+import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { getRouteSnapshot, subscribeRoute } from '../../router.js';
@@ -28,6 +29,7 @@ export function createDiagnosticsRoute(useDashboardSlices) {
 }
 
 function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
+  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
   const [reportState, setReportState] = useState(() => ({ workspace, report: null, error: '', desktopLogs: null }));
   const report = reportState.workspace === workspace ? reportState.report : null;
   const loadError = reportState.workspace === workspace ? reportState.error : '';
@@ -285,14 +287,15 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
         ),
         h('div', { className: 'diagnostic-section diagnostic-section-resources' },
           h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
-          runtime?.buildIdentity?.buildId && runtime.buildIdentity.buildId !== 'Unknown' ? h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }) : null
+          technicalDetailsEnabled && runtime?.buildIdentity?.buildId && runtime.buildIdentity.buildId !== 'Unknown'
+            ? h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }) : null
         ),
-        h('div', { className: 'diagnostic-section diagnostic-section-logs' },
+        technicalDetailsEnabled ? h('div', { className: 'diagnostic-section diagnostic-section-logs' },
           h('div', { id: 'diagnosticFilterHost' },
             h(DiagnosticFilterBar, { filters: normalizedFilters, sources, summary, live, onChange: next => { captureLogPositions(); setFilters(next); }, onClear: clearFilters, onToggleLive: () => setLive(value => !value) })
           ),
           h(DiagnosticLogs, { report, view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } })
-        )
+        ) : null
       ) : null
     )
   );

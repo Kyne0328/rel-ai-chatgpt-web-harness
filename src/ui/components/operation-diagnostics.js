@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { diagnosticDuration, diagnosticTime, operationDiagnostics, runtimeBuildDiagnostics } from '../operation-diagnostics.js';
+import { useDeveloperFeatureEnabled } from '../developer-mode-react.js';
 
 import { Tooltip } from './tooltip.js';
 
@@ -11,10 +12,12 @@ function DiagnosticHelp({ label = 'More information', children }) {
 }
 
 export function OperationDiagnostics({ operation, live = false }) {
+  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
   const [wasLive, setWasLive] = useState(live);
   useEffect(() => { if (live) setWasLive(true); }, [live]);
   const announce = live || wasLive;
   const view = operationDiagnostics(operation);
+  if (!technicalDetailsEnabled) return null;
   const facts = [
     ['Operation', view.operationId || 'Unknown'],
     ['Current phase', view.phaseLabel],
@@ -56,7 +59,9 @@ export function OperationDiagnostics({ operation, live = false }) {
 }
 
 export function RuntimeBuildIdentity({ runtime, compatibility }) {
+  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
   const view = runtimeBuildDiagnostics(runtime, compatibility);
+  if (!technicalDetailsEnabled) return null;
   const help = `${view.parityReason} Cached parity applies only to the recorded source snapshot; historical events may have used another build.`;
   const basicFields = new Set(['Build ID', 'Source revision', 'Built at', 'Runtime started']);
   const compatibilityFields = new Set(['Dirty source', 'Release metadata', 'Source/build parity', 'Parity checked']);
