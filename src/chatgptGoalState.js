@@ -97,7 +97,7 @@ function commitGoalBinding(config, goal, match) {
     const binding = { version: link ? 1 : 0, conversationId: match.conversationId,
       owner: goal.owner, tunnelId: goal.tunnelId || '', messageId: match.messageId,
       receiptMessageId: match.receiptMessageId || '', verifiedAt: Date.now() };
-    const saved = writeGoalRow(db, row, { ...goal, conversationId: match.conversationId,
+    const saved = writeGoalRow(db, row, { ...goal, conversationId: match.conversationId, candidateConversationId: '',
       ...(match.projectId ? { chatgptProjectId: match.projectId } : {}),
       binding, discoveryScan: null, state: 'monitoring', error: '', retryCount: 0, nextAttemptAt: 0, updatedAt: Date.now() });
     if (!claim) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(claimKey, goal.workId);

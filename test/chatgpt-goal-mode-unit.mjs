@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
-import { updateGoal as updateGoalOptions, activateGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
+import { parseConversationUrl, activeMessages, turnState, recentGoalChatCandidates, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
+import { updateGoal as updateGoalOptions, activateGoal, resumeGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
 import { parseGoalCommand, validateWorkMode } from '../src/goalCommands.js';
 import { buildGoalEvidence } from '../src/chatgptGoalEvidence.js';
@@ -2018,6 +2018,89 @@ test('connector begin delivers its durable linking receipt through output valida
     assert.equal(output.work_id, f.work_id);
     assert.equal(output.chat_link.version, 1);
     assert.equal(output.chat_link.link_id, readChatLink(f.config, loadGoal(f.config, f.work_id)).linkId);
+  });
+});
+
+test('Goal begin returns bounded account chat hints and exact selection still verifies the active-branch receipt', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, conversationId: '', observedNode: '', stableSince: 0 });
+    const requests = [];
+    let tree = conversation(ID, '/goal Fix work');
+    configureGoalBrowserTransport(async request => {
+      requests.push(request);
+      if (request.path?.includes('/conversations?offset=')) return { ok: true, data: {
+        items: [{ id: ID, title: 'Test chat retrieval API' }, { id: OTHER, title: 'Other work' }]
+      } };
+      if (request.path?.includes('/snorlax/sidebar')) return { ok: true, data: {
+        items: [projectPreview(1, [{ id: ID, update_time: Date.now() / 1000 }])], cursor: null
+      } };
+      if (request.path?.includes('/conversation/')) return { ok: true, data: await readConversationProjection(response(tree)) };
+      throw new Error('Unexpected request: ' + request.path);
+    });
+    try {
+      const ctx = { ...f.context, connector: true };
+      const result = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(f.config,
+        { mode: 'goal', title: 'Find this chat' }, ctx));
+      assert.equal(result.chatCandidatesStatus, 'available');
+      assert.deepEqual(result.chatCandidates, [
+        { id: ID, title: 'Test chat retrieval API', projectName: 'Project 1' },
+        { id: OTHER, title: 'Other work' }
+      ]);
+      assert.equal(result.chat_link.version, 1);
+      assert.match(result.nextAction, /goal_resume/);
+      assert.ok(requests.every(request => !request.headers?.authorization && !request.headers?.cookie));
+      await validateToolOutput(f.config, 'relai_work', { mode: 'goal', action: 'begin' }, result);
+      const output = serializeConnectorResult({ mode: 'goal', publicName: 'relai_work', action: 'begin',
+        operationName: 'work.begin', value: result, args: {}, workId: f.work_id });
+      assert.deepEqual(output.chatCandidates, result.chatCandidates);
+
+      resumeGoal(f.config, { work_id: f.work_id, conversationUrl: 'https://chatgpt.com/c/' + OTHER }, ctx);
+      await pollGoal(f.config, f.work_id, { nativeTransport: async request => {
+        if (request.path?.includes('/conversation/')) return { ok: true,
+          data: await readConversationProjection(response(conversation(OTHER, '/goal Other work'))) };
+        throw new Error('Wrong-chat verification must not scan catalogues or send.');
+      } });
+      assert.equal(loadGoal(f.config, f.work_id).binding, null, 'a title-based guess cannot bind');
+      assert.equal(loadGoal(f.config, f.work_id).conversationId, '', 'a rejected guess must restore automatic discovery');
+
+      resumeGoal(f.config, { work_id: f.work_id, conversationUrl: 'https://chatgpt.com/c/' + ID }, ctx);
+      tree = linkedConversation(ID, f.work_id, result.chat_link, '/goal Find this chat');
+      await pollGoal(f.config, f.work_id, { nativeTransport: async request => {
+        if (request.path?.includes('/conversation/')) return { ok: true,
+          data: await readConversationProjection(response(tree)) };
+        throw new Error('Exact candidate verification must not scan catalogues or send.');
+      } });
+      assert.equal(loadGoal(f.config, f.work_id).binding?.conversationId, ID, JSON.stringify(goalStatus(f.config, { work_id: f.work_id }, ctx)));
+    } finally { configureGoalBrowserTransport(null); }
+  });
+});
+
+test('Goal chat candidate lookup ignores missing Project metadata and bounds untrusted titles', async () => {
+  const requests = [];
+  const result = await recentGoalChatCandidates({ nativeTransport: async request => {
+    requests.push(request);
+    if (request.path?.includes('/conversations?offset=')) return { ok: true,
+      data: { items: [{ id: ID, title: 'A'.repeat(300) }] } };
+    return { ok: false, status: 401 };
+  } });
+  assert.deepEqual(result, [{ id: ID, title: 'A'.repeat(120) }]);
+  assert.equal(requests.length, 2);
+});
+
+test('Goal begin preserves accepted intent and receipt when the catalogue is unauthorized', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, conversationId: '' });
+    configureGoalBrowserTransport(async () => ({ ok: false, status: 401 }));
+    try {
+      const result = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(
+        f.config, { mode: 'goal', title: 'Unauthenticated catalogue' }, { ...f.context, connector: true }));
+      assert.equal(result.modeAcknowledgement.effective, 'goal');
+      assert.equal(result.chatCandidatesStatus, 'unavailable');
+      assert.equal(result.chatCandidates, undefined);
+      assert.equal(result.chat_link.version, 1);
+      assert.equal(loadGoal(f.config, f.work_id).active, true);
+      await validateToolOutput(f.config, 'relai_work', { mode: 'goal', action: 'begin' }, result);
+    } finally { configureGoalBrowserTransport(null); }
   });
 });
 

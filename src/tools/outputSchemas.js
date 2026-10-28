@@ -16,6 +16,14 @@ const FIELD_SCHEMAS = Object.freeze({
     readiness: { type: 'string' }
   }, required: ['requested', 'effective', 'readiness'], additionalProperties: false },
   chat_link: { type: 'object', properties: { version: { const: 1 }, link_id: { type: 'string', pattern: '^[A-Za-z0-9_-]{32}$' } }, required: ['version', 'link_id'], additionalProperties: false },
+  chatCandidatesStatus: { enum: ['available', 'empty', 'unavailable'] },
+  chatCandidates: { type: 'array', maxItems: 5, items: {
+    type: 'object', properties: {
+      id: { type: 'string', pattern: '^[0-9a-fA-F-]{36}$' },
+      title: { type: 'string', maxLength: 120 },
+      projectName: { type: 'string', maxLength: 120 }
+    }, required: ['id', 'title'], additionalProperties: false
+  } },
   compositionId: STRING,
   compositionOutputRef: STRING,
   outputs: ARRAY,
@@ -520,7 +528,7 @@ const TOOL_FIELDS = Object.freeze({
   [OP.COMPOSE]: ['ok', 'workspace', 'work_id', 'compositionId', 'compositionOutputRef', 'outputs', 'calls', 'unsettledCalls', 'durationMs', 'summary', 'error', 'errorCode', 'nextAction'],
   [OP.WORK_CONTEXT]: ['ok', 'workspace', 'work_id', 'status', 'identity', 'title', 'objective', 'intent', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
   [OP.WORK_PLAN]: ['ok', 'workspace', 'work_id', 'plan', 'message'],
-  [OP.WORK_BEGIN]: ['ok', 'workspace', 'work_id', 'modeAcknowledgement', 'chat_link', 'resourceLink', 'status', 'identity', 'title', 'objective', 'intent', 'plan', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
+  [OP.WORK_BEGIN]: ['ok', 'workspace', 'work_id', 'modeAcknowledgement', 'chat_link', 'chatCandidatesStatus', 'chatCandidates', 'resourceLink', 'status', 'identity', 'title', 'objective', 'intent', 'plan', 'workspaceBinding', 'activeRelatedWork', 'bootstrap', 'nextAction'],
   [OP.SNAPSHOT]: ['ok', 'workspace', 'work_id', 'root', 'manifests', 'manifestContents', 'discoveredCommands', 'projectInstructions', 'skills', 'skillDiscovery', 'fileCount', 'effectiveMaxEntries', 'budgetMultiplied', 'files', 'returnedFileCount', 'omittedFiles', 'skipped', 'skippedCount', 'truncated', 'hints', 'git', 'recommendedFlow', 'writeGuidance', 'operationJournal', 'repository', 'changedFiles', 'next'],
   [OP.READ]: ['ok', 'workspace', 'work_id', 'items', 'resourceLink', 'skipped', 'requestedCount', 'returnedCount', 'partial', 'truncated', 'error'],
   [OP.SEARCH_TEXT]: ['ok', 'workspace', 'work_id', 'pattern', 'queries', 'queryCount', 'uniqueFileCount', 'execution', 'glob', 'fixed', 'ignoreCase', 'matches', 'matchCount', 'mode', 'effectiveMode', 'autoTier', 'selectionStrategy', 'contextBefore', 'contextAfter', 'groupByFile', 'mergeOverlaps', 'maxFiles', 'maxRangesPerFile', 'maxRangeLines', 'files', 'results', 'resultCount', 'returnedFileCount', 'returnedRangeCount', 'contextMatchCount', 'returnedBytes', 'maxBytes', 'omittedFiles', 'omittedRanges', 'truncated', 'contextTruncated', 'next'],

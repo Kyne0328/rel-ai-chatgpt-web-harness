@@ -261,6 +261,26 @@ async function listProjectChats(projectId, cursor, deps = {}) {
   return { items: result.items, cursor: result.cursor || null };
 }
 
+// Metadata hints for a newly requested Goal/Loop. A title can suggest a chat,
+// but only a matching work receipt on its active branch can authorize binding.
+async function recentGoalChatCandidates(deps = {}) {
+  const { items } = await conversationPage(deps);
+  const recent = items.filter(item => UUID.test(String(item?.id || ''))).slice(0, 5);
+  let projectNames = new Map();
+  try {
+    const sidebar = await listGoalProjects(deps, '', 1);
+    const names = new Map(sidebar.projects.map(project => [project.id, project.name]));
+    projectNames = new Map(sidebar.previews.map(item => [item.id, names.get(item.projectId) || '']));
+  } catch {
+    // A Project sidebar failure must not discard usable ordinary chat hints.
+  }
+  return recent.map(item => ({
+    id: item.id,
+    title: String(item.title || '(untitled)').replace(/\p{Cc}/gu, ' ').slice(0, 120),
+    ...(projectNames.get(item.id) ? { projectName: projectNames.get(item.id).slice(0, 120) } : {})
+  }));
+}
+
 async function getConversation(id, deps = {}) {
   return requestChatgpt('/backend-api/conversation/' + assertConversationId(id),
     { signal: deps.signal, projectConversation: true }, deps);
@@ -755,4 +775,4 @@ async function evaluateGoalHelper(packet, deps = {}) {
   return result;
 }
 
-export { hasChatLinkReceipt, latestGoalCommand, initiatingGoalCommand, evaluateGoalHelper, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };
+export { hasChatLinkReceipt, latestGoalCommand, initiatingGoalCommand, evaluateGoalHelper, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, recentGoalChatCandidates, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };

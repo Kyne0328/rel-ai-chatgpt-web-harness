@@ -12,7 +12,7 @@ import { evaluateGoalDecision } from './chatgptGoalEvaluator.js';
 import { isTerminalTaskStatus } from './taskState.js';
 import { principalFingerprint } from './mcp/principal.ts';
 import { principalTunnelId } from './mcp/tunnelIdentity.js';
-import { hasChatLinkReceipt, chatgptCredentials, hasGoalBrowserTransport, getConversation, findRecentGoalCommand, latestGoalCommand, initiatingGoalCommand, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
+import { hasChatLinkReceipt, chatgptCredentials, hasGoalBrowserTransport, recentGoalChatCandidates, getConversation, findRecentGoalCommand, latestGoalCommand, initiatingGoalCommand, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
 import { goalMessageExists } from './chatgptConversationReader.js';
 import { chatLinkResource } from './chatgptChatLink.js';
 
@@ -142,6 +142,13 @@ function coordinatedGoalDeps(config, record, deps) {
     }, { transaction: true }) };
 }
 
+async function goalChatCandidates(config, workId, context) {
+  const goal = requireOwnedGoal(config, { work_id: workId }, context);
+  if (!goal.active || goal.binding) return [];
+  // Keep task creation responsive when the remote catalogue is slow or signed out.
+  return recentGoalChatCandidates(coordinatedGoalDeps(config, goal, { signal: AbortSignal.timeout(5_000) }));
+}
+
 function verifiedCorrelation(config, record) {
   if (!record.conversationCorrelation) return '';
   const ids = new Set(listGoals(config).filter(goal => goal.owner === record.owner
@@ -235,6 +242,8 @@ function resumeGoal(config, args, context) {
     throw new Error('Reconcile the unresolved continuation in its original conversation before rebinding.');
   }
   const resumed = mutateGoal(config, goal.workId, current => ({ ...current,
+    ...(switching ? { candidateConversationId: goal.active && !goal.binding && args.conversationUrl
+      ? conversationId : '' } : {}),
     ...(switching ? { conversationId, binding: null, observedNode: '', stableSince: 0,
       pendingNode: '', pendingPrompt: '', pendingOutcome: 'not_sent' } : {}),
     active: true, state: 'monitoring', resumedAt: Date.now(), nextAttemptAt: 0, error: '', pauseReason: '',
@@ -854,6 +863,11 @@ async function pollGoal(config, workId, deps = {}) {
         return;
       }
       if (match.state !== 'matched') {
+        if (goal.candidateConversationId && goal.conversationId === goal.candidateConversationId) {
+          // Titles only suggest a candidate; an absent receipt restores normal discovery.
+          goal = saveGoal(config, { ...goal, conversationId: '', candidateConversationId: '' });
+          if (!goal?.active || goal.conversationId) return;
+        }
         deferGoalDiscovery(config, goal, deps);
         return;
       }
@@ -1014,4 +1028,4 @@ function stopGoalMonitor() {
   for (const controller of activePolls.values()) controller.abort();
 }
 
-export { activateGoal, pauseGoal, resumeGoal, updateGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor, finishGoalMonitor };
+export { activateGoal, pauseGoal, resumeGoal, updateGoal, goalChatCandidates, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor, finishGoalMonitor };
