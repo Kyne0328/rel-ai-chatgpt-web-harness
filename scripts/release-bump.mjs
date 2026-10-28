@@ -75,12 +75,6 @@ function updateJsonVersion(relativePath, nextVersion) {
   writeJson(relativePath, json);
 }
 
-function replaceExact(relativePath, oldText, newText) {
-  const content = read(relativePath);
-  if (!content.includes(oldText)) die(`${relativePath} did not contain expected text: ${oldText}`);
-  write(relativePath, content.replace(oldText, newText));
-}
-
 function changelogHasVersion(content, nextVersion) {
   return new RegExp(String.raw`^## \[${nextVersion.replaceAll('.', ESCAPED_DOT)}\]`, 'm').test(content);
 }
@@ -136,7 +130,6 @@ if (!dryRun) {
   }
 }
 writeJson('release-manifest.json', releaseManifest);
-replaceExact(path.join('electron', 'renderer', 'status.html'), `id="appVersion">v${current}</span>`, `id="appVersion">v${version}</span>`);
 if (!noChangelog) insertChangelog(version, date);
 
 if (!dryRun && notes.length) {

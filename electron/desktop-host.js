@@ -17,7 +17,6 @@ import { createDiagnosticFiles } from './diagnostic-files.js';
 import { registerIpcHandlers } from './ipc-handlers.js';
 import { hasExistingConfig, isManualUpdateInstall, readGuiConfig } from './launcher-utils.js';
 import { installLocalProtocol, localRendererUrl, registerLocalScheme } from './local-protocol.js';
-import { createRecoveryWindowManager } from './recovery-window.js';
 import { createPulseWindowManager } from './pulse-window.js';
 import { importResourceModule } from './resource-path.js';
 import { createRuntimeLogBuffer } from './runtime-log-buffer.js';
@@ -37,7 +36,7 @@ import { createTunnelConnectionStore } from './tunnel-connections.js';
 import { createTunnelRecoverySupervisor } from './tunnel-recovery-supervisor.js';
 import { createTunnelRuntimePool } from './tunnel-runtime-pool.js';
 import { createUpdateSupportPolicy } from './update-support-policy.js';
-import { fitWindowToContent, WINDOW_SIZE_LIMITS } from './window-size.js';
+import { fitWindowToContent } from './window-size.js';
 import { removeControllerRuntimeMarker, writeControllerRuntimeMarker } from './controller-runtime.js';
 import { readDesktopSettings, saveDesktopSettings } from './desktop-settings.js';
 
@@ -106,6 +105,8 @@ async function createDesktopHost(options = {}) {
   let updateInstallPrepared = false;
   let lastServiceContextKey = '';
   let startPromise = null;
+  let startupRetryTimer = null;
+  let startupRetryAttempt = 0;
   let eventsBound = false;
   const buildStatus = readBuildStatus({ app });
   let currentStatus = initialDesktopStatus(app.getVersion(), buildStatus);
@@ -125,17 +126,6 @@ async function createDesktopHost(options = {}) {
   const tunnelCredentials = createTunnelCredentialStore({ safeStorage });
   const tunnelConnections = createTunnelConnectionStore({ safeStorage });
   const taskCodeIde = createTaskCodeIdeLauncher({ shell });
-  const recoveryWindowManager = createRecoveryWindowManager({
-    BrowserWindow,
-    iconPath,
-    preloadPath,
-    rendererUrl: localRendererUrl('status.html'),
-    limits: WINDOW_SIZE_LIMITS.status,
-    installProtocol: sessionProtocol => installLocalProtocol(sessionProtocol, rendererRoot),
-    isQuitting: () => isQuitting,
-    onReady: hydrateRecoveryWindow,
-    onSecurityError: error => runtimeLogs.append(error.message, { level: 'warning', source: 'electron-security' })
-  });
   const startupSplash = createStartupSplashManager({
     BrowserWindow,
     iconPath,
@@ -152,7 +142,7 @@ async function createDesktopHost(options = {}) {
     rendererRoot,
     runtimeLogs,
     isQuitting: () => isQuitting,
-    recoveryWindowManager
+    startupSplash
   });
   const pulseWindowManager = createPulseWindowManager({
     BrowserWindow,
@@ -207,8 +197,8 @@ async function createDesktopHost(options = {}) {
     onError: error => setStatus({ error: formatError(error), errorCode: ERROR_CODES.UNKNOWN }),
     onLoadError: error => {
       setStatus({ error: formatError(error), errorCode: ERROR_CODES.DASHBOARD_UNAVAILABLE });
-      startupSplash.hide();
-      recoveryWindowManager.show();
+      showStartupProblem('Dashboard unavailable. Retrying automatically…');
+      scheduleStartupRetry();
     },
     onRendererGone: (error, details) => runtimeLogs.append(formatError(error), {
       level: 'warning',
@@ -250,7 +240,7 @@ async function createDesktopHost(options = {}) {
     nativeImage,
     platform: process.platform,
     getWindow: () => dashboardWindowManager.getWindow()
-      || recoveryWindowManager.getWindow()
+      || startupSplash.getWindow()
       || setupWindowManager.getWindow()
       || null,
     isApplicationOpen: () => BrowserWindow.getAllWindows().some(win => !win.isDestroyed() && win.isVisible() && win.isFocused())
@@ -395,7 +385,8 @@ async function createDesktopHost(options = {}) {
       pulseWindowManager.stop();
       await browserSurfaceHost.closeAll();
       await dashboardWindowManager.close();
-      recoveryWindowManager.close();
+      cancelStartupRetry();
+      startupSplash.hide();
       setupWindowManager.close({ returnToFallback: false });
       desktopTray.destroy();
     },
@@ -434,7 +425,7 @@ async function createDesktopHost(options = {}) {
     saveLauncherConfig: savePrimaryLauncherConfig,
     getWizardWindow: setupWindowManager.getWindow,
     closeWizard: setupWindowManager.close,
-    getFallbackWindow: recoveryWindowManager.getWindow,
+    getSplashWindow: startupSplash.getWindow,
     getDashboardWindow: dashboardWindowManager.getWindow,
     getPulseWindow: pulseWindowManager.getWindow,
     setPulseExpanded: pulseWindowManager.setExpanded,
@@ -772,7 +763,7 @@ async function createDesktopHost(options = {}) {
 
   function openRecoverySetup() {
     if (pendingLogout) throw new Error('Finish logout with Retry logout, or quit Rel.AI.');
-    recoveryWindowManager.hide();
+    startupSplash.hide();
     setupWindowManager.create({ recovery: true });
     return { ok: true };
   }
@@ -802,7 +793,7 @@ async function createDesktopHost(options = {}) {
       setupWindowManager.create();
       return;
     }
-    void openDashboardWindow().catch(() => recoveryWindowManager.show());
+    void openDashboardWindow().catch(error => showStartupProblem(formatError(error)));
   }
 
   function currentDashboardStatus() {
@@ -810,7 +801,6 @@ async function createDesktopHost(options = {}) {
   }
 
   function pushStatus(statusOptions = {}) {
-    recoveryWindowManager.sendStatus(currentStatus);
     const dashboardWindow = dashboardWindowManager.getWindow();
     if (statusOptions.dashboard !== false && dashboardWindow) {
       dashboardWindow.webContents.send('server:status', currentStatus);
@@ -818,15 +808,9 @@ async function createDesktopHost(options = {}) {
     desktopTray.update();
   }
 
-  function hydrateRecoveryWindow() {
-    pushStatus();
-    for (const entry of runtimeLogs.snapshot({ limit: 100 }).entries) recoveryWindowManager.sendLog(entry);
-  }
-
   function setTaskActivityStatus(taskActivity) {
     currentStatus = normalizeDesktopStatus({ ...currentStatus, taskActivity });
     pulseWindowManager.update(currentStatus);
-    recoveryWindowManager.sendStatus(currentStatus);
     void appUpdater?.resumeDeferredInstall?.();
   }
 
@@ -966,7 +950,7 @@ async function createDesktopHost(options = {}) {
     desktopTray.setup();
     if (launchUncertain) {
       setStatus({ error: 'The installer outcome is uncertain. Local work remains paused; quit Rel.AI and verify that the installer has finished before reopening.', errorCode: ERROR_CODES.UPDATE_FAILED });
-      recoveryWindowManager.show();
+      showStartupProblem('Update could not be verified. Check diagnostics.', true);
       return;
     }
     appUpdater.start({ preserveState: true });
@@ -980,10 +964,14 @@ async function createDesktopHost(options = {}) {
     ]);
     if (!serviceRuntime.isListening()) await startServer();
     if (!serviceRuntime.isListening()) {
-      recoveryWindowManager.show();
-      throw new Error('Rel.AI could not restart the local service after the update was cancelled.');
+      showStartupProblem('Restoring the local service automatically…');
+      scheduleStartupRetry();
+      return;
     }
-    await showDashboardWindow('', { forceReload: true }).catch(() => recoveryWindowManager.show());
+    await showDashboardWindow('', { forceReload: true }).catch(() => {
+      showStartupProblem('Dashboard unavailable. Retrying automatically…');
+      scheduleStartupRetry();
+    });
   }
 
   function updateRuntimeAccess() {
@@ -1041,12 +1029,11 @@ async function createDesktopHost(options = {}) {
 
   function publicConnectionLog(source, value, logOptions = {}) {
     const payload = value && typeof value === 'object' ? value : { message: value };
-    const entry = runtimeLogs.append(payload.message, {
+    runtimeLogs.append(payload.message, {
       ...payload,
       ...logOptions,
       source: payload.source || source
     });
-    if (entry) recoveryWindowManager.sendLog(entry);
   }
 
   function syncServiceContext() {
@@ -1110,6 +1097,7 @@ async function createDesktopHost(options = {}) {
   }
 
   function stopServer(stopOptions = {}) {
+    cancelStartupRetry();
     tunnelRecoverySupervisor?.cancel();
     return serviceRuntime.stopServer(stopOptions);
   }
@@ -1125,7 +1113,6 @@ async function createDesktopHost(options = {}) {
     await dashboardWindowManager.open(routeHash, windowOptions);
     startupSplash.hide();
     taskbarCompletionBadge.clear();
-    recoveryWindowManager.hide();
   }
 
   async function openDashboardWindow(routeHash = '', windowOptions = {}) {
@@ -1135,12 +1122,8 @@ async function createDesktopHost(options = {}) {
       return { ok: false, reason: 'unconfigured' };
     }
     if (!serviceRuntime.isListening()) {
-      void startServer();
-      await serviceRuntime.waitUntilListening(0);
-    }
-    if (!serviceRuntime.isListening()) {
-      recoveryWindowManager.show();
-      throw new Error(currentStatus.error || 'Rel.AI connection is not running.');
+      const status = await launchConfiguredDesktop({ routeHash });
+      return { ok: status?.serverRunning === true };
     }
     try {
       await showDashboardWindow(routeHash, windowOptions);
@@ -1150,7 +1133,8 @@ async function createDesktopHost(options = {}) {
         ERROR_CODES.DASHBOARD_UNAVAILABLE,
         `Dashboard failed to open: ${formatError(error)}`
       ));
-      recoveryWindowManager.show();
+      showStartupProblem('Dashboard unavailable. Retrying automatically…');
+      scheduleStartupRetry();
       throw error;
     }
   }
@@ -1186,13 +1170,44 @@ async function createDesktopHost(options = {}) {
     return { mode: 'fresh', hasConfig: false };
   }
 
+  function cancelStartupRetry() {
+    if (startupRetryTimer) clearTimeout(startupRetryTimer);
+    startupRetryTimer = null;
+  }
+
+  function showStartupProblem(message, blocked = false, background = false) {
+    if (background || isQuitting || setupWindowManager.getWindow() || dashboardWindowManager.getWindow()?.isVisible?.()) return;
+    try {
+      startupSplash.show();
+      startupSplash.update(message, { blocked });
+    } catch (error) {
+      runtimeLogs.append(`Startup splash unavailable: ${formatError(error)}`, { level: 'warning', source: 'startup-splash' });
+    }
+  }
+
+  function scheduleStartupRetry(options = {}) {
+    if (startupRetryTimer || isQuitting || pendingLogout || appUpdater?.getStatus()?.state === 'installing') return;
+    const delayMs = Math.min(60_000, 2_000 * 2 ** Math.min(startupRetryAttempt++, 5));
+    runtimeLogs.append('Local desktop startup retry scheduled.', {
+      level: 'warning',
+      source: 'desktop-lifecycle',
+      details: { retryInMs: delayMs }
+    });
+    startupRetryTimer = setTimeout(() => {
+      startupRetryTimer = null;
+      void launchConfiguredDesktop({ ...options, autoRetry: true });
+    }, delayMs);
+    startupRetryTimer.unref?.();
+  }
+
   async function launchConfiguredDesktop(launchOptions = {}) {
     if (launchOptions.restart) {
       const restartBlock = taskActivityBlockReason(desktopPower.getStatus(), 'restarting the connection');
       if (restartBlock) throw new Error(restartBlock);
     }
     try {
-      if (!launchOptions.background && !launchOptions.restart && !launchOptions.firstRun) {
+      cancelStartupRetry();
+      if (!launchOptions.background && !launchOptions.firstRun && !setupWindowManager.getWindow()) {
         try {
           startupSplash.show();
           startupSplash.update('Starting local service…');
@@ -1207,28 +1222,55 @@ async function createDesktopHost(options = {}) {
         ? await pendingStart
         : await serviceRuntime.waitUntilListening(0);
       if (!serviceRuntime.isListening()) {
-        startupSplash.hide();
-        recoveryWindowManager.show();
+        const needsSettings = currentStatus.errorCode === ERROR_CODES.CONFIGURATION_INVALID;
+        const installerUncertain = appUpdater?.getStatus()?.installLaunchUncertain === true;
+        if (needsSettings || installerUncertain || pendingLogout) {
+          const message = needsSettings ? 'Connection settings need attention.'
+            : pendingLogout ? 'Logout needs attention. See diagnostics.'
+              : 'Update could not be verified. Check diagnostics.';
+          showStartupProblem(message, needsSettings, launchOptions.background);
+        } else {
+          showStartupProblem('Local service unavailable. Retrying automatically…', false, launchOptions.background);
+          scheduleStartupRetry({ background: launchOptions.background === true, routeHash: launchOptions.routeHash });
+        }
         return status;
       }
       if (!launchOptions.background) {
-        if (launchOptions.firstRun) await serviceProcessClient.markOnboardingHandoff();
+        if (launchOptions.firstRun) {
+          try { await serviceProcessClient.markOnboardingHandoff(); }
+          catch (error) {
+            // The handoff records UI metadata, not local service health. A late
+            // acknowledgment must not turn a listening service into a failure.
+            runtimeLogs.append(`Onboarding handoff could not be confirmed: ${formatError(error)}`, {
+              level: 'warning', source: 'desktop-lifecycle'
+            });
+          }
+        }
         startupSplash.update('Opening dashboard…');
-        await showDashboardWindow('');
-      } else {
-        recoveryWindowManager.hide();
+        await showDashboardWindow(launchOptions.routeHash || '');
       }
+      startupRetryAttempt = 0;
       return currentStatus;
     } catch (error) {
-      startupSplash.hide();
+      const needsSettings = currentStatus.errorCode === ERROR_CODES.CONFIGURATION_INVALID;
+      const installerUncertain = appUpdater?.getStatus()?.installLaunchUncertain === true;
+      if (needsSettings || installerUncertain || pendingLogout) {
+        const message = needsSettings ? 'Connection settings need attention.'
+          : pendingLogout ? 'Logout needs attention. See diagnostics.'
+            : 'Update could not be verified. Check diagnostics.';
+        showStartupProblem(message, needsSettings, launchOptions.background);
+        return currentStatus;
+      }
+      const localRunning = serviceRuntime.isListening();
       if (currentStatus.errorCode !== ERROR_CODES.DASHBOARD_UNAVAILABLE) {
         setStatus(desktopStatusFailure(
-          ERROR_CODES.LOCAL_SERVICE_START_FAILED,
+          localRunning ? ERROR_CODES.DASHBOARD_UNAVAILABLE : ERROR_CODES.LOCAL_SERVICE_START_FAILED,
           error,
-          { serverRunning: false, tunnelStatus: 'failed' }
+          localRunning ? { serverRunning: true } : { serverRunning: false, tunnelStatus: 'failed' }
         ));
       }
-      recoveryWindowManager.show();
+      showStartupProblem(localRunning ? 'Dashboard unavailable. Retrying automatically…' : 'Rel.AI could not start. Retrying automatically…', false, launchOptions.background);
+      scheduleStartupRetry({ background: launchOptions.background === true, routeHash: launchOptions.routeHash });
       return currentStatus;
     }
   }
@@ -1290,7 +1332,7 @@ async function createDesktopHost(options = {}) {
         errorCode: shutdown?.clean !== true ? 'logout_shutdown_failed' : clearData ? 'local_data_clear_failed' : 'connection_state_clear_failed',
         logoutPending: true
       });
-      recoveryWindowManager.show();
+      showStartupProblem('Logout could not finish. See diagnostics.', true);
       throw error;
     }
   }

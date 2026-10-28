@@ -24,6 +24,10 @@ h1 span { margin-left: 5px; font-size: 11px; color: #8caf9c; letter-spacing: .16
 .progress { width: 180px; height: 2px; overflow: hidden; background: #2a4136; border-radius: 5px; }
 .progress-light { width: 38%; height: 100%; background: linear-gradient(90deg, transparent, #86e5a4, #c9f8d2); border-radius: inherit; }
 .startup p { margin: 0; min-height: 18px; font-size: 12px; color: #a9bcb1; letter-spacing: .01em; text-align: center; }
+.startup button { border: 1px solid #456453; border-radius: 7px; background: #1c3329; color: #e2f4e7; padding: 6px 12px; font: inherit; cursor: pointer; }
+.startup button:hover { background: #294737; }
+.startup button:focus-visible { outline: 2px solid #a0efb5; outline-offset: 3px; }
+[hidden] { display: none !important; }
 @media (prefers-reduced-motion: no-preference) {
   .identity { animation: enter .42s ease-out both; }
   .logo-field img { animation: breathe 3s ease-in-out infinite; }

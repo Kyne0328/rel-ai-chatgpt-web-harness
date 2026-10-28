@@ -325,12 +325,10 @@ try {
   retryStartCalls = 0;
   retryFailureCode = 'REL_AI_SERVICE_REQUEST_TIMEOUT';
   retryLogs.length = 0;
-  const requestTimeoutFailure = await retryRuntime.startServer();
-  assert.equal(retryStartCalls, 1, 'an expensive start-request timeout must not repeat the same initialization in a fresh process');
-  assert.equal(requestTimeoutFailure.serverRunning, false);
-  assert.equal(requestTimeoutFailure.errorCode, 'local_service_start_failed');
-  assert.equal(retryLogs.filter(entry => entry.options?.code === 'local_service_start_retry').length, 0,
-    'start-request timeouts must not be logged as retryable spawn failures');
+  const requestTimeoutRecovery = await retryRuntime.startServer();
+  assert.equal(retryStartCalls, 2, 'a timed-out start request with an invalidated utility must recover with a fresh process');
+  assert.equal(requestTimeoutRecovery.serverRunning, true);
+  assert.equal(retryLogs.filter(entry => entry.options?.code === 'local_service_start_retry').length, 1);
 
   let terminalStatus = { serverRunning: false, tunnelStatus: 'stopped' };
   let terminalListening = false;

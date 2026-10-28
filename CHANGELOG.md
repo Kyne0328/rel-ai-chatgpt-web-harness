@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Avoid false failures from late acknowledgments and timeouts.** Keep the local service healthy when first-run handoff metadata is delayed, retry dashboard authentication bootstrap without restarting the service, distinguish unconfirmed dashboard mutations from failed changes, retain troubleshooting reports with bounded transient retries, and recognize live HTTP event streams as reachable.
+
+- **Replace the manual Electron recovery page with automatic startup recovery.** Keep the existing Rel.AI logo splash visible while local startup is retried with backoff; allow the slow local utility start observed in desktop logs, retry a confirmed timed-out start with a fresh process, and offer connection settings only for nonrecoverable configuration problems. Remove the old recovery window, renderer and IPC surface while keeping dashboard diagnostics and first-run setup.
+
+
 - **Show a branded startup splash for foreground desktop launches.** Animate the existing Rel.AI logo and a lightweight progress light while the local service and dashboard initialize; display actual startup stages, dismiss immediately on dashboard readiness or recovery, and preserve silent launch-at-login and reduced-motion settings.
 
 - **Migrate desktop, tracing, filesystem watcher, language transport, and code intelligence to their current major releases.** Update Electron 45, OpenTelemetry SDK 3, Chokidar 6, vscode-jsonrpc 10, and TypeScript 7's native LSP. Replace the retired tracing provider and legacy JavaScript tsserver wrapper, preserve telemetry consent and startup behavior, and update native runtime packaging for supported desktop platforms.

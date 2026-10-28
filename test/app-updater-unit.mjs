@@ -557,7 +557,8 @@ for (const launchUncertain of [false, true]) {
     serviceRuntime: { isListening: () => listening },
     startServer: async () => { listening = true; restored.push('service'); },
     showDashboardWindow: async () => { restored.push('dashboard'); },
-    recoveryWindowManager: { show() { restored.push('recovery-window'); } },
+    showStartupProblem() { restored.push('splash'); },
+    scheduleStartupRetry() { restored.push('retry'); },
     setStatus() { restored.push('status'); },
     currentStatus: {}, ERROR_CODES: { UPDATE_FAILED: 'update_failed' }
   };
@@ -569,7 +570,7 @@ for (const launchUncertain of [false, true]) {
   releaseMarker();
   await pending;
   assert.deepEqual(restored, launchUncertain
-    ? ['coordinator', 'tray', 'status', 'recovery-window']
+    ? ['coordinator', 'tray', 'status', 'splash']
     : ['coordinator', 'tray', 'updater', 'support-policy', 'power', 'pulse', 'pulse-status', 'runtime-marker', 'lifecycle', 'service', 'dashboard'],
   'recovery must restore every stopped component, but must not restart work alongside an uncertain installer');
 }
@@ -605,6 +606,8 @@ let starts = 0;
 let restarts = 0;
 uncertainLaunch = true;
 const serviceContext = {
+  pendingLogout: null,
+  currentStatus: {},
   appUpdater: { getStatus: () => ({ installLaunchUncertain: uncertainLaunch }) },
   syncServiceContext() {},
   serviceRuntime: { startServer() { starts += 1; }, restartConnection() { restarts += 1; } },

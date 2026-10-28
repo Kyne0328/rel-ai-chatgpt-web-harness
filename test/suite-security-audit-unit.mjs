@@ -196,7 +196,7 @@ async function case_ipc_security_unit() {
   const handles = new Map();
   const listeners = new Map();
   const wizard = { id: 'wizard' };
-  const fallback = { id: 'fallback' };
+  const splash = { id: 'splash' };
   const dashboard = { id: 'dashboard' };
   const pulse = { id: 'pulse' };
   const other = { id: 'other' };
@@ -213,7 +213,7 @@ async function case_ipc_security_unit() {
     clipboard: { writeText: value => { clipboardText = value; } },
     getWizardWindow: () => wizard,
     closeWizard: options => calls.push(['closeWizard', options]),
-    getFallbackWindow: () => fallback,
+    getSplashWindow: () => splash,
     getDashboardWindow: () => dashboard,
     getPulseWindow: () => pulse,
     setPulseExpanded: expanded => { calls.push(['pulseExpanded', expanded]); return expanded; },
@@ -312,17 +312,17 @@ async function case_ipc_security_unit() {
   assert.ok(calls.some(entry => entry[0] === 'save'));
   assert.ok(calls.some(entry => entry[0] === 'launch' && entry[1].firstRun === true));
   assert.throws(() => handles.get('desktop:restart-connection')(eventFor(other)), /not available/);
-  assert.throws(() => handles.get('recovery:restart-connection')(eventFor(other)), /not available/);
+  assert.throws(() => handles.get('startup:open-setup')(eventFor(other)), /not available/);
+  assert.deepEqual(handles.get('startup:open-setup')(eventFor(splash)), { ok: true });
   assert.throws(() => handles.get('desktop:relaunch')(eventFor(other)), /not available/);
   assert.throws(() => handles.get('desktop:quit')(eventFor(other)), /not available/);
   assert.equal(restartCalls, 0, 'wizard startup must stay separate from the tunnel-only retry operation');
   assert.equal(relaunchCalls, 0);
   assert.equal(quitCalls, 0);
   await handles.get('desktop:restart-connection')(eventFor(dashboard));
-  await handles.get('recovery:restart-connection')(eventFor(fallback));
   await handles.get('desktop:relaunch')(eventFor(dashboard));
   await handles.get('desktop:quit')(eventFor(dashboard));
-  assert.equal(restartCalls, 2);
+  assert.equal(restartCalls, 1);
   assert.equal(relaunchCalls, 1);
   assert.equal(quitCalls, 1);
   listeners.get('desktop:stop-service')(eventFor(other));

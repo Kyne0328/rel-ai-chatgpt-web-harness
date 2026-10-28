@@ -2,7 +2,7 @@ import type { TaskActivityDto } from './tasks.ts';
 import type { ConnectionStateDto } from './connection.ts';
 import type { DiagnosticReportDto } from './diagnostics.ts';
 
-export type DesktopSurface = 'wizard' | 'fallback' | 'dashboard' | 'pulse';
+export type DesktopSurface = 'wizard' | 'splash' | 'dashboard' | 'pulse';
 export type DesktopIpcInputMode = 'handle' | 'on';
 
 export interface DesktopStatusDto {
@@ -82,15 +82,9 @@ export interface DesktopIpcRequestMap {
   'wizard:done': [config: Record<string, unknown>];
   'wizard:cancel': [];
   'wizard:open-openai-setup': [destination: string];
-  'recovery:get-config': [];
-  'recovery:open-setup': [];
+  'wizard:get-config': [];
+  'startup:open-setup': [];
   'url:open-dashboard': [routeHash?: string];
-  'notifications:get-enabled': [];
-  'notifications:set-enabled': [enabled: boolean];
-  'server:start': [];
-  'server:stop': [];
-  'recovery:restart-connection': [];
-  'recovery:relaunch': [];
   'desktop:restart-connection': [];
   'desktop:relaunch': [];
   'desktop:logout': [payload: { clearData: boolean }];
@@ -187,21 +181,16 @@ export interface DesktopIpcEventMap {
   'desktop:browser-state': DesktopBrowserStateDto;
   'desktop:update-status': Record<string, unknown>;
   'pulse:update': Record<string, unknown>;
+  'startup:status': { text: string; blocked: boolean };
 }
 
 export const DESKTOP_IPC = Object.freeze({
   WIZARD_DONE: 'wizard:done',
   WIZARD_CANCEL: 'wizard:cancel',
   WIZARD_OPEN_OPENAI_SETUP: 'wizard:open-openai-setup',
-  RECOVERY_GET_CONFIG: 'recovery:get-config',
-  RECOVERY_OPEN_SETUP: 'recovery:open-setup',
+  WIZARD_GET_CONFIG: 'wizard:get-config',
+  STARTUP_OPEN_SETUP: 'startup:open-setup',
   URL_OPEN_DASHBOARD: 'url:open-dashboard',
-  NOTIFICATIONS_GET_ENABLED: 'notifications:get-enabled',
-  NOTIFICATIONS_SET_ENABLED: 'notifications:set-enabled',
-  SERVER_START: 'server:start',
-  SERVER_STOP: 'server:stop',
-  RECOVERY_RESTART_CONNECTION: 'recovery:restart-connection',
-  RECOVERY_RELAUNCH: 'recovery:relaunch',
   DESKTOP_RESTART_CONNECTION: 'desktop:restart-connection',
   DESKTOP_RELAUNCH: 'desktop:relaunch',
   DESKTOP_LOGOUT: 'desktop:logout',
@@ -265,7 +254,8 @@ export const DESKTOP_IPC = Object.freeze({
   DESKTOP_BROWSER_STATE: 'desktop:browser-state',
   DESKTOP_UPDATE_STATUS: 'desktop:update-status',
   PULSE_SET_EXPANDED: 'pulse:set-expanded',
-  PULSE_UPDATE: 'pulse:update'
+  PULSE_UPDATE: 'pulse:update',
+  STARTUP_STATUS: 'startup:status'
 } as const);
 
 export type DesktopIpcChannel = typeof DESKTOP_IPC[keyof typeof DESKTOP_IPC];
@@ -279,16 +269,10 @@ export const DESKTOP_IPC_INPUT_CONTRACT = Object.freeze({
   [DESKTOP_IPC.WIZARD_DONE]: input('handle', ['wizard'], 'reject'),
   [DESKTOP_IPC.WIZARD_CANCEL]: input('handle', ['wizard'], 'reject'),
   [DESKTOP_IPC.WIZARD_OPEN_OPENAI_SETUP]: input('handle', ['wizard'], 'reject'),
-  [DESKTOP_IPC.RECOVERY_GET_CONFIG]: input('handle', ['wizard'], 'reject'),
-  [DESKTOP_IPC.RECOVERY_OPEN_SETUP]: input('handle', ['fallback'], 'reject'),
-  [DESKTOP_IPC.URL_OPEN_DASHBOARD]: input('handle', ['fallback', 'pulse'], 'reject'),
+  [DESKTOP_IPC.WIZARD_GET_CONFIG]: input('handle', ['wizard'], 'reject'),
+  [DESKTOP_IPC.STARTUP_OPEN_SETUP]: input('handle', ['splash'], 'reject'),
+  [DESKTOP_IPC.URL_OPEN_DASHBOARD]: input('handle', ['pulse'], 'reject'),
   [DESKTOP_IPC.PULSE_SET_EXPANDED]: input('handle', ['pulse'], 'reject'),
-  [DESKTOP_IPC.NOTIFICATIONS_GET_ENABLED]: input('handle', ['fallback'], 'reject'),
-  [DESKTOP_IPC.NOTIFICATIONS_SET_ENABLED]: input('handle', ['fallback'], 'reject'),
-  [DESKTOP_IPC.SERVER_START]: input('handle', ['fallback'], 'reject'),
-  [DESKTOP_IPC.SERVER_STOP]: input('handle', ['fallback'], 'reject'),
-  [DESKTOP_IPC.RECOVERY_RESTART_CONNECTION]: input('handle', ['fallback'], 'reject'),
-  [DESKTOP_IPC.RECOVERY_RELAUNCH]: input('handle', ['fallback'], 'reject'),
   [DESKTOP_IPC.DESKTOP_RESTART_CONNECTION]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_RELAUNCH]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_LOGOUT]: input('handle', ['dashboard'], 'reject'),
@@ -343,7 +327,7 @@ export const DESKTOP_IPC_INPUT_CONTRACT = Object.freeze({
   [DESKTOP_IPC.DESKTOP_CODE_DIFF]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_CODE_EDITORS]: input('handle', ['dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_CODE_OPEN_IDE]: input('handle', ['dashboard'], 'reject'),
-  [DESKTOP_IPC.URL_COPY]: input('handle', ['wizard', 'fallback', 'dashboard'], 'reject'),
+  [DESKTOP_IPC.URL_COPY]: input('handle', ['wizard', 'dashboard'], 'reject'),
   [DESKTOP_IPC.DESKTOP_STOP_SERVICE]: input('on', ['dashboard'], 'ignore'),
-  [DESKTOP_IPC.WINDOW_FIT_CONTENT]: input('on', ['wizard', 'fallback'], 'ignore')
+  [DESKTOP_IPC.WINDOW_FIT_CONTENT]: input('on', ['wizard'], 'ignore')
 }) satisfies DesktopIpcInputContract;

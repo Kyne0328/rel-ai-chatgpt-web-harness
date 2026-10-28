@@ -187,7 +187,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     if (!result?.ok) {
       const message = result?.error || 'unknown error';
       setServerError(message);
-      toast(`Could not save project: ${message}`, { variant: 'error' });
+      toast(result.outcomeUnknown ? message : `Could not save project: ${message}`, { variant: result.outcomeUnknown ? 'warn' : 'error' });
       return;
     }
     clearDirty();
@@ -623,7 +623,11 @@ async function deleteProject(alias, { forgetLocalData = true, onSuccess, setBusy
   setBusy?.(true);
   const result = await postJson('/api/workspaces', { action: 'delete', alias, confirmDelete: true, forgetLocalData });
   setBusy?.(false);
-  if (!result?.ok) { toast(`Could not delete project from Rel.AI: ${result?.error || 'unknown error'}`, { variant: 'error' }); return false; }
+  if (!result?.ok) {
+    toast(result?.outcomeUnknown ? result.error : `Could not delete project from Rel.AI: ${result?.error || 'unknown error'}`,
+      { variant: result?.outcomeUnknown ? 'warn' : 'error' });
+    return false;
+  }
   toast(`Project deleted from Rel.AI: ${alias}`, { variant: 'success' });
   onSuccess?.();
   invalidateCache();

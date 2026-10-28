@@ -657,7 +657,7 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
         ...(operationId ? { operationId } : {})
       }, { timeout: 10000, pauseTimeoutWhenHidden: false });
       if (result?.ok === false) {
-        toast(result.error || 'The task action could not be completed.', { variant: 'error' });
+        toast(result.error || 'The task action could not be completed.', { variant: result.outcomeUnknown ? 'warn' : 'error' });
         return;
       }
       const message = taskControlMessage(action, result);

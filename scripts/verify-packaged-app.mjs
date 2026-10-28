@@ -128,7 +128,7 @@ const asarPath = path.join(resourcesRoot, 'app.asar');
 const asarEntries = new Set(listPackage(asarPath).map(entry => entry.replaceAll('\\', '/').replace(/^\//, '')));
 const electronPackage = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
 assertElectronRuntimeCoverage({ electronRoot: path.join(root, 'electron'), electronPackage, asarEntries });
-for (const relativePath of ['preload.cjs', 'chatgpt-goal-helper.js', 'startup-background.js', 'secure-tunnel-runtime.js', 'tunnel-credentials.js', 'service-process.js', 'service-process-client.js', 'runtime-log-snapshot.js', 'service-activity-projection.js', 'renderer/app.css', 'renderer/color-tokens.css', 'renderer/status.html', 'renderer/wizard.html']) {
+for (const relativePath of ['preload.cjs', 'chatgpt-goal-helper.js', 'startup-background.js', 'secure-tunnel-runtime.js', 'tunnel-credentials.js', 'service-process.js', 'service-process-client.js', 'runtime-log-snapshot.js', 'service-activity-projection.js', 'renderer/app.css', 'renderer/color-tokens.css', 'renderer/splash.html', 'renderer/wizard.html']) {
   assert.ok(asarEntries.has(relativePath), `Packaged ASAR is missing: ${relativePath}`);
 }
 

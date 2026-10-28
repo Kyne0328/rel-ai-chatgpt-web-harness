@@ -132,11 +132,20 @@ function structuredRequestError(message, status = 0) {
     errorCode: 'dashboard_unavailable',
     title: 'Dashboard request failed',
     error: String(message || 'The Rel.AI dashboard did not respond.'),
-    recovery: { message: 'Refresh the dashboard. Restart the connection service if the problem continues.', actionLabel: 'Open Connection', href: '#settings/connection', retryable: true }
+    recovery: { message: 'Try refreshing the dashboard if the request does not recover.', actionLabel: 'Open Connection', href: '#settings/connection', retryable: true }
   };
 }
 
-function requestError(err, timeoutMs) {
+function requestError(err, timeoutMs, method = 'GET') {
+  // The browser losing a response does not prove a state-changing request was
+  // rolled back. Never invite a blind retry of a potentially completed action.
+  if (!['GET', 'HEAD'].includes(String(method).toUpperCase())) {
+    return {
+      ok: false, outcomeUnknown: true, errorCode: 'dashboard_action_unconfirmed',
+      title: 'Action not confirmed',
+      error: 'No confirmation received. The action may have completed. Check the refreshed state before trying again.'
+    };
+  }
   const isAbort = err?.name === 'AbortError';
   return structuredRequestError(isAbort ? `Request timed out after ${Math.round(timeoutMs / 1000)} seconds.` : String(err));
 }
@@ -169,7 +178,9 @@ export async function fetchJson(url, opts = {}) {
     }
     return data;
   } catch (err) {
-    return requestError(err, timeoutMs);
+    const result = requestError(err, timeoutMs, fetchOpts.method);
+    if (result.outcomeUnknown) requestDashboardRefresh();
+    return result;
   } finally {
     clearRequestTimeout();
   }

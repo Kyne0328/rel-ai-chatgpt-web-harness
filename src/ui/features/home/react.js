@@ -130,6 +130,7 @@ function HomeTaskControls({ task }) {
     setBusy(action);
     try {
       const result = await postJson('/api/tasks/control', { action, work_id: id }, { timeout: 10000, pauseTimeoutWhenHidden: false });
+      if (result?.outcomeUnknown) { toast(result.error, { variant: 'warn' }); return; }
       if (result?.ok === false) throw new Error(result.error || 'Task control failed.');
       toast(taskControlMessage(action, result), { variant: result.processCleanup?.complete === false ? 'warn' : 'success' });
       requestDashboardRefresh();

@@ -205,7 +205,7 @@ assert.match(electronCss, /status-badge\.working::before[\s\S]*--ui-status-info-
 assert.match(electronCss, /status-badge\.waiting::before[\s\S]*--ui-status-info-foreground/);
 assert.match(electronCss, /status-health-card\.connecting \.health-dot[^}]*--ui-status-info-foreground/);
 
-for (const relativePath of ['electron/renderer/status.html', 'electron/renderer/wizard.html']) {
+for (const relativePath of ['electron/renderer/wizard.html']) {
   const html = read(relativePath);
   assert.ok(html.indexOf('color-tokens.css') < html.indexOf('app.css'), `${relativePath} must load generated tokens before component CSS`);
 }

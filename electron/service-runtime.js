@@ -113,7 +113,7 @@ function createDesktopServiceRuntime(deps) {
           if (runToken !== lifecycleToken) return getCurrentStatus();
           const retryable = attempt < LOCAL_START_MAX_ATTEMPTS && isRetryableLocalStartupError(error);
           if (!retryable) throw error;
-          runtimeLogs.append?.('Local service process did not spawn. Rel.AI is retrying once with a fresh service process.', {
+          runtimeLogs.append?.('Local service startup did not complete. Rel.AI is retrying once with a fresh service process.', {
             level: 'warning',
             source: 'desktop-lifecycle',
             code: 'local_service_start_retry',
@@ -472,7 +472,15 @@ function createDesktopServiceRuntime(deps) {
 
   async function buildDashboardConnection() {
     if (!isListening()) throw new Error('Local service is not running.');
-    const authorization = await serviceProcessClient.dashboardBootstrap();
+    let authorization;
+    try {
+      authorization = await serviceProcessClient.dashboardBootstrap();
+    } catch (error) {
+      // Bootstrap tokens are short-lived and safe to replace. Retrying this
+      // request must not restart an otherwise healthy local service.
+      if (error?.code !== 'REL_AI_SERVICE_REQUEST_TIMEOUT' || !isListening()) throw error;
+      authorization = await serviceProcessClient.dashboardBootstrap();
+    }
     const chrome = dashboardWindowManager.getState();
     const chromeMode = chrome.customTitleBar ? 'custom' : 'native';
     return {
@@ -527,7 +535,9 @@ async function waitForPromise(promise, timeoutMs) {
 
 function isRetryableLocalStartupError(error) {
   const code = String(error?.code || '');
-  return code === 'REL_AI_SERVICE_SPAWN_TIMEOUT' || code === 'EADDRINUSE';
+  return code === 'REL_AI_SERVICE_SPAWN_TIMEOUT'
+    || (code === 'REL_AI_SERVICE_REQUEST_TIMEOUT' && error?.method === 'start')
+    || code === 'EADDRINUSE';
 }
 
 function tunnelErrorCode(error, errorCodes) {

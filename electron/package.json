@@ -81,7 +81,6 @@
       "desktop-tray.js",
       "desktop-status.js",
       "build-provenance.js",
-      "recovery-window.js",
       "window-security.js",
       "local-protocol.js",
       "runtime-log-buffer.js",

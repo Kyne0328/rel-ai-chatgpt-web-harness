@@ -858,22 +858,22 @@ async function case_local_protocol_unit() {
   
   const root = path.resolve('electron/renderer');
   
-  assert.equal(localRendererUrl('status.html'), 'relai-app://renderer/status.html');
+  assert.equal(localRendererUrl('splash.html'), 'relai-app://renderer/splash.html');
   assert.equal(localRendererUrl('wizard.html', { recovery: 1 }), 'relai-app://renderer/wizard.html?recovery=1');
-  assert.throws(() => localRendererUrl('../status.html'), /file name/);
-  assert.equal(resolveLocalRendererPath('relai-app://renderer/status.html?ignored=1', root), path.join(root, 'status.html'));
+  assert.throws(() => localRendererUrl('../splash.html'), /file name/);
+  assert.equal(resolveLocalRendererPath('relai-app://renderer/splash.html?ignored=1', root), path.join(root, 'splash.html'));
   for (const target of [
-    'file:///tmp/status.html',
-    'relai-app://other/status.html',
+    'file:///tmp/splash.html',
+    'relai-app://other/splash.html',
     'relai-app://renderer/../main.js',
     'relai-app://renderer/%2e%2e/main.js',
     'relai-app://renderer/unknown.json',
-    'https://renderer/status.html'
+    'https://renderer/splash.html'
   ]) assert.equal(resolveLocalRendererPath(target, root), '');
   
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-local-protocol-'));
   try {
-    fs.writeFileSync(path.join(temp, 'status.html'), '<main>ready</main>');
+    fs.writeFileSync(path.join(temp, 'splash.html'), '<main>ready</main>');
     const fontBytes = Buffer.from([0x77, 0x4f, 0x46, 0x32]);
     fs.writeFileSync(path.join(temp, 'fixture.woff2'), fontBytes);
     let handler = null;
@@ -886,7 +886,7 @@ async function case_local_protocol_unit() {
     assert.equal(installLocalProtocol(protocol, temp), true);
     assert.equal(installLocalProtocol(protocol, temp), false, 'the same protocol object must not register twice');
   
-    const existing = await handler({ url: 'relai-app://renderer/status.html' });
+    const existing = await handler({ url: 'relai-app://renderer/splash.html' });
     assert.equal(existing.status, 200);
     assert.equal(existing.headers.get('content-type'), 'text/html; charset=utf-8');
     assert.equal(await existing.text(), '<main>ready</main>');
@@ -1143,7 +1143,7 @@ async function case_window_security_unit() {
   webHandlers.get('will-navigate')({ preventDefault: () => { prevented = true; } }, `${allowedUrl}#step2`);
   assert.equal(prevented, false);
   
-  for (const target of ['https://example.com/', 'relai-app://renderer/status.html', 'file:///tmp/wizard.html']) {
+  for (const target of ['https://example.com/', 'relai-app://renderer/splash.html', 'file:///tmp/wizard.html']) {
     prevented = false;
     webHandlers.get('will-redirect')({ preventDefault: () => { prevented = true; } }, target);
     assert.equal(prevented, true);
@@ -1866,7 +1866,7 @@ async function case_logout_connection_clear_failure() {
       tunnelConnections: { clear() {} },
       connection: { clearConnectionState: () => ({ ok: cleared, error: cleared ? '' : 'Some saved connection data could not be cleared.' }) },
       desktopTray: { setup: () => { calls.tray += 1; } },
-      recoveryWindowManager: { show: () => { calls.recovery += 1; } },
+      showStartupProblem: () => { calls.recovery += 1; },
       setStatus: update => Object.assign(status, update),
       startServer: () => { calls.networkStarts += 1; },
       process: { argv: ['fixture-node', 'fixture-app'] },
@@ -1949,7 +1949,7 @@ async function case_logout_data_failure_recovery() {
       tunnelCredentials: { clear: () => { calls.push('credentials'); if (failing) throw new Error('credential store failed'); } },
       tunnelConnections: { clear() {}, list: () => { calls.push('connections-read'); if (failure === 'corrupt-connections') throw new Error('fixture connections corrupt'); return []; } }, connection: { clearConnectionState: () => ({ ok: true }) },
       desktopTray: { setup: () => calls.push('tray') },
-      recoveryWindowManager: { show: () => calls.push('recovery') },
+      showStartupProblem: () => calls.push('splash'),
       process: { argv: ['fixture', 'fixture-app'] },
       app: { relaunch: () => { if (failing && failure === 'relaunch') throw new Error('fixture relaunch unavailable'); calls.push('relaunch'); }, exit: () => calls.push('exit') }
     };
@@ -1960,7 +1960,7 @@ async function case_logout_data_failure_recovery() {
     assert.equal(context.isQuitting, false);
     assert.equal(context.currentStatus.logoutPending, true);
     assert.ok(context.pendingLogout);
-    assert.ok(calls.includes('reset') && calls.includes('tray') && calls.includes('recovery') && calls.includes('publish'));
+    assert.ok(calls.includes('reset') && calls.includes('tray') && calls.includes('splash') && calls.includes('publish'));
     assert.equal(calls.includes('config-read') || calls.includes('connections-read') || calls.includes('service-context'), false, 'logout recovery must publish without reading deleted/corrupt configuration or waking the stopped service');
     assert.equal(calls.includes('relaunch') || calls.includes('exit'), false);
     if (failure === 'unclean' || failure === 'shutdown-throw') assert.equal(calls.includes('clear'), false);
@@ -1976,9 +1976,6 @@ async function case_logout_data_failure_recovery() {
     assert.equal(calls.includes('network'), false, 'retry logout must never reconnect the service');
     assert.equal(calls.filter(call => call === 'plan').length, failure === 'credentials' ? 0 : 1);
   }
-  const renderer = fs.readFileSync(new URL('../electron/renderer/status.js', import.meta.url), 'utf8');
-  const view = runInNewContext(renderer.slice(renderer.indexOf('function connectionView('), renderer.indexOf('function taskPresentation(')) + '\nconnectionView');
-  assert.equal(view({ logoutPending: true, serverRunning: true, tunnelStatus: 'running' }).title, 'Logout could not finish.');
 }
 await case_logout_data_failure_recovery();
 

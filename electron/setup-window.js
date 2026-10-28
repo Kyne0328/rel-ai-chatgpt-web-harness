@@ -4,7 +4,7 @@ import { localWindowWebPreferences, secureLocalWindow } from './window-security.
 import { STARTUP_BACKGROUND_COLOR } from './startup-background.js';
 
 function createSetupWindowManager(deps) {
-  const { BrowserWindow, iconPath = '', preloadPath, rendererRoot, runtimeLogs, isQuitting, recoveryWindowManager } = deps;
+  const { BrowserWindow, iconPath = '', preloadPath, rendererRoot, runtimeLogs, isQuitting, startupSplash } = deps;
   let window = null;
   let recoveryMode = false;
   let updateMode = false;
@@ -70,7 +70,10 @@ function createSetupWindowManager(deps) {
     updateMode = false;
     updateVersions = { previousVersion: '', currentVersion: '' };
     returnToFallback = false;
-    if (shouldReturn && !isQuitting()) recoveryWindowManager.show();
+    if (shouldReturn && !isQuitting()) {
+      startupSplash.show();
+      startupSplash.update('Connection setup was closed.', { blocked: true });
+    }
   }
 
   function getWindow() {

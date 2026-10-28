@@ -56,9 +56,11 @@ assert.deepEqual(first.windowOpenHandler(), { action: 'deny' });
 manager.update('Starting local service…');
 assert.deepEqual(sent, [], 'status must wait until splash renderer has subscribed');
 first.webContents.emit('did-finish-load');
-assert.deepEqual(sent.pop(), ['startup:status', 'Starting local service…']);
+assert.deepEqual(sent.pop(), ['startup:status', { text: 'Starting local service…', blocked: false }]);
 manager.update('Opening dashboard…');
-assert.deepEqual(sent.pop(), ['startup:status', 'Opening dashboard…']);
+assert.deepEqual(sent.pop(), ['startup:status', { text: 'Opening dashboard…', blocked: false }]);
+manager.update('Connection settings need attention.', { blocked: true });
+assert.deepEqual(sent.pop(), ['startup:status', { text: 'Connection settings need attention.', blocked: true }]);
 first.emit('ready-to-show');
 assert.equal(first.shown, true, 'only a painted splash becomes visible');
 

@@ -34,7 +34,7 @@ function copyFixture() {
     'electron/build/installer.nsh',
     'electron/build/update-status-helper.ps1',
     'electron/update-status-helper.js',
-    'electron/renderer/status.html',
+    'electron/renderer/splash.html',
     'electron/scripts/verify-fuses.js',
     'src/contracts/package.json',
     'src/core/package.json',
@@ -179,6 +179,7 @@ function verifyPackageContracts() {
     'Electron packaging must include the complete canonical source tree, including CSS, MJS, HTML, and platform helpers'
   );
   const packagedNodeModules = electronPackage.build.extraResources.find(resource => resource.to === 'node_modules')?.filter || [];
+  assert.ok(packagedNodeModules.includes('jose/**'), 'Electron packaging must include jose because @midscene/core imports it when initializing Computer Control');
   assert.ok(packagedNodeModules.includes('yallist/**'), 'Electron packaging must include yallist because the bundled semver dependency resolves it through lru-cache at runtime');
   assert.ok(packagedNodeModules.includes('yauzl/**'), 'Electron packaging must include yauzl because the packaged extension tool-bundle runtime extracts ZIP archives');
   assert.ok(packagedNodeModules.includes('pend/**'), 'Electron packaging must include pend because the bundled yauzl runtime requires it');

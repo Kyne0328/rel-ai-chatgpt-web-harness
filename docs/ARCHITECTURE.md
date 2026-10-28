@@ -62,7 +62,7 @@ src/http/dashboard.ts
 
 Unsaved form/input state should remain local to the owning React feature when it is not server state. Canonical project/task/process/connection data stays in the dashboard store. Electron-only authority remains behind the constrained `window.relaiDesktop` API exposed by `electron/preload.cjs`; React must not bypass IPC or move privileged desktop behavior into the renderer.
 
-The first-run/recovery renderer is intentionally independent of the dashboard React tree. `electron/renderer/wizard.*`, `electron/renderer/status.*`, and `electron/recovery-window.js` must remain able to recover or configure the application when the dashboard is unavailable.
+The first-run wizard and branded startup splash remain independent of the dashboard React tree. `electron/renderer/wizard.*` handles connection configuration; `electron/renderer/splash.*` displays startup and automatic recovery progress until the authenticated dashboard is ready.
 
 Dashboard JavaScript and CSS have source/generated boundaries:
 
@@ -73,7 +73,7 @@ Dashboard JavaScript and CSS have source/generated boundaries:
 
 Accessibility is part of the frontend contract: current-route semantics, route-heading focus, live-region announcements, focus trapping/restoration, keyboard navigation, reduced motion, forced colors, responsive navigation, and usable touch targets must survive feature changes.
 
-Frontend behavior is protected at several levels: focused model/store/router/SSE unit tests, dashboard integration/smoke tests, representative browser acceptance, custom Electron chrome tests, Monaco/Changes browser coverage, and recovery-window tests. Add the narrowest regression at the ownership boundary that failed instead of copying the same assertion across unrelated suites.
+Frontend behavior is protected at several levels: focused model/store/router/SSE unit tests, dashboard integration/smoke tests, representative browser acceptance, custom Electron chrome tests, Monaco/Changes browser coverage, and startup-splash tests. Add the narrowest regression at the ownership boundary that failed instead of copying the same assertion across unrelated suites.
 
 ## Secure tunnel ownership
 

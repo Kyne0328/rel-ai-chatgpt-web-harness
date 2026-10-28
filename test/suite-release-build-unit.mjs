@@ -577,9 +577,9 @@ async function case_knip_production_model_unit() {
     'main.js!',
     'preload.cjs!',
     'service-process.js!',
-    'renderer/status.js!',
     'renderer/wizard.js!',
     'renderer/pulse.js!',
+    'renderer/splash.js!',
     'build/after-pack.js!',
     'scripts/verify-fuses.js!'
   ], 'Electron production analysis must model concrete runtime and packaging entry points');

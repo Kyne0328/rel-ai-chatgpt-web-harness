@@ -72,8 +72,8 @@ function read(rel) {
   assert.match(read('README.md'), /Tunnel[\s\S]*No authentication/i);
   assert.match(read('README.md'), /Add or reconnect Rel\.AI MCP/i);
   assert.doesNotMatch(read('docs/ONE_CLICK_SETUP.md'), /removed tools[^\n]*relai_apply_update/);
-  assert.match(read('electron/renderer/status.html'), /Secure MCP Tunnel|Secure tunnel/);
-  assert.match(read('electron/renderer/status.js'), /Starting Secure MCP Tunnel/);
+  assert.match(read('electron/renderer/splash.html'), /relai-logo\.png/);
+  assert.match(read('electron/renderer/splash.js'), /startupStatus/);
   assert.doesNotMatch(read('electron/main.js'), /killOrphanedNgrok\(\)/);
 }
 

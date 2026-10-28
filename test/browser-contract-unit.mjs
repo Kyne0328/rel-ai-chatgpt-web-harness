@@ -26,6 +26,11 @@ const server = http.createServer((request, response) => {
     response.end('<!doctype html><title>Route OK</title><p>ready</p>');
     return;
   }
+  if (request.url === '/events') {
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    response.write(': connected\n\n');
+    return;
+  }
   if (request.url === '/large') {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     response.end(`<!doctype html><title>Large Route</title>${'x'.repeat(200000)}`);
@@ -76,6 +81,11 @@ try {
   assert.equal(large.ok, true);
   assert.equal(large.title, 'Large Route');
   assert.ok(large.responseBytes > 200000, 'the probe must count the full streamed response without buffering it all');
+
+  const streaming = await relaiHttpProbe(workspace, {}, { route: '/events', timeoutMs: 1000 });
+  assert.equal(streaming.ok, true, 'an established SSE connection is reachable without waiting for its body to end');
+  assert.equal(streaming.reachable, true);
+  assert.equal(streaming.statusCode, 200);
 
   await assert.rejects(
     () => relaiHttpProbe(workspace, {}, { route: 'https://example.com/' }),

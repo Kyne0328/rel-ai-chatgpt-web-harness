@@ -17,7 +17,7 @@ function registerIpcHandlers(deps) {
     contract: DESKTOP_IPC_INPUT_CONTRACT,
     windowGetters: {
       wizard: deps.getWizardWindow,
-      fallback: deps.getFallbackWindow,
+      splash: deps.getSplashWindow,
       dashboard: deps.getDashboardWindow,
       pulse: deps.getPulseWindow
     }
@@ -33,19 +33,16 @@ function registerIpcHandlers(deps) {
     saveLauncherConfig: deps.saveLauncherConfig,
     launchConfiguredDesktop: deps.launchConfiguredDesktop
   });
-  registerRecoveryIpc({
+  registerStartupIpc({
     ipc,
     channels: DESKTOP_IPC,
     openRecoverySetup: deps.openRecoverySetup,
-    openDashboardWindow: deps.openDashboardWindow,
-    getNotificationsEnabled: deps.getNotificationsEnabled,
-    setNotificationsEnabled: deps.setNotificationsEnabled
+    openDashboardWindow: deps.openDashboardWindow
   });
   registerPulseIpc({ ipc, channels: DESKTOP_IPC, setPulseExpanded: deps.setPulseExpanded });
   registerServiceIpc({
     ipc,
     channels: DESKTOP_IPC,
-    startServer: deps.startServer,
     stopServer: deps.stopServer,
     restartConnection: deps.restartConnection,
     relaunchApplication: deps.relaunchApplication,
@@ -162,14 +159,12 @@ function registerSetupIpc({ ipc, channels, shell, closeWizard, getRecoveryConfig
     await shell.openExternal(url);
     return { ok: true };
   });
-  ipc.handle(channels.RECOVERY_GET_CONFIG, 'Recovery configuration', () => getRecoveryConfig());
+  ipc.handle(channels.WIZARD_GET_CONFIG, 'Existing connection configuration', () => getRecoveryConfig());
 }
 
-function registerRecoveryIpc({ ipc, channels, openRecoverySetup, openDashboardWindow, getNotificationsEnabled, setNotificationsEnabled }) {
-  ipc.handle(channels.RECOVERY_OPEN_SETUP, 'Connection recovery', () => openRecoverySetup());
+function registerStartupIpc({ ipc, channels, openRecoverySetup, openDashboardWindow }) {
+  ipc.handle(channels.STARTUP_OPEN_SETUP, 'Connection settings', () => openRecoverySetup());
   ipc.handle(channels.URL_OPEN_DASHBOARD, 'Dashboard opening', (_event, routeHash = '') => openDashboardWindow(routeHash));
-  ipc.handle(channels.NOTIFICATIONS_GET_ENABLED, 'Notification preferences', () => ({ ok: true, enabled: getNotificationsEnabled() }));
-  ipc.handle(channels.NOTIFICATIONS_SET_ENABLED, 'Notification preferences', (_event, enabled) => ({ ok: true, enabled: setNotificationsEnabled(enabled) }));
 }
 
 function registerPulseIpc({ ipc, channels, setPulseExpanded }) {
@@ -179,12 +174,8 @@ function registerPulseIpc({ ipc, channels, setPulseExpanded }) {
   });
 }
 
-function registerServiceIpc({ ipc, channels, startServer, stopServer, restartConnection, relaunchApplication, logoutApplication, quitApplication }) {
-  ipc.handle(channels.SERVER_START, 'Service startup', () => startServer());
-  ipc.handle(channels.SERVER_STOP, 'Service shutdown', () => stopServer());
-  ipc.handle(channels.RECOVERY_RESTART_CONNECTION, 'Connection retry', () => restartConnection());
+function registerServiceIpc({ ipc, channels, stopServer, restartConnection, relaunchApplication, logoutApplication, quitApplication }) {
   ipc.handle(channels.DESKTOP_RESTART_CONNECTION, 'Connection retry', () => restartConnection());
-  ipc.handle(channels.RECOVERY_RELAUNCH, 'Application restart', () => relaunchApplication());
   ipc.handle(channels.DESKTOP_RELAUNCH, 'Application restart', () => relaunchApplication());
   ipc.handle(channels.DESKTOP_LOGOUT, 'Application logout', (_event, payload) => logoutApplication(normalizeLogoutPayload(payload)));
   ipc.handle(channels.DESKTOP_QUIT, 'Application quit', () => quitApplication());
@@ -221,7 +212,8 @@ function registerSharedUtilityIpc({ ipc, channels, BrowserWindow, clipboard, gua
     const win = BrowserWindow.fromWebContents(event.sender);
     if (!win) return;
     const isWizard = guards.isSenderWindow(event, getWizardWindow);
-    fitWindowToContent(win, { type: isWizard ? 'wizard' : 'status', width: Number(payload.width), height: Number(payload.height) });
+    if (!isWizard) return;
+    fitWindowToContent(win, { type: 'wizard', width: Number(payload.width), height: Number(payload.height) });
   });
 }
 

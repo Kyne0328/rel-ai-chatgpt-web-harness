@@ -89,7 +89,7 @@ npm test
 
 Tests are risk controls. Prefer the smallest non-overlapping set that protects business behavior, security, validation, transactions or concurrency, data integrity, external protocol compatibility, or a meaningful release contract.
 
-For frontend work, choose tests by ownership: store/SSE/router/model tests for data semantics, dashboard smoke/integration tests for wiring, browser acceptance for real interaction/layout behavior, custom-chrome tests for Electron window integration, `code-editor-browser.mjs` for Monaco/Changes behavior, and recovery-window tests for the independent recovery boundary. Do not preserve tests whose only purpose was to lock obsolete imperative renderer structure.
+For frontend work, choose tests by ownership: store/SSE/router/model tests for data semantics, dashboard smoke/integration tests for wiring, browser acceptance for real interaction/layout behavior, custom-chrome tests for Electron window integration, `code-editor-browser.mjs` for Monaco/Changes behavior, and startup-splash tests for the independent startup boundary. Do not preserve tests whose only purpose was to lock obsolete imperative renderer structure.
 
 ## Dashboard architecture
 
@@ -128,10 +128,10 @@ Keep route metadata centralized. The route policy accepts canonical destinations
 - `electron/main.js` is the thin Electron composition root; it injects Electron capabilities into `electron/desktop-host.js` and starts the host.
 - `electron/desktop-host.js` owns desktop lifecycle, windows, tray, updater, safeStorage-backed credentials, notifications, OS integration, and utility-process supervision. Rel.AI analytics, onboarding state transitions, and task-code repository operations stay behind the service utility-process boundary.
 - `electron/renderer/wizard.html` and `wizard.js` own first-run and connection-recovery editing.
-- `electron/recovery-window.js` and the status renderer remain independent of the React dashboard so recovery still works when the routine dashboard is unavailable.
-- `electron/preload.cjs` exposes narrow, surface-specific bridges. The dashboard uses `window.relaiDesktop`; application/recovery renderers use `window.electronAPI`.
+- `electron/startup-splash.js` and its renderer provide animated startup status and automatic recovery while the local dashboard is unavailable.
+- `electron/preload.cjs` exposes narrow, surface-specific bridges. The dashboard uses `window.relaiDesktop`; the wizard uses `window.electronAPI`; startup uses `window.relaiSplash`.
 - `electron/ipc-handlers.js` and dashboard-specific IPC handlers validate renderer requests and sender ownership.
-- the React dashboard is the routine application surface; the status window is recovery-only.
+- the React dashboard is the routine application surface; the splash replaces the old recovery window during startup.
 
 The referenced UI TypeScript project checks `src/ui/router.js` with `@ts-check`; the remaining legacy React JavaScript stays outside that checked boundary.
 

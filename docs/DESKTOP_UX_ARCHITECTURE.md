@@ -76,7 +76,7 @@ Backend read models and lifecycle decisions remain backend-owned. React must not
 
 Feature forms keep unsaved values in local React state where appropriate. Server/project/task/process state stays in the canonical dashboard store. Desktop-only operations use the approved `window.relaiDesktop` preload bridge; renderer code must not recreate privileged Electron authority.
 
-The first-run and recovery surfaces stay independent of the dashboard React tree. The wizard/status renderer and `electron/recovery-window.js` must still work when dashboard JavaScript, dashboard data, or the local service is unhealthy.
+The first-run wizard and startup splash stay independent of the dashboard React tree. The splash shows automatic local startup retries, and the wizard handles configuration that requires user input. There is no separate recovery page.
 
 ## Settings ownership
 

@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
-const statusHtml = read('electron/renderer/status.html');
-const statusJs = read('electron/renderer/status.js');
+const splashHtml = read('electron/renderer/splash.html');
+const splashJs = read('electron/renderer/splash.js');
 const preload = read('electron/preload.cjs');
 
 const mainEntry = read('electron/main.js');
@@ -31,7 +31,7 @@ const dashboardReact = read('src/ui/react/main.js');
 const dashboardEvents = read('src/ui/events.js');
 const dashboardWindowPolicy = read('electron/dashboard-window.js');
 
-for (const file of ['electron/renderer/status.html', 'electron/renderer/wizard.html']) {
+for (const file of ['electron/renderer/wizard.html']) {
   const html = read(file);
   assert.match(html, /<link\s+rel="stylesheet"\s+href="\.\/color-tokens\.css"\s*\/?\s*>|<link\s+rel="stylesheet"\s+href="color-tokens\.css"\s*\/?\s*>/);
   assert.match(html, /<link\s+rel="stylesheet"\s+href="\.\/app\.css"\s*\/?\s*>|<link\s+rel="stylesheet"\s+href="app\.css"\s*\/?\s*>/);
@@ -41,36 +41,10 @@ for (const file of ['electron/renderer/status.html', 'electron/renderer/wizard.h
   assert.doesNotMatch(html, /Open in browser/i);
 }
 
-assert.match(statusHtml, /Connection recovery/);
-assert.match(statusHtml, /Secure MCP Tunnel/);
-assert.match(statusHtml, /Copy tunnel ID/);
-assert.match(statusHtml, /id="localHealthCard"/);
-assert.match(statusHtml, /id="publicHealthCard"/);
-assert.match(statusHtml, /id="serverToggleBtn"/);
-assert.match(statusHtml, /id="restartAppBtn"/);
-assert.doesNotMatch(statusHtml, /notificationToggleBtn|Desktop notifications/);
-assert.doesNotMatch(statusHtml, /Connect to ChatGPT|guide-list/, 'Recovery must not duplicate the normal ChatGPT setup guide.');
-assert.match(statusHtml, /id="errorTitle"/);
-assert.match(statusHtml, /Recent app logs/);
-assert.match(statusJs, /currentStatus\.tunnelId/);
-assert.match(statusJs, /Tunnel ID copied/);
-assert.match(statusJs, /The Secure MCP Tunnel did not become ready/);
-assert.match(statusJs, /debugLogsToggle/);
-assert.match(statusJs, /tunnelStatus === 'degraded'/);
-assert.match(statusJs, /restartConnection\(\)/);
-assert.match(statusJs, /relaunchApp\(\)/);
-assert.match(statusJs, /Secure tunnel:/);
-assert.match(statusJs, /Local MCP:/);
-assert.match(statusJs, /safeDiagnosticText/);
-assert.match(statusJs, /Task activity:/);
-assert.match(statusJs, /setActionError/);
-assert.match(statusJs, /function parseTimestampMs\(/, 'Recovery timers must normalize numeric and ISO timestamps through one parser');
-assert.match(statusJs, /const startedAt = parseTimestampMs\(activity\.startedAt\)/, 'Recovery elapsed time must parse task start timestamps before subtraction');
-assert.match(statusJs, /function relativeTime\(timestamp, now = Date\.now\(\)\)[\s\S]{0,180}parseTimestampMs\(timestamp\)/, 'Recovery relative time must parse ISO timestamps instead of subtracting strings');
-assert.doesNotMatch(statusJs, /Date\.now\(\) - timestamp/, 'Recovery relative time must never subtract an unparsed timestamp');
-assert.doesNotMatch(statusJs, /notificationToggleBtn|desktop notification setting could not be saved/i);
-assert.doesNotMatch(statusJs, /updateUI\(\{\s*error:[\s\S]{0,160}tunnelStatus:\s*'failed'/, 'recovery action failures must not falsify the tunnel connection state');
-assert.doesNotMatch(statusJs, /currentStatus\.mcpUrl|approval token|ngrok|gateway/i);
+assert.match(splashHtml, /relai-logo\.png/, 'startup uses the original logo asset');
+assert.match(splashHtml, /id="startupSettings"[^>]*hidden/, 'nonrecoverable settings action is hidden during ordinary startup');
+assert.match(splashHtml, /aria-live="polite"/, 'startup states remain accessible');
+assert.match(splashJs, /relaiSplash\?\.onStatus/, 'startup statuses use the sandboxed preload bridge');
 
 assert.match(preload, /return \(\) => ipcRenderer\.removeListener\(channel, listener\)/);
 assert.doesNotMatch(preload, /removeAllListeners/);
@@ -487,12 +461,11 @@ assert.match(main, /serviceRuntime\.waitUntilListening\(0\)/, 'foreground dashbo
 assert.doesNotMatch(main, /options\.firstRun\s*\?\s*'#settings\/connection'/, 'first-run tunnel completion must not bounce users back to Connection');
 assert.match(desktopHost, /serviceProcessClient\.markOnboardingHandoff\(\)/, 'first-run tunnel completion must delegate the Overview handoff to the core utility process');
 assert.match(coreDesktopOperations, /writeOnboardingState\(\{[\s\S]{0,260}handoffPending:\s*true/, 'the core operation must persist the remaining Overview guide');
-assert.match(main, /await showDashboardWindow\(''\)/, 'first-run tunnel completion must open Overview for the next setup step');
+assert.match(main, /await showDashboardWindow\(launchOptions\.routeHash \|\| ''\)/, 'first-run tunnel completion must open Overview while preserving an optional deep link');
 assert.match(main, /app\.relaunch\(\)/, 'desktop recovery must provide a full application relaunch escape hatch');
 assert.match(main, /taskActivityBlockReason\(desktopPower\.getStatus\(\), 'restarting Rel\.AI'\)/, 'full app restart must remain guarded while Rel.AI work is active');
-assert.match(main, /onReady:\s*hydrateRecoveryWindow/, 'recovery reloads must rehydrate from authoritative desktop state');
+assert.doesNotMatch(desktopHost, /createRecoveryWindowManager|recoveryWindowManager/, 'the recovery window is no longer created');
 assert.match(main, /onExit:\s*\(\{ code \}\) => \{[\s\S]*!currentStatus\.serverRunning[\s\S]*launchConfiguredDesktop\(\{ restart: true, background: true \}\)/, 'an unexpected healthy local-service exit must restart the full connection in the background instead of leaving the dashboard reconnecting forever');
-assert.match(main, /runtimeLogs\.snapshot\(\{\s*limit:\s*100\s*\}\)\.entries[\s\S]{0,120}recoveryWindowManager\.sendLog\(entry\)/, 'recovery reloads must restore the bounded recent diagnostic log tail');
 assert.doesNotMatch(main, /waitForLocalService|setTimeout\(poll,\s*20\)/, 'local service readiness must not use a 20ms polling loop');
 assert.match(main, /const status = launchOptions\.background[\s\S]{0,80}\? await pendingStart[\s\S]{0,80}: await serviceRuntime\.waitUntilListening\(0\)/, 'foreground startup, including first run, must follow authoritative local readiness instead of opening Recovery on a shorter UI-only timeout');
 assert.doesNotMatch(main, /dashboard:\s*false/, 'tunnel state changes must reach the desktop dashboard without manual refresh');

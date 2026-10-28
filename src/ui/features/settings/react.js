@@ -1681,7 +1681,7 @@ function LocalDataSettings() {
     setBusy('history');
     const result = await postJson('/api/diagnostics/reset', { target: 'history', confirm: true }).catch(actionError => ({ ok: false, error: messageOf(actionError) }));
     setBusy('');
-    if (!result?.ok) { toast(result?.error || 'Task and activity history could not be cleared.', { variant: 'error' }); return; }
+    if (!result?.ok) { toast(result?.error || 'Task and activity history could not be cleared.', { variant: result?.outcomeUnknown ? 'warn' : 'error' }); return; }
     toast(result.message || 'Task and activity history cleared.', { variant: 'success' }); requestDashboardRefresh(); await load();
   };
   const clearAnalytics = async () => {
@@ -1696,7 +1696,7 @@ function LocalDataSettings() {
     setBusy('analytics');
     const result = await postJson('/api/diagnostics/reset', { target: 'analytics', confirm: true }).catch(actionError => ({ ok: false, error: messageOf(actionError) }));
     setBusy('');
-    if (!result?.ok) { toast(result?.error || 'Local analytics could not be cleared.', { variant: 'error' }); return; }
+    if (!result?.ok) { toast(result?.error || 'Local analytics could not be cleared.', { variant: result?.outcomeUnknown ? 'warn' : 'error' }); return; }
     toast(result.message || 'Local analytics cleared.', { variant: 'success' }); requestDashboardRefresh(); await load();
   };
   const clearAppLog = async () => {
@@ -1705,7 +1705,7 @@ function LocalDataSettings() {
     setBusy('logs');
     const result = await postJson('/api/diagnostics/reset', { target: 'runtime_logs', confirm: true }).catch(actionError => ({ ok: false, error: messageOf(actionError) }));
     setBusy('');
-    if (!result?.ok) { toast(result?.error || 'The saved app log could not be cleared.', { variant: 'error' }); return; }
+    if (!result?.ok) { toast(result?.error || 'The saved app log could not be cleared.', { variant: result?.outcomeUnknown ? 'warn' : 'error' }); return; }
     toast(result.message || 'Saved app log cleared.', { variant: 'success' }); requestDashboardRefresh(); await load();
   };
   const openFolder = async () => {

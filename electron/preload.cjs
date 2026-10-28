@@ -82,7 +82,8 @@ if (surface === 'dashboard') {
   });
 } else if (surface === 'splash') {
   contextBridge.exposeInMainWorld('relaiSplash', {
-    onStatus: callback => subscribe('startup:status', callback, 'Startup-status')
+    onStatus: callback => subscribe('startup:status', callback, 'Startup-status'),
+    openSetup: () => ipcRenderer.invoke('startup:open-setup')
   });
 } else if (surface === 'pulse') {
   contextBridge.exposeInMainWorld('relaiPulse', {
@@ -94,19 +95,9 @@ if (surface === 'dashboard') {
   contextBridge.exposeInMainWorld('electronAPI', {
     wizardDone: config => ipcRenderer.invoke('wizard:done', config),
     closeWizard: () => ipcRenderer.invoke('wizard:cancel'),
-    getRecoveryConfig: () => ipcRenderer.invoke('recovery:get-config'),
+    getRecoveryConfig: () => ipcRenderer.invoke('wizard:get-config'),
     openOpenAISetup: destination => ipcRenderer.invoke('wizard:open-openai-setup', destination),
-    openRecoverySetup: () => ipcRenderer.invoke('recovery:open-setup'),
-    startServer: () => ipcRenderer.invoke('server:start'),
-    stopServer: () => ipcRenderer.invoke('server:stop'),
-    restartConnection: () => ipcRenderer.invoke('recovery:restart-connection'),
-    relaunchApp: () => ipcRenderer.invoke('recovery:relaunch'),
     copyUrl: url => ipcRenderer.invoke('url:copy', url),
-    openDashboard: () => ipcRenderer.invoke('url:open-dashboard'),
-    getNotificationsEnabled: () => ipcRenderer.invoke('notifications:get-enabled'),
-    setNotificationsEnabled: enabled => ipcRenderer.invoke('notifications:set-enabled', enabled),
-    onServerStatus: callback => subscribe('server:status', callback, 'Server-status'),
-    onServerLog: callback => subscribe('server:log', callback, 'Server-log'),
     copyText: text => ipcRenderer.invoke('url:copy', text),
     fitWindowToContent: size => ipcRenderer.send('window:fit-content', size)
   });

@@ -47,7 +47,11 @@ async function probeHttpTarget(workspace, _config, target, args = {}, requested 
       if (next.origin !== allowedOrigin) throw new Error('HTTP probe refused a redirect outside the configured local Rel.AI origin.');
       current = next.toString();
     }
-    const summary = await readResponseSummary(response);
+    // Event streams intentionally never finish. A successful HTTP response
+    // already proves reachability; do not wait for an endless body to close.
+    const streaming = /^text\/event-stream\b/i.test(response.headers.get('content-type') || '');
+    const summary = streaming ? { bytes: 0, sample: '' } : await readResponseSummary(response);
+    if (streaming) void response.body?.cancel().catch(() => {});
     const text = summary.sample;
     const title = ((text.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '');
     return {

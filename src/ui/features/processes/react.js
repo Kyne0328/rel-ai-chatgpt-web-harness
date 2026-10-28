@@ -156,9 +156,11 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
     setStopError('');
     try {
       const result = await postJson('/api/processes/stop', row.operationId ? { operationId: row.operationId } : { processId: row.stopProcessId, graceMs: 3000 }, { timeout: 10000 });
-      const outcome = row.operationId
-        ? { status: result?.ok === false ? 'error' : 'requested', message: result?.ok === false ? result.error || 'Stop could not be requested.' : '' }
-        : processStopResult(result);
+      const outcome = result?.outcomeUnknown
+        ? { status: 'requested', message: result.error }
+        : row.operationId
+          ? { status: result?.ok === false ? 'error' : 'requested', message: result?.ok === false ? result.error || 'Stop could not be requested.' : '' }
+          : processStopResult(result);
       setStopState(outcome.status);
       setStopError(outcome.message);
     } catch (error) {

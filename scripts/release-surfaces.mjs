@@ -17,7 +17,7 @@ const RELEASE_CHANGE_FILES = Object.freeze([
   ...VERSION_JSON_FILES,
   'release-manifest.json',
   'CHANGELOG.md',
-  'electron/renderer/status.html'
+  'electron/renderer/splash.html'
 ]);
 
 function isReleaseChangeFile(relativePath) {

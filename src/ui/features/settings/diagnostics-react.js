@@ -40,6 +40,8 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
   const reportRef = useRef(report);
   const liveRef = useRef(live);
   const refreshTimerRef = useRef(0);
+  const retryTimerRef = useRef(0);
+  const retryCountRef = useRef(0);
   const requestRef = useRef(null);
   const requestGenerationRef = useRef(0);
   const workspaceRef = useRef(workspace);
@@ -79,20 +81,31 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
       try {
         const url = '/api/diagnostics' + (workspace ? `?workspace=${encodeURIComponent(workspace)}` : '');
         const result = await fetchJson(url, { cache: 'no-store' });
-        if (!result?.ok) throw new Error(result?.error || 'Troubleshooting info could not be loaded.');
+        if (!result?.ok) throw Object.assign(new Error(result?.error || 'Troubleshooting info could not be loaded.'), {
+          transient: result?.errorCode === 'dashboard_unavailable'
+        });
         if (!isCurrent()) return null;
         if (silent) captureLogPositions();
         reportRef.current = result;
+        retryCountRef.current = 0;
         setReportState({ workspace, report: result, error: '', desktopLogs: null });
         return result;
       } catch (error) {
         // The diagnostics API runs inside the service that may have crashed.
         const fallbackLogs = await loadDesktopRuntimeLogs();
         if (!isCurrent()) return null;
-        const previous = silent ? reportRef.current : null;
+        const previous = reportRef.current;
         reportRef.current = previous;
-        setReportState({ workspace, report: previous, error: fallbackLogs ? 'Local service is unavailable.' : messageOf(error), desktopLogs: fallbackLogs });
-        if (silent) setLive(false);
+        // A timed-out diagnostics request is not proof that the service died.
+        // Desktop fallback logs are available even while the service is healthy.
+        setReportState({ workspace, report: previous, error: messageOf(error), desktopLogs: fallbackLogs });
+        if (error?.transient === true && retryCountRef.current < 2 && !retryTimerRef.current) {
+          retryCountRef.current += 1;
+          retryTimerRef.current = window.setTimeout(() => {
+            retryTimerRef.current = 0;
+            void loadReport({ silent: true });
+          }, 1500);
+        }
         return null;
       } finally {
         if (requestRef.current === request) requestRef.current = null;
@@ -105,6 +118,9 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
     const generation = ++requestGenerationRef.current;
     workspaceRef.current = workspace;
     reportRef.current = null;
+    retryCountRef.current = 0;
+    if (retryTimerRef.current) window.clearTimeout(retryTimerRef.current);
+    retryTimerRef.current = 0;
     setReportState({ workspace, report: null, error: '', desktopLogs: null });
     setTunnelDoctor(null);
     void load();
@@ -112,6 +128,8 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
       if (requestGenerationRef.current === generation) requestGenerationRef.current += 1;
       window.clearTimeout(refreshTimerRef.current);
       refreshTimerRef.current = 0;
+      if (retryTimerRef.current) window.clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = 0;
     };
   }, [load, workspace]);
 

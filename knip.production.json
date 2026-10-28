@@ -43,7 +43,6 @@
         "main.js!",
         "preload.cjs!",
         "service-process.js!",
-        "renderer/status.js!",
         "renderer/wizard.js!",
         "renderer/pulse.js!",
         "renderer/splash.js!",

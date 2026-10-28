@@ -4,6 +4,7 @@ const originalDocument = globalThis.document;
 const originalEventSource = globalThis.EventSource;
 const originalWindow = globalThis.window;
 const originalFetch = globalThis.fetch;
+const originalCustomEvent = globalThis.CustomEvent;
 
 const visibilityListeners = new Set();
 const documentStub = {
@@ -121,11 +122,29 @@ try {
   const backgroundTimeout = await boundedBackgroundRequest;
   assert.equal(backgroundTimeout.ok, false);
   assert.match(backgroundTimeout.error, /timed out/i);
+
+  let serverCompletedChange = false;
+  let refreshCalls = 0;
+  globalThis.window.dispatchEvent = () => { refreshCalls += 1; };
+  globalThis.CustomEvent = class CustomEvent { constructor(type) { this.type = type; } };
+  globalThis.fetch = (_url, options = {}) => new Promise((_resolve, reject) => {
+    setTimeout(() => { serverCompletedChange = true; }, 70);
+    options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+  });
+  const unconfirmed = await api.postJson('/api/workspaces', { action: 'upsert' }, { timeout: 25, pauseTimeoutWhenHidden: false });
+  assert.equal(unconfirmed.ok, false);
+  assert.equal(unconfirmed.outcomeUnknown, true, 'lost POST responses must never assert that the server rolled back a mutation');
+  assert.equal(unconfirmed.errorCode, 'dashboard_action_unconfirmed');
+  assert.match(unconfirmed.error, /may have completed/i);
+  assert.equal(refreshCalls, 1, 'an unconfirmed mutation must refresh the authoritative dashboard state');
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(serverCompletedChange, true, 'the server can finish after the browser has reported an unconfirmed outcome');
 } finally {
   if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
   if (originalEventSource === undefined) delete globalThis.EventSource; else globalThis.EventSource = originalEventSource;
   if (originalWindow === undefined) delete globalThis.window; else globalThis.window = originalWindow;
   if (originalFetch === undefined) delete globalThis.fetch; else globalThis.fetch = originalFetch;
+  if (originalCustomEvent === undefined) delete globalThis.CustomEvent; else globalThis.CustomEvent = originalCustomEvent;
 }
 
 console.log('Dashboard event visibility lifecycle tests passed.');

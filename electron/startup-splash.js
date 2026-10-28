@@ -8,6 +8,7 @@ function createStartupSplashManager({
   let window = null;
   let loaded = false;
   let status = 'Starting Rel.AI…';
+  let blocked = false;
 
   function show() {
     if (isQuitting()) return null;
@@ -29,7 +30,7 @@ function createStartupSplashManager({
     created.webContents.on('did-finish-load', () => {
       if (window !== created || created.isDestroyed()) return;
       loaded = true;
-      created.webContents.send('startup:status', status);
+      created.webContents.send('startup:status', { text: status, blocked });
     });
     created.on('closed', () => {
       if (window === created) { window = null; loaded = false; }
@@ -42,9 +43,10 @@ function createStartupSplashManager({
     return created;
   }
 
-  function update(nextStatus) {
+  function update(nextStatus, options = {}) {
     status = String(nextStatus);
-    if (loaded && window && !window.isDestroyed()) window.webContents.send('startup:status', status);
+    blocked = options.blocked === true;
+    if (loaded && window && !window.isDestroyed()) window.webContents.send('startup:status', { text: status, blocked });
   }
 
   function hide() {

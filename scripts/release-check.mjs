@@ -95,9 +95,6 @@ expect(semver.valid(version) === version, `package.json version must be semver-l
 for (const relativePath of VERSION_JSON_FILES) assertJsonVersion(relativePath, version);
 assertTunnelClient();
 
-const statusHtml = read(path.join('electron', 'renderer', 'status.html'));
-expect(statusHtml.includes(`id="appVersion">v${version}</span>`), `electron/renderer/status.html must display v${version}`);
-
 const changelog = read('CHANGELOG.md');
 const entry = firstChangelogEntry(changelog);
 expect(entry, 'CHANGELOG.md must start with a ## [version] — YYYY-MM-DD entry after the title');

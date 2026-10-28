@@ -101,7 +101,7 @@ assert.match(String(rootPkg.scripts['verify:tunnel-client'] || ''), /scripts\/ve
 assert.equal(rootPkg.scripts['fetch:ngrok'], undefined);
 assert.equal(rootPkg.scripts['verify:ngrok'], undefined);
 
-for (const renderer of ['status.html', 'wizard.html']) {
+for (const renderer of ['wizard.html']) {
   const html = fs.readFileSync(path.join(root, 'electron', 'renderer', renderer), 'utf8');
   assert.ok(html.indexOf('color-tokens.css') < html.indexOf('app.css'), `${renderer} must load color tokens before component CSS.`);
 }

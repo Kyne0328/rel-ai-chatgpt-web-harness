@@ -55,14 +55,11 @@ assert.equal(connectionSummary(healthyWithUpdateReconnect).label, 'Ready', 'dash
 assert.equal(connectionLayerViews(healthyWithUpdateReconnect).find(layer => layer.key === 'dashboardUpdates')?.label, 'Updates reconnecting');
 assert.equal(connectionSummary({ ...healthyWithUpdateReconnect, publicEndpoint: { status: 'degraded' } }).label, 'Tunnel reconnecting');
 
-const recoverySource = read('electron/renderer/status.js');
 const dashboardSource = read('src/ui/react/main.js');
 const homeSource = read('src/ui/features/home/react.js');
 const routerSource = read('src/ui/router.js');
 const desktopHostSource = read('electron/desktop-host.js');
 const shellChromeSource = read('src/http/dashboardShellChrome.ts');
-assert.match(recoverySource, /taskActivityPresentation/, 'Recovery must consume Electron shared task semantics');
-assert.match(recoverySource, /category === 'attention'/, 'Recovery must render the shared attention category');
 assert.match(dashboardSource, /classifyTaskActivity\(data\?\.taskActivity\)/, 'dashboard top status must use the canonical task classifier');
 assert.match(homeSource, /classifyTaskActivity\(activity\)/, 'Home task summary must use the canonical task classifier');
 assert.doesNotMatch(routerSource, /relai_dashboard_route/, 'the retired dashboard-route persistence writer must stay removed');

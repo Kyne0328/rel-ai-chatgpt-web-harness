@@ -143,7 +143,7 @@ const launchSource = desktopHostSource.slice(
   desktopHostSource.indexOf('  async function launchConfiguredDesktop(launchOptions = {}) {'),
   desktopHostSource.indexOf('  async function relaunchApplication() {')
 );
-async function exerciseLaunch(options, listening) {
+async function exerciseLaunch(options, listening, errorCode = '') {
   const events = [];
   const context = {
     startupSplash: {
@@ -154,16 +154,21 @@ async function exerciseLaunch(options, listening) {
     startServer: async () => { events.push('start-service'); return { serverRunning: listening }; },
     serviceRuntime: { isListening: () => listening, waitUntilListening: async () => ({ serverRunning: listening }) },
     showDashboardWindow: async () => { events.push('dashboard'); },
-    recoveryWindowManager: {
-      show() { events.push('recovery'); },
-      hide() { events.push('hide-recovery'); }
-    },
-    serviceProcessClient: { markOnboardingHandoff: async () => {} },
+    setupWindowManager: { getWindow: () => null },
+    cancelStartupRetry: () => {},
+    showStartupProblem: message => events.push('problem: ' + message),
+    scheduleStartupRetry: () => events.push('retry'),
+    startupRetryAttempt: 0,
+    serviceProcessClient: { markOnboardingHandoff: async () => {
+      if (options.simulateHandoffTimeout) throw new Error('Rel.AI service request timed out: desktop-onboarding-handoff');
+    } },
+    appUpdater: { getStatus: () => ({}) },
+    pendingLogout: null,
     desktopPower: { getStatus: () => ({}) },
     taskActivityBlockReason: () => '',
-    currentStatus: { serverRunning: listening },
-    runtimeLogs: { append() {} },
-    ERROR_CODES: { DASHBOARD_UNAVAILABLE: 'dashboard', LOCAL_SERVICE_START_FAILED: 'service' },
+    currentStatus: { serverRunning: listening, errorCode },
+    runtimeLogs: { append(message) { events.push('log: ' + message); } },
+    ERROR_CODES: { DASHBOARD_UNAVAILABLE: 'dashboard', LOCAL_SERVICE_START_FAILED: 'service', CONFIGURATION_INVALID: 'config' },
     stopServer: async () => {},
     desktopStatusFailure: () => ({}),
     setStatus: () => {},
@@ -180,14 +185,45 @@ const quietLaunch = await exerciseLaunch({ background: true }, true);
 assert.ok(!quietLaunch.includes('splash'), 'launch-at-login must not open a splash');
 assert.ok(!quietLaunch.includes('dashboard'), 'launch-at-login must remain background-only');
 const failedLaunch = await exerciseLaunch({}, false);
-assert.deepEqual(failedLaunch.slice(-2), ['dismiss', 'recovery'], 'recovery must replace the splash on startup failure');
+assert.deepEqual(failedLaunch.slice(-2), ['problem: Local service unavailable. Retrying automatically…', 'retry'],
+  'startup failure must schedule a safe retry without showing a recovery page');
+const invalidConfigLaunch = await exerciseLaunch({}, false, 'config');
+assert.ok(invalidConfigLaunch.includes('problem: Connection settings need attention.'), 'a configuration blocker must explain why setup is needed');
+assert.ok(!invalidConfigLaunch.includes('retry'), 'a permanent configuration problem must not enter a restart loop');
+const lateHandoff = await exerciseLaunch({ firstRun: true, simulateHandoffTimeout: true }, true);
+assert.ok(lateHandoff.includes('dashboard'), 'a late onboarding handoff must not prevent opening a healthy dashboard');
+assert.ok(!lateHandoff.includes('retry'), 'a late handoff must not trigger a service restart');
+assert.ok(lateHandoff.some(entry => entry.startsWith('log: Onboarding handoff could not be confirmed:')),
+  'lost onboarding acknowledgment must be recorded as a warning, not a service failure');
+
+// Dashboard bootstrap may be delayed even when the utility remains listening.
+const bootstrapSource = serviceRuntimeSource.slice(
+  serviceRuntimeSource.indexOf('  async function buildDashboardConnection() {'),
+  serviceRuntimeSource.indexOf('  return { startServer, restartConnection,', serviceRuntimeSource.indexOf('  async function buildDashboardConnection() {'))
+);
+let bootstrapCalls = 0;
+const bootstrapConnection = runInNewContext(`${bootstrapSource}\nbuildDashboardConnection`, {
+  isListening: () => true,
+  serviceProcessClient: { async dashboardBootstrap() {
+    bootstrapCalls += 1;
+    if (bootstrapCalls === 1) throw Object.assign(new Error('late response'), { code: 'REL_AI_SERVICE_REQUEST_TIMEOUT' });
+    return { port: 3333, bootstrap: 'new-token' };
+  } },
+  dashboardWindowManager: { getState: () => ({ customTitleBar: false, platform: 'win32' }) },
+  lifecycleToken: 5
+});
+const bootstrapped = await bootstrapConnection();
+assert.equal(bootstrapCalls, 2, 'a late bootstrap acknowledgment must be retried without restarting the service');
+assert.ok(bootstrapped.url.includes('bootstrap=new-token'));
+assert.equal(bootstrapped.authGeneration, 5);
+
 
 // Reopening a stopped service must recover regardless of the retained window.
 const focusSource = desktopHostSource.slice(
   desktopHostSource.indexOf('  function focusActiveWindow() {'),
   desktopHostSource.indexOf('  function currentDashboardStatus() {')
 );
-for (const surface of ['dashboard', 'recovery']) {
+for (const surface of ['dashboard', 'splash']) {
   let dashboardOpenCalls = 0;
   let staleWindowShowCalls = 0;
   const focus = runInNewContext(`${focusSource}\nfocusActiveWindow`, {
@@ -195,8 +231,7 @@ for (const surface of ['dashboard', 'recovery']) {
     dashboardWindowManager: { getWindow: () => surface === 'dashboard' ? {
       show() { staleWindowShowCalls += 1; }, focus() {}
     } : null },
-    recoveryWindowManager: { getWindow: () => surface === 'recovery' ? { isVisible: () => true } : null,
-      show() { staleWindowShowCalls += 1; } },
+    startupSplash: { getWindow: () => surface === 'splash' ? { isVisible: () => true } : null },
     setupWindowManager: { getWindow: () => null, create() {} },
     hasConfiguredDesktop: () => true,
     serviceRuntime: { isListening: () => false },
@@ -244,7 +279,6 @@ try {
       setupWindowManager: { getWindow: () => null, create() { setupCalls += 1; } },
       dashboardWindowManager: { getWindow: () => null },
       serviceRuntime: { isListening: () => true },
-      recoveryWindowManager: { show() { throw new Error('unexpected recovery window'); } },
       showDashboardWindow: async () => { dashboardCalls += 1; },
       openDashboardWindow: async () => { focusOpens += 1; }
     };

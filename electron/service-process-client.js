@@ -12,7 +12,7 @@ function createServiceProcessClient(options = {}) {
     onLog = () => {},
     onExit = () => {},
     spawnTimeoutMs = SPAWN_TIMEOUT_MS,
-    startTimeoutMs = 30_000,
+    startTimeoutMs = 60_000,
     stopTimeoutMs = 12_000
   } = options;
   if (!utilityProcess || typeof utilityProcess.fork !== 'function') throw new TypeError('Electron utilityProcess is required.');
