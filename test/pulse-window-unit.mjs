@@ -94,8 +94,8 @@ assert.doesNotMatch(ordinaryWaiting.detail, /waiting on you/i, 'ordinary remote 
 
 const connectedIdle = projectPulseStatus({ serverRunning: true, tunnelStatus: 'running' });
 assert.equal(connectedIdle.visible, true, 'Pulse must remain available while Rel.AI is idle');
-assert.equal(connectedIdle.tone, 'idle');
-assert.equal(connectedIdle.detail, '');
+assert.equal(connectedIdle.tone, 'ready');
+assert.equal(connectedIdle.detail, 'Waiting for a ChatGPT request.');
 assert.equal(projectPulseStatus({ serverRunning: false }).visible, true);
 
 const pulseHtml = readFileSync(new URL('../electron/renderer/pulse.html', import.meta.url), 'utf8');
@@ -200,6 +200,7 @@ const fakeScreen = {
 };
 assert.deepEqual(pulseBounds(fakeScreen), { x: 1196, y: 68, width: 286, height: 48 });
 assert.deepEqual(pulseBounds(fakeScreen, { expanded: true }), { x: 1118, y: 68, width: 364, height: 384 });
+assert.deepEqual(pulseBounds(fakeScreen, { expanded: true, ready: true }), { x: 1118, y: 68, width: 364, height: 186 }, 'idle but connected Pulse must not show a large empty panel');
 assert.deepEqual(
   pulseBounds(fakeScreen, { expanded: true, anchor: { right: 150, top: 0 } }),
   { x: 100, y: 50, width: 364, height: 384 },

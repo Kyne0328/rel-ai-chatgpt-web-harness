@@ -65,7 +65,7 @@ function buildDiagnosticReport(input = {}) {
     })),
     tunnelHealth: normalizeTunnelHealth(input.tunnelHealth),
     resourceDiagnostics: normalizeResourceDiagnostics(input.resourceDiagnostics),
-    logs: { runtime, failedActivity }
+    logs: { runtime, failedActivity, requests: normalizeRequestActivity(input.mcpActivity) }
   };
   report.reportText = formatDiagnosticReport(report);
   return report;
@@ -298,6 +298,21 @@ function normalizeRuntimeLogs(value) {
   };
 }
 
+function normalizeRequestActivity(value) {
+  const events = Array.isArray(value?.recentEvents) ? value.recentEvents : [];
+  return events.filter(event => ['mcp_request_received', 'mcp_request_succeeded', 'mcp_request_failed', 'mcp_request_recovered', 'authentication_failed'].includes(event?.type))
+    .slice(-40).map(event => {
+      const type = String(event.type);
+      const action = type === 'mcp_request_received' ? 'Received' : type === 'mcp_request_succeeded' ? 'Completed' : type === 'mcp_request_failed' ? 'Failed' : type === 'mcp_request_recovered' ? 'Recovered' : 'Authentication failed';
+      const method = sanitizeText(event.method || '', 100);
+      return {
+        ts: sanitizeText(event.timestamp || '', 50),
+        level: type === 'mcp_request_failed' || type === 'authentication_failed' ? 'error' : 'info',
+        message: `${action}${method ? ` · ${method}` : ''}`
+      };
+    });
+}
+
 function normalizeFailedActivity(value) {
   const entries = Array.isArray(value?.entries) ? value.entries : Array.isArray(value) ? value : [];
   return entries
@@ -378,6 +393,10 @@ function formatDiagnosticReport(report) {
       const context = logContext(entry, ['code', 'workspace', 'taskId', 'eventId', 'tool', 'operation']);
       lines.push(`${entry.ts || ''} ${entry.level.toUpperCase()} ${entry.source}${context}: ${entry.message}`.trim());
     }
+  }
+  if (report.logs.requests.length) {
+    lines.push('', 'Recent ChatGPT requests:');
+    for (const entry of report.logs.requests.slice(-20)) lines.push(`${entry.ts} ${entry.level}: ${entry.message}`);
   }
   if (report.logs.failedActivity.length) {
     lines.push('', 'Recent failed activity:');

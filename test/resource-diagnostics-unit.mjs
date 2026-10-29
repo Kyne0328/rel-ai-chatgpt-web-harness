@@ -15,6 +15,13 @@ const explicitChecks = buildDiagnosticReport({
 assert.equal(explicitChecks.connectionState.localService.status, 'running');
 assert.deepEqual(explicitChecks.checks.map(check => check.status), ['Unavailable', 'Passed', 'Failed']);
 assert.deepEqual(buildDiagnosticReport({}).checks, [], 'missing probes never synthesize successful checks');
+const requestReport = buildDiagnosticReport({ mcpActivity: { recentEvents: [
+  { type: 'mcp_request_received', timestamp: '2026-10-29T15:10:00Z', requestId: 'private-request-id', method: 'tools/call', principal: 'private-user' },
+  { type: 'mcp_request_failed', timestamp: '2026-10-29T15:10:02Z', requestId: 'private-request-id', method: 'tools/call' }
+] } });
+assert.deepEqual(requestReport.logs.requests.map(event => event.message), ['Received · tools/call', 'Failed · tools/call']);
+assert.equal(requestReport.logs.requests.at(-1)?.level, 'error');
+assert.doesNotMatch(requestReport.reportText, /private-request-id|private-user/, 'request history must omit private identifiers');
 import { hostResourceDiagnosticSnapshot } from '../src/hostResourceScheduler.js';
 import { ResourceDiagnostics } from '../src/ui/features/settings/resource-diagnostics.js';
 

@@ -80,6 +80,7 @@
 .diagnostic-finding.warning { border-left-color: var(--ui-status-warning-foreground); }
 .diagnostic-finding.error { border-left-color: var(--ui-status-danger-foreground); }
 .diagnostic-log-grid { @apply grid gap-3; grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
+.diagnostic-log-grid > :last-child:nth-child(odd) { grid-column: 1 / -1; }
 .diagnostic-log-row { @apply rounded-lg text-[13px]; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); }
 .diagnostic-log-row.info { box-shadow: inset 2px 0 var(--ui-status-info-foreground); }
 .diagnostic-log-row.warning { box-shadow: inset 2px 0 var(--ui-status-warning-foreground); }

@@ -102,7 +102,6 @@ export function connectionSummary(state = {}) {
   if (tunnel === 'available' && Number(normalized.publicEndpoint.connectionCount || 0) > 1 && Number(normalized.publicEndpoint.issueCount || 0) > 0) {
     return summary('Rel.AI is connected', 'Connected', 'warn', partialTunnelMessage(normalized.publicEndpoint));
   }
-  if (activity === 'request_failed') return summary('The last ChatGPT request failed', 'Last request failed', 'warn', 'The local Rel.AI service and Secure MCP Tunnel are ready for another request. Restart Rel.AI only if a connection layer has a problem.');
   if (activity === 'active') return summary('ChatGPT is using Rel.AI', 'Active now', 'working', 'A request from ChatGPT is in progress.');
   if (activity === 'recent' || activity === 'connected') return summary('Rel.AI is available to ChatGPT', 'Recently active', 'ok', 'A recent ChatGPT request completed successfully.');
   return summary('Rel.AI is ready for ChatGPT', 'Ready', 'ok', 'This computer is connected and ready for ChatGPT.');

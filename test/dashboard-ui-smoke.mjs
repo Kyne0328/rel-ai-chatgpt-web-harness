@@ -4,14 +4,13 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { Icon } from '../src/ui/components/icons.js';
-import { OperationDiagnostics, RuntimeBuildIdentity } from '../src/ui/components/operation-diagnostics.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DESKTOP_NAV_ITEMS, MOBILE_MORE_NAV_ITEMS, MOBILE_NAV_ITEMS, MOBILE_PRIMARY_NAV_ITEMS, SETTINGS_NAV_ITEMS, SYSTEM_NAV_ITEMS, navigationCommands, routeMetadata } from '../src/ui/navigation-catalog.js';
 import { normalizeRouteKey } from '../src/ui/route-policy.js';
 import { repositorySummary } from '../src/ui/features/workspaces/model.js';
-import { advanceDeveloperUnlockClicks, runtimeCompatibilityNotice } from '../src/ui/features/settings/react.js';
+import { advanceDeveloperUnlockClicks } from '../src/ui/features/settings/react.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
@@ -21,34 +20,11 @@ const reactShell = read('src/ui/react/main.js');
 assert.match(reactShell, /id: 'commandPaletteBtn'[\s\S]*?'aria-label': `Open quick navigation \$\{shortcut\}`/, 'quick navigation must retain its purpose and visible platform shortcut in its accessible name at every width');
 assert.match(reactShell, /className: 'command-trigger-label'\s*\},\s*'Quick navigation\s+'/, 'quick navigation needs textual whitespace before its shortcut; a CSS gap does not separate its visible label text');
 
-assert.match(settingsReact, /about-runtime-mismatch/, 'Runtime/source skew needs a bounded developer-facing notice instead of staying invisible');
 assert.match(settingsReact, /Beta \/ pre-release \(developers & testers\)/, 'the beta release option must identify its developer/tester audience before selection');
 assert.match(settingsReact, /updateChannel === 'beta' \? h\('div', \{[\s\S]*className: 'application-update-beta-warning'[\s\S]*role: 'alert'/, 'selecting beta must show a prominent accessible warning');
 assert.match(settingsReact, /serious bugs or incomplete changes/i, 'the beta warning must state the risk of severe breakage plainly');
 assert.match(settingsReact, /reinstall if a beta build fails/i, 'the beta warning must preserve the recovery consequence');
 assert.match(settingsReact, /Use Stable for normal work/, 'the beta warning must clearly recommend Stable for normal use');
-assert.equal(runtimeCompatibilityNotice(
-  { applicationVersion: '1.1.3' },
-  { applicationVersion: '1.1.3' },
-  { available: true, metadataMatches: true }
-), null, 'matching runtime/source metadata must stay silent');
-assert.equal(runtimeCompatibilityNotice(
-  { applicationVersion: '1.1.4' },
-  { applicationVersion: '1.1.4' },
-  { available: true, metadataMatches: false, compatible: true, restartRequired: false }
-), null, 'same-version compatible metadata drift must not produce a false runtime/source warning');
-const restartNotice = runtimeCompatibilityNotice(
-  { applicationVersion: '1.1.2' },
-  { applicationVersion: '1.1.3' },
-  { available: true, metadataMatches: false, restartRequired: true, activeTasksPreventRestart: false }
-);
-assert.match(restartNotice?.message || '', /Restart Rel\.AI.*current source/i, 'restart-required skew must tell developers how to load the current source');
-const blockedRestartNotice = runtimeCompatibilityNotice(
-  { applicationVersion: '1.1.2' },
-  { applicationVersion: '1.1.3' },
-  { available: true, metadataMatches: false, restartRequired: true, activeTasksPreventRestart: true }
-);
-assert.match(blockedRestartNotice?.message || '', /Finish active tasks before restarting/i, 'active work must suppress misleading immediate-restart guidance');
 const extensionsReact = read('src/ui/features/extensions/react.js');
 const homeReact = read('src/ui/features/home/react.js');
 const activityReact = read('src/ui/features/activity/react.js');
@@ -91,7 +67,9 @@ assert.equal(SETTINGS_NAV_ITEMS.find(item => item.id === 'connection')?.href, '#
 assert.equal(normalizeRouteKey('settings/privacy'), 'settings/privacy', 'Privacy & data must be a canonical settings route instead of falling back to Overview');
 assert.match(extensionsReact, /confirmPermissions: true/, 'Extension installation must require permission review confirmation');
 assert.match(settingsReact, /developerOptionsUnlocked \? h\(DeveloperOptions, \{/, 'Developer options must stay hidden until they are unlocked');
-assert.match(settingsReact, /writeDeveloperFeatureEnabled\(feature, enabled\)/, 'Developer feature changes must persist independently');
+assert.match(settingsReact, /writeExperimentalFeatureEnabled\(feature, enabled\)/, 'Developer feature changes must persist independently');
+assert.match(settingsReact, /href: '#extensions'/, 'Developer options must offer a direct Extensions action');
+assert.match(settingsReact, /label: 'Build'/, 'Build identifier must expose the developer options unlock');
 assert.doesNotMatch(settingsReact, /label: 'Developer mode'/, 'Developer options must not use a global Developer mode toggle');
 assert.match(reactShell, /extensionsEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'The Extensions flag must expose Extensions in desktop navigation');
 assert.match(reactShell, /extensionsEnabled \? \[\.\.\.MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM\]/, 'The Extensions flag must expose Extensions in mobile navigation');
@@ -147,34 +125,3 @@ for (const size of [12, 16, 18, 24, 32]) {
 }
 
 console.log('Dashboard UI ownership and icon rendering contracts passed.');
-
-// Render the actual shared inspector component, including older uninstrumented events.
-const renderDiagnostics = props => renderToStaticMarkup(React.createElement(OperationDiagnostics, props));
-const legacyDiagnostics = renderDiagnostics({ operation: { status: 'completed' } });
-assert.match(legacyDiagnostics, /Operation ended/);
-assert.match(legacyDiagnostics, /Unknown/);
-assert.doesNotMatch(legacyDiagnostics, /role="status"|data-clock-elapsed-start/, 'historical/unknown records must not announce or run a live clock');
-const liveDiagnostics = renderDiagnostics({ live: true, operation: { id: 'operation-wait', metadata: { timeline: {
-  phase: 'queued', phaseStartedAt: '2026-10-05T01:00:00Z', executed: false,
-  blocking: { owner: '<script>untrusted owner</script>', operationId: 'owner-op' },
-  phases: [{ phase: 'accepted', durationMs: 123, endedAt: '2026-10-05T01:00:00Z' }]
-} } } });
-assert.match(liveDiagnostics, /Waiting for this owner/);
-assert.match(liveDiagnostics, /<details><summary>Details<\/summary>/, 'diagnostic disclosure must use native keyboard-operable semantics');
-assert.match(liveDiagnostics, /role="status" aria-atomic="true"/);
-assert.doesNotMatch(liveDiagnostics.match(/role="status"[\s\S]*?<\/div>/)?.[0] || '', /data-clock-elapsed-start/, 'elapsed clocks must not create second-by-second live announcements');
-assert.match(liveDiagnostics, /data-clock-elapsed-start/);
-assert.match(liveDiagnostics, /123 ms/);
-assert.match(liveDiagnostics, /&lt;script&gt;untrusted owner&lt;\/script&gt;/);
-assert.doesNotMatch(liveDiagnostics, /<script>/, 'backend diagnostic labels must render as escaped text');
-const readyDiagnostics = renderDiagnostics({ live: true, operation: { timeline: { phase: 'result-ready', terminationCertainty: 'unconfirmed' } } });
-assert.match(readyDiagnostics, /Result ready/);
-assert.match(readyDiagnostics, /termination is unconfirmed/);
-assert.doesNotMatch(readyDiagnostics, /data-clock-elapsed-start/);
-const buildDiagnostics = renderToStaticMarkup(React.createElement(RuntimeBuildIdentity, {
-  runtime: { buildIdentity: { buildId: 'runtime-a' } }, compatibility: { metadataMatches: true }
-}));
-assert.match(buildDiagnostics, /Runtime details/);
-assert.match(buildDiagnostics, /Build ID<\/dt><dd>runtime-a/);
-assert.match(buildDiagnostics, /Source\/build parity<\/dt><dd>Unknown/);
-assert.match(buildDiagnostics, /role="tooltip"/);

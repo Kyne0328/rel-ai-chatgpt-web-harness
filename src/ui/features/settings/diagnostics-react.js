@@ -381,15 +381,21 @@ function SystemCheckGrid({ report = {} }) {
     status: local === 'running' ? 'Passed' : local === 'starting' ? 'Checking' : local === 'failed' ? 'Failed' : 'Unavailable',
     detail: local ? 'Recorded service state: ' + local : 'Local service status is unavailable.' },
     ...(Array.isArray(report.checks) ? report.checks : [])];
-  return h('div', { className: 'system-check-grid', 'data-diagnostic-region': 'checks' }, checks.map(check => {
-    const tone = check.status === 'Passed' ? 'ok' : check.status === 'Failed' ? 'bad' : check.status === 'Checking' ? 'working' : 'warn';
-    const tunnelParts = String(check.title || '').startsWith('Secure MCP Tunnel · ')
-      ? check.title.split(' · ') : null;
-    return h('div', { className: 'system-check-card ' + tone, key: check.id },
-      h('div', { className: 'system-check-card-head' }, h('strong', { className: 'system-check-title' }, tunnelParts ? tunnelParts[0] : check.title), h(StatusPill, { label: check.status, tone })),
-      tunnelParts ? h('code', { className: 'system-check-id' }, tunnelParts.slice(1).join(' · ')) : null,
-      h('p', { className: 'system-check-detail' }, check.detail));
-  }));
+  const passed = checks.filter(check => check.status === 'Passed').length;
+  const requiresAttention = checks.some(check => check.status === 'Failed' || check.status === 'Unavailable');
+  return h('details', { className: 'diagnostic-technical-checks', 'data-diagnostic-region': 'checks', open: requiresAttention },
+    h('summary', null, h('span', null, 'Technical connection checks'),
+      h('span', { className: 'settings-help' }, `${passed} of ${checks.length} passed`)),
+    h('div', { className: 'system-check-grid' }, checks.map(check => {
+      const tone = check.status === 'Passed' ? 'ok' : check.status === 'Failed' ? 'bad' : check.status === 'Checking' ? 'working' : 'warn';
+      const tunnelParts = String(check.title || '').startsWith('Secure MCP Tunnel · ')
+        ? check.title.split(' · ') : null;
+      return h('div', { className: 'system-check-card ' + tone, key: check.id },
+        h('div', { className: 'system-check-card-head' }, h('strong', { className: 'system-check-title' }, tunnelParts ? tunnelParts[0] : check.title), h(StatusPill, { label: check.status, tone })),
+        tunnelParts ? h('code', { className: 'system-check-id' }, tunnelParts.slice(1).join(' · ')) : null,
+        h('p', { className: 'system-check-detail' }, check.detail));
+    }))
+  );
 }
 
 function TunnelHealthSummary({ health = {} }) {
@@ -559,13 +565,15 @@ function findingSeverityLabel(severity) { return severity === 'error' ? 'Blockin
 
 function DiagnosticLogs({ view, registerLog }) {
   return h('div', { className: 'diagnostic-log-grid', 'data-diagnostic-region': 'logs' },
-    h(LogPanel, { keyName: 'failed', title: 'Failed activity', entries: view.failed, emptyText: 'No failed activity matches the current filters.', available: true, subtitle: '', registerLog })
+    h(LogPanel, { keyName: 'failed', title: 'Failed activity', entries: view.failed, emptyText: 'No failed activity matches the current filters.', available: true, subtitle: '', registerLog }),
+    h(LogPanel, { keyName: 'requests', title: 'ChatGPT requests', entries: view.requests, emptyText: 'No recent request events match the current filters.', available: true, subtitle: 'Recent calls and their completion or failure.', registerLog }),
+    h(LogPanel, { keyName: 'service', title: 'Service & tunnel events', entries: view.service, emptyText: 'No service or tunnel messages match the current filters.', available: true, subtitle: 'Connection recovery, transport errors, and timeouts.', registerLog })
   );
 }
 function LogPanel({ keyName, title, entries, emptyText, available, subtitle, registerLog }) {
   return h('section', { className: 'card diagnostic-log-card' },
     h('div', { className: 'card-head' }, h('div', null, h('h3', null, title), subtitle ? h('p', null, subtitle) : null), h('span', { className: 'section-action' }, available ? `${entries.length} shown` : 'Unavailable')),
-    h('div', { className: 'card-body diagnostic-log-list', role: 'log', 'aria-label': title, ref: element => registerLog(keyName, element) }, available && entries.length ? entries.map((entry, index) => h(LogRow, { entry, key: `${entry.ts || 'unknown'}:${entry.eventId || index}` })) : h('div', { className: 'diagnostic-log-empty' }, emptyText))
+    h('div', { className: 'card-body diagnostic-log-list', role: 'log', tabIndex: 0, 'aria-label': title, ref: element => registerLog(keyName, element) }, available && entries.length ? entries.map((entry, index) => h(LogRow, { entry, key: `${entry.ts || 'unknown'}:${entry.eventId || index}` })) : h('div', { className: 'diagnostic-log-empty' }, emptyText))
   );
 }
 function LogRow({ entry }) {
@@ -617,7 +625,7 @@ function diagnosticSources(report) {
   return [...sources].filter(Boolean).sort((left, right) => left.localeCompare(right));
 }
 function filteredDiagnosticView(report, filters) {
-  if (!report) return { findings: [], failed: [], totalFindings: 0, totalFailed: 0 };
+  if (!report) return { findings: [], failed: [], requests: [], service: [], totalFindings: 0, totalFailed: 0 };
   const showFindings = filters.scope === 'all' || filters.scope === 'findings';
   const showFailed = filters.scope === 'all' || filters.scope === 'failed';
   const matchesSearch = values => !filters.search || values.some(value => String(value || '').toLowerCase().includes(filters.search));
@@ -631,7 +639,16 @@ function filteredDiagnosticView(report, filters) {
     if (filters.source !== 'all' && source !== filters.source) return false;
     return matchesSearch([source, entry.message, entry.error, entry.workspace]);
   }) : [];
-  return { findings, failed, totalFindings: (report.findings || []).length, totalFailed: failedEntries.length };
+  const showEvents = filters.scope === 'all' && filters.source === 'all';
+  const eventMatches = entry => (filters.severity === 'all'
+    || (filters.severity === 'error' && entry.level === 'error')
+    || (filters.severity === 'warning' && entry.level === 'warning')
+    || (filters.severity === 'info' && entry.level === 'info'))
+    && matchesSearch([entry.message, entry.source, entry.code]);
+  const requests = showEvents ? (report.logs?.requests || []).filter(eventMatches) : [];
+  const service = showEvents ? (report.logs?.runtime?.entries || []).filter(entry =>
+    /tunnel|timeout|request|mcp|connection|retry|reconnect|transport/i.test([entry.source, entry.component, entry.code, entry.message].join(' ')) && eventMatches(entry)).slice(-40) : [];
+  return { findings, failed, requests, service, totalFindings: (report.findings || []).length, totalFailed: failedEntries.length };
 }
 function downloadDiagnosticState(report) { const exportedAt = new Date().toISOString(); const payload = { schemaVersion: 1, exportedAt, report }; const filename = `relai-diagnostic-state-${exportedAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z').replace('T', '-')}.json`; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = filename; link.hidden = true; document.body.appendChild(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 0); return { ok: true, filename }; }
 function messageOf(error) { return error instanceof Error ? error.message : String(error || 'The action failed.'); }

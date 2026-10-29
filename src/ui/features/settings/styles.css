@@ -14,6 +14,12 @@
   .connection-goal-select select, .connection-goal-controls button { min-height: 44px; }
 }
 
+.diagnostic-technical-checks { border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); }
+.diagnostic-technical-checks > summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; cursor: pointer; padding: 12px 14px; font-size: 13px; font-weight: 600; }
+.diagnostic-technical-checks[open] > summary { border-bottom: 1px solid var(--ui-border-subtle); }
+.diagnostic-technical-checks .system-check-grid { padding: 12px; }
+.about-build-trigger { min-height: 32px; border: 0; border-radius: var(--radius-sm); padding: 4px 6px; background: transparent; color: var(--ui-text-secondary); font: 12px/1.5 'Geist Mono Variable', monospace; text-align: left; overflow-wrap: anywhere; }
+.about-build-trigger:hover { background: var(--ui-surface-secondary); color: var(--ui-text-primary); }
 .settings-loading { padding: 24px; color: var(--ui-text-secondary); }
 .workspace-validation-preference-row {
   display: flex;

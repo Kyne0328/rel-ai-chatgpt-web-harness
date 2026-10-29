@@ -159,6 +159,9 @@ button { font: inherit; }
 .pulse-shell[data-tone="working"].is-heartbeating .pulse-state-dot::after {
   animation: pulse-breathe 1.6s cubic-bezier(.16, 1, .3, 1) 1;
 }
+.pulse-shell[data-tone="ready"] .pulse-state-dot { background: var(--ui-status-success-foreground); box-shadow: 0 0 0 3px var(--ui-status-success-background); }
+.pulse-shell[data-tone="ready"] .pulse-state-label,
+.pulse-shell[data-tone="ready"] .pulse-expanded-state { color: var(--ui-status-success-foreground); }
 .pulse-shell[data-tone="waiting"] .pulse-state-dot {
   background: var(--ui-status-info-foreground);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ui-status-info-foreground) 18%, transparent);
@@ -289,6 +292,7 @@ button { font: inherit; }
 .pulse-progress-caption span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pulse-progress-caption span:last-child { flex: none; }
 
+.pulse-shell[data-tone="ready"] .pulse-context { display: none; }
 .pulse-context {
   display: grid;
   gap: 1px;

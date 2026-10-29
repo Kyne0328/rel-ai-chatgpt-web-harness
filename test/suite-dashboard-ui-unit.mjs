@@ -313,11 +313,9 @@ async function case_connection_state_unit() {
     ...base,
     mcpConnection: { status: 'ready', activityStatus: 'request_failed', lastRequestMethod: 'tools/call' }
   });
-  assert.equal(connectionSummary(failed).label, 'Last request failed');
-  assert.equal(connectionSummary(failed).title, 'The last ChatGPT request failed');
-  assert.doesNotMatch(connectionSummary(failed).message, /tools\//i);
-  assert.match(connectionSummary(failed).message, /local Rel\.AI service and Secure MCP Tunnel are ready for another request/i);
-  assert.match(connectionSummary(failed).message, /Restart Rel\.AI only if a connection layer has a problem/i);
+  assert.equal(connectionSummary(failed).label, 'Ready', 'an earlier failed request must not turn a healthy connection yellow');
+  assert.equal(connectionSummary(failed).tone, 'ok');
+  assert.equal(connectionLayerViews(failed).find(layer => layer.key === 'mcpClient')?.label, 'Last request failed', 'individual request failures remain visible in connection details');
   
   const legacyClientState = connectionStateFor({
     ...base,

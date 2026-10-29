@@ -70,7 +70,6 @@ const presentationFiles = [
 const presentation = presentationFiles.map(readSource).join('\n');
 
 for (const label of [
-  'Developer options',
   'Show technical details',
   'Runtime details',
   'Source/build parity',
@@ -89,6 +88,8 @@ for (const label of [
 }
 
 const settings = readSource('src/ui/features/settings/react.js');
+assert.match(settings, /developerOptionsUnlocked \? h\(DeveloperOptions/, 'Developer options are available only after the build unlock');
+assert.match(settings, /href: '#extensions'/, 'Hidden Extensions manager remains reachable from developer options');
 const diagnostics = readSource('src/ui/features/settings/diagnostics-react.js');
 const activity = readSource('src/ui/features/activity/react.js');
 const sessions = readSource('src/ui/features/sessions/react.js');
@@ -96,7 +97,7 @@ const tools = readSource('src/ui/features/tools/react.js');
 const processes = readSource('src/ui/features/processes/react.js');
 const workspaces = readSource('src/ui/features/workspaces/react.js');
 
-assert.match(settings, /title: 'Experimental features'/, 'Extensions must live under a normal Experimental features setting');
+assert.match(settings, /title: 'Developer options'/, 'Extensions must remain under unlocked developer options');
 assert.match(diagnostics, /Export support information/, 'Troubleshooting must keep the support export');
 assert.match(diagnostics, /Failed activity/, 'Troubleshooting must keep readable failed activity');
 assert.doesNotMatch(diagnostics, /JSON\.stringify\(finding\.details/, 'Troubleshooting must not render raw finding JSON');
@@ -106,4 +107,4 @@ assert.doesNotMatch(tools, /tool\.parameters|tool-parameter-list/, 'Tools must n
 assert.doesNotMatch(processes, /data-archive-recovery|Archive record|Restore record|useDeveloperFeatureEnabled/, 'Running Commands must not expose recovery bookkeeping');
 assert.doesNotMatch(workspaces, /action: 'override'|Accept risk and unlock|Developer recovery details/, 'Projects must not expose the unsafe recovery override');
 
-console.log('Experimental features migrate Extensions without restoring developer-only UI, and internal implementation details stay out of production surfaces.');
+console.log('Extensions remain behind developer options; unrelated internal implementation details stay out of production surfaces.');

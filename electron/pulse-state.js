@@ -60,12 +60,13 @@ function projectPulseStatus(status = {}) {
       actionRequired: false
     };
   }
+  const ready = status.serverRunning === true && normalizeStatus(status.tunnelStatus) === 'running';
   return {
     visible: true,
-    tone: 'idle',
-    badge: 'Idle',
-    title: 'Rel.AI is idle',
-    detail: '',
+    tone: ready ? 'ready' : 'idle',
+    badge: ready ? 'Ready' : 'Idle',
+    title: ready ? 'Rel.AI is ready' : 'Rel.AI is idle',
+    detail: ready ? 'Waiting for a ChatGPT request.' : '',
     route: '#home',
     taskCount: 0,
     actionRequired: false

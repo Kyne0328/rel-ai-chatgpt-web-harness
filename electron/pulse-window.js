@@ -5,6 +5,7 @@ const PULSE_WIDTH = 286;
 const PULSE_HEIGHT = 48;
 const PULSE_EXPANDED_WIDTH = 364;
 const PULSE_EXPANDED_HEIGHT = 384;
+const PULSE_READY_HEIGHT = 186;
 const PULSE_MARGIN = 18;
 const PULSE_UNLINKED_SHOW_DELAY_MS = 300;
 
@@ -74,6 +75,7 @@ function createPulseWindowManager(options = {}) {
   function update(status = {}) {
     currentStatus = status && typeof status === 'object' ? status : {};
     currentModel = projectPulseStatus(currentStatus);
+    if (expanded) applyGeometry();
     sync();
     return pulseModel();
   }
@@ -219,7 +221,7 @@ function createPulseWindowManager(options = {}) {
 
   function applyGeometry() {
     if (!window || window.isDestroyed()) return;
-    const bounds = pulseBounds(screen, { expanded, anchor: customAnchor });
+    const bounds = pulseBounds(screen, { expanded, ready: currentModel.tone === 'ready', anchor: customAnchor });
     if (wayland) {
       window.setSize?.(bounds.width, bounds.height, false);
       return;
@@ -282,7 +284,7 @@ function createPulseWindowManager(options = {}) {
 function pulseBounds(screen, options = {}) {
   const expanded = options.expanded === true;
   const width = expanded ? PULSE_EXPANDED_WIDTH : PULSE_WIDTH;
-  const height = expanded ? PULSE_EXPANDED_HEIGHT : PULSE_HEIGHT;
+  const height = expanded ? (options.ready === true ? PULSE_READY_HEIGHT : PULSE_EXPANDED_HEIGHT) : PULSE_HEIGHT;
   const anchor = options.anchor && Number.isFinite(options.anchor.right) && Number.isFinite(options.anchor.top)
     ? options.anchor
     : null;

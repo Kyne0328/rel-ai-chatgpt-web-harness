@@ -18,6 +18,19 @@ import { supportPolicyView } from './desktop-update-policy.js';
 const h = React.createElement;
 const RELEASES_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
 const EXPERIMENTAL_FEATURE_FLAGS = Object.freeze(Object.values(EXPERIMENTAL_FEATURES));
+const DEVELOPER_OPTIONS_UNLOCK_KEY = 'relai_developer_options_unlocked';
+
+function readDeveloperOptionsUnlocked() {
+  try { return window.localStorage.getItem(DEVELOPER_OPTIONS_UNLOCK_KEY) === '1'; }
+  catch { return false; }
+}
+
+export function advanceDeveloperUnlockClicks(previous = {}, now = Date.now()) {
+  if (previous.unlocked) return previous;
+  const withinWindow = Number.isFinite(previous.startedAt) && now - previous.startedAt <= 2500 && now >= previous.startedAt;
+  const count = withinWindow ? Number(previous.count || 0) + 1 : 1;
+  return { count, startedAt: withinWindow ? previous.startedAt : now, unlocked: count >= 5 };
+}
 const NOTIFICATION_DEFAULTS = Object.freeze({
   enabled: true,
   taskCompleted: true,
@@ -49,7 +62,7 @@ export function SettingsView({ data = {}, subPage = '' }) {
     preferences: h(PreferencesPage),
     privacy: h(PrivacyDataPage, { computerControl: data.config?.computerControl, projectAccess: data.config?.projectAccess }),
     application: h(ApplicationPage),
-    about: h(AboutPage, { metadata: data.application || {} })
+    about: h(AboutPage, { metadata: data.application || {}, buildId: data.desktopStatus?.buildStatus?.buildId || data.runtime?.buildIdentity?.buildId || '' })
   }[page] || h(PreferencesPage);
   return h('div', { id: '__settings-content', className: 'settings-content', 'data-settings-react': page },
     h('nav', { className: 'settings-navigation', 'aria-label': 'Settings pages' },
@@ -1211,6 +1224,7 @@ function ApplicationPage() {
   const [lifecycle, setLifecycle] = useState(undefined);
   const [lifecycleError, setLifecycleError] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [developerOptionsUnlocked] = useState(readDeveloperOptionsUnlocked);
   const [experimentalFeatures, setExperimentalFeatures] = useState(() => Object.fromEntries(
     EXPERIMENTAL_FEATURE_FLAGS.map(feature => [feature.id, readExperimentalFeatureEnabled(feature.id)])
   ));
@@ -1231,21 +1245,24 @@ function ApplicationPage() {
       : lifecycle === undefined ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading app settings…') : h(React.Fragment, null,
       h(StartupSettings, { initial: lifecycle }),
       h(ApplicationUpdates, { lifecycle }),
-      h(ExperimentalFeatures, {
+      developerOptionsUnlocked ? h(DeveloperOptions, {
         enabledFeatures: experimentalFeatures,
         onChange: (feature, enabled) => setExperimentalFeatures(current => ({
           ...current,
           [feature]: writeExperimentalFeatureEnabled(feature, enabled)
         }))
-      }),
+      }) : null,
       typeof desktop?.quitApp === 'function' ? h(Card, { title: 'Application controls' }, h(QuitRow)) : null
     )
   );
 }
 
-function ExperimentalFeatures({ enabledFeatures, onChange }) {
-  return h(Card, { title: 'Experimental features' },
-    h('p', { className: 'settings-help' }, 'Features still being tested. They may change or be removed in a future update.'),
+function DeveloperOptions({ enabledFeatures, onChange }) {
+  return h(Card, { title: 'Developer options' },
+    h('p', { className: 'settings-help' }, 'Experimental tools for developers and testers. These are optional and may change.'),
+    h('div', { className: 'connection-actions' },
+      h('a', { className: 'buttonlike secondary', href: '#extensions' }, 'Open Extensions')
+    ),
     EXPERIMENTAL_FEATURE_FLAGS.map(feature => h(ToggleRow, {
       key: feature.id,
       label: feature.label,
@@ -1805,7 +1822,19 @@ function QuitRow() {
   );
 }
 
-function AboutPage({ metadata }) {
+function AboutPage({ metadata, buildId = '' }) {
+  const buildLabel = buildId || 'Development build';
+  const [unlockClicks, setUnlockClicks] = useState({});
+  const [unlocked, setUnlocked] = useState(readDeveloperOptionsUnlocked);
+  const onBuildClick = () => {
+    if (unlocked) return;
+    const next = advanceDeveloperUnlockClicks(unlockClicks);
+    setUnlockClicks(next);
+    if (!next.unlocked) return;
+    try { window.localStorage.setItem(DEVELOPER_OPTIONS_UNLOCK_KEY, '1'); } catch {}
+    setUnlocked(true);
+    toast('Developer options unlocked. Open Settings → App to manage Extensions.', { variant: 'success' });
+  };
   const repositoryUrl = validatedGitHubUrl(metadata.repositoryUrl);
   const developer = metadata.developer || {};
   const developerUrl = validatedGitHubUrl(developer.profileUrl);
@@ -1822,6 +1851,11 @@ function AboutPage({ metadata }) {
         h('h4', null, metadata.name || 'Rel.AI MCP'),
         h('p', null, 'Version: ', metadata.version ? `v${metadata.version}` : 'Unknown')
       )),
+      h(AboutRow, { label: 'Build' }, h('button', {
+        type: 'button', className: 'about-build-trigger', onClick: onBuildClick,
+        title: unlocked ? 'Developer options unlocked' : 'Build identifier',
+        'aria-label': unlocked ? `Build ${buildLabel}. Developer options unlocked.` : `Build ${buildLabel}`
+      }, buildLabel)),
       developer.name ? h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': developer.username ? `${developer.name} on GitHub (@${developer.username})` : `${developer.name} on GitHub` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')) : null,
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${repositoryLabel(repositoryUrl)} source code on GitHub` }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
     ),

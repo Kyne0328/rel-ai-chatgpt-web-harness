@@ -196,8 +196,8 @@
     transform: none;
     -webkit-app-region: no-drag;
   }
-  .window-titlebar .window-titlebar-button:hover:not(:disabled) { color: var(--ui-text-primary); background: var(--ui-surface-raised); border-color: var(--ui-border-subtle); }
-  .window-titlebar .window-titlebar-button:active:not(:disabled) { background: color-mix(in srgb, var(--ui-surface-raised) 78%, var(--ui-text-primary) 22%); transform: none; }
+  .window-titlebar .window-titlebar-button:hover:not(:disabled) { color: var(--ui-text-primary); background: var(--ui-surface-secondary); border-color: var(--ui-border-subtle); }
+  .window-titlebar .window-titlebar-button:active:not(:disabled) { background: color-mix(in srgb, var(--ui-surface-secondary) 90%, var(--ui-text-primary) 10%); transform: none; }
   .window-titlebar .window-titlebar-button:focus-visible { position: relative; z-index: 1; outline-offset: -3px; }
   .window-titlebar .window-titlebar-close:hover:not(:disabled),
   .window-titlebar .window-titlebar-close:active:not(:disabled) { color: var(--ui-window-close-foreground); background: var(--ui-window-close-background); border-color: var(--ui-window-close-background); }

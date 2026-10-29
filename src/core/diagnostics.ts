@@ -17,6 +17,7 @@ import { clearLocalAnalytics } from '../localAnalytics.js';
 import * as productUx from '../productUx.js';
 import { taskHistoryPersistenceSnapshot } from '../taskHistoryStore.ts';
 import { activeLogicalTaskCount } from '../taskState.js';
+import { mcpConnectionManager } from '../mcp/connectionManager.js';
 
 export interface DiagnosticsRuntimeOptions {
   host?: string;
@@ -149,6 +150,7 @@ export async function getDiagnosticsReport(
     tunnelHealth: desktopStatus?.tunnelHealth || null,
     resourceDiagnostics: resourceDiagnosticsSnapshot(hostResources, cacheStats(), managedRoots),
     runtimeLogs,
+    mcpActivity: mcpConnectionManager.snapshot(),
     auditLogs,
     taskHistoryPersistence: taskHistoryPersistenceSnapshot(),
     activeTaskCount: activeLogicalTaskCount(activity)

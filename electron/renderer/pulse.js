@@ -63,6 +63,7 @@ function announceStatus(message) {
 
 function stateLabel(model) {
   if (model.actionRequired) return 'Action required';
+  if (model.tone === 'ready') return 'Ready';
   if (model.tone === 'working') return 'Working';
   if (model.tone === 'waiting') return 'Waiting';
   if (model.tone === 'attention') return 'Needs attention';
