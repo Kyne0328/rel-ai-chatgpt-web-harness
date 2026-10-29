@@ -28,7 +28,6 @@ import { OPERATION_IDS as OP } from './operationIds.js';
 import { beginCommandActivity } from '../commandActivity.js';
 
 const DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 30_000;
-const WORK_FINISH_QUEUE_TIMEOUT_MS = 2_000;
 const DEFAULT_MUTATION_WATCHDOG_MS = 5 * 60_000;
 const MUTATION_WATCHDOG_TERMINATION_GRACE_MS = 15_000;
 
@@ -275,9 +274,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             ? Math.max(1, deadlineAtMs - Date.now())
             : context?.backgroundFallbackExecution === true
               ? positiveMilliseconds(process.env.REL_AI_MCP_WORKSPACE_QUEUE_TIMEOUT_MS, DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS)
-              : executionName === OP.WORK_FINISH
-                ? WORK_FINISH_QUEUE_TIMEOUT_MS
-                : queueMode === 'write' && isMutationScope(queueScope)
+              : queueMode === 'write' && isMutationScope(queueScope)
                   ? positiveMilliseconds(process.env.REL_AI_MCP_WORKSPACE_QUEUE_TIMEOUT_MS, DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS)
                   : 0,
           {

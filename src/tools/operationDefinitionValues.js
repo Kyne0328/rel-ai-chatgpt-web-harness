@@ -367,7 +367,7 @@ const OPERATION_DEFINITION_VALUES = [
     description: "relai_work finish preserves legacy behavior: it closes normal tasks, records an iteration (not task success) in Loop Mode, and awaits supported achievement evidence for adaptive Goals. relai_work complete explicitly closes a successful task in normal, Goal, or Loop Mode, prevents further continuation, and records the actual validation state without inventing passed checks. Adaptive Goals still require fresh objective-achievement evidence. Stop, cancel, and failure are not success. Rel.AI never falls back to another task in the workspace.",
     inputSchema: {"type":"object","properties":{"workspace":{"type":"string"},"summary":{"type":"string","minLength":1,"maxLength":2000},"action":{"type":"string","enum":["complete"]}},"required":["summary"],"additionalProperties":false},
     handlerName: 'completeTask',
-    behavior: {"audit":"completion","summary":"completion","concurrencyScope":"mutation"},
+    behavior: {"audit":"completion","summary":"completion","concurrencyScope":"task"},
     dashboard: {"category":"Workflow"}
   },
 ];

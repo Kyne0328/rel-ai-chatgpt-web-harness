@@ -40,43 +40,54 @@ try {
   const blocker = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' });
   const finisher = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' });
 
+  const startedPath = path.join(temp, 'mutation-started');
+  const releasePath = path.join(temp, 'mutation-release');
   const activeMutation = callTool('relai_exec', {
     workspace: 'app',
     work_id: blocker.work_id,
     executable: process.execPath,
-    argv: ['-e', 'setTimeout(() => process.exit(0), 4000)']
+    argv: ['-e', [
+      "const fs=require('node:fs');",
+      "fs.writeFileSync(process.argv[1],'started');",
+      "const timer=setInterval(()=>{if(fs.existsSync(process.argv[2])){clearInterval(timer);process.exit(0)}},10);"
+    ].join(''), startedPath, releasePath]
   });
-  await new Promise(resolve => setTimeout(resolve, 150));
+  // A file handshake proves that the other command still owns the mutation
+  // lane. No arbitrary sleep is needed to guess whether it has started.
+  try {
+    await new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => { clearInterval(poll); reject(new Error('Mutation fixture never started.')); }, 8000);
+      const poll = setInterval(() => {
+        if (!fs.existsSync(startedPath)) return;
+        clearInterval(poll);
+        clearTimeout(deadline);
+        resolve();
+      }, 10);
+    });
 
-  const startedAt = Date.now();
-  await assert.rejects(
-    callTool('relai_work', {
-      action: 'finish',
-      workspace: 'app',
-      work_id: finisher.work_id,
-      summary: 'Completion should retry instead of waiting behind unrelated long mutation work.'
-    }),
-    error => error?.code === 'WORKSPACE_OPERATION_QUEUE_TIMEOUT' && error?.retryable === true
-  );
-  const waitMs = Date.now() - startedAt;
-  assert.ok(waitMs >= 1500 && waitMs < 3500, `work.finish queue deadline should be bounded near 2s, observed ${waitMs}ms`);
-
-  const activeResult = await activeMutation;
-  assert.equal(activeResult.commandSucceeded, true);
-
-  const completed = await callTool('relai_work', {
-    action: 'finish',
-    workspace: 'app',
-    work_id: finisher.work_id,
-    summary: 'Completion succeeds once the unrelated mutation barrier is free.'
-  });
-  assert.equal(completed.completionKnown, true);
+    const completed = await new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => reject(new Error('Unrelated task finish waited for the active mutation.')), 8000);
+      callTool('relai_work', {
+        action: 'finish',
+        workspace: 'app',
+        work_id: finisher.work_id,
+        summary: 'Independent completion does not wait for a running command in another task.'
+      }).then(value => { clearTimeout(deadline); resolve(value); }, error => { clearTimeout(deadline); reject(error); });
+    });
+    assert.equal(completed.completionKnown, true);
+    assert.equal(completed.ok, true);
+    assert.equal(fs.existsSync(releasePath), false, 'Task A must still be running when Task B completes');
+  } finally {
+    fs.writeFileSync(releasePath, 'release');
+    const activeResult = await activeMutation;
+    assert.equal(activeResult.commandSucceeded, true, 'finishing another task must not terminate the running command');
+  }
 
   await callTool('relai_work', {
     action: 'cancel',
     workspace: 'app',
     work_id: blocker.work_id,
-    reason: 'Queue deadline regression coverage complete.'
+    reason: 'Independent task finish regression coverage complete.'
   });
 } finally {
   await flushTaskHistoryPersistence();
@@ -87,4 +98,4 @@ try {
   fs.rmSync(temp, { recursive: true, force: true, maxRetries: process.platform === 'win32' ? 20 : 5, retryDelay: 100 });
 }
 
-console.log('work.finish fails retryably instead of stalling behind an unrelated long mutation.');
+console.log('work.finish completes independently while another task keeps the mutation lane.');

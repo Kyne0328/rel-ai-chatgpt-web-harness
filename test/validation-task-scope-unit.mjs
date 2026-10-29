@@ -13,6 +13,7 @@ import { repositoryIntelligence } from '../src/repository/intelligence/service.j
 import { resetTaskHistoryCaches } from '../src/taskHistoryStorage.ts';
 import { flushTaskHistoryPersistence } from '../src/taskHistoryStore.ts';
 import { resetToolActivity } from '../src/toolActivity.js';
+import { runWorkspaceOperation } from '../src/workspaceOperationQueue.js';
 
 const callTool = (name, args, context = {}) => rawCallTool(name, args, { principal: 'local:trusted', ...context });
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-validation-task-scope-'));
@@ -79,6 +80,30 @@ try {
   assert.equal(plan.recommended, 'focused');
   assert.equal(repositoryIntelligence.status({ alias: 'app', path: workspacePath }, readConfig()).watching, false,
     'validation impact analysis must not start a live repository watcher');
+
+  // A source mutation in Task A must not prevent independent Task B from
+  // completing, even when the mutation lane stays occupied throughout finish.
+  const independentFinishTask = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
+  let releaseSource;
+  let sourceStarted;
+  const sourceAdmitted = new Promise(resolve => { sourceStarted = resolve; });
+  const sourceGate = runWorkspaceOperation('app', async () => {
+    sourceStarted();
+    await new Promise(resolve => { releaseSource = resolve; });
+  }, { mode: 'write', scope: 'mutation', taskId: task.work_id });
+  await sourceAdmitted;
+  try {
+    const independentFinish = await callTool('relai_work', {
+      action: 'finish', workspace: 'app', work_id: independentFinishTask.work_id,
+      summary: 'This task finished while another task kept its mutation lane.'
+    }, context);
+    assert.equal(independentFinish.completionKnown, true, 'unrelated long-running command cannot block ordinary finish');
+    assert.equal(independentFinish.ok, true);
+    assert.equal(independentFinish.validationStatus, 'not_required');
+  } finally {
+    releaseSource();
+    await sourceGate;
+  }
 
   const unrelated = await callTool('relai_work', { mode: 'normal', action: 'begin', workspace: 'app', bootstrap: 'none' }, context);
   await callTool('relai_edit', {

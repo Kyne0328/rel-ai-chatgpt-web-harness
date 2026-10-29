@@ -207,12 +207,11 @@ assert.deepEqual(globalOrder, [
 ]);
 assert.equal(pendingWorkspaceOperations(), 0);
 
-// Standalone task completion is a short repository-wide critical section. It must
-// not race a source-workspace operation from another logical task after validation
-// has been checked but before completion is accepted.
+// Task completion is independent of the long mutation lane. Workspace scratch
+// deletion still enters the existing short mutation boundary below.
 {
   const finishBehavior = getOperationDefinition(OP.WORK_FINISH)?.behavior;
-  assert.equal(finishBehavior?.concurrencyScope, 'mutation', 'work.finish must use the short mutation barrier');
+  assert.equal(finishBehavior?.concurrencyScope, 'task', 'work.finish must not inherit the long mutation lane');
 
   const sourceOperationStarted = deferred();
   const releaseSourceOperation = deferred();

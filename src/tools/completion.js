@@ -447,16 +447,17 @@ function requireMatchingTaskContext(taskId) {
 async function cleanupTaskScratch(config, workspace, taskId, authority, signal) {
   let workspaceCleanup = { removedPaths: [], skippedPaths: [], error: '' };
   try {
-    workspaceCleanup = {
-      ...workspaceCleanup,
-      ...await cleanupTaskWorkspaceEphemeralFiles(
-        workspace,
-        config,
-        taskId,
-        authority?.ephemeralWorkspaceFiles || [],
-        { signal }
-      )
-    };
+    const files = authority?.ephemeralWorkspaceFiles || [];
+    if (files.length) {
+      // Only workspace-file deletion needs the shared mutation lane. Ordinary
+      // task completion must not wait for an unrelated long-running command.
+      workspaceCleanup = {
+        ...workspaceCleanup,
+        ...await runWorkspaceMutationBoundary(workspace.alias,
+          () => cleanupTaskWorkspaceEphemeralFiles(workspace, config, taskId, files, { signal }),
+          { taskId, signal })
+      };
+    }
   } catch (error) {
     signal?.throwIfAborted?.();
     workspaceCleanup.error = error instanceof Error ? error.message : String(error);
