@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { getApplicationMetadata } from '../appMetadata.js';
 import { writeJsonAtomic } from '../durableState.ts';
 import { runProcess } from '../process.js';
+import { reportExtensionProgress, extensionProgress } from './installProgress.js';
 import {
   extensionBinRoot,
   managedExtensionBundleCommandPath,
@@ -251,6 +252,8 @@ const catalogEntrySchema = z.object({
   publisher: z.string().min(1).max(100),
   permissions: z.array(z.enum(PERMISSIONS)).max(PERMISSIONS.length),
   autoInstall: z.boolean().optional(),
+  downloadBytes: z.number().int().positive().max(3 * 1024 * 1024 * 1024).optional(),
+  downloadApproximate: z.boolean().optional(),
   featured: z.boolean().optional()
 }).strict().superRefine((entry, ctx) => {
   if (!semver.valid(entry.version)) ctx.addIssue({ code: 'custom', path: ['version'], message: 'version must be valid semantic versioning.' });
@@ -642,22 +645,23 @@ async function fetchExtensionCatalog(options = {}) {
   return catalog;
 }
 
-async function prepareManagedCommandInstall(config, manifest, extensionStaging) {
+async function prepareManagedCommandInstall(config, manifest, extensionStaging, progress) {
   if (manifest.kind !== 'cli' || !manifest.install) return null;
   const artifact = manifest.install.artifacts.find(item => item.platform === process.platform && item.arch === process.arch);
   if (!artifact) return null;
   if (manifest.install.type === 'bundle') {
-    return await prepareManagedBundleInstall(config, manifest, artifact, extensionStaging);
+    return await prepareManagedBundleInstall(config, manifest, artifact, extensionStaging, progress);
   }
   if (manifest.install.type === 'conda') {
-    return await prepareManagedCondaInstall(config, manifest, artifact, extensionStaging);
+    return await prepareManagedCondaInstall(config, manifest, artifact, extensionStaging, progress);
   }
 
   const command = String(manifest.entrypoints.command || '').trim();
   if (!command) return null;
   const disposition = managedCommandDisposition(config, manifest.id, command);
   if (!disposition) return null;
-  const content = await fetchFile(artifact.url, MAX_INSTALL_ARTIFACT_BYTES, `CLI artifact for ${manifest.id}`, { timeoutMs: 120_000 });
+  const content = await fetchFile(artifact.url, MAX_INSTALL_ARTIFACT_BYTES, 'CLI artifact for ' + manifest.id, { timeoutMs: 120_000,
+    onProgress: (bytes, total) => progress?.('Downloading tool', bytes, total) });
   const digest = crypto.createHash('sha256').update(content).digest('hex');
   if (digest !== artifact.sha256) throw new Error(`Checksum mismatch for CLI artifact '${command}'.`);
 
@@ -680,7 +684,7 @@ async function prepareManagedCommandInstall(config, manifest, extensionStaging) 
   }
 }
 
-async function prepareManagedBundleInstall(config, manifest, artifact, extensionStaging) {
+async function prepareManagedBundleInstall(config, manifest, artifact, extensionStaging, progress) {
   const managed = artifact.commands
     .map(item => ({ item, disposition: managedCommandDisposition(config, manifest.id, item.command) }))
     .filter(item => item.disposition);
@@ -695,8 +699,9 @@ async function prepareManagedBundleInstall(config, manifest, artifact, extension
     `tool bundle for ${manifest.id}`,
     archivePath,
     artifact.sha256,
-    { timeoutMs: 15 * 60_000 }
+    { timeoutMs: 15 * 60_000, onProgress: (bytes, total) => progress?.('Downloading tool bundle', bytes, total) }
   );
+  progress?.('Extracting tool bundle');
   try {
     await extractToolBundleZip(archivePath, toolRoot, {
       ownerConfig: config,
@@ -729,7 +734,7 @@ async function prepareManagedBundleInstall(config, manifest, artifact, extension
   })));
 }
 
-async function prepareManagedCondaInstall(config, manifest, artifact, extensionStaging) {
+async function prepareManagedCondaInstall(config, manifest, artifact, extensionStaging, progress) {
   const managed = artifact.commands
     .map(item => ({ item, disposition: managedCommandDisposition(config, manifest.id, item.command) }))
     .filter(item => item.disposition);
@@ -768,7 +773,7 @@ async function prepareManagedCondaInstall(config, manifest, artifact, extensionS
     'micromamba runtime',
     managerPath,
     manager.sha256,
-    { timeoutMs: 180_000 }
+    { timeoutMs: 180_000, onProgress: (bytes, total) => progress?.('Downloading runtime', bytes, total) }
   );
   if (process.platform !== 'win32') fs.chmodSync(managerPath, 0o700);
 
@@ -783,7 +788,7 @@ async function prepareManagedCondaInstall(config, manifest, artifact, extensionS
       `Conda package ${index + 1} for ${manifest.id}`,
       packagePath,
       pkg.sha256,
-      { timeoutMs: 15 * 60_000 }
+      { timeoutMs: 15 * 60_000, onProgress: (bytes, total) => progress?.('Downloading package ' + (index + 1) + '/' + lock.packages.length, bytes, total) }
     );
     const stat = fs.statSync(packagePath);
     if (stat.size !== pkg.size) throw new Error(`Conda package ${index + 1} for '${manifest.id}' has an unexpected size.`);
@@ -792,6 +797,7 @@ async function prepareManagedCondaInstall(config, manifest, artifact, extensionS
 
   const explicit = ['@EXPLICIT', ...localPackages.map(packagePath => pathToFileURL(packagePath).href), ''].join('\n');
   fs.writeFileSync(explicitPath, explicit, { mode: 0o600 });
+  progress?.('Installing downloaded packages');
   await runMicromamba(managerPath, [
     'create',
     '--yes',
@@ -1018,6 +1024,8 @@ function extensionReviewFingerprint(source, entry) {
     publisher: entry.publisher,
     permissions: [...entry.permissions].sort(),
     autoInstall: entry.autoInstall === true,
+    downloadBytes: entry.downloadBytes || null,
+    downloadApproximate: entry.downloadApproximate === true,
     featured: entry.featured === true
   };
   return crypto.createHash('sha256').update(JSON.stringify(reviewed)).digest('hex');
@@ -1025,9 +1033,15 @@ function extensionReviewFingerprint(source, entry) {
 
 async function installExtension(config, id, options = {}) {
   const lease = acquireExtensionOperation(config);
+  reportExtensionProgress(id, { status: 'installing', phase: 'Checking catalog', downloadedBytes: 0, totalBytes: null });
   try {
     assertExtensionRecovery(config, lease);
-    return await installExtensionUnderLease(config, id, options);
+    const installed = await installExtensionUnderLease(config, id, options);
+    reportExtensionProgress(id, { status: 'completed', phase: 'Installed' });
+    return installed;
+  } catch (error) {
+    reportExtensionProgress(id, { status: 'failed', phase: 'Installation failed', error: String(error?.message || error).slice(0, 400) });
+    throw error;
   } finally { lease.release(); }
 }
 
@@ -1072,6 +1086,7 @@ async function installExtensionUnderLease(config, id, options) {
   }
   assertInstallCompatibility(manifest, config);
   return await commitExtensionPackage(config, manifest, {
+    progress: (phase, downloadedBytes = 0, totalBytes = null) => reportExtensionProgress(id, { status: 'installing', phase, downloadedBytes, totalBytes }),
     metadata: {
       sourceId: source.id,
       repositoryUrl: source.repositoryUrl,
@@ -1080,7 +1095,7 @@ async function installExtensionUnderLease(config, id, options) {
     },
     readFile: file => {
       const fileUrl = new URL(file.path.replaceAll('\\', '/'), entry.manifestUrl).href;
-      return fetchFile(fileUrl, MAX_EXTENSION_FILE_BYTES, `extension file ${file.path}`);
+      return fetchFile(fileUrl, MAX_EXTENSION_FILE_BYTES, 'extension file ' + file.path, { onProgress: (bytes, total) => reportExtensionProgress(id, { status: 'installing', phase: 'Downloading ' + file.path, downloadedBytes: bytes, totalBytes: total }) });
     }
   });
 }
@@ -1178,8 +1193,9 @@ async function commitExtensionPackage(config, manifest, options) {
   let totalBytes = 0;
   let packageCommitted = false;
   try {
-    managedInstall = await prepareManagedCommandInstall(config, manifest, staging);
+    managedInstall = await prepareManagedCommandInstall(config, manifest, staging, options.progress);
     for (const file of manifest.files) {
+      options.progress?.('Downloading ' + file.path);
       const content = Buffer.from(await options.readFile(file));
       totalBytes += content.length;
       if (content.length > MAX_EXTENSION_FILE_BYTES || totalBytes > MAX_EXTENSION_TOTAL_BYTES) {
@@ -1191,6 +1207,7 @@ async function commitExtensionPackage(config, manifest, options) {
       fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
       fs.writeFileSync(destination, content, { mode: 0o600 });
     }
+    options.progress?.('Verifying and installing');
     fs.writeFileSync(path.join(staging, MANIFEST_FILENAME), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
     const commandIdentity = command => {
       const file = managedExtensionCommandPath(config, command);
@@ -1544,6 +1561,7 @@ async function fetchFile(url, maxBytes, label, options = {}) {
     if (!response.body) return Buffer.alloc(0);
     const reader = response.body.getReader();
     const chunks = [];
+    let lastProgressAt = 0;
     let totalBytes = 0;
     let completed = false;
     try {
@@ -1556,7 +1574,12 @@ async function fetchFile(url, maxBytes, label, options = {}) {
           throw new Error(`The ${label} exceeds the allowed size.`);
         }
         chunks.push(Buffer.from(value));
+        if (options.onProgress && (Date.now() - lastProgressAt >= 100 || declaredLength && totalBytes === declaredLength)) {
+          options.onProgress(totalBytes, declaredLength || null);
+          lastProgressAt = Date.now();
+        }
       }
+      options.onProgress?.(totalBytes, declaredLength || null);
       completed = true;
       return Buffer.concat(chunks, totalBytes);
     } finally {
@@ -1596,6 +1619,7 @@ async function downloadVerifiedFile(url, maxBytes, label, destination, expectedS
     created = true;
     const digest = crypto.createHash('sha256');
     let totalBytes = 0;
+    let lastProgressAt = 0;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -1611,7 +1635,12 @@ async function downloadVerifiedFile(url, maxBytes, label, destination, expectedS
         offset += written;
       }
       digest.update(chunk);
+      if (options.onProgress && (Date.now() - lastProgressAt >= 100 || declaredLength && totalBytes === declaredLength)) {
+        options.onProgress(totalBytes, declaredLength || null);
+        lastProgressAt = Date.now();
+      }
     }
+    options.onProgress?.(totalBytes, declaredLength || null);
     const actualSha256 = digest.digest('hex');
     if (actualSha256 !== expectedSha256) throw new Error(`Checksum mismatch for ${label}.`);
     fs.closeSync(fd);
@@ -1754,5 +1783,5 @@ function errorMessage(error) {
 }
 
 export {
-  MAX_EXTENSION_FILE_BYTES, MAX_EXTENSION_TOTAL_BYTES, PERMISSIONS, configuredExtensionSources, downloadVerifiedFile, extensionCatalogSchema, extensionDashboard, extensionSkillRecords, extensionSourceId, extensionsRoot, installExtension, installLocalExtension, listInstalledExtensions, parseExtensionCatalog, parseExtensionManifest, removeExtension, validateExtensionSource
+  extensionProgress, MAX_EXTENSION_FILE_BYTES, MAX_EXTENSION_TOTAL_BYTES, PERMISSIONS, configuredExtensionSources, downloadVerifiedFile, extensionCatalogSchema, extensionDashboard, extensionSkillRecords, extensionSourceId, extensionsRoot, installExtension, installLocalExtension, listInstalledExtensions, parseExtensionCatalog, parseExtensionManifest, removeExtension, validateExtensionSource
 };

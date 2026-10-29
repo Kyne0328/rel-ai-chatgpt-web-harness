@@ -2,6 +2,7 @@ import { readConfig, writeConfig } from '../config.js';
 import {
   configuredExtensionSources,
   extensionDashboard,
+  extensionProgress,
   extensionSourceId,
   installExtension,
   listInstalledExtensions,
@@ -11,6 +12,10 @@ import {
 
 export async function getExtensionsDashboard(refresh = false): Promise<Record<string, unknown>> {
   return await extensionDashboard(readConfig(), { refresh }) as Record<string, unknown>;
+}
+
+export function getExtensionsInstallProgress(): Record<string, unknown> {
+  return { ok: true, installs: extensionProgress() };
 }
 
 export async function installDashboardExtension(id: string, sourceId = '', reviewFingerprint = ''): Promise<Record<string, unknown>> {

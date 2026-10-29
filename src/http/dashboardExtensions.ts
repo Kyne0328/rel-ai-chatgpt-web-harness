@@ -1,6 +1,7 @@
 import {
   addDashboardExtensionSource,
   getExtensionsDashboard,
+  getExtensionsInstallProgress,
   installDashboardExtension,
   removeDashboardExtension,
   removeDashboardExtensionSource
@@ -11,6 +12,10 @@ import type { HttpRouteContext } from './types.ts';
 async function handleApiExtensions(ctx: HttpRouteContext): Promise<void> {
   const refresh = ctx.parsed.searchParams.get('refresh') === '1';
   sendJson(ctx.res, 200, await getExtensionsDashboard(refresh));
+}
+
+function handleApiExtensionsProgress(ctx: HttpRouteContext): void {
+  sendJson(ctx.res, 200, getExtensionsInstallProgress());
 }
 
 async function handleApiExtensionsAction(ctx: HttpRouteContext): Promise<void> {
@@ -54,4 +59,4 @@ async function handleApiExtensionsAction(ctx: HttpRouteContext): Promise<void> {
   }
 }
 
-export { handleApiExtensions, handleApiExtensionsAction };
+export { handleApiExtensions, handleApiExtensionsAction, handleApiExtensionsProgress };

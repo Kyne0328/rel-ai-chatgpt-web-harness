@@ -69,7 +69,7 @@
     "validate:plugin": "node scripts/validate-plugin.mjs",
     "pack:plugin": "node scripts/pack-plugin.mjs",
     "test:plugin": "node test/plugin-package-unit.mjs && node test/extension-authoring-unit.mjs",
-    "test:skills": "node test/skill-package-behavior-unit.mjs && node test/plugin-metadata-unit.mjs && node test/extensions-unit.mjs && node test/skill-system-budget-unit.mjs && node test/extensions-ui-unit.mjs",
+    "test:skills": "node test/skill-package-behavior-unit.mjs && node test/plugin-metadata-unit.mjs && node test/extensions-unit.mjs && node test/extension-download-progress-unit.mjs && node test/skill-system-budget-unit.mjs && node test/extensions-ui-unit.mjs",
     "test:tool-routing": "node test/host-local-routing-contract-unit.mjs && node test/tool-behavior-evaluator-unit.mjs && node test/agent-trace-evaluator-unit.mjs",
     "audit:agent-traces": "node scripts/evaluate-agent-traces.mjs",
     "audit:skill-traces": "node scripts/evaluate-agent-traces.mjs test/fixtures/skill-routing-live-scenarios.json",

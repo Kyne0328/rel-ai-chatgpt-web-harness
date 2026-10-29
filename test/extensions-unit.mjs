@@ -443,6 +443,7 @@ try {
     { version: '1.0.1' },
     { permissions: ['workspace.read', 'workspace.write'] },
     { autoInstall: true },
+    { downloadBytes: 1310000000 },
     { manifestUrl: 'https://changed.test/relai-extension.json' },
     { publisher: 'Different publisher' }
   ]) {

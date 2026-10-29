@@ -14,12 +14,40 @@ const EXTENSIONS_REPOSITORY_URL = 'https://github.com/Kyne0328/rel-ai-extensions
 const EXTENSIONS_LOAD_TIMEOUT_MS = 30 * 1000;
 const EXTENSIONS_CACHE_TTL_MS = 15 * 1000;
 
+function extensionSize(bytes, approximate = false) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return 'Size not provided';
+  const unit = bytes >= 1e9 ? 'GB' : bytes >= 1e6 ? 'MB' : 'KB';
+  const divisor = unit === 'GB' ? 1e9 : unit === 'MB' ? 1e6 : 1e3;
+  return (approximate ? 'Approx. ' : '') + (bytes / divisor).toFixed(2) + ' ' + unit;
+}
+
+function ExtensionDownloadProgress({ items }) {
+  const active = items.filter(item => item.status === 'installing');
+  if (!active.length) return null;
+  return h('div', { className: 'extensions-download-progress', role: 'status', 'aria-live': 'polite' },
+    active.map(item => {
+      const known = Number(item.totalBytes) > 0;
+      const done = Math.max(0, Number(item.downloadedBytes) || 0);
+      return h('div', { key: item.id, className: 'extensions-download-progress-item' },
+        h('strong', null, 'Installing ' + item.id),
+        h('span', null, item.phase || 'Preparing'),
+        h('progress', { max: known ? item.totalBytes : undefined, value: known ? Math.min(done, item.totalBytes) : undefined,
+          'aria-label': 'Extension download progress' }),
+        known ? h('span', null, extensionSize(done) + ' / ' + extensionSize(item.totalBytes) + ' (' + Math.round(100 * Math.min(done, item.totalBytes) / item.totalBytes) + '%)')
+          : done > 0 ? h('span', null, 'Downloaded ' + extensionSize(done) + '; total size unknown') : null
+      );
+    })
+  );
+}
+
 function createExtensionsRoute() {
   return function ExtensionsRoute() {
     const [activeTab, setActiveTab] = useState('installed');
     const [data, setData] = useState(null);
     const [busy, setBusy] = useState('');
     const [error, setError] = useState('');
+    const [installProgress, setInstallProgress] = useState([]);
+    const hasActiveInstall = installProgress.some(item => item.status === 'installing');
     const [inspectedExtension, setInspectedExtension] = useState(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [filterKind, setFilterKind] = useState('all');
@@ -71,6 +99,21 @@ function createExtensionsRoute() {
       return () => { mountedRef.current = false; requestRef.current += 1; };
     }, []);
 
+    useEffect(() => {
+      let mounted = true;
+      const poll = async () => {
+        try {
+          const result = await fetchJson('/api/extensions/progress', { cache: 'no-store', timeout: 5000 });
+          if (mounted && result?.ok && Array.isArray(result.installs)) setInstallProgress(result.installs);
+        } catch {}
+      };
+      void poll();
+      const active = Boolean(busy && (busy.startsWith('install:') || busy.startsWith('update:')))
+        || hasActiveInstall;
+      const timer = active ? setInterval(() => { void poll(); }, 1200) : null;
+      return () => { mounted = false; if (timer) clearInterval(timer); };
+    }, [busy, hasActiveInstall]);
+
     const refreshCatalog = async () => {
       if (!beginOperation('refresh')) return;
       try {
@@ -107,8 +150,11 @@ function createExtensionsRoute() {
         return;
       }
       const permissions = permissionSummary(entry.permissions);
+      const sizeMessage = Number(entry.downloadBytes) > 0
+        ? ' Download: ' + extensionSize(entry.downloadBytes, entry.downloadApproximate) + '. Extra disk space is required after extraction.'
+        : ' Download size was not provided by the publisher.';
       const cliSetup = entry.autoInstall
-        ? ' If a required command is missing and the manifest includes a managed artifact for this computer, Rel.AI downloads and verifies that tool. Otherwise, the extension installs as Setup needed until the command is available.'
+        ? ' Rel.AI downloads and verifies any available managed tool required by this extension.'
         : entry.kind === 'cli'
           ? ' This extension requires its command to be available on your system PATH.'
           : '';
@@ -116,13 +162,14 @@ function createExtensionsRoute() {
         title: action === 'update' ? `Update ${entry.name}` : `Install ${entry.name}`,
         message: `${action === 'update' ? 'Update to' : 'Install'} version ${entry.version} from ${entry.sourceName || 'the Rel.AI extension catalog'}?`,
         detail: permissions.length
-          ? `This extension requests these permissions: ${permissions}. Rel.AI still applies its normal authorization rules and permission prompts to local actions.${cliSetup}`
-          : `This extension requests no additional permissions. Rel.AI still applies its normal authorization rules to local actions.${cliSetup}`,
+          ? `This extension requests these permissions: ${permissions}. Rel.AI still applies its normal authorization rules and permission prompts to local actions.${cliSetup}${sizeMessage}`
+          : `This extension requests no additional permissions. Rel.AI still applies its normal authorization rules to local actions.${cliSetup}${sizeMessage}`,
         confirmLabel: action === 'update' ? 'Update extension' : 'Install extension'
       });
       if (!confirmed || !beginOperation(`${action}:${entry.id}`)) return;
+      setInspectedExtension(null);
       try {
-      const result = await postJson('/api/extensions', { action, id: entry.id, sourceId: entry.sourceId, reviewFingerprint: entry.reviewFingerprint, confirmPermissions: true }, { cache: 'no-store', timeout: 15 * 60 * 1000 });
+      const result = await postJson('/api/extensions', { action, id: entry.id, sourceId: entry.sourceId, reviewFingerprint: entry.reviewFingerprint, confirmPermissions: true }, { cache: 'no-store', timeout: 60 * 60 * 1000 });
       if (!result?.ok) {
         toast(result?.error || `Could not ${action} the extension.`, { variant: 'error' });
         return;
@@ -141,6 +188,8 @@ function createExtensionsRoute() {
       if (mountedRef.current && inspectedExtension?.id === entry.id) {
         setInspectedExtension(null);
       }
+      } catch (error) {
+        toast(error instanceof Error ? error.message : 'Extension installation failed.', { variant: 'error' });
       } finally {
         finishOperation();
       }
@@ -269,6 +318,8 @@ function createExtensionsRoute() {
         h('p', null, error),
         h('button', { className: 'secondary compact-button', type: 'button', disabled: Boolean(busy), onClick: () => void refreshCatalog() }, 'Try again')
       ) : null,
+
+      h(ExtensionDownloadProgress, { items: installProgress }),
 
       !data && !error ? h(ExtensionsLoadingSkeleton) : null,
 
@@ -682,6 +733,9 @@ function ExtensionProCard({
           h(Icon, { name: 'sparkles', size: 11 }),
           'Managed tool'
         ) : null,
+        Number(extension.downloadBytes) > 0 ? h('span', { className: 'extension-type-pill' },
+          h(Icon, { name: 'download', size: 11 }), extensionSize(extension.downloadBytes, extension.downloadApproximate)
+        ) : null,
         extension.entrypoints?.command ? h('span', { className: 'extension-type-pill' },
           h(Icon, { name: 'processes', size: 11 }),
           `Command: ${extension.entrypoints.command}`
@@ -887,6 +941,10 @@ function ExtensionInspectorDialog({
           h('div', { className: 'extension-detail-cell' },
             h('span', { className: 'extension-detail-cell-label' }, 'Extension ID'),
             h('code', { className: 'extension-detail-cell-value' }, extension.id)
+          ),
+          h('div', { className: 'extension-detail-cell' },
+            h('span', { className: 'extension-detail-cell-label' }, 'Download size'),
+            h('span', { className: 'extension-detail-cell-value' }, extensionSize(catalogEntry?.downloadBytes || extension.downloadBytes, catalogEntry?.downloadApproximate || extension.downloadApproximate))
           ),
           h('div', { className: 'extension-detail-cell' },
             h('span', { className: 'extension-detail-cell-label' }, 'Type'),

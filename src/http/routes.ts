@@ -95,6 +95,7 @@ const GET_ROUTES: Readonly<Record<string, RouteDefinition>> = Object.freeze({
   '/api/diagnostics': { auth: authDashboard, handler: lazyRoute(loadDashboardDiagnostics, 'handleApiDiagnostics') },
   '/api/telemetry': { auth: authDashboard, handler: lazyRoute(loadDashboardTelemetry, 'handleApiTelemetry') },
   '/api/extensions': { auth: authDashboard, handler: lazyRoute(loadDashboardExtensions, 'handleApiExtensions') },
+  '/api/extensions/progress': { auth: authDashboard, handler: lazyRoute(loadDashboardExtensions, 'handleApiExtensionsProgress') },
   '/api/computer': { auth: authDashboard, handler: lazyRoute(loadDashboardComputer, 'handleApiComputer') },
   '/api/release-notes': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleReleaseNotes') },
   '/api/workspace/preflight': { auth: authDashboard, handler: lazyRoute(loadDashboard, 'handleWorkspacePreflight') },
