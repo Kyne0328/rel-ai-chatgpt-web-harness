@@ -68,10 +68,10 @@ try {
       assert.ok(measurement.documentOverflow <= 0.5, `Analytics must contain horizontal overflow inside its own controls instead of overflowing the page: ${JSON.stringify(measurement)}`);
     }
     if (measurement.route === '#tools') {
-      assert.equal(measurement.toolCategories.relai_exec, 'Execute');
-      assert.equal(measurement.toolCategories.relai_process, 'Execute');
-      assert.equal(measurement.toolCategories.relai_work, 'Workflow');
-      assert.equal(measurement.toolCategories.relai_changes, 'Review · Recover');
+      assert.equal(measurement.rawToolNamesVisible, false, 'Tools must not expose raw internal tool names in the production UI.');
+      assert.ok(measurement.toolCapabilities.filter(label => label === 'Execute').length >= 2, 'Execute capabilities must remain visible.');
+      assert.ok(measurement.toolCapabilities.includes('Workflow'), 'Workflow capability must remain visible.');
+      assert.ok(measurement.toolCapabilities.includes('Review · Recover'), 'Review and recovery capabilities must remain visible.');
     }
   }
   console.log(`Electron ${chromePlatform} dashboard chrome is clear across Analytics, Tools, and Sessions.`);

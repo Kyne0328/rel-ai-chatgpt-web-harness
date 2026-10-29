@@ -373,7 +373,8 @@ app.whenReady().then(async () => {
       result.mismatchedTaskRejected = !document.querySelector('.task-detail-header h2') && document.querySelector('[data-task-detail-state]')?.textContent.includes('did not match') === true;
       snapshot = { ...snapshot, tasks: [...snapshot.tasks, taskSession('summary-error-task', 'Last available summary')] };
       listeners.forEach(listener => listener());
-      location.hash = '#tasks?task=summary-error-task';
+      // Overview is summary-only by design; Activity explicitly requires detail hydration.
+      location.hash = '#tasks?task=summary-error-task&tab=activity';
       await until(() => document.querySelector('[data-task-detail-state="error"]') && document.querySelector('.task-detail-header h2')?.textContent === 'Last available summary', 'preserved summary on hydration failure');
       result.summarySurvivesDetailFailure = document.querySelector('[data-task-detail-state]')?.textContent.includes('Showing the last available task details.') === true;
       location.hash = '#tasks?task=slow-detail-task';
@@ -430,7 +431,7 @@ app.whenReady().then(async () => {
       document.querySelector('#session-tab-activity').click();
       await until(() => document.querySelectorAll('#session-panel-activity .task-event-link').length > 0, 'recent task activity');
       result.inspectorRecentRows = document.querySelectorAll('#session-panel-activity .task-event-link').length;
-      result.inspectorPreviewRemoved = !document.querySelector('#session-panel-activity button, .task-event-inspection')
+      result.inspectorPreviewRemoved = !document.querySelector('#session-panel-activity .task-event-link button, .task-event-inspection')
         && Boolean(document.querySelector('#session-panel-activity .task-activity-view-all'))
         && Boolean(document.querySelector('#session-panel-activity .task-event-link[href*="event="]'));
       result.inspectorSingleScroll = getComputedStyle(document.querySelector('.session-inspector')).overflowY === 'auto'

@@ -190,7 +190,17 @@ try {
     timer = setTimeout(() => { unsubscribe(); reject(new Error('Running command output did not reach the dashboard projection.')); }, 4000);
     check();
   });
-  assert.ok(commands.find(command => command.operationId === firstId).commandSummary.includes('command live output'));
+  const outputRecord = commandActivities(queueConfig).find(command => command.operationId === firstId);
+  assert.ok(outputRecord.commandSummary.includes('command live output'));
+  assert.ok(Number.isFinite(Date.parse(outputRecord.lastOutputAt)), 'live command must report the time output was actually captured');
+  assert.equal(outputRecord.lastOutputBytes, outputRecord.stdoutBytes + outputRecord.stderrBytes);
+  assert.ok(outputRecord.lastOutputBytes > 0, 'live command must expose observed output bytes');
+  const runningReceipt = fallbackExecutionStatus(firstId, { config: queueConfig });
+  assert.equal(runningReceipt.lastOutputAt, outputRecord.lastOutputAt, 'MCP status must surface observed output without retaining new chunks');
+  assert.equal(runningReceipt.lastOutputBytes, outputRecord.lastOutputBytes);
+  const queuedOutputRecord = commandActivities(queueConfig).find(command => command.operationId === secondId);
+  assert.equal(queuedOutputRecord.lastOutputAt, '', 'queued commands cannot fabricate output activity');
+  assert.equal(queuedOutputRecord.lastOutputBytes, 0);
   assert.throws(() => commandActivityControl({ stateDir: path.join(temp, 'other') }, firstId), /Unknown command/);
   const activeQueueTask = getToolActivity().tasks.find(task => task.id === queueTask.work_id);
   const activeOperationIds = activeQueueTask.currentOperations.map(operation => operation.id || operation.operationId);

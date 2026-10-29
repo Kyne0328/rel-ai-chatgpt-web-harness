@@ -7,7 +7,7 @@ import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { processListView, processStopResult } from './index.js';
 import { routeHref } from '../../router.js';
-import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
+import { commandOutputStatusAt } from '../../clock.js';
 
 const h = React.createElement;
 const PROCESS_STORE_KEYS = Object.freeze(['managedProcesses', 'commandOperations']);
@@ -15,7 +15,6 @@ const PROCESS_OUTPUT_CHUNK_BYTES = 256 * 1024;
 
 export function createProcessesRoute(useDashboardSlices) {
   return function ProcessesRoute() {
-    const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
     const data = useDashboardSlices(PROCESS_STORE_KEYS);
     const sampleKey = JSON.stringify((data.managedProcesses || [])
       .filter(process => ['starting', 'running', 'stopping'].includes(process.status))
@@ -27,7 +26,6 @@ export function createProcessesRoute(useDashboardSlices) {
     );
     const rows = model.rows.filter(row => row.state.active);
     const recoveryRows = model.rows.filter(row => !row.state.terminal && !row.state.active && !row.recoveryArchived);
-    const archivedRows = model.rows.filter(row => row.recoveryArchived);
     const recentRows = model.rows.filter(row => row.state.terminal).slice(0, 5);
     const count = `${model.running} running${model.queued ? ` · ${model.queued} queued` : ''}`;
     const recentLabel = model.finished > recentRows.length
@@ -54,21 +52,13 @@ export function createProcessesRoute(useDashboardSlices) {
         recoveryRows.length ? h('section', { className: 'card processes-recovery-card', 'aria-labelledby': 'process-recovery-heading' },
           h('div', { className: 'card-head' },
             h('div', null,
-              h('h3', { id: 'process-recovery-heading' }, technicalDetailsEnabled ? 'Recovery' : 'Previous action cleanup'),
-              h('p', null, technicalDetailsEnabled
-                ? 'These records need cleanup verification. They are kept separate from active processes until their state can be confirmed.'
-                : 'Rel.AI is still checking whether these previous actions fully stopped. They are kept separate from active commands while that check finishes.')
+              h('h3', { id: 'process-recovery-heading' }, 'Previous action cleanup'),
+              h('p', null, 'Rel.AI is still checking whether these previous actions fully stopped. They are kept separate from active commands while that check finishes.')
             ),
             h('span', { className: 'feature-count' }, `${recoveryRows.length} unresolved`)
           ),
           h('div', { className: 'card-body', 'data-process-recovery-list': true },
             recoveryRows.map(row => h(ProcessRow, { key: row.processId, row }))
-          )
-        ) : null,
-        technicalDetailsEnabled && archivedRows.length ? h('details', { className: 'card recent-processes', 'data-archived-recovery': true },
-          h('summary', null, `Archived recovery records · ${archivedRows.length}`),
-          h('div', { className: 'recent-process-list' },
-            archivedRows.map(row => h(ProcessRow, { key: row.processId, row }))
           )
         ) : null
       )
@@ -124,29 +114,8 @@ export function useProcessMemory(sampleKey, enabled = true) {
 }
 
 export const ProcessRow = memo(function ProcessRow({ row }) {
-  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
   const [stopState, setStopState] = useState('idle');
   const [stopError, setStopError] = useState('');
-  const [archiveState, setArchiveState] = useState('idle');
-  const [archiveError, setArchiveError] = useState('');
-  const archive = async () => {
-    if (archiveState === 'loading') return;
-    const archived = !row.recoveryArchived;
-    if (archived && !await confirmAction({ title: 'Archive unresolved record?',
-      message: `Archive "${row.label}"?`,
-      detail: 'This removes the entry from Recovery. Its logs and unconfirmed cleanup status are retained. It does not stop a process or release an unverified ownership lock. You can restore the record later.',
-      confirmLabel: 'Archive record' })) return;
-    setArchiveState('loading');
-    setArchiveError('');
-    try {
-      const result = await postJson('/api/processes/recovery', { processId: row.processId, archived, expectedArchivedAt: row.recoveryArchivedAt });
-      if (result?.ok === false) throw new Error(result.error || 'Recovery visibility could not be saved.');
-      setArchiveState('idle');
-    } catch (error) {
-      setArchiveState('error');
-      setArchiveError(String(error?.message || error));
-    } finally { requestDashboardRefresh(); }
-  };
   const stop = async () => {
     if (stopState === 'loading' || (row.stopProcessId == null && !row.operationId)) return;
     const confirmed = await confirmAction({
@@ -196,6 +165,12 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
           h('span', null, row.project),
           row.operationId ? (row.taskId ? h('a', { href: routeHref('tasks', { workspace: row.project, task: row.taskId }) }, row.taskTitle) : h('span', null, row.taskTitle)) : null,
           row.startedAt ? h('span', null, 'Started ', h('span', { 'data-clock-relative': row.startedAt }, row.startedAgo)) : null,
+          row.operationId && state.status === 'running'
+            ? row.lastOutputAt
+              ? h('span', { className: 'process-output-activity', 'data-clock-output-since': row.lastOutputAt,
+                title: 'Output is not proof of useful progress. A quiet command may still be running.' }, commandOutputStatusAt(row.lastOutputAt))
+              : h('span', { className: 'process-output-activity' }, 'No output yet')
+            : null,
           state.terminal && row.exitCode != null ? h('span', null, `Exit code ${row.exitCode}`) : null
         )
       ),
@@ -218,11 +193,6 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
           disabled: stopState === 'loading' || stopState === 'success' || stopState === 'requested',
           onClick: () => { void stop(); }
         }, stopText) : null,
-        technicalDetailsEnabled && (row.canArchiveRecovery || row.recoveryArchived) ? h('button', {
-          className: 'secondary', type: 'button', 'data-archive-recovery': true,
-          'aria-label': `${row.recoveryArchived ? 'Restore' : 'Archive'} ${row.label}`,
-          disabled: archiveState === 'loading', onClick: () => { void archive(); }
-        }, archiveState === 'loading' ? 'Saving…' : row.recoveryArchived ? 'Restore record' : 'Archive record') : null,
         state.status === 'stopping' ? h('span', { className: 'process-stop-state', role: 'status' }, 'Stopping…') : null
       )
     ),
@@ -230,8 +200,6 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
       h('strong', null, 'Stop not confirmed'),
       h('div', null, stopError)
     ) : null,
-    technicalDetailsEnabled && archiveError ? h('div', { className: 'process-output-error', role: 'alert' }, archiveError) : null,
-    technicalDetailsEnabled && row.recoveryArchived ? h('div', { className: 'process-output-notice' }, 'Archived record. Cleanup remains unconfirmed; automatic recovery checks and ownership protections remain in effect.') : null,
     h('section', { className: 'process-command-summary command-console', 'data-console-kind': 'command' },
       h('div', { className: 'command-console-heading' }, h('strong', null, 'Command')),
       h('pre', { tabIndex: 0, 'aria-label': 'Command' }, h('code', null, row.commandSummary))
@@ -240,13 +208,7 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
       ? h('div', { className: 'connection-notice bad process-recovery' }, h('strong', null, row.error || 'Process failed'),
           state.recovery !== row.error ? h('div', null, state.recovery) : null)
       : row.recoveryNote || row.error || ['orphaned', 'unknown'].includes(state.status)
-        ? technicalDetailsEnabled
-          ? h('details', { className: 'process-recovery-details' },
-              h('summary', null, 'Why the outcome is unverified'),
-              h('p', null, row.error || row.recoveryNote || state.recovery),
-              state.recovery && state.recovery !== row.error && state.recovery !== row.recoveryNote
-                ? h('p', null, state.recovery) : null)
-          : h('div', { className: 'process-output-notice' }, 'Rel.AI is still checking whether this previous action fully stopped.')
+        ? h('div', { className: 'process-output-notice' }, 'Rel.AI is still checking whether this previous action fully stopped.')
         : null,
     h(ProcessOutput, { processId: row.processId, operationId: row.operationId, output: row.output, active: state.active })
   );

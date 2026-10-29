@@ -14,14 +14,11 @@ import { fetchJson } from '../../api.js';
 import { FilterChoice, filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
 import { StatusPill } from '../../components/pill.js';
-import { OperationDiagnostics } from '../../components/operation-diagnostics.js';
-import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
 import { toast } from '../../components/toast.js';
 import { copyText } from '../../clipboard.js';
 import { getRouteParams, getWorkspaceFilter, navigate, replaceRouteParams, routeHref } from '../../router.js';
 import { formatTerminalOutput, timeAgo } from '../../utils.js';
 import { activityEventId } from '../../activity-event.js';
-import { operationDiagnostics } from '../../operation-diagnostics.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import {
   activityAbsoluteTime,
@@ -85,7 +82,6 @@ function ActivityView({ data = {} }) {
   const [olderHistoryLoading, setOlderHistoryLoading] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState(initialRoute.eventId);
   const [now, setNow] = useState(() => Date.now());
-  const [copyState, setCopyState] = useState('idle');
   const [liveAnnouncement, setLiveAnnouncement] = useState('');
   const [unseenLiveCount, setUnseenLiveCount] = useState(0);
   const [highlightedEventIds, setHighlightedEventIds] = useState(() => new Set());
@@ -98,7 +94,6 @@ function ActivityView({ data = {} }) {
   const historyRetryRef = useRef(false);
   const nextExpiryRef = useRef(Number.POSITIVE_INFINITY);
   const searchTimerRef = useRef(0);
-  const copyTimerRef = useRef(0);
   const inspectorHeadingRef = useRef(null);
   const listPaneRef = useRef(null);
   const listAtTopRef = useRef(true);
@@ -286,7 +281,6 @@ function ActivityView({ data = {} }) {
     return () => {
       historyRequestRef.current += 1;
       window.clearTimeout(searchTimerRef.current);
-      window.clearTimeout(copyTimerRef.current);
       window.clearTimeout(liveAnnouncementTimerRef.current);
       for (const timer of highlightTimers) window.clearTimeout(timer);
       highlightTimers.clear();
@@ -492,8 +486,6 @@ function ActivityView({ data = {} }) {
 
   const selectEntry = useCallback(entry => {
     const eventId = activityEventId(entry);
-    window.clearTimeout(copyTimerRef.current);
-    setCopyState('idle');
     selectionFocusRef.current = true;
     setRequestedEventId(eventId);
     replaceRouteParams({ event: eventId });
@@ -512,18 +504,6 @@ function ActivityView({ data = {} }) {
     rowVirtualizerRef.current?.scrollToIndex?.(0, { align: 'start' });
     if (listPaneRef.current) listPaneRef.current.scrollTop = 0;
   }, []);
-
-  const copySelected = useCallback(async () => {
-    if (!selectedEntry) return;
-    try {
-      await copyText(JSON.stringify(safeEventProjection(selectedEntry), null, 2));
-      window.clearTimeout(copyTimerRef.current);
-      setCopyState('success');
-      copyTimerRef.current = window.setTimeout(() => setCopyState('idle'), 1200);
-    } catch {
-      toast('Clipboard access failed.', { variant: 'error' });
-    }
-  }, [selectedEntry]);
 
   const summary = historyLoading
     ? 'Loading stored activity history…'
@@ -616,9 +596,7 @@ function ActivityView({ data = {} }) {
           runtime: data.runtime,
           runtimeCompatibility: data.runtimeCompatibility,
           sessionIndex,
-          headingRef: inspectorHeadingRef,
-          copyState,
-          onCopy: copySelected
+          headingRef: inspectorHeadingRef
         })
       )
     )
@@ -796,8 +774,7 @@ function ActivitySpacerRow({ height }) {
   );
 }
 
-export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, onCopy }) {
-  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
+export function ActivityInspector({ entry, sessionIndex, headingRef }) {
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
       h('div', { className: 'inspector-empty' }, h('strong', null, 'Select an activity'))
@@ -828,14 +805,6 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
     ? '' : distinctActivityText(result, message, heading) ? result : '';
   const fileLocationText = !files.length && distinctActivityText(fileLocation, target) ? fileLocation : '';
   const errorText = distinctActivityText(error, message, result) ? error : '';
-  const fields = [
-    ['Tool', toolName(entry)],
-    ['Action', entry.action || entry.operation || 'execute'],
-    ['Category', entry.category || 'tool'],
-    ['Event ID', entry.eventId || entry.id || '—'],
-    ['Rel.AI task ID', entry.taskId || entry.sessionId || '—'],
-    ...(entry.sequence != null ? [['Sequence', entry.sequence]] : [])
-  ];
   return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
     h('div', { className: 'activity-inspector-head' },
       h('h2', { tabIndex: -1, ref: headingRef }, heading)
@@ -869,27 +838,7 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, copyState, 
       stderr.trim() ? h(StreamOutputDetail, { title: 'Standard error', output: stderr, stream: 'stderr' }) : null,
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
-      readableSection('Error', errorText, 'activity-detail-error'),
-      technicalDetailsEnabled ? h('details', { className: 'activity-detail-technical', open: group === 'active' || Boolean(operationDiagnostics(entry).warning) },
-        h('summary', null, 'Technical details'),
-        h(OperationDiagnostics, { key: activityEventId(entry), operation: entry, live: group === 'active' }),
-        h('div', { className: 'activity-detail-fields' },
-          fields.map(([label, value]) => h('div', { className: 'detail-field', key: label },
-            h('span', { className: 'detail-field-label' }, label),
-            h('span', null, String(value))
-          ))
-        ),
-        h(RawDetail, { title: 'Raw target', value: entry.target, key: 'raw-target' }),
-        h(RawDetail, { title: 'Raw result', value: entry.result, key: 'raw-result' }),
-        h(RawDetail, { title: 'Safe metadata', value: entry.metadata, key: 'safe-metadata' }),
-        h(RawDetail, { title: 'Raw error', value: entry.error, key: 'raw-error' }),
-        h('button', {
-          type: 'button',
-          className: 'secondary',
-          'data-state': copyState === 'success' ? 'success' : undefined,
-          onClick: onCopy
-        }, copyState === 'success' ? 'Copied' : 'Copy event JSON')
-      ) : null
+      readableSection('Error', errorText, 'activity-detail-error')
     )
   );
 }
@@ -982,110 +931,6 @@ function distinctActivityText(value, ...others) {
 
 function normalizeActivityText(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
-const JSON_NO_MATCH = Symbol('json-no-match');
-
-function RawDetail({ title, value }) {
-  const [query, setQuery] = useState('');
-  const [treeRevision, setTreeRevision] = useState({ id: 0, open: true });
-  const [copied, setCopied] = useState(false);
-  const copyTimerRef = useRef(0);
-  const empty = value === undefined || value === null || value === '' || (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0);
-  const objectValue = value && typeof value === 'object';
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredValue = useMemo(() => objectValue ? filterJsonValue(value, normalizedQuery) : value, [normalizedQuery, objectValue, value]);
-
-  useEffect(() => () => window.clearTimeout(copyTimerRef.current), []);
-  if (empty) return null;
-
-  const copyValue = async () => {
-    const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-    try {
-      const ok = await copyText(text);
-      if (ok === false) throw new Error('Clipboard write failed.');
-      setCopied(true);
-      window.clearTimeout(copyTimerRef.current);
-      copyTimerRef.current = window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      toast('Clipboard access failed.', { variant: 'error' });
-    }
-  };
-
-  return h('section', { className: 'activity-detail-raw' },
-    h('div', { className: 'activity-detail-raw-head' },
-      h('h4', null, title),
-      h('div', { className: 'activity-detail-raw-actions' },
-        objectValue ? h('button', {
-          type: 'button',
-          className: 'secondary compact-button',
-          'aria-expanded': treeRevision.open,
-          onClick: () => setTreeRevision(current => ({ id: current.id + 1, open: !current.open }))
-        }, treeRevision.open ? 'Collapse all' : 'Expand all') : null,
-        h('button', { type: 'button', className: 'secondary compact-button', onClick: () => { void copyValue(); } }, copied ? 'Copied' : 'Copy value')
-      )
-    ),
-    objectValue ? h('label', { className: 'activity-json-search' },
-      h('span', { className: 'sr-only' }, `Search ${title}`),
-      h(Icon, { name: 'search', size: 14 }),
-      h('input', { type: 'search', value: query, placeholder: 'Search keys or values', onChange: event => setQuery(event.target.value) })
-    ) : null,
-    objectValue
-      ? filteredValue === JSON_NO_MATCH
-        ? h('div', { className: 'activity-json-empty' }, 'No matching keys or values.')
-        : h('div', { className: 'activity-json-tree' }, h(JsonTreeNode, { value: filteredValue, treeRevision, root: true }))
-      : h('pre', { className: 'detail-pre' }, String(value))
-  );
-}
-
-function JsonTreeNode({ label = '', value, treeRevision, root = false }) {
-  const branch = value && typeof value === 'object';
-  const [open, setOpen] = useState(true);
-  useEffect(() => { setOpen(treeRevision.open); }, [treeRevision]);
-  if (!branch) {
-    return h('div', { className: 'activity-json-leaf' },
-      label !== '' ? h('span', { className: 'activity-json-key' }, label) : null,
-      label !== '' ? h('span', { 'aria-hidden': 'true' }, ':') : null,
-      h('code', null, jsonPrimitive(value))
-    );
-  }
-  const entries = Array.isArray(value) ? value.map((item, index) => [String(index), item]) : Object.entries(value);
-  const typeLabel = Array.isArray(value) ? `Array · ${entries.length}` : `Object · ${entries.length}`;
-  return h('details', { className: `activity-json-branch${root ? ' is-root' : ''}`, open, onToggle: event => setOpen(event.currentTarget.open) },
-    h('summary', null,
-      label !== '' ? h('span', { className: 'activity-json-key' }, label) : null,
-      h('span', { className: 'activity-json-type' }, typeLabel)
-    ),
-    h('div', { className: 'activity-json-children' },
-      entries.map(([key, child]) => h(JsonTreeNode, { key, label: key, value: child, treeRevision }))
-    )
-  );
-}
-
-function filterJsonValue(value, query, key = '') {
-  if (!query) return value;
-  if (String(key).toLowerCase().includes(query)) return value;
-  if (!value || typeof value !== 'object') return String(value).toLowerCase().includes(query) ? value : JSON_NO_MATCH;
-  if (Array.isArray(value)) {
-    const filtered = [];
-    value.forEach((item, index) => {
-      const match = filterJsonValue(item, query, index);
-      if (match !== JSON_NO_MATCH) filtered.push(match);
-    });
-    return filtered.length ? filtered : JSON_NO_MATCH;
-  }
-  const filtered = {};
-  for (const [childKey, childValue] of Object.entries(value)) {
-    const match = filterJsonValue(childValue, query, childKey);
-    if (match !== JSON_NO_MATCH) filtered[childKey] = match;
-  }
-  return Object.keys(filtered).length ? filtered : JSON_NO_MATCH;
-}
-
-function jsonPrimitive(value) {
-  if (typeof value === 'string') return JSON.stringify(value);
-  if (value === null) return 'null';
-  return String(value);
 }
 
 function openActivityFilters({ filterState, filterOptions, onApply }) {
@@ -1262,28 +1107,4 @@ function activityResultText(entry) {
 function activityErrorText(entry) {
   if (typeof entry.error === 'string') return entry.error.trim();
   return String(entry.error?.message || '').trim();
-}
-
-function safeEventProjection(entry) {
-  if (entry?.safeCopy && typeof entry.safeCopy === 'object') return entry.safeCopy;
-  return {
-    eventId: entry.eventId || entry.id,
-    taskId: entry.taskId,
-    sessionId: entry.sessionId,
-    sequence: entry.sequence,
-    timestamp: entry.timestamp || entry.ts,
-    category: entry.category,
-    action: entry.action,
-    status: entry.status || activityStatusGroup(entry),
-    title: entry.title || entry.operation,
-    summary: entry.summary || entry.message || activityMessage(entry),
-    durationMs: entry.durationMs || entry.ms,
-    tool: entry.tool,
-    workspace: entry.workspace,
-    target: entry.target || (entry.path ? { workspaceRelativePath: entry.path } : undefined),
-    result: entry.result,
-    error: entry.error,
-    command: entry.command,
-    metadata: entry.metadata
-  };
 }

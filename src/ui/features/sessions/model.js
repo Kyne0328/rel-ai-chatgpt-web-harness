@@ -72,6 +72,12 @@ export function taskRunningOperations(session = {}) {
   return isOngoingSession(session) && Array.isArray(session.currentOperations) ? session.currentOperations : [];
 }
 
+export function taskRowActivity(session = {}, semantic = semanticProgressFor(session)) {
+  if (!isOngoingSession(session)) return '';
+  if (session.goalMode?.state === 'needs_auth' || session.goalMode?.authRequired) return 'Waiting for ChatGPT sign-in';
+  return String(semantic.currentActivity || semantic.currentStage || session.currentActivity || session.currentStage || 'Waiting for work').trim();
+}
+
 export function taskValidationView(session = {}) {
   const events = (Array.isArray(session.events) ? session.events : []).filter(event =>
     event.operation === 'checks' || event.tool?.operation === 'checks'

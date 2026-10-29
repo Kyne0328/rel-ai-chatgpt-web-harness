@@ -139,6 +139,15 @@ try {
   assert.equal(refreshCalls, 1, 'an unconfirmed mutation must refresh the authoritative dashboard state');
   await new Promise(resolve => setTimeout(resolve, 80));
   assert.equal(serverCompletedChange, true, 'the server can finish after the browser has reported an unconfirmed outcome');
+
+  let checks = 0;
+  const reconciled = await api.reconcileUnconfirmedResult(unconfirmed, () => ++checks === 2, { attempts: 3, intervalMs: 0 });
+  assert.equal(reconciled.ok, true);
+  assert.equal(reconciled.reconciled, true);
+  assert.equal(checks, 2, 'verification must stop as soon as the resulting state is confirmed');
+  const stillUnconfirmed = await api.reconcileUnconfirmedResult(unconfirmed, () => false, { attempts: 2, intervalMs: 0 });
+  assert.equal(stillUnconfirmed.outcomeUnknown, true, 'an unverified outcome must never be declared successful');
+  assert.equal((await api.reconcileUnconfirmedResult({ ok: true }, () => { throw Error('should not run'); })).ok, true);
 } finally {
   if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
   if (originalEventSource === undefined) delete globalThis.EventSource; else globalThis.EventSource = originalEventSource;

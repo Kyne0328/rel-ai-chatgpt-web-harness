@@ -29,6 +29,8 @@ function commandRowView(command, now) {
   const label = { queued: 'Queued', running: 'Running', stopping: 'Stopping', completed: 'Completed', cancelled: 'Stopped', failed: 'Failed', unknown: 'Outcome unverified' }[command.status] || 'Unknown';
   const row = processRowView({ ...command, processId: `command:${command.operationId}` }, now);
   return { ...row, elapsed: command.status === 'unknown' ? 'Completion unverified' : row.elapsed,
+    lastOutputAt: typeof command.lastOutputAt === 'string' ? command.lastOutputAt : '',
+    lastOutputBytes: Number.isSafeInteger(command.lastOutputBytes) && command.lastOutputBytes >= 0 ? command.lastOutputBytes : null,
     operationId: command.operationId, stopProcessId: null, taskId: command.workId,
     taskTitle: command.taskTitle || command.workId || 'Independent command',
     label: 'Command',

@@ -152,10 +152,3 @@ textarea.ws-form-path { @apply min-h-24 resize-y; }
   .workspace-analytics-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .workspace-analytics-head small { display: none; }
 }
-
-.workspace-recovery-override { margin-top: 8px; border-top: 1px solid var(--ui-border-subtle); padding-top: 8px; }
-.workspace-recovery-override > summary { cursor: pointer; font-size: 13px; font-weight: 600; padding: 8px 0; }
-.workspace-recovery-override p { font-size: 13px; line-height: 1.5; color: var(--ui-text-secondary); }
-.workspace-recovery-override label { display: grid; gap: 6px; font-size: 13px; }
-.workspace-recovery-override input { max-width: 340px; }
-.workspace-recovery-override button { margin-top: 8px; }

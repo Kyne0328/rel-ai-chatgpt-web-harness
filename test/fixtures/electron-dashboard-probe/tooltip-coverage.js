@@ -27,7 +27,7 @@ export async function exerciseTooltipCoverage({ win, waitFor, waitForCapturePain
     };
     location.hash = '#usage';
   })()`);
-  const results = { themes: [], edges: [], diagnostics: null };
+  const results = { themes: [], edges: [] };
   try {
     await waitFor(win, `document.querySelectorAll('.analytics-matrix-bubble').length === 18`);
     for (const theme of ['dark', 'light']) {
@@ -71,28 +71,6 @@ export async function exerciseTooltipCoverage({ win, waitFor, waitForCapturePain
     await waitFor(win, `document.getElementById(window.__tooltipActiveTrigger.getAttribute('aria-describedby')).hidden`);
     results.clippedAnchorDismissed = true;
 
-    await win.webContents.setZoomFactor(1);
-    win.setContentSize(1180, 760);
-    await win.webContents.executeJavaScript(`(() => {
-      const startedAt = new Date(Date.now() - 1000).toISOString();
-      const entry = { id: 'tooltip-diagnostic', eventId: 'tooltip-diagnostic', timestamp: startedAt, tool: 'relai_read', workspace: 'tooltip-fixture', status: 'running', summary: 'Tooltip diagnostics fixture',
-        metadata: { timeline: { phase: 'queued', phaseStartedAt: startedAt, lastProgressAt: startedAt, executed: false, deadlineKind: 'admission', blocking: { owner: 'Synthetic workspace writer' }, phases: [{ phase: 'queued', startedAt, durationMs: 1000 }] } } };
-      window.fetch = async (...args) => {
-        const response = await window.__tooltipCoverageFetch(...args);
-        if (!String(args[0]).includes('/api/dashboard/v10')) return response;
-        const data = await response.json();
-        data.auditTail = { ...(data.auditTail || {}), entries: [...(data.auditTail?.entries || []).filter(row => row.id !== entry.id), entry] };
-        return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
-      };
-      location.hash = '#activity?workspace=tooltip-fixture&time=all';
-      window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
-    })()`);
-    // Activity derives a stable hashed DOM identity rather than exposing source IDs.
-    const diagnosticTrigger = `[...document.querySelectorAll('.activity-row-trigger')].find(button => button.textContent?.includes('Tooltip diagnostics fixture'))`;
-    await waitFor(win, diagnosticTrigger);
-    await win.webContents.executeJavaScript(`(${diagnosticTrigger}).click()`);
-    await waitFor(win, `document.querySelector('.operation-diagnostics-help-trigger')`);
-    results.diagnostics = await exerciseTrigger('.operation-diagnostics-help-trigger', 0);
     return results;
   } finally {
     await win.webContents.executeJavaScript(`(() => {

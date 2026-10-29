@@ -75,10 +75,6 @@
   --scrollbar-size-compact: 8px;
 }
 
-:root:not([data-relai-technical-details]) .task-detail-technical {
-  display: none !important;
-}
-
 @layer base {
   *, *::before, *::after { @apply box-border; }
   html { @apply min-h-full; background: var(--ui-canvas); }

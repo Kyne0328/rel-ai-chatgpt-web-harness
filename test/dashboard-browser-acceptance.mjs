@@ -194,8 +194,8 @@ try {
   assert.equal(result.taskInteraction.selectedRow, true);
   assert.deepEqual(result.taskInteraction.tabs, ['overview', 'changes', 'activity', 'processes']);
   assert.ok(result.taskInteraction.detailText.length > 100);
-  assert.equal(result.taskInteraction.detailsAvailable, true);
-  assert.equal(result.taskInteraction.workSessionId, true);
+  assert.equal(result.taskInteraction.technicalDetailsAbsent, true, 'task detail must not expose the removed technical disclosure');
+  assert.equal(result.taskInteraction.internalTaskIdAbsent, true, 'task detail must not expose internal task identifiers');
   assert.ok(result.taskInteraction.eventLinks > 0, JSON.stringify(result.taskInteraction));
   assert.match(result.taskProcesses.operation, /Read source files/);
   assert.match(result.taskProcesses.command, /Task development server/);
@@ -203,7 +203,7 @@ try {
   assert.equal(result.taskProcesses.badge, '2');
   assert.equal(result.taskProcesses.empty, false);
   assert.equal(result.taskProcesses.validationTab, false);
-  assert.deepEqual(result.taskProcesses.technical, { taskId: true, operations: 0, runtimeBuild: false });
+  assert.equal(result.taskProcesses.technicalUiAbsent, true, 'task process view must not expose internal technical UI');
   assert.equal(result.taskSelectionStability.immediate, 'acceptance-running');
   assert.equal(result.taskSelectionStability.afterRefresh.selected, 'acceptance-running', 'live task refresh must preserve the clicked task instead of restoring the old completed deep link');
   assert.equal(result.taskSelectionStability.afterRefresh.routeTask, 'acceptance-running', 'mouse selection must update the task deep link');
@@ -220,8 +220,8 @@ try {
   assert.equal(result.activityInteraction.selectedRow, true);
   assert.equal(result.activitySelectionStability.selected, result.activitySelectionStability.expected, 'refreshing activity must preserve the newly selected event instead of restoring the original deep link');
   assert.equal(result.activitySelectionStability.routeEvent, result.activitySelectionStability.expected, 'activity selection must update the event deep link');
-  assert.equal(result.activityInteraction.copyButton, true);
-  assert.equal(result.activityInteraction.errorWrapped, true);
+  assert.equal(result.activityInteraction.rawCopyAbsent, true, 'Activity must not expose raw event/value copy controls');
+  assert.equal(result.activityInteraction.rawTreeAbsent, true, 'Activity must not expose the removed raw JSON tree');
   assert.deepEqual(result.activityDesktopGeometry.visibleHeaders, ['Time', 'Activity'], JSON.stringify(result.activityDesktopGeometry));
   assert.equal(result.activityDesktopGeometry.headerVisible, true, JSON.stringify(result.activityDesktopGeometry));
   assert.equal(result.activityDesktopGeometry.cellVisible, true, JSON.stringify(result.activityDesktopGeometry));
@@ -257,23 +257,7 @@ try {
   assert.equal(result.goalAccounts.deepLinkPreservedCard, true, 'tunnel deep links must update the mounted account selector');
   assert.equal(result.goalAccounts.inventoryPreservedCard, true, 'adding and removing tunnels must refresh the mounted account inventory');
   assert.equal(result.goalAccounts.browserScopedChecks, true, 'automatic browser sign-in checks must inspect only the displayed login account');
-  const operationDiagnostics = result.operationDiagnostics;
-  assert.deepEqual(operationDiagnostics.legacy, { unknownTiming: true, unknownTermination: true, liveClocks: 0 });
-  assert.equal(operationDiagnostics.keyboardExpanded, true, 'native timing disclosure must open from the keyboard');
-  assert.deepEqual(operationDiagnostics.repeated, {
-    samePanel: true, sameDisclosure: true, expanded: true, focusPreserved: true,
-    statusMutations: 0, measuredDuration: true, clockOutsideAnnouncement: true
-  }, 'repeated aggregate polls must preserve disclosure, focus, measured durations and quiet live status');
-  assert.deepEqual(operationDiagnostics.collecting, { samePanel: true, expanded: true, sameLiveRegion: true });
-  assert.deepEqual(operationDiagnostics.ready, {
-    samePanel: true, sameLiveRegion: true, noLiveClock: true, uncertaintyVisible: true, runtimeHidden: true
-  }, 'result readiness must preserve the live region, stop clocks, and retain termination uncertainty');
-  assert.ok(operationDiagnostics.narrow.viewportWidth >= 300 && operationDiagnostics.narrow.viewportWidth <= 375);
-  assert.equal(operationDiagnostics.narrow.horizontalOverflow, false, 'expanded operation diagnostics must reflow on a narrow viewport');
-  assert.equal(operationDiagnostics.narrow.factsContained, true, 'long blocker identifiers must stay inside the inspector');
-  assert.equal(operationDiagnostics.narrow.summaryReachable, true);
-  assert.equal(operationDiagnostics.narrow.expanded, true);
-  assert.equal(fs.existsSync(operationDiagnostics.narrow.screenshot), true);
+  assert.equal(result.operationDiagnosticsRemoved, true, 'operation/build diagnostic panels must stay out of the production UI');
   assert.deepEqual(result.responsive.map(item => item.name), [
     'window-1024x768',
     'window-640x720',
@@ -310,7 +294,8 @@ try {
     assert.equal(scenario.activityScrollLeft, 0, `${scenario.name} moved Activity away from its initial position`);
     if (scenario.taskTabKeyboardVisible !== undefined && scenario.viewportWidth >= 300) {
       assert.equal(scenario.taskTabKeyboardVisible, true, `${scenario.name} must reveal the keyboard-selected task tab`);
-      assert.equal(scenario.taskDetailsAccessible, true, `${scenario.name} must retain access to Details`);
+      assert.equal(scenario.taskOverviewAccessible, true, `${scenario.name} must retain access to the normal task Overview`);
+      assert.equal(scenario.taskTechnicalDetailsAbsent, true, `${scenario.name} must not expose the removed technical task disclosure`);
       assert.equal(scenario.taskInspectorNoOverflow, true, `${scenario.name} task inspector must not overflow the document`);
     }
     assert.equal(scenario.reducedMotion, true);
@@ -342,7 +327,7 @@ try {
   const standard400 = result.responsive.find(item => item.name === 'css-320-zoom-400');
   assert.equal(standard400.zoomFactor, 4);
   assert.ok(standard400.viewportWidth >= 300 && standard400.viewportWidth <= 320, JSON.stringify(standard400));
-  assert.deepEqual(result.accessibility.map(audit => audit.route).sort(), ['activity', 'goal-mode-connection', 'task-technical', 'tasks', 'workspaces']);
+  assert.deepEqual(result.accessibility.map(audit => audit.route).sort(), ['activity', 'goal-mode-connection', 'task-detail', 'tasks', 'workspaces']);
   const seriousAccessibilityViolations = result.accessibility.flatMap(audit => audit.violations
     .filter(violation => ['critical', 'serious'].includes(violation.impact))
     .map(violation => ({ route: audit.route, ...violation })));
@@ -383,7 +368,6 @@ try {
   assert.equal(result.uiuxCoverage.tooltipCoverage.themes.length, 2);
   assert.equal(result.uiuxCoverage.tooltipCoverage.edges.length, 6);
   assert.equal(result.uiuxCoverage.tooltipCoverage.clippedAnchorDismissed, true);
-  assert.equal(result.uiuxCoverage.tooltipCoverage.diagnostics.focusPreserved, true);
   assert.equal(result.uiuxCoverage.sharedControls.themes.length, 2);
   assert.deepEqual(result.uiuxCoverage.sharedControls.failures, [], JSON.stringify(result.uiuxCoverage.sharedControls));
   const coverageViolations = result.uiuxCoverage.accessibility.flatMap(audit => audit.violations.map(violation => ({ route: audit.route, ...violation })));

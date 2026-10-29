@@ -4,6 +4,7 @@ const calls = [];
 const outcomes = new Map();
 const pending = new Map();
 let statusListener;
+let splashListener;
 let pulseListener;
 let logListener;
 
@@ -27,6 +28,7 @@ contextBridge.exposeInMainWorld('nativeFixture', {
     else operation.resolve(outcome.value);
   },
   status(value) { statusListener?.(value); },
+  splash(value) { splashListener?.(value); },
   pulse(value) { pulseListener?.(value); },
   log(value) { logListener?.(value); }
 });
@@ -44,13 +46,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onServerStatus(listener) { statusListener = listener; },
   onServerLog(listener) { logListener = listener; },
   fitWindowToContent() {},
-  copyUrl: value => invoke('copyUrl', value),
-  openDashboard: () => invoke('openDashboard'),
-  openRecoverySetup: () => invoke('openRecoverySetup'),
-  startServer: () => invoke('startServer'),
-  stopServer: () => invoke('stopServer'),
-  restartConnection: () => invoke('restartConnection'),
-  relaunchApp: () => invoke('relaunchApp')
+  openDashboard: () => invoke('openDashboard')
+});
+
+contextBridge.exposeInMainWorld('relaiSplash', {
+  onStatus(listener) { splashListener = listener; },
+  openSetup: () => invoke('openSetup')
 });
 
 contextBridge.exposeInMainWorld('relaiPulse', {

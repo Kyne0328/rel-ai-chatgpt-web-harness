@@ -95,13 +95,13 @@ try {
   assert.equal(child.status, 0, 'Isolated native renderer probe failed: ' + diagnostic);
   assert.ok(probe, 'Native renderer probe must produce a report.');
   assert.equal(probe.error, undefined, diagnostic);
-  assert.equal(probe.axe.length, 12, 'Both themes must cover wizard validation/connection, Recovery action/connection, and Pulse collapsed/error states.');
+  assert.equal(probe.axe.length, 12, 'Both themes must cover wizard validation/connection, splash startup/recovery, and Pulse collapsed/error states.');
   assert.equal(probe.layouts.length, 14, 'Both themes must cover native narrow and 200% zoom layouts.');
   assert.equal(probe.contrast.length, 4, 'Both wizard step numerals must receive measured contrast checks in both themes.');
   assert.ok(probe.checks.length >= 70, 'Expected rendered keyboard, focus, names, error/retry, and native state checks.');
   assert.ok(probe.checks.every(check => check.status === 'passed'), diagnostic);
   assert.ok(probe.axe.every(scan => scan.violations.length === 0), diagnostic);
-  console.log('Rendered Wizard, Recovery, and Pulse checks passed in both themes with synthetic bridges, keyboard/focus, 320px, and 200% zoom.');
+  console.log('Rendered Wizard, Splash, and Pulse checks passed in both themes with synthetic bridges, keyboard/focus, 320px, and 200% zoom.');
   console.log('Manual screen-reader, OS high-contrast, native picker/window-manager, text-spacing, and visual screenshot review remain not-run; this suite is not an accessibility-conformance claim.');
   if (process.env.RELAI_NATIVE_ARTIFACT_DIR) console.log('Native renderer report/screenshots: ' + process.env.RELAI_NATIVE_ARTIFACT_DIR);
 } finally {

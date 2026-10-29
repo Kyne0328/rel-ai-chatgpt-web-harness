@@ -190,6 +190,20 @@ export async function postJson(url, body, opts = {}) {
   return fetchJson(url, { method: 'POST', body: JSON.stringify(body), ...opts });
 }
 
+// A lost mutation response is not proof of failure. Only turn it into success
+// when a subsequent independent GET verifies the requested resulting state.
+// Never replay the original POST or infer success from a healthy HTTP response.
+export async function reconcileUnconfirmedResult(result, verify, { attempts = 3, intervalMs = 650 } = {}) {
+  if (!result?.outcomeUnknown || typeof verify !== 'function') return result;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt) await new Promise(resolve => setTimeout(resolve, intervalMs));
+    try {
+      if (await verify()) return { ...result, ok: true, reconciled: true, outcomeUnknown: false };
+    } catch { /* Failed verification is still an unknown outcome. */ }
+  }
+  return result;
+}
+
 export function invalidateCache(url) {
   _cacheGeneration += 1;
   const keys = url ? [url] : responseCache.keys();

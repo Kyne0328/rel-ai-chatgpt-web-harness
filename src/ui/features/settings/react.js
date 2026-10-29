@@ -7,8 +7,7 @@ import { openModal } from '../../components/modal.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary, hasObservedMcpConnection, tunnelRuntimeView } from '../../connection-state.js';
-import { DEVELOPER_FEATURES, readDeveloperFeatureEnabled, readDeveloperOptionsUnlocked, unlockDeveloperOptions, writeDeveloperFeatureEnabled } from '../../developer-mode.js';
-import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
+import { EXPERIMENTAL_FEATURES, readExperimentalFeatureEnabled, writeExperimentalFeatureEnabled } from '../../experimental-features.js';
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath, getRouteSnapshot, subscribeRoute } from '../../router.js';
 import { SETTINGS_NAV_ITEMS } from '../../navigation-catalog.js';
@@ -18,9 +17,7 @@ import { supportPolicyView } from './desktop-update-policy.js';
 
 const h = React.createElement;
 const RELEASES_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
-const DEVELOPER_UNLOCK_CLICK_COUNT = 5;
-const DEVELOPER_UNLOCK_WINDOW_MS = 2500;
-const DEVELOPER_FEATURE_FLAGS = Object.freeze(Object.values(DEVELOPER_FEATURES));
+const EXPERIMENTAL_FEATURE_FLAGS = Object.freeze(Object.values(EXPERIMENTAL_FEATURES));
 const NOTIFICATION_DEFAULTS = Object.freeze({
   enabled: true,
   taskCompleted: true,
@@ -52,13 +49,7 @@ export function SettingsView({ data = {}, subPage = '' }) {
     preferences: h(PreferencesPage),
     privacy: h(PrivacyDataPage, { computerControl: data.config?.computerControl, projectAccess: data.config?.projectAccess }),
     application: h(ApplicationPage),
-    about: h(AboutPage, {
-      metadata: data.application || {},
-      buildStatus: data.desktopStatus?.buildStatus,
-      runtime: data.runtime,
-      repositoryRuntime: data.repositoryRuntime,
-      runtimeCompatibility: data.runtimeCompatibility
-    })
+    about: h(AboutPage, { metadata: data.application || {} })
   }[page] || h(PreferencesPage);
   return h('div', { id: '__settings-content', className: 'settings-content', 'data-settings-react': page },
     h('nav', { className: 'settings-navigation', 'aria-label': 'Settings pages' },
@@ -1220,9 +1211,8 @@ function ApplicationPage() {
   const [lifecycle, setLifecycle] = useState(undefined);
   const [lifecycleError, setLifecycleError] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const developerOptionsUnlocked = readDeveloperOptionsUnlocked();
-  const [developerFeatures, setDeveloperFeatures] = useState(() => Object.fromEntries(
-    DEVELOPER_FEATURE_FLAGS.map(feature => [feature.id, readDeveloperFeatureEnabled(feature.id)])
+  const [experimentalFeatures, setExperimentalFeatures] = useState(() => Object.fromEntries(
+    EXPERIMENTAL_FEATURE_FLAGS.map(feature => [feature.id, readExperimentalFeatureEnabled(feature.id)])
   ));
   const desktop = window.relaiDesktop;
   useEffect(() => {
@@ -1241,31 +1231,28 @@ function ApplicationPage() {
       : lifecycle === undefined ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading app settings…') : h(React.Fragment, null,
       h(StartupSettings, { initial: lifecycle }),
       h(ApplicationUpdates, { lifecycle }),
-      developerOptionsUnlocked ? h(DeveloperOptions, {
-        enabledFeatures: developerFeatures,
-        onChange: (feature, enabled) => setDeveloperFeatures(current => ({
+      h(ExperimentalFeatures, {
+        enabledFeatures: experimentalFeatures,
+        onChange: (feature, enabled) => setExperimentalFeatures(current => ({
           ...current,
-          [feature]: writeDeveloperFeatureEnabled(feature, enabled)
+          [feature]: writeExperimentalFeatureEnabled(feature, enabled)
         }))
-      }) : null,
+      }),
       typeof desktop?.quitApp === 'function' ? h(Card, { title: 'Application controls' }, h(QuitRow)) : null
     )
   );
 }
 
-function DeveloperOptions({ enabledFeatures, onChange }) {
-  return h('details', { className: 'settings-advanced developer-options' },
-    h('summary', null, 'Developer options'),
-    h('div', { className: 'settings-panel-body' },
-      h('p', { className: 'settings-help' }, 'Enable only the developer features you need. These options can expose internal implementation details.'),
-      DEVELOPER_FEATURE_FLAGS.map(feature => h(ToggleRow, {
-        key: feature.id,
-        label: feature.label,
-        help: feature.help,
-        checked: enabledFeatures[feature.id] === true,
-        onChange: enabled => onChange(feature.id, enabled)
-      }))
-    )
+function ExperimentalFeatures({ enabledFeatures, onChange }) {
+  return h(Card, { title: 'Experimental features' },
+    h('p', { className: 'settings-help' }, 'Features still being tested. They may change or be removed in a future update.'),
+    EXPERIMENTAL_FEATURE_FLAGS.map(feature => h(ToggleRow, {
+      key: feature.id,
+      label: feature.label,
+      help: feature.help,
+      checked: enabledFeatures[feature.id] === true,
+      onChange: enabled => onChange(feature.id, enabled)
+    }))
   );
 }
 
@@ -1818,22 +1805,10 @@ function QuitRow() {
   );
 }
 
-function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime = {}, runtimeCompatibility = {} }) {
-  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
+function AboutPage({ metadata }) {
   const repositoryUrl = validatedGitHubUrl(metadata.repositoryUrl);
   const developer = metadata.developer || {};
   const developerUrl = validatedGitHubUrl(developer.profileUrl);
-  const buildId = technicalDetailsEnabled ? buildIdOf(buildStatus) : '';
-  const runtimeNotice = technicalDetailsEnabled ? runtimeCompatibilityNotice(runtime, repositoryRuntime, runtimeCompatibility) : null;
-  const developerUnlockRef = useRef({ count: 0, startedAt: 0 });
-  const onBuildClick = () => {
-    if (readDeveloperOptionsUnlocked()) return;
-    const next = advanceDeveloperUnlockClicks(developerUnlockRef.current);
-    developerUnlockRef.current = next.unlocked ? { count: 0, startedAt: 0 } : next;
-    if (!next.unlocked) return;
-    unlockDeveloperOptions();
-    toast('Developer options unlocked. Choose the features you want to enable in App settings.', { variant: 'success' });
-  };
   const documentLink = (path, label) => {
     const href = repositoryDocumentUrl(repositoryUrl, path);
     return href
@@ -1845,18 +1820,8 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
     h(Card, { title: 'Application information' },
       h('div', { className: 'about-product' }, h('div', null,
         h('h4', null, metadata.name || 'Rel.AI MCP'),
-        h('p', null, 'Version: ', h('button', {
-          className: 'about-build-trigger',
-          type: 'button',
-          onClick: onBuildClick,
-          'aria-label': `Version ${metadata.version ? `v${metadata.version}` : 'unknown'}`
-        }, metadata.version ? `v${metadata.version}` : 'Unknown')),
-        buildId ? h('p', null, 'Build: ', h('code', null, buildId)) : null
+        h('p', null, 'Version: ', metadata.version ? `v${metadata.version}` : 'Unknown')
       )),
-      runtimeNotice ? h('div', { className: 'connection-notice warn about-runtime-mismatch', role: 'status' },
-        h('strong', null, runtimeNotice.title),
-        h('div', null, runtimeNotice.message)
-      ) : null,
       developer.name ? h(AboutRow, { label: 'Developer' }, h('span', { className: 'about-detail-value' }, developerUrl ? h('a', { className: 'settings-external-link about-detail-value', href: developerUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': developer.username ? `${developer.name} on GitHub (@${developer.username})` : `${developer.name} on GitHub` }, developer.name) : developer.name, developer.username ? ` (@${developer.username})` : '')) : null,
       h(AboutRow, { label: 'Source code' }, repositoryUrl ? h('a', { className: 'settings-external-link about-detail-value', href: repositoryUrl, target: '_blank', rel: 'noopener noreferrer', 'aria-label': `${repositoryLabel(repositoryUrl)} source code on GitHub` }, repositoryLabel(repositoryUrl)) : h('span', { className: 'about-detail-value' }, metadata.repositoryUrl || ''))
     ),
@@ -1875,33 +1840,6 @@ function AboutPage({ metadata, buildStatus = {}, runtime = {}, repositoryRuntime
 
 function AboutRow({ label, children }) {
   return h('div', { className: 'setting-row about-detail-row' }, h('div', { className: 'setting-row-copy' }, h('strong', null, label)), children);
-}
-
-function buildIdOf(buildStatus = {}) { return String(buildStatus?.buildId || '').trim(); }
-
-function runtimeCompatibilityNotice(runtime = {}, repositoryRuntime = {}, compatibility = {}) {
-  if (compatibility?.available !== true || compatibility?.metadataMatches !== false) return null;
-  const runningVersion = String(runtime?.applicationVersion || runtime?.packageVersion || '').trim();
-  const sourceVersion = String(repositoryRuntime?.applicationVersion || repositoryRuntime?.packageVersion || '').trim();
-  if (!runningVersion || !sourceVersion) return null;
-  const activeTasksPreventRestart = compatibility?.activeTasksPreventRestart === true;
-  const restartRequired = compatibility?.restartRequired === true;
-  if (runningVersion === sourceVersion && !restartRequired) return null;
-  const title = restartRequired ? 'Restart required to load current source' : 'Running runtime differs from current source';
-  const message = activeTasksPreventRestart
-    ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Finish active tasks before restarting Rel.AI to load the current source.`
-    : restartRequired
-      ? `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. Restart Rel.AI to load the current source and tools.`
-      : `Rel.AI is running v${runningVersion} while this source tree is v${sourceVersion}. The running version is compatible, but its behavior may not match this source exactly.`;
-  return { title, message, runningVersion, sourceVersion };
-}
-
-function advanceDeveloperUnlockClicks(state = {}, now = Date.now()) {
-  const startedAt = Number(state.startedAt || 0);
-  const withinWindow = startedAt > 0 && now - startedAt <= DEVELOPER_UNLOCK_WINDOW_MS;
-  const count = withinWindow ? Number(state.count || 0) + 1 : 1;
-  const nextStartedAt = withinWindow ? startedAt : now;
-  return { count, startedAt: nextStartedAt, unlocked: count >= DEVELOPER_UNLOCK_CLICK_COUNT };
 }
 
 function validatedGitHubUrl(value) {
@@ -1927,4 +1865,4 @@ function normalizeReleaseNoteText(value) { return String(value || '').replace(/<
 function messageOf(error) { return error instanceof Error ? error.message : String(error || 'The action failed.'); }
 function prefersReducedMotion() { return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; }
 
-export { advanceDeveloperUnlockClicks, connectionGuideMode, connectionPrimaryAction, normalizeNotificationPreferences, normalizeReleaseNoteText, runtimeCompatibilityNotice, updateView };
+export { connectionGuideMode, connectionPrimaryAction, normalizeNotificationPreferences, normalizeReleaseNoteText, updateView };

@@ -9,6 +9,7 @@ let _currentRouteKey = null;
 let _bound = false;
 let _guardPending = false;
 let _queuedRouteKey = null;
+let _lastRouteSection = '';
 /** @type {{ key: string, path: string, search: string } | null} */
 let _routeSnapshot = null;
 /** @type {Set<() => void>} */
@@ -160,9 +161,18 @@ function commitRoute(routeKey, dispatch = true) {
   const path = (separator >= 0 ? routeKey.slice(0, separator) : routeKey) || 'home';
   const search = separator >= 0 ? routeKey.slice(separator) : '';
   _routeSnapshot = Object.freeze({ key: routeKey, path, search });
+  // Mark only actual section navigation, not query changes within a page.
+  const section = path.split('/')[0] || 'home';
+  if (dispatch && typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+    if (_lastRouteSection !== section) {
+      performance.clearMarks(`relai.route.${section}.start`);
+      performance.mark(`relai.route.${section}.start`);
+    }
+  }
+  _lastRouteSection = section;
   _routeListeners.forEach(listener => listener());
   if (dispatch && typeof window !== 'undefined') {
-    const id = path.split('/')[0] || 'home';
+    const id = section;
     window.dispatchEvent(new CustomEvent('relai:route-change', {
       detail: { section: id, path, params: new URLSearchParams(search.slice(1)) }
     }));

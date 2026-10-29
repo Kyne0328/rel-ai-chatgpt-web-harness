@@ -2,12 +2,13 @@
 
 ## Unreleased
 
-- **Keep embedded Chromium browsing and improve saved-session continuity.** Persistent profiles retain their authenticated state when a task finishes, and an authorized subsequent task reclaims the same open browser session without recalling its session ID. Keep exclusive task leases, stable principal-scoped profiles across refreshed authorization grants, explicit private-session cleanup, and manual sign-in handoffs. No separate browser download or Playwright downgrade is required for Rel.AI.
+- **Show startup progress earlier and make busy work easier to follow.** Move the branded splash ahead of desktop lifecycle persistence during visible foreground launches, distinguish automatic recovery in the progress animation, record desktop launch and lazy-route timing, show current work directly on task rows, and safely reconcile delayed project and task-control results using read-only state checks.
 
 - **Avoid false failures from late acknowledgments and timeouts.** Keep the local service healthy when first-run handoff metadata is delayed, retry dashboard authentication bootstrap without restarting the service, distinguish unconfirmed dashboard mutations from failed changes, retain troubleshooting reports with bounded transient retries, and recognize live HTTP event streams as reachable.
 
 - **Replace the manual Electron recovery page with automatic startup recovery.** Keep the existing Rel.AI logo splash visible while local startup is retried with backoff; allow the slow local utility start observed in desktop logs, retry a confirmed timed-out start with a fresh process, and offer connection settings only for nonrecoverable configuration problems. Remove the old recovery window, renderer and IPC surface while keeping dashboard diagnostics and first-run setup.
 
+- **Keep embedded Chromium browsing and improve saved-session continuity.** Persistent profiles retain their authenticated state when a task finishes, and an authorized subsequent task reclaims the same open browser session without recalling its session ID. Keep exclusive task leases, stable principal-scoped profiles across refreshed authorization grants, explicit private-session cleanup, and manual sign-in handoffs. No separate browser download or Playwright downgrade is required for Rel.AI.
 
 - **Show a branded startup splash for foreground desktop launches.** Animate the existing Rel.AI logo and a lightweight progress light while the local service and dashboard initialize; display actual startup stages, dismiss immediately on dashboard readiness or recovery, and preserve silent launch-at-login and reduced-motion settings.
 

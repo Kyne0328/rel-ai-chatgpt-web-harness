@@ -97,7 +97,7 @@
     "test:public-workflow": "node test/workflow-smoke.mjs",
     "test:regressions": "node test/regression-fixes-smoke.mjs",
     "test:repository-intelligence": "node test/run-repository-intelligence-tests.mjs && node scripts/verify-tree-sitter-assets.mjs",
-    "test:unit:extras": "node test/session-summary-unit.mjs && node test/mcp-connection-manager-unit.mjs && node test/property-boundaries-unit.mjs && node test/mcp-events-unit.mjs && node test/process-cancellation-unit.mjs && node test/process-output-pipe-stall-unit.mjs",
+    "test:unit:extras": "node test/command-output-activity-unit.mjs && node test/session-summary-unit.mjs && node test/mcp-connection-manager-unit.mjs && node test/property-boundaries-unit.mjs && node test/mcp-events-unit.mjs && node test/process-cancellation-unit.mjs && node test/process-output-pipe-stall-unit.mjs",
     "test:pty": "node test/process-pty-unit.mjs",
     "test:unit": "node test/run-tests.mjs && npm run test:unit:extras",
     "test:integration": "node test/run-repository-intelligence-tests.mjs",

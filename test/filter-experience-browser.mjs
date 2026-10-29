@@ -86,10 +86,7 @@ try {
   assert.equal(result.diagnostics.cancelPreserved, true);
   assert.equal(result.diagnostics.fixedChoicesVisible, true);
   assert.equal(result.diagnostics.sourceDisabledForFindings, true);
-  assert.equal(result.diagnostics.initialLiveTailLabel, 'Start live updates');
-  assert.equal(result.diagnostics.liveTailActiveLabel, 'Pause live updates');
-  assert.equal(result.diagnostics.liveTailStarted, true);
-  assert.equal(result.diagnostics.liveTailStopped, true);
+  assert.equal(result.diagnostics.liveTailRemoved, true, 'Troubleshooting must not expose an in-app raw log live-tail control');
   assert.equal(result.diagnostics.searchEmpty, true, JSON.stringify(result.diagnostics));
   assert.equal(result.diagnostics.pendingSearchCleared, true, JSON.stringify(result.diagnostics));
   assert.equal(result.diagnostics.pendingFilterRemovalPreserved, true, JSON.stringify(result.diagnostics));
@@ -98,8 +95,7 @@ try {
   assert.equal(result.diagnostics.findingSeveritiesReadable, true);
   assert.deepEqual(result.diagnostics.applied.chips.sort(), ['Scope: Failed activity', 'Severity: Blocking']);
   assert.equal(result.diagnostics.applied.badge, 'Filters (2)');
-  assert.match(result.diagnostics.applied.summary, /findings.*log entries shown/);
-  assert.equal(result.diagnostics.applied.liveTailPressed, 'false');
+  assert.match(result.diagnostics.applied.summary, /findings.*failed activit(?:y|ies) shown/);
   assert.deepEqual(result.diagnostics.applied.reportActions, ['Copy report', 'Export support information']);
   assert.match(result.tools.applied.chip, /Validate/);
   assert.match(result.tools.applied.badge, /Validate/);

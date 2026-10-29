@@ -193,7 +193,7 @@ visitProcessNode(restartedProcessTree);
 assert.ok(processNodes.some(node => node?.props?.['data-process-id'] === 'restart-survivor'), 'a process whose state is unknown after restart must remain visible');
 assert.ok(processNodes.some(node => node?.props?.['data-stop-process'] === true && node.props.disabled === false), 'a restart-unknown process must retain its enabled Stop action');
 assert.ok(processNodes.includes('Unknown after restart'), 'the renderer must disclose uncertain restart state');
-assert.ok(processNodes.some(node => typeof node === 'string' && /Stop the process if it is still running/.test(node)), 'the renderer must retain restart recovery guidance');
+assert.ok(processNodes.some(node => typeof node === 'string' && /still checking whether this previous action fully stopped/i.test(node)), 'the renderer must explain unresolved cleanup without exposing internal recovery mechanics');
 assert.ok(processNodes.includes('0 running'), 'uncertain processes must not be counted as running');
 assert.ok(processNodes.includes('1 unresolved'));
 const recoverySection = processNodes.find(node => node?.props?.['data-process-recovery-list'] === true);
@@ -222,8 +222,8 @@ const noControllerTree = processRenderContext.renderProcesses(() => ({
 const previousNodes = processNodes.splice(0);
 visitProcessNode(noControllerTree);
 assert.equal(processNodes.some(node => node?.props?.['data-stop-process'] === true), false);
-assert.ok(processNodes.includes(missingController.recovery), 'the row must show the backend recovery action');
-assert.equal(processNodes.filter(node => node === missingController.recovery).length, 1, 'older servers sending the same error and recovery text must not duplicate it');
+assert.ok(processNodes.some(node => typeof node === 'string' && /still checking whether this previous action fully stopped/i.test(node)), 'the row must show the user-safe unresolved cleanup state');
+assert.equal(processNodes.includes(missingController.recovery), false, 'backend recovery instructions must not leak into the production UI');
 processNodes.splice(0, processNodes.length, ...previousNodes);
 
 const defaultUseState = processRenderContext.useState;
@@ -253,20 +253,14 @@ const archiveTree = processRenderContext.renderProcesses(() => archiveData)();
 processNodes.splice(0);
 visitProcessNode(archiveTree);
 assert.equal(processNodes.some(node => node?.props?.['data-stop-process']), false);
-processNodes.find(node => node?.props?.['data-archive-recovery']).props.onClick();
-await new Promise(resolve => setImmediate(resolve));
-assert.equal(processStopRequests.at(-1)[0], '/api/processes/recovery');
-assert.deepEqual(JSON.parse(JSON.stringify(processStopRequests.at(-1)[1])), { processId: 'archive-legacy', archived: true, expectedArchivedAt: '' });
+assert.equal(processNodes.some(node => node?.props?.['data-archive-recovery']), false, 'recovery bookkeeping must not expose archive controls');
+assert.ok(processNodes.some(node => typeof node === 'string' && /still checking whether this previous action fully stopped/i.test(node)));
 const archivedTree = processRenderContext.renderProcesses(() => ({ managedProcesses: [{ ...archiveData.managedProcesses[0], recoveryArchivedAt: '2026-10-25T00:00:00Z' }] }))();
 processNodes.splice(0);
 visitProcessNode(archivedTree);
-assert.equal(processNodes.some(node => node?.props?.['data-process-recovery-list']), false, 'archived records leave the current Recovery list');
-assert.ok(processNodes.some(node => node?.props?.['data-archived-recovery']));
-assert.ok(processNodes.includes('Restore record'));
-assert.ok(processNodes.some(node => typeof node === 'string' && node.includes('Cleanup remains unconfirmed')));
-processNodes.find(node => node?.props?.['data-archive-recovery']).props.onClick();
-await new Promise(resolve => setImmediate(resolve));
-assert.equal(processStopRequests.at(-1)[1].archived, false);
+assert.equal(processNodes.some(node => node?.props?.['data-process-recovery-list']), false, 'archived bookkeeping must stay out of the current cleanup list');
+assert.equal(processNodes.some(node => node?.props?.['data-archived-recovery']), false, 'archived recovery bookkeeping must stay out of the production UI');
+assert.equal(processNodes.includes('Restore record'), false);
 
 const commandTree = processRenderContext.renderProcesses(() => ({
   managedProcesses: [{ processId: 'service-stays-running', status: 'running', label: 'Service' }],
@@ -495,7 +489,7 @@ const sessionCssSource = fs.readFileSync(path.join(root, 'src/ui/features/sessio
 
 assert.match(sessionsSource, /sessions-summary-line/, 'Tasks surface must retain a compact user-facing summary in its toolbar');
 assert.match(sessionsSource, /Review its progress, changes, checks, and activity\./, 'Tasks empty inspector must explain what selecting a task reveals');
-assert.match(sessionsSource, /'aria-label': `Copy \$\{label\} \$\{value\}`/);
+assert.doesNotMatch(sessionsSource, /task-detail-identifier|Copy \$\{label\} \$\{value\}/, 'Tasks must not expose internal identifier copy controls');
 assert.doesNotMatch(sessionsSource, /Client task capability|Native MCP tasks|Native task ID/);
 assert.doesNotMatch(sessionsSource, /nativeTasksCard|nativeTaskRow|data-cancel-native-task|bindNativeTaskActions/);
 assert.match(sessionsSource, /data-stop-task-operation/);

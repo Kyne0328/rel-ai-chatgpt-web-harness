@@ -82,28 +82,6 @@
 .activity-session-actions { @apply flex shrink-0 flex-wrap items-center gap-3; }
 .activity-detail-error { @apply rounded-lg p-3; background: var(--ui-status-danger-background); border: 1px solid var(--ui-status-danger-border); }
 .activity-detail-error > h3, .activity-detail-error > p { color: var(--ui-status-danger-foreground); }
-.activity-detail-technical { @apply border-t pt-3; border-color: var(--ui-border-default); }
-.activity-detail-technical > summary { @apply flex min-h-11 cursor-pointer items-center text-[13px] font-semibold; color: var(--ui-text-secondary); }
-.activity-detail-fields { @apply mt-2; }
-.activity-detail-raw { @apply mt-3 grid gap-2; }
-.activity-detail-raw h4 { @apply text-[13px] font-bold uppercase tracking-[.06em]; color: var(--ui-text-tertiary); }
-.activity-detail-raw-head { @apply flex flex-wrap items-center justify-between gap-2; }
-.activity-detail-raw-actions { @apply flex flex-wrap items-center gap-1; }
-.activity-detail-raw-actions button { min-height: 36px; }
-.activity-json-search { @apply flex min-h-10 items-center gap-2 rounded-md px-2.5; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); color: var(--ui-text-tertiary); }
-.activity-json-search input { min-height: 36px; min-width: 0; flex: 1; border: 0; padding: 0; background: transparent; box-shadow: none; }
-.activity-json-search input:focus { box-shadow: none; }
-.activity-json-tree { max-height: 360px; overflow: auto; padding: var(--filter-inset, 12px); border: 1px solid var(--ui-border-subtle); border-radius: var(--technical-radius, 7px); background: var(--ui-surface-secondary); font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: var(--technical-font-size, 12px); line-height: var(--technical-line-height, 1.6); }
-.activity-json-branch { margin: 0; }
-.activity-json-branch > summary { display: flex; min-height: 28px; align-items: center; gap: 6px; cursor: pointer; color: var(--ui-text-secondary); }
-.activity-json-branch.is-root > summary { color: var(--ui-text-primary); }
-.activity-json-children { margin-left: 13px; padding-left: 10px; border-left: 1px solid var(--ui-border-subtle); }
-.activity-json-leaf { display: flex; min-height: 26px; min-width: 0; align-items: baseline; gap: 6px; padding-left: 4px; }
-.activity-json-key { color: var(--ui-action-primary); overflow-wrap: anywhere; }
-.activity-json-type { color: var(--ui-text-tertiary); font-size: 13px; }
-.activity-json-leaf code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ui-text-primary); }
-.activity-json-empty { @apply rounded-md px-3 py-2 text-[13px]; color: var(--ui-text-tertiary); background: var(--ui-surface-secondary); border: 1px dashed var(--ui-border-default); }
-.activity-detail-technical > button { @apply mt-3; }
 }
 
 @media (prefers-reduced-motion: reduce) {

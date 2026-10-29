@@ -389,6 +389,17 @@ function fallbackPhaseMessage(name: string, operation: any = {}) {
   if (phase === 'preparing') return `${name} left the queue and is preparing to execute${timing}.`;
   if (phase === 'running') return `${name} is executing${timing}.`;
   if (phase === 'stopping') return `${name} is stopping after cancellation or timeout${timing}.`;
+  if (phase === 'spawned') {
+    const at = Date.parse(operation.lastOutputAt || '');
+    const ageMs = Date.now() - at;
+    const output = Number.isFinite(at) && ageMs >= 0
+      ? ageMs < 30_000 ? ' Recent command output observed.' : ' No recent command output observed; execution may still be healthy.'
+      : ' Command output activity is unknown.';
+    return `${name} command is running${timing}.${output}`;
+  }
+  if (phase === 'host-queued') return `${name} is waiting for host resources${timing}.`;
+  if (['exited', 'draining-output'].includes(phase)) return `${name} command exited; output collection is finishing${timing}.`;
+  if (['drained', 'reconciling', 'persisting'].includes(phase)) return `${name} is finalizing its result${timing}.`;
   return `${name} is starting${timing}.`;
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { sessionSummary } from '../src/ui/features/sessions/model.js';
+import { sessionSummary, taskRowActivity } from '../src/ui/features/sessions/model.js';
 
 assert.equal(sessionSummary([
   { status: 'running' },
@@ -25,4 +25,7 @@ assert.equal(sessionSummary([
   { status: 'failed' }
 ]), '0 active · 0 waiting · 1 inactive · 0 completed · 1 cancelled · 1 failed', 'inactive, cancelled, and failed tasks must never inflate the waiting count');
 
+assert.equal(taskRowActivity({ status: 'running', currentActivity: 'Checking repository' }), 'Checking repository');
+assert.equal(taskRowActivity({ status: 'waiting', goalMode: { state: 'needs_auth' } }), 'Waiting for ChatGPT sign-in');
+assert.equal(taskRowActivity({ status: 'completed', currentActivity: 'Checking repository' }), '', 'ended tasks should not show stale active work');
 console.log('Task summary status buckets passed.');

@@ -5,7 +5,7 @@ import { StatusPill } from '../../components/pill.js';
 import { taskProgressView } from '../../components/task-progress.js';
 import { toast } from '../../components/toast.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
-import { postJson, requestDashboardRefresh } from '../../api.js';
+import { fetchJson, postJson, reconcileUnconfirmedResult, requestDashboardRefresh } from '../../api.js';
 import { taskControlMessage } from '../sessions/model.js';
 import { routeMetadata } from '../../navigation-catalog.js';
 import { getWorkspaceFilter, routeHref } from '../../router.js';
@@ -129,10 +129,17 @@ function HomeTaskControls({ task }) {
     if (action === 'cancel' && !await confirmAction({ title: 'Cancel task?', message: 'Cancel this task and stop its current actions?', detail: 'Persistent background processes can continue. Review Running commands for their status.', confirmLabel: 'Cancel task', danger: true })) return;
     setBusy(action);
     try {
-      const result = await postJson('/api/tasks/control', { action, work_id: id }, { timeout: 10000, pauseTimeoutWhenHidden: false });
+      const mutation = await postJson('/api/tasks/control', { action, work_id: id }, { timeout: 10000, pauseTimeoutWhenHidden: false });
+      const result = await reconcileUnconfirmedResult(mutation, action === 'cancel' || action === 'goal_stop' ? async () => {
+        const latest = await fetchJson(`/api/tasks/session?task=${encodeURIComponent(id)}`, { cache: 'no-store', pauseTimeoutWhenHidden: false });
+        if (!latest?.ok || String(latest.session?.id || latest.session?.work_id || latest.session?.taskId || '') !== id) return false;
+        return action === 'cancel' ? latest.session.status === 'cancelled'
+          : latest.session.goalMode?.goalActive === false;
+      } : null);
       if (result?.outcomeUnknown) { toast(result.error, { variant: 'warn' }); return; }
       if (result?.ok === false) throw new Error(result.error || 'Task control failed.');
-      toast(taskControlMessage(action, result), { variant: result.processCleanup?.complete === false ? 'warn' : 'success' });
+      toast(result.reconciled ? (action === 'cancel' ? 'Task cancellation confirmed.' : 'Goal stopped.')
+        : taskControlMessage(action, result), { variant: result.processCleanup?.complete === false ? 'warn' : 'success' });
       requestDashboardRefresh();
     } catch (error) { toast(String(error?.message || error), { variant: 'error' }); }
     finally { setBusy(''); }

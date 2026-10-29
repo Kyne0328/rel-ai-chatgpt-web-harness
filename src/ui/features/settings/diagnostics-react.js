@@ -3,45 +3,33 @@ import { fetchJson } from '../../api.js';
 import { copyText } from '../../clipboard.js';
 import { filterRadioField, filterSelectField, openFilterDrawer } from '../../components/filter-drawer.js';
 import { Icon } from '../../components/icons.js';
-import { RuntimeBuildIdentity } from '../../components/operation-diagnostics.js';
-import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
 import { StatusPill } from '../../components/pill.js';
 import { toast } from '../../components/toast.js';
 import { getRouteSnapshot, subscribeRoute } from '../../router.js';
 
-import { timeAgo } from '../../utils.js';
 import { restartConnection } from './connection-recovery.js';
 import { ResourceDiagnostics } from './resource-diagnostics.js';
 
 const h = React.createElement;
-const LIVE_TAIL_REFRESH_DELAY_MS = 160;
 const DEFAULT_FILTERS = Object.freeze({ search: '', scope: 'all', severity: 'all', source: 'all' });
 
-const RUNTIME_SLICES = Object.freeze(['runtime', 'runtimeCompatibility']);
-
-export function createDiagnosticsRoute(useDashboardSlices) {
+export function createDiagnosticsRoute() {
   return function DiagnosticsRoute() {
-    const data = useDashboardSlices(RUNTIME_SLICES);
     const route = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
     const workspace = new URLSearchParams(route.search).get('workspace') || '';
-    return h(DiagnosticsView, { runtime: data.runtime, runtimeCompatibility: data.runtimeCompatibility, workspace });
+    return h(DiagnosticsView, { workspace });
   };
 }
 
-function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
-  const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
+function DiagnosticsView({ workspace = '' }) {
   const [reportState, setReportState] = useState(() => ({ workspace, report: null, error: '', desktopLogs: null }));
   const report = reportState.workspace === workspace ? reportState.report : null;
   const loadError = reportState.workspace === workspace ? reportState.error : '';
   const desktopLogs = reportState.workspace === workspace ? reportState.desktopLogs : null;
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
-  const [live, setLive] = useState(false);
   const [busy, setBusy] = useState('');
   const [tunnelDoctor, setTunnelDoctor] = useState(null);
-  const [liveAnnouncement, setLiveAnnouncement] = useState('');
   const reportRef = useRef(report);
-  const liveRef = useRef(live);
-  const refreshTimerRef = useRef(0);
   const retryTimerRef = useRef(0);
   const retryCountRef = useRef(0);
   const requestRef = useRef(null);
@@ -52,7 +40,6 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
   const scrollStateRef = useRef(new Map());
 
   reportRef.current = report;
-  useEffect(() => { liveRef.current = live; }, [live]);
 
   const captureLogPositions = useCallback(() => {
     for (const [key, element] of logRefs.current.entries()) {
@@ -128,56 +115,10 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
     void load();
     return () => {
       if (requestGenerationRef.current === generation) requestGenerationRef.current += 1;
-      window.clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = 0;
       if (retryTimerRef.current) window.clearTimeout(retryTimerRef.current);
       retryTimerRef.current = 0;
     };
   }, [load, workspace]);
-
-  const scheduleRefresh = useCallback(() => {
-    if (document.visibilityState === 'hidden' || refreshTimerRef.current) return;
-    refreshTimerRef.current = window.setTimeout(() => {
-      refreshTimerRef.current = 0;
-      void load({ silent: true });
-    }, LIVE_TAIL_REFRESH_DELAY_MS);
-  }, [load]);
-
-  useEffect(() => {
-    if (!live) return undefined;
-    const onLive = event => {
-      if (!liveRef.current || !location.hash.startsWith('#diagnostics')) return;
-      const detail = event.detail || {};
-      const change = detail.type === 'diagnostics.updated' ? detail.data?.change : null;
-      if (['append', 'replace'].includes(change?.type) && change.entry && reportRef.current?.logs?.runtime) {
-        const current = reportRef.current;
-        const delta = applyRuntimeLogDelta(current.logs.runtime, change);
-        if (delta.kind === 'duplicate') return;
-        if (delta.kind === 'refresh') { scheduleRefresh(); return; }
-        const next = { ...current, logs: { ...current.logs, runtime: delta.runtime } };
-        reportRef.current = next;
-        captureLogPositions();
-        setReportState(currentState => ({ workspace, report: next, error: currentState.workspace === workspace ? currentState.error : '' }));
-        if (change.type === 'append' && ['warning', 'error'].includes(change.entry.level)) {
-          setLiveAnnouncement(`New app log ${change.entry.level} from ${change.entry.source || 'Rel.AI'}.`);
-        }
-        return;
-      }
-      scheduleRefresh();
-    };
-    window.addEventListener('relai:diagnostics-live', onLive);
-    return () => window.removeEventListener('relai:diagnostics-live', onLive);
-  }, [captureLogPositions, live, scheduleRefresh, workspace]);
-
-  useEffect(() => {
-    if (!live) return undefined;
-    const onVisibilityChange = () => {
-      if (document.visibilityState !== 'visible' || !liveRef.current || !location.hash.startsWith('#diagnostics')) return;
-      void load({ silent: true });
-    };
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [live, load]);
 
   useEffect(() => {
     for (const [key, element] of logRefs.current.entries()) {
@@ -189,12 +130,14 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
   }, [report, filters]);
 
   const sources = useMemo(() => diagnosticSources(report), [report]);
-  const normalizedFilters = useMemo(
-    () => sources.includes(filters.source) ? filters : { ...filters, source: 'all' },
-    [filters, sources]
-  );
+  const normalizedFilters = useMemo(() => {
+    const scope = ['all', 'findings', 'failed'].includes(filters.scope) ? filters.scope : 'all';
+    const severity = ['all', 'error', 'warning', 'info'].includes(filters.severity) ? filters.severity : 'all';
+    const source = sources.includes(filters.source) ? filters.source : 'all';
+    return { ...filters, scope, severity, source };
+  }, [filters, sources]);
   const view = useMemo(() => filteredDiagnosticView(report, normalizedFilters), [report, normalizedFilters]);
-  const summary = report ? `${view.findings.length} of ${view.totalFindings} findings · ${view.shownLogs} of ${view.totalLogs} log entries shown` : 'Loading diagnostics…';
+  const summary = report ? `${view.findings.length} of ${view.totalFindings} findings · ${view.failed.length} of ${view.totalFailed} failed activities shown` : 'Loading troubleshooting…';
 
   const clearFilters = () => { captureLogPositions(); setFilters(DEFAULT_FILTERS); };
   const copyReport = async () => {
@@ -272,7 +215,6 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
           ) : null
         )
       ),
-      h('div', { className: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' }, liveAnnouncement),
       !report && !loadError ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' }, h('div', { className: 'empty', role: 'status' }, 'Loading troubleshooting info…')) : null,
       loadError ? h(DiagnosticUnavailable, { error: loadError, hasReport: Boolean(report), desktopLogs, onRetry: () => void load() }) : null,
       report ? h('div', { id: 'diagnosticSummary', className: 'diagnostic-summary' },
@@ -286,22 +228,20 @@ function DiagnosticsView({ runtime, runtimeCompatibility, workspace = '' }) {
           tunnelDoctor ? h(TunnelDoctorResult, { result: tunnelDoctor }) : null
         ),
         h('div', { className: 'diagnostic-section diagnostic-section-resources' },
-          h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load }),
-          technicalDetailsEnabled && runtime?.buildIdentity?.buildId && runtime.buildIdentity.buildId !== 'Unknown'
-            ? h(RuntimeBuildIdentity, { runtime, compatibility: runtimeCompatibility }) : null
+          h(ResourceDiagnostics, { resources: report.resourceDiagnostics, onRefresh: load })
         ),
-        technicalDetailsEnabled ? h('div', { className: 'diagnostic-section diagnostic-section-logs' },
+        h('div', { className: 'diagnostic-section diagnostic-section-logs' },
           h('div', { id: 'diagnosticFilterHost' },
-            h(DiagnosticFilterBar, { filters: normalizedFilters, sources, summary, live, onChange: next => { captureLogPositions(); setFilters(next); }, onClear: clearFilters, onToggleLive: () => setLive(value => !value) })
+            h(DiagnosticFilterBar, { filters: normalizedFilters, sources, summary, onChange: next => { captureLogPositions(); setFilters(next); }, onClear: clearFilters })
           ),
-          h(DiagnosticLogs, { report, view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } })
-        ) : null
+          h(DiagnosticLogs, { view, registerLog: (key, element) => { if (element) logRefs.current.set(key, element); else logRefs.current.delete(key); } })
+        )
       ) : null
     )
   );
 }
 
-function DiagnosticFilterBar({ filters, sources, summary, live, onChange, onClear, onToggleLive }) {
+function DiagnosticFilterBar({ filters, sources, summary, onChange, onClear }) {
   const [search, setSearch] = useState(filters.search);
   const searchTimerRef = useRef(0);
   useEffect(() => { setSearch(filters.search); }, [filters.search]);
@@ -326,25 +266,14 @@ function DiagnosticFilterBar({ filters, sources, summary, live, onChange, onClea
     h('div', { className: 'filter-bar-controls' },
       h('label', { className: 'filter-search-control' },
         h('span', { className: 'sr-only' }, 'Search troubleshooting'),
-        h('input', { type: 'search', className: 'filter-search-input', placeholder: 'Search code, source, message, or project', value: search, autoComplete: 'off', onChange: event => updateSearch(event.currentTarget.value) })
+        h('input', { type: 'search', className: 'filter-search-input', placeholder: 'Search problems or failed activity', value: search, autoComplete: 'off', onChange: event => updateSearch(event.currentTarget.value) })
       ),
       h('button', {
         type: 'button',
         className: `secondary filter-open-button${active.length ? ' active' : ''}`,
         'aria-label': active.length ? `Open filters. ${active.length} active` : 'Open filters',
         onClick: openFilters
-      }, active.length ? `Filters (${active.length})` : 'Filters'),
-      h('div', { className: 'filter-bar-action' },
-        h('button', {
-          type: 'button',
-          className: `secondary filter-state-toggle diagnostic-live-tail${live ? ' active' : ''}`,
-          'data-live-tail': '',
-          'aria-pressed': String(live),
-          'aria-label': live ? 'Pause live updates' : 'Start live updates',
-          title: live ? 'Pause live updates' : 'Start live updates',
-          onClick: onToggleLive
-        }, live ? 'Pause' : 'Live')
-      )
+      }, active.length ? `Filters (${active.length})` : 'Filters')
     ),
     active.length ? h('div', { className: 'filter-chip-list', 'aria-label': 'Active filters' }, active.map(filter => h('button', {
       type: 'button', className: 'secondary filter-chip', key: filter.key,
@@ -372,7 +301,6 @@ function openDiagnosticFilters({ filters, sources, onChange }) {
           options: [
             { value: 'all', label: 'Everything' },
             { value: 'findings', label: 'Findings' },
-            { value: 'service', label: 'App log' },
             { value: 'failed', label: 'Failed activity' }
           ],
           onChange: value => {
@@ -388,18 +316,17 @@ function openDiagnosticFilters({ filters, sources, onChange }) {
             { value: 'all', label: 'All severities' },
             { value: 'error', label: 'Blocking' },
             { value: 'warning', label: 'Warnings' },
-            { value: 'info', label: 'Recommendations' },
-            { value: 'debug', label: 'Debug logs' }
+            { value: 'info', label: 'Recommendations' }
           ],
           onChange: value => { draft.severity = value; }
         }),
         filterSelectField({
           key: 'source',
-          label: 'Source',
+          label: 'Action',
           value: draft.scope === 'findings' ? 'all' : draft.source,
           options: [{ value: 'all', label: 'All sources' }, ...sources.map(source => ({ value: source, label: source }))],
           disabled: draft.scope === 'findings',
-          help: draft.scope === 'findings' ? 'Source applies to service and failed activity logs.' : '',
+          help: draft.scope === 'findings' ? 'Action applies to failed activity.' : '',
           onChange: value => { draft.source = value; }
         })
       );
@@ -418,9 +345,9 @@ function openDiagnosticFilters({ filters, sources, onChange }) {
 
 function diagnosticFilterChips(filters) {
   const chips = [];
-  if (filters.scope !== 'all') chips.push({ key: 'scope', label: 'Scope', value: { findings: 'Findings', service: 'App log', failed: 'Failed activity' }[filters.scope] || filters.scope });
-  if (filters.severity !== 'all') chips.push({ key: 'severity', label: 'Severity', value: { error: 'Blocking', warning: 'Warnings', info: 'Recommendations', debug: 'Debug logs' }[filters.severity] || filters.severity });
-  if (filters.source !== 'all') chips.push({ key: 'source', label: 'Source', value: filters.source });
+  if (filters.scope !== 'all') chips.push({ key: 'scope', label: 'Scope', value: { findings: 'Findings', failed: 'Failed activity' }[filters.scope] || filters.scope });
+  if (filters.severity !== 'all') chips.push({ key: 'severity', label: 'Severity', value: { error: 'Blocking', warning: 'Warnings', info: 'Recommendations' }[filters.severity] || filters.severity });
+  if (filters.source !== 'all') chips.push({ key: 'source', label: 'Action', value: filters.source });
   return chips;
 }
 function hasDiagnosticFilters(filters) { return Boolean(filters.search || filters.scope !== 'all' || filters.severity !== 'all' || filters.source !== 'all'); }
@@ -526,13 +453,7 @@ function TunnelDoctorResult({ result = {} }) {
             : null
         );
       }) : h('div', { className: 'diagnostic-log-empty' }, result.error || 'No individual tunnel checks were returned.'),
-      result.truncated ? h('small', null, 'Technical output was truncated to keep this diagnostic bounded.') : null,
-      result.rawOutput ? h('div', { className: 'diagnostic-copy diagnostic-doctor-raw' },
-        h('details', null,
-          h('summary', null, 'Technical output'),
-          h('pre', null, result.rawOutput)
-        )
-      ) : null
+      result.truncated ? h('small', null, 'Additional diagnostic details are available in exported support information.') : null
     )
   );
 }
@@ -607,7 +528,7 @@ function DiagnosticFindings({ findings, total, onReload }) {
           h('span', { className: 'status-indicator status-good', 'aria-hidden': 'true' }),
           h('strong', null, 'No current problems')
         ),
-        h('span', { className: 'diagnostic-clear-sub' }, 'Logs below may still contain earlier failures.')
+        h('span', { className: 'diagnostic-clear-sub' }, 'Recent failed activity may still appear below.')
       )
     : h('div', { className: 'diagnostic-log-empty', 'data-diagnostic-region': 'findings' }, h('strong', null, 'No findings match the current filters.'));
   return h('div', { className: 'diagnostic-list', 'data-diagnostic-region': 'findings' }, findings.map(finding => h(DiagnosticFinding, { finding, key: finding.code, onReload })));
@@ -630,19 +551,14 @@ function DiagnosticFinding({ finding, onReload }) {
       h('h3', null, finding.title),
       h('p', null, h('strong', null, 'Impact:'), ` ${finding.impact}`),
       h('p', null, h('strong', null, 'Recommended action:'), ` ${finding.recommendation}`),
-      Array.isArray(finding.context) && finding.context.length ? h('div', { className: 'diagnostic-context' }, finding.context.map((entry, index) => h('div', { className: 'diagnostic-context-row', key: index }, h('code', null, entry.tool || 'configuration change'), h('span', entry.ts ? { 'data-clock-relative': entry.ts } : null, entry.ts ? timeAgo(entry.ts) : ''), h('small', null, entry.path || entry.reason || 'No additional context recorded.')))) : null,
-      canRestart ? h(React.Fragment, null, h('button', { className: 'secondary compact-button', type: 'button', disabled: busy, onClick: () => void retry() }, busy ? 'Retrying connection…' : (finding.action.label || 'Restart connection')), h('a', { className: 'buttonlike secondary compact-button', href: finding.action.href || '#settings/connection' }, 'Review connection settings')) : finding.action?.href ? h('a', { className: 'buttonlike secondary compact-button', href: finding.action.href }, finding.action.label || 'Details') : null,
-      h('details', { 'data-diagnostic-detail': finding.code }, h('summary', null, 'Technical details'), h('p', null, h('strong', null, 'Code:'), ' ', h('code', null, finding.code)), h('pre', null, JSON.stringify(finding.details || {}, null, 2)))
+      canRestart ? h(React.Fragment, null, h('button', { className: 'secondary compact-button', type: 'button', disabled: busy, onClick: () => void retry() }, busy ? 'Retrying connection…' : (finding.action.label || 'Restart connection')), h('a', { className: 'buttonlike secondary compact-button', href: finding.action.href || '#settings/connection' }, 'Review connection settings')) : finding.action?.href ? h('a', { className: 'buttonlike secondary compact-button', href: finding.action.href }, finding.action.label || 'Details') : null
     )
   );
 }
 function findingSeverityLabel(severity) { return severity === 'error' ? 'Blocking' : severity === 'warning' ? 'Warning' : 'Recommendation'; }
 
-function DiagnosticLogs({ report, view, registerLog }) {
-  const runtime = report.logs?.runtime || { available: false, entries: [] };
-  const runtimeEmpty = runtime.available ? 'No app messages match the current filters.' : 'App logs are available in the desktop app.';
+function DiagnosticLogs({ view, registerLog }) {
   return h('div', { className: 'diagnostic-log-grid', 'data-diagnostic-region': 'logs' },
-    h(LogPanel, { keyName: 'runtime', title: 'App log', entries: view.runtime, emptyText: runtimeEmpty, available: runtime.available, subtitle: runtime.persistent ? (runtime.persistence?.healthy === false ? 'Rel.AI cannot save logs now. Logs from this session are still visible.' : 'Saved locally with sensitive values removed') : '', registerLog }),
     h(LogPanel, { keyName: 'failed', title: 'Failed activity', entries: view.failed, emptyText: 'No failed activity matches the current filters.', available: true, subtitle: '', registerLog })
   );
 }
@@ -653,27 +569,16 @@ function LogPanel({ keyName, title, entries, emptyText, available, subtitle, reg
   );
 }
 function LogRow({ entry }) {
-  const message = entry.message || entry.error || 'Recorded diagnostic event';
-  const source = entry.source || entry.tool || 'activity';
-  const component = entry.component ? `${source}/${entry.component}` : source;
+  const message = entry.message || entry.error || 'Recorded failed activity';
   const level = entry.level || (entry.error ? 'error' : 'info');
   const repeatCount = Math.max(1, Number(entry.repeatCount || 1));
-  const context = {
-    ...(entry.code || entry.errorCode ? { code: entry.code || entry.errorCode } : {}),
-    ...(entry.workspace ? { project: entry.workspace } : {}),
-    ...(entry.taskId ? { task: entry.taskId } : {}),
-    ...(entry.eventId ? { event: entry.eventId } : {}),
-    ...(entry.tool && entry.source ? { tool: entry.tool } : {}),
-    ...(entry.operation ? { operation: entry.operation } : {}),
-    ...(entry.details && typeof entry.details === 'object' ? entry.details : {})
-  };
-  return h('details', { className: `diagnostic-log-row ${level}` },
-    h('summary', { className: 'diagnostic-log-summary' },
+  return h('div', { className: `diagnostic-log-row ${level}` },
+    h('div', { className: 'diagnostic-log-summary' },
       h('time', { dateTime: entry.ts || '' }, localLogTime(entry.lastTs || entry.ts)),
       h('span', { className: `diagnostic-log-level ${level}` }, levelLabel(level)),
-      h('code', { title: component }, component), h('span', { className: 'diagnostic-log-message' }, message), repeatCount > 1 ? h('span', { className: 'diagnostic-log-repeat' }, `×${repeatCount}`) : null
-    ),
-    h('div', { className: 'diagnostic-log-details' }, Object.keys(context).length ? h(React.Fragment, null, h('strong', null, 'Technical details'), h('pre', null, JSON.stringify(context, null, 2))) : h('span', null, 'No additional technical details.'))
+      h('span', { className: 'diagnostic-log-message' }, message),
+      repeatCount > 1 ? h('span', { className: 'diagnostic-log-repeat' }, `×${repeatCount}`) : null
+    )
   );
 }
 function localLogTime(value) { const timestamp = Date.parse(String(value || '')); return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString(undefined, { hour12: false }) : 'Unknown time'; }
@@ -704,62 +609,31 @@ async function loadDesktopRuntimeLogs() {
   } catch { return null; }
 }
 
-function applyRuntimeLogDelta(runtime = {}, change = {}) {
-  const currentRevision = finiteRevision(runtime.revision);
-  const incomingRevision = finiteRevision(change.revision);
-  if (incomingRevision && incomingRevision <= currentRevision) return { kind: 'duplicate', runtime };
-  if (incomingRevision && incomingRevision > currentRevision + 1) return { kind: 'refresh', runtime };
-  const entries = Array.isArray(runtime.entries) ? runtime.entries : [];
-  let nextEntries;
-  if (change.type === 'replace') {
-    const index = Number.isInteger(Number(change.index)) ? Number(change.index) : entries.length - 1;
-    if (index < 0 || index >= entries.length) return { kind: 'refresh', runtime };
-    nextEntries = [...entries];
-    nextEntries[index] = change.entry;
-  } else if (change.type === 'append') {
-    nextEntries = [...entries, change.entry].slice(-100);
-  } else {
-    return { kind: 'refresh', runtime };
-  }
-  return {
-    kind: 'applied',
-    runtime: {
-      ...runtime,
-      entries: nextEntries,
-      count: Math.max(Number(change.count || 0), change.type === 'append' ? Number(runtime.count || 0) + 1 : nextEntries.length, nextEntries.length),
-      revision: incomingRevision || currentRevision
-    }
-  };
-}
 
 function diagnosticSources(report) {
   if (!report) return [];
   const sources = new Set();
-  for (const entry of report.logs?.runtime?.entries || []) sources.add(String(entry.source || 'desktop'));
   for (const entry of report.logs?.failedActivity || []) sources.add(String(entry.tool || 'activity'));
   return [...sources].filter(Boolean).sort((left, right) => left.localeCompare(right));
 }
 function filteredDiagnosticView(report, filters) {
-  if (!report) return { findings: [], runtime: [], failed: [], totalFindings: 0, totalLogs: 0, shownLogs: 0 };
+  if (!report) return { findings: [], failed: [], totalFindings: 0, totalFailed: 0 };
   const showFindings = filters.scope === 'all' || filters.scope === 'findings';
-  const showService = filters.scope === 'all' || filters.scope === 'service';
   const showFailed = filters.scope === 'all' || filters.scope === 'failed';
   const matchesSearch = values => !filters.search || values.some(value => String(value || '').toLowerCase().includes(filters.search));
-  const findings = showFindings ? (report.findings || []).filter(finding => (filters.severity === 'all' || finding.severity === filters.severity) && matchesSearch([finding.code, finding.title, finding.impact, finding.recommendation, JSON.stringify(finding.context || [])])) : [];
-  const matchesLog = (entry, kind) => {
-    const level = kind === 'failed' ? 'error' : entry.level || (entry.error ? 'error' : 'info');
-    const source = String(kind === 'failed' ? entry.tool || 'activity' : entry.source || 'desktop');
-    if (filters.severity === 'all' && kind === 'runtime' && level === 'debug') return false;
-    if (filters.severity !== 'all' && level !== filters.severity) return false;
+  const findings = showFindings ? (report.findings || []).filter(finding =>
+    (filters.severity === 'all' || finding.severity === filters.severity)
+    && matchesSearch([finding.title, finding.impact, finding.recommendation])) : [];
+  const failedEntries = report.logs?.failedActivity || [];
+  const failed = showFailed ? failedEntries.filter(entry => {
+    const source = String(entry.tool || 'activity');
+    if (filters.severity !== 'all' && filters.severity !== 'error') return false;
     if (filters.source !== 'all' && source !== filters.source) return false;
-    return matchesSearch([source, entry.component, entry.code, entry.errorCode, entry.message, entry.error, entry.workspace, entry.taskId, entry.eventId, JSON.stringify(entry.details || {})]);
-  };
-  const runtime = showService ? (report.logs?.runtime?.entries || []).filter(entry => matchesLog(entry, 'runtime')) : [];
-  const failed = showFailed ? (report.logs?.failedActivity || []).filter(entry => matchesLog(entry, 'failed')) : [];
-  return { findings, runtime, failed, totalFindings: (report.findings || []).length, totalLogs: (report.logs?.runtime?.entries || []).length + (report.logs?.failedActivity || []).length, shownLogs: runtime.length + failed.length };
+    return matchesSearch([source, entry.message, entry.error, entry.workspace]);
+  }) : [];
+  return { findings, failed, totalFindings: (report.findings || []).length, totalFailed: failedEntries.length };
 }
-function finiteRevision(value) { const revision = Number(value); return Number.isFinite(revision) ? Math.max(0, revision) : 0; }
 function downloadDiagnosticState(report) { const exportedAt = new Date().toISOString(); const payload = { schemaVersion: 1, exportedAt, report }; const filename = `relai-diagnostic-state-${exportedAt.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z').replace('T', '-')}.json`; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = filename; link.hidden = true; document.body.appendChild(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 0); return { ok: true, filename }; }
 function messageOf(error) { return error instanceof Error ? error.message : String(error || 'The action failed.'); }
 
-export { applyRuntimeLogDelta, diagnosticSources, filteredDiagnosticView };
+export { diagnosticSources, filteredDiagnosticView };

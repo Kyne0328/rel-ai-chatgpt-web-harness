@@ -455,7 +455,7 @@ async function case_dashboard_clock_unit() {
     const assert = __m0.default;
   
     const __m1 = await import("../src/ui/clock.js");
-    const { createDashboardClock, elapsedAt, parseClockTime } = __m1;
+    const { createDashboardClock, elapsedAt, parseClockTime, commandOutputStatusAt } = __m1;
   
     const __m2 = await import("../src/ui/utils.js");
     const { formatDuration } = __m2;
@@ -470,7 +470,7 @@ async function case_dashboard_clock_unit() {
     getAttribute(name) { return this.attributes.get(name) ?? null; }
     setAttribute(name, value) { this.attributes.set(name, String(value)); }
     removeAttribute(name) { this.attributes.delete(name); }
-    matches() { return this.hasAttribute('data-clock-elapsed-start') || this.hasAttribute('data-clock-relative'); }
+    matches() { return this.hasAttribute('data-clock-elapsed-start') || this.hasAttribute('data-clock-relative') || this.hasAttribute('data-clock-output-since'); }
     querySelectorAll() { return []; }
   }
   
@@ -519,11 +519,12 @@ async function case_dashboard_clock_unit() {
   const relativeNode = new FakeNode({ 'data-clock-relative': '2026-07-28T09:59:00.000Z' });
   const boundaryNode = new FakeNode({ 'data-clock-relative': '2026-07-28T09:59:06.000Z' });
   const roleNode = new FakeNode({ 'data-clock-elapsed-start': '2026-07-28T10:00:02.000Z' });
+  const outputNode = new FakeNode({ 'data-clock-output-since': '2026-07-28T10:00:00.000Z' });
   const completedNode = new FakeNode({
     'data-clock-elapsed-start': '2026-07-28T09:00:00.000Z',
     'data-clock-elapsed-end': '2026-07-28T09:00:30.000Z'
   });
-  const documentRef = new FakeDocument([elapsedNode, relativeNode, boundaryNode, roleNode, completedNode]);
+  const documentRef = new FakeDocument([elapsedNode, relativeNode, boundaryNode, roleNode, completedNode, outputNode]);
   let ticks = 0;
   const clock = createDashboardClock({
     documentRef,
@@ -551,8 +552,11 @@ async function case_dashboard_clock_unit() {
   assert.equal(boundaryNode.textContent, 'now');
   assert.equal(roleNode.textContent, '3s');
   assert.equal(completedNode.textContent, '30s');
+  assert.equal(outputNode.textContent, 'Recent output · now');
+  assert.equal(commandOutputStatusAt('2026-07-28T10:00:00.000Z', Date.parse('2026-07-28T10:00:30Z')), 'No recent output · last received 30s ago');
+  assert.equal(commandOutputStatusAt('', now), 'Output timing unavailable');
   assert.equal(mutationObserver?.options?.attributes, true, 'clock must observe clock-role attribute changes on reused React nodes');
-  assert.deepEqual(mutationObserver?.options?.attributeFilter, ['data-clock-elapsed-start', 'data-clock-elapsed-end', 'data-clock-relative']);
+  assert.deepEqual(mutationObserver?.options?.attributeFilter, ['data-clock-elapsed-start', 'data-clock-elapsed-end', 'data-clock-relative', 'data-clock-output-since']);
   const queriesAfterStart = documentRef.queryCount;
 
   now = Date.parse('2026-07-28T10:00:07.000Z');
@@ -567,6 +571,7 @@ async function case_dashboard_clock_unit() {
   now = Date.parse('2026-07-28T10:01:10.000Z');
   [...timers.values()][0].callback();
   assert.equal(elapsedNode.textContent, '1m 10s');
+  assert.match(outputNode.textContent, /^No recent output · last received/);
   assert.equal(relativeNode.textContent, '2m ago');
   relativeNode.textContent = '1m ago';
   now = Date.parse('2026-07-28T10:01:11.000Z');
@@ -580,6 +585,9 @@ async function case_dashboard_clock_unit() {
   roleNode.setAttribute('data-clock-relative', '2026-07-28T10:01:10.000Z');
   mutationObserver.emit([{ type: 'attributes', target: roleNode, addedNodes: [] }]);
   assert.equal(roleNode.textContent, 'now', 'a reused task node must switch immediately from elapsed time to relative time');
+  outputNode.setAttribute('data-clock-output-since', '2026-07-28T10:01:10.000Z');
+  mutationObserver.emit([{ type: 'attributes', target: outputNode, addedNodes: [] }]);
+  assert.equal(outputNode.textContent, 'Recent output · now', 'new output must immediately reset quiet status');
   now = Date.parse('2026-07-28T10:02:11.000Z');
   [...timers.values()][0].callback();
   assert.equal(roleNode.textContent, '1m ago', 'a reused task node must keep updating after its clock role changes');

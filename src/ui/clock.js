@@ -1,7 +1,7 @@
 import { formatDuration, timeAgo } from './utils.js';
 
-const CLOCK_SELECTOR = '[data-clock-elapsed-start], [data-clock-relative]';
-const CLOCK_ATTRIBUTE_FILTER = Object.freeze(['data-clock-elapsed-start', 'data-clock-elapsed-end', 'data-clock-relative']);
+const CLOCK_SELECTOR = '[data-clock-elapsed-start], [data-clock-relative], [data-clock-output-since]';
+const CLOCK_ATTRIBUTE_FILTER = Object.freeze(['data-clock-elapsed-start', 'data-clock-elapsed-end', 'data-clock-relative', 'data-clock-output-since']);
 
 export function parseClockTime(value) {
   if (value == null || value === '') return Number.NaN;
@@ -18,6 +18,17 @@ export function elapsedAt(start, end, now = Date.now()) {
   return formatDuration(Math.max(0, boundary - started), { live: !Number.isFinite(completed) });
 }
 
+// Output activity is a visibility signal, never proof a process has made
+// useful progress or is stuck. Do not use it to change termination policy.
+export function commandOutputStatusAt(value, now = Date.now()) {
+  const timestamp = parseClockTime(value);
+  if (!Number.isFinite(timestamp) || timestamp > now) return 'Output timing unavailable';
+  const age = Math.max(0, now - timestamp);
+  const elapsed = age < 60_000 ? `${Math.floor(age / 1000)}s ago` : timeAgo(value, now);
+  return age < 30_000 ? `Recent output · ${timeAgo(value, now)}`
+    : `No recent output · last received ${elapsed}`;
+}
+
 export function createDashboardClock(options = {}) {
   const documentRef = options.documentRef || document;
   const windowRef = options.windowRef || window;
@@ -29,6 +40,7 @@ export function createDashboardClock(options = {}) {
   const onTick = typeof options.onTick === 'function' ? options.onTick : null;
   const liveElapsedNodes = new Set();
   const relativeNodes = new Set();
+  const outputNodes = new Set();
   let observer = null;
   let timer = null;
   let stopped = true;
@@ -47,6 +59,11 @@ export function createDashboardClock(options = {}) {
     if (text && node.textContent !== text) node.textContent = text;
   }
 
+  function updateOutputNode(node, currentTime) {
+    const text = commandOutputStatusAt(node.getAttribute('data-clock-output-since'), currentTime);
+    if (node.textContent !== text) node.textContent = text;
+  }
+
   function registerNode(node, currentTime) {
     if (!node?.hasAttribute) return;
     const hasElapsed = node.hasAttribute('data-clock-elapsed-start');
@@ -61,6 +78,10 @@ export function createDashboardClock(options = {}) {
     } else {
       relativeNodes.delete(node);
     }
+    if (node.hasAttribute('data-clock-output-since')) {
+      outputNodes.add(node);
+      updateOutputNode(node, currentTime);
+    } else outputNodes.delete(node);
   }
 
   function observe(root = documentRef) {
@@ -90,6 +111,7 @@ export function createDashboardClock(options = {}) {
       node => node.hasAttribute('data-clock-elapsed-start') && !node.hasAttribute('data-clock-elapsed-end')
     );
     updateRegistered(relativeNodes, updateRelativeNode, currentTime, node => node.hasAttribute('data-clock-relative'));
+    updateRegistered(outputNodes, updateOutputNode, currentTime, node => node.hasAttribute('data-clock-output-since'));
     onTick?.(currentTime);
   }
 
@@ -160,6 +182,7 @@ export function createDashboardClock(options = {}) {
     stopObserver();
     liveElapsedNodes.clear();
     relativeNodes.clear();
+    outputNodes.clear();
     documentRef.removeEventListener?.('visibilitychange', handleVisibility);
   }
 

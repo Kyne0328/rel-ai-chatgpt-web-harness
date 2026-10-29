@@ -203,10 +203,10 @@ app.whenReady().then(async () => {
       inspector: Boolean(inspector && detail),
       selectedRow: Boolean(document.querySelector('.task-row.is-selected')),
       tabs: [...(detail?.querySelectorAll('[data-session-tab]') || [])].map(tab => tab.dataset.sessionTab),
-      detailsAvailable: Boolean(detail?.querySelector('[data-session-details]')),
+      technicalDetailsAbsent: !detail?.querySelector('[data-session-details]'),
       detailText: detail?.textContent || '',
-      workSessionId: Boolean(detail?.querySelector('[aria-label^="Copy Task ID "]')),
-      processId: /Process ID/.test(detail?.textContent || ''),
+      internalTaskIdAbsent: !detail?.querySelector('[aria-label^="Copy Task ID "]'),
+      processIdAbsent: !/Process ID/.test(detail?.textContent || ''),
       eventLinks: detail?.querySelectorAll('.task-event-link').length || 0
     };
   })()`);
@@ -215,7 +215,7 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(screenshotDir, 'task-inspector-desktop.png'), (await win.webContents.capturePage()).toPNG());
   const taskSelectionStability = await exerciseTaskSelectionStability(win);
   const taskProcesses = await exerciseTaskProcesses(win);
-  accessibility.push(await auditAccessibility(win, axePath, 'task-technical'));
+  accessibility.push(await auditAccessibility(win, axePath, 'task-detail'));
 
   await win.webContents.setZoomFactor(1);
   win.setSize(1600, 900);
@@ -306,16 +306,15 @@ app.whenReady().then(async () => {
   const activityInteraction = await win.webContents.executeJavaScript(`(() => {
     const inspector = document.querySelector('[data-activity-inspector]');
     const detail = inspector?.querySelector('.activity-detail-head');
-    const errorValue = inspector?.querySelector('.detail-pre, .activity-json-leaf code');
     return {
       expanded: Boolean(detail),
       selectedRow: Boolean(document.querySelector('.activity-table tbody tr.is-selected')),
-      copyButton: Boolean([...inspector.querySelectorAll('button')].find(button => /copy event json/i.test(button.textContent))),
-      errorWrapped: errorValue ? getComputedStyle(errorValue).overflowWrap !== 'normal' : false
+      rawCopyAbsent: ![...inspector.querySelectorAll('button')].some(button => /copy event json|copy value/i.test(button.textContent)),
+      rawTreeAbsent: !inspector?.querySelector('.activity-json-tree, .activity-json-leaf, .activity-detail-raw')
     };
   })()`);
   const activitySelectionStability = await exerciseActivitySelectionStability(win);
-  const operationDiagnostics = await exerciseOperationDiagnostics(win);
+  const operationDiagnosticsRemoved = await win.webContents.executeJavaScript(`!document.querySelector('[data-operation-diagnostics]') && !document.querySelector('[data-runtime-build-identity]')`);
   await waitFor(win, `!document.querySelector('#__relai-drawer-backdrop')`);
   await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
   await waitFor(win, `document.querySelectorAll('.task-row').length >= 9`);
@@ -464,16 +463,20 @@ app.whenReady().then(async () => {
       win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
       win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
       await waitFor(win, `document.activeElement?.id === 'session-tab-processes' && document.activeElement.getAttribute('aria-selected') === 'true'`);
-      Object.assign(measurement, await win.webContents.executeJavaScript(`(() => {
+      const taskTabKeyboardVisible = await win.webContents.executeJavaScript(`(() => {
         const tab = document.getElementById('session-tab-processes');
         const rect = tab.getBoundingClientRect();
         const rail = document.querySelector('.inspector-tabs').getBoundingClientRect();
-        document.querySelector('#session-tab-overview').click();
-        const details = document.querySelector('[data-session-details] summary').getBoundingClientRect();
-        return { taskTabKeyboardVisible: rect.left >= rail.left - 1 && rect.right <= rail.right + 1,
-          taskDetailsAccessible: details.left >= 0 && details.right <= innerWidth,
-          taskInspectorNoOverflow: document.documentElement.scrollWidth <= innerWidth + 1 };
-      })()`));
+        return rect.left >= rail.left - 1 && rect.right <= rail.right + 1;
+      })()`);
+      await win.webContents.executeJavaScript(`document.querySelector('#session-tab-overview').click()`);
+      await waitFor(win, `document.querySelector('#session-tab-overview')?.getAttribute('aria-selected') === 'true' && !document.querySelector('#session-panel-overview')?.hidden`);
+      Object.assign(measurement, await win.webContents.executeJavaScript(`(() => ({
+        taskTabKeyboardVisible: ${JSON.stringify(taskTabKeyboardVisible)},
+        taskOverviewAccessible: Boolean(document.querySelector('#session-panel-overview') && !document.querySelector('#session-panel-overview').hidden),
+        taskTechnicalDetailsAbsent: !document.querySelector('[data-session-details]'),
+        taskInspectorNoOverflow: document.documentElement.scrollWidth <= innerWidth + 1
+      }))()`));
       await waitForCapturePaint(win);
       fs.writeFileSync(path.join(screenshotDir, 'task-inspector-' + scenario.name + '.png'), (await win.webContents.capturePage()).toPNG());
 
@@ -648,7 +651,7 @@ app.whenReady().then(async () => {
     taskProcesses,
     activityInteraction,
     activitySelectionStability,
-    operationDiagnostics,
+    operationDiagnosticsRemoved,
     activityDesktopGeometry,
     activityLiveStability,
     keyboard: { beforeFocus, afterFocus },
@@ -863,159 +866,6 @@ async function exerciseConnectionSaveLifecycle(win) {
   return { during, after, failed, recovered };
 }
 
-async function exerciseOperationDiagnostics(win) {
-  const size = win.getSize();
-  const zoom = win.webContents.getZoomFactor();
-  const visible = win.isVisible();
-  win.show();
-  win.focus();
-  const startedAt = new Date(Date.now() - 5000).toISOString();
-  const timeline = {
-    phase: 'queued', phaseStartedAt: startedAt, lastProgressAt: startedAt,
-    executed: false, deadlineKind: 'admission', terminationCertainty: 'not-started',
-    blocking: { owner: 'Workspace writer', operationId: `owner-${'x'.repeat(160)}`, taskId: 'acceptance-owner' },
-    phases: [{ phase: 'accepted', startedAt, endedAt: startedAt, durationMs: 123 }, { phase: 'queued', startedAt, durationMs: 2000 }]
-  };
-  await win.webContents.executeJavaScript(`(() => {
-    window.__relaiDiagnosticsOriginalFetch = window.fetch;
-    window.__relaiDiagnosticsFixture = { status: 'completed', timeline: null };
-    window.__relaiDiagnosticsFetches = 0;
-    window.fetch = async (...args) => {
-      const response = await window.__relaiDiagnosticsOriginalFetch(...args);
-      if (!String(args[0]).includes('/api/dashboard/v10')) return response;
-      const data = await response.json();
-      const fixture = window.__relaiDiagnosticsFixture;
-      data.auditTail.entries = data.auditTail.entries.map(entry => entry.taskId === 'acceptance-running'
-        ? { ...entry, status: fixture.status, operationId: 'diagnostic-operation', summary: 'Operation diagnostics fixture',
-          metadata: fixture.timeline ? { timeline: fixture.timeline } : {} } : entry);
-      data.runtime = { ...(data.runtime || {}), buildIdentity: { buildId: 'diagnostic-build', dirty: true,
-        sourceRevision: 'revision-fixture', sourceFingerprint: 'fingerprint-fixture', startedAt: ${JSON.stringify(startedAt)}, schemaDigest: 'schema-fixture' } };
-      data.runtimeCompatibility = { metadataMatches: true, sourceParity: { status: 'unknown', verified: false } };
-      window.__relaiDiagnosticsFetches += 1;
-      return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
-    };
-    location.hash = '#activity?time=all&task=acceptance-running';
-    window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
-  })()`);
-  try {
-    await waitFor(win, `window.__relaiDiagnosticsFetches > 0 && document.querySelector('.activity-row-trigger')?.textContent.includes('Operation diagnostics fixture')`);
-    await win.webContents.executeJavaScript(`document.querySelector('.activity-row-trigger').click()`);
-    await waitFor(win, `document.querySelector('[data-operation-diagnostics="unknown"]')`);
-    const legacy = await win.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[data-operation-diagnostics]');
-      const fields = [...panel.querySelectorAll('dl > div')];
-      return {
-        unknownTiming: fields.find(item => item.querySelector('dt')?.textContent === 'Phase started')?.querySelector('dd')?.textContent === 'Unknown',
-        unknownTermination: fields.find(item => item.querySelector('dt')?.textContent === 'Process termination')?.querySelector('dd')?.textContent === 'unknown',
-        liveClocks: panel.querySelectorAll('[data-clock-elapsed-start]').length
-      };
-    })()`);
-    const refresh = async fixture => {
-      const before = await win.webContents.executeJavaScript('window.__relaiDiagnosticsFetches');
-      await win.webContents.executeJavaScript(`window.__relaiDiagnosticsFixture = ${JSON.stringify(fixture)}; window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'))`);
-      await waitFor(win, `window.__relaiDiagnosticsFetches > ${before}`);
-      await waitForCapturePaint(win);
-    };
-    await refresh({ status: 'running', timeline });
-    await waitFor(win, `document.querySelector('[data-operation-diagnostics="queued"] [role="status"]')?.textContent.includes('Waiting for this owner')`);
-    await win.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[data-operation-diagnostics]');
-      const details = panel.querySelector('details');
-      details.open = false;
-      details.querySelector('summary').focus();
-      window.__relaiDiagnosticsEnter = null;
-      details.querySelector('summary').addEventListener('keypress', event => {
-        window.__relaiDiagnosticsEnter = { trusted: event.isTrusted, charCode: event.charCode, key: event.key };
-      }, { once: true });
-      window.__relaiDiagnosticsPanel = panel;
-      window.__relaiDiagnosticsDetails = details;
-      window.__relaiDiagnosticsStatus = panel.querySelector('[role="status"]');
-      window.__relaiDiagnosticsMutations = 0;
-      window.__relaiDiagnosticsObserver = new MutationObserver(records => { window.__relaiDiagnosticsMutations += records.length; });
-      window.__relaiDiagnosticsObserver.observe(window.__relaiDiagnosticsStatus, { childList: true, characterData: true, subtree: true });
-    })()`);
-    win.focus();
-    win.webContents.focus();
-    await waitFor(win, `document.hasFocus() && document.activeElement === document.querySelector('[data-operation-diagnostics] summary')`);
-    // sendInputEvent keyDown is a raw-key event. Native summary activation also
-    // needs the Enter character/keypress stage of a real keyboard sequence.
-    win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
-    win.webContents.sendInputEvent({ type: 'char', keyCode: String.fromCharCode(13) });
-    win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
-    try {
-      await waitFor(win, `document.querySelector('[data-operation-diagnostics] details')?.open && window.__relaiDiagnosticsEnter?.trusted === true && window.__relaiDiagnosticsEnter?.charCode === 13`);
-    } catch (error) {
-      const keyboard = await win.webContents.executeJavaScript(`({ focused: document.hasFocus(), active: document.activeElement?.outerHTML, enter: window.__relaiDiagnosticsEnter, open: document.querySelector('[data-operation-diagnostics] details')?.open })`);
-      throw new Error(`${error.message}; native summary keyboard=${JSON.stringify(keyboard)}`, { cause: error });
-    }
-    const keyboardExpanded = true;
-    for (let index = 0; index < 3; index += 1) await refresh({ status: 'running', timeline });
-    const repeated = await win.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[data-operation-diagnostics]');
-      return {
-        samePanel: panel === window.__relaiDiagnosticsPanel,
-        sameDisclosure: panel.querySelector('details') === window.__relaiDiagnosticsDetails,
-        expanded: panel.querySelector('details').open,
-        focusPreserved: document.activeElement === panel.querySelector('summary'),
-        statusMutations: window.__relaiDiagnosticsMutations,
-        measuredDuration: panel.textContent.includes('123 ms'),
-        clockOutsideAnnouncement: !panel.querySelector('[role="status"] [data-clock-elapsed-start]')
-      };
-    })()`);
-    await win.webContents.setZoomFactor(2);
-    win.setSize(750, 900);
-    await delay(150);
-    await win.webContents.executeJavaScript(`document.querySelector('[data-operation-diagnostics] summary').scrollIntoView({ block: 'center' })`);
-    await waitForCapturePaint(win);
-    const narrow = await win.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[data-operation-diagnostics]');
-      const bounds = panel.getBoundingClientRect();
-      const summary = panel.querySelector('summary').getBoundingClientRect();
-      return {
-        viewportWidth: innerWidth,
-        horizontalOverflow: document.documentElement.scrollWidth > innerWidth + 1,
-        factsContained: [...panel.querySelectorAll('dd')].every(node => { const rect = node.getBoundingClientRect(); return rect.left >= bounds.left && rect.right <= bounds.right + 1; }),
-        summaryReachable: summary.width > 0 && summary.top >= 0 && summary.bottom <= innerHeight,
-        expanded: panel.querySelector('details').open
-      };
-    })()`);
-    fs.mkdirSync(screenshotDir, { recursive: true });
-    narrow.screenshot = path.join(screenshotDir, 'operation-diagnostics-narrow.png');
-    fs.writeFileSync(narrow.screenshot, (await win.webContents.capturePage()).toPNG());
-    await refresh({ status: 'running', timeline: { ...timeline, phase: 'draining-output', executed: true, childExitedAt: startedAt, terminationCertainty: 'unknown' } });
-    await waitFor(win, `document.querySelector('[data-operation-diagnostics="draining-output"]')?.textContent.includes('Command exited, collecting result')`);
-    const collecting = await win.webContents.executeJavaScript(`({
-      samePanel: document.querySelector('[data-operation-diagnostics]') === window.__relaiDiagnosticsPanel,
-      expanded: document.querySelector('[data-operation-diagnostics] details')?.open,
-      sameLiveRegion: document.querySelector('[data-operation-diagnostics] [role="status"]') === window.__relaiDiagnosticsStatus
-    })`);
-    await refresh({ status: 'completed', timeline: { ...timeline, phase: 'result-ready', executed: true, terminationCertainty: 'unconfirmed' } });
-    await waitFor(win, `document.querySelector('[data-operation-diagnostics="result-ready"]')?.textContent.includes('Result ready')`);
-    const ready = await win.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[data-operation-diagnostics]');
-      const build = document.querySelector('[data-runtime-build-identity]');
-      return {
-        samePanel: panel === window.__relaiDiagnosticsPanel,
-        sameLiveRegion: panel.querySelector('[role="status"]') === window.__relaiDiagnosticsStatus,
-        noLiveClock: panel.querySelectorAll('[data-clock-elapsed-start]').length === 0,
-        uncertaintyVisible: panel.querySelector('.operation-diagnostics-warning')?.textContent.includes('termination is unconfirmed') === true,
-        runtimeHidden: build === null
-      };
-    })()`);
-    return { legacy, keyboardExpanded, repeated, narrow, collecting, ready };
-  } finally {
-    await win.webContents.executeJavaScript(`(() => {
-      window.__relaiDiagnosticsObserver?.disconnect();
-      window.fetch = window.__relaiDiagnosticsOriginalFetch;
-      for (const key of Object.keys(window).filter(key => key.startsWith('__relaiDiagnostics'))) delete window[key];
-      window.dispatchEvent(new CustomEvent('relai:dashboard-refresh'));
-    })()`);
-    await win.webContents.setZoomFactor(zoom);
-    win.setSize(...size);
-    if (!visible) win.hide();
-  }
-}
-
 async function exerciseActivitySelectionStability(win) {
   const ids = await win.webContents.executeJavaScript(`(() => {
     const rows = [...document.querySelectorAll('[data-activity-event-id]')];
@@ -1163,16 +1013,8 @@ async function exerciseTaskProcesses(win) {
     })()`);
     await waitForCapturePaint(win);
     fs.writeFileSync(path.join(screenshotDir, 'task-processes-desktop.png'), (await win.webContents.capturePage()).toPNG());
-    await win.webContents.executeJavaScript(`document.querySelector('#session-tab-overview').click(); document.querySelector('[data-session-details] summary').click()`);
-    await waitFor(win, `document.querySelector('[data-session-details]')?.open`);
-    result.technical = await win.webContents.executeJavaScript(`(() => {
-      const panel = document.querySelector('[data-session-details]');
-      return { taskId: Boolean(panel.querySelector('[data-copy-value="acceptance-running"]')),
-        operations: panel.querySelectorAll('[data-task-operation], [data-process-id]').length,
-        runtimeBuild: Boolean(panel.querySelector('[data-runtime-build-identity]')) };
-    })()`);
-    await waitForCapturePaint(win);
-    fs.writeFileSync(path.join(screenshotDir, 'task-technical-desktop.png'), (await win.webContents.capturePage()).toPNG());
+    await win.webContents.executeJavaScript(`document.querySelector('#session-tab-overview').click()`);
+    result.technicalUiAbsent = await win.webContents.executeJavaScript(`!document.querySelector('[data-session-details]') && !document.querySelector('[data-runtime-build-identity]')`);
     return result;
   } finally {
     await win.webContents.executeJavaScript(`(() => {

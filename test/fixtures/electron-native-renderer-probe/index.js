@@ -185,6 +185,7 @@ async function wizardStepContrast() {
 
 async function wizardChecks() {
   await load('wizard');
+  await nativeButtonStates();
   await wizardStepContrast();
   await waitFor('window.nativeFixture.calls("getRecoveryConfig").length === 1');
   await axNames(['Paste Tunnel ID here', 'Paste runtime API key here', 'Connect this computer', 'Cancel'], 'wizard');
@@ -276,46 +277,41 @@ async function nativeButtonStates() {
   await evaluate('document.getElementById("nativeStateSpecimens").remove()');
 }
 
-const readyStatus = { serverRunning: true, tunnelStatus: 'running', tunnelId: 'tunnel_synthetic_recovery', version: '0.0.0-fixture', taskActivity: {} };
-async function recoveryChecks() {
-  await load('status');
-  await nativeButtonStates();
-  await control('status', readyStatus);
-  await axNames(['Open dashboard', 'Copy tunnel ID', 'Edit connection'], 'Recovery');
-  await control('queue', 'copyUrl', [{ pending: true }, { value: { ok: true } }]);
-  await activate('#copyBtn');
-  await waitFor('document.getElementById("copyBtn").disabled');
-  check('Recovery pending copy has not claimed success', await evaluate('!document.getElementById("copyBtn").textContent.includes("copied")'));
-  await control('release', 'copyUrl', { reject: 'Synthetic clipboard unavailable. Try again.' });
-  await waitFor('!document.getElementById("copyBtn").disabled && !document.getElementById("errorPanel").hidden');
-  check('Recovery copy failure is an alert', await evaluate('document.getElementById("errorPanel").getAttribute("role") === "alert" && document.getElementById("errorMessage").textContent.includes("clipboard")'));
-  // Observe the 1.3-second success state before keyboard dispatch; hidden-window frame cadence must not race its expiry.
-  await evaluate('(() => { window.__nativeCopyOutcome = null; const button = document.getElementById("copyBtn"); const observer = new MutationObserver(() => { if (button.textContent === "Tunnel ID copied") { window.__nativeCopyOutcome = { label: button.textContent, errorHidden: document.getElementById("errorPanel").hidden }; observer.disconnect(); } }); observer.observe(button, { childList: true, subtree: true, characterData: true }); })()');
-  await activate('#copyBtn');
-  await waitFor('window.__nativeCopyOutcome?.label === "Tunnel ID copied"');
-  check('Recovery copy retry reports success and clears stale action error', await evaluate('window.__nativeCopyOutcome.errorHidden') && (await control('calls', 'copyUrl')).length === 2);
-  await waitFor('!document.getElementById("copyBtn").disabled && document.getElementById("copyBtn").textContent === "Copy tunnel ID"');
-  check('Recovery copy settles to currently available control', await evaluate('!document.getElementById("copyBtn").dataset.pending'));
-  await control('queue', 'openRecoverySetup', [{ value: { ok: false, error: 'Synthetic settings unavailable.' } }, { value: { ok: true } }]);
-  await activate('#settingsBtn');
-  await waitFor('document.getElementById("errorMessage").textContent.includes("settings unavailable")');
-  check('Recovery structured error restores retry control', await evaluate('!document.getElementById("settingsBtn").disabled'));
-  await audit('Recovery-action-error');
-  await activate('#settingsBtn');
-  await waitFor('document.getElementById("errorPanel").hidden');
-  await control('status', { ...readyStatus, serverRunning: false, tunnelStatus: 'failed', error: 'Synthetic connection failed.' });
-  await control('queue', 'restartConnection', [{ pending: true }]);
-  await activate('#retryBtn');
-  await waitFor('document.getElementById("retryBtn").disabled');
-  await control('release', 'restartConnection', { value: readyStatus });
-  await waitFor('document.getElementById("statusBadge").textContent === "Ready"');
-  check('Recovery retry renders authoritative ready result', await evaluate('document.getElementById("errorPanel").hidden && !document.getElementById("retryBtn").disabled'));
-  await control('status', { ...readyStatus, serverRunning: false, tunnelStatus: 'failed', error: 'Synthetic connection failed. ' + 'Diagnostic detail remains readable. '.repeat(8) });
-  await audit('Recovery-connection-error');
-  await screenshot('Recovery-error');
-  await layout('Recovery 320px', 320, 720, 1, '#retryBtn');
-  await layout('Recovery 200% zoom', 640, 1280, 2, '#retryBtn');
-  check('Recovery never called real service or installer bridge', (await control('calls')).every(call => !['startServer', 'stopServer', 'relaunchApp'].includes(call.method)));
+// The old standalone Recovery renderer is deliberately absent: startup/recovery
+// feedback is now validated through the same branded splash surface.
+async function splashChecks() {
+  await load('splash');
+  win.setContentSize(420, 310);
+  await frames();
+  check('splash has a polite live startup status', await evaluate('document.getElementById("startupStatus").getAttribute("aria-live") === "polite"'));
+  check('splash starts without a manual settings action', await evaluate('document.getElementById("startupSettings").hidden'));
+  check('splash uses the installed Rel.AI logo', await evaluate('document.querySelector(".logo-field img")?.getAttribute("src") === "relai-logo.png"'));
+  await control('splash', { text: 'Starting local service…', phase: 'working', blocked: false });
+  check('splash receives startup progress', await evaluate('document.getElementById("startupStatus").textContent === "Starting local service…" && document.querySelector(".splash").dataset.phase === "working"'));
+  await audit('splash-startup');
+  await control('splash', { text: 'Reconnecting automatically…', phase: 'recovering', blocked: false });
+  check('recovering phase is distinct', await evaluate('document.querySelector(".splash").dataset.phase === "recovering" && document.getElementById("startupSettings").hidden'));
+  await setMedia(true);
+  check('reduced-motion disables travel', await evaluate('matchMedia("(prefers-reduced-motion: reduce)").matches && !document.querySelector(".progress-light").getAnimations().some(animation => animation.playState === "running")'));
+  await setMedia(false);
+  await control('splash', { text: 'Connection settings need attention.', phase: 'working', blocked: true });
+  await axNames(['Connection settings'], 'splash settings');
+  check('blocked state only offers settings', await evaluate('!document.getElementById("startupSettings").hidden && document.querySelector(".splash").dataset.phase === "blocked"'));
+  await control('queue', 'openSetup', [{ pending: true }, { value: { ok: true } }]);
+  await activate('#startupSettings');
+  await waitFor('document.getElementById("startupSettings").disabled');
+  check('settings action busy state is accessible', await evaluate('document.getElementById("startupSettings").getAttribute("aria-busy") === "true"'));
+  await control('release', 'openSetup', { value: { ok: false, error: 'Synthetic settings unavailable.' } });
+  await waitFor('!document.getElementById("startupSettings").disabled');
+  check('failed setup explains outcome', await evaluate('document.getElementById("startupStatus").textContent.includes("settings unavailable")'));
+  await audit('splash-settings');
+  await screenshot('splash-blocked');
+  await layout('splash 320px', 320, 310, 1, '#startupSettings');
+  await layout('splash 200% zoom', 640, 620, 2, '#startupSettings');
+  await activate('#startupSettings');
+  await waitFor('window.nativeFixture.calls("openSetup").length >= 2');
+  check('settings retry uses only synthetic bridge', (await control('calls', 'openSetup')).length >= 2);
+  check('splash never calls service restart', !(await control('calls')).some(call => ['startServer', 'stopServer', 'restartConnection', 'relaunchApp'].includes(call.method)));
 }
 
 async function pulseChecks() {
@@ -400,8 +396,8 @@ try {
   for (theme of ['dark', 'light']) {
     stage(theme + ': wizard');
     await wizardChecks();
-    stage(theme + ': Recovery');
-    await recoveryChecks();
+    stage(theme + ': splash');
+    await splashChecks();
     stage(theme + ': Pulse');
     await pulseChecks();
   }

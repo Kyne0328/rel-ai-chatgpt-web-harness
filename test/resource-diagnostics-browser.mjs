@@ -266,7 +266,9 @@ async function capture(page, name) {
   await page.waitForTimeout(50);
   const expectedTheme = name.endsWith('-dark') ? 'dark' : 'light';
   assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), expectedTheme, 'screenshot label must match the rendered theme');
-  await page.screenshot({ path: target, fullPage: true });
+  // Responsive geometry is asserted separately above. Capture the visible
+  // viewport instead of stitching a long diagnostics page under software rendering.
+  await page.screenshot({ path: target });
   assert.equal(fs.existsSync(target), true);
   screenshots.push(target);
 }

@@ -24,7 +24,8 @@ export function beginCommandActivity(config, { operationId, workId = '', taskTit
     startedAt: new Date(startedAtMs).toISOString(), endedAt: '', phase: 'queued', status: 'queued',
     executed: false, terminationConfirmed: null,
     canStop: cancellable, exitCode: null, error: '', stateRoot: getStateDir(config),
-    stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutBytes: 0, stderrBytes: 0 };
+    stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutBytes: 0, stderrBytes: 0,
+    lastOutputAt: '', lastOutputBytes: 0 };
   records.set(operationId, record);
   changed();
   return {
@@ -40,7 +41,10 @@ export function beginCommandActivity(config, { operationId, workId = '', taskTit
     output(stream, chunk) {
       if (record.endedAt || !['stdout', 'stderr'].includes(stream)) return;
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (!bytes.length) return;
       record[stream + 'Bytes'] += bytes.length;
+      record.lastOutputBytes = record.stdoutBytes + record.stderrBytes;
+      record.lastOutputAt = new Date().toISOString();
       record[stream] = Buffer.concat([record[stream], bytes.subarray(-OUTPUT_BYTES)]).subarray(-OUTPUT_BYTES);
       changed();
     },
@@ -64,6 +68,14 @@ function requireCommand(config, operationId) {
   const record = records.get(String(operationId || ''));
   if (!record || record.stateRoot !== getStateDir(config)) throw new Error('Unknown command operation.');
   return record;
+}
+
+// Lightweight lookup for MCP status; no output buffers or disk writes on
+// every chunk. Missing state after restart remains unknown.
+export function commandOutputActivity(operationId, stateRoot) {
+  const record = records.get(String(operationId || ''));
+  if (!record || record.stateRoot !== stateRoot) return null;
+  return { lastOutputAt: record.lastOutputAt, lastOutputBytes: record.lastOutputBytes };
 }
 
 export function commandActivityControl(config, operationId) {

@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import './styles.css';
 import { Icon } from '../../components/icons.js';
 import { fetchJson } from '../../api.js';
-import { useDeveloperFeatureEnabled } from '../../developer-mode-react.js';
 import { FilterChoice } from '../../components/filter-drawer.js';
 import {
   TOOL_CAPABILITIES,
@@ -20,7 +19,6 @@ const TOOL_CATALOG_CACHE_TTL_MS = 60 * 1000;
 
 export function createToolsRoute() {
   return function ToolsRoute() {
-    const technicalDetailsEnabled = useDeveloperFeatureEnabled('technicalDetails');
     const [tools, setTools] = useState([]);
     const [loadState, setLoadState] = useState({ status: 'loading', error: '' });
     const [retryToken, setRetryToken] = useState(0);
@@ -78,7 +76,7 @@ export function createToolsRoute() {
                   onAction: () => setRetryToken(value => value + 1)
                 })
               : visible.length
-                ? visible.map(tool => h(ToolCard, { key: tool.name || tool.title || tool.displayName, tool, technicalDetailsEnabled }))
+                ? visible.map(tool => h(ToolCard, { key: tool.name || tool.title || tool.displayName, tool }))
                 : h(EmptyState, {
                     title: tools.length ? 'No matching tools' : 'No tools available',
                     description: tools.length ? 'Change the search or capability filter.' : 'Rel.AI did not report any ChatGPT tools.'
@@ -121,22 +119,14 @@ function ToolsFilterBar({ search, capability, summary, onSearch, onCapabilityCle
   );
 }
 
-function ToolCard({ tool, technicalDetailsEnabled = false }) {
+function ToolCard({ tool }) {
   const capabilities = toolCapabilities(tool);
-  const parameters = Array.isArray(tool.parameters) ? tool.parameters : [];
   return h('article', { className: `tool-card ${capabilities.map(item => `capability-${item}`).join(' ')}` },
     h('div', { className: 'tool-card-head' },
       h('span', { className: 'tool-capability' }, capabilities.map(capabilityLabel).join(' · '))
     ),
     h('div', { className: 'tool-card-title' }, h('h3', null, tool.title || tool.displayName || tool.name || 'Tool')),
-    h('p', null, tool.description || 'No description provided.'),
-    technicalDetailsEnabled ? h('details', { className: 'tool-parameters' },
-      h('summary', null, 'Technical details'),
-      h('div', { className: 'tool-parameter-list' },
-        h('code', null, tool.name || ''),
-        ...parameters.map(parameter => h('code', { key: parameter }, parameter))
-      )
-    ) : null
+    h('p', null, tool.description || 'No description provided.')
   );
 }
 

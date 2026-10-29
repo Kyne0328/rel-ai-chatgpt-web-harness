@@ -22,9 +22,9 @@
   gap: 18px;
 }
 .workspace-validation-preference-row p { margin-top: 4px; color: var(--ui-text-secondary); font-size: 13px; line-height: 1.5; }
-.connection-advanced-settings, .developer-options { margin-top: 14px; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
-.connection-advanced-settings > summary, .developer-options > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; }
-.connection-advanced-settings[open] > summary, .connection-account-switch[open] > summary, .developer-options[open] > summary { border-bottom: 1px solid var(--ui-border-default); }
+.connection-advanced-settings { margin-top: 14px; border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
+.connection-advanced-settings > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; }
+.connection-advanced-settings[open] > summary, .connection-account-switch[open] > summary { border-bottom: 1px solid var(--ui-border-default); }
 .connection-account-switch { border: 1px solid var(--ui-border-default); border-radius: var(--radius-md); }
 .connection-account-switch > summary { cursor: pointer; padding: 12px 14px; font-weight: 700; }
 .connection-account-switch-body { padding: 14px; }
@@ -128,9 +128,6 @@
 .settings-validation-row > div { @apply grid min-w-0 gap-0.5; }
 .settings-validation-row > div span { @apply text-[13px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
 .settings-advanced { @apply max-w-5xl; }
-.developer-options { width: 100%; max-width: none; margin-top: 0; overflow: hidden; background: var(--ui-surface-primary); }
-.developer-options > .settings-panel-body { padding: 12px 14px 14px; }
-
 .appearance-preview { @apply grid gap-3 rounded-xl p-3; grid-template-columns: repeat(2,minmax(0,1fr)); background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
 .appearance-swatch { @apply min-h-16 rounded-lg p-3; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); }
 .appearance-swatch strong { @apply block text-[13px]; }
@@ -201,9 +198,6 @@
 .browser-site-warning { @apply rounded-lg px-3 py-2.5; background: var(--ui-status-warning-background); color: var(--ui-status-warning-foreground); border: 1px solid var(--ui-status-warning-border); }
 .browser-site-actions { @apply flex justify-end; }
 .local-data-actions { @apply flex flex-wrap gap-2; }
-.about-build-trigger { all: unset; border-radius: 4px; cursor: default; }
-.about-build-trigger:focus-visible { outline: 2px solid var(--ui-action-primary); outline-offset: 2px; }
-
 }
 
 @media (max-width: 980px) { .settings-grid { grid-template-columns: 1fr; } }

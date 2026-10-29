@@ -7,6 +7,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readJsonFile, writeJsonAtomic } from '../durableState.ts';
 import { getStateDir } from '../statePaths.js';
+import { commandOutputActivity } from '../commandActivity.js';
 import { readTaskBackgroundOperation, readTaskBackgroundOperations, recordTaskBackgroundOperation } from '../taskHistoryStore.ts';
 import { listMutationProcessRecords } from '../mutationProcessOwnership.js';
 import { sanitizeTaskRecord } from '../taskObservability.js';
@@ -637,6 +638,8 @@ function publicFallbackRecord(record, now = Date.now) {
     ...(record.noticePersistenceError ? { noticePersistenceError: record.noticePersistenceError } : {}),
     ...(record.phase ? { phase: record.phase } : {}),
     ...(record.timeline ? { timeline: record.timeline } : {}),
+    ...(record.tool === 'relai_exec' && record.stateRoot
+      ? commandOutputActivity(record.operationId, record.stateRoot) || {} : {}),
     ...(record.executionRecovery ? { executionRecovery: record.executionRecovery } : {}),
     ...(record.resultRetention ? { resultRetention: record.resultRetention } : {}),
     ...(record.persistedResultCompacted ? { persistedResultCompacted: true } : {}),

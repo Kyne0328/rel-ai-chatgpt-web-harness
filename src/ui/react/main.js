@@ -21,7 +21,7 @@ import { classifyTaskActivity } from '../../taskActivityPresentation.js';
 import { toast } from '../components/toast.js';
 import { StatusPill } from '../components/pill.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary } from '../connection-state.js';
-import { DEVELOPER_FEATURE_CHANGE_EVENT, DEVELOPER_FEATURES, readDeveloperFeatureEnabled } from '../developer-mode.js';
+import { EXPERIMENTAL_FEATURE_CHANGE_EVENT, EXPERIMENTAL_FEATURES, readExperimentalFeatureEnabled } from '../experimental-features.js';
 import {
   DESKTOP_WORK_NAV_ITEMS,
   DESKTOP_SYSTEM_NAV_ITEMS,
@@ -300,7 +300,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => document.documentElement.dataset.sidebar === 'collapsed');
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [extensionsEnabled, setExtensionsEnabled] = useState(() => readDeveloperFeatureEnabled('extensions'));
+  const [extensionsEnabled, setExtensionsEnabled] = useState(() => readExperimentalFeatureEnabled('extensions'));
   const paletteOpener = useRef(null);
   const previousRoutePath = useRef(route.path);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -335,15 +335,15 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   useEffect(() => {
     const refreshExtensionsFlag = event => {
       if (event?.detail?.feature && event.detail.feature !== 'extensions') return;
-      setExtensionsEnabled(readDeveloperFeatureEnabled('extensions'));
+      setExtensionsEnabled(readExperimentalFeatureEnabled('extensions'));
     };
     const onStorage = event => {
-      if (event.key === DEVELOPER_FEATURES.extensions.storageKey) refreshExtensionsFlag();
+      if (event.key === EXPERIMENTAL_FEATURES.extensions.storageKey) refreshExtensionsFlag();
     };
-    window.addEventListener(DEVELOPER_FEATURE_CHANGE_EVENT, refreshExtensionsFlag);
+    window.addEventListener(EXPERIMENTAL_FEATURE_CHANGE_EVENT, refreshExtensionsFlag);
     window.addEventListener('storage', onStorage);
     return () => {
-      window.removeEventListener(DEVELOPER_FEATURE_CHANGE_EVENT, refreshExtensionsFlag);
+      window.removeEventListener(EXPERIMENTAL_FEATURE_CHANGE_EVENT, refreshExtensionsFlag);
       window.removeEventListener('storage', onStorage);
     };
   }, []);
@@ -700,10 +700,21 @@ const RouteOutlet = memo(function RouteOutlet({ route, routeState }) {
           title: `Loading ${route.title}…`,
           description: 'Preparing this page.'
         })
-      }, Component ? h(Component) : null)
+      }, Component ? h(React.Fragment, null, h(RouteReadyTiming, { section: route.section }), h(Component)) : null)
     )
   );
 });
+
+function RouteReadyTiming({ section }) {
+  useEffect(() => {
+    // The effect runs after the lazy route has committed, not on every hover.
+    const marker = `relai.route.${section}.start`;
+    if (!performance.getEntriesByName(marker, 'mark').length) return;
+    performance.measure('relai.route.ready', { start: marker, detail: { section } });
+    performance.clearMarks(marker);
+  }, [section]);
+  return null;
+}
 
 class RouteErrorBoundary extends React.Component {
   constructor(props) {

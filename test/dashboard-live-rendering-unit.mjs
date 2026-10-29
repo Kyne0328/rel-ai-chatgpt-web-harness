@@ -37,16 +37,6 @@ function functionSource(source, name) {
   throw new Error(`unterminated function ${name}`);
 }
 
-function exerciseRuntimeLogDelta(runtime, change) {
-  const context = {};
-  vm.runInNewContext(`
-    ${functionSource(diagnostics, 'finiteRevision')}
-    ${functionSource(diagnostics, 'applyRuntimeLogDelta')}
-    globalThis.applyRuntimeLogDelta = applyRuntimeLogDelta;
-  `, context);
-  return context.applyRuntimeLogDelta(runtime, change);
-}
-
 function exerciseTunnelDoctorPresentation(result) {
   const context = {};
   vm.runInNewContext(`
@@ -121,7 +111,7 @@ assert.match(sessionsReact, /View all activity/, 'full event history remains acc
 assert.match(sessionsReact, /data-load-more-task-activity/, 'Task Activity must offer inline View more activity');
 assert.doesNotMatch(sessionsReact, /TaskEventInspector|setSelected\(event\)/, 'Task Activity must not duplicate the full event inspector');
 assert.match(sessionsReact, /event: activityEventId\(event\)/, 'task event links must deep-link into the exact Activity event');
-assert.match(sessionsReact, /data-session-details/, 'task technical record remains accessible as a secondary disclosure');
+assert.doesNotMatch(sessionsReact, /data-session-details|TechnicalDetails|data-export-task-trace/, 'Tasks must not expose internal technical records or trace export');
 assert.doesNotMatch(sessionsReact, /task-other-processes/, 'task Processes must not show unrelated project processes');
 assert.match(processesReact, /key: row\.processId/, 'Process rows must reconcile by canonical process identity');
 assert.match(processesReact, /postJson\('\/api\/processes\/stop'/, 'Process stop must retain the existing backend lifecycle endpoint');
@@ -132,8 +122,8 @@ assert.match(toolsReact, /result\?\.ok === false \|\| payload == null/, 'Tool AP
 assert.doesNotMatch(usageReact, /taskRevision/, 'Analytics must not re-read monthly history on every live task revision');
 assert.doesNotMatch(homeReact, /HomeAnalytics, \{ taskRevision:/, 'Overview analytics must not re-read monthly history on every live task revision');
 assert.doesNotMatch(workspacesReact, /useWorkspaceAnalytics\(analyticsAliases, Number\(data\.live/, 'Project analytics must not re-read monthly history on every live task revision');
-assert.match(diagnostics, /visibilitychange/, 'Live Troubleshooting must reconcile feature-local report state after returning from a hidden window');
-assert.match(diagnostics, /load\(\{ silent: true \}\)/, 'Visibility catch-up must reuse the bounded silent diagnostics refresh path');
+assert.doesNotMatch(diagnostics, /relai:diagnostics-live|diagnostic-live-tail/, 'Troubleshooting must not expose or maintain an in-app raw log live-tail surface');
+assert.match(diagnostics, /Export support information/, 'Troubleshooting must preserve support export for detailed engineering evidence');
 assert.match(workspacesReact, /useWorkspaceAnalytics/, 'Projects must retain per-project analytics in React ownership');
 assert.match(workspaceModals, /sourcePaths:\s*paths/, 'Project create and edit must preserve multi-source project folders');
 assert.match(workspaceModals, /Forget stored activity for this project/, 'Project deletion must expose an explicit stored-activity cleanup choice');
@@ -171,23 +161,8 @@ assert.match(diagnostics, /data-diagnostic-region': 'tunnel-doctor'/, 'Troublesh
   assert.equal(failedDoctor.needsAttention, true, 'real tunnel failures must remain visually actionable');
   assert.equal(failedDoctor.label, 'Needs attention');
 }
-assert.match(diagnostics, /role: 'log'/, 'Diagnostic log regions must retain explicit log semantics without making the whole stream aria-live');
-assert.doesNotMatch(diagnostics, /aria-live[^\n]*diagnostic-log-list|window\.prompt/, 'Diagnostics must not turn the full live log into an aria-live region or regress to a native prompt');
-{
-  const runtime = { revision: 4, count: 1, entries: [{ message: 'existing' }] };
-  const duplicate = exerciseRuntimeLogDelta(runtime, { type: 'append', revision: 4, count: 1, entry: { message: 'duplicate', level: 'info' } });
-  assert.equal(duplicate.kind, 'duplicate');
-  assert.deepEqual(Array.from(duplicate.runtime.entries, entry => entry.message), ['existing'], 'duplicate diagnostic revisions must not duplicate log rows');
-
-  const gap = exerciseRuntimeLogDelta(runtime, { type: 'append', revision: 6, count: 2, entry: { message: 'gap', level: 'warning' } });
-  assert.equal(gap.kind, 'refresh', 'revision gaps must request an authoritative diagnostic refresh');
-  assert.deepEqual(Array.from(gap.runtime.entries, entry => entry.message), ['existing']);
-
-  const next = exerciseRuntimeLogDelta(runtime, { type: 'append', revision: 5, count: 2, entry: { message: 'next', level: 'warning' } });
-  assert.equal(next.kind, 'applied');
-  assert.equal(next.runtime.revision, 5);
-  assert.deepEqual(Array.from(next.runtime.entries, entry => entry.message), ['existing', 'next']);
-}
+assert.match(diagnostics, /role: 'log'/, 'Failed activity must retain explicit log semantics without becoming an aria-live stream');
+assert.doesNotMatch(diagnostics, /aria-live[^\n]*diagnostic-log-list|window\.prompt/, 'Troubleshooting must not turn failed activity into an aria-live stream or regress to a native prompt');
 assert.match(settingsReact, /const state = connectionStateFor\(data\)/, 'Connection must derive status directly from the canonical dashboard snapshot');
 assert.match(settingsReact, /data\.desktopStatus\?\.tunnelId \|\| data\.connection\?\.tunnelId/, 'Connection guidance must derive the Tunnel ID from canonical dashboard state');
 
@@ -514,6 +489,7 @@ for (const streamId of ['a', 'b']) {
     workSessionStateView: () => ({}), routeHref: () => '#tasks',
     getWorkspaceFilter: () => routeWorkspace, setWorkspaceFilter: value => { routeWorkspace = value; },
     invalidateCache: () => { invalidated++; }, requestDashboardRefresh: () => { refreshed++; },
+    reconcileUnconfirmedResult: result => result,
     postJson: (url, body) => new Promise(resolve => requests.push({ url, body, resolve })),
     fetchJson: url => new Promise(resolve => preflights.push({ url, resolve }))
   };

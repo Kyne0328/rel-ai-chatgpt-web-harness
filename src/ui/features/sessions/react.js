@@ -1,11 +1,9 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, Suspense } from 'react';
 import { flushSync } from 'react-dom';
-import { fetchJson, postJson, requestDashboardRefresh } from '../../api.js';
-import { copyText } from '../../clipboard.js';
+import { fetchJson, postJson, reconcileUnconfirmedResult, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
-import { OperationDiagnostics } from '../../components/operation-diagnostics.js';
 import { formatDuration, timeAgo } from '../../utils.js';
 import { getRouteParams, getRouteSnapshot, getWorkspaceFilter, navigate, replaceRouteParams, routeHref, setWorkspaceFilter, subscribeRoute } from '../../router.js';
 import { activityEventId } from '../../activity-event.js';
@@ -33,11 +31,10 @@ import {
   sessionListTimestampValue,
   sessionNeedsAttention,
   sessionsForDisplay,
-  taskTraceJsonl,
   taskControlMessage,
   taskProcessGroups,
   taskRunningOperations,
-  taskValidationView
+  taskRowActivity
 } from './model.js';
 
 const h = React.createElement;
@@ -122,7 +119,6 @@ function SessionsPage({ data = {} }) {
   const [hydrated, setHydrated] = useState(null);
   const [hydrationState, setHydrationState] = useState(null);
   const [detailRefresh, setDetailRefresh] = useState(null);
-  const [technicalExpandedId, setTechnicalExpandedId] = useState('');
   const requestedTab = routeParams.get('tab');
   const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'processes']), []);
   const [activeTab, setActiveTab] = useState(() => validTabs.has(requestedTab) ? requestedTab : 'overview');
@@ -157,7 +153,6 @@ function SessionsPage({ data = {} }) {
       setHydrated(null);
       setHydrationState(null);
       setDetailRefresh(null);
-      setTechnicalExpandedId('');
       setActiveTab(validTabs.has(getRouteParams().get('tab')) ? getRouteParams().get('tab') : 'overview');
     }
     setSelectedId(id);
@@ -187,9 +182,8 @@ function SessionsPage({ data = {} }) {
     const summary = selectedSummaryRef.current;
     // The list summary already supports Overview and Changes. Avoid fetching
     // large retained task details on each selection; fetch for Activity,
-    // technical disclosure, direct off-page links and explicit refreshes.
-    if (summary && !forceRefresh && activeTab !== 'activity'
-      && requestedTab !== 'technical' && technicalExpandedId !== selectedId) return undefined;
+    // direct off-page links and explicit refreshes.
+    if (summary && !forceRefresh && activeTab !== 'activity') return undefined;
     if (selectedSummaryHasTrace && !forceRefresh) {
       setHydrated({ id: selectedId, session: summary });
       setHydrationState({ id: selectedId, status: 'ready' });
@@ -243,8 +237,8 @@ function SessionsPage({ data = {} }) {
       cancelled = true;
       hydrationRequest.current += 1;
     };
-  }, [activeTab, detailRefresh, offPageRefresh, requestedTab, selectedHydrationCacheTtl,
-    selectedId, selectedSummaryAvailable, selectedSummaryHasTrace, technicalExpandedId]);
+  }, [activeTab, detailRefresh, offPageRefresh, selectedHydrationCacheTtl,
+    selectedId, selectedSummaryAvailable, selectedSummaryHasTrace]);
 
   useEffect(() => {
     if (!selectedId || hydrated?.id !== selectedId) return;
@@ -445,8 +439,6 @@ function SessionsPage({ data = {} }) {
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
                 onLoadMoreActivity: loadMoreActivity,
                 activityTotalCount: hydrated?.id === selectedId ? hydrated?.activity?.totalCount : undefined,
-                technicalRequested: requestedTab === 'technical',
-                onTechnicalOpen: setTechnicalExpandedId,
                 onControlComplete: refreshSelectedSession,
                 managedProcesses: data.managedProcesses || [],
                 commandOperations: data.commandOperations || [],
@@ -562,6 +554,7 @@ const TaskRow = memo(function TaskRow({ session, selected, onSelect }) {
   const projectFiles = semanticFileCounts(session, semantic).product;
   const project = session.workspace || 'No project';
   const title = session.title || operation;
+  const activity = taskRowActivity(session, semantic);
   return h('button', {
     className: `task-row${selected ? ' is-selected' : ''}`,
     type: 'button',
@@ -573,7 +566,8 @@ const TaskRow = memo(function TaskRow({ session, selected, onSelect }) {
     h('span', { className: 'task-row-status' }, h(StatusPill, { state })),
     h('span', { className: 'task-row-main' },
       h('strong', null, title),
-      h('span', { className: 'task-row-meta' }, `${project} · ${toolCalls} tool call${toolCalls === 1 ? '' : 's'} · ${projectFiles} project file${projectFiles === 1 ? '' : 's'}`)
+      activity && activity !== title ? h('span', { className: 'task-row-activity', title: activity }, activity) : null,
+      h('span', { className: 'task-row-meta' }, `${project}${session.goalMode?.goalActive ? ' · Goal' : ''} · ${toolCalls} tool call${toolCalls === 1 ? '' : 's'} · ${projectFiles} project file${projectFiles === 1 ? '' : 's'}`)
     ),
     h('span', { className: 'task-row-time' }, h(SessionTime, { session, live })),
     h(Icon, { name: 'chevronRight', size: 16 })
@@ -596,7 +590,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, activityTotalCount, onLoadMoreActivity, technicalRequested = false, onTechnicalOpen, onControlComplete, managedProcesses = [], commandOperations = [], requestedFilePath = '' }) {
+function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, activityTotalCount, onLoadMoreActivity, onControlComplete, managedProcesses = [], commandOperations = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -651,16 +645,23 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
     }
     setControlKey(key);
     try {
-      const result = await postJson('/api/tasks/control', {
+      const mutation = await postJson('/api/tasks/control', {
         action,
         work_id: id,
         ...(operationId ? { operationId } : {})
       }, { timeout: 10000, pauseTimeoutWhenHidden: false });
+      const result = await reconcileUnconfirmedResult(mutation, action === 'cancel' || action === 'goal_stop' ? async () => {
+        const state = await fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(id)}`, { cache: 'no-store', pauseTimeoutWhenHidden: false });
+        if (!state?.ok || sessionIdentifier(state.session) !== id) return false;
+        return action === 'cancel' ? state.session.status === 'cancelled'
+          : state.session.goalMode?.goalActive === false;
+      } : null);
       if (result?.ok === false) {
         toast(result.error || 'The task action could not be completed.', { variant: result.outcomeUnknown ? 'warn' : 'error' });
         return;
       }
-      const message = taskControlMessage(action, result);
+      const message = result.reconciled ? (action === 'cancel' ? 'Task cancellation confirmed.' : 'Goal stopped.')
+        : taskControlMessage(action, result);
       setControlNotice(message);
       toast(message, { variant: result.processCleanup?.complete === false ? 'warn' : 'success' });
       requestDashboardRefresh();
@@ -765,15 +766,7 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
           h('a', { className: 'section-action', href: taskChangesHref(id) }, 'View changes')
         )
       ) : null,
-      h(OriginalRequest, { objective: session.objective }),
-      h('details', { key: id + ':' + technicalRequested, className: 'task-detail-technical', 'data-session-details': '', open: technicalRequested,
-        onToggle: event => { if (event.currentTarget.open) onTechnicalOpen?.(id); } },
-        h('summary', null, 'Technical details'),
-        h(TechnicalDetails, { session }),
-        session.trace?.entries?.length
-          ? h('button', { className: 'secondary compact-button', type: 'button', onClick: () => exportTrace(session), 'data-export-task-trace': '' }, 'Export trace (.jsonl)')
-          : null
-      )
+      h(OriginalRequest, { objective: session.objective })
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-changes', role: 'tabpanel', 'aria-labelledby': 'session-tab-changes', tabIndex: 0, hidden: activeTab !== 'changes', 'data-session-panel': 'changes' },
       changesVisited ? h(Suspense, {
@@ -1113,39 +1106,6 @@ function EventRow({ event, session }) {
   );
 }
 
-function TechnicalDetails({ session }) {
-  const recordedTime = value => {
-    if (!value) return 'Not recorded';
-    const date = new Date(value);
-    return Number.isFinite(date.getTime()) ? date.toLocaleString() : 'Not recorded';
-  };
-  return h('div', { className: 'task-technical-record' },
-    h('section', { className: 'task-detail-section' },
-      h('div', { className: 'task-detail-heading' }, h('h3', null, 'Task record')),
-      h('div', { className: 'task-detail-grid' },
-        h(IdentifierDetail, { label: 'Task ID', value: sessionIdentifier(session) || 'Not recorded' }),
-        h(Detail, { label: 'Started', value: recordedTime(session.startedAt) }),
-        h(Detail, { label: 'Ended', value: recordedTime(session.completedAt || session.endedAt) }),
-        h(Detail, { label: 'Checks', value: taskValidationView(session).statusLabel }),
-        session.endReason ? h(Detail, { label: 'End reason', value: session.endReason }) : null
-      )
-    )
-  );
-}
-
-function IdentifierDetail({ label, value }) {
-  const copy = () => void copyText(value)
-    .then(() => toast('Identifier copied.', { variant: 'success' }))
-    .catch(error => toast(error instanceof Error ? error.message : String(error), { variant: 'error' }));
-  return h('div', null,
-    h('span', null, label),
-    h('strong', { className: 'task-detail-identifier' },
-      h('code', null, value),
-      h('button', { className: 'runtime-copy-id', type: 'button', onClick: copy, 'data-copy-value': value, 'aria-label': `Copy ${label} ${value}` }, 'Copy')
-    )
-  );
-}
-
 function CurrentOperations({ session, controlKey = '', onStopOperation, excludedOperationIds = new Set() }) {
   const operations = taskRunningOperations(session).filter(operation =>
     !excludedOperationIds.has(String(operation.id || operation.operationId || operation.invocationId || '')));
@@ -1166,21 +1126,8 @@ function CurrentOperations({ session, controlKey = '', onStopOperation, excluded
             'aria-label': `Stop ${operation.label || operation.tool || 'running action'}`,
             onClick: () => { void onStopOperation?.(operationId); }
           }, stopping ? 'Stopping…' : 'Stop') : null
-        ),
-        h(OperationDiagnostics, { operation, live: true })
+        )
       );
     }))
   );
-}
-
-function exportTrace(session) {
-  const jsonl = taskTraceJsonl(session);
-  if (!jsonl) return;
-  const blob = new Blob([jsonl], { type: 'application/x-ndjson;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `relai-task-trace-${sessionIdentifier(session).slice(0, 24) || 'task'}.jsonl`;
-  link.click();
-  URL.revokeObjectURL(url);
 }

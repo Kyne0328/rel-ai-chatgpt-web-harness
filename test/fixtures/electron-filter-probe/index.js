@@ -177,7 +177,7 @@ app.whenReady().then(async () => {
 
     win.setSize(1100, 820);
     await win.webContents.executeJavaScript(`location.hash = '#diagnostics'`);
-    await waitFor(win, `document.querySelector('#diagnosticFilterHost .filter-open-button') && /findings.*log entries shown/.test(document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent || '')`);
+    await waitFor(win, `document.querySelector('#diagnosticFilterHost .filter-open-button') && /findings.*failed activit(?:y|ies) shown/.test(document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent || '')`);
     const diagnostics = await win.webContents.executeJavaScript(`(async () => {
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
       const setRadio = (root, label, value) => {
@@ -201,7 +201,6 @@ app.whenReady().then(async () => {
         chips: [...document.querySelectorAll('#diagnosticFilterHost .filter-chip')].map(chip => chip.textContent.trim()),
         summary: document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent.trim() || '',
         badge: document.querySelector('#diagnosticFilterHost .filter-open-button')?.textContent.trim() || '',
-        liveTailPressed: document.querySelector('[data-live-tail]')?.getAttribute('aria-pressed'),
         reportActions: [...document.querySelectorAll('.diagnostic-page-actions button')].map(button => button.textContent.trim())
       };
       const pendingFilterInput = document.querySelector('#diagnosticFilterHost .filter-search-input');
@@ -219,25 +218,20 @@ app.whenReady().then(async () => {
       await delay(220);
       drawer = document.querySelector('.filter-drawer');
       setRadio(drawer, 'Scope', 'findings');
-      const source = [...drawer.querySelectorAll('label')].find(item => item.textContent.includes('Source'))?.querySelector('select');
+      const source = [...drawer.querySelectorAll('label')].find(item => item.textContent.includes('Action'))?.querySelector('select');
       const sourceDisabledForFindings = source?.disabled === true && source.value === 'all';
       [...drawer.querySelectorAll('button')].find(button => /Apply filters/.test(button.textContent))?.click();
       await delay(30);
       const pendingDrawerSearchValue = document.querySelector('#diagnosticFilterHost .filter-search-input')?.value || '';
       const pendingDrawerSearchPreserved = pendingDrawerSearchValue === 'drawer-pending-acceptance';
       document.querySelector('#diagnosticFilterHost .filter-clear-button')?.click();
-      const initialLiveTailLabel = document.querySelector('[data-live-tail]')?.getAttribute('aria-label') || '';
-      document.querySelector('[data-live-tail]')?.click(); await delay(80);
-      const liveTailStarted = document.querySelector('[data-live-tail]')?.getAttribute('aria-pressed') === 'true';
-      const liveTailActiveLabel = document.querySelector('[data-live-tail]')?.getAttribute('aria-label') || '';
-      document.querySelector('[data-live-tail]')?.click(); await delay(80);
-      const liveTailStopped = document.querySelector('[data-live-tail]')?.getAttribute('aria-pressed') === 'false';
+      const liveTailRemoved = !document.querySelector('[data-live-tail]');
       const search = document.querySelector('#diagnosticFilterHost .filter-search-input');
       const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
       inputValueSetter?.call(search, 'no-diagnostic-match-acceptance'); search.dispatchEvent(new Event('input', { bubbles: true })); await delay(220);
       const searchSummary = document.querySelector('#diagnosticFilterHost .filter-summary')?.textContent || '';
       const searchValue = document.querySelector('#diagnosticFilterHost .filter-search-input')?.value || '';
-      const searchEmpty = /0 of .* findings.*0 of .* log entries shown/.test(searchSummary);
+      const searchEmpty = /0 of .* findings.*0 of .* failed activit(?:y|ies) shown/.test(searchSummary);
       inputValueSetter?.call(search, 'pending-clear-acceptance');
       search.dispatchEvent(new Event('input', { bubbles: true }));
       document.querySelector('#diagnosticFilterHost .filter-clear-button')?.click();
@@ -249,7 +243,7 @@ app.whenReady().then(async () => {
         .some(code => !code.closest('details[data-diagnostic-detail]'));
       const findingSeveritiesReadable = [...document.querySelectorAll('.diagnostic-severity')]
         .every(element => ['Blocking', 'Warning', 'Recommendation'].includes(element.textContent.trim()));
-      return { cancelPreserved, fixedChoicesVisible, sourceDisabledForFindings, initialLiveTailLabel, liveTailActiveLabel, liveTailStarted, liveTailStopped, searchEmpty, searchSummary, searchValue, pendingSearchCleared, pendingFilterRemovalPreserved, pendingDrawerSearchPreserved, pendingDrawerSearchValue, pendingFilterChips, clearSearchValue, clearSearchSummary, technicalFindingCodesGated, findingSeveritiesReadable, applied };
+      return { cancelPreserved, fixedChoicesVisible, sourceDisabledForFindings, liveTailRemoved, searchEmpty, searchSummary, searchValue, pendingSearchCleared, pendingFilterRemovalPreserved, pendingDrawerSearchPreserved, pendingDrawerSearchValue, pendingFilterChips, clearSearchValue, clearSearchSummary, technicalFindingCodesGated, findingSeveritiesReadable, applied };
     })()`);
 
     await win.webContents.executeJavaScript(`location.hash = '#tools'`);

@@ -4,7 +4,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { OverlayFrame } from '../../components/overlay-frame.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
-import { fetchJson, invalidateCache, postJson, requestDashboardRefresh } from '../../api.js';
+import { DASHBOARD_DATA_URL, fetchJson, invalidateCache, postJson, reconcileUnconfirmedResult, requestDashboardRefresh } from '../../api.js';
 import { markUnsaved } from '../../interaction-safety.js';
 import { getWorkspaceFilter, navigate, routeHref, setWorkspaceFilter } from '../../router.js';
 import { timeAgo } from '../../utils.js';
@@ -174,7 +174,7 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
     if (conflict) return;
     const cleanAlias = alias.trim();
     setSaving(true);
-    const result = await postJson('/api/workspaces', {
+    const mutation = await postJson('/api/workspaces', {
       action: 'upsert',
       mode: isEdit ? 'update' : 'create',
       originalAlias: isEdit ? originalAlias : cleanAlias,
@@ -182,6 +182,12 @@ export function ProjectFormModal({ configuredWorkspaces = [], mode = 'add', onCl
       path: paths[0],
       sourcePaths: paths,
       enforceUniquePath: true
+    });
+    const result = await reconcileUnconfirmedResult(mutation, async () => {
+      const state = await fetchJson(DASHBOARD_DATA_URL, { cache: 'no-store', pauseTimeoutWhenHidden: false });
+      const saved = state?.ok && state.config?.workspaces?.find(item => item.alias === cleanAlias);
+      return Boolean(saved && sourcePathsFromWorkspace(saved).length === paths.length
+        && paths.every(path => sourcePathsFromWorkspace(saved).includes(path)));
     });
     setSaving(false);
     if (!result?.ok) {
@@ -334,14 +340,20 @@ function RepairProjectModalContent({ configuredWorkspaces = [], onClose, opener 
     if (duplicate) return;
     setSaving(true);
     setServerError('');
-    const result = await postJson('/api/workspaces', {
+    const mutation = await postJson('/api/workspaces', {
       action: 'upsert', mode: 'update', originalAlias: workspace.alias, alias: workspace.alias, path: clean, enforceUniquePath: true
+    });
+    const result = await reconcileUnconfirmedResult(mutation, async () => {
+      const latest = await fetchJson(DASHBOARD_DATA_URL, { cache: 'no-store', pauseTimeoutWhenHidden: false });
+      const saved = latest?.ok && latest.config?.workspaces?.find(item => item.alias === workspace.alias);
+      return Boolean(saved && sourcePathsFromWorkspace(saved).includes(clean));
     });
     setSaving(false);
     if (!result?.ok) {
       const message = result?.error || 'unknown error';
       setServerError(message);
-      toast(`Could not repair project: ${message}`, { variant: 'error' });
+      toast(result?.outcomeUnknown ? message : `Could not repair project: ${message}`,
+        { variant: result?.outcomeUnknown ? 'warn' : 'error' });
       return;
     }
     clearDirty();
@@ -621,7 +633,14 @@ function deleteConfirmation(alias, { forgetLocalData, setForgetLocalData, disabl
 }
 async function deleteProject(alias, { forgetLocalData = true, onSuccess, setBusy }) {
   setBusy?.(true);
-  const result = await postJson('/api/workspaces', { action: 'delete', alias, confirmDelete: true, forgetLocalData });
+  const mutation = await postJson('/api/workspaces', { action: 'delete', alias, confirmDelete: true, forgetLocalData });
+  const result = await reconcileUnconfirmedResult(mutation, async () => {
+    // Project absence cannot prove optional stored activity/history deletion.
+    if (forgetLocalData) return false;
+    const state = await fetchJson(DASHBOARD_DATA_URL, { cache: 'no-store', pauseTimeoutWhenHidden: false });
+    return state?.ok === true && Array.isArray(state.config?.workspaces)
+      && !state.config.workspaces.some(workspace => workspace.alias === alias);
+  });
   setBusy?.(false);
   if (!result?.ok) {
     toast(result?.outcomeUnknown ? result.error : `Could not delete project from Rel.AI: ${result?.error || 'unknown error'}`,
