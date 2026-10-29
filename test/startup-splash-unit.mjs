@@ -56,11 +56,13 @@ assert.deepEqual(first.windowOpenHandler(), { action: 'deny' });
 manager.update('Starting local service…');
 assert.deepEqual(sent, [], 'status must wait until splash renderer has subscribed');
 first.webContents.emit('did-finish-load');
-assert.deepEqual(sent.pop(), ['startup:status', { text: 'Starting local service…', blocked: false }]);
+assert.deepEqual(sent.pop(), ['startup:status', { text: 'Starting local service…', blocked: false, phase: 'working' }]);
 manager.update('Opening dashboard…');
-assert.deepEqual(sent.pop(), ['startup:status', { text: 'Opening dashboard…', blocked: false }]);
+assert.deepEqual(sent.pop(), ['startup:status', { text: 'Opening dashboard…', blocked: false, phase: 'working' }]);
 manager.update('Connection settings need attention.', { blocked: true });
-assert.deepEqual(sent.pop(), ['startup:status', { text: 'Connection settings need attention.', blocked: true }]);
+assert.deepEqual(sent.pop(), ['startup:status', { text: 'Connection settings need attention.', blocked: true, phase: 'working' }]);
+manager.update('Reconnecting automatically…', { phase: 'recovering' });
+assert.deepEqual(sent.pop(), ['startup:status', { text: 'Reconnecting automatically…', blocked: false, phase: 'recovering' }]);
 first.emit('ready-to-show');
 assert.equal(first.shown, true, 'only a painted splash becomes visible');
 
@@ -92,6 +94,10 @@ const css = fs.readFileSync(path.join(root, 'electron/renderer/splash.css'), 'ut
 assert.match(html, /src="relai-logo\.png"/, 'splash must use the existing application logo');
 assert.match(html, /role="status" aria-live="polite"/, 'current startup stage must be announced accessibly');
 assert.match(css, /prefers-reduced-motion: no-preference/, 'nonessential animation must respect reduced motion');
+assert.match(css, /prefers-reduced-motion: reduce/, 'reduced-motion splash must retain static progress feedback');
+assert.match(css, /data-phase="recovering"/, 'automatic retries must have a distinct visual state');
+const splashRenderer = fs.readFileSync(path.join(root, 'electron/renderer/splash.js'), 'utf8');
+assert.match(splashRenderer, /splash\.dataset\.phase/, 'renderer maps real startup phase changes into visual state');
 assert.match(fs.readFileSync(path.join(root, 'electron/package.json'), 'utf8'), /"startup-splash\.js"/, 'native packaging must include splash manager');
 
 console.log('startup splash unit tests passed');

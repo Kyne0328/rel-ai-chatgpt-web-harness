@@ -522,10 +522,23 @@ async function createDesktopHost(options = {}) {
       });
     }
     installLocalProtocol(protocol, rendererRoot);
+    const launchStarted = performance.now();
+    // Do not reveal a window during login/background launches. Normal
+    // foreground launches show feedback before lifecycle disk I/O completes.
+    let openedAtLogin = process.argv.includes('--background');
+    if (!openedAtLogin) {
+      try { openedAtLogin = app.getLoginItemSettings({ path: process.execPath, args: ['--background'] })?.wasOpenedAtLogin === true; }
+      catch { /* Unsupported login-item inspection is not a startup failure. */ }
+    }
+    if (!openedAtLogin) {
+      try { startupSplash.show(); startupSplash.update('Loading settings…'); }
+      catch (error) { runtimeLogs.append(`Startup splash unavailable: ${formatError(error)}`, { level: 'warning', source: 'startup-splash' }); }
+    }
     const [, lifecycleStatus] = await Promise.all([
       writeControllerRuntimeMarker(app),
       desktopLifecycle.start()
     ]);
+    runtimeLogs.append('Desktop lifecycle ready.', { source: 'desktop-performance', details: { elapsedMs: Math.round(performance.now() - launchStarted) } });
     dashboardWindowManager.setThemePreference(lifecycleStatus.themePreference);
     desktopPower.setKeepAwakeEnabled(lifecycleStatus.keepAwake === true);
     pulseWindowManager.setEnabled(lifecycleStatus.pulseEnabled !== false);
@@ -1163,9 +1176,11 @@ async function createDesktopHost(options = {}) {
         level: 'warning',
         source: 'desktop-lifecycle'
       });
+      startupSplash.hide();
       setupWindowManager.create({ update: true, previousVersion, currentVersion });
       return { mode: 'update', hasConfig: false };
     }
+    startupSplash.hide();
     setupWindowManager.create();
     return { mode: 'fresh', hasConfig: false };
   }
@@ -1179,7 +1194,7 @@ async function createDesktopHost(options = {}) {
     if (background || isQuitting || setupWindowManager.getWindow() || dashboardWindowManager.getWindow()?.isVisible?.()) return;
     try {
       startupSplash.show();
-      startupSplash.update(message, { blocked });
+      startupSplash.update(message, { blocked, phase: blocked ? 'working' : 'recovering' });
     } catch (error) {
       runtimeLogs.append(`Startup splash unavailable: ${formatError(error)}`, { level: 'warning', source: 'startup-splash' });
     }
@@ -1207,6 +1222,7 @@ async function createDesktopHost(options = {}) {
     }
     try {
       cancelStartupRetry();
+      const stageStarted = performance.now();
       if (!launchOptions.background && !launchOptions.firstRun && !setupWindowManager.getWindow()) {
         try {
           startupSplash.show();
@@ -1235,6 +1251,7 @@ async function createDesktopHost(options = {}) {
         }
         return status;
       }
+      const localReadyMs = Math.round(performance.now() - stageStarted);
       if (!launchOptions.background) {
         if (launchOptions.firstRun) {
           try { await serviceProcessClient.markOnboardingHandoff(); }
@@ -1249,6 +1266,10 @@ async function createDesktopHost(options = {}) {
         startupSplash.update('Opening dashboard…');
         await showDashboardWindow(launchOptions.routeHash || '');
       }
+      runtimeLogs.append('Desktop startup stages completed.', { source: 'desktop-performance', details: {
+        localReadyMs, dashboardOpenMs: Math.round(performance.now() - stageStarted) - localReadyMs,
+        totalMs: Math.round(performance.now() - stageStarted), background: launchOptions.background === true
+      } });
       startupRetryAttempt = 0;
       return currentStatus;
     } catch (error) {

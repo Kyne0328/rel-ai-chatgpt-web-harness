@@ -22,7 +22,10 @@ h1 { margin: 12px 0 0; font-size: 24px; letter-spacing: -.045em; line-height: 1.
 h1 span { margin-left: 5px; font-size: 11px; color: #8caf9c; letter-spacing: .16em; font-weight: 600; vertical-align: 3px; }
 .startup { display: flex; flex-direction: column; align-items: center; width: 100%; gap: 15px; }
 .progress { width: 180px; height: 2px; overflow: hidden; background: #2a4136; border-radius: 5px; }
-.progress-light { width: 38%; height: 100%; background: linear-gradient(90deg, transparent, #86e5a4, #c9f8d2); border-radius: inherit; }
+.progress-light { width: 38%; height: 100%; background: linear-gradient(90deg, transparent, #86e5a4 70%, #d6ffe0); border-radius: inherit; box-shadow: 0 0 13px #86e5a4; }
+.splash[data-phase="recovering"] .progress-light { background: linear-gradient(90deg, transparent, #dfb96a, #f9dfab); box-shadow: 0 0 10px #dfb96a; }
+.splash[data-phase="blocked"] .progress-light { animation: none; transform: translateX(84px); opacity: .45; }
+.splash[data-phase="blocked"] .logo-field img { animation: none; }
 .startup p { margin: 0; min-height: 18px; font-size: 12px; color: #a9bcb1; letter-spacing: .01em; text-align: center; }
 .startup button { border: 1px solid #456453; border-radius: 7px; background: #1c3329; color: #e2f4e7; padding: 6px 12px; font: inherit; cursor: pointer; }
 .startup button:hover { background: #294737; }
@@ -31,8 +34,10 @@ h1 span { margin-left: 5px; font-size: 11px; color: #8caf9c; letter-spacing: .16
 @media (prefers-reduced-motion: no-preference) {
   .identity { animation: enter .42s ease-out both; }
   .logo-field img { animation: breathe 3s ease-in-out infinite; }
-  .progress-light { animation: travel 1.45s ease-in-out infinite; }
+  .progress-light { animation: travel 1.8s ease-in-out infinite; }
+  .splash[data-phase="recovering"] .progress-light { animation-duration: 2.6s; }
 }
 @keyframes enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.035); } }
 @keyframes travel { from { transform: translateX(-105%); } to { transform: translateX(275%); } }
+@media (prefers-reduced-motion: reduce) { .progress-light { width: 100%; opacity: .4; } }

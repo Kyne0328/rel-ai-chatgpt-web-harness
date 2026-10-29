@@ -159,6 +159,7 @@ async function exerciseLaunch(options, listening, errorCode = '') {
     showStartupProblem: message => events.push('problem: ' + message),
     scheduleStartupRetry: () => events.push('retry'),
     startupRetryAttempt: 0,
+    performance: { now: () => 100 },
     serviceProcessClient: { markOnboardingHandoff: async () => {
       if (options.simulateHandoffTimeout) throw new Error('Rel.AI service request timed out: desktop-onboarding-handoff');
     } },
@@ -180,7 +181,8 @@ async function exerciseLaunch(options, listening, errorCode = '') {
 }
 const visibleLaunch = await exerciseLaunch({}, true);
 assert.deepEqual(visibleLaunch.slice(0, 3), ['splash', 'Starting local service…', 'start-service']);
-assert.deepEqual(visibleLaunch.slice(-2), ['Opening dashboard…', 'dashboard']);
+assert.ok(visibleLaunch.includes('Opening dashboard…') && visibleLaunch.includes('dashboard'), 'foreground startup opens the dashboard');
+assert.ok(visibleLaunch.includes('log: Desktop startup stages completed.'), 'startup phase timings are recorded');
 const quietLaunch = await exerciseLaunch({ background: true }, true);
 assert.ok(!quietLaunch.includes('splash'), 'launch-at-login must not open a splash');
 assert.ok(!quietLaunch.includes('dashboard'), 'launch-at-login must remain background-only');
