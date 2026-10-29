@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -54,6 +55,10 @@ class FakeWindow {
       reload: () => { this.reloaded = true; },
       executeJavaScript: async source => {
         this.executedScripts.push(source);
+        if (source.includes('Dashboard UI did not finish loading.')) {
+          this.onDashboardReadinessWait?.();
+          return this.dashboardReadyPromise || true;
+        }
         const match = /location\.hash = (.+)$/.exec(source);
         if (match && this.webContents.url) {
           const target = new URL(this.webContents.url);
@@ -98,6 +103,7 @@ class FakeWindow {
   }
   destroy() { this.destroyed = true; this.events.get('closed')?.(); }
   isDestroyed() { return this.destroyed; }
+  isVisible() { return this.shown === true && this.hidden !== true; }
 }
 
 const dependencies = {
@@ -147,6 +153,71 @@ try {
   await delayedOpen;
   assert.equal(delayedWindow.shown, true, 'dashboard must become visible after its authenticated navigation finishes');
   await delayedManager.close();
+  windows.length = 0;
+
+  // A loaded HTML document is not ready if its React route still shows the skeleton.
+  let finishRouteLoad;
+  let notifyRouteWait;
+  const routeWaitStarted = new Promise(resolve => { notifyRouteWait = resolve; });
+  class UnreadyRouteWindow extends FakeWindow {
+    constructor(options) {
+      super(options);
+      this.dashboardReadyPromise = new Promise(resolve => { finishRouteLoad = resolve; });
+      this.onDashboardReadinessWait = notifyRouteWait;
+    }
+  }
+  const routeManager = createDashboardWindowManager({ ...dependencies, BrowserWindow: UnreadyRouteWindow });
+  const pendingRouteOpen = routeManager.open();
+  await routeWaitStarted;
+  const unreadyWindow = routeManager.getWindow();
+  unreadyWindow.emit('ready-to-show');
+  assert.notEqual(unreadyWindow.shown, true, 'an HTML-loaded but unrendered React route must remain hidden');
+  finishRouteLoad(true);
+  await pendingRouteOpen;
+  assert.equal(unreadyWindow.shown, true, 'first usable route content should reveal the window without an animation delay');
+  await routeManager.close();
+  // Evaluate the production readiness predicate: a shell with its lazy-route
+  // loading skeleton is not ready; the first committed route is.
+  const readinessScript = unreadyWindow.executedScripts.find(source => source.includes('Dashboard UI did not finish loading.'));
+  assert.ok(readinessScript);
+  let routeClass = 'dashboard-state-loading';
+  let notifyMutation;
+  let disconnected = false;
+  const readiness = vm.runInNewContext(readinessScript, {
+    document: {
+      documentElement: {},
+      querySelector: () => ({}),
+      getElementById: () => ({ firstElementChild: { classList: { contains: name => name === routeClass } } })
+    },
+    MutationObserver: class {
+      constructor(callback) { notifyMutation = callback; }
+      observe() {}
+      disconnect() { disconnected = true; }
+    },
+    setTimeout,
+    clearTimeout
+  });
+  let early = false;
+  readiness.then(() => { early = true; });
+  await Promise.resolve();
+  assert.equal(early, false, 'the loading skeleton must not count as a rendered route');
+  routeClass = 'section';
+  notifyMutation();
+  await readiness;
+  assert.equal(disconnected, true, 'readiness observer must be disposed after content is ready');
+  windows.length = 0;
+
+  class FailedRouteWindow extends FakeWindow {
+    constructor(options) {
+      super(options);
+      this.dashboardReadyPromise = Promise.reject(new Error('Dashboard UI did not finish loading.'));
+    }
+  }
+  const failedRouteManager = createDashboardWindowManager({ ...dependencies, BrowserWindow: FailedRouteWindow });
+  await assert.rejects(failedRouteManager.open(), /Dashboard UI did not finish loading/);
+  assert.equal(failedRouteManager.getWindow(), null, 'a failed hidden dashboard must be discarded for clean recovery');
+  assert.notEqual(windows.at(-1).shown, true, 'failed initial render must never expose blank UI');
+  await failedRouteManager.close();
   windows.length = 0;
 
   const manager = createDashboardWindowManager(dependencies);

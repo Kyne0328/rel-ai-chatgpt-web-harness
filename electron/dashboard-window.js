@@ -9,6 +9,29 @@ import { localWindowWebPreferences } from './window-security.js';
 import { STARTUP_BACKGROUND_COLOR } from './startup-background.js';
 
 const dashboardPreloadPath = fileURLToPath(new URL('./preload.cjs', import.meta.url));
+// The page load event precedes the first React route's commit.
+// Wait for actual route content rather than revealing its loading skeleton.
+const DASHBOARD_READY_SCRIPT = `new Promise((resolve, reject) => {
+  const ready = () => {
+    const shell = document.querySelector('[data-react-dashboard-ready="true"]');
+    const route = document.getElementById('routeRoot')?.firstElementChild;
+    return Boolean(shell && route && !route.classList.contains('dashboard-state-loading'));
+  };
+  let settled = false;
+  let timeout;
+  const observer = new MutationObserver(() => { if (ready()) finish(); });
+  function finish(error) {
+    if (settled) return;
+    settled = true;
+    observer.disconnect();
+    clearTimeout(timeout);
+    if (error) reject(error);
+    else resolve(true);
+  }
+  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+  timeout = setTimeout(() => finish(new Error('Dashboard UI did not finish loading.')), 30000);
+  if (ready()) finish();
+})`;
 import { dashboardTitleBarOverlay, dashboardWindowChrome, dashboardWindowChromeState } from "./window-chrome.js";
 
 function createDashboardWindowManager(deps) {
@@ -54,17 +77,20 @@ function createDashboardWindowManager(deps) {
     const forceReload = options.forceReload === true;
     if (forceReload && !requestedHash && current?.hash) target.hash = current.hash;
     const { sameDashboard, authRefreshRequired } = planDashboardNavigation(current, target, { requestedHash, currentAuthGeneration: dashboardAuthGeneration, nextAuthGeneration: authGeneration });
-    if (!sameDashboard || authRefreshRequired || forceReload) {
-      try {
-        await win.loadURL(target.href);
-        if (authGeneration) dashboardAuthGeneration = authGeneration;
-      } catch (error) {
-        if (!isAbortedNavigationError(error)) throw error;
+    try {
+      if (!sameDashboard || authRefreshRequired || forceReload) {
+        try { await win.loadURL(target.href); }
+        catch (error) { if (!isAbortedNavigationError(error)) throw error; }
+      } else if (requestedHash && current.hash !== requestedHash) {
+        await navigateDashboardHash(win, requestedHash);
       }
-    } else if (requestedHash && current.hash !== requestedHash) {
-      await navigateDashboardHash(win, requestedHash);
+      if (!win.isVisible()) await win.webContents.executeJavaScript(DASHBOARD_READY_SCRIPT);
+    } catch (error) {
+      // A failed initial boot must remain hidden and reload on the next retry.
+      if (!win.isDestroyed() && !win.isVisible()) win.destroy();
+      throw error;
     }
-    if (!dashboardAuthGeneration && authGeneration) dashboardAuthGeneration = authGeneration;
+    if (authGeneration) dashboardAuthGeneration = authGeneration;
     win.show();
     win.focus();
     return win;
