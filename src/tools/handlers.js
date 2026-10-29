@@ -4,6 +4,7 @@ import { setTimeout as setNodeTimeout } from 'node:timers';
 
 
 import { resolveWorkspace } from '../config.js';
+import { readProjectInstructions } from '../projectInstructions.js';
 import { principalFingerprint } from '../mcp/principal.ts';
 import { repoSnapshot, relaiReadAsync, workspaceTidyPlan, workspaceTidyRun, relaiVerify, relaiHttpProbe, relaiDiff, relaiRestorePaths, relaiGitCommit, relaiGitPush, relaiGitDraftPr } from '../localRepoBridge.js';
 import { planEdit } from '../executionPlanner.js';
@@ -48,6 +49,7 @@ function resolveOptionalWorkspace(config, args = {}) {
 const startTaskHandler = async (config, args = {}, context = {}) => {
   const mode = validateWorkMode(args);
   const workspace = resolveOptionalWorkspace(config, args);
+  const projectInstructions = taskProjectInstructions(workspace, args);
   const task = startTask(workspace, args);
   const recovered = context?.requestTaskContext?.session;
   const activity = getToolActivity();
@@ -95,9 +97,19 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
         : 'Read the returned chat linking receipt resource once in this originating chat. Do not display its URI or ask the user for a URL. Then continue the work.' } : {}),
     plan: progress?.plan || current?.plan,
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
-    ...(recovered ? { bootstrap: { recoveredTask: compactSessionSummary(recovered) } } : {})
+    ...((projectInstructions || recovered) ? { bootstrap: {
+      ...(projectInstructions ? { projectInstructions } : {}),
+      ...(recovered ? { recoveredTask: compactSessionSummary(recovered) } : {})
+    } } : {})
   };
 };
+
+function taskProjectInstructions(workspace, args = {}) {
+  if (!workspace) return undefined;
+  return taskBootstrapFromSnapshot({
+    projectInstructions: readProjectInstructions(workspace, { targetPath: args.instructionPath })
+  }, 'compact').projectInstructions;
+}
 
 function defaultTaskSteps(args = {}) {
   const title = String(args.title || args.objective || 'Complete requested work').trim().slice(0, 300) || 'Complete requested work';
@@ -119,9 +131,11 @@ const taskContextHandler = async (config, inputArgs = {}, context = {}) => {
   const activeRelatedWork = compactActiveRelatedWork(taskActivity, currentTask || {});
   const taskResult = activeRelatedWork.length ? { ...task, activeRelatedWork } : task;
   const bootstrapMode = String(args.bootstrap || 'compact').toLowerCase();
-  if (!workspace || bootstrapMode === 'none') {
-    if (workspace) scheduleIntelligenceWarmup(workspace, config);
-    return taskResult;
+  if (!workspace) return taskResult;
+  if (bootstrapMode === 'none') {
+    scheduleIntelligenceWarmup(workspace, config);
+    const projectInstructions = taskProjectInstructions(workspace, args);
+    return projectInstructions ? { ...taskResult, bootstrap: { projectInstructions } } : taskResult;
   }
   const snapshot = await repoSnapshot(workspace, config, {
     maxEntries: bootstrapMode === 'full' ? undefined : 64,

@@ -27,6 +27,8 @@ fs.writeFileSync(path.join(workspace, 'package.json'), JSON.stringify({
   scripts: { check: 'node --check src/index.js' }
 }, null, 2));
 fs.writeFileSync(path.join(workspace, 'src', 'index.js'), 'export const value = 1;\n');
+fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Root project instruction.\n');
+fs.writeFileSync(path.join(workspace, 'src', 'AGENTS.md'), 'Source project instruction.\n');
 execFileSync('git', ['init'], { cwd: workspace, stdio: 'ignore' });
 execFileSync('git', ['config', 'user.email', 'relai@example.test'], { cwd: workspace });
 execFileSync('git', ['config', 'user.name', 'RelAI Test'], { cwd: workspace });
@@ -69,6 +71,35 @@ try {
   migratedDb.close();
 
   const context = { publicHttpOnly: true, conversationId: 'knowledge-continuity-chat' };
+
+  const instructionTask = await callTool('relai_work', { mode: 'normal',
+    action: 'begin', workspace: 'app', title: 'Project instruction delivery', bootstrap: 'none'
+  }, context);
+  assert.deepEqual(instructionTask.bootstrap?.projectInstructions?.sources, ['AGENTS.md'],
+    'project-bound task start must deliver root AGENTS.md even when optional repository scanning is disabled');
+  assert.match(instructionTask.bootstrap?.projectInstructions?.content || '', /Root project instruction/);
+  assert.deepEqual(Object.keys(instructionTask.bootstrap || {}), ['projectInstructions'],
+    'mandatory project instructions must not force any other optional repository bootstrap');
+
+  fs.writeFileSync(path.join(workspace, 'AGENTS.md'), 'Refreshed root project instruction.\n');
+  const futureInstructionTime = new Date(Date.now() + 2000);
+  fs.utimesSync(path.join(workspace, 'AGENTS.md'), futureInstructionTime, futureInstructionTime);
+  const refreshedInstructionContext = await callTool('relai_work', {
+    action: 'context', work_id: instructionTask.work_id, bootstrap: 'none'
+  }, context);
+  assert.match(refreshedInstructionContext.bootstrap?.projectInstructions?.content || '', /Refreshed root project instruction/,
+    'bootstrap:none context refresh must still deliver changed project instructions');
+  await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: instructionTask.work_id, reason: 'instruction delivery regression complete' }, context);
+
+  const nestedInstructionTask = await callTool('relai_work', { mode: 'normal',
+    action: 'begin', workspace: 'app', title: 'Nested project instruction delivery', bootstrap: 'none', instructionPath: 'src/index.js'
+  }, context);
+  assert.deepEqual(nestedInstructionTask.bootstrap?.projectInstructions?.sources, ['src/AGENTS.md', 'AGENTS.md'],
+    'task start must honor an explicitly known nested instruction path');
+  assert.match(nestedInstructionTask.bootstrap?.projectInstructions?.content || '', /Source project instruction/);
+  assert.match(nestedInstructionTask.bootstrap?.projectInstructions?.content || '', /Refreshed root project instruction/);
+  await callTool('relai_work', { action: 'cancel', workspace: 'app', work_id: nestedInstructionTask.work_id, reason: 'nested instruction delivery regression complete' }, context);
+
   const first = await callTool('relai_work', { mode: 'normal',
     action: 'begin', workspace: 'app', title: 'Remember continuity marker', objective: 'Remember continuity marker',
     contextSummary: 'Host capsule alpha', bootstrap: 'compact'
