@@ -19,6 +19,9 @@ import { chatLinkResource } from './chatgptChatLink.js';
 const DETECTION_PREFIX = 'chatgpt_goal_detection:';
 const RATE_LIMIT_PREFIX = 'chatgpt_goal_rate_limit:';
 const DISCOVERY_RETRY_MS = 120_000;
+// The originating ChatGPT turn can still be committing tool results when a
+// candidate is proposed. A missing receipt on the first read is not a mismatch.
+const CANDIDATE_RECEIPT_GRACE_MS = 5 * 60_000;
 const STALE_UNLINKED_IDLE_MS = 24 * 60 * 60_000;
 const SETTLE_MS = 30_000;
 const UNFINISHED_TURN_IDLE_MS = 4 * 60_000 + 30_000;
@@ -243,7 +246,7 @@ function resumeGoal(config, args, context) {
   }
   const resumed = mutateGoal(config, goal.workId, current => ({ ...current,
     ...(switching ? { candidateConversationId: goal.active && !goal.binding && args.conversationUrl
-      ? conversationId : '' } : {}),
+      ? conversationId : '', candidateSelectedAt: Date.now() } : {}),
     ...(switching ? { conversationId, binding: null, observedNode: '', stableSince: 0,
       pendingNode: '', pendingPrompt: '', pendingOutcome: 'not_sent' } : {}),
     active: true, state: 'monitoring', resumedAt: Date.now(), nextAttemptAt: 0, error: '', pauseReason: '',
@@ -863,8 +866,10 @@ async function pollGoal(config, workId, deps = {}) {
         return;
       }
       if (match.state !== 'matched') {
-        if (goal.candidateConversationId && goal.conversationId === goal.candidateConversationId) {
-          // Titles only suggest a candidate; an absent receipt restores normal discovery.
+        if (goal.candidateConversationId && goal.conversationId === goal.candidateConversationId
+          && Date.now() - Number(goal.candidateSelectedAt || 0) >= CANDIDATE_RECEIPT_GRACE_MS) {
+          // Discard an unverified hint only after allowing the originating turn
+          // to finish persisting its receipt. No hint can authorize a send.
           goal = saveGoal(config, { ...goal, conversationId: '', candidateConversationId: '' });
           if (!goal?.active || goal.conversationId) return;
         }

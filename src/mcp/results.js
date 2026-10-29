@@ -1,5 +1,6 @@
 import { boundResponsePayload, jsonBytes, responseByteLimit, utf8Head } from '../tools/responseBudget.js';
 import { MCP_CONTENT_TYPES } from '../contracts/mcp.ts';
+import { parseChatLinkResource } from '../chatgptChatLink.js';
 
 const DEFAULT_MAX_TOOL_RESULT_BYTES = 512 * 1024;
 const DEFAULT_MAX_TOOL_TEXT_BYTES = 8 * 1024;
@@ -13,6 +14,7 @@ const MAX_TOOL_TEXT_BYTES = Number(process.env.REL_AI_MCP_MAX_TOOL_TEXT_BYTES ||
 function toolResult(payload, isError, meta, options = {}) {
   const { imageContents, structuredPayload } = extractToolImages(payload);
   const resourceLinkContent = toolResourceLinkContent(payload);
+  const linkingReceiptContent = !isError && payload?.ok !== false ? toolLinkingReceiptContent(payload) : null;
   const serialized = JSON.stringify(structuredPayload);
   const bytes = Buffer.byteLength(serialized, 'utf8');
   const withoutTimeline = structuredPayload?.timeline || structuredPayload?.errorDetails?.timeline
@@ -27,6 +29,7 @@ function toolResult(payload, isError, meta, options = {}) {
   });
   const result = {
     content: [
+      ...(linkingReceiptContent ? [linkingReceiptContent] : []),
       { type: MCP_CONTENT_TYPES.TEXT, text: truncateUtf8Head(text, MAX_TOOL_TEXT_BYTES) },
       ...imageContents,
       ...(resourceLinkContent ? [resourceLinkContent] : [])
@@ -40,7 +43,10 @@ function toolResult(payload, isError, meta, options = {}) {
     result.structuredContent = { ...result.structuredContent, responseBudget: { maxResponseBytes: limit, returnedBytes: 0, complete: result.structuredContent?.truncated !== true } };
     if (jsonBytes(result) > limit - 512) {
       result.structuredContent = { ...boundResponsePayload(result.structuredContent, limit - 1024), truncated: true };
-      result.content = [{ type: MCP_CONTENT_TYPES.TEXT, text: utf8Head(conciseToolResultText(result.structuredContent, { isError }), 256) }];
+      result.content = [
+        ...(linkingReceiptContent ? [linkingReceiptContent] : []),
+        { type: MCP_CONTENT_TYPES.TEXT, text: utf8Head(conciseToolResultText(result.structuredContent, { isError }), 256) }
+      ];
     }
     result.structuredContent.responseBudget = { maxResponseBytes: limit, returnedBytes: 0, complete: result.structuredContent?.truncated !== true };
     for (let pass = 0; pass < 3; pass += 1) result.structuredContent.responseBudget.returnedBytes = jsonBytes(result);
@@ -102,6 +108,19 @@ function toolResourceLinkContent(payload) {
     ...(typeof link.mimeType === 'string' && link.mimeType ? { mimeType: link.mimeType } : {}),
     ...(Number.isSafeInteger(link.size) && link.size >= 0 ? { size: link.size } : {})
   };
+}
+
+function toolLinkingReceiptContent(payload) {
+  const link = payload?.chat_link;
+  const resource = parseChatLinkResource(payload?.resourceLink?.uri);
+  if (!resource || resource.workId !== payload.work_id || link?.version !== 1
+    || link.link_id !== resource.linkId) return null;
+  // A standalone JSON tool-result part survives hosts that omit resource-read
+  // metadata but retain text. The browser reader still demands the exact
+  // receipt on the active branch before binding a goal.
+  return { type: MCP_CONTENT_TYPES.TEXT, text: JSON.stringify({
+    work_id: resource.workId, chat_link: { version: 1, link_id: resource.linkId }
+  }) };
 }
 
 function conciseToolResultText(payload, options = {}) {

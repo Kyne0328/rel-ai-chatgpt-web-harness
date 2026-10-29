@@ -2061,7 +2061,16 @@ test('Goal begin returns bounded account chat hints and exact selection still ve
         throw new Error('Wrong-chat verification must not scan catalogues or send.');
       } });
       assert.equal(loadGoal(f.config, f.work_id).binding, null, 'a title-based guess cannot bind');
-      assert.equal(loadGoal(f.config, f.work_id).conversationId, '', 'a rejected guess must restore automatic discovery');
+      assert.equal(loadGoal(f.config, f.work_id).conversationId, OTHER,
+        'a missing receipt on the first read may still be a pending ChatGPT turn');
+      t.mock.timers.tick(5 * 60_000 + 1);
+      await pollGoal(f.config, f.work_id, { nativeTransport: async request => {
+        if (request.path?.includes('/conversation/')) return { ok: true,
+          data: await readConversationProjection(response(conversation(OTHER, '/goal Other work'))) };
+        throw new Error('An expired candidate must not scan catalogues in the same poll.');
+      } });
+      assert.equal(loadGoal(f.config, f.work_id).conversationId, '',
+        'an unverified candidate eventually restores automatic discovery');
 
       resumeGoal(f.config, { work_id: f.work_id, conversationUrl: 'https://chatgpt.com/c/' + ID }, ctx);
       tree = linkedConversation(ID, f.work_id, result.chat_link, '/goal Find this chat');
@@ -2072,6 +2081,42 @@ test('Goal begin returns bounded account chat hints and exact selection still ve
       } });
       assert.equal(loadGoal(f.config, f.work_id).binding?.conversationId, ID, JSON.stringify(goalStatus(f.config, { work_id: f.work_id }, ctx)));
     } finally { configureGoalBrowserTransport(null); }
+  });
+});
+
+test('candidate waits for a delayed tool receipt, then links without a catalogue scan', async t => {
+  await withMonitoredGoal(t, async f => {
+    f.patchGoal({ binding: null, conversationId: '', observedNode: '', stableSince: 0 });
+    const context = { ...f.context, connector: true };
+    const link = ensureChatLink(f.config, f.work_id, context);
+    const payload = { ok: true, work_id: f.work_id, chat_link: link,
+      resourceLink: chatLinkResource(f.work_id, link.link_id) };
+    const tool = toolResult(payload);
+    const jsonPart = tool.content.find(item => item.type === 'text' && item.text.startsWith('{"work_id":'));
+    assert.ok(jsonPart, 'a real Goal response must include a standalone JSON linking receipt');
+    assert.deepEqual(JSON.parse(jsonPart.text), { work_id: f.work_id, chat_link: link });
+    assert.ok(tool.content.some(item => item.type === 'resource_link'));
+    let tree = conversation(ID, '/goal Verify delayed linking');
+    const requests = [];
+    const transport = async request => {
+      requests.push(request);
+      if (request.path?.includes('/conversation/')) return { ok: true,
+        data: await readConversationProjection(response(tree)) };
+      throw new Error('An exact candidate must not scan unrelated chat catalogues or send.');
+    };
+    resumeGoal(f.config, { work_id: f.work_id, conversationUrl: 'https://chatgpt.com/c/' + ID }, context);
+    await pollGoal(f.config, f.work_id, { nativeTransport: transport });
+    assert.equal(loadGoal(f.config, f.work_id).binding, null);
+    assert.equal(loadGoal(f.config, f.work_id).conversationId, ID);
+    t.mock.timers.tick(5_100);
+    tree.mapping.receipt = { parent: 'u', message: { id: 'tool-receipt',
+      author: { role: 'tool' }, create_time: Date.now() / 1000,
+      content: { parts: [jsonPart.text] } } };
+    tree.mapping.a.parent = 'receipt';
+    await pollGoal(f.config, f.work_id, { nativeTransport: transport });
+    assert.equal(loadGoal(f.config, f.work_id).binding?.conversationId, ID);
+    assert.equal(f.status().chatLink.state, 'linked');
+    assert.equal(requests.length, 4, 'one pending read, two receipt-verification reads, and one monitoring observation');
   });
 });
 
