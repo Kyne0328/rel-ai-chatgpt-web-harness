@@ -1,12 +1,12 @@
 import * as crypto from 'node:crypto';
 import { throwIfAborted, withAbort, withAbortResource } from '../abortablePromise.ts';
 import { readConfig } from '../config.js';
+import { browserProfilePrincipalFingerprint } from '../mcp/principal.ts';
 import { taskError } from '../toolActivity.js';
 import {
   assertAutomationAttribution,
   createAutomationAttribution,
   registerTerminalTaskCleanup,
-  taskIdFor,
   type AutomationAttribution,
   type AutomationContext,
   type AutomationWorkspace
@@ -57,6 +57,8 @@ type BrowserSessionRecord = {
   sessionId: string;
   attribution: AutomationAttribution;
   driver: LocalBrowserDriver;
+  released: boolean;
+  closeFailed: boolean;
   tabs: Map<string, BrowserTabRecord>;
   activeTabId: string;
   createdAt: string;
@@ -125,6 +127,8 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
         activeTabId: record.activeTabId,
         browserProduct: record.browserProduct,
         profile: record.profileMode,
+        browserEngine: 'chromium',
+        inUse: Boolean(record.attribution.taskId),
         handoff: record.handoff,
         createdAt: record.createdAt
       }))
@@ -140,6 +144,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     throwIfAborted(options.signal, browserCancellationError);
     if (shutdownPromise) throw taskError('BROWSER_RUNTIME_SHUTTING_DOWN', 'Wait for local browser shutdown to finish before starting another session.');
     const attribution = createAutomationAttribution(workspace, args, context);
+    const requestedProfile = normalizeBrowserProfileMode(args.profile);
     const taskId = attribution.taskId;
     if (taskId && taskCleanups.has(taskId)) throw taskError('BROWSER_SESSION_CLOSING', 'Wait for this work session\'s browser cleanup to finish before starting another session.');
     const existing = taskId ? [...sessions.values()].find(record =>
@@ -148,25 +153,40 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     const pendingForTask = taskId ? [...pendingStarts].some(pending =>
       pending.attribution.taskId === taskId && attributionMatches(pending.attribution, workspace, context)
     ) : false;
-    if (existing || pendingForTask) {
-      const detail = existing ? `: ${existing.sessionId}` : '';
-      throw taskError('BROWSER_SESSION_ALREADY_ACTIVE', `Work session already has an active or starting local browser session${detail}. Stop it before starting another.`);
-    }
-    if (sessions.size + pendingStarts.size >= MAX_ACTIVE_BROWSER_SESSIONS) {
-      throw taskError('BROWSER_SESSION_LIMIT', `Rel.AI supports at most ${MAX_ACTIVE_BROWSER_SESSIONS} concurrent local browser sessions.`);
+    if (pendingForTask) throw taskError('BROWSER_SESSION_ALREADY_ACTIVE', 'Browser launch is already in progress for this task.');
+    if (existing) {
+      if (existing.closeFailed || closingSessions.has(existing.sessionId)) throw taskError('BROWSER_SESSION_CLOSING', 'This browser session has not completed cleanup.');
+      if (existing.profileMode !== requestedProfile) throw taskError('BROWSER_SESSION_ALREADY_ACTIVE', 'Stop the existing browser session before changing its privacy mode.');
+      return reuseBrowser(existing, args, options.signal);
     }
 
     const viewport = normalizeViewport(args.width, args.height);
     const sessionId = `browser_${crypto.randomBytes(24).toString('base64url')}`;
     const createdAt = new Date().toISOString();
-    const profileMode = normalizeBrowserProfileMode(args.profile);
+    const profileMode = requestedProfile;
     const profileDirectory = profileMode === 'persistent'
-      ? preparePersistentBrowserProfile(getProfileConfig(), attribution.principalFingerprint)
+      ? preparePersistentBrowserProfile(getProfileConfig(), browserProfilePrincipalFingerprint(context.principal), attribution.principalFingerprint)
       : '';
     const profileKey = normalizeProfileKey(profileDirectory);
-    if (profileKey && (activeProfiles.has(profileKey) || pendingProfiles.has(profileKey))) {
-      throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Persistent Rel.AI browser profile is already active in another local browser session.');
+    if (profileKey && activeProfiles.has(profileKey)) {
+      const active = sessions.get(activeProfiles.get(profileKey)!);
+      if (!active) throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'The saved browser is unavailable while its profile remains reserved.');
+      if (active.closeFailed || closingSessions.has(active.sessionId))
+        throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'The saved browser has unfinished cleanup.');
+      if (active.attribution.workspaceId !== workspace.alias)
+        throw taskError('BROWSER_SESSION_WORKSPACE_MISMATCH', 'The saved browser is currently assigned to another workspace.');
+      if (!active.released && active.attribution.taskId !== taskId)
+        throw taskError('BROWSER_SESSION_BUSY', 'The saved browser is currently in use by another work session.');
+      if (active.handoff?.active)
+        throw taskError('BROWSER_USER_CONTROL_ACTIVE', 'Finish the user browser handoff before reusing this session.');
+      active.attribution = attribution;
+      active.released = false;
+      return reuseBrowser(active, args, options.signal);
     }
+    if (profileKey && pendingProfiles.has(profileKey))
+      throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Saved browser profile is currently starting or being cleared.');
+    if (sessions.size + pendingStarts.size >= MAX_ACTIVE_BROWSER_SESSIONS)
+      throw taskError('BROWSER_SESSION_LIMIT', `Rel.AI supports at most ${MAX_ACTIVE_BROWSER_SESSIONS} concurrent local browser sessions.`);
 
     let resolveStartDone: (() => void) | undefined;
     const startDone = new Promise<void>(resolve => { resolveStartDone = resolve; });
@@ -196,7 +216,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
         // Every acquired driver has one owner, including a launch that completes
         // after caller cancellation. Failed cleanup stays visible and retryable.
         const acquired: BrowserSessionRecord = {
-          sessionId, attribution, driver, tabs: new Map(), activeTabId: '',
+          sessionId, attribution, driver, released: false, closeFailed: false, tabs: new Map(), activeTabId: '',
           createdAt, browserProduct: driver.browserProduct, profileMode,
           profileDirectory, profileKey, handoff: null
         };
@@ -253,6 +273,22 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
         finishStart();
       }
     }
+  }
+
+  async function reuseBrowser(record: BrowserSessionRecord, args: BrowserArgs, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const target = args.url ? normalizeBrowserUrl(args.url) : '';
+    const tab = record.tabs.get(record.activeTabId);
+    const page = target && tab ? await navigateTab(tab, target, timeoutFor(args.timeoutMs), signal) : {};
+    if (target && !tab) {
+      const created = await createTab(record, signal);
+      Object.assign(page, await navigateTab(created, target, timeoutFor(args.timeoutMs), signal));
+    }
+    if (target && record.profileDirectory && !record.driver.recordsPersistentSites)
+      await recordPersistentBrowserSite(record.profileDirectory, target);
+    return sessionResult(record, 'start', {
+      reused: true, browserEngine: 'chromium', browserProduct: record.browserProduct,
+      tabs: await tabSummaries(record), ...page
+    });
   }
 
   async function listTabs(
@@ -407,8 +443,13 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     args: BrowserArgs = {},
     context: BrowserContext = {}
   ): Promise<Record<string, unknown>> {
-    const record = requireSession(workspace, args, context);
-    if (record.handoff?.active && browserHandoffExpired(record.handoff)) {
+    // A completed work session may leave an unfinished human sign-in handoff.
+    // Allow the same authenticated principal to release that handoff without
+    // silently acquiring a new task lease or resurrecting the completed task.
+    const record = requireSession(workspace, args, context, true);
+    if (record.released && !record.handoff?.active)
+      throw taskError('BROWSER_SESSION_REQUIRES_START', 'Start the saved browser before controlling it.');
+    if (!record.released && record.handoff?.active && browserHandoffExpired(record.handoff)) {
       throw taskError('BROWSER_HANDOFF_EXPIRED', 'This browser handoff expired. Request it again before resuming AI control.');
     }
     await record.driver.setControl?.('ai');
@@ -423,7 +464,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
   ): Promise<Record<string, unknown>> {
     const attribution = createAutomationAttribution(workspace, args, context);
     const config = getProfileConfig();
-    const directory = assertPersistentBrowserProfileSafe(config, attribution.principalFingerprint);
+    const directory = assertPersistentBrowserProfileSafe(config, browserProfilePrincipalFingerprint(context.principal));
     const profileKey = normalizeProfileKey(directory);
     if (activeProfiles.has(profileKey) || pendingProfiles.has(profileKey)) {
       throw taskError('BROWSER_PROFILE_ALREADY_ACTIVE', 'Stop the persistent browser session before clearing its saved site data.');
@@ -431,7 +472,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     pendingProfiles.add(profileKey);
     try {
       await clearBrowserProfileSession(directory);
-      const result = await clearPersistentBrowserProfile(config, attribution.principalFingerprint);
+      const result = await clearPersistentBrowserProfile(config, browserProfilePrincipalFingerprint(context.principal));
       return { ok: true, workspace: workspace.alias, action: 'clear_profile', profile: 'persistent', cleared: result.cleared };
     } finally {
       pendingProfiles.delete(profileKey);
@@ -462,8 +503,16 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       for (const pending of starts) pending.cancelled = true;
       await Promise.all(starts.map(pending => pending.done));
       const records = [...sessions.values()].filter(record => record.attribution.taskId === id);
-      await trackClose(records);
-      return { stopped: records.length };
+      // A completed task releases its lease, not the signed-in browser profile.
+      const ephemeral = records.filter(record => record.profileMode === 'ephemeral');
+      await trackClose(ephemeral);
+      for (const record of records) {
+        if (record.profileMode === 'persistent' && sessions.get(record.sessionId) === record) {
+          record.attribution = { ...record.attribution, taskId: '' };
+          record.released = true;
+        }
+      }
+      return { stopped: ephemeral.length };
     })().finally(() => { taskCleanups.delete(id); });
     taskCleanups.set(id, cleanup);
     return cleanup;
@@ -535,6 +584,8 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
       throw taskError('BROWSER_SESSION_NOT_FOUND', `Unknown or closed local browser session: ${sessionId}.`);
     }
     assertAutomationAttribution(record.attribution, workspace, args, context, { resource: 'browser' });
+    if (!allowClosing && record.released) throw taskError('BROWSER_SESSION_REQUIRES_START', 'Start the saved browser to acquire control for this work session.');
+    if (!allowClosing && record.closeFailed) throw taskError('BROWSER_SESSION_CLOSING', 'This browser has unfinished cleanup.');
     if (!allowClosing && closingSessions.has(sessionId)) throw taskError('BROWSER_SESSION_CLOSING', 'Wait for local browser cleanup to finish before using this session.');
     return record;
   }
@@ -586,6 +637,7 @@ function createBrowserRuntime(dependencies: BrowserRuntimeDependencies = {}): Br
     // remains retryable and must not permit another driver to use its profile.
     const closing = Promise.resolve().then(() => record.driver.close())
       .then(() => removeSession(record))
+      .catch(error => { record.closeFailed = true; throw error; })
       .finally(() => { closingSessions.delete(record.sessionId); });
     closingSessions.set(record.sessionId, closing);
     return closing;

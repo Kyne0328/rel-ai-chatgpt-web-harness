@@ -88,6 +88,22 @@ function principalFingerprint(value: unknown): string {
   return crypto.createHash('sha256').update(normalizePrincipalKey(value)).digest('base64url');
 }
 
+// Browser profiles need a durable account identity. Tool authorization still uses
+// the complete principal fingerprint, including the current grants and resource.
+function browserProfilePrincipalFingerprint(value: unknown): string {
+  if (!isRecord(value)) return principalFingerprint(value);
+  const subject = String(value.subject ?? value.sub ?? '').trim();
+  const clientId = String(value.clientId ?? value.client_id ?? '').trim();
+  if (!subject && (!clientId || clientId === 'unknown-client')) return principalFingerprint(value);
+  const stable = Object.fromEntries(
+    ['issuer', 'clientId', 'client_id', 'subject', 'sub', 'tenant', 'tenantId',
+      'organization', 'organizationId', 'orgId', 'authMode']
+      .filter(key => value[key] != null && value[key] !== '')
+      .map(key => [key, value[key]])
+  );
+  return crypto.createHash('sha256').update(stableJson(stable)).digest('base64url');
+}
+
 function normalizePrincipalKey(principal: unknown): string {
   if (principal == null || principal === '') return 'anonymous';
   if (typeof principal === 'string' || typeof principal === 'number' || typeof principal === 'boolean') {
@@ -145,6 +161,7 @@ function isRecord(value: unknown): value is PrincipalRecord {
 export {
   createHttpPrincipal,
   createStdioPrincipal,
+  browserProfilePrincipalFingerprint,
   principalFingerprint,
   principalForContext,
   principalIdentity,

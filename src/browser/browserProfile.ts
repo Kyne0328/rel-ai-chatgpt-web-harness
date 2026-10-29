@@ -27,7 +27,7 @@ function browserProfileDirectory(config: Record<string, unknown>, principalFinge
   return path.join(persistentBrowserProfileRoot(config), principalKey, 'default');
 }
 
-function preparePersistentBrowserProfile(config: Record<string, unknown>, principalFingerprint: string): string {
+function preparePersistentBrowserProfile(config: Record<string, unknown>, principalFingerprint: string, legacyFingerprint?: string): string {
   const directory = browserProfileDirectory(config, principalFingerprint);
   const root = persistentBrowserProfileRoot(config);
   const rootExisting = safeLstat(root);
@@ -40,6 +40,23 @@ function preparePersistentBrowserProfile(config: Record<string, unknown>, princi
   if (principalExisting?.isSymbolicLink()) throw new Error('Persistent browser profile principal path must not be a symbolic link.');
   if (principalExisting && !principalExisting.isDirectory()) throw new Error('Persistent browser profile principal path is not a directory.');
   fs.mkdirSync(principalDirectory, { recursive: true, mode: 0o700 });
+
+  // Keep pre-existing Chromium sign-ins when the authenticated principal's
+  // identity becomes stable across refreshed OAuth grants.
+  if (legacyFingerprint && legacyFingerprint !== principalFingerprint && !safeLstat(directory)) {
+    const legacy = browserProfileDirectory(config, legacyFingerprint);
+    const legacyParent = path.dirname(legacy);
+    const parentStat = safeLstat(legacyParent);
+    const legacyStat = safeLstat(legacy);
+    if (parentStat?.isSymbolicLink() || (parentStat && !parentStat.isDirectory()))
+      throw new Error('Legacy browser principal path is unsafe.');
+    if (legacyStat?.isSymbolicLink() || (legacyStat && !legacyStat.isDirectory()))
+      throw new Error('Persistent browser profile path is not a directory or is a symbolic link.');
+    if (legacyStat) {
+      fs.renameSync(legacy, directory);
+      try { fs.rmdirSync(legacyParent); } catch {}
+    }
+  }
 
   const existing = safeLstat(directory);
   if (existing?.isSymbolicLink()) throw new Error('Persistent browser profile path must not be a symbolic link.');

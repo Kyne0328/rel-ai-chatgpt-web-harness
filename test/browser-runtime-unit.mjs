@@ -192,12 +192,47 @@ assert.equal(recovered.ok, true, 'a new session must be startable after browser 
 assert.equal(runtime.activeSessionCount(), 1);
 
 const cleaned = await runtime.stopSessionsForTask(context.taskId);
-assert.equal(cleaned.stopped, 1, 'task completion/cancellation cleanup must close task-attributed browser sessions');
-assert.equal(runtime.activeSessionCount(), 0);
+assert.equal(cleaned.stopped, 0, 'task completion releases the persistent browser rather than closing it');
+assert.equal(runtime.activeSessionCount(), 1);
 await assert.rejects(
   () => runtime.snapshot(workspace, { sessionId: recovered.sessionId, work_id: context.taskId }, context),
-  error => error?.code === 'BROWSER_SESSION_NOT_FOUND'
+  error => error?.code === 'BROWSER_SESSION_REQUIRES_START'
 );
+const nextTask = { taskId: 'work_browser_followup' };
+const reused = await runtime.start(workspace, { work_id: nextTask.taskId }, nextTask);
+assert.equal(reused.sessionId, recovered.sessionId, 'the following task must automatically reuse the saved browser');
+assert.equal(reused.reused, true);
+await assert.rejects(
+  () => runtime.start(workspace, { profile: 'ephemeral', work_id: nextTask.taskId }, nextTask),
+  error => error?.code === 'BROWSER_SESSION_ALREADY_ACTIVE',
+  'an explicit private session must not quietly reuse a persistent session'
+);
+await assert.rejects(
+  () => runtime.start(workspace, { work_id: 'work_browser_busy' }, { taskId: 'work_browser_busy' }),
+  error => error?.code === 'BROWSER_SESSION_BUSY',
+  'concurrent work cannot claim a leased browser'
+);
+await assert.rejects(
+  () => runtime.start({ alias: 'other' }, { work_id: 'work_browser_foreign' }, { taskId: 'work_browser_foreign' }),
+  error => error?.code === 'BROWSER_SESSION_WORKSPACE_MISMATCH',
+  'browser profile reuse must not cross workspace boundaries'
+);
+const reusedWithNavigation = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/followup', work_id: nextTask.taskId }, nextTask);
+assert.equal(reusedWithNavigation.sessionId, reused.sessionId);
+assert.equal(reusedWithNavigation.url, 'http://127.0.0.1:3000/followup', 'reused browser start must honor a new requested URL');
+await assert.rejects(
+  () => runtime.snapshot(workspace, { sessionId: reused.sessionId, work_id: context.taskId }, context),
+  error => error?.code === 'BROWSER_SESSION_TASK_MISMATCH'
+);
+await runtime.handoff(workspace, { sessionId: reused.sessionId, reason: 'mfa', work_id: nextTask.taskId }, nextTask);
+const handoffReleased = await runtime.stopSessionsForTask(nextTask.taskId);
+assert.equal(handoffReleased.stopped, 0);
+assert.equal((await runtime.resume(workspace, { sessionId: reused.sessionId, work_id: nextTask.taskId }, nextTask)).status, 'ready',
+  'human input handoff must be releasable after the initiating task has completed');
+const finalTask = { taskId: 'work_browser_final' };
+const afterHandoff = await runtime.start(workspace, { work_id: finalTask.taskId }, finalTask);
+assert.equal(afterHandoff.sessionId, reused.sessionId, 'released handoff must not strand an authenticated profile');
+await runtime.stop(workspace, { sessionId: reused.sessionId, work_id: finalTask.taskId }, finalTask);
 
 const ownerPrincipal = { clientId: 'browser-runtime-owner', subject: 'owner', authMode: 'test' };
 const ownerContext = { taskId: 'work_browser_owned', principal: ownerPrincipal };
@@ -262,8 +297,8 @@ await assert.rejects(
   closingFake.state.closeBarrier = closeBarrier.promise;
   const firstStop = closingRuntime.stop(workspace, { sessionId: session.sessionId }, owner);
   const secondStop = closingRuntime.stop(workspace, { sessionId: session.sessionId }, owner);
-  await assert.rejects(() => closingRuntime.start(workspace, {}, { taskId: 'work_other' }), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
-  await assert.rejects(() => closingRuntime.clearProfile(workspace, {}, owner), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  await assert.rejects(() => closingRuntime.start(workspace, {}, { taskId: 'work_other' }), error => ['BROWSER_PROFILE_ALREADY_ACTIVE', 'BROWSER_SESSION_BUSY'].includes(error?.code));
+  await assert.rejects(() => closingRuntime.clearProfile(workspace, {}, owner), error => ['BROWSER_PROFILE_ALREADY_ACTIVE', 'BROWSER_SESSION_BUSY'].includes(error?.code));
   await assert.rejects(() => closingRuntime.snapshot(workspace, { sessionId: session.sessionId }, owner), error => error?.code === 'BROWSER_SESSION_CLOSING');
   closeBarrier.resolve();
   assert.equal((await firstStop).ok, true);
@@ -277,7 +312,7 @@ await assert.rejects(
   assert.equal(failedStop.ok, false, 'driver close errors must be reported');
   assert.match(failedStop.error, /simulated close failure/);
   assert.equal(closingRuntime.activeSessionCount(), 1, 'failed close must preserve ownership for retry');
-  await assert.rejects(() => closingRuntime.start(workspace, {}, { taskId: 'work_other' }), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  await assert.rejects(() => closingRuntime.start(workspace, {}, { taskId: 'work_other' }), error => ['BROWSER_PROFILE_ALREADY_ACTIVE', 'BROWSER_SESSION_BUSY'].includes(error?.code));
   assert.equal((await closingRuntime.stop(workspace, { sessionId: replacement.sessionId }, owner)).ok, true);
   const shutdownSession = await closingRuntime.start(workspace, {}, owner);
   closingFake.state.failNextClose = true;
@@ -336,7 +371,7 @@ for (const cleanup of ['task', 'shutdown']) {
   const immediateFake = createFakeBrowserHarness();
   const immediateRuntime = createBrowserRuntime({ launch: immediateFake.launch, getProfileConfig: () => ({ stateDir: path.join(temp, `immediate-${cleanup}`) }) });
   const owner = { taskId: `work_immediate_${cleanup}` };
-  const session = await immediateRuntime.start(workspace, {}, owner);
+  const session = await immediateRuntime.start(workspace, { profile: 'ephemeral' }, owner);
   const closeBarrier = Promise.withResolvers();
   immediateFake.state.closeBarrier = closeBarrier.promise;
   const cleaning = cleanup === 'task' ? immediateRuntime.stopSessionsForTask(owner.taskId) : immediateRuntime.shutdown();
@@ -368,8 +403,8 @@ for (const cancellation of ['caller', 'shutdown']) {
   if (cleaning) await cleaning;
   else await new Promise(resolve => setImmediate(resolve));
   assert.equal(lateRuntime.activeSessionCount(), 1, 'a late driver with failed cleanup must retain a retryable owner');
-  await assert.rejects(() => lateRuntime.start(workspace, {}, {}), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
-  await assert.rejects(() => lateRuntime.clearProfile(workspace, {}, {}), error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE');
+  await assert.rejects(() => lateRuntime.start(workspace, {}, {}), error => ['BROWSER_PROFILE_ALREADY_ACTIVE', 'BROWSER_SESSION_BUSY'].includes(error?.code));
+  await assert.rejects(() => lateRuntime.clearProfile(workspace, {}, {}), error => ['BROWSER_PROFILE_ALREADY_ACTIVE', 'BROWSER_SESSION_BUSY'].includes(error?.code));
   lateFake.state.failClose = false;
   await lateRuntime.shutdown();
   assert.equal(lateRuntime.activeSessionCount(), 0, 'later shutdown must finish retained late-driver cleanup');

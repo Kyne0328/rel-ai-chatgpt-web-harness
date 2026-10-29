@@ -10,7 +10,7 @@ import {
   clearPersistentBrowserProfiles,
   persistentBrowserProfileRoot
 } from '../src/browser/browserProfile.ts';
-import { principalFingerprint } from '../src/mcp/principal.ts';
+import { browserProfilePrincipalFingerprint, principalFingerprint } from '../src/mcp/principal.ts';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'relai-browser-local-io-'));
 const primary = path.join(temp, 'downloads-workspace');
@@ -24,13 +24,26 @@ fs.writeFileSync(path.join(uploadSource, 'invoice.pdf'), 'authorized invoice');
 fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside');
 
 const workspace = { alias: 'files', path: primary, sourcePaths: [primary, uploadSource] };
-const principal = { clientId: 'browser-io-test', subject: 'user-a', authMode: 'test' };
+const principal = { clientId: 'browser-io-test', subject: 'user-a', authMode: 'test', scopes: ['browser:read'], resource: 'legacy-route' };
 const task = { taskId: 'work_browser_io_a', principal };
+const identityWithRead = { ...principal, scopes: ['browser:read'], resource: 'first-route' };
+const identityWithWrite = { ...principal, scopes: ['browser:write'], resource: 'second-route' };
+assert.notEqual(principalFingerprint(identityWithRead), principalFingerprint(identityWithWrite),
+  'authorization identity must still track current grants');
+assert.equal(browserProfilePrincipalFingerprint(identityWithRead), browserProfilePrincipalFingerprint(identityWithWrite),
+  'saved browser profile identity must not change when the same account renews grants');
+assert.notEqual(browserProfilePrincipalFingerprint(identityWithRead),
+  browserProfilePrincipalFingerprint({ ...identityWithRead, subject: 'another-user' }),
+  'different authenticated accounts must not share a browser profile');
 const fake = createFakeBrowserHarness();
 const runtime = createBrowserRuntime({
   launch: fake.launch,
   getProfileConfig: () => ({ stateDir })
 });
+
+const legacyPath = browserProfileDirectory({ stateDir }, principalFingerprint(principal));
+fs.mkdirSync(legacyPath, { recursive: true });
+fs.writeFileSync(path.join(legacyPath, 'preserved-signin.fixture'), 'old Chromium site data');
 
 try {
   const started = await runtime.start(workspace, { url: 'http://127.0.0.1:3000/', work_id: task.taskId }, task);
@@ -39,6 +52,11 @@ try {
     fake.state.launchOptions.at(-1).profileDirectory.startsWith(persistentBrowserProfileRoot({ stateDir })),
     'the default persistent browser must use Rel.AI-owned profile storage rather than an external Chrome profile'
   );
+  const migrated = fake.state.launchOptions.at(-1).profileDirectory;
+  assert.notEqual(migrated, legacyPath, 'stable principal identity gets a canonical profile directory');
+  assert.equal(fs.readFileSync(path.join(migrated, 'preserved-signin.fixture'), 'utf8'), 'old Chromium site data',
+    'existing Chromium sign-in data must be migrated rather than abandoned');
+  assert.equal(fs.existsSync(legacyPath), false, 'old principal directory must no longer hold a duplicate profile');
   const sessionId = started.sessionId;
 
   const uploaded = await runtime.upload(workspace, {
@@ -190,7 +208,7 @@ try {
       profile: 'persistent',
       work_id: 'work_profile_b'
     }, { taskId: 'work_profile_b', principal }),
-    error => error?.code === 'BROWSER_PROFILE_ALREADY_ACTIVE'
+    error => ['BROWSER_PROFILE_ALREADY_ACTIVE', 'BROWSER_SESSION_BUSY'].includes(error?.code)
   );
   await runtime.stop(workspace, { sessionId: persistentA.sessionId, work_id: 'work_profile_a' }, { taskId: 'work_profile_a', principal });
 
