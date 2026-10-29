@@ -336,13 +336,15 @@ function turnState(conversation) {
   };
 }
 
-// Catalogue metadata is shared across the account; conversation bodies are
-// fetched only for the five newest candidates. No historical body expansion.
-const RECENT_GOAL_CHATS = 5;
+// One account-wide metadata catalogue, but only four new or changed chat bodies
+// are inspected per pass. Persist completed inspections so subsequent passes can
+// advance without rereading unchanged conversations.
+const DISCOVERY_SCAN_BATCH = 4;
+const RECENT_GOAL_CHATS = 40;
 const CATALOGUE_TTL_MS = 60_000;
-// Pending tasks share one candidate scan per account read window. A five-second
-// cache can expire during the scan itself and exhaust the 30-read budget when
-// several unlinked goals retry. Binding still requires an uncached branch read.
+// Pending tasks share durable receipt projections for one account read window.
+// Expired or changed evidence is rescanned only as the bounded budget permits;
+// binding still requires a fresh active-branch read.
 const EVIDENCE_TTL_MS = READ_WINDOW_MS;
 const MAX_PROJECT_FALLBACK_READS = 4;
 
@@ -379,8 +381,20 @@ async function latestGoalCatalogue(deps, state) {
   state.scan = scan;
   let fallbackReads = 0;
   if (!scan.ordinary) {
-    const ordinary = await conversationPage(deps);
+    let ordinary = await conversationPage(deps);
     scan.items = recentChats(ordinary.items);
+    let offset = ordinary.items.length;
+    // Page through ordinary-chat metadata too. The first page alone can omit
+    // older ordinary chats even when their receipts are still discoverable.
+    while (ordinary.more && offset < RECENT_GOAL_CHATS) {
+      ordinary = await conversationPage(deps, offset);
+      if (!ordinary.items.length) break;
+      scan.items = recentChats([
+        ...scan.items.map(item => ({ ...item, update_time: item.updated / 1000 })),
+        ...ordinary.items
+      ]);
+      offset += ordinary.items.length;
+    }
     scan.ordinary = true;
   }
   for (let page = 0; page < MAX_SIDEBAR_PAGES; page++) {
@@ -428,11 +442,9 @@ function discoveryEvidence(conversation) {
 async function sharedGoalEvidence(deps) {
   const scope = accountScope(deps);
   if (scope.cooldownUntil > Date.now()) throw rateLimitError(scope.cooldownUntil, true, scope.cooldownReason);
-  const key = 'latest-five-evidence:' + (deps.discoveryStore?.key || 'fixture');
-  const freshness = goalDiscoveryFreshAfter(deps);
-  const cached = scope.discovery.get(key);
-  if (cached?.promise) return waitForDiscovery(cached.promise, deps.signal);
-  if (cached?.value && Date.now() < cached.expiresAt && cached.at >= freshness) return cached.value;
+  const key = 'progressive-evidence:' + (deps.discoveryStore?.key || 'fixture');
+  const pending = scope.discovery.get(key);
+  if (pending?.promise) return waitForDiscovery(pending.promise, deps.signal);
   const record = { promise: null };
   record.promise = (async () => {
     const claim = deps.discoveryStore?.claim();
@@ -440,35 +452,55 @@ async function sharedGoalEvidence(deps) {
       { code: 'GOAL_DISCOVERY_BUSY', deferred: true, retryAt: Math.min(claim.retryAt, Date.now() + 5_000) });
     const state = claim?.state || scope.goalIndex || {};
     const shared = { ...deps, signal: AbortSignal.timeout(120_000) };
+    const freshness = goalDiscoveryFreshAfter(deps);
     try {
       const candidates = await latestGoalCatalogue(shared, state);
-      const entries = [];
-      for (const item of candidates) {
-        let entry = state.evidence?.find(old => old.id === item.id && old.updated === item.updated
-          && Date.now() - old.at < EVIDENCE_TTL_MS && old.at >= freshness);
-        if (!entry) {
-          try {
-            entry = { ...item, at: Date.now(), proof: discoveryEvidence(await getConversation(item.id, shared)) };
-          } catch (error) { if ([403, 404].includes(error?.status)) continue; throw error; }
+      const candidateIds = new Map(candidates.map(item => [item.id, item]));
+      const byId = new Map((state.evidence || [])
+        .filter(entry => candidateIds.get(entry.id)?.updated === entry.updated)
+        .map(entry => [entry.id, entry]));
+      const fresh = item => {
+        const entry = byId.get(item.id);
+        return entry && entry.updated === item.updated
+          && Date.now() - entry.at < EVIDENCE_TTL_MS && entry.at >= freshness;
+      };
+      // A previously projected exact receipt is only a candidate, but it can
+      // skip unrelated body reads: the caller still verifies its active branch.
+      const hasCandidateReceipt = candidates.some(item => fresh(item)
+        && byId.get(item.id)?.proof?.receipts?.some(receipt => receipt.workId === deps.workId
+          && (!deps.linkId || receipt.linkId === deps.linkId)));
+      // Never select by list position: new chats can reorder the catalogue.
+      // Prefer unseen/changed IDs before revisiting expired negative evidence.
+      const pendingReads = hasCandidateReceipt ? [] : candidates.filter(item => !fresh(item));
+      const unseen = pendingReads.filter(item => !byId.has(item.id));
+      const expired = pendingReads.filter(item => byId.has(item.id));
+      for (const item of [...unseen, ...expired].slice(0, DISCOVERY_SCAN_BATCH)) {
+        let proof;
+        try {
+          proof = discoveryEvidence(await getConversation(item.id, shared));
+        } catch (error) {
+          if (![403, 404].includes(error?.status)) throw error;
+          proof = { receipts: [], workIds: [] };
         }
-        entries.push(entry);
-        // Retain successful reads across a later budget wait or crash recovery.
-        state.evidence = [...entries, ...(state.evidence || []).filter(old => !entries.some(e => e.id === old.id))].slice(0, RECENT_GOAL_CHATS);
+        byId.set(item.id, { ...item, at: Date.now(), proof });
+        // Save successful reads on budget exhaustion or interrupted scans.
+        state.evidence = candidates.map(candidate => byId.get(candidate.id)).filter(Boolean);
       }
-      state.evidence = entries;
+      state.evidence = candidates.map(item => byId.get(item.id)).filter(Boolean);
       scope.goalIndex = state;
       if (claim?.token && !deps.discoveryStore.save(claim.token, state)) {
         throw Object.assign(new Error('Chat discovery lease changed; rechecking account evidence.'),
           { deferred: true, retryAt: Date.now() + 5_000 });
       }
-      scope.discovery.set(key, { value: entries, at: Date.now(), expiresAt: Date.now() + EVIDENCE_TTL_MS });
-      return entries;
+      return state.evidence.filter(fresh);
     } catch (error) {
       scope.goalIndex = state;
       if (claim?.token) deps.discoveryStore.save(claim.token, state);
       throw error;
     }
-  })().catch(error => { if (scope.discovery.get(key) === record) scope.discovery.delete(key); throw error; });
+  })().finally(() => {
+    if (scope.discovery.get(key) === record) scope.discovery.delete(key);
+  });
   scope.discovery.set(key, record);
   return waitForDiscovery(record.promise, deps.signal);
 }

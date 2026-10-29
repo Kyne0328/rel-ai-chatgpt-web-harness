@@ -2244,7 +2244,7 @@ function rankedChat(index, updated) {
   return { id: '30000000-0000-4000-8000-' + String(index).padStart(12, '0'), update_time: updated };
 }
 
-test('global newest five can all belong to a later Project page and never read older chat bodies', async () => {
+test('first four newest chats can belong to a later Project page without reading older bodies', async () => {
   const workId = 'latest-project', link = { version: 1, link_id: 's'.repeat(32) };
   const latest = Array.from({ length: 5 }, (_, i) => rankedChat(i + 1, 2000 - i));
   const older = [rankedChat(6, 1000), rankedChat(7, 900)];
@@ -2255,12 +2255,12 @@ test('global newest five can all belong to a later Project page and never read o
     nativeTransport: fixture.transport, chatgptProjectName: 'Wrong hint' });
   assert.equal(result.conversationId, latest[3].id);
   const bodyIds = fixture.requests.filter(r => r.path.includes('/conversation/')).map(r => r.path.split('/').at(-1));
-  assert.equal(new Set(bodyIds).size, 5);
+  assert.equal(new Set(bodyIds).size, 4);
   assert.equal(bodyIds.some(id => older.some(item => item.id === id)), false);
-  assert.equal(bodyIds.length, 6, 'five candidates and one fresh verification');
+  assert.equal(bodyIds.length, 5, 'four candidates and one fresh verification');
 });
 
-test('four pending goals share the same five candidate reads and receive separate verified matches', async () => {
+test('four pending goals share the first discovery batch and receive separate verified matches', async () => {
   const chats = Array.from({ length: 6 }, (_, i) => rankedChat(i + 1, 2000 - i));
   const links = chats.slice(0, 4).map((_, i) => ({ version: 1, link_id: String.fromCharCode(97 + i).repeat(32) }));
   const trees = Object.fromEntries(chats.slice(0, 4).map((chat, i) => [chat.id, linkedConversation(chat.id, 'work-' + i, links[i])]));
@@ -2269,8 +2269,112 @@ test('four pending goals share the same five candidate reads and receive separat
   const results = await Promise.all(links.map((link, i) => findRecentGoalCommand({
     nativeTransport: fixture.transport, workId: 'work-' + i, linkId: link.link_id, explicitGoal: true })));
   assert.deepEqual(results.map(r => r.conversationId), chats.slice(0, 4).map(chat => chat.id));
-  assert.equal(fixture.requests.length, 11, 'two metadata reads, five shared bodies, four fresh verifications');
+  assert.equal(fixture.requests.length, 10, 'two metadata reads, four shared bodies, four fresh verifications');
   assert.equal(fixture.requests.some(r => r.path.endsWith(chats[5].id)), false);
+});
+
+test('progressive discovery scans four more chats per pass without repeating prior bodies', async t => {
+  await withMonitoredGoal(t, async f => {
+    const chats = Array.from({ length: 12 }, (_, i) => rankedChat(i + 1, 3000 - i));
+    const link = { version: 1, link_id: 'i'.repeat(32) };
+    const fixture = discoveryFixture({ ordinary: chats,
+      trees: { [chats[7].id]: linkedConversation(chats[7].id, f.work_id, link) } });
+    const store = goalDiscoveryStore(f.config, { owner: 'progressive', tunnelId: 'fixture' });
+    const deps = { workId: f.work_id, linkId: link.link_id, explicitGoal: true,
+      discoveryStore: store, nativeTransport: fixture.transport };
+    const bodyIds = () => fixture.requests.filter(r => r.path.includes('/conversation/'))
+      .map(r => r.path.split('/').at(-1));
+    assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+    assert.deepEqual(bodyIds(), chats.slice(0, 4).map(chat => chat.id));
+    assert.equal((await findRecentGoalCommand(deps)).conversationId, chats[7].id);
+    assert.deepEqual(bodyIds().slice(4, 8), chats.slice(4, 8).map(chat => chat.id));
+    assert.equal(bodyIds().length, 9, 'eight inspected chats plus one fresh receipt verification');
+    assert.equal(store.read().evidence.length, 8, 'durable index retains both batches');
+    assert.equal(bodyIds().includes(chats[8].id), false, 'later batches remain unread after a match');
+  });
+});
+
+test('cached receipt for another goal links without scanning the next four chats', async t => {
+  await withMonitoredGoal(t, async f => {
+    const chats = Array.from({ length: 12 }, (_, i) => rankedChat(i + 1, 3000 - i));
+    const links = ['m'.repeat(32), 'n'.repeat(32)];
+    const fixture = discoveryFixture({ ordinary: chats, trees: {
+      [chats[0].id]: linkedConversation(chats[0].id, 'first-work', { version: 1, link_id: links[0] }),
+      [chats[1].id]: linkedConversation(chats[1].id, 'second-work', { version: 1, link_id: links[1] })
+    } });
+    const store = goalDiscoveryStore(f.config, { owner: 'cached-matches', tunnelId: 'fixture' });
+    const deps = { explicitGoal: true, discoveryStore: store, nativeTransport: fixture.transport };
+    assert.equal((await findRecentGoalCommand({ ...deps, workId: 'first-work',
+      linkId: links[0] })).conversationId, chats[0].id);
+    assert.equal((await findRecentGoalCommand({ ...deps, workId: 'second-work',
+      linkId: links[1] })).conversationId, chats[1].id);
+    const bodies = fixture.requests.filter(r => r.path.includes('/conversation/'))
+      .map(r => r.path.split('/').at(-1));
+    assert.equal(bodies.length, 6, 'four shared discovery reads and two fresh binding checks');
+    assert.equal(new Set(bodies).size, 4, 'no unnecessary second batch was read');
+  });
+});
+
+test('new chats join progressive discovery without rescanning unchanged completed IDs', async t => {
+  await withMonitoredGoal(t, async f => {
+    const ordinary = Array.from({ length: 9 }, (_, i) => rankedChat(i + 1, 3000 - i));
+    const incoming = rankedChat(30, 4000);
+    const link = { version: 1, link_id: 'j'.repeat(32) };
+    const fixture = discoveryFixture({ ordinary, trees: {} });
+    const store = goalDiscoveryStore(f.config, { owner: 'arrival', tunnelId: 'fixture' });
+    const deps = { workId: f.work_id, linkId: link.link_id, explicitGoal: true,
+      discoveryStore: store, nativeTransport: fixture.transport };
+    const inspected = () => fixture.requests.filter(r => r.path.includes('/conversation/'))
+      .map(r => r.path.split('/').at(-1));
+    assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+    assert.deepEqual(inspected(), ordinary.slice(0, 4).map(chat => chat.id));
+    ordinary.unshift(incoming);
+    fixture.trees[incoming.id] = linkedConversation(incoming.id, f.work_id, link);
+    t.mock.timers.tick(6_000);
+    const linked = await findRecentGoalCommand({ ...deps, issuedAt: Date.now() });
+    assert.equal(linked.conversationId, incoming.id);
+    assert.equal(inspected().filter(id => ordinary.slice(1, 5).some(chat => chat.id === id)).length, 4,
+      'previously inspected unchanged IDs were read once');
+    assert.equal(inspected().filter(id => id === incoming.id).length, 2,
+      'one discovery read plus one fresh verification of the new chat');
+  });
+});
+
+test('a restarted discovery transport resumes from the next four persisted candidate IDs', async t => {
+  await withMonitoredGoal(t, async f => {
+    const chats = Array.from({ length: 12 }, (_, i) => rankedChat(i + 1, 3000 - i));
+    const link = { version: 1, link_id: 'k'.repeat(32) };
+    const fixture = discoveryFixture({ ordinary: chats,
+      trees: { [chats[5].id]: linkedConversation(chats[5].id, f.work_id, link) } });
+    const store = goalDiscoveryStore(f.config, { owner: 'restarted', tunnelId: 'fixture' });
+    const deps = { workId: f.work_id, linkId: link.link_id, explicitGoal: true, discoveryStore: store };
+    assert.equal((await findRecentGoalCommand({ ...deps, nativeTransport: fixture.transport })).state, 'absent');
+    const result = await findRecentGoalCommand({ ...deps, nativeTransport: request => fixture.transport(request) });
+    assert.equal(result.conversationId, chats[5].id);
+    const bodies = fixture.requests.filter(r => r.path.includes('/conversation/')).map(r => r.path.split('/').at(-1));
+    assert.equal(bodies.length, 9);
+    assert.equal(new Set(bodies).size, 8, 'restart does not reread already inspected IDs');
+    assert.deepEqual(store.read().evidence.map(entry => entry.id), chats.slice(0, 8).map(chat => chat.id));
+  });
+});
+
+test('twenty ordinary chat candidates are inspected progressively within the read budget', async t => {
+  await withMonitoredGoal(t, async f => {
+    const chats = Array.from({ length: 20 }, (_, i) => rankedChat(i + 1, 3000 - i));
+    const fixture = discoveryFixture({ ordinary: chats });
+    const store = goalDiscoveryStore(f.config, { owner: 'twenty', tunnelId: 'fixture' });
+    const deps = { workId: f.work_id, linkId: 'l'.repeat(32), explicitGoal: true,
+      discoveryStore: store, nativeTransport: fixture.transport };
+    for (const count of [4, 8, 12, 16, 20]) {
+      assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+      const bodies = fixture.requests.filter(r => r.path.includes('/conversation/'));
+      assert.equal(bodies.length, count, 'each pass inspects at most four previously unread chats');
+    }
+    assert.equal(store.read().evidence.length, 20);
+    assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+    assert.equal(fixture.requests.filter(r => r.path.includes('/conversation/')).length, 20,
+      'a completed pass does not reread unchanged chats before evidence expires');
+  });
 });
 
 test('cached discovery survives transport restart but freshly rejects an off-branch match', async t => {
