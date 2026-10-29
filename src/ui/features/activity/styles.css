@@ -39,7 +39,7 @@
 .activity-requested-row td { background: var(--ui-status-info-background); }
 .activity-data-row.is-new-event td { position: relative; }
 .activity-data-row.is-new-event td:first-child { border-left: 3px solid var(--ui-action-primary); }
-.activity-data-row.is-new-event td::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: color-mix(in srgb, var(--ui-action-primary) 14%, transparent); animation: activity-event-arrive 1.4s var(--ease-out) both; }
+.activity-data-row.is-new-event td::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: color-mix(in srgb, var(--ui-action-primary) 8%, transparent); animation: activity-event-arrive 240ms var(--ease-out) both; }
 .activity-data-row:hover td { background: var(--ui-surface-secondary); }
 .activity-data-row:focus-visible { outline: 2px solid var(--ui-focus-ring); outline-offset: -2px; }
 .activity-table tbody tr.is-selected td { background: var(--ui-selection-background); }
@@ -104,6 +104,11 @@
 .activity-json-leaf code { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ui-text-primary); }
 .activity-json-empty { @apply rounded-md px-3 py-2 text-[13px]; color: var(--ui-text-tertiary); background: var(--ui-surface-secondary); border: 1px dashed var(--ui-border-default); }
 .activity-detail-technical > button { @apply mt-3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-data-row.is-new-event td::after, .activity-skeleton { animation: none; }
+  .activity-data-row.is-new-event td::after { opacity: 0; }
 }
 
 @keyframes activity-event-arrive {

@@ -422,8 +422,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
               tone: connection.tone,
               label: connection.label,
               'aria-label': `Open Connection settings; current status ${connection.label}`
-            }),
-            h(LastUpdatedClock, { lastEventAt: ui.lastEventAt })
+            })
           )
         ),
         h(RecoveryNotice, { recovery: ui.recovery }),
@@ -800,29 +799,6 @@ function connectionPresentation(data = {}) {
   const dashboardLayer = connectionLayerViews(state).find(layer => layer.key === 'dashboardUpdates');
   if (dashboardLayer) return { label: dashboardLayer.label, tone: dashboardLayer.tone };
   return { label: 'Available', tone: 'ok', callCount: task.activeCalls };
-}
-
-const LastUpdatedClock = memo(function LastUpdatedClock({ lastEventAt }) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    setNow(Date.now());
-    if (!lastEventAt) return undefined;
-    const onTick = event => {
-      const value = Number(event?.detail?.now);
-      setNow(Number.isFinite(value) ? value : Date.now());
-    };
-    window.addEventListener('relai:clock-tick', onTick);
-    return () => window.removeEventListener('relai:clock-tick', onTick);
-  }, [lastEventAt]);
-  return h('span', { className: 'section-action', id: 'lastUpdated' }, lastUpdatedText(lastEventAt, now));
-});
-
-function lastUpdatedText(lastEventAt, now) {
-  if (!lastEventAt) return '';
-  const seconds = Math.max(0, Math.floor((now - lastEventAt) / 1000));
-  if (seconds < 5) return 'Updated just now';
-  if (seconds < 60) return `Updated ${seconds}s ago`;
-  return `Updated ${Math.floor(seconds / 60)}m ago`;
 }
 
 function RecoveryNotice({ recovery }) {

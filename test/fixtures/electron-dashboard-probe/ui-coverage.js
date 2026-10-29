@@ -14,12 +14,25 @@ export async function exerciseUIUXCoverage({ win, axePath, screenshotDir, auditA
     window.__coverageOriginalFetch = window.fetch;
     window.__coverageOriginalDesktop = window.relaiDesktop;
     const installed = [
-      { id: 'fixture.long-skill-identifier-for-reflow-and-unicode-測試', name: 'Fixture skill with a long readable title', version: '1.0.0', kind: 'skill', ready: true, description: 'Synthetic local coverage fixture.', permissions: [], publisher: 'Fixture publisher' },
+      { id: 'fixture.long-skill-identifier-for-reflow-and-unicode-測試', name: 'Fixture skill with a long readable title and similarly named release-final-v2-2026-10-29-測試', version: '1.0.0', kind: 'skill', ready: true, description: 'Synthetic local coverage fixture with a long, readable description that should wrap without pushing its actions out of view. '.repeat(3), permissions: [], publisher: 'Fixture publisher — Équipe de qualité' },
       { id: 'fixture.command', name: 'Fixture command', version: '1.0.0', kind: 'cli', ready: false, missingCommands: ['fixture-command'], description: 'Setup-needed fixture.', permissions: [] }
     ];
     // Seed logs before any coverage route mounts, so the application's normal
     // history cache sees the synthetic dataset from its first coverage read.
-    const entries = Array.from({ length: 160 }, (_, index) => ({ id: 'coverage-' + index, timestamp: new Date(Date.now() - index * 1000).toISOString(), tool: 'relai_read', status: 'completed', workspace: 'coverage-only', summary: 'Keyboard coverage event ' + index }));
+    const longPath = 'C:/Users/Example/Documents/' + 'projects-with-long-descriptive-names/'.repeat(12) + 'final-release-v12';
+    const stressfulSummaries = [
+      'Compare release-final-v12-candidate-a.patch with release-final-v12-candidate-b.patch and preserve both full filenames.',
+      'A long command output summary with no convenient breaks: ' + '0123456789abcdef'.repeat(16),
+      'Multi-language project review — 測試 — résumé — اختبار — emoji 🛠️ — names must remain readable.',
+      'Output includes literal <components> & markup-looking text without being parsed as HTML.'
+    ];
+    const entries = Array.from({ length: 160 }, (_, index) => ({
+      id: 'coverage-' + index,
+      timestamp: new Date(Date.now() - index * 1000).toISOString(),
+      tool: 'relai_read', status: 'completed',
+      workspace: index < stressfulSummaries.length ? longPath : 'coverage-only',
+      summary: index < stressfulSummaries.length ? stressfulSummaries[index] : 'Keyboard coverage event ' + index
+    }));
     window.fetch = (...args) => {
       if (String(args[0]).includes('/api/logs')) return Promise.resolve(new Response(JSON.stringify({ ok: true, entries, page: { hasMore: false } }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
       if (String(args[0]).includes('/api/extensions')) return Promise.resolve(new Response(JSON.stringify({ ok: true, installed, catalog: installed.map(entry => ({ ...entry, installed: true, updateAvailable: false })), sources: [], installRoot: 'C:/fixture/extensions' }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
@@ -38,6 +51,8 @@ export async function exerciseUIUXCoverage({ win, axePath, screenshotDir, auditA
           await win.webContents.executeJavaScript(`(() => { document.documentElement.dataset.theme = ${JSON.stringify(theme)}; location.hash = ${JSON.stringify('#' + route.route)}; })()`);
           await waitFor(win, `document.querySelector(${JSON.stringify(route.region)}) && !document.querySelector('.settings-loading, .extensions-loading-skeleton')`);
           await waitForCapturePaint(win);
+          // Measure settled theme/route colors, not intermediate CSS transition frames.
+          await win.webContents.executeJavaScript(`Promise.all(document.getAnimations().filter(animation => animation instanceof CSSTransition).map(animation => animation.finished.catch(() => {})))`);
           const result = await win.webContents.executeJavaScript(`(() => {
             const region = document.querySelector(${JSON.stringify(route.region)});
             const title = document.getElementById('pageTitle');

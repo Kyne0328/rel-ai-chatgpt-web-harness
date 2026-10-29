@@ -56,9 +56,9 @@
 
 @layer components {
 .settings-content { @apply flex min-w-0 flex-col gap-3; }
-.settings-panel-intro { @apply rounded-lg px-3 py-2.5; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); }
+.settings-panel-intro { @apply px-1 py-2.5; background: transparent; }
 .settings-panel-intro h2 { @apply text-lg; }
-.settings-panel-intro p { @apply mt-1 text-[13px]; color: var(--ui-text-secondary); }
+.settings-panel-intro p { @apply mt-1 text-sm; color: var(--ui-text-secondary); }
 .settings-grid { @apply grid gap-3; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .settings-save-row { @apply sticky bottom-3 flex items-center justify-between gap-3 rounded-lg px-3 py-2.5; z-index: var(--z-sticky); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); box-shadow: none; }
 .settings-save-actions { @apply flex gap-2; }
@@ -77,7 +77,7 @@
 .connection-settings-load-error p { margin: 0; }
 .settings-header { @apply flex flex-col gap-1; }
 .settings-header h2 { @apply text-[16px] font-bold; }
-.settings-header p { @apply max-w-4xl text-[13px] leading-5; color: var(--ui-text-secondary); }
+.settings-header p { @apply max-w-4xl text-sm leading-6; color: var(--ui-text-secondary); }
 .settings-panel-body { @apply grid gap-4; }
 .about-product { @apply flex min-w-0 items-center gap-4 rounded-xl p-4; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-default); }
 .about-product img { @apply size-14 shrink-0 object-contain; padding: 8px; border: 1px solid var(--ui-brand-mark-border); border-radius: 12px; background: var(--ui-brand-mark-surface); box-shadow: var(--ui-brand-mark-shadow); }
@@ -115,7 +115,7 @@
 .settings-history-copy { @apply flex flex-col gap-1.5; }
 .settings-history-copy span { @apply max-w-3xl text-[13px] leading-5; color: var(--ui-text-secondary); }
 .settings-history-panel { border-color: color-mix(in srgb, var(--ui-status-danger-foreground) 24%, var(--ui-border-default)); }
-.settings-panel-intro { @apply grid gap-1 rounded-lg px-3 py-2.5; border: 1px solid var(--ui-border-subtle); background: var(--ui-surface-secondary); }
+.settings-panel-intro { @apply grid gap-1 px-1 py-2.5; }
 .settings-panel-intro strong { @apply text-[13px]; }
 .settings-panel-intro span { @apply text-[13px] leading-5; color: var(--ui-text-secondary); }
 .settings-fact-grid { @apply grid overflow-hidden rounded-xl; grid-template-columns: repeat(3,minmax(0,1fr)); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); }

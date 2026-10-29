@@ -25,11 +25,11 @@
   --space-5: 24px;
   --font-11: 11px;
   --font-12: 12px;
-  --font-13: 13px;
-  --font-14: 14px;
-  --font-16: 16px;
-  --font-20: 20px;
-  --font-24: 24px;
+  --font-13: 0.8125rem;
+  --font-14: 0.875rem;
+  --font-16: 1rem;
+  --font-20: 1.25rem;
+  --font-24: 1.5rem;
   --weight-medium: 500;
   --weight-bold: 600;
   --weight-display: 700;
@@ -57,9 +57,9 @@
   --technical-radius: var(--radius-md);
   --status-height: 36px;
   --status-height-compact: 24px;
-  --text-page-title: 23px;
+  --text-page-title: 1.4375rem;
   --text-section-title: var(--font-16);
-  --text-card-title: var(--font-13);
+  --text-card-title: 0.9375rem;
   --text-metric: var(--font-24);
   --text-metric-compact: 18px;
   --z-skip: 100;
@@ -87,7 +87,7 @@
     background: var(--ui-canvas);
     color: var(--ui-text-primary);
     font-family: 'Geist Variable', 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    font-size: 15px;
+    font-size: 0.9375rem;
     line-height: 1.6;
   }
   body.overlay-open { overflow: hidden; }
@@ -259,7 +259,7 @@
   .secondary-nav { @apply mt-3 border-t pt-3; border-color: var(--ui-border-subtle); }
   .sidebar-group-label { @apply px-2 text-[13px] font-bold uppercase tracking-[.08em]; color: var(--ui-text-tertiary); }
   .nav a, .secondary-nav a, .mobile-nav a {
-    @apply flex items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-semibold transition-all;
+    @apply flex items-center gap-2.5 rounded-lg px-2.5 text-[13px] font-semibold;
     min-height: 42px;
     color: var(--ui-text-secondary);
     border: 1px solid transparent;
@@ -287,7 +287,7 @@
   }
   .title-wrap { @apply min-w-0 flex-1 py-0.5; }
   .page-title { @apply font-extrabold; font-size: var(--text-page-title); line-height: 1.35; overflow-wrap: anywhere; }
-  .page-subtitle { @apply mt-1 text-[13px]; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
+  .page-subtitle { @apply mt-1 text-sm; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
   .top-controls { @apply flex min-w-0 items-center justify-end gap-2; }
 
   .workspace-menu { @apply relative min-w-[210px]; }
@@ -345,15 +345,14 @@
   .command-trigger > svg { @apply size-4 shrink-0 fill-none stroke-current; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .command-trigger-label { @apply whitespace-nowrap; }
   .command-trigger kbd { @apply ml-auto rounded px-1.5 py-0.5 text-[13px] font-medium; color: var(--ui-text-tertiary); background: var(--ui-surface-primary); border: 1px solid var(--ui-border-default); }
-  #lastUpdated { @apply min-w-[92px] whitespace-nowrap text-right text-[13px]; }
 
   .route-root { @apply flex min-w-0 flex-col; flex: 1 0 auto; }
   .route-root > * { animation: route-enter 180ms var(--ease-out) both; }
   .section { @apply flex min-w-0 flex-col gap-3; }
   .feature-toolbar {
-    @apply flex min-h-[50px] items-center justify-between gap-4 rounded-lg px-3 py-2.5;
-    background: var(--ui-surface-primary);
-    border: 1px solid var(--ui-border-subtle);
+    @apply flex min-h-[50px] items-center justify-between gap-4 px-1 py-2.5;
+    background: transparent;
+    border-bottom: 1px solid var(--ui-border-subtle);
   }
   .feature-toolbar > p { @apply max-w-3xl text-[13px] leading-6; color: var(--ui-text-secondary); max-width: 75ch; }
   .section-head-actions { @apply flex items-center gap-2; }
@@ -367,7 +366,7 @@
     border: 1px solid var(--ui-border-subtle);
     box-shadow: none;
   }
-  .card-head { @apply flex min-h-12 items-center justify-between gap-4 border-b px-4 py-3; border-color: var(--ui-border-default); }
+  .card-head { @apply flex min-h-12 items-center justify-between gap-4 border-b px-4 py-3; border-color: var(--ui-border-subtle); }
   .card-head h3 { @apply font-bold; font-size: var(--text-card-title); }
   .layout-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .card-body { @apply min-w-0; padding: var(--card-inset); }
@@ -375,7 +374,7 @@
   .list { @apply flex flex-col; }
   .list-item { @apply flex min-h-12 items-center gap-3 border-b px-3 py-2.5 last:border-b-0; border-color: var(--ui-border-subtle); }
   .list-item:hover { background: color-mix(in srgb, var(--ui-surface-secondary) 68%, transparent); }
-  .item-title { @apply text-[13px] font-semibold; }
+  .item-title { @apply text-sm font-semibold; }
   .item-sub { @apply mt-0.5 text-[13px] leading-5; color: var(--ui-text-secondary); }
   .item-time { @apply ml-auto shrink-0 text-[13px]; color: var(--ui-text-tertiary); }
 
@@ -655,7 +654,7 @@
   .main { padding-inline: 18px; }
   .topbar { @apply items-start; }
   .top-controls { @apply flex-wrap; }
-  .command-trigger-label, #lastUpdated { @apply hidden; }
+  .command-trigger-label { @apply hidden; }
   .command-trigger { min-width: auto; }
 }
 
@@ -673,6 +672,7 @@
 
 @media (max-width: 760px) {
   body { font-size: 16px; }
+  html, .main { scroll-padding-bottom: calc(82px + env(safe-area-inset-bottom)); }
   :root, :root[data-sidebar="collapsed"] { --sidebar-width: 0px; }
   .sidebar { @apply hidden; }
   .main { padding: 12px 12px calc(74px + env(safe-area-inset-bottom)); }
@@ -741,7 +741,7 @@
 
 @media (max-width: 320px) {
   .main { padding: 6px 6px calc(74px + env(safe-area-inset-bottom)); }
-  .page-subtitle, #lastUpdated { display: none; }
+  .page-subtitle { display: none; }
   .topbar { gap: 6px; margin-bottom: 6px; }
   .feature-toolbar { min-height: 0; padding: 6px; }
   .card-head { min-height: 0; padding: 8px; }
@@ -759,7 +759,17 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  html { scroll-behavior: auto; }
+  .route-root > *, .dashboard-loading-line, .skeleton-block, .loading-mark, .task-overview-spinner { animation: none; }
+  .modal-shell, .modal-panel, .drawer-panel, .modal-backdrop, #__relai-modal-backdrop, .drawer-backdrop, #__relai-drawer-backdrop { animation: overlay-enter 120ms var(--ease-out) both; }
+  .sidebar-toggle svg { transition: none; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .modal-backdrop, #__relai-modal-backdrop, .drawer-backdrop, #__relai-drawer-backdrop {
+    backdrop-filter: none;
+    background: color-mix(in srgb, var(--ui-canvas) 94%, var(--ui-text-primary) 6%);
+  }
 }
 
 @media (forced-colors: active) {
