@@ -60,7 +60,8 @@ try {
   assert.equal(result.inspectorProcessState, 'Running');
   assert.equal(result.inspectorProcessBadge, '2', 'only task-owned processes contribute to the task badge');
   assert.equal(result.inspectorOtherProcessesHidden, true, 'unrelated project processes must be absent from task details');
-  assert.equal(result.inspectorDetailsLinkWorks, true, 'existing Technical deep links open secondary Details');
+  assert.equal(result.inspectorDetailsLinkWorks, true, 'legacy Technical deep links retain access to Overview');
+  assert.equal(result.inspectorTaskIdentifiers, true, 'task and linked-chat IDs must be available to copy');
   assert.equal(result.inspectorHeaderHasNoIds, true);
   assert.equal(result.mobileTasksParentActive, true, 'full-screen Changes belongs to Tasks on mobile navigation');
   const fullScreenParams = new URLSearchParams(result.inspectorFullScreenHref.split('?')[1]);

@@ -39,6 +39,7 @@ const { flushLocalAnalytics } = await import('../src/localAnalytics.js');
 const { repositoryIntelligence } = await import('../src/repository/intelligence/service.js');
 const { describeTaskCodeWorkspace, readTaskCodeDiff } = await import('../src/taskCodeWorkspace.js');
 const { flushTaskHistoryPersistence } = await import('../src/taskHistoryStore.ts');
+const { withStateDatabase } = await import('../src/stateDatabase.ts');
 const { readTaskIntegrity } = await import('../src/taskIntegrity.ts');
 const { resetTaskHistoryCaches } = await import('../src/taskHistoryStorage.ts');
 const { callTool } = await import('../src/tools.js');
@@ -100,6 +101,24 @@ try {
   assert.equal(live.changedFiles.includes('ambient.txt'), false, 'unrelated dirty files must stay out of the task changes list');
   assert.equal(live.readOnly, true);
   assert.equal(live.writable, false);
+
+  // Some retained sessions lack their workspace field. The task's authoritative
+  // integrity record must recover its project rather than attempting to resolve ''.
+  await flushTaskHistoryPersistence();
+  const savedSession = withStateDatabase(config, db =>
+    db.prepare('SELECT payload FROM task_history WHERE id=?').get(taskId).payload, { readonly: true });
+  try {
+    withStateDatabase(config, db => db.prepare('UPDATE task_history SET payload=? WHERE id=?')
+      .run(JSON.stringify({ ...JSON.parse(savedSession), workspace: '' }), taskId), { transaction: true });
+    const recovered = await describeTaskCodeWorkspace(config, { taskId });
+    assert.equal(recovered.workspace, 'app', 'missing saved workspace must resolve from task integrity');
+    assert.deepEqual(new Set(recovered.changedFiles), new Set(live.changedFiles));
+    const recoveredDiff = await readTaskCodeDiff(config, { taskId, path: 'alpha.txt' });
+    assert.equal(recoveredDiff.workspace, 'app', 'diff reads must recover the same task-owned project');
+  } finally {
+    withStateDatabase(config, db => db.prepare('UPDATE task_history SET payload=? WHERE id=?')
+      .run(savedSession, taskId), { transaction: true });
+  }
 
   const renamed = updateWorkspace(readConfig(), {
     action: 'upsert',

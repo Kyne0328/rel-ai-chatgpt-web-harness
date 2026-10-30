@@ -91,7 +91,13 @@ function resolveTaskCodeContext(config, taskIdValue) {
     error.code = 'TASK_NOT_FOUND';
     throw error;
   }
-  const taskWorkspaceAlias = String(session.workspace || '').trim();
+  const taskWorkspaceAlias = String(session.workspace || '').trim()
+    || String(readTaskIntegrity(config, taskId)?.workspace || '').trim();
+  if (!taskWorkspaceAlias) {
+    const error = new Error('The saved task has no project identity. Reopen it from its original project to review changes.');
+    error.code = 'TASK_WORKSPACE_UNAVAILABLE';
+    throw error;
+  }
   let baseWorkspace;
   try {
     baseWorkspace = resolveWorkspace(config, taskWorkspaceAlias);

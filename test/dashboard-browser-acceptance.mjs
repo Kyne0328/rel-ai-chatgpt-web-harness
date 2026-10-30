@@ -195,7 +195,7 @@ try {
   assert.deepEqual(result.taskInteraction.tabs, ['overview', 'changes', 'activity', 'processes']);
   assert.ok(result.taskInteraction.detailText.length > 100);
   assert.equal(result.taskInteraction.technicalDetailsAbsent, true, 'task detail must not expose the removed technical disclosure');
-  assert.equal(result.taskInteraction.internalTaskIdAbsent, true, 'task detail must not expose internal task identifiers');
+  assert.equal(result.taskInteraction.taskIdCopyAvailable, true, 'task details must offer a copyable task ID for manual continuation');
   assert.ok(result.taskInteraction.eventLinks > 0, JSON.stringify(result.taskInteraction));
   assert.match(result.taskProcesses.operation, /Read source files/);
   assert.match(result.taskProcesses.command, /Task development server/);

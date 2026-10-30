@@ -94,6 +94,13 @@
 .task-detail-clock { @apply tabular-nums; }
 .task-detail-identifier { @apply flex min-w-0 items-center justify-between gap-2; }
 .task-detail-identifier code { min-width: 0; overflow-wrap: anywhere; }
+.task-identifiers { @apply border-t pt-2; border-color: var(--ui-border-default); }
+.task-identifiers summary { @apply flex min-h-11 cursor-pointer items-center text-[13px] font-semibold; color: var(--ui-text-secondary); }
+.task-identifier-rows { @apply grid gap-2 pb-2; }
+.task-detail-identifier > div { @apply grid min-w-0 gap-0.5; }
+.task-detail-identifier span { @apply text-[12px] font-semibold; color: var(--ui-text-secondary); }
+.task-detail-identifier code { @apply text-[12px]; color: var(--ui-text-primary); }
+.task-detail-identifier button { @apply shrink-0; }
 
 .task-detail-section { @apply grid gap-2.5 border-t pt-3; border-color: var(--ui-border-default); }
 .task-detail-section > h3, .task-detail-heading h3 { @apply text-[13px] font-bold; }

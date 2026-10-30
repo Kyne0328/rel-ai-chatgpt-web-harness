@@ -2,6 +2,7 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSync
 import { flushSync } from 'react-dom';
 import { fetchJson, postJson, reconcileUnconfirmedResult, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
+import { copyText } from '../../clipboard.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { formatDuration, timeAgo } from '../../utils.js';
@@ -758,6 +759,15 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
         h(Detail, { label: 'Project files', value: fileCounts.product }),
         fileCounts.support > 0 ? h(Detail, { label: 'Support artifacts', value: fileCounts.support }) : null
       ),
+      h('details', { className: 'task-identifiers', 'data-task-identifiers': '' },
+        h('summary', null, 'Task identifiers'),
+        h('div', { className: 'task-identifier-rows' },
+          h(TaskIdentifier, { label: 'Task ID', value: id }),
+          session.goalMode?.conversationId
+            ? h(TaskIdentifier, { label: 'Chat ID', value: session.goalMode.conversationId })
+            : null
+        )
+      ),
       h(AttentionSection, { session }),
       h(FailureHistorySection, { session }),
       fileCounts.product + fileCounts.support > 0 ? h('section', { className: 'task-detail-section task-files-summary' },
@@ -793,6 +803,21 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
         onStopOperation: operationId => controlTask('stop', operationId) })
     ),
 
+  );
+}
+
+function TaskIdentifier({ label, value }) {
+  return h('div', { className: 'task-detail-identifier' },
+    h('div', null, h('span', null, label), h('code', null, value)),
+    h('button', {
+      className: 'secondary compact-button',
+      type: 'button',
+      'aria-label': `Copy ${label}`,
+      onClick: () => {
+        void copyText(value).then(() => toast(`${label} copied.`, { variant: 'success' }))
+          .catch(error => toast(error instanceof Error ? error.message : String(error), { variant: 'error' }));
+      }
+    }, h(Icon, { name: 'copy', size: 14 }), 'Copy')
   );
 }
 

@@ -205,7 +205,7 @@ app.whenReady().then(async () => {
       tabs: [...(detail?.querySelectorAll('[data-session-tab]') || [])].map(tab => tab.dataset.sessionTab),
       technicalDetailsAbsent: !detail?.querySelector('[data-session-details]'),
       detailText: detail?.textContent || '',
-      internalTaskIdAbsent: !detail?.querySelector('[aria-label^="Copy Task ID "]'),
+      taskIdCopyAvailable: Boolean(detail?.querySelector('[aria-label="Copy Task ID"]')),
       processIdAbsent: !/Process ID/.test(detail?.textContent || ''),
       eventLinks: detail?.querySelectorAll('.task-event-link').length || 0
     };

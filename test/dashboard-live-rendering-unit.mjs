@@ -112,6 +112,8 @@ assert.match(sessionsReact, /data-load-more-task-activity/, 'Task Activity must 
 assert.doesNotMatch(sessionsReact, /TaskEventInspector|setSelected\(event\)/, 'Task Activity must not duplicate the full event inspector');
 assert.match(sessionsReact, /event: activityEventId\(event\)/, 'task event links must deep-link into the exact Activity event');
 assert.doesNotMatch(sessionsReact, /data-session-details|TechnicalDetails|data-export-task-trace/, 'Tasks must not expose internal technical records or trace export');
+assert.match(sessionsReact, /data-task-identifiers/, 'Task Overview must retain the identifiers needed for manual continuation');
+assert.match(sessionsReact, /label: 'Chat ID', value: session\.goalMode\.conversationId/, 'Linked ChatGPT conversation IDs must be available to copy');
 assert.doesNotMatch(sessionsReact, /task-other-processes/, 'task Processes must not show unrelated project processes');
 assert.match(processesReact, /key: row\.processId/, 'Process rows must reconcile by canonical process identity');
 assert.match(processesReact, /postJson\('\/api\/processes\/stop'/, 'Process stop must retain the existing backend lifecycle endpoint');

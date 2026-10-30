@@ -390,6 +390,7 @@ app.whenReady().then(async () => {
       await wait(0);
       result.lateTaskDetailsIgnored = document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task';
       const inspectorTask = { work_id: 'probe-task', title: 'Inspector regression task', workspace: 'app', status: 'running', changeRevision: 1,
+        goalMode: { goalActive: false, conversationId: 'probe-chat-id' },
         changedFiles: ['src/example.js', 'src/new.js'], validation: 'not_run',
         events: Array.from({ length: 400 }, (_, index) => ({ eventId: 'inspector-' + index, timestamp: new Date(Date.now() - index * 1000).toISOString(), tool: 'relai_read', title: 'Inspector event ' + index, summary: 'Recorded event ' + index, status: 'succeeded', taskId: 'probe-task', workspace: 'app' })) };
       snapshot = { ...snapshot, tasks: [inspectorTask],
@@ -405,6 +406,12 @@ app.whenReady().then(async () => {
       await until(() => document.querySelector('#session-tab-changes')?.getAttribute('aria-selected') === 'true' && document.querySelector('.task-diff-viewer .monaco-diff-editor') && document.querySelector('[data-code-file-heading]')?.textContent === 'src/new.js', 'embedded Changes deep link');
       result.inspectorFullScreenHref = document.querySelector('[data-code-fullscreen-link]')?.getAttribute('href');
       result.inspectorHeaderHasNoIds = !document.querySelector('.task-detail-header')?.textContent.includes('probe-task');
+      const identifiers = document.querySelector('[data-task-identifiers]');
+      identifiers.open = true;
+      result.inspectorTaskIdentifiers = Boolean(identifiers.querySelector('[aria-label="Copy Task ID"]'))
+        && identifiers.textContent.includes('probe-task')
+        && Boolean(identifiers.querySelector('[aria-label="Copy Chat ID"]'))
+        && identifiers.textContent.includes('probe-chat-id');
       const inspectorEditor = () => window.monaco.editor.getEditors().find(editor => editor.getModel()?.getValue()?.includes('function greet'));
       document.querySelector('.task-diff-viewer .code-layout-button:last-child').click();
       inspectorEditor()?.setPosition({ lineNumber: 3, column: 5 });
@@ -437,8 +444,8 @@ app.whenReady().then(async () => {
       result.inspectorSingleScroll = getComputedStyle(document.querySelector('.session-inspector')).overflowY === 'auto'
         && getComputedStyle(document.querySelector('.task-event-scroll')).overflowY !== 'auto';
       location.hash = '#tasks?task=probe-task&tab=technical';
-      await until(() => !document.querySelector('#session-panel-overview')?.hidden && document.querySelector('[data-session-details]')?.open, 'retained technical deep link');
-      result.inspectorDetailsLinkWorks = document.querySelector('[data-session-details]')?.textContent.includes('probe-task');
+      await until(() => !document.querySelector('#session-panel-overview')?.hidden, 'legacy technical link opens Overview');
+      result.inspectorDetailsLinkWorks = Boolean(document.querySelector('[data-task-identifiers]'));
       result.runtimeDockRemoved = !document.querySelector('.runtime-dock-btn, .runtime-dock');
       return result;
     })()`);
