@@ -456,7 +456,9 @@ async function case_dashboard_clock_unit() {
     const { createDashboardClock, elapsedAt, parseClockTime, commandOutputStatusAt } = __m1;
   
     const __m2 = await import("../src/ui/utils.js");
-    const { formatDuration } = __m2;
+    const { formatDuration, timeAgo } = __m2;
+    assert.equal(timeAgo('2026-07-28T08:45:00Z', Date.parse('2026-07-28T10:00:00Z')), '1h 15m ago');
+    assert.equal(timeAgo('2026-07-27T08:45:00Z', Date.parse('2026-07-28T10:00:00Z')), '1d 1h 15m ago');
   
   class FakeNode {
     constructor(attributes = {}) {

@@ -129,6 +129,8 @@ export async function verifyRunProcessSpillFinalization(runProcess) {
   const completions = [];
   const phases = [];
   let budgetTimer;
+  let rejectOutputDeadline;
+  const outputDeadline = new Promise((_, reject) => { rejectOutputDeadline = reject; });
   fs.openSync = function(file, ...args) {
     const fd = originalOpen.call(fs, file, ...args);
     if (String(file).includes(`${path.sep}output-spills${path.sep}`)) descriptors.add(fd);
@@ -148,12 +150,15 @@ export async function verifyRunProcessSpillFinalization(runProcess) {
           cwd: root, outputSpillTaskId: 'owner', maxOutputBytes: 1000,
           resourceClass: 'heavy', resourceOwner: 'finalization-fixture',
           timeout: 2000, outputFinalizationTimeoutMs: 30,
-          onPhase: event => { phases.push(event); }
+          onPhase: event => {
+            phases.push(event);
+            if (event.phase === 'exited') {
+              budgetTimer = setTimeout(() => rejectOutputDeadline(new Error('Exited child remained blocked on a stalled spill write.')), 1500);
+            }
+          }
         }, config
       )),
-      new Promise((_, reject) => {
-        budgetTimer = setTimeout(() => reject(new Error('Exited child remained blocked on a stalled spill write.')), 1500);
-      })
+      outputDeadline
     ]);
     assert.ok(completions.length > 0);
     assert.equal(result.executed, true);

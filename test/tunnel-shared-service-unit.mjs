@@ -349,7 +349,6 @@ try {
   console.log('HTTP result waits returned terminal results and preserved background work across retrieval disconnects.');
 } finally {
   await stopHttpTestServer(child);
-  // Cleanup uses async filesystem operations; allow in-flight reads to finish before removing the fixture.
-  await new Promise(resolve => setTimeout(resolve, 100));
-  fs.rmSync(temp, { recursive: true, force: true });
+  // Windows may release closed child-process file handles just after exit.
+  await fs.promises.rm(temp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }

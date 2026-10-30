@@ -34,10 +34,15 @@ function reportSize() {
 }
 reportSize();
 setInterval(reportSize, 25);
+let interruptObserved = false;
 readline.createInterface({ input: process.stdin, terminal: false })
-  .on('line', value => process.stdout.write('ECHO:' + value + '\\n'));
+  .on('line', value => {
+    if (interruptObserved && value === 'RELAI_SIGINT_ACK') return process.exit(31);
+    process.stdout.write('ECHO:' + value + '\\n');
+  });
 process.on('SIGINT', () => {
-  process.stdout.write('TARGET_SIGINT\\n', () => process.exit(31));
+  interruptObserved = true;
+  process.stdout.write('TARGET_SIGINT\\n');
 });
 // A failed assertion cannot leave this synthetic target running indefinitely.
 setTimeout(() => process.exit(97), 20000);
@@ -166,8 +171,11 @@ try {
   await waitFor(snapshot => snapshot.stdout.text.includes('TTY:true') && snapshot.stdout.text.includes('SIZE:90:30'));
   const interrupted = await writeManagedProcess(config, { processId, input: '\x03' }, context);
   assert.equal(interrupted.acceptedBytes, 1);
-  const exited = await waitFor(snapshot => snapshot.stdout.text.includes('TARGET_SIGINT')
-    && snapshot.status === 'failed' && snapshot.exitCode === 31, 10000);
+  await waitFor(snapshot => snapshot.stdout.text.includes('TARGET_SIGINT'), 10000);
+  const acknowledgement = 'RELAI_SIGINT_ACK\r';
+  const acknowledged = await writeManagedProcess(config, { processId, input: acknowledgement }, context);
+  assert.equal(acknowledged.acceptedBytes, Buffer.byteLength(acknowledgement));
+  const exited = await waitFor(snapshot => snapshot.status === 'failed' && snapshot.exitCode === 31, 10000);
   assert.equal(exited.rootExitConfirmed, true);
   // Terminal status can precede asynchronous metadata persistence and job-directory cleanup.
   // The idempotent stop below waits for those durable cleanup steps before asserting them.

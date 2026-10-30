@@ -101,7 +101,11 @@ const serialEntries = files
   .filter(({ name }) => serialFiles.has(name));
 const requestedJobs = Number.parseInt(process.env.REL_AI_TEST_JOBS || '', 10);
 const availableJobs = Math.max(1, Number(os.availableParallelism?.() || os.cpus().length || 1));
-const jobCount = Math.min(parallelEntries.length, Number.isFinite(requestedJobs) && requestedJobs > 0 ? requestedJobs : Math.min(4, availableJobs));
+// Windows process-job and SQLite fixtures contend with concurrent test roots;
+// serial execution keeps their process and storage observations isolated.
+// Preserve explicit overrides for larger or dedicated test machines.
+const defaultJobs = process.platform === 'win32' ? 1 : 4;
+const jobCount = Math.min(parallelEntries.length, Number.isFinite(requestedJobs) && requestedJobs > 0 ? requestedJobs : Math.min(defaultJobs, availableJobs));
 const suiteStarted = Date.now();
 const results = new Array(files.length);
 let nextIndex = 0;

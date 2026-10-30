@@ -933,7 +933,7 @@ async function exerciseTaskSelectionStability(win) {
       data.tasks = data.tasks.map(task => task.id === 'acceptance-completed'
         ? { ...task, title: 'Completed task after selection refresh' }
         : task.id === 'acceptance-running'
-          ? { ...task, toolCallCount: 92, currentActivity: 'Reading source files from a tool call' }
+          ? { ...task, recordedEventCount: 92, currentActivity: 'Reading source files from a tool call' }
           : task);
       return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
     };

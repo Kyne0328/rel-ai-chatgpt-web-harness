@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useState } from 'react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import './styles.css';
 import '../../components/command-console.css';
 import { Icon } from '../../components/icons.js';
@@ -8,6 +8,8 @@ import { confirmAction } from '../../components/confirm-dialog.js';
 import { processListView, processStopResult } from './index.js';
 import { routeHref } from '../../router.js';
 import { commandOutputStatusAt } from '../../clock.js';
+import { copyText } from '../../clipboard.js';
+import { toast } from '../../components/toast.js';
 
 const h = React.createElement;
 const PROCESS_STORE_KEYS = Object.freeze(['managedProcesses', 'commandOperations']);
@@ -26,7 +28,11 @@ export function createProcessesRoute(useDashboardSlices) {
     );
     const rows = model.rows.filter(row => row.state.active);
     const recoveryRows = model.rows.filter(row => !row.state.terminal && !row.state.active && !row.recoveryArchived);
-    const recentRows = model.rows.filter(row => row.state.terminal).slice(0, 5);
+    const recentRows = model.rows.filter(row => row.state.terminal && (
+      ['failed', 'stopped', 'cancelled'].includes(row.state.status)
+      || Number(new Date(row.endedAt)) - Number(new Date(row.startedAt)) >= 10_000
+    )).slice(0, 5);
+    const archivedRows = model.rows.filter(row => row.recoveryArchived);
     const count = `${model.running} running${model.queued ? ` · ${model.queued} queued` : ''}`;
     const recentLabel = model.finished > recentRows.length
       ? `Recently ended · latest ${recentRows.length}`
@@ -58,8 +64,16 @@ export function createProcessesRoute(useDashboardSlices) {
             h('span', { className: 'feature-count' }, `${recoveryRows.length} unresolved`)
           ),
           h('div', { className: 'card-body', 'data-process-recovery-list': true },
-            recoveryRows.map(row => h(ProcessRow, { key: row.processId, row }))
+            recoveryRows.slice(0, 3).map(row => h(ProcessRow, { key: row.processId, row })),
+            recoveryRows.length > 3 ? h('details', { className: 'recent-processes' },
+              h('summary', null, `Show ${recoveryRows.length - 3} older unresolved actions`),
+              recoveryRows.slice(3).map(row => h(ProcessRow, { key: row.processId, row }))
+            ) : null
           )
+        ) : null,
+        archivedRows.length ? h('details', { className: 'recent-processes' },
+          h('summary', null, `Archived cleanup history · ${archivedRows.length}`),
+          archivedRows.map(row => h(ProcessRow, { key: row.processId, row }))
         ) : null
       )
     );
@@ -116,6 +130,21 @@ export function useProcessMemory(sampleKey, enabled = true) {
 export const ProcessRow = memo(function ProcessRow({ row }) {
   const [stopState, setStopState] = useState('idle');
   const [stopError, setStopError] = useState('');
+  const [archiving, setArchiving] = useState(false);
+  const archiveRecovery = async () => {
+    if (!row.canArchiveRecovery || archiving) return;
+    setArchiving(true);
+    try {
+      const result = await postJson('/api/processes/recovery', {
+        processId: row.stopProcessId,
+        archived: !row.recoveryArchived,
+        expectedArchivedAt: row.recoveryArchivedAt
+      }, { timeout: 10000 });
+      if (result?.ok === false) throw new Error(result.error || 'Could not update cleanup history.');
+      requestDashboardRefresh();
+    } catch (error) { setStopError(String(error?.message || error)); }
+    finally { setArchiving(false); }
+  };
   const stop = async () => {
     if (stopState === 'loading' || (row.stopProcessId == null && !row.operationId)) return;
     const confirmed = await confirmAction({
@@ -193,11 +222,14 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
           disabled: stopState === 'loading' || stopState === 'success' || stopState === 'requested',
           onClick: () => { void stop(); }
         }, stopText) : null,
-        state.status === 'stopping' ? h('span', { className: 'process-stop-state', role: 'status' }, 'Stopping…') : null
+        state.status === 'stopping' ? h('span', { className: 'process-stop-state', role: 'status' }, 'Stopping…') : null,
+        row.canArchiveRecovery ? h('button', { className: 'secondary compact-button', type: 'button',
+          disabled: archiving, onClick: () => { void archiveRecovery(); }
+        }, archiving ? 'Updating…' : row.recoveryArchived ? 'Restore' : 'Archive') : null
       )
     ),
     stopError && !state.terminal ? h('div', { className: 'connection-notice bad process-stop-error', role: 'alert' },
-      h('strong', null, 'Stop not confirmed'),
+      h('strong', null, 'Action not completed'),
       h('div', null, stopError)
     ) : null,
     h('section', { className: 'process-command-summary command-console', 'data-console-kind': 'command' },
@@ -214,18 +246,22 @@ export const ProcessRow = memo(function ProcessRow({ row }) {
   );
 });
 
-function ProcessOutput({ processId, operationId, output, active = false }) {
-  if (!active && !output.hasOutput) return null;
-  const stdoutVisible = output.stdout.trim() || output.stdoutMeta.totalBytes > 0;
-  const stderrVisible = output.stderr.trim() || output.stderrMeta.totalBytes > 0;
-  return h('details', { className: 'process-output', open: active && output.hasOutput },
-    h('summary', null, active ? 'Live output' : 'Recent output'),
-    output.hasOutput
-      ? h(React.Fragment, null,
-          stdoutVisible ? h(OutputBlock, { processId, operationId, stream: 'stdout', value: output.stdout, meta: output.stdoutMeta, active }) : null,
-          stderrVisible ? h(OutputBlock, { processId, operationId, stream: 'stderr', value: output.stderr, meta: output.stderrMeta, active }) : null
-        )
-      : h('div', { className: 'process-output-empty', role: 'status' }, output.message)
+export function ProcessOutput({ processId, operationId, output, active = false }) {
+  const [stream, setStream] = useState('stdout');
+  const value = stream === 'stdout' ? output.stdout : output.stderr;
+  const meta = stream === 'stdout' ? output.stdoutMeta : output.stderrMeta;
+  return h('section', { className: 'process-output', 'aria-label': active ? 'Live command output' : 'Recent command output' },
+    h('div', { className: 'process-output-streams', role: 'group', 'aria-label': 'Output stream' },
+      ...['stdout', 'stderr'].map(name => h('button', { key: name, type: 'button',
+        className: `secondary compact-button${stream === name ? ' is-selected' : ''}`,
+        'aria-pressed': stream === name,
+        onClick: () => setStream(name)
+      }, name, output[`${name}Meta`].totalBytes ? ` · ${formatBytes(output[`${name}Meta`].totalBytes)}` : ''))
+    ),
+    String(value || '').trim() || meta.totalBytes
+      ? h(OutputBlock, { key: `${processId}:${stream}`, processId, operationId, stream, value, meta, active })
+      : h('div', { className: 'process-output-empty', role: 'status' }, active
+          ? `No ${stream} output yet.` : `No ${stream} output was recorded.`)
   );
 }
 
@@ -233,6 +269,8 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
   const [history, setHistory] = useState(null);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [error, setError] = useState('');
+  const [following, setFollowing] = useState(true);
+  const outputRef = useRef(null);
   useEffect(() => {
     setHistory(null);
     setLoadingEarlier(false);
@@ -311,11 +349,21 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
     }
   };
 
+  useEffect(() => {
+    if (!active || !following || !outputRef.current) return;
+    const node = outputRef.current;
+    node.scrollTop = node.scrollHeight;
+  }, [visible, active, following]);
+
   const shownBytes = Math.max(0, nextOffset - startOffset);
   return h('div', { className: 'process-output-block command-console', 'data-console-kind': stream },
     h('div', { className: 'process-output-block-head command-console-heading' },
       h('span', null, stream),
-      h('small', null, `${formatBytes(shownBytes)} shown of ${formatBytes(meta.totalBytes)}`)
+      h('small', null, `${formatBytes(shownBytes)} shown of ${formatBytes(meta.totalBytes)}`),
+      h('button', { type: 'button', className: 'secondary compact-button',
+        onClick: () => { void copyText(String(visible || '')).catch(() => toast('Unable to copy output.', { variant: 'error' })); } }, 'Copy'),
+      active ? h('button', { type: 'button', className: 'secondary compact-button',
+        'aria-pressed': following, onClick: () => setFollowing(!following) }, following ? 'Following' : 'Follow latest') : null
     ),
     latestTailOnly ? h('div', { className: 'process-output-notice' },
       `Showing the latest ${formatBytes(meta.totalBytes - meta.tailStartOffset)}. Earlier retained output is available.`
@@ -328,7 +376,12 @@ function OutputBlock({ processId, operationId, stream, value, meta, active }) {
     ) : null,
     history?.gap ? h('div', { className: 'process-output-notice warning' }, 'A gap in this output could not be recovered from retained logs.') : null,
     error ? h('div', { className: 'process-output-error', role: 'alert' }, error) : null,
-    h('pre', { tabIndex: 0, 'aria-label': `Recent ${stream} output` }, renderTerminalOutput(visible)),
+    h('pre', { ref: outputRef, tabIndex: 0, 'aria-label': `Recent ${stream} output`,
+      onScroll: event => {
+        if (!active || !following) return;
+        const node = event.currentTarget;
+        if (node.scrollHeight - node.clientHeight - node.scrollTop > 40) setFollowing(false);
+      } }, renderTerminalOutput(visible)),
     canLoadEarlier ? h('div', { className: 'process-output-actions' },
       h('button', {
         className: 'secondary compact-button',

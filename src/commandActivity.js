@@ -57,8 +57,10 @@ export function beginCommandActivity(config, { operationId, workId = '', taskTit
       record.status = termination === false || (record.executed && termination !== true) ? 'unknown'
         : result.cancelled ? 'cancelled' : error || result.commandSucceeded === false || result.ok === false ? 'failed' : 'completed';
       record.error = String(error?.message || result.error || '');
-      const ended = [...records.values()].filter(item => ['completed', 'cancelled', 'failed'].includes(item.status)).sort((a, b) => b.endedAt.localeCompare(a.endedAt));
-      for (const item of ended.slice(5)) records.delete(item.operationId);
+      // Display-only records must be bounded even when a command outcome is unverified.
+      // Process ownership and durable recovery are tracked separately.
+      const ended = [...records.values()].filter(item => item.endedAt).sort((a, b) => b.endedAt.localeCompare(a.endedAt));
+      for (const item of ended.slice(20)) records.delete(item.operationId);
       changed();
     }
   };

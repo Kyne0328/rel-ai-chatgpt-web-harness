@@ -6,7 +6,8 @@ export function timeAgo(v, now = Date.now()) {
   if (m < 1) return 'now';
   if (m < 60) return m + 'm ago';
   const h = Math.floor(m / 60);
-  return h < 24 ? h + 'h ago' : Math.floor(h / 24) + 'd ago';
+  if (h < 24) return `${h}h ${m % 60}m ago`;
+  return `${Math.floor(h / 24)}d ${h % 24}h ${m % 60}m ago`;
 }
 
 export function formatDuration(milliseconds, options = {}) {

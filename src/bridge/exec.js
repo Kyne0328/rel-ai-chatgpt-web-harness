@@ -17,6 +17,7 @@ import { normalizeCommandEnv, normalizeExecutionInvocation, resolveCommandCwd } 
 import { statusMapFromOutput, parseGitStatus } from '../repo/gitStatus.js';
 import { redactCommandForAudit } from '../commandDisplay.js';
 import { withTaskEphemeralEnvironment } from '../taskEphemeral.ts';
+import { runIsolatedCommand } from '../isolatedExecution.js';
 import { clampNumber } from './limits.js';
 const MAX_CHANGED_FILES = 200;
 const MAX_FILESYSTEM_MUTATION_FILES = 50_000;
@@ -321,7 +322,14 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     'relai.process.command': displayCommand,
     'relai.process.execution_mode': command ? 'shell' : 'direct',
 
-  }, () => runProcess(
+  }, () => context.isolatedExecution
+    ? runIsolatedCommand(workspace, config, args, context.isolatedExecution, {
+        cwd: cwd.relativePath === '.' ? '' : cwd.relativePath,
+        signal, timeoutMs, maxOutputBytes,
+        onPhase: event => context.onOperationPhase?.(event),
+        onOutput: context.onOperationOutput
+      })
+    : runProcess(
     processExecutable,
     processArgv,
     {
@@ -358,7 +366,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     mutationTracking = 'not-executed';
   } else if (!trackMutation) {
     changed = { files: [], truncated: false };
-    mutationTracking = 'declared-read-only';
+    mutationTracking = context.isolatedExecution ? 'isolated-snapshot' : 'declared-read-only';
   } else {
     try {
       const after = await readGitStatusMap(workspace, config, signal);
@@ -412,6 +420,7 @@ async function relaiExec(workspace, config, args = {}, context = {}) {
     ...(ephemeralChangedFiles.length ? { ephemeralChangedFiles } : {}),
     changedFilesTruncated: changed.truncated,
     mutationTracking,
+    ...(context.isolatedExecution ? { sourceSnapshotOnly: true, currentWorkspaceValidated: false } : {}),
     ...(trackMutation ? { mutationTrackingDetails } : {}),
     ...(mutationUnknown ? { mutationUnknown: true } : {})
   };

@@ -8,6 +8,7 @@ import { combineAbortSignals, isTimeoutAbort } from '../abortSignals.ts';
 import { hasAgentCancellationHandle } from '../executionControl.js';
 import { isClearlyReadOnlyExec } from '../executionClassification.js';
 import { resolveWorkspace } from '../config.js';
+import { resolveSafePath } from '../safety.js';
 import { fallbackExecutionsStatus, updateFallbackExecutionPhase } from '../mcp/fallbackExecutions.js';
 import { addSpanEvent, runSpan, setSpanAttributes, safeTelemetryErrorCode } from '../telemetry.js';
 import { failureCategoryFromCode } from '../analyticsFailureCategory.ts';
@@ -26,6 +27,7 @@ import {
 import { maybeStartSession } from './session.js';
 import { OPERATION_IDS as OP } from './operationIds.js';
 import { beginCommandActivity } from '../commandActivity.js';
+import { prepareIsolatedCommand, releaseIsolatedCommand } from '../isolatedExecution.js';
 
 const DEFAULT_FOREGROUND_WORKSPACE_QUEUE_TIMEOUT_MS = 30_000;
 const DEFAULT_MUTATION_WATCHDOG_MS = 5 * 60_000;
@@ -71,8 +73,13 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
       }
       const branchChange = isExplicitBranchChange(executionName, effectiveArgs);
       const readOnlyExec = executionName === OP.EXEC && isClearlyReadOnlyExec(effectiveArgs);
-      const queueMode = queueModeFor(executionName, definition, readOnlyExec);
-      const queueScope = queueScopeFor(executionName, definition, branchChange, readOnlyExec);
+      const isolated = executionName === OP.EXEC && Boolean(effectiveArgs?.containerImage);
+      if (isolated && (!taskId || !workspace || directFilesystem)) {
+        throw Object.assign(new Error('Isolated container execution requires a configured workspace and durable work_id.'), { code: 'ISOLATION_REQUIRES_WORK_ID' });
+      }
+      const scopedPaths = exactEditPathKeys(executionName, effectiveArgs, workspace);
+      const queueMode = isolated ? 'write' : queueModeFor(executionName, definition, readOnlyExec);
+      const queueScope = isolated ? 'task' : scopedPaths.length ? 'paths' : queueScopeFor(executionName, definition, branchChange, readOnlyExec);
       const queueTaskId = taskId || detachedQueueTaskId(context, queueScope);
       const requestedTimeoutMs = Number(effectiveArgs?.timeoutMs);
       const inheritedDeadlineAtMs = Number(context?.deadlineAtMs);
@@ -100,6 +107,7 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
         }
       });
       let taskBaselineStatusOutput;
+      let preparedIsolated = null;
 
       const invokeHandler = async (args, signal = requestSignal) => {
         if (typeof definition?.handler !== 'function') throw new Error(`Tool '${name}' has no executable handler.`);
@@ -127,7 +135,8 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
           requestTaskContext,
           backgroundStatusMode,
           fallbackOperationId: context?.fallbackOperationId || '',
-          mutationTrackingRequired: executionName !== OP.EXEC || !readOnlyExec,
+          mutationTrackingRequired: executionName !== OP.EXEC || (!readOnlyExec && !isolated),
+          ...(preparedIsolated ? { isolatedExecution: preparedIsolated } : {}),
           resourceClass: readOnlyExec ? 'light' : 'heavy',
           ...(taskBaselineStatusOutput !== undefined ? { preExecutionGitStatus: taskBaselineStatusOutput } : {}),
           workspaceOverride: workspaceOverride || undefined
@@ -173,7 +182,21 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
         return invokeHandler(effectiveArgs, operationSignal);
       }
       timeline.transition('queued');
-      const result = await runWorkspaceOperation(
+      if (isolated) {
+        // Hold the mutation lane only while capturing a consistent source copy.
+        // The Docker command itself cannot mount or modify the live workspace.
+        preparedIsolated = await runWorkspaceOperation(workspace.alias,
+          () => {
+            assertNoRecoveredMutationProcess(config, workspace.alias, workspace.path);
+            recoverStructuredPatchTransaction(config, workspace);
+            return prepareIsolatedCommand(workspace, config, effectiveArgs, { signal: operationSignal });
+          },
+          queueOptions('write', 'mutation', taskId, operationSignal, 0, {
+            taskId, operation: 'Preparing isolated workspace', principalFingerprint: queuePrincipalFingerprint
+          }, timeline, true));
+      }
+      let result;
+      try { result = await runWorkspaceOperation(
         executionName === OP.WORK_BEGIN || executionName === OP.WORK_STOP || executionName === OP.WORK_CANCEL || executionName === OP.PROCESS_STOP || executionName === OP.PROCESS_READ || executionName === OP.PROCESS_LIST || backgroundStatusMode
           ? ''
           : workspaceOverride?.alias || effectiveArgs?.workspace,
@@ -285,10 +308,16 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
             startedAt: new Date().toISOString()
           },
           timeline,
-          executionName === OP.EXEC || executionName === OP.EDIT
+          executionName === OP.EXEC || executionName === OP.EDIT,
+          scopedPaths
         )
       );
-
+      } finally {
+        if (preparedIsolated && (!preparedIsolated.started || preparedIsolated.safeToCleanup)) {
+          // Cleanup is best effort; an unverified container is never considered dead.
+          try { await releaseIsolatedCommand(workspace, config, preparedIsolated); } catch {}
+        }
+      }
       return result;
     }, { carrier: context?.requestHeaders || {} }
   )).catch(error => {
@@ -308,7 +337,21 @@ async function executeToolCall({ config, name, executionName = name, effectiveAr
 }
 
 function isMutationScope(scope) {
-  return scope === 'mutation' || scope === 'workspace';
+  return scope === 'mutation' || scope === 'paths' || scope === 'workspace';
+}
+
+function exactEditPathKeys(executionName, args = {}, workspace = null) {
+  if (executionName !== OP.EDIT || !workspace || args.updateText || args.semantic || args.symbolEdit
+    || args.runChecks || args.stage || args.envAction || args.file || args.dryRun) return [];
+  const edits = Array.isArray(args.edits) && args.edits.length ? args.edits : [args];
+  if (edits.length > 100 || edits.some(item => !item?.path || item.file || item.symbolEdit || item.updateText
+    || !(item.content !== undefined || item.oldText !== undefined || Array.isArray(item.replacements)))) return [];
+  try {
+    return [...new Set(edits.map(item => {
+      const safe = resolveSafePath(workspace.path, item.path, { operation: 'write', label: 'Edit path' });
+      return process.platform === 'win32' ? safe.absolutePath.toLowerCase() : safe.absolutePath;
+    }))].sort();
+  } catch { return []; } // Unknown or protected effects keep the shared mutation lane.
 }
 
 // Durable subprocess ownership already gates the next mutation at admission.
@@ -503,12 +546,13 @@ function detachedQueueTaskId(context = {}, queueScope = '') {
   return String(context?.requestId || '').trim();
 }
 
-function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = null, timeline = null, bypassTaskLane = false) {
+function queueOptions(mode, scope, taskId, signal, queueTimeoutMs = 0, owner = null, timeline = null, bypassTaskLane = false, pathKeys = []) {
   return {
     mode,
     scope,
     taskId,
     ...(bypassTaskLane ? { bypassTaskLane: true } : {}),
+    ...(pathKeys.length ? { pathKeys } : {}),
     ...(owner ? { owner } : {}),
     ...(signal ? { signal } : {}),
     ...(queueTimeoutMs > 0 ? { queueTimeoutMs } : {}),

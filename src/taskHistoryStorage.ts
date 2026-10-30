@@ -116,12 +116,14 @@ function listSessionSummaries(directory: string, limit = MAX_HISTORY_QUERY_SESSI
   const invalid: string[] = [];
   const sessions = withStateDatabase(config, (db: DatabaseSync) => {
     const rows = db.prepare(`
-      SELECT id,updated_at_ms,payload
+      SELECT id,updated_at_ms,payload,
+        (SELECT COUNT(*) FROM task_history_events WHERE task_id=task_history_summaries.id) AS activity_count
       FROM task_history_summaries
       ORDER BY updated_at_ms DESC,id ASC
       LIMIT ?
     `).all(Math.max(0, Math.floor(Number(limit) || 0))) as unknown as TaskHistoryRow[];
-    return parseSessionRows(db, rows, true, invalid);
+    const counts = new Map(rows.map(row => [row.id, Number((row as TaskHistoryRow & { activity_count?: number }).activity_count || 0)]));
+    return parseSessionRows(db, rows, true, invalid).map(session => ({ ...session, recordedEventCount: counts.get(session.id) || 0 }));
   }, { readonly: true }) as StoredTaskSession[];
   removeInvalidSessions(config, invalid);
   return sessions;
@@ -217,15 +219,18 @@ function listSessionSummaryPage(directory: string, options: SessionPageOptions =
     }
     parameters.push(pageSize + 1);
     const rows = db.prepare(`
-      SELECT id,updated_at_ms,payload FROM task_history_summaries
+      SELECT id,updated_at_ms,payload,
+        (SELECT COUNT(*) FROM task_history_events WHERE task_id=task_history_summaries.id) AS activity_count
+      FROM task_history_summaries
       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
       ORDER BY updated_at_ms DESC,id ASC
       LIMIT ?
     `).all(...parameters) as unknown as TaskHistoryRow[];
     const hasMore = rows.length > pageSize;
     const pageRows = rows.slice(0, pageSize);
+    const counts = new Map(pageRows.map(row => [row.id, Number((row as TaskHistoryRow & { activity_count?: number }).activity_count || 0)]));
     const items = parseSessionRows(db, pageRows, true).map(session => ({
-      ...session, events: [],
+      ...session, events: [], recordedEventCount: counts.get(session.id) || 0,
       ...(options.includeCursors ? { _pageCursor: { updatedAtMs: Number(session.historyUpdatedAtMs || 0), id: String(session.id || '') } } : {})
     }));
     const last = pageRows.at(-1);

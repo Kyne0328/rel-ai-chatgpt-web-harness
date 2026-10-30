@@ -134,7 +134,9 @@ try {
   // Observe rejection immediately to avoid an unhandled rejection during cleanup.
   const startOutcome = pendingStart.then(value => ({ value }), error => ({ error }));
   let starting;
-  const startupDeadline = Date.now() + 5000;
+  // Host-capacity admission can wait under the parallel everyday test runner.
+  // This is an observation bound; the cancellation still targets the starting record.
+  const startupDeadline = Date.now() + 15_000;
   while (!starting && Date.now() < startupDeadline) {
     starting = listManagedProcesses(config, { workspace: 'app' }, startupContext).processes.find(item => item.workSessionId === startupContext.taskId);
     if (!starting) await new Promise(resolve => setTimeout(resolve, 10));

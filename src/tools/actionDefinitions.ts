@@ -189,7 +189,7 @@ function getOperationDefinitions(): readonly CatalogToolDefinition[] {
 const PUBLIC_TOOL_VALUES = [
   {
     name: 'relai_compose', title: 'Compose Tools',
-    description: 'JavaScript: await tools.<name>(args). ALL_TOOLS has schemas; text(value)/image(childImage) emit. Await all calls and dependent mutations. Scope, permissions, queues and receipts persist. Lifecycle controls and complete:true stay direct. No recursion/direct host access. Failure keeps effects; inspect calls/compositionOutputRef. LIMITS has budgets.',
+    description: 'JS: await tools.<name>(args); ALL_TOOLS schemas; text(value)/image(childImage) emit. Await calls and mutations. Scope, permissions, queues and receipts persist. Lifecycle/complete:true stay direct. No recursion or host access. Failure may leave effects; inspect calls/compositionOutputRef. LIMITS budgets.',
     annotations: annotations(false, true, false, true),
     behavior: { taskScope: 'optional', executionClass: EXECUTION_CLASS.BACKGROUND_FALLBACK_ELIGIBLE, longRunning: true },
     dashboard: { category: 'Workflow', capabilities: ['workflow'] }
@@ -228,7 +228,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_exec', title: 'Run Command',
-    description: 'One-shot workspace commands via direct executable + argv or command string. Durable work runs until exit/cancel. REL_AI_EPHEMERAL_DIR is task scratch outside Git; ephemeralPaths declares exact new project scratch files. Taskless work has a safety timeout. For long tests/builds, use a work_id and omit timeoutMs, or set a budget for the entire command; explicit deadlines are hard limits and output does not extend them.',
+    description: 'One-shot workspace commands: direct executable + argv or command string. With work_id runs to exit/cancel; timeoutMs hard cap despite output. Taskless safety timeout. REL_AI_EPHEMERAL_DIR off-Git scratch; ephemeralPaths disposable new files. containerImage runs a dirty-workspace copy in Docker after releasing mutation lease.',
     dashboard: { capabilities: ['execute'] }
   },
   {
@@ -265,7 +265,7 @@ const PUBLIC_TOOL_VALUES = [
   },
   {
     name: 'relai_changes', title: 'Review or Restore Changes',
-    description: 'Reviews, checkpoints or replays reviews, restores, resets, or tidies workspace changes. Read-only review/replay and explicitly scoped restore/reset can use an authorized workspace when their action contract permits.',
+    description: 'Review/checkpoint/replay changes, restore/reset paths, or tidy work. Authorized workspaces allow scoped read-only review and restore.',
     annotations: annotations(false, true, false, false), dashboard: { capabilities: ['review', 'recover'] },
     groups: ['audit', 'cleanup'], behavior: { taskScope: 'optional' }
   },

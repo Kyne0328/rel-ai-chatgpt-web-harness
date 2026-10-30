@@ -18,6 +18,8 @@ import { toast } from '../../components/toast.js';
 import { copyText } from '../../clipboard.js';
 import { getRouteParams, getWorkspaceFilter, navigate, replaceRouteParams, routeHref } from '../../router.js';
 import { formatTerminalOutput, timeAgo } from '../../utils.js';
+import { processOutputView } from '../../task-identity.js';
+import { ProcessOutput } from '../processes/react.js';
 import { activityEventId } from '../../activity-event.js';
 import { eventTimestampValue } from '../../../taskEvents.js';
 import {
@@ -41,7 +43,7 @@ import {
 } from './model.js';
 
 const h = React.createElement;
-const ACTIVITY_STORE_KEYS = Object.freeze(['auditTail', 'tasks', 'runtime', 'runtimeCompatibility']);
+const ACTIVITY_STORE_KEYS = Object.freeze(['auditTail', 'tasks', 'runtime', 'runtimeCompatibility', 'commandOperations']);
 const EMPTY_FILTERS = Object.freeze({ search: '', timeRange: '1h', workspace: '', tool: '', status: '', task: '' });
 const TIME_OPTIONS = Object.freeze([
   { value: '15m', label: 'Last 15 minutes' },
@@ -596,6 +598,7 @@ function ActivityView({ data = {} }) {
           runtime: data.runtime,
           runtimeCompatibility: data.runtimeCompatibility,
           sessionIndex,
+          commandOperations: data.commandOperations || [],
           headingRef: inspectorHeadingRef
         })
       )
@@ -774,7 +777,7 @@ function ActivitySpacerRow({ height }) {
   );
 }
 
-export function ActivityInspector({ entry, sessionIndex, headingRef }) {
+export function ActivityInspector({ entry, sessionIndex, headingRef, commandOperations = [] }) {
   if (!entry) {
     return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
       h('div', { className: 'inspector-empty' }, h('strong', null, 'Select an activity'))
@@ -790,6 +793,8 @@ export function ActivityInspector({ entry, sessionIndex, headingRef }) {
   const command = String(entry.command || '').trim();
   const stdout = String(entry.stdout ?? entry.result?.stdout ?? entry.metadata?.stdout ?? '');
   const stderr = String(entry.stderr ?? entry.result?.stderr ?? entry.metadata?.stderr ?? '');
+  const operationId = String(entry.operationId || entry.tool?.invocationId || '');
+  const liveCommand = commandOperations.find(item => item.operationId === operationId);
   const fileLocation = activityFileLocation(entry);
   const files = activityFilePaths(entry);
   const error = activityErrorText(entry);
@@ -834,8 +839,11 @@ export function ActivityInspector({ entry, sessionIndex, headingRef }) {
       readableSection('Target', targetText),
       files.length ? h(ActivityFilesDetail, { entry, files }) : null,
       command ? h(CommandDetail, { command }) : null,
-      stdout.trim() ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
-      stderr.trim() ? h(StreamOutputDetail, { title: 'Standard error', output: stderr, stream: 'stderr' }) : null,
+      liveCommand ? h(ProcessOutput, { key: operationId, processId: `command:${operationId}`,
+        operationId, output: processOutputView(liveCommand),
+        active: ['queued', 'running', 'stopping'].includes(liveCommand.status) }) : h(React.Fragment, null,
+          stdout.trim() ? h(StreamOutputDetail, { title: 'Standard output', output: stdout, stream: 'stdout' }) : null,
+          stderr.trim() ? h(StreamOutputDetail, { title: 'Standard error', output: stderr, stream: 'stderr' }) : null),
       readableSection('Result', resultText),
       readableSection('File location', fileLocationText),
       readableSection('Error', errorText, 'activity-detail-error')

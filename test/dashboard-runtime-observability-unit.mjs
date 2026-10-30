@@ -489,7 +489,8 @@ const sessionCssSource = fs.readFileSync(path.join(root, 'src/ui/features/sessio
 
 assert.match(sessionsSource, /sessions-summary-line/, 'Tasks surface must retain a compact user-facing summary in its toolbar');
 assert.match(sessionsSource, /Review its progress, changes, checks, and activity\./, 'Tasks empty inspector must explain what selecting a task reveals');
-assert.doesNotMatch(sessionsSource, /task-detail-identifier|Copy \$\{label\} \$\{value\}/, 'Tasks must not expose internal identifier copy controls');
+assert.match(sessionsSource, /function TaskIdentifier\(/, 'Task details must preserve copyable identifiers for manual continuation');
+assert.match(sessionsSource, /'aria-label': `Copy \$\{label\}`/, 'Identifier copy controls must have accessible names');
 assert.doesNotMatch(sessionsSource, /Client task capability|Native MCP tasks|Native task ID/);
 assert.doesNotMatch(sessionsSource, /nativeTasksCard|nativeTaskRow|data-cancel-native-task|bindNativeTaskActions/);
 assert.match(sessionsSource, /data-stop-task-operation/);
@@ -504,15 +505,17 @@ assert.deepEqual(mergeSessionDetail({ events: [{ eventId: 'old', summary: 'Earli
 assert.match(sessionsSource, /\/api\/tasks\/control/);
 assert.match(processesSource, /data-stop-process/);
 assert.match(processesSource, /: 'Stop'/);
-assert.match(processesSource, /filter\(row => row\.state\.terminal\)\.slice\(0, 5\)/, 'Running Commands must retain a bounded recently-ended view without inventing a time-based persistence policy');
+assert.match(processesSource, /const recentRows = model\.rows\.filter\(row => row\.state\.terminal/, 'Recently ended must include only terminal command records');
+assert.match(processesSource, /\)\)\.slice\(0, 5\)/, 'Recently ended commands must remain bounded and omit trivial executions');
 assert.match(processesSource, /className: 'recent-processes'/, 'Recently ended commands must use progressive disclosure');
 assert.match(processesSource, /href: '#activity'/, 'Running Commands must link to the full Activity history');
 assert.match(processesSource, /Servers, watchers, debuggers, and other long-running commands appear here/, 'Running Commands empty state must explain what appears on the page');
 assert.doesNotMatch(processesSource, /Startup task completed; process still running|Native task ID|Process ID|Saved output|process-detail-grid|process-relationship/);
 assert.doesNotMatch(processesSource, /Cancel task|data-cancel-native-task/);
 assert.match(processesSource, /'aria-label': `Recent \$\{stream\} output`/);
-assert.match(processesSource, /active \? 'Live output' : 'Recent output'/, 'running commands must identify output as live');
-assert.match(processesSource, /open: active && output\.hasOutput/, 'running command output must be visible as soon as output arrives');
+assert.match(processesSource, /active \? 'Live command output' : 'Recent command output'/, 'running command output must be identifiable as live');
+assert.match(processesSource, /'aria-pressed': stream === name/, 'stdout and stderr must both be independently discoverable');
+assert.match(processesSource, /No \$\{stream\} output yet\./, 'running commands must expose empty streams without hiding the viewer');
 assert.match(dashboardDataSource, /includeTail: true/, 'dashboard process projection must include managed-process output tails');
 assert.match(dashboardDataSource, /tailBytes: 16 \* 1024/, 'dashboard process output tails must stay bounded');
 assert.match(dashboardDataSource, /includeTailOffsets: true/, 'dashboard process projection must expose exact live-tail offsets');
@@ -528,8 +531,8 @@ assert.doesNotMatch(connectionPageSource, /Native MCP Tasks|Execution mode|conne
 assert.doesNotMatch(cssSource, /\.native-task-row|\.runtime-activity-spinner|\.runtime-capability-row/);
 assert.match(sessionCssSource, /\.task-progress\.static\.terminal\.cancelled[\s\S]*--ui-status-neutral-background/);
 assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress\s*\{[^}]*box-shadow:\s*inset 2px 0 0 var\(--ui-action-primary\)/s, 'active plan cards must use a restrained edge accent instead of a bright full-card outline');
-assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{[^}]*opacity:\s*0[^}]*animation:\s*task-plan-heartbeat/s, 'active plan heartbeat must have an invisible resting state');
-assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{\s*display:\s*none;/, 'reduced-motion users must not receive the active plan heartbeat');
+assert.match(sessionCssSource, /\.task-plan-active-dot\s*\{[^}]*border-radius:\s*999px/s, 'active plan markers must remain a simple dot');
+assert.match(sessionCssSource, /\.task-plan-step\.is-in_progress \.task-plan-marker::before\s*\{[^}]*opacity:\s*\.55/s, 'the active plan ring must use restrained static emphasis');
 assert.match(sessionCssSource, /@media \(prefers-reduced-motion: reduce\)/);
 
 

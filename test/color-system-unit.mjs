@@ -76,6 +76,8 @@ assert.deepEqual(
   'light and dark themes must expose identical semantic roles'
 );
 
+expectContrast('light', 'textDisabled', 'disabledBackground', 4.5);
+
 for (const themeName of THEME_NAMES) {
   for (const foreground of ['textPrimary', 'textSecondary', 'textTertiary']) {
     for (const background of ['surfacePrimary', 'surfaceSecondary']) {

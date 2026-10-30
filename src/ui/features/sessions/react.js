@@ -181,11 +181,8 @@ function SessionsPage({ data = {} }) {
     const request = ++hydrationRequest.current;
     const forceRefresh = detailRefresh?.id === selectedId;
     const summary = selectedSummaryRef.current;
-    // The list summary already supports Overview and Changes. Avoid fetching
-    // large retained task details on each selection; fetch for Activity,
-    // direct off-page links and explicit refreshes.
-    if (summary && !forceRefresh && activeTab !== 'activity') return undefined;
-    if (selectedSummaryHasTrace && !forceRefresh) {
+    // On selection, load the retained activity page, not the entire diagnostic trace.
+    if (selectedSummaryHasTrace && !forceRefresh && Array.isArray(summary.events) && summary.events.length) {
       setHydrated({ id: selectedId, session: summary });
       setHydrationState({ id: selectedId, status: 'ready' });
       return undefined;
@@ -193,15 +190,18 @@ function SessionsPage({ data = {} }) {
     let cancelled = false;
     setHydrationState(previous => previous?.id === selectedId && previous.status === 'ready'
       ? previous : { id: selectedId, status: 'loading' });
-    void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}`, {
+    void fetchJson(`${TASK_SESSION_URL}?task=${encodeURIComponent(selectedId)}${summary ? '&activityOnly=1' : ''}`, {
       cacheTtlMs: selectedHydrationCacheTtl,
       // Off-page detail has no live summary to supersede a cached response.
       ...(forceRefresh || !summary ? { cache: 'no-store' } : {})
     })
       .then(response => {
         if (cancelled || request !== hydrationRequest.current) return;
-        if (response?.ok === false || !response?.session) {
-          const unavailable = response?.httpStatus === 404 || (response?.ok !== false && !response?.session);
+        const returnedSession = summary && response?.activity?.entries
+          ? { ...summary, events: response.activity.entries }
+          : response?.session;
+        if (response?.ok === false || !returnedSession) {
+          const unavailable = response?.httpStatus === 404 || (response?.ok !== false && !returnedSession);
           setHydrationState({
             id: selectedId,
             status: unavailable ? 'unavailable' : 'error',
@@ -209,7 +209,7 @@ function SessionsPage({ data = {} }) {
           });
           return;
         }
-        if (sessionIdentifier(response.session) !== selectedId) {
+        if (sessionIdentifier(returnedSession) !== selectedId) {
           setHydrationState({ id: selectedId, status: 'error', message: 'The returned details did not match the requested task. Try again.' });
           return;
         }
@@ -218,14 +218,14 @@ function SessionsPage({ data = {} }) {
           const sameTask = previous?.id === selectedId;
           const previousEvents = sameTask ? previous.session?.events || [] : [];
           const session = {
-            ...response.session,
+            ...returnedSession,
             ...(response.trace ? { trace: response.trace } : {}),
-            events: mergeSessionEvents(previousEvents, response.session.events || [])
+            events: mergeSessionEvents(previousEvents, returnedSession.events || [])
           };
           return {
             id: selectedId,
             session,
-            activity: response.activity || {}
+            activity: response.activity?.page || response.activity || {}
           };
         });
       })
@@ -238,7 +238,7 @@ function SessionsPage({ data = {} }) {
       cancelled = true;
       hydrationRequest.current += 1;
     };
-  }, [activeTab, detailRefresh, offPageRefresh, selectedHydrationCacheTtl,
+  }, [detailRefresh, offPageRefresh, selectedHydrationCacheTtl,
     selectedId, selectedSummaryAvailable, selectedSummaryHasTrace]);
 
   useEffect(() => {
@@ -551,7 +551,7 @@ const TaskRow = memo(function TaskRow({ session, selected, onSelect }) {
   const live = isOngoingSession(session);
   const semantic = semanticProgressFor(session);
   const operation = semantic.currentActivity || session.currentActivity || session.operation || operationForTool(session.lastTool);
-  const toolCalls = Number(session.toolCallCount ?? session.calls ?? 0);
+  const toolCalls = Math.max(0, Number(session.recordedEventCount ?? session.events?.length ?? 0));
   const projectFiles = semanticFileCounts(session, semantic).product;
   const project = session.workspace || 'No project';
   const title = session.title || operation;
@@ -694,10 +694,8 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
     !commandIds.has(String(operation.id || operation.operationId || operation.invocationId || '')));
   const tabCounts = {
     changes: fileCounts.product + fileCounts.support,
-    activity: Number.isFinite(activityTotalCount) ? Math.max(activityTotalCount, (session.events || []).length) : (session.events || []).length,
-    activityLabel: Number.isFinite(activityTotalCount)
-      ? `${Math.max(activityTotalCount, (session.events || []).length)} recorded events; ${(session.events || []).length} loaded${activityHasMore ? ', more available' : ''}`
-      : `${(session.events || []).length} loaded events${activityHasMore ? '; more history available' : ''}`,
+    activity: Math.max(Number(session.recordedEventCount || 0), Number.isFinite(activityTotalCount) ? activityTotalCount : 0, (session.events || []).length),
+    activityLabel: `${Math.max(Number(session.recordedEventCount || 0), Number.isFinite(activityTotalCount) ? activityTotalCount : 0, (session.events || []).length)} recorded events; ${(session.events || []).length} loaded${activityHasMore ? ', more available' : ''}`,
     processes: ownedProcessCount + taskCommands.length + otherOperations.length,
     processesLabel: `${taskCommands.length + otherOperations.length} task operations and ${ownedProcessCount} managed commands`
   };
@@ -755,7 +753,7 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
       h('div', { className: 'task-detail-grid task-detail-facts' },
         h(Detail, { label: 'Project', value: session.workspace || 'No project' }),
         h(DurationDetail, { session, live }),
-        h(Detail, { label: 'Tool calls', value: session.toolCallCount ?? session.calls ?? 0 }),
+        h(Detail, { label: 'Tool calls', value: tabCounts.activity }),
         h(Detail, { label: 'Project files', value: fileCounts.product }),
         fileCounts.support > 0 ? h(Detail, { label: 'Support artifacts', value: fileCounts.support }) : null
       ),
@@ -1056,7 +1054,7 @@ function TaskTraceSection({ session, activityHasMore = false, activityTotalCount
   const [loadError, setLoadError] = useState('');
   const ordered = orderSessionEvents(session.events || []);
   const recent = ordered.slice(0, visibleCount);
-  const total = Number.isFinite(activityTotalCount) ? Math.max(activityTotalCount, ordered.length) : ordered.length;
+  const total = Math.max(Number(session.recordedEventCount || 0), Number.isFinite(activityTotalCount) ? activityTotalCount : 0, ordered.length);
   const hasBuffered = ordered.length > visibleCount;
   const canLoadMore = activityHasMore && typeof onLoadMoreActivity === 'function';
   const showMore = async () => {

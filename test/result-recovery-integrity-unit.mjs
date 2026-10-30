@@ -395,7 +395,16 @@ try {
   const inferredLookup = await relaiStatus(config, { workspace: 'app', operationId: inferred.body.result.structuredContent.operationId }, { connector: true, principal });
   assert.equal(inferredLookup.errorCode, undefined);
   // A pre-upgrade retained raw path is canonicalized only through configured scope.
-  const legacy = start({ scopeId: 'legacy-path', workspace: root, signature: 'legacy-path' });
+  let legacy;
+  for (;;) {
+    try {
+      legacy = start({ scopeId: 'legacy-path', workspace: root, signature: 'legacy-path' });
+      break;
+    } catch (error) {
+      if (!error?.recoveryPromise) throw error;
+      await error.recoveryPromise;
+    }
+  }
   await legacy.record.promise;
   fallback.resetFallbackExecutions();
   assert.equal(fallback.fallbackExecutionStatus(legacy.record.operationId, { config, noticeScope: scope, workspace: 'app' }).workspace, 'app');

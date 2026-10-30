@@ -26,7 +26,7 @@ export const COLOR_THEMES = Object.freeze({
   }),
   light: Object.freeze({
     canvas: '#f8fafc', surfacePrimary: '#ffffff', surfaceSecondary: '#f1f5f9', surfaceRaised: '#e2e8f0', surfaceInput: '#ffffff',
-    textPrimary: '#0f172a', textSecondary: '#334155', textTertiary: '#475569', textDisabled: '#64748b',
+    textPrimary: '#0f172a', textSecondary: '#334155', textTertiary: '#475569', textDisabled: '#526179',
     borderSubtle: '#e2e8f0', borderDefault: '#cbd5e1', borderControl: '#64748b',
     brandMarkSurface: '#111111', brandMarkBorder: 'rgba(21,128,61,.18)', brandMarkShadow: '0 .25rem .75rem rgba(0,0,0,.14)',
     actionPrimary: '#15803d', actionPrimaryHover: '#166534', actionPrimaryActive: '#14532d', actionPrimaryForeground: '#ffffff',

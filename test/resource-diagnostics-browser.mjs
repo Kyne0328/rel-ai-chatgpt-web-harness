@@ -73,9 +73,6 @@ try {
   assert.equal(await panel.getByRole('img', { name: /Service memory: 3 samples/ }).count(), 1);
   await page.evaluate(() => { document.documentElement.dataset.theme = 'dark'; });
   await capture(page, 'resources-overview-dark');
-  const overview = path.join(screenshotDir, 'resource-panel-dark.png');
-  await panel.screenshot({ path: overview });
-  screenshots.push(overview);
   await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
   await capture(page, 'resources-overview-light');
 
@@ -268,7 +265,11 @@ async function capture(page, name) {
   assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), expectedTheme, 'screenshot label must match the rendered theme');
   // Responsive geometry is asserted separately above. Capture the visible
   // viewport instead of stitching a long diagnostics page under software rendering.
-  await page.screenshot({ path: target });
+  // Capture through Electron, as the other native dashboard probes do.
+  // Repeated Playwright protocol screenshots can stall under Windows software rendering.
+  const png = await application.evaluate(async ({ BrowserWindow }) =>
+    (await BrowserWindow.getAllWindows()[0].webContents.capturePage()).toPNG().toString('base64'));
+  fs.writeFileSync(target, Buffer.from(png, 'base64'));
   assert.equal(fs.existsSync(target), true);
   screenshots.push(target);
 }

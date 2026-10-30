@@ -17,6 +17,10 @@
 .process-meta { flex-wrap: wrap; margin-top: .55rem; color: var(--ui-text-secondary); font-size: 13px; }
 .process-meta span + span::before { content: '·'; margin-right: .65rem; }
 .process-output { margin-top: .8rem; }
+.process-output-streams { display: flex; flex-wrap: wrap; gap: .5rem; }
+.process-output-streams .is-selected { color: var(--ui-text-primary); border-color: var(--ui-action-primary); background: var(--ui-selection-background); }
+.process-output-block-head { flex-wrap: wrap; }
+.process-output-block-head > button { flex-shrink: 0; }
 .process-output summary { display: flex; min-height: 44px; align-items: center; cursor: pointer; color: var(--ui-text-secondary); font-size: .82rem; }
 .process-output-block { margin-top: .65rem; }
 .process-output-block-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .35rem; }

@@ -41,6 +41,7 @@ const READ = 'read';
 const WRITE = 'write';
 const TASK_SCOPE = 'task';
 const MUTATION_SCOPE = 'mutation';
+const PATH_SCOPE = 'paths';
 const WORKSPACE_SCOPE = 'workspace';
 
 function lockStateFor(key) {
@@ -287,6 +288,10 @@ function mutationKey(workspace) {
   return `workspace:${workspaceIdentity(workspace)}:mutation`;
 }
 
+function pathMutationKey(workspace, file) {
+  return `workspace:${workspaceIdentity(workspace)}:path:${file}`;
+}
+
 function notifyWait(options, waitMs, details) {
   if (typeof options.onWait !== 'function') return;
   try {
@@ -481,7 +486,9 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
       ? WORKSPACE_SCOPE
       : requestedScope === MUTATION_SCOPE
         ? MUTATION_SCOPE
-        : TASK_SCOPE;
+        : requestedScope === PATH_SCOPE
+          ? Array.isArray(options.pathKeys) && options.pathKeys.length ? PATH_SCOPE : MUTATION_SCOPE
+          : TASK_SCOPE;
   const outerKey = workspaceKey(workspace);
 
   if (scope === WORKSPACE_SCOPE) {
@@ -498,6 +505,27 @@ async function runWorkspaceOperation(workspaceAlias, operation, options = {}) {
       });
       return withOuterWorkspaceOwnership(workspace, operation);
     }, signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
+  }
+
+  if (scope === PATH_SCOPE) {
+    throwIfWorkspaceMutationBlocked(workspace);
+    const signal = mutationQueueSignal(workspace, options.signal);
+    const paths = [...new Set(options.pathKeys.map(String))].sort();
+    return withLock(outerKey, READ, (workspaceWaitMs, workspaceState) => withOuterWorkspaceOwnership(workspace, () =>
+      withLock(taskKey(workspace, taskId), WRITE, (taskWaitMs, taskState) =>
+        withLock(mutationKey(workspace), READ, (mutationWaitMs, mutationState) => {
+          let totalWait = workspaceWaitMs + taskWaitMs + mutationWaitMs;
+          const enterPath = index => index === paths.length
+            ? (notifyWait(options, totalWait, { workspace, taskId, scope, mode: WRITE,
+                queued: workspaceState.queue.length + taskState.queue.length + mutationState.queue.length }), operation())
+            : withLock(
+            pathMutationKey(workspace, paths[index]), WRITE,
+            waitMs => { totalWait += waitMs; return enterPath(index + 1); },
+            signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
+          return enterPath(0);
+        }, signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState),
+        signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState)),
+      signal, queueDeadline, options.owner, queueTimeoutMs, options.onQueueState);
   }
 
   if (scope === MUTATION_SCOPE) {

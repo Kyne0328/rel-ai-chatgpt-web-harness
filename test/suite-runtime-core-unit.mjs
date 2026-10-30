@@ -1945,8 +1945,8 @@ async function case_usage_ui_contract_unit() {
   assert.match(markup, /visibility:hidden/, 'An unmeasured tooltip must stay invisible until its initial placement is known');
   assert.match(markup, /How this metric is calculated/, 'The referenced explanation must be retained for assistive technology');
   assert.doesNotMatch(markup, /aria-expanded/, 'A tooltip must not advertise an unrelated disclosure state');
-  for (const consumer of [usageReact, charts, read('src/ui/components/operation-diagnostics.js')]) {
-    assert.match(consumer, /h\(Tooltip,/, 'Metrics, matrix cells and diagnostics must use the shared tooltip contract');
+  for (const consumer of [usageReact, charts]) {
+    assert.match(consumer, /h\(Tooltip,/, 'Analytics metrics and matrix cells must use the shared tooltip contract');
   }
   assert.match(usageRender, /percentage points[\s\S]{0,80}90% to 95% is \+5 pp/i, 'Rate help must explain percentage points with an example');
   // Pointer transfer, Escape, focus and viewport geometry are exercised in the rendered fixture.

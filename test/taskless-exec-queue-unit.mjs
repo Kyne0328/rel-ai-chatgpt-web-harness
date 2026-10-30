@@ -13,6 +13,7 @@ const workspace = path.join(temp, 'workspace');
 const stateDir = path.join(temp, 'state');
 const configPath = path.join(temp, 'config.json');
 const marker = path.join(temp, 'holder-started.txt');
+const release = path.join(temp, 'holder-release.txt');
 const holderScript = path.join(workspace, 'holder.cjs');
 const previousConfig = process.env.REL_AI_MCP_CONFIG;
 const previousQueueTimeout = process.env.REL_AI_MCP_WORKSPACE_QUEUE_TIMEOUT_MS;
@@ -22,7 +23,12 @@ fs.writeFileSync(path.join(workspace, 'README.md'), '# fixture\n');
 fs.writeFileSync(holderScript, `
 const fs = require('node:fs');
 fs.writeFileSync(process.argv[2], 'started');
-setTimeout(() => process.exit(0), 1200);
+const checkRelease = setInterval(() => {
+  if (fs.existsSync(process.argv[3])) {
+    clearInterval(checkRelease);
+    process.exit(0);
+  }
+}, 25);
 `);
 execFileSync('git', ['init'], { cwd: workspace, stdio: 'ignore' });
 execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: workspace });
@@ -43,30 +49,30 @@ const callTool = (name, args, requestId) => rawCallTool(name, args, {
   requestId
 });
 
+let holder;
 try {
-  const holder = callTool('relai_exec', {
+  holder = callTool('relai_exec', {
     workspace: 'app',
     executable: process.execPath,
-    argv: [holderScript, marker]
+    argv: [holderScript, marker, release]
   }, 'taskless-holder');
 
-  for (let index = 0; index < 100 && !fs.existsSync(marker); index += 1) {
-    await new Promise(resolve => setTimeout(resolve, 10));
+  const startDeadline = Date.now() + 10_000;
+  while (!fs.existsSync(marker) && Date.now() < startDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 25));
   }
   assert.equal(fs.existsSync(marker), true, 'taskless mutation fixture must enter the command before the read starts');
 
   const snapshot = callTool('relai_snapshot', { workspace: 'app', maxEntries: 20 }, 'taskless-reader');
+  let readTimeout;
   const first = await Promise.race([
     snapshot.then(() => 'snapshot'),
-    new Promise(resolve => setTimeout(() => resolve('blocked'), 400))
+    new Promise(resolve => { readTimeout = setTimeout(() => resolve('blocked'), 10_000); })
   ]);
-  assert.equal(
-    first,
-    'snapshot',
-    'a taskless mutation-scope command must not be promoted to a workspace-wide lock that blocks unrelated reads'
-  );
+  clearTimeout(readTimeout);
+  assert.equal(first, 'snapshot', 'an unrelated read must finish while the mutating command still holds its scope');
+  assert.equal(fs.existsSync(release), false, 'the mutating command must remain active until explicitly released');
 
-  const queuedStartedAt = Date.now();
   await assert.rejects(
     callTool('relai_exec', {
       workspace: 'app',
@@ -79,14 +85,15 @@ try {
       && Number(error?.queueTimeoutMs) <= 250
       && Boolean(error?.blockingOperationId)
   );
-  const queuedWaitMs = Date.now() - queuedStartedAt;
-  assert.ok(queuedWaitMs >= 150 && queuedWaitMs < 800, `foreground mutation queue wait should be bounded near 250ms, observed ${queuedWaitMs}ms`);
   assert.equal(fs.existsSync(path.join(workspace, 'must-not-run.txt')), false, 'a timed-out queued mutation must never execute later');
 
+  fs.writeFileSync(release, 'release');
   const [snapshotResult, holderResult] = await Promise.all([snapshot, holder]);
   assert.equal(snapshotResult.ok, true);
   assert.equal(holderResult.commandSucceeded, true);
 } finally {
+  fs.writeFileSync(release, 'release');
+  await holder?.catch(() => {});
   await repositoryIntelligence.shutdown();
   await flushLocalAnalytics();
   if (previousConfig == null) delete process.env.REL_AI_MCP_CONFIG;

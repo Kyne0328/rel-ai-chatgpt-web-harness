@@ -206,9 +206,9 @@ function settingsReadHarness(names, overrides = {}) {
     React: { Fragment: 'Fragment' }, Card: 'Card', ToggleRow: 'ToggleRow', StatusPill: 'StatusPill',
     SettingsHeader: 'SettingsHeader', StartupSettings: 'StartupSettings', ApplicationUpdates: 'ApplicationUpdates',
     BrowserSiteList: 'BrowserSiteList', DataRow: 'DataRow', DeveloperOptions: 'DeveloperOptions', QuitRow: 'QuitRow',
-    DEVELOPER_FEATURE_FLAGS: [], NOTIFICATION_CATEGORIES: [], NOTIFICATION_DEFAULTS: { enabled: true },
+    DEVELOPER_FEATURE_FLAGS: [], EXPERIMENTAL_FEATURE_FLAGS: [], NOTIFICATION_CATEGORIES: [], NOTIFICATION_DEFAULTS: { enabled: true },
     readDeveloperOptionsUnlocked: () => false,
-    readDeveloperFeatureEnabled: () => false,
+    readDeveloperFeatureEnabled: () => false, readExperimentalFeatureEnabled: () => false,
     messageOf: error => error.message || String(error), formatBytes: value => String(value || 0),
     useState(initial) {
       const index = cursor++;
@@ -327,7 +327,7 @@ for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'stora
 
 // The spoken source-link name must retain its visible repository identity.
 {
-  const harness = settingsReadHarness(['AboutPage', 'validatedGitHubUrl', 'repositoryLabel', 'repositoryDocumentUrl', 'buildIdOf', 'runtimeCompatibilityNotice'], { AboutRow: 'AboutRow' });
+  const harness = settingsReadHarness(['AboutPage', 'validatedGitHubUrl', 'repositoryLabel', 'repositoryDocumentUrl'], { AboutRow: 'AboutRow' });
   for (const repository of ['Kyne0328/rel-ai-chatgpt-web-harness', 'fixture-owner/renamed-repository']) {
     const url = 'https://github.com/' + repository;
     const tree = harness.render('AboutPage', { metadata: { repositoryUrl: url, version: '1.0.0' } });

@@ -13,6 +13,7 @@ const command = { operationId: 'command-1', workId: 'work-1', workspace: 'app',
   lastOutputAt: outputAt, lastOutputBytes: 250 };
 const row = processListView({ commandOperations: [command] }, now).rows[0];
 assert.equal(row.lastOutputAt, outputAt);
+assert.equal(row.label, 'node test/example.mjs', 'command rows should expose a meaningful title instead of Command');
 assert.equal(row.lastOutputBytes, 250);
 assert.equal(commandOutputStatusAt(outputAt, now), 'Recent output · now');
 assert.match(commandOutputStatusAt(outputAt, now + 60_000), /^No recent output · last received/);
@@ -29,6 +30,7 @@ const renderContext = {
   memo: component => component,
   useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
   useEffect: () => {},
+  useRef: () => ({ current: null }),
   Icon: () => null,
   StatusPill: ({ label }) => label,
   useDeveloperFeatureEnabled: () => false,

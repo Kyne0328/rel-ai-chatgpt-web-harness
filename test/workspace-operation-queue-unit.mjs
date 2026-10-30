@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { isolatedDockerArguments } from '../src/isolatedExecution.js';
 
 import { getOperationDefinition } from '../src/tools/actionDefinitions.ts';
 import { OPERATION_IDS as OP } from '../src/tools/operationIds.js';
@@ -300,6 +301,45 @@ assert.equal(pendingWorkspaceOperations(), 0);
   releaseGlobal.resolve();
   await Promise.all([global, lateBoundary]);
   assert.equal(lateEntered, true);
+}
+
+// Independent exact-file edits hold only their path leases. Unknown mutations
+// still own the whole mutation barrier and must wait for every path lease.
+{
+  const started = deferred();
+  const releaseFirst = deferred();
+  const order = [];
+  const first = runWorkspaceOperation('resource-leases', async () => {
+    order.push('a:start'); started.resolve(); await releaseFirst.promise; order.push('a:end');
+  }, { mode: 'write', scope: 'paths', taskId: 'a', pathKeys: ['/repo/a.js'] });
+  await started.promise;
+  const independent = runWorkspaceOperation('resource-leases', async () => { order.push('b:start'); },
+    { mode: 'write', scope: 'paths', taskId: 'b', pathKeys: ['/repo/b.js'] });
+  await independent;
+  const same = runWorkspaceOperation('resource-leases', async () => { order.push('same:start'); },
+    { mode: 'write', scope: 'paths', taskId: 'c', pathKeys: ['/repo/a.js'] });
+  const general = runWorkspaceOperation('resource-leases', async () => { order.push('general:start'); },
+    { mode: 'write', scope: 'mutation', taskId: 'd' });
+  await nextTurn();
+  assert.deepEqual(order, ['a:start', 'b:start']);
+  releaseFirst.resolve();
+  await Promise.all([first, same, general]);
+  assert.ok(order.indexOf('same:start') > order.indexOf('a:end'));
+  assert.ok(order.indexOf('general:start') > order.indexOf('a:end'));
+  assert.equal(pendingWorkspaceOperations(), 0);
+}
+
+// Container execution never receives a live host workspace mount or network.
+{
+  const volume = 'relai-isolated-' + 'a'.repeat(32);
+  const argv = isolatedDockerArguments(volume, 'node:22-alpine', { command: 'npm test' }, 'packages/app');
+  assert.ok(argv.includes('none') && argv.includes('--read-only'));
+  assert.ok(argv.includes('type=volume,source=' + volume + ',target=/workspace'));
+  assert.ok(argv.includes('/workspace/packages/app'));
+  assert.ok(!argv.some(value => value.includes('/relai-source')));
+  assert.deepEqual(argv.slice(-4), ['/bin/sh', 'node:22-alpine', '-c', 'npm test']);
+  assert.throws(() => isolatedDockerArguments(volume, 'node:22-alpine', { command: 'echo hi', env: { TOKEN: 'secret' } }), /custom environment/);
+  assert.throws(() => isolatedDockerArguments(volume, 'node:22-alpine', { command: 'echo hi' }, '../escape'), /inside the workspace/);
 }
 
 // A rejected operation must still release the lock.

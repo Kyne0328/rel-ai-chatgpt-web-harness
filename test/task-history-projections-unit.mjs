@@ -28,13 +28,18 @@ try {
   assertAccounting();
   const summary = db.prepare('SELECT payload FROM task_history_summaries WHERE id=?').get(session.id).payload;
   assert.ok(summary.length < 1024, 'dashboard summaries must not contain multi-event timeline payloads');
-  assert.equal(listSessionSummaries(path.join(stateDir, 'sessions'), 100)[0].id, 'large');
-  assert.equal(listSessionSummaryPage(path.join(stateDir, 'sessions'), { workspace: 'app' }).items.length, 1);
+  const snapshotHistoryDirectory = path.join(stateDir, 'sessions');
+  assert.equal(listSessionSummaries(snapshotHistoryDirectory, 100)[0].id, 'large');
+  assert.equal(listSessionSummaries(snapshotHistoryDirectory, 100)[0].recordedEventCount, 2,
+    'summary tool-call count must come from the persisted Activity index, not the lifecycle counter');
+  assert.equal(listSessionSummaryPage(snapshotHistoryDirectory, { workspace: 'app' }).items[0].recordedEventCount, 2);
   session.events = [session.events[1], { eventId: 'three', timestamp: '2026-10-03T00:00:00Z', summary: 'latest' }];
   db.prepare('UPDATE task_history SET payload=?,updated_at_ms=? WHERE id=?').run(JSON.stringify(session), Date.now(), session.id);
   assertAccounting();
   // Retained indexed events survive timeline rotation and remain counted.
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM task_history_events').get().n, 3);
+  assert.equal(listSessionSummaries(snapshotHistoryDirectory, 100)[0].recordedEventCount, 3);
+  assert.equal(listSessionSummaryPage(snapshotHistoryDirectory, { workspace: 'app' }).items[0].recordedEventCount, 3);
   db.exec('BEGIN IMMEDIATE');
   db.prepare('DELETE FROM task_history WHERE id=?').run(session.id);
   assertAccounting();

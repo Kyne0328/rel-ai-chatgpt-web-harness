@@ -33,11 +33,18 @@ function commandRowView(command, now) {
     lastOutputBytes: Number.isSafeInteger(command.lastOutputBytes) && command.lastOutputBytes >= 0 ? command.lastOutputBytes : null,
     operationId: command.operationId, stopProcessId: null, taskId: command.workId,
     taskTitle: command.taskTitle || command.workId || 'Independent command',
-    label: 'Command',
+    label: commandTitle(command.commandSummary),
     state: { status: command.status, label, terminal, active,
       canStop: active && command.status !== 'stopping' && command.canStop === true,
       pillClass: active ? 'working' : command.status === 'failed' ? 'bad' : '',
       recovery: command.error || (command.status === 'unknown' ? 'The command ended, but process cleanup could not be confirmed.' : '') } };
+}
+
+function commandTitle(value) {
+  const command = String(value || '').replace(/\s+/g, ' ').trim();
+  const script = command.match(/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?([\w:.-]+)/i);
+  if (script) return `Run ${script[1].replace(/[:_-]/g, ' ')}`;
+  return command.length > 86 ? `${command.slice(0, 85)}…` : command || 'Command';
 }
 
 function processRowView(process = {}, now = Date.now(), snapshot = null) {

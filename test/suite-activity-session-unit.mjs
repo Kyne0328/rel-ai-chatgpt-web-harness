@@ -28,14 +28,14 @@ async function case_activity_controller_contract_unit() {
   assert.match(activity, /await loadHistory\('merge'\)/, 'resuming must reconcile buffered events with a fresh stored snapshot');
   assert.match(activity, /relai:clock-tick/, 'time-range filters must age from the shared dashboard clock');
   assert.match(activity, /nextActivityExpiry/, 'clock updates must only rerender at an expiration boundary');
-  assert.match(activity, /'aria-expanded': treeRevision\.open/, 'the raw JSON tree toggle must expose its expanded state to assistive technology');
-  assert.match(activity, /treeRevision\.open \? 'Collapse all' : 'Expand all'/, 'raw JSON controls must use one stateful expand/collapse toggle instead of duplicate opposite actions');
+  assert.match(activity, /readableSection\('Target', targetText\)/, 'Activity details must present a readable target instead of a raw JSON tree');
+  assert.match(activity, /readableSection\('Result', resultText\)/, 'Activity details must present a readable result');
   assert.match(activity, /command \? h\(CommandDetail, \{ command \}\) : null/, 'Activity details must render the recorded command as a first-class readable section');
   assert.match(activity, /Copy command/, 'Activity command details must provide a dedicated copy action');
   assert.match(activityCss, /\.activity-detail-command pre\s*\{[^}]*white-space:\s*pre-wrap;[^}]*overflow-wrap:\s*anywhere;/s, 'long commands must wrap instead of being visually clipped');
-  assert.match(activity, /h\(RawDetail, \{ title: 'Raw target'/, 'technical details must preserve raw target information');
-  assert.match(activity, /h\(RawDetail, \{ title: 'Raw result'/, 'technical details must preserve raw result information');
-  assert.match(activity, /h\(RawDetail, \{ title: 'Raw error'/, 'technical details must preserve raw error information');
+  assert.match(activity, /readableSection\('Error', errorText/, 'Activity details must preserve readable error information');
+  assert.match(activity, /StreamOutputDetail, \{ title: 'Standard output'/, 'Activity details must preserve standard output');
+  assert.match(activity, /StreamOutputDetail, \{ title: 'Standard error'/, 'Activity details must preserve standard error');
   
   console.log('Activity React controller contract test passed.');
 }
@@ -512,13 +512,14 @@ async function case_task_inspector_lifecycle_unit() {
       flushSync: callback => callback(),
       fetchJson: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject })),
       postJson: (url, payload) => new Promise(resolve => controls.push({ url, payload, resolve })),
+      reconcileUnconfirmedResult: async result => result,
       requestDashboardRefresh: () => { refreshes += 1; },
       toast() {},
       confirmAction: async () => true,
       routeHref: () => '#activity',
       orderWorkspacesAlphabetically: rows => rows
     };
-    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskProcessesSection, CurrentOperations, TechnicalDetails, TaskTraceSection };', context);
+    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskProcessesSection, CurrentOperations, TaskTraceSection };', context);
     return {
       requests, controls,
       refreshes: () => refreshes,
@@ -612,12 +613,10 @@ async function case_task_inspector_lifecycle_unit() {
     app.controls[0].resolve({ ok: true, stoppedOperationCount: 1 });
     await settle();
 
-    const technical = app.render('TechnicalDetails', { session: active });
-    assert.equal(find(technical, node => node.type?.name === 'CurrentOperations'), null, 'Technical must not duplicate operations');
-    assert.equal(find(technical, node => node.type?.name === 'IdentifierDetail').props.label, 'Task ID');
-    assert.equal(find(technical, node => node.props.label === 'Ended').props.value, 'Not recorded', 'missing completion evidence must not imply completion');
-    assert.equal(find(technical, node => node.props.label === 'End reason'), null, 'missing end reasons must not be synthesized');
-    assert.equal(find(technical, node => node.props.label === 'Checks').props.value, 'Not recorded');
+    const overview = app.render('SessionInspector', { session: active, activeTab: 'overview' });
+    const identifiers = find(overview, node => Object.hasOwn(node.props, 'data-task-identifiers'));
+    assert.ok(identifiers, 'Task Overview must preserve identifiers for manual continuation');
+    assert.equal(find(identifiers, node => node.type?.name === 'TaskIdentifier').props.label, 'Task ID');
 
     const completed = { ...active, status: 'completed' };
     assert.equal(app.render('CurrentOperations', { session: completed }), null, 'terminal tasks must hide stale operation snapshots');

@@ -9,10 +9,11 @@ function publicExecInputSchema(inputSchema) {
       command: describe('command', 'Shell command string. The command form does not accept argv or input.'),
       executable: describe('executable', 'Executable launched directly with shell:false.'),
       argv: describe('argv', 'Arguments passed without shell parsing; keep each logical argument separate.'),
-      input: describe('input', 'Literal stdin for direct executable + argv mode, including multiline scripts or structured text; quotes are preserved.'),
+      input: describe('input', 'Literal stdin for direct executable + argv; supports multiline scripts or structured text and preserves quotes.'),
       cwd: describe('cwd', 'Optional workspace-relative working directory.'),
-      env: describe('env', 'Optional environment variables supplied directly to the child process. Durable tasks also receive the reserved REL_AI_EPHEMERAL_DIR scratch directory outside the project.'),
-      ephemeralPaths: describe('ephemeralPaths', 'Exact new workspace-relative disposable files this command may create. Requires work_id. Rel.AI excludes matching changed files from default task commits and removes them at task end only if they remain untracked and unchanged.'),
+      env: describe('env', 'Child environment variables. Tasks also receive REL_AI_EPHEMERAL_DIR scratch outside the project.'),
+      ephemeralPaths: describe('ephemeralPaths', 'New disposable project paths; requires work_id. Excluded from default task commits; removed at task end only if still untracked and unchanged.'),
+      containerImage: describe('containerImage', 'Installed Linux Docker image; requires work_id. Runs in an isolated copied-workspace volume, without live project access. Only the snapshot is validated. No image downloads.'),
       timeoutMs: describe('timeoutMs', 'Maximum operation runtime in milliseconds.'),
       maxOutputBytes: describe('maxOutputBytes', 'Maximum captured stdout/stderr bytes before output is truncated.')
     }
