@@ -205,7 +205,7 @@ app.whenReady().then(async () => {
       tabs: [...(detail?.querySelectorAll('[data-session-tab]') || [])].map(tab => tab.dataset.sessionTab),
       technicalDetailsAbsent: !detail?.querySelector('[data-session-details]'),
       detailText: detail?.textContent || '',
-      taskIdCopyAvailable: Boolean(detail?.querySelector('[aria-label="Copy Task ID"]')),
+      taskIdCopyAvailable: Boolean(detail?.querySelector('[aria-label="Copy Work ID"]')),
       processIdAbsent: !/Process ID/.test(detail?.textContent || ''),
       eventLinks: detail?.querySelectorAll('.task-event-link').length || 0
     };
@@ -933,7 +933,7 @@ async function exerciseTaskSelectionStability(win) {
       data.tasks = data.tasks.map(task => task.id === 'acceptance-completed'
         ? { ...task, title: 'Completed task after selection refresh' }
         : task.id === 'acceptance-running'
-          ? { ...task, recordedEventCount: 92, currentActivity: 'Reading source files from a tool call' }
+          ? { ...task, recordedEventCount: 102, toolCallCount: 92, currentActivity: 'Reading source files from a tool call' }
           : task);
       return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
     };
@@ -1261,7 +1261,6 @@ async function exerciseNavigationControls(win, failures) {
   const scenarios = [
     { selector: '.nav a[data-nav-id="home"]', hash: '#home', ready: `document.querySelector('[data-home-react]')` },
     { selector: '.nav a[data-nav-id="tasks"]', hash: '#tasks', ready: `document.querySelector('[data-sessions-react]')` },
-    { selector: '[data-code-fullscreen-link]', prefix: true, hash: '#code', ready: `document.querySelector('[data-code-react]')` },
     { selector: '.nav a[data-nav-id="workspaces"]', hash: '#workspaces', ready: `document.querySelector('[data-workspaces-react]')` },
     { selector: '.nav a[data-nav-id="activity"]', hash: '#activity', ready: `document.querySelector('.activity-master-detail')` },
     { selector: '.sidebar .nav a[data-nav-id="processes"]', hash: '#processes', ready: `document.querySelector('[data-processes-react="true"]')` },
@@ -1275,12 +1274,6 @@ async function exerciseNavigationControls(win, failures) {
   ];
   const results = [];
   for (const scenario of scenarios) {
-    if (scenario.hash === '#code') {
-      await win.webContents.executeJavaScript(`document.querySelector('.task-row[data-task-id="acceptance-running"]')?.click()`);
-      await waitFor(win, `document.querySelector('#session-tab-changes')`);
-      await win.webContents.executeJavaScript(`document.querySelector('#session-tab-changes').click()`);
-      await waitFor(win, `document.querySelector('[data-code-fullscreen-link]')`);
-    }
     win.focus();
     win.webContents.focus();
     await waitFor(win, `document.hasFocus()`);

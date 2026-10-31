@@ -47,6 +47,9 @@ function titleForTool(tool, details = {}) {
   const titles = {
     [OP.WORK_BEGIN]: workspace ? `Work in ${workspace}` : 'Start logical task',
     [OP.WORK_PLAN]: 'Update task plan',
+    [OP.WORK_CONTEXT]: 'Read task context',
+    [OP.WORK_RESULT]: 'Retrieve operation result',
+    [OP.WORK_HISTORY]: 'Review task history',
     [OP.GOAL_STOP]: 'Stop Goal Mode',
     [OP.GOAL_PAUSE]: 'Pause Goal Mode',
     [OP.GOAL_RESUME]: 'Resume Goal Mode',
@@ -65,14 +68,22 @@ function titleForTool(tool, details = {}) {
     [OP.PROCESS_WRITE]: 'Send managed process input',
     [OP.PROCESS_STOP]: 'Stop managed process',
     [OP.PROCESS_LIST]: 'List managed processes',
+    [OP.UI]: 'Inspect local app UI',
+    [OP.BROWSER]: 'Use local browser',
+    [OP.DESKTOP]: 'Use desktop integration',
+    [OP.COMPUTER]: 'Use desktop controls',
     [OP.VALIDATE_CHECKS]: 'Run repository validation',
     [OP.VALIDATE_DIAGNOSTICS]: 'Run code diagnostics',
+    [OP.VALIDATE_HTTP]: 'Check local HTTP endpoint',
     [OP.PUBLISH_COMMIT]: 'Create Git commit',
     [OP.PUBLISH_PUSH]: 'Publish Git branch',
     [OP.PUBLISH_DRAFT_PR]: 'Draft pull request',
     [OP.CHANGES_DIFF]: 'Review repository changes',
     [OP.CHANGES_CHECKPOINT]: 'Checkpoint repository review',
     [OP.CHANGES_REPLAY]: 'Replay repository review',
+    [OP.CHANGES_RESTORE]: 'Restore repository changes',
+    [OP.CHANGES_TIDY_PLAN]: 'Plan repository cleanup',
+    [OP.CHANGES_TIDY_RUN]: 'Clean repository artifacts',
     [OP.WORK_STATUS]: 'Inspect repository status',
     [OP.WORK_STOP]: 'Stop running task operations',
     [OP.WORK_CANCEL]: 'Cancel work session',
@@ -389,7 +400,8 @@ function terminalTitleForTool(name, args, result, status) {
   if (completedTitles[name]) return completedTitles[name];
   const outcome = cleanText(result?.outcome, 160);
   if (outcome && outcome !== 'Completed successfully') return outcome;
-  return titleForTool(name, args) || 'Action completed';
+  return titleForTool(name, args)
+    || (name ? actionForTool(name).replaceAll('.', ' ').replace(/\b\w/g, letter => letter.toUpperCase()) : 'Unclassified action completed');
 }
 
 function stageForTool(name, status) {

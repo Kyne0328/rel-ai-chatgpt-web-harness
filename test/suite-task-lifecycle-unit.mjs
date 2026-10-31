@@ -2178,30 +2178,6 @@ async function case_task_state_unit() {
 }
 await case_task_state_unit();
 
-// Formerly task-trace-unit.mjs
-async function case_task_trace_unit() {
-  const __m0 = await import("node:assert/strict");
-    const assert = __m0.default;
-  
-    const __m1 = await import("../src/ui/features/sessions/model.js");
-    const { taskTraceJsonl } = __m1;
-  
-  const session = {
-    trace: {
-      entries: [
-        { auditId: 'a1', taskId: 'task-1', tool: 'read', ok: true },
-        { auditId: 'a2', taskId: 'task-1', tool: 'exec', ok: false, error: 'failed' }
-      ]
-    }
-  };
-  const jsonl = taskTraceJsonl(session);
-  const rows = jsonl.trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(rows, session.trace.entries);
-  assert.equal(taskTraceJsonl({}), '');
-  console.log('Task trace JSONL export tests passed.');
-}
-await case_task_trace_unit();
-
 // Formerly taskbar-completion-badge-unit.mjs
 async function case_taskbar_completion_badge_unit() {
   const __m0 = await import("node:assert/strict");

@@ -94,9 +94,15 @@
 .task-detail-clock { @apply tabular-nums; }
 .task-detail-identifier { @apply flex min-w-0 items-center justify-between gap-2; }
 .task-detail-identifier code { min-width: 0; overflow-wrap: anywhere; }
-.task-identifiers { @apply border-t pt-2; border-color: var(--ui-border-default); }
-.task-identifiers summary { @apply flex min-h-11 cursor-pointer items-center text-[13px] font-semibold; color: var(--ui-text-secondary); }
 .task-identifier-rows { @apply grid gap-2 pb-2; }
+.task-full-details { min-width: 0; }
+.task-full-details > .task-detail-section:first-child { border-top: 0; padding-top: 0; }
+.task-details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); gap: 10px; }
+.task-details-grid > div { display: grid; min-width: 0; gap: 5px; padding: 12px; background: var(--ui-surface-secondary); border: 1px solid var(--ui-border-subtle); border-radius: var(--radius-md); }
+.task-details-grid > div > span { font-size: 12px; color: var(--ui-text-tertiary); }
+.task-details-grid > div > strong { font-size: 13px; overflow-wrap: anywhere; }
+.task-details-long-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; font-size: 13px; }
+
 .task-detail-identifier > div { @apply grid min-w-0 gap-0.5; }
 .task-detail-identifier span { @apply text-[12px] font-semibold; color: var(--ui-text-secondary); }
 .task-detail-identifier code { @apply text-[12px]; color: var(--ui-text-primary); }

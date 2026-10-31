@@ -51,100 +51,47 @@ try {
   assert.equal(code, 0, `Code editor browser probe failed. stdout=${stdout} stderr=${stderr} probe=${probeOutput}`);
   const result = JSON.parse(probeOutput);
   assert.equal(result.error, undefined, result.error);
-  assert.equal(result.inspectorHiddenReadsStable, true, 'a hidden Changes tab must not refetch when the task summary updates');
-  assert.equal(result.inspectorDiffRestored, true, 'file, diff layout and editor position survive inactive tabs');
-  assert.deepEqual(result.inspectorProcessGroups, [
-    { title: 'Task commands', ids: ['proc-task-owned'] },
-    { title: 'Persistent commands', ids: ['proc-persistent'] }
-  ]);
-  assert.equal(result.inspectorProcessState, 'Running');
-  assert.equal(result.inspectorProcessBadge, '2', 'only task-owned processes contribute to the task badge');
-  assert.equal(result.inspectorOtherProcessesHidden, true, 'unrelated project processes must be absent from task details');
-  assert.equal(result.inspectorDetailsLinkWorks, true, 'legacy Technical deep links retain access to Overview');
-  assert.equal(result.inspectorTaskIdentifiers, true, 'task and linked-chat IDs must be available to copy');
-  assert.equal(result.inspectorHeaderHasNoIds, true);
-  assert.equal(result.mobileTasksParentActive, true, 'full-screen Changes belongs to Tasks on mobile navigation');
-  const fullScreenParams = new URLSearchParams(result.inspectorFullScreenHref.split('?')[1]);
-  assert.equal(result.inspectorFullScreenHref.split('?')[0], '#code');
-  assert.equal(fullScreenParams.get('task'), 'probe-task');
-  assert.equal(fullScreenParams.get('file'), 'src/new.js');
-  assert.equal(fullScreenParams.get('search'), 'Inspector');
-  assert.equal(fullScreenParams.get('taskStatus'), 'open');
-  assert.equal(result.inspectorProjectProcessesLink, true, 'project-wide process inspection remains available via Running Commands');
-  assert.ok(result.inspectorRecentRows > 0 && result.inspectorRecentRows <= 8, 'Tasks render only the latest eight activity events');
-  assert.equal(result.inspectorPreviewRemoved, true, 'Task Activity must have one event action and a full Activity link');
-  assert.equal(result.inspectorSingleScroll, true, 'task activity must share the outer task inspector scrollbar');
-  assert.equal(result.runtimeDockRemoved, true, 'redundant Runtime dock and shortcut must be absent');
-  assert.equal(result.editorPresent, true, 'Monaco editor must render');
-  assert.equal(result.inlineDiffEditor, true, 'the Changes surface must render task changes with Monaco diff rendering');
-  assert.equal(result.readOnly, true, 'the rendered task diff must be read-only');
-  assert.equal(result.saveButtonPresent, false, 'the Changes surface must not expose a Save control');
-  assert.equal(result.filteredFolderExpanded, true, 'filtering must reveal matching files inside collapsed folders');
-  assert.equal(result.filterPreservedFolderCollapse, true, 'clearing a filter must restore the previous folder collapse state');
-  assert.ok(result.fontFaces.length === 2 && result.fontFaces.every(face => face.loaded), 'both UI and monospace fonts must load from bundled assets');
-  assert.deepEqual(result.changedFileRows, ['src/example.js', 'src/new.js'], 'the file explorer must show only changed files and hide untouched files');
-  assert.deepEqual(result.taskOptions, ['probe-task'], 'Changes must exclude tasks with no project-file changes and support-only artifacts');
-  assert.equal(result.taskReturnHref, '#tasks?workspace=app&task=probe-task', 'Changes must provide a contextual link back to the selected task');
-  assert.equal(result.selectedFileHeading, 'src/new.js', 'task file links must be able to deep-link to the exact changed file');
-  assert.deepEqual(result.sameTaskFileNavigation, { heading: 'src/example.js', routeFile: 'src/example.js' }, 'same-task file navigation must update the displayed diff');
-  assert.equal(result.routeAfterPendingDiff, '#activity?task=outside-task', 'a delayed diff must not overwrite another page after leaving Changes');
-  assert.deepEqual(result.invalidFileContext, { heading: 'missing.js', routeFile: 'missing.js', recoveryVisible: true, selectedOtherFile: false }, 'a missing-file deep link must keep its identity and explain recovery instead of silently substituting another file');
-  assert.deepEqual(result.retainedTaskIdentity, { selected: 'retained-task', routeTask: 'retained-task', heading: 'src/retained.js', requested: 'retained-task', otherTaskAvailable: true }, 'a retained task absent from the aggregate must load its own changes even when another task is available');
-  assert.deepEqual(result.unavailableTaskContext, { selected: 'unavailable-task', routeTask: 'unavailable-task', routeFile: 'src/retained.js', errorIdentifiesTask: true, returnTask: 'unavailable-task' }, 'unavailable task changes must retain the requested context and expose recovery');
-  assert.equal(result.unavailableTaskRecovered, true, 'Retry must load the same requested task after a transient failure');
-  assert.deepEqual(result.retainedTaskWithoutSummaries, ['retained-task'], 'an explicit retained task must be resolvable when the aggregate has no tasks');
-  assert.deepEqual(result.historicalDiffUnavailable, {
-    recordedFileVisible: true, contextPreserved: true, noRawIpcError: true, currentFileOnly: true
-  }, 'older tasks with no verified commit must retain file navigation without attempting an unsafe diff');
-  assert.deepEqual(result.taskFileHrefs, ['#code?task=probe-task&from=tasks'], 'Overview must offer one route to Changes instead of a duplicate file list');
-  assert.equal(result.scopedTaskFileHref, '#code?workspace=app&task=probe-task&from=tasks&search=Changes+viewer&taskStatus=open', 'Changes navigation must retain project, search and task-status context');
-  assert.equal(result.filteredTaskReturnHref, '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open');
-  assert.deepEqual(result.restoredTaskContext, { search: 'Changes viewer', status: 'open', workspace: 'app', selected: 'probe-task', scopeExplained: true }, 'returning from Changes must restore filters and task selection with honest loaded-history scope');
-  const taskActivityParams = new URLSearchParams(result.scopedTaskActivityHref.split('?')[1]);
-  assert.deepEqual(Object.fromEntries(taskActivityParams), { workspace: 'app', task: 'probe-task', time: 'all', from: 'tasks', returnTask: 'probe-task', returnWorkspace: 'app', returnSearch: 'Changes viewer', returnTaskStatus: 'open' }, 'Tasks Activity links must keep their own filter namespace and origin task');
-  const taskEventActivityParams = new URLSearchParams(result.taskEventActivityHref.split('?')[1]);
-  assert.equal(taskEventActivityParams.get('returnTask'), 'probe-task', 'individual task events must preserve return selection');
-  assert.equal(taskEventActivityParams.get('returnSearch'), 'Changes viewer', 'individual task events must preserve task search');
-  assert.equal(taskEventActivityParams.get('returnTaskStatus'), 'open', 'individual task events must preserve task status');
-  assert.equal(result.activityOwnFiltersInitiallyEmpty, true, 'Tasks search and status must not silently filter Activity');
-  assert.equal(result.activityTaskReturnHref, '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open', 'Activity edits must not overwrite Tasks return filters');
-  assert.equal(result.activityNestedReturnHref, result.activityTaskReturnHref, 'Task activity navigation must retain the originating Tasks context');
-  assert.deepEqual(result.activityRestoredTaskContext, { search: 'Changes viewer', status: 'open', workspace: 'app', selected: 'probe-task' }, 'Tasks Activity Tasks must restore the rendered search, status, project and selection');
-  assert.equal(result.activityAllProjectsReturnHref, '#tasks?task=probe-task&search=Changes+viewer&taskStatus=open', 'Activity must preserve explicit all-projects Tasks scope');
-  assert.equal(result.activityAllProjectsRestored, true, 'the all-projects scope must remain unscoped after a rendered Activity roundtrip');
-  assert.equal(result.activityDifferentTaskReturnHref, '#tasks?workspace=app&task=no-change-task', 'opening a different Activity task must not inherit another task’s return filters');
-  assert.deepEqual(result.filteredSelection, { emptyExplainsLoadedScope: true, selectionExplained: true, selectedTaskVisible: true }, 'changing filters must retain and explain an explicit selection outside the loaded results');
-  assert.equal(result.allProjectsReturnHref, '#tasks?task=probe-task', 'an all-projects Tasks visit must not become project-scoped on return');
-  assert.deepEqual(result.taskDetailFailure, { identifiesTask: true, selectPromptAbsent: true, messageVisible: true }, 'structured detail failures must show task-specific error and retry rather than an unselected state');
-  assert.deepEqual(result.taskDetailRetry, { attempts: 2, errorCleared: true, routeTask: 'retry-detail-task' }, 'detail Retry must bypass the failed read and preserve the requested task');
-  assert.deepEqual(result.missingTaskDetails, { retryVisible: true, identifiesTask: true }, 'not-found tasks must have a distinct unavailable state with a recovery action');
-  assert.equal(result.mismatchedTaskRejected, true, 'task detail responses must match the requested identity');
-  assert.equal(result.summarySurvivesDetailFailure, true, 'a detail read failure must retain and label the last available summary');
-  assert.deepEqual(result.taskDetailLoading, { loading: true, selectPromptAbsent: true }, 'pending retained tasks must have a distinct loading state');
-  assert.equal(result.lateTaskDetailsIgnored, true, 'a late response for an older task must not replace a newer selection');
-  assert.deepEqual(result.statusBadges.map(item => item.code), ['M', 'U'], 'changed-file markers must expose real Git states instead of hardcoding M');
-  assert.match(result.statusBadges[0]?.title || '', /^Modified:/);
-  assert.match(result.statusBadges[1]?.title || '', /^Untracked:/);
-  for (const badge of result.statusBadges) {
-    assert.ok(badge.fontSize >= 12 && badge.width >= 24 && badge.height >= 20, `changed-file markers must be readable badges: ${JSON.stringify(result.statusBadges)}`);
-  }
-  assert.equal(result.sameEditorAfterLiveUpdate, true, 'live task updates must not recreate the active editor');
-  assert.equal(result.sameModelAfterLiveUpdate, true, 'same-path live updates must preserve Monaco model identity');
-  assert.match(result.freshModelAfterLiveUpdate, /const answer = 43;/, 'same-path task revisions must update visible content');
-  assert.match(result.modelAfterOutOfOrderRefresh, /const answer = 45;/, 'older in-flight responses must not overwrite a newer revision');
-  assert.match(result.modelAfterManualRefresh, /const answer = 46;/, 'manual Refresh must update the selected same-path model');
-  assert.deepEqual(result.positionAfterLiveUpdate, result.positionBeforeLiveUpdate, 'live task updates must not move the active cursor');
-  assert.equal(result.editorCountAfterUnmount, 0, 'leaving the React Changes route must dispose Monaco editors');
-  assert.equal(result.modelCountAfterUnmount, 0, 'leaving the React Changes route must dispose Monaco models');
-  assert.equal(result.modelLanguage, 'javascript', `JavaScript files must use the JavaScript Monaco language: ${JSON.stringify(result)}`);
-  assert.ok(result.tokenColors.length >= 3, `Monaco JavaScript tokenization and syntax colors must be applied by the active theme: ${JSON.stringify(result)}`);
-  assert.ok(result.lineHeight > 0 && result.lineTops.length >= 4, `Monaco must expose stable line geometry: ${JSON.stringify(result)}`);
-  for (let index = 1; index < result.lineTops.length; index += 1) {
-    assert.equal(result.lineTops[index] - result.lineTops[index - 1], result.lineHeight, `code lines must use one stable line height: ${JSON.stringify(result)}`);
-  }
-  assert.ok(result.geometry?.monaco?.height > 100, `Monaco viewport must have usable height: ${JSON.stringify(result)}`);
-  assert.deepEqual(result.cspErrors, [], `Monaco must render without CSP style violations: ${JSON.stringify(result.cspErrors)}`);
-  console.log('Rendered read-only Changes diff keeps syntax colors, file states, geometry, and stable live-update state.');
+  assert.equal(result.integrated, true, 'the diff viewer must render only inside Tasks');
+  assert.equal(result.readOnly, true, 'Monaco diffs remain read-only');
+  assert.equal(result.language, 'javascript', 'Monaco must recognize source-file language');
+  assert.deepEqual(result.filePaths, ['src/example.js', 'src/new.js'], 'only changed task files are shown');
+  assert.equal(result.noStandaloneControls, true, 'the retired standalone Changes surface must have no entry points');
+  assert.equal(result.noCodeNavigation, true, 'Changes must not be a separate navigation destination');
+  assert.equal(result.noOverviewFilesLink, true, 'Overview must not link to a separate Changes surface');
+  assert.equal(result.ideControl, true, 'IDE access must remain in the embedded Changes tab');
+  assert.equal(result.liveRefresh.sameModel, true, 'same-path live diff updates must preserve Monaco model identity');
+  assert.equal(result.liveRefresh.line, 3, 'same-path live diff updates must preserve the editor position');
+  assert.match(result.liveRefresh.content, /const answer = 43;/, 'the active diff must refresh from the authoritative task revision');
+  assert.match(result.outOfOrderContent, /const answer = 45;/, 'an older in-flight diff must not overwrite a newer task revision');
+  assert.deepEqual(result.activityFirstOpen, { rows: 2, badgeAbsent: true, heading: 'Recent activity' },
+    'Task Activity must be hydrated on its first open without a competing event-count badge');
+  assert.deepEqual(result.restore, { file: 'src/new.js', unified: true, line: 3 },
+    'file, diff layout and editor position must survive a hidden Tasks tab');
+  assert.deepEqual(result.narrow, { stacked: true, fits: true, editorUsable: true },
+    'embedded Changes must remain usable in a narrow container');
+  assert.equal(result.fileRoute, 'src/example.js', 'file selection must update the Tasks deep link');
+  assert.deepEqual(result.legacy, {
+    workspace: 'app', task: 'probe-task', file: 'src/new.js',
+    tab: 'changes', search: 'legacy', taskStatus: 'open'
+  }, 'old #code URLs must redirect to the correct Tasks Changes tab without losing context');
+  assert.equal(result.legacyDiscardedFrom, true, 'retired standalone-only URL parameters must be removed');
+  assert.equal(result.historicalFallback, true, 'older tasks with unavailable original diffs retain an honest read-only fallback');
+  assert.equal(result.missingFilePreserved, true, 'missing-file links retain their selected file and show a useful explanation');
+  assert.deepEqual(result.processOwnership, { taskOwnedVisible: true, persistentVisible: true, unrelatedHidden: true },
+    'Task Processes must show only commands attributed to the selected task');
+  assert.deepEqual(result.countPresentation, { toolCallsVisible: true, activityEventsHidden: true, activityBadgeAbsent: true },
+    'Tasks must expose Tool calls as the single truthful work-count metric');
+  const activityReturnParams = new URLSearchParams(result.activityReturnHref.split('?')[1]);
+  assert.deepEqual(Object.fromEntries(['workspace', 'task', 'search', 'taskStatus'].map(key => [key, activityReturnParams.get(key)])), {
+    workspace: 'app', task: 'probe-task', search: 'probe', taskStatus: 'completed'
+  }, 'Activity must preserve the originating Tasks filter and selection context');
+  assert.equal(result.activityReturnRestored, true, 'returning from Activity must restore the originating Tasks context');
+  assert.deepEqual(result.taskDetailFailure, { messageVisible: true, identifiesTask: true },
+    'task-detail failures must identify the selected task and retain the structured error');
+  assert.ok(result.taskDetailRetry.attempts >= 2, 'Retry must issue a fresh detail request for the same task');
+  assert.equal(result.taskDetailRetry.recovered, true, 'Task detail Retry must recover without losing selection');
+  assert.equal(result.mismatchedTaskRejected, true, 'a task-detail response for another task must be rejected');
+  console.log('Task-integrated Changes and task-context browser acceptance passed.');
 } finally {
   if (child && child.exitCode == null) child.kill('SIGKILL');
   await stopHttpTestServer(server);

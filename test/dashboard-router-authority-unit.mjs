@@ -5,7 +5,8 @@ import { setImmediate as yieldTurn } from 'node:timers/promises';
 assert.equal(normalizeRouteKey('tasks?task=task-a&tab=changes&file=src%2Fa.js'), 'tasks?task=task-a&tab=changes&file=src%2Fa.js');
 assert.equal(normalizeRouteKey('tasks?task=task-a&tab=invalid'), 'tasks?task=task-a');
 assert.equal(normalizeRouteKey('tasks?task=task-a&tab=validation'), 'tasks?task=task-a', 'removed validation links must fall back to the task overview');
-assert.equal(normalizeRouteKey('tasks?task=task-a&tab=technical'), 'tasks?task=task-a&tab=technical');
+assert.equal(normalizeRouteKey('tasks?task=task-a&tab=details'), 'tasks?task=task-a&tab=details');
+assert.equal(normalizeRouteKey('tasks?task=task-a&tab=technical'), 'tasks?task=task-a&tab=details', 'retired Technical deep links must canonicalize to Details');
 
 const windowRef = new EventTarget();
 const marker = { dataset: { unsavedChanges: 'false' } };
@@ -46,8 +47,8 @@ assert.equal(router.getRouteSnapshot().key, 'home', 'rapid navigation must remai
 assert.equal(router.replaceRouteParams({ task: 'unapproved' }).get('task'), null, 'parameter helpers must read the committed route while a guard is pending');
 overlays.getOverlaySnapshot().modal.content.onConfirm();
 await yieldTurn();
-assert.equal(router.getRouteSnapshot().key, 'code?task=work-2&file=src%2Fmain.ts', 'confirmation must commit the latest competing destination');
-assert.equal(globalThis.location.hash, '#code?task=work-2&file=src%2Fmain.ts');
+assert.equal(router.getRouteSnapshot().key, 'tasks?task=work-2&file=src%2Fmain.ts&tab=changes', 'retired Changes routes must resolve inside Tasks after confirmation');
+assert.equal(globalThis.location.hash, '#tasks?task=work-2&file=src%2Fmain.ts&tab=changes');
 assert.equal(router.getRouteParams().get('task'), 'work-2');
 assert.equal(router.getWorkspaceFilter(), '', 'committed route helpers must reflect the confirmed target');
 

@@ -1,15 +1,11 @@
 @reference "tailwindcss";
 
-.code-page { min-height: 0; }
-.code-toolbar { align-items: end; }
-.code-task-control { display: grid; min-width: min(480px, 48vw); gap: 5px; }
-.code-task-control label { color: var(--ui-text-tertiary); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
-.code-task-control select, .code-toolbar-actions select, .code-explorer-head input { border: 1px solid var(--ui-border-control); border-radius: var(--radius-md); background: var(--ui-surface-secondary); }
-.code-task-control select { width: 100%; padding-inline: 10px; }
+.code-toolbar-actions select, .code-explorer-head input { border: 1px solid var(--ui-border-control); border-radius: var(--radius-md); background: var(--ui-surface-secondary); }
 .code-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .code-toolbar-actions select { max-width: 190px; padding-inline: 8px; }
 .code-workspace-meta { margin: -4px 0 10px; color: var(--ui-text-tertiary); font-size: 13px; }
 .task-diff-embedded-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.task-diff-viewer { min-width: 0; container-type: inline-size; }
 .task-diff-embedded-toolbar .code-workspace-meta { margin: 0; }
 .code-workbench { display: grid; grid-template-columns: minmax(210px, 280px) minmax(0, 1fr); min-height: 620px; height: calc(100dvh - 220px); overflow: hidden; border: 1px solid var(--ui-border-default); border-radius: var(--radius-lg); background: var(--ui-surface-primary); box-shadow: var(--shadow-sm); }
 .code-workbench.code-workbench-embedded { min-height: 480px; height: 560px; max-height: calc(100dvh - 260px); }
@@ -63,12 +59,32 @@
 .code-diff-column > strong { padding: 8px 12px; border-bottom: 1px solid var(--ui-border-subtle); color: var(--ui-text-tertiary); font-size: 13px; }
 .code-diff-column pre { min-height: 0; flex: 1; overflow: auto; margin: 0; padding: 14px; white-space: pre; color: var(--ui-text-primary); font-family: 'Geist Mono Variable', 'JetBrains Mono', "Cascadia Code", monospace; font-size: 13px; line-height: 1.5; }
 @media (max-width: 900px) {
-  .code-toolbar { align-items: stretch; flex-direction: column; }
-  .code-task-control { min-width: 0; }
   .code-toolbar-actions { justify-content: stretch; }
   .code-toolbar-actions select { min-width: 0; flex: 1; }
-  .code-workbench { height: auto; min-height: 720px; grid-template-columns: 1fr; grid-template-rows: 220px minmax(480px, 1fr); }
-  .code-explorer { border-right: 0; border-bottom: 1px solid var(--ui-border-subtle); }
+}
+@container (max-width: 820px) {
+  .code-workbench-embedded {
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(180px, 260px) minmax(460px, auto);
+    overflow: visible;
+  }
+  .code-workbench-embedded .code-explorer {
+    border-right: 0;
+    border-bottom: 1px solid var(--ui-border-subtle);
+  }
+  .code-workbench-embedded .code-editor-pane { height: clamp(460px, 65vh, 720px); }
+}
+@container (max-width: 560px) {
+  .task-diff-embedded-toolbar .code-toolbar-actions { flex-wrap: wrap; }
+  .code-workbench-embedded .code-editor-toolbar { align-items: flex-start; flex-direction: column; }
+  .code-workbench-embedded .code-view-controls { width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .code-workbench-embedded .code-keyboard-hint { white-space: normal; }
+  .code-workbench-embedded .code-diff-fallback { grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(2, minmax(0, 1fr)); }
+  .code-workbench-embedded .code-diff-column { border-right: 0; border-bottom: 1px solid var(--ui-border-subtle); }
+  .code-workbench-embedded .code-diff-column:last-child { border-bottom: 0; }
 }
 @media (max-width: 620px) {
   .code-editor-toolbar { align-items: flex-start; flex-direction: column; }

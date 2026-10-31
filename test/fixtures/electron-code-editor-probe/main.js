@@ -1,458 +1,256 @@
+/* global window, document, location, history, requestAnimationFrame */
 const { app, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const targetUrl = process.env.RELAI_PROBE_TARGET_URL;
 const outputPath = process.env.RELAI_PROBE_OUTPUT_PATH;
+if (!targetUrl || !outputPath) throw new Error('Task Changes probe needs a target URL and output path.');
 
-if (!targetUrl || !outputPath) throw new Error('Code editor probe requires RELAI_PROBE_TARGET_URL and RELAI_PROBE_OUTPUT_PATH.');
+async function probeTaskChanges() {
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const until = async (predicate, label) => {
+    const deadline = Date.now() + 8000;
+    while (!predicate()) {
+      if (Date.now() >= deadline) throw new Error('Timed out waiting for ' + label + ' at ' + location.hash + ' text=' + document.body.textContent.slice(0, 500) + ' panels=' + document.querySelectorAll('[data-session-panel]').length + ' tabs=' + document.querySelectorAll('[data-session-tab]').length);
+      await wait(20);
+    }
+  };
+  const activityEntries = [
+    { eventId: 'probe-event-1', timestamp: new Date().toISOString(), tool: 'relai_read', title: 'Read fixture', summary: 'Activity return context fixture', status: 'succeeded', workspace: 'app', taskId: 'probe-task' },
+    { eventId: 'probe-event-2', timestamp: new Date(Date.now() - 1000).toISOString(), tool: 'relai_exec', title: 'Run fixture', summary: 'Activity already hydrated on first open', status: 'succeeded', workspace: 'app', taskId: 'probe-task' }
+  ];
+  const detailRequests = [];
+  let retryDetailFails = true;
+  const task = (id, files = [], overrides = {}) => ({
+    work_id: id, title: id, workspace: 'app', status: 'completed', toolCallCount: 2,
+    changedFiles: files, events: [], changeRevision: 1, ...overrides
+  });
+  let snapshot = {
+    config: { workspaces: [{ alias: 'app' }] },
+    tasks: [task('probe-task', ['src/example.js', 'src/new.js']), task('no-change-task')],
+    live: { revisions: { task: 1 } }
+  };
+  const listeners = new Set();
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = (input, options) => {
+    const url = new URL(String(input), location.href);
+    const respond = (body, status = 200) => Promise.resolve(new Response(JSON.stringify(body), {
+      status, headers: { 'Content-Type': 'application/json' }
+    }));
+    if (url.pathname === '/api/logs') return respond({ ok: true, entries: activityEntries });
+    if (url.pathname === '/api/tasks/session') {
+      const id = url.searchParams.get('task');
+      detailRequests.push(id);
+      if (id === 'retry-detail-task') return retryDetailFails
+        ? respond({ ok: false, error: 'Temporary detail failure.' }, 503)
+        : respond({ ok: true, session: task(id, [], { title: 'Recovered retained task' }) });
+      if (id === 'mismatched-detail-task') return respond({ ok: true, session: task('another-task', [], { title: 'Wrong task' }) });
+      const summary = snapshot.tasks.find(item => item.work_id === id);
+      const events = activityEntries.filter(entry => entry.taskId === id);
+      const session = summary
+        ? { ...summary, events, recordedEventCount: events.length }
+        : task(id, ['src/retained.js']);
+      return respond({ ok: true, session });
+    }
+    return nativeFetch(input, options);
+  };
+
+  history.replaceState(null, '', '#tasks?workspace=app&task=probe-task&tab=changes&file=src%2Fnew.js');
+  const host = document.createElement('div');
+  document.body.replaceChildren(host);
+  const module = await import('/public/dashboard-react.js');
+  module.mountReactFoundation(host, {
+    getSnapshot: () => snapshot,
+    subscribe(callback) { listeners.add(callback); return () => listeners.delete(callback); }
+  });
+  window.dispatchEvent(new CustomEvent('relai:route-change', {
+    detail: { section: 'tasks', path: 'tasks', params: new URLSearchParams(location.hash.split('?')[1]) }
+  }));
+  await until(() =>
+    document.querySelector('#session-tab-changes')?.getAttribute('aria-selected') === 'true' &&
+    document.querySelector('.task-diff-viewer .monaco-diff-editor') &&
+    document.querySelector('[data-code-file-heading]')?.textContent === 'src/new.js', 'embedded task diff');
+
+  const activeEditor = () => window.monaco?.editor?.getEditors?.().find(
+    editor => editor.getModel?.()?.getValue?.()?.includes('function greet')
+  );
+  const current = activeEditor();
+  const result = {
+    integrated: true,
+    readOnly: current?.getOption(window.monaco.editor.EditorOption.readOnly) === true,
+    language: current?.getModel?.()?.getLanguageId?.(),
+    filePaths: [...document.querySelectorAll('[data-code-file]')].map(node => node.dataset.codeFile),
+    noStandaloneControls: !document.querySelector('[data-code-fullscreen-link], [data-code-task-link], [data-code-task], [data-code-react]'),
+    ideControl: Boolean(document.querySelector('[data-code-open-ide]')) &&
+      Boolean(document.querySelector('[data-code-ide]')) &&
+      !document.querySelector('[data-code-open-ide]')?.disabled,
+    noOverviewFilesLink: !document.querySelector('.task-files-summary a'),
+    noCodeNavigation: !document.querySelector('[data-nav-id="code"]')
+  };
+
+  const initialModel = current?.getModel?.();
+  current?.setPosition({ lineNumber: 3, column: 4 });
+  window.relaiCodeProbe.setRevision(2, 20);
+  snapshot = {
+    ...snapshot,
+    tasks: snapshot.tasks.map(item => item.work_id === 'probe-task' ? { ...item, changeRevision: 2 } : item),
+    live: { revisions: { task: 2 } }
+  };
+  listeners.forEach(listener => listener());
+  await until(() => activeEditor()?.getModel?.()?.getValue?.()?.includes('const answer = 43;'), 'live diff refresh');
+  result.liveRefresh = {
+    sameModel: initialModel === activeEditor()?.getModel?.(),
+    line: activeEditor()?.getPosition?.()?.lineNumber,
+    content: activeEditor()?.getModel?.()?.getValue?.() || ''
+  };
+
+  window.relaiCodeProbe.setRevision(3, 250);
+  snapshot = { ...snapshot, tasks: snapshot.tasks.map(item => item.work_id === 'probe-task' ? { ...item, changeRevision: 3 } : item) };
+  listeners.forEach(listener => listener());
+  await wait(30);
+  window.relaiCodeProbe.setRevision(4, 20);
+  snapshot = { ...snapshot, tasks: snapshot.tasks.map(item => item.work_id === 'probe-task' ? { ...item, changeRevision: 4 } : item) };
+  listeners.forEach(listener => listener());
+  await until(() => activeEditor()?.getModel?.()?.getValue?.()?.includes('const answer = 45;'), 'newer diff revision');
+  await wait(280);
+  result.outOfOrderContent = activeEditor()?.getModel?.()?.getValue?.() || '';
+
+  document.querySelector('[data-code-open-ide]')?.click();
+  await wait(30);
+  document.querySelector('.code-layout-button:last-child').click();
+  current?.setPosition({ lineNumber: 3, column: 4 });
+  document.querySelector('#session-tab-activity').click();
+  await until(() => !document.querySelector('.task-diff-viewer .monaco-diff-editor') &&
+    document.querySelector('#session-panel-activity .task-event-link'), 'first Activity tab open');
+  result.activityFirstOpen = {
+    rows: document.querySelectorAll('#session-panel-activity .task-event-link').length,
+    badgeAbsent: !document.querySelector('#session-tab-activity .task-tab-badge'),
+    heading: document.querySelector('#session-panel-activity .task-detail-heading')?.textContent?.trim() || ''
+  };
+  document.querySelector('#session-tab-changes').click();
+  await until(() => document.querySelector('.task-diff-viewer .monaco-diff-editor') && activeEditor(), 'editor remount');
+  result.restore = {
+    file: document.querySelector('[data-code-file-heading]')?.textContent,
+    unified: document.querySelector('.code-layout-button:last-child')?.getAttribute('aria-pressed') === 'true',
+    line: activeEditor()?.getPosition?.()?.lineNumber
+  };
+
+  const embedded = document.querySelector('.task-diff-viewer');
+  embedded.style.width = '380px';
+  await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const workbench = embedded.querySelector('.code-workbench-embedded');
+  const explorer = embedded.querySelector('.code-explorer').getBoundingClientRect();
+  const diff = embedded.querySelector('.code-editor-pane').getBoundingClientRect();
+  result.narrow = {
+    stacked: diff.top >= explorer.bottom - 2,
+    fits: workbench.scrollWidth <= workbench.clientWidth + 2,
+    editorUsable: diff.width >= 280 && diff.height >= 450
+  };
+  embedded.style.width = '';
+
+  document.querySelector('[data-code-file="src/example.js"]').click();
+  await until(() => document.querySelector('[data-code-file-heading]')?.textContent === 'src/example.js', 'file selection');
+  result.fileRoute = new URLSearchParams(location.hash.split('?')[1]).get('file');
+
+  location.hash = '#code?workspace=app&task=probe-task&file=src%2Fnew.js&search=legacy&taskStatus=open&from=tasks';
+  await until(() => location.hash.startsWith('#tasks?') &&
+    new URLSearchParams(location.hash.split('?')[1]).get('tab') === 'changes' &&
+    document.querySelector('[data-code-file-heading]')?.textContent === 'src/new.js', 'legacy code route');
+  const params = new URLSearchParams(location.hash.split('?')[1]);
+  result.legacy = Object.fromEntries(['workspace','task','file','tab','search','taskStatus'].map(key => [key, params.get(key)]));
+  result.legacyDiscardedFrom = !params.has('from');
+
+  location.hash = '#tasks?task=historical-task&tab=changes&file=src%2Fretained.js';
+  await until(() => document.querySelector('[data-code-editor]')?.textContent.includes('Original task diff unavailable'), 'historical diff fallback');
+  result.historicalFallback = Boolean(document.querySelector('[data-code-file="src/retained.js"]')) &&
+    !document.querySelector('.task-diff-viewer .monaco-diff-editor');
+
+  location.hash = '#tasks?task=probe-task&tab=changes&file=missing.js';
+  await until(() => document.querySelector('[data-code-editor]')?.textContent.includes('not available for this task'), 'missing-file explanation');
+  result.missingFilePreserved = new URLSearchParams(location.hash.split('?')[1]).get('file') === 'missing.js';
+
+  snapshot = {
+    ...snapshot,
+    managedProcesses: [
+      { processId: 'proc-task-owned', workSessionId: 'probe-task', workspaceId: 'app', lifecycle: 'task', status: 'running', label: 'Task command', pid: 123 },
+      { processId: 'proc-persistent', workSessionId: 'probe-task', workspaceId: 'app', lifecycle: 'persistent', status: 'running', label: 'Persistent server', pid: 124 },
+      { processId: 'proc-other', workSessionId: 'another-task', workspaceId: 'app', lifecycle: 'persistent', status: 'orphaned', label: 'Other service', pid: 125 }
+    ]
+  };
+  listeners.forEach(listener => listener());
+  location.hash = '#tasks?workspace=app&task=probe-task&tab=processes';
+  await until(() => document.querySelector('[data-process-id="proc-task-owned"]') &&
+    document.querySelector('[data-process-id="proc-persistent"]'), 'task-owned processes');
+  result.processOwnership = {
+    taskOwnedVisible: Boolean(document.querySelector('[data-process-id="proc-task-owned"]')),
+    persistentVisible: Boolean(document.querySelector('[data-process-id="proc-persistent"]')),
+    unrelatedHidden: !document.querySelector('[data-process-id="proc-other"]')
+  };
+
+  location.hash = '#tasks?workspace=app&task=probe-task&tab=details';
+  await until(() => document.querySelector('#session-panel-details')?.hidden === false, 'task details');
+  result.countPresentation = {
+    toolCallsVisible: document.querySelector('#session-panel-details')?.textContent.includes('Tool calls') === true,
+    activityEventsHidden: document.querySelector('#session-panel-details')?.textContent.includes('Activity events') === false,
+    activityBadgeAbsent: !document.querySelector('#session-tab-activity .task-tab-badge')
+  };
+
+  location.hash = '#tasks?workspace=app&task=probe-task&search=probe&taskStatus=completed&tab=activity';
+  await until(() => document.querySelector('#session-panel-activity .task-activity-view-all') &&
+    document.querySelector('[aria-label="Search tasks"]')?.value === 'probe', 'task Activity return origin');
+  document.querySelector('#session-panel-activity .task-activity-view-all').click();
+  await until(() => document.querySelector('.activity-row-trigger'), 'Activity route row');
+  document.querySelector('.activity-row-trigger').click();
+  await until(() => document.querySelector('.activity-session-actions a[href^="#tasks"]'), 'Activity return link');
+  const activityReturnLink = document.querySelector('.activity-session-actions a[href^="#tasks"]');
+  result.activityReturnHref = activityReturnLink.getAttribute('href');
+  activityReturnLink.click();
+  await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'probe' &&
+    document.querySelector('[aria-label="Task status filter"]')?.value === 'completed' &&
+    document.querySelector('[aria-label="Project filter"]')?.value === 'app' &&
+    document.querySelector('[data-task-id="probe-task"]')?.classList.contains('is-selected'), 'restored Tasks context');
+  result.activityReturnRestored = true;
+
+  location.hash = '#tasks?task=retry-detail-task';
+  await until(() => document.querySelector('[data-task-detail-state="error"]') && document.querySelector('[data-retry-task-detail]'), 'task detail failure');
+  result.taskDetailFailure = {
+    messageVisible: document.querySelector('[data-task-detail-state]')?.textContent.includes('Temporary detail failure.') === true,
+    identifiesTask: document.querySelector('[data-task-detail-state]')?.textContent.includes('retry-detail-task') === true
+  };
+  retryDetailFails = false;
+  document.querySelector('[data-retry-task-detail]').click();
+  await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task', 'task detail retry');
+  result.taskDetailRetry = {
+    attempts: detailRequests.filter(id => id === 'retry-detail-task').length,
+    recovered: !document.querySelector('[data-task-detail-state]')
+  };
+
+  location.hash = '#tasks?task=mismatched-detail-task';
+  await until(() => document.querySelector('[data-task-detail-state="error"]'), 'mismatched task detail');
+  result.mismatchedTaskRejected = document.querySelector('[data-task-detail-state]')?.textContent.includes('did not match') === true;
+  return result;
+}
 
 app.whenReady().then(async () => {
-  const cspErrors = [];
   const win = new BrowserWindow({
-    show: false,
-    width: 1280,
-    height: 900,
+    show: false, width: 1280, height: 900,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
+      contextIsolation: true, nodeIntegration: false, sandbox: true
     }
-  });
-  win.webContents.on('console-message', (_event, _level, message) => {
-    if (/content security policy|refused to apply inline style/i.test(String(message || ''))) cspErrors.push(String(message));
   });
   win.webContents.session.webRequest.onBeforeRequest((details, callback) => {
     callback({ cancel: new URL(details.url).pathname === '/public/dashboard-app.js' });
   });
-
   try {
     await win.loadURL(targetUrl);
-    await win.webContents.executeJavaScript(require('axe-core').source);
-    const result = await win.webContents.executeJavaScript(`(async () => {
-      const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-      const until = async (predicate, label) => {
-        const deadline = Date.now() + 5000;
-        while (!predicate()) {
-          if (Date.now() >= deadline) throw new Error('Timed out waiting for ' + label);
-          await wait(10);
-        }
-      };
-      const setInputValue = (field, value) => {
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, value);
-        field.dispatchEvent(new Event('input', { bubbles: true }));
-      };
-      const nativeFetch = window.fetch.bind(window);
-      const detailRequests = [];
-      let retryDetailFails = true;
-      let releaseSlowDetail;
-      const activityEntries = [
-        { eventId: 'task-return-event', timestamp: new Date().toISOString(), tool: 'relai_read', title: 'Read fixture', summary: 'Activity return context fixture', status: 'succeeded', workspace: 'app', taskId: 'probe-task' },
-        { eventId: 'other-task-event', timestamp: new Date().toISOString(), tool: 'relai_read', title: 'Read fixture', summary: 'Different task activity fixture', status: 'succeeded', workspace: 'app', taskId: 'no-change-task' }
-      ];
-      const taskSession = (id, title) => ({ work_id: id, title, workspace: 'app', status: 'completed', events: [], changedFiles: [] });
-      window.fetch = async (input, options) => {
-        const url = new URL(String(input), location.href);
-        if (url.pathname === '/api/logs') return new Response(JSON.stringify({ ok: true, entries: activityEntries }), { headers: { 'Content-Type': 'application/json' } });
-        if (url.pathname !== '/api/tasks/session') return nativeFetch(input, options);
-        const id = url.searchParams.get('task');
-        detailRequests.push(id);
-        const respond = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-        if (id === 'retry-detail-task') return retryDetailFails
-          ? respond({ ok: false, error: 'Temporary detail failure.' }, 503)
-          : respond({ ok: true, session: taskSession(id, 'Recovered retained task') });
-        if (id === 'slow-detail-task') return new Promise(resolve => { releaseSlowDetail = () => resolve(respond({ ok: true, session: taskSession(id, 'Stale delayed task') })); });
-        if (id === 'mismatched-detail-task') return respond({ ok: true, session: taskSession('another-task', 'Wrong task') });
-        if (id === 'missing-detail-task') return respond({ ok: false, error: 'Work session not found.' }, 404);
-        if (id === 'summary-error-task') return respond({ ok: false, error: 'Summary details temporarily unavailable.' }, 503);
-        const summary = snapshot.tasks.find(task => task.work_id === id);
-        return summary ? respond({ ok: true, session: { ...summary, events: summary.events?.length ? summary.events : activityEntries.filter(entry => entry.taskId === id) } }) : respond({ ok: false, error: 'Work session not found.' }, 404);
-      };
-      history.replaceState(null, '', '#code?task=probe-task&file=src%2Fnew.js');
-      const host = document.createElement('div');
-      document.body.replaceChildren(host);
-      const module = await import('/public/dashboard-react.js');
-      let snapshot = {
-        config: { workspaces: [{ alias: 'app' }] },
-        tasks: [
-          { work_id: 'probe-task', changeRevision: 1, title: 'Changes viewer probe', status: 'running', workspace: 'app', changedFiles: ['src/example.js', 'src/new.js'] },
-          { work_id: 'no-change-task', title: 'No changes', status: 'completed', workspace: 'app', changedFiles: [] },
-          { work_id: 'support-only-task', title: 'Support only', status: 'completed', workspace: 'app', changedFiles: ['tools/helper.jar'] }
-        ],
-        live: { revisions: { task: 1 } }
-      };
-      const listeners = new Set();
-      const store = {
-        getSnapshot: () => snapshot,
-        subscribe: listener => {
-          listeners.add(listener);
-          return () => listeners.delete(listener);
-        }
-      };
-      module.mountReactFoundation(host, store);
-      window.dispatchEvent(new CustomEvent('relai:route-change', {
-        detail: { section: 'code', path: 'code', params: new URLSearchParams('task=probe-task') }
-      }));
-      for (let attempt = 0; attempt < 50 && (!document.querySelector('.monaco-editor .view-lines') || typeof window.monaco?.editor?.colorize !== 'function'); attempt += 1) await wait(50);
-      await wait(300);
-      const editorBefore = document.querySelector('.monaco-diff-editor');
-      const editors = window.monaco?.editor?.getEditors?.() || [];
-      const liveEditor = editors.find(editor => editor.getModel?.()?.getValue?.()?.includes('const answer = 42;')) || editors.at(-1) || null;
-      const model = liveEditor?.getModel?.() || null;
-      const readOnly = liveEditor?.getOption?.(window.monaco.editor.EditorOption.readOnly) === true;
-      const modelLanguage = model?.getLanguageId?.() || '';
-      const modelValue = model?.getValue?.() || '';
-      const editorHtml = editorBefore?.innerHTML || '';
-      const theme = document.documentElement.dataset.theme === 'light' ? 'vs' : 'vs-dark';
-      const colorizedHtml = await window.monaco.editor.colorize(modelValue, modelLanguage, { theme });
-      const colorProbe = document.createElement('div');
-      colorProbe.style.position = 'fixed';
-      colorProbe.style.left = '-10000px';
-      colorProbe.innerHTML = colorizedHtml;
-      document.body.appendChild(colorProbe);
-      const tokenColors = [...new Set([...colorProbe.querySelectorAll('span')]
-        .map(token => getComputedStyle(token).color)
-        .filter(Boolean))];
-      colorProbe.remove();
-      const lineHeight = liveEditor?.getOption?.(window.monaco.editor.EditorOption.lineHeight) || 0;
-      const lineTops = liveEditor
-        ? Array.from({ length: Math.min(5, model?.getLineCount?.() || 0) }, (_, index) => liveEditor.getTopForLineNumber(index + 1))
-        : [];
-      liveEditor?.setPosition?.({ lineNumber: 3, column: 10 });
-      const positionBeforeLiveUpdate = liveEditor?.getPosition?.() || null;
-      const rectFor = selector => {
-        const box = document.querySelector(selector)?.getBoundingClientRect();
-        return box ? { width: box.width, height: box.height, top: box.top, left: box.left } : null;
-      };
-      window.relaiCodeProbe.setRevision(2);
-      snapshot = {
-        ...snapshot,
-        tasks: snapshot.tasks.map(task => task.work_id === 'probe-task' ? { ...task, changeRevision: 2 } : task),
-        live: { revisions: { task: 2 } }
-      };
-      listeners.forEach(listener => listener());
-      await wait(150);
-      const positionAfterLiveUpdate = liveEditor?.getPosition?.() || null;
-      const result = {
-        editorPresent: Boolean(editorBefore),
-        mobileTasksParentActive: document.querySelector('.mobile-nav [data-nav-id="tasks"]')?.getAttribute('aria-current') === 'page',
-        inlineDiffEditor: Boolean(document.querySelector('.monaco-diff-editor')),
-        readOnly,
-        saveButtonPresent: Boolean(document.querySelector('[data-code-save]')),
-        changedFileRows: [...document.querySelectorAll('[data-code-file]')].map(button => button.dataset.codeFile || ''),
-        taskOptions: [...document.querySelectorAll('[data-code-task] option')].map(option => option.value),
-        taskReturnHref: document.querySelector('[data-code-task-link]')?.getAttribute('href') || '',
-        selectedFileHeading: document.querySelector('[data-code-file-heading]')?.textContent.trim() || '',
-        statusBadges: [...document.querySelectorAll('[data-code-file]')].map(button => {
-          const marker = button.querySelector('.code-file-marker');
-          const style = marker ? getComputedStyle(marker) : null;
-          const box = marker?.getBoundingClientRect?.();
-          return {
-            path: button.dataset.codeFile || '',
-            code: marker?.textContent?.trim() || '',
-            title: button.getAttribute('title') || '',
-            fontSize: style ? Number.parseFloat(style.fontSize) : 0,
-            width: box?.width || 0,
-            height: box?.height || 0
-          };
-        }),
-        sameEditorAfterLiveUpdate: editorBefore === document.querySelector('.monaco-diff-editor'),
-        sameModelAfterLiveUpdate: model === liveEditor?.getModel?.(),
-        freshModelAfterLiveUpdate: liveEditor?.getModel?.()?.getValue?.() || '',
-        modelLanguage,
-        modelValue,
-        tokenColors,
-        lineHeight,
-        lineTops,
-        positionBeforeLiveUpdate,
-        positionAfterLiveUpdate,
-        editorHtmlSample: editorHtml.slice(0, 1000),
-        geometry: {
-          host: rectFor('[data-code-editor]'),
-          pane: rectFor('.code-editor-pane'),
-          workbench: rectFor('.code-workbench'),
-          monaco: rectFor('.monaco-editor:not(.gutter)')
-        }
-      };
-      const folder = () => document.querySelector('.code-tree-folder-label[title="src"]');
-      folder().click();
-      await until(() => folder()?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-code-file]'), 'folder collapse');
-      setInputValue(document.querySelector('[data-code-search]'), 'new.js');
-      await until(() => document.querySelector('[data-code-file="src/new.js"]') && !document.querySelector('[data-code-file="src/example.js"]'), 'matching file inside collapsed folder');
-      result.filteredFolderExpanded = folder().getAttribute('aria-expanded') === 'true';
-      setInputValue(document.querySelector('[data-code-search]'), '');
-      await until(() => folder()?.getAttribute('aria-expanded') === 'false' && !document.querySelector('[data-code-file]'), 'restore folder collapse after filtering');
-      result.filterPreservedFolderCollapse = true;
-      folder().click();
-      await until(() => document.querySelectorAll('[data-code-file]').length === 2, 'restore changed file rows');
-      result.fontFaces = await Promise.all(['Geist Variable', 'Geist Mono Variable'].map(async family => {
-        const faces = await document.fonts.load('400 15px "' + family + '"', 'Rel.AI');
-        return { family, loaded: faces.length > 0 && faces.every(face => face.status === 'loaded') };
-      }));
-      // Older same-path responses must not overwrite the latest task revision.
-      window.relaiCodeProbe.setRevision(3, 300);
-      snapshot = { ...snapshot, tasks: snapshot.tasks.map(task => task.work_id === 'probe-task' ? { ...task, changeRevision: 3 } : task) };
-      listeners.forEach(listener => listener());
-      await wait(35);
-      window.relaiCodeProbe.setRevision(4, 20);
-      snapshot = { ...snapshot, tasks: snapshot.tasks.map(task => task.work_id === 'probe-task' ? { ...task, changeRevision: 4 } : task) };
-      listeners.forEach(listener => listener());
-      await wait(350);
-      result.modelAfterOutOfOrderRefresh = liveEditor?.getModel?.()?.getValue?.() || '';
-      window.relaiCodeProbe.setRevision(5, 20);
-      document.querySelector('[data-code-refresh]')?.click();
-      await wait(100);
-      result.modelAfterManualRefresh = liveEditor?.getModel?.()?.getValue?.() || '';
-      // Navigate to another file without unmounting Changes. The URL and the
-      // rendered diff must agree even when the task itself has not changed.
-      location.hash = '#code?task=probe-task&file=src%2Fexample.js';
-      await wait(200);
-      result.sameTaskFileNavigation = {
-        heading: document.querySelector('[data-code-file-heading]')?.textContent.trim() || '',
-        routeFile: new URLSearchParams(location.hash.split('?')[1] || '').get('file')
-      };
-      document.querySelector('[data-code-file="src/new.js"]')?.click();
-      location.hash = '#activity?task=outside-task';
-      await wait(200);
-      result.routeAfterPendingDiff = location.hash;
-      location.hash = '#code?task=probe-task&file=missing.js';
-      await wait(250);
-      await until(() => document.querySelector('[data-code-editor][role="alert"]')?.textContent.includes('missing.js'), 'missing requested file explanation');
-      result.invalidFileContext = {
-        heading: document.querySelector('[data-code-file-heading]')?.textContent.trim() || '',
-        routeFile: new URLSearchParams(location.hash.split('?')[1] || '').get('file'),
-        recoveryVisible: document.querySelector('[data-code-editor]')?.textContent.includes('Choose a changed file or refresh') === true,
-        selectedOtherFile: Boolean(document.querySelector('[data-code-file].active'))
-      };
-      location.hash = '#code?task=retained-task&file=src%2Fretained.js';
-      await until(() => document.querySelector('[data-code-task]')?.value === 'retained-task' && document.querySelector('[data-code-file="src/retained.js"]') && document.querySelector('.monaco-diff-editor'), 'retained task changes');
-      result.retainedTaskIdentity = {
-        selected: document.querySelector('[data-code-task]')?.value,
-        routeTask: new URLSearchParams(location.hash.split('?')[1]).get('task'),
-        heading: document.querySelector('[data-code-file-heading]')?.textContent.trim(),
-        requested: window.relaiCodeProbe.taskRequests().at(-1),
-        otherTaskAvailable: Boolean(document.querySelector('[data-code-task] option[value="probe-task"]'))
-      };
-      location.hash = '#code?task=unavailable-task&file=src%2Fretained.js';
-      await until(() => document.querySelector('[data-code-task-error]') && document.querySelector('[data-code-refresh]')?.textContent === 'Retry', 'unavailable retained task retry');
-      result.unavailableTaskContext = {
-        selected: document.querySelector('[data-code-task]')?.value,
-        routeTask: new URLSearchParams(location.hash.split('?')[1]).get('task'),
-        routeFile: new URLSearchParams(location.hash.split('?')[1]).get('file'),
-        errorIdentifiesTask: document.querySelector('[data-code-task-error]')?.textContent.includes('unavailable-task') === true,
-        returnTask: new URLSearchParams(document.querySelector('[data-code-task-link]')?.hash.split('?')[1]).get('task')
-      };
-      window.relaiCodeProbe.setUnavailableTaskAvailable(true);
-      document.querySelector('[data-code-refresh]').click();
-      await until(() => !document.querySelector('[data-code-task-error]') && document.querySelector('[data-code-file="src/retained.js"]') && document.querySelector('.monaco-diff-editor'), 'retained task retry recovery');
-      result.unavailableTaskRecovered = document.querySelector('[data-code-task]')?.value === 'unavailable-task';
-      const aggregateTasks = snapshot.tasks;
-      snapshot = { ...snapshot, tasks: [] };
-      listeners.forEach(listener => listener());
-      location.hash = '#code?task=retained-task&file=src%2Fretained.js';
-      await until(() => document.querySelector('[data-code-task]')?.value === 'retained-task' && document.querySelector('[data-code-file="src/retained.js"]') && document.querySelector('.monaco-diff-editor'), 'retained task without aggregate summaries');
-      result.retainedTaskWithoutSummaries = [...document.querySelectorAll('[data-code-task] option')].map(option => option.value);
-      location.hash = '#code?task=historical-task&file=src%2Fretained.js';
-      await until(() => document.querySelector('[data-code-task]')?.value === 'historical-task'
-        && document.querySelector('[data-code-editor]')?.textContent.includes('Original task diff unavailable'), 'historical task current file fallback');
-      result.historicalDiffUnavailable = {
-        recordedFileVisible: Boolean(document.querySelector('[data-code-file="src/retained.js"]')),
-        contextPreserved: new URLSearchParams(location.hash.split('?')[1]).get('file') === 'src/retained.js',
-        noRawIpcError: !document.querySelector('[data-code-editor][role="alert"]'),
-        currentFileOnly: window.relaiCodeProbe.historicalDiffRequests() === 1
-      };
-      snapshot = { ...snapshot, tasks: aggregateTasks };
-      listeners.forEach(listener => listener());
-      location.hash = '#tasks?task=probe-task';
-      for (let attempt = 0; attempt < 20 && !document.querySelector('[data-task-id="probe-task"]'); attempt += 1) await wait(25);
-      document.querySelector('[data-task-id="probe-task"]')?.click();
-      for (let attempt = 0; attempt < 20 && !document.querySelector('.task-files-summary a'); attempt += 1) await wait(25);
-      result.taskFileHrefs = [...document.querySelectorAll('.task-files-summary a')].map(link => link.getAttribute('href') || '');
-      result.editorCountAfterUnmount = window.monaco?.editor?.getEditors?.().length || 0;
-      result.modelCountAfterUnmount = window.monaco?.editor?.getModels?.().length || 0;
-      location.hash = '#tasks?workspace=app&task=probe-task&search=Changes+viewer&taskStatus=open';
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[aria-label="Task status filter"]')?.value === 'open' && document.querySelector('.task-files-summary a')?.hash.includes('from=tasks'), 'task filter route hydration');
-      result.scopedTaskFileHref = document.querySelector('.task-files-summary a').getAttribute('href');
-      document.querySelector('.task-files-summary a').click();
-      await until(() => document.querySelector('[data-code-task-link]')?.hash.includes('search=Changes+viewer'), 'contextual return link');
-      result.filteredTaskReturnHref = document.querySelector('[data-code-task-link]').getAttribute('href');
-      document.querySelector('[data-code-task-link]').click();
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[data-task-id="probe-task"].is-selected'), 'restored task selection');
-      result.restoredTaskContext = {
-        search: document.querySelector('[aria-label="Search tasks"]')?.value,
-        status: document.querySelector('[aria-label="Task status filter"]')?.value,
-        workspace: document.querySelector('[aria-label="Project filter"]')?.value,
-        selected: document.querySelector('.task-row.is-selected')?.dataset.taskId,
-        scopeExplained: document.querySelector('[data-task-search-scope]')?.textContent.includes('loaded tasks') === true
-      };
-      document.querySelector('#session-tab-activity').click();
-      const taskActivityLink = () => document.querySelector('#session-panel-activity .task-activity-view-all');
-      const activityTaskLink = () => document.querySelector('.activity-session-actions a[href^="#tasks"]');
-      await until(() => taskActivityLink(), 'task Activity link');
-      result.scopedTaskActivityHref = taskActivityLink().getAttribute('href');
-      result.taskEventActivityHref = document.querySelector('[data-task-event-link]')?.getAttribute('href');
-      taskActivityLink().click();
-      await until(() => document.querySelector('.activity-row-trigger')?.textContent.includes('Activity return context fixture'), 'contextual task activity');
-      result.activityOwnFiltersInitiallyEmpty = !new URLSearchParams(location.hash.split('?')[1]).has('search') && !new URLSearchParams(location.hash.split('?')[1]).has('status');
-      document.querySelector('.activity-row-trigger').click();
-      await until(() => activityTaskLink(), 'Activity task return link');
-      const activitySearch = document.querySelector('input[placeholder="Search activity"]');
-      setInputValue(activitySearch, 'Activity return context');
-      await until(() => new URLSearchParams(location.hash.split('?')[1]).get('search') === 'Activity return context', 'independent Activity search');
-      result.activityTaskReturnHref = activityTaskLink().getAttribute('href');
-      activityTaskLink().click();
-      await until(() => document.querySelector('#session-tab-activity'), 'returned task Activity tab');
-      document.querySelector('#session-tab-activity').click();
-      await until(() => taskActivityLink(), 'returned task activity link');
-      taskActivityLink().click();
-      await until(() => document.querySelector('.activity-row-trigger'), 'returned Activity rows');
-      document.querySelector('.activity-row-trigger').click();
-      await until(() => activityTaskLink(), 'returned Activity task link');
-      result.activityNestedReturnHref = activityTaskLink().getAttribute('href');
-      activityTaskLink().click();
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[data-task-id="probe-task"].is-selected'), 'Tasks Activity Tasks roundtrip');
-      result.activityRestoredTaskContext = {
-        search: document.querySelector('[aria-label="Search tasks"]')?.value,
-        status: document.querySelector('[aria-label="Task status filter"]')?.value,
-        workspace: document.querySelector('[aria-label="Project filter"]')?.value,
-        selected: document.querySelector('.task-row.is-selected')?.dataset.taskId
-      };
-      location.hash = '#tasks?task=probe-task&search=Changes+viewer&taskStatus=open';
-      await until(() => document.querySelector('[aria-label="Project filter"]')?.value === '' && document.querySelector('#session-tab-activity'), 'all-projects Tasks Activity context');
-      document.querySelector('#session-tab-activity').click();
-      await until(() => taskActivityLink()?.hash.includes('returnSearch=Changes+viewer'), 'all-projects task Activity deep link');
-      taskActivityLink().click();
-      await until(() => document.querySelector('.activity-row-trigger'), 'all-projects origin task activity');
-      document.querySelector('.activity-row-trigger').click();
-      await until(() => activityTaskLink(), 'all-projects origin Activity return link');
-      result.activityAllProjectsReturnHref = activityTaskLink().getAttribute('href');
-      activityTaskLink().click();
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'Changes viewer' && document.querySelector('[data-task-id="probe-task"].is-selected'), 'all-projects Activity roundtrip');
-      result.activityAllProjectsRestored = document.querySelector('[aria-label="Project filter"]')?.value === '';
-      location.hash = '#activity?workspace=app&task=no-change-task&time=all&from=tasks&returnTask=probe-task&returnWorkspace=app&returnSearch=Changes+viewer&returnTaskStatus=open';
-      await until(() => document.querySelector('.activity-row-trigger')?.textContent.includes('Different task activity fixture'), 'different Activity task selection');
-      document.querySelector('.activity-row-trigger').click();
-      await until(() => activityTaskLink()?.hash.includes('task=no-change-task'), 'different task return link');
-      result.activityDifferentTaskReturnHref = activityTaskLink().getAttribute('href');
-      location.hash = '#tasks?task=probe-task&search=nomatch&taskStatus=completed';
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === 'nomatch' && document.querySelector('[aria-label="Task status filter"]')?.value === 'completed', 'changed task filters');
-      result.filteredSelection = {
-        emptyExplainsLoadedScope: document.querySelector('.task-list .empty')?.textContent.includes('No loaded tasks match') === true,
-        selectionExplained: Boolean(document.querySelector('[data-task-selection-context]')),
-        selectedTaskVisible: document.querySelector('.task-detail-header h2')?.textContent === 'Changes viewer probe'
-      };
-      location.hash = '#tasks?task=probe-task';
-      await until(() => document.querySelector('[aria-label="Search tasks"]')?.value === '' && document.querySelector('.task-files-summary a')?.hash.includes('from=tasks'), 'all projects task route');
-      document.querySelector('.task-files-summary a').click();
-      await until(() => document.querySelector('[data-code-task-link]'), 'all projects return link');
-      result.allProjectsReturnHref = document.querySelector('[data-code-task-link]').getAttribute('href');
-      location.hash = '#tasks?task=retry-detail-task';
-      await until(() => document.querySelector('[data-task-detail-state="error"]') && document.querySelector('[data-retry-task-detail]'), 'structured detail error');
-      result.taskDetailFailure = {
-        identifiesTask: document.querySelector('[data-task-detail-state]')?.textContent.includes('retry-detail-task') === true,
-        selectPromptAbsent: !document.querySelector('[data-session-inspector]')?.textContent.includes('Select a task'),
-        messageVisible: document.querySelector('[data-task-detail-state]')?.textContent.includes('Temporary detail failure.') === true
-      };
-      retryDetailFails = false;
-      document.querySelector('[data-retry-task-detail]').click();
-      await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task', 'detail retry success');
-      result.taskDetailRetry = {
-        attempts: detailRequests.filter(id => id === 'retry-detail-task').length,
-        errorCleared: !document.querySelector('[data-task-detail-state]'),
-        routeTask: new URLSearchParams(location.hash.split('?')[1]).get('task')
-      };
-      location.hash = '#tasks?task=missing-detail-task';
-      await until(() => document.querySelector('[data-task-detail-state="unavailable"]'), 'missing task distinction');
-      result.missingTaskDetails = {
-        retryVisible: Boolean(document.querySelector('[data-retry-task-detail]')),
-        identifiesTask: document.querySelector('[data-task-detail-state]')?.textContent.includes('missing-detail-task') === true
-      };
-      location.hash = '#tasks?task=mismatched-detail-task';
-      await until(() => document.querySelector('[data-task-detail-state="error"]'), 'mismatched task rejection');
-      result.mismatchedTaskRejected = !document.querySelector('.task-detail-header h2') && document.querySelector('[data-task-detail-state]')?.textContent.includes('did not match') === true;
-      snapshot = { ...snapshot, tasks: [...snapshot.tasks, taskSession('summary-error-task', 'Last available summary')] };
-      listeners.forEach(listener => listener());
-      // Overview is summary-only by design; Activity explicitly requires detail hydration.
-      location.hash = '#tasks?task=summary-error-task&tab=activity';
-      await until(() => document.querySelector('[data-task-detail-state="error"]') && document.querySelector('.task-detail-header h2')?.textContent === 'Last available summary', 'preserved summary on hydration failure');
-      result.summarySurvivesDetailFailure = document.querySelector('[data-task-detail-state]')?.textContent.includes('Showing the last available task details.') === true;
-      location.hash = '#tasks?task=slow-detail-task';
-      await until(() => releaseSlowDetail && document.querySelector('[data-task-detail-state="loading"]'), 'pending retained task');
-      result.taskDetailLoading = {
-        loading: document.querySelector('[data-task-detail-state]')?.getAttribute('aria-busy') === 'true',
-        selectPromptAbsent: !document.querySelector('[data-session-inspector]')?.textContent.includes('Select a task')
-      };
-      location.hash = '#tasks?task=retry-detail-task';
-      await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task', 'newer task selection');
-      releaseSlowDetail();
-      await wait(0);
-      await wait(0);
-      result.lateTaskDetailsIgnored = document.querySelector('.task-detail-header h2')?.textContent === 'Recovered retained task';
-      const inspectorTask = { work_id: 'probe-task', title: 'Inspector regression task', workspace: 'app', status: 'running', changeRevision: 1,
-        goalMode: { goalActive: false, conversationId: 'probe-chat-id' },
-        changedFiles: ['src/example.js', 'src/new.js'], validation: 'not_run',
-        events: Array.from({ length: 400 }, (_, index) => ({ eventId: 'inspector-' + index, timestamp: new Date(Date.now() - index * 1000).toISOString(), tool: 'relai_read', title: 'Inspector event ' + index, summary: 'Recorded event ' + index, status: 'succeeded', taskId: 'probe-task', workspace: 'app' })) };
-      snapshot = { ...snapshot, tasks: [inspectorTask],
-        managedProcesses: [
-          { processId: 'proc-task-owned', workSessionId: 'probe-task', workspaceId: 'app', lifecycle: 'task', status: 'running', label: 'Task command', pid: 123 },
-          { processId: 'proc-persistent', workSessionId: 'probe-task', workspaceId: 'app', lifecycle: 'persistent', status: 'running', label: 'Persistent server', pid: 124 },
-          { processId: 'proc-other', workSessionId: 'another-task', workspaceId: 'app', lifecycle: 'persistent', status: 'orphaned', label: 'Other service', canStop: false, recovery: 'Recorded recovery guidance' }
-        ],
-        auditTail: { entries: Array.from({ length: 25 }, (_, index) => ({ id: 'dock-' + index, ts: Date.now() + index, tool: 'relai_read', summary: 'Dock event ' + index, status: 'succeeded' })) },
-        taskActivity: { state: 'working', activeCalls: 1, activeTaskCount: 1, tasks: [{ ...inspectorTask, currentActivity: 'Inspecting recorded evidence' }] } };
-      listeners.forEach(listener => listener());
-      location.hash = '#tasks?workspace=app&task=probe-task&tab=changes&file=src%2Fnew.js&search=Inspector&taskStatus=open';
-      await until(() => document.querySelector('#session-tab-changes')?.getAttribute('aria-selected') === 'true' && document.querySelector('.task-diff-viewer .monaco-diff-editor') && document.querySelector('[data-code-file-heading]')?.textContent === 'src/new.js', 'embedded Changes deep link');
-      result.inspectorFullScreenHref = document.querySelector('[data-code-fullscreen-link]')?.getAttribute('href');
-      result.inspectorHeaderHasNoIds = !document.querySelector('.task-detail-header')?.textContent.includes('probe-task');
-      const identifiers = document.querySelector('[data-task-identifiers]');
-      identifiers.open = true;
-      result.inspectorTaskIdentifiers = Boolean(identifiers.querySelector('[aria-label="Copy Task ID"]'))
-        && identifiers.textContent.includes('probe-task')
-        && Boolean(identifiers.querySelector('[aria-label="Copy Chat ID"]'))
-        && identifiers.textContent.includes('probe-chat-id');
-      const inspectorEditor = () => window.monaco.editor.getEditors().find(editor => editor.getModel()?.getValue()?.includes('function greet'));
-      document.querySelector('.task-diff-viewer .code-layout-button:last-child').click();
-      inspectorEditor()?.setPosition({ lineNumber: 3, column: 5 });
-      document.querySelector('#session-tab-activity').click();
-      await until(() => !document.querySelector('#session-panel-changes .monaco-diff-editor'), 'hidden editor disposal');
-      const readsWhileHidden = window.relaiCodeProbe.taskRequests().length;
-      snapshot = { ...snapshot, tasks: [{ ...inspectorTask, title: 'Updated inspector title' }] };
-      listeners.forEach(listener => listener());
-      await until(() => document.querySelector('.task-detail-header h2')?.textContent === 'Updated inspector title', 'hidden task update');
-      result.inspectorHiddenReadsStable = window.relaiCodeProbe.taskRequests().length === readsWhileHidden;
-      document.querySelector('#session-tab-changes').click();
-      await until(() => document.querySelector('.task-diff-viewer .monaco-diff-editor') && inspectorEditor(), 'editor remount');
-      result.inspectorDiffRestored = document.querySelector('[data-code-file-heading]')?.textContent === 'src/new.js'
-        && document.querySelector('.code-layout-button:last-child')?.getAttribute('aria-pressed') === 'true'
-        && inspectorEditor().getPosition()?.lineNumber === 3;
-      document.querySelector('#session-tab-processes').click();
-      await until(() => document.querySelector('#session-panel-processes [data-process-id="proc-persistent"]'), 'attributed task processes');
-      result.inspectorProcessBadge = document.querySelector('#session-tab-processes .task-tab-badge')?.textContent;
-      result.inspectorOtherProcessesHidden = !document.querySelector('[data-process-id="proc-other"]') && !document.querySelector('.task-other-processes');
-      const groups = [...document.querySelectorAll('#session-panel-processes .task-process-group')];
-      result.inspectorProcessGroups = groups.map(group => ({ title: group.querySelector('h3').textContent, ids: [...group.querySelectorAll('[data-process-id]')].map(row => row.dataset.processId) }));
-      result.inspectorProcessState = document.querySelector('[data-process-id="proc-persistent"] .status-pill')?.textContent;
-      result.inspectorProjectProcessesLink = Boolean(document.querySelector('.task-processes-container a[href^="#processes"]'));
-      document.querySelector('#session-tab-activity').click();
-      await until(() => document.querySelectorAll('#session-panel-activity .task-event-link').length > 0, 'recent task activity');
-      result.inspectorRecentRows = document.querySelectorAll('#session-panel-activity .task-event-link').length;
-      result.inspectorPreviewRemoved = !document.querySelector('#session-panel-activity .task-event-link button, .task-event-inspection')
-        && Boolean(document.querySelector('#session-panel-activity .task-activity-view-all'))
-        && Boolean(document.querySelector('#session-panel-activity .task-event-link[href*="event="]'));
-      result.inspectorSingleScroll = getComputedStyle(document.querySelector('.session-inspector')).overflowY === 'auto'
-        && getComputedStyle(document.querySelector('.task-event-scroll')).overflowY !== 'auto';
-      location.hash = '#tasks?task=probe-task&tab=technical';
-      await until(() => !document.querySelector('#session-panel-overview')?.hidden, 'legacy technical link opens Overview');
-      result.inspectorDetailsLinkWorks = Boolean(document.querySelector('[data-task-identifiers]'));
-      result.runtimeDockRemoved = !document.querySelector('.runtime-dock-btn, .runtime-dock');
-      return result;
-    })()`);
-    result.cspErrors = cspErrors;
+    const result = await win.webContents.executeJavaScript('(' + probeTaskChanges.toString() + ')()');
     fs.writeFileSync(outputPath, JSON.stringify(result, null, 2));
   } catch (error) {
-    fs.writeFileSync(outputPath, JSON.stringify({ error: error instanceof Error ? error.stack || error.message : String(error), cspErrors }, null, 2));
+    fs.writeFileSync(outputPath, JSON.stringify({
+      error: error instanceof Error ? error.stack || error.message : String(error)
+    }, null, 2));
     process.exitCode = 1;
   } finally {
     win.destroy();

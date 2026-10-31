@@ -51,7 +51,7 @@ Work contains Overview (`#home`), Tasks (`#tasks`), Browser (`#browser`), and Pr
 
 Settings remains at the bottom. Its Connection page is also reachable from the live topbar status. More contains the ChatGPT tools catalogue and, only when enabled, Extensions. Opening a secondary destination expands More and marks the destination current. The footer identifies the application surface without implying connection health.
 
-Changes remains a canonical full-screen route at `#code`, available from the task's Changes panel and quick navigation. It preserves task/file context and highlights Tasks in the sidebar. Connection remains canonical at `#settings/connection`, with Settings highlighted for all its subpages.
+Changes is part of each task's inspector, not a separate desktop or mobile destination. Legacy `#code` links normalize to the selected task's Changes tab while preserving its file and filter context. Connection remains canonical at `#settings/connection`, with Settings highlighted for all its subpages.
 
 ### Mobile navigation
 
@@ -133,13 +133,13 @@ Search remains visible. Simple choices such as tool capability and Activity time
 
 Feature-specific filters remain owned by their feature rather than duplicated in global state.
 
-## Task evidence and runtime dock
+## Task evidence and operations
 
-Tasks retains the master-detail inspector with Overview, Changes, Activity, Validation, and Processes tabs. A separate Details control opens identifiers, runtime information, running-operation diagnostics, and trace export; existing `tab=technical` links open this secondary panel. The header prioritizes the task title, status, and project. Activity badges disclose loaded history and whether more exists, Validation shows the recorded outcome, and Processes counts only task-owned entries. The Tasks route accepts validated `tab` and `file` parameters; standalone Changes remains canonical at `#code`. Embedded diffs validate task and file identity without requiring the Changes route. Inactive diff editors are disposed while their file, layout, selection, and scroll state are retained.
+Tasks retains the master-detail inspector with Overview, Details, Changes, Activity, and Processes tabs. Details shows the durable Work ID, available verified conversation ID, recorded execution status, timestamps, outcome, call counts, and validation status without exposing raw technical traces. Legacy `tab=technical` links canonicalize to `tab=details`; the retired Technical panel and its raw trace export remain absent. The header prioritizes the task title, status, and project. Tool-call counts come from task call accounting and remain the single user-facing work count in Tasks; Activity keeps its event timeline without a competing numeric count. Processes counts only task-owned entries. The Tasks route accepts validated `tab` and `file` parameters; Changes are presented only in the task's Changes tab; obsolete `#code` links are redirected to that tab without losing task or file context. Embedded diffs respond to their container width, validate task and file identity, and retain file/layout/scroll state while inactive editors are disposed.
 
 Process attribution uses durable `workSessionId` and lifecycle fields. Task-bound and persistent processes started by the task are separate from other managed workspace processes, which remain collapsed until requested. Older task-owned records without lifecycle metadata remain visible in their own group. The inspector reuses Running commands status, recovery, Stop controls, and identity-verified memory readings; optional sampling stops on hidden documents and inactive tabs.
 
-The optional runtime dock consumes the canonical store only while open and reuses the dashboard event connection. It shows the latest bounded activity tail and managed process states. Local dashboard diagnostics display cached, explicit Git and PTY probes and individual tunnel states. Missing evidence is never promoted to success.
+The retired runtime dock is no longer an alternate activity or command surface. Activity and Running commands own their respective data; Troubleshooting holds diagnostics and support exports. Missing evidence is never promoted to success.
 
 ## Resource diagnostics
 

@@ -519,7 +519,7 @@ async function case_task_inspector_lifecycle_unit() {
       routeHref: () => '#activity',
       orderWorkspacesAlphabetically: rows => rows
     };
-    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskProcessesSection, CurrentOperations, TaskTraceSection };', context);
+    vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskDetailsSection, TaskProcessesSection, CurrentOperations, TaskTraceSection };', context);
     return {
       requests, controls,
       refreshes: () => refreshes,
@@ -582,6 +582,8 @@ async function case_task_inspector_lifecycle_unit() {
     assert.equal(tabProps.counts.processes, 2, 'Processes must count task operations and owned commands, excluding other tasks');
     const tabs = app.render('SessionTabs', tabProps);
     assert.equal(find(tabs, node => node.props['data-session-tab'] === 'validation'), null);
+    assert.equal(find(tabs, node => node.props['data-session-tab'] === 'activity' && find(node, child => child.props?.className === 'task-tab-badge')), null,
+      'Activity must not show a second event-count badge beside the truthful Tool calls metric');
     assert.equal(find(detail, node => node.props['data-session-panel'] === 'validation'), null);
 
     const processes = app.render('TaskProcessesSection', find(detail, node => node.type?.name === 'TaskProcessesSection').props);
@@ -614,9 +616,16 @@ async function case_task_inspector_lifecycle_unit() {
     await settle();
 
     const overview = app.render('SessionInspector', { session: active, activeTab: 'overview' });
-    const identifiers = find(overview, node => Object.hasOwn(node.props, 'data-task-identifiers'));
-    assert.ok(identifiers, 'Task Overview must preserve identifiers for manual continuation');
-    assert.equal(find(identifiers, node => node.type?.name === 'TaskIdentifier').props.label, 'Task ID');
+    const detailsSection = find(overview, node => node.type?.name === 'TaskDetailsSection');
+    assert.ok(detailsSection, 'Task inspector must expose the Details section');
+    const renderedDetails = app.render('TaskDetailsSection', detailsSection.props);
+    const identifiers = find(renderedDetails, node => Object.hasOwn(node.props, 'data-task-identifiers'));
+    assert.ok(identifiers, 'Task Details must preserve identifiers for manual continuation');
+    assert.equal(find(identifiers, node => node.type?.name === 'TaskIdentifier').props.label, 'Work ID');
+    assert.equal(find(renderedDetails, node => node.type?.name === 'Detail' && node.props.label === 'Activity events'), null,
+      'Task Details must not expose recorded Activity as a competing work-count metric');
+    assert.ok(find(renderedDetails, node => node.type?.name === 'Detail' && node.props.label === 'Tool calls'),
+      'Task Details must retain the truthful Tool calls metric');
 
     const completed = { ...active, status: 'completed' };
     assert.equal(app.render('CurrentOperations', { session: completed }), null, 'terminal tasks must hide stale operation snapshots');

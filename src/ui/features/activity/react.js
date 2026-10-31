@@ -31,6 +31,7 @@ import {
   activityFileLocation,
   activityFilterTransition,
   activityMessage,
+  activityOperationLabel,
   activitySessionView,
   activityStatusGroup,
   activityToolLabel,
@@ -810,6 +811,8 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, commandOper
     ? '' : distinctActivityText(result, message, heading) ? result : '';
   const fileLocationText = !files.length && distinctActivityText(fileLocation, target) ? fileLocation : '';
   const errorText = distinctActivityText(error, message, result) ? error : '';
+  const hasDetail = Boolean(summaryText || targetText || resultText || fileLocationText || errorText
+    || command || stdout.trim() || stderr.trim() || files.length);
   return h('aside', { className: 'activity-inspector', 'data-activity-inspector': '' },
     h('div', { className: 'activity-inspector-head' },
       h('h2', { tabIndex: -1, ref: headingRef }, heading)
@@ -820,6 +823,8 @@ export function ActivityInspector({ entry, sessionIndex, headingRef, commandOper
         h('span', { className: 'activity-detail-time muted' }, activityAbsoluteTime(entry))
       ),
       summaryText ? h('p', { className: 'activity-detail-summary' }, summaryText) : null,
+      readableSection('Operation', activityOperationLabel(entry)),
+      !hasDetail ? h('p', { className: 'task-detail-note' }, 'No additional details were recorded for this activity.') : null,
       session.id ? h('section', { className: 'activity-session-context' },
         h('div', { className: 'activity-session-copy' },
           h('strong', null, session.title),

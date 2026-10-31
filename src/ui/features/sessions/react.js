@@ -35,7 +35,9 @@ import {
   taskControlMessage,
   taskProcessGroups,
   taskRunningOperations,
-  taskRowActivity
+  taskRowActivity,
+  taskToolCallCount,
+  taskValidationView
 } from './model.js';
 
 const h = React.createElement;
@@ -121,7 +123,7 @@ function SessionsPage({ data = {} }) {
   const [hydrationState, setHydrationState] = useState(null);
   const [detailRefresh, setDetailRefresh] = useState(null);
   const requestedTab = routeParams.get('tab');
-  const validTabs = useMemo(() => new Set(['overview', 'changes', 'activity', 'processes']), []);
+  const validTabs = useMemo(() => new Set(['overview', 'details', 'changes', 'activity', 'processes']), []);
   const [activeTab, setActiveTab] = useState(() => validTabs.has(requestedTab) ? requestedTab : 'overview');
   useEffect(() => {
     setActiveTab(validTabs.has(requestedTab) ? requestedTab : 'overview');
@@ -439,7 +441,6 @@ function SessionsPage({ data = {} }) {
                 setActiveTab: selectTab,
                 activityHasMore: hydrated?.id === selectedId && hydrated?.activity?.hasMore === true,
                 onLoadMoreActivity: loadMoreActivity,
-                activityTotalCount: hydrated?.id === selectedId ? hydrated?.activity?.totalCount : undefined,
                 onControlComplete: refreshSelectedSession,
                 managedProcesses: data.managedProcesses || [],
                 commandOperations: data.commandOperations || [],
@@ -551,7 +552,7 @@ const TaskRow = memo(function TaskRow({ session, selected, onSelect }) {
   const live = isOngoingSession(session);
   const semantic = semanticProgressFor(session);
   const operation = semantic.currentActivity || session.currentActivity || session.operation || operationForTool(session.lastTool);
-  const toolCalls = Math.max(0, Number(session.recordedEventCount ?? session.events?.length ?? 0));
+  const toolCalls = taskToolCallCount(session);
   const projectFiles = semanticFileCounts(session, semantic).product;
   const project = session.workspace || 'No project';
   const title = session.title || operation;
@@ -568,7 +569,7 @@ const TaskRow = memo(function TaskRow({ session, selected, onSelect }) {
     h('span', { className: 'task-row-main' },
       h('strong', null, title),
       activity && activity !== title ? h('span', { className: 'task-row-activity', title: activity }, activity) : null,
-      h('span', { className: 'task-row-meta' }, `${project}${session.goalMode?.goalActive ? ' · Goal' : ''} · ${toolCalls} tool call${toolCalls === 1 ? '' : 's'} · ${projectFiles} project file${projectFiles === 1 ? '' : 's'}`)
+      h('span', { className: 'task-row-meta' }, `${project}${session.goalMode?.goalActive ? ' · Goal' : ''} · ${toolCalls === null ? 'Tool calls not recorded' : `${toolCalls} tool call${toolCalls === 1 ? '' : 's'}`} · ${projectFiles} project file${projectFiles === 1 ? '' : 's'}`)
     ),
     h('span', { className: 'task-row-time' }, h(SessionTime, { session, live })),
     h(Icon, { name: 'chevronRight', size: 16 })
@@ -591,7 +592,7 @@ function SessionTime({ session, live }) {
   return h('span', end ? { 'data-clock-relative': end } : null, timeAgo(end) || '—');
 }
 
-function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, activityTotalCount, onLoadMoreActivity, onControlComplete, managedProcesses = [], commandOperations = [], requestedFilePath = '' }) {
+function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, onLoadMoreActivity, onControlComplete, managedProcesses = [], commandOperations = [], requestedFilePath = '' }) {
   const headingRef = useRef(null);
   const previousId = useRef('');
   const id = sessionIdentifier(session);
@@ -694,8 +695,6 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
     !commandIds.has(String(operation.id || operation.operationId || operation.invocationId || '')));
   const tabCounts = {
     changes: fileCounts.product + fileCounts.support,
-    activity: Math.max(Number(session.recordedEventCount || 0), Number.isFinite(activityTotalCount) ? activityTotalCount : 0, (session.events || []).length),
-    activityLabel: `${Math.max(Number(session.recordedEventCount || 0), Number.isFinite(activityTotalCount) ? activityTotalCount : 0, (session.events || []).length)} recorded events; ${(session.events || []).length} loaded${activityHasMore ? ', more available' : ''}`,
     processes: ownedProcessCount + taskCommands.length + otherOperations.length,
     processesLabel: `${taskCommands.length + otherOperations.length} task operations and ${ownedProcessCount} managed commands`
   };
@@ -753,28 +752,16 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
       h('div', { className: 'task-detail-grid task-detail-facts' },
         h(Detail, { label: 'Project', value: session.workspace || 'No project' }),
         h(DurationDetail, { session, live }),
-        h(Detail, { label: 'Tool calls', value: tabCounts.activity }),
+        h(Detail, { label: 'Tool calls', value: taskToolCallCount(session) ?? 'Not recorded' }),
         h(Detail, { label: 'Project files', value: fileCounts.product }),
         fileCounts.support > 0 ? h(Detail, { label: 'Support artifacts', value: fileCounts.support }) : null
       ),
-      h('details', { className: 'task-identifiers', 'data-task-identifiers': '' },
-        h('summary', null, 'Task identifiers'),
-        h('div', { className: 'task-identifier-rows' },
-          h(TaskIdentifier, { label: 'Task ID', value: id }),
-          session.goalMode?.conversationId
-            ? h(TaskIdentifier, { label: 'Chat ID', value: session.goalMode.conversationId })
-            : null
-        )
-      ),
       h(AttentionSection, { session }),
       h(FailureHistorySection, { session }),
-      fileCounts.product + fileCounts.support > 0 ? h('section', { className: 'task-detail-section task-files-summary' },
-        h('div', { className: 'task-detail-heading' },
-          h('h3', null, 'Files'),
-          h('a', { className: 'section-action', href: taskChangesHref(id) }, 'View changes')
-        )
-      ) : null,
       h(OriginalRequest, { objective: session.objective })
+    ),
+    h('div', { className: 'inspector-panel', id: 'session-panel-details', role: 'tabpanel', 'aria-labelledby': 'session-tab-details', tabIndex: 0, hidden: activeTab !== 'details', 'data-session-panel': 'details' },
+      h(TaskDetailsSection, { session, state, fileCounts })
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-changes', role: 'tabpanel', 'aria-labelledby': 'session-tab-changes', tabIndex: 0, hidden: activeTab !== 'changes', 'data-session-panel': 'changes' },
       changesVisited ? h(Suspense, {
@@ -782,8 +769,6 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
       }, h(TaskDiffViewer, {
         taskId: id,
         initialFilePath: selectedDiffFile,
-        fullScreenHref: taskChangesHref(id, selectedDiffFile),
-        mode: 'embedded',
         active: activeTab === 'changes',
         changeRevision: session.changeRevision,
         onSelectFile: path => {
@@ -793,7 +778,7 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
       })) : null
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-activity', role: 'tabpanel', 'aria-labelledby': 'session-tab-activity', tabIndex: 0, hidden: activeTab !== 'activity', 'data-session-panel': 'activity' },
-      activeTab === 'activity' ? h(TaskTraceSection, { session, activityHasMore, activityTotalCount, onLoadMoreActivity }) : null
+      activeTab === 'activity' ? h(TaskTraceSection, { session, activityHasMore, onLoadMoreActivity }) : null
     ),
     h('div', { className: 'inspector-panel', id: 'session-panel-processes', role: 'tabpanel', 'aria-labelledby': 'session-tab-processes', tabIndex: 0, hidden: activeTab !== 'processes', 'data-session-panel': 'processes' },
       h(TaskProcessesSection, { session, taskId: id, workspace: session.workspace, managedProcesses,
@@ -801,6 +786,61 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, a
         onStopOperation: operationId => controlTask('stop', operationId) })
     ),
 
+  );
+}
+
+function TaskDetailsSection({ session, state, fileCounts }) {
+  const conversationId = session.goalMode?.conversationId || session.correlation?.conversationId || '';
+  const createdAt = session.startedAtIso || session.createdAt || session.startedAt;
+  const finishedAt = session.completedAt || session.cancelledAt || session.endedAt || session.inactiveAt;
+  const dateLabel = value => {
+    const raw = String(value || '');
+    const numeric = /^\d{10,13}$/.test(raw) ? Number(raw) : null;
+    const timestamp = numeric === null ? Date.parse(raw) : numeric < 100_000_000_000 ? numeric * 1000 : numeric;
+    return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : 'Not recorded';
+  };
+  const validation = taskValidationView(session).statusLabel;
+  return h('div', { className: 'detail-stack task-full-details', 'data-task-details': '' },
+    h('section', { className: 'task-detail-section' },
+      h('h3', null, 'Task and conversation'),
+      h('div', { className: 'task-identifier-rows', 'data-task-identifiers': '' },
+        h(TaskIdentifier, { label: 'Work ID', value: sessionIdentifier(session) }),
+        conversationId ? h(TaskIdentifier, { label: 'Conversation ID', value: conversationId })
+          : h('p', { className: 'task-detail-note' }, 'No verified ChatGPT conversation ID is recorded for this task.')
+      )
+    ),
+    h('section', { className: 'task-detail-section' },
+      h('h3', null, 'Execution'),
+      h('div', { className: 'task-details-grid' },
+        h(Detail, { label: 'Project', value: session.workspace || 'No project' }),
+        h(Detail, { label: 'Status', value: state.label }),
+        h(Detail, { label: 'Mode', value: session.goalMode?.goalActive ? 'Goal Mode' : session.goalMode ? 'Goal Mode inactive' : 'Normal task' }),
+        session.goalMode?.state ? h(Detail, { label: 'Goal state', value: session.goalMode.state }) : null,
+        session.goalMode?.tunnelId ? h(Detail, { label: 'Tunnel ID', value: session.goalMode.tunnelId }) : null,
+        h(Detail, { label: 'Started', value: dateLabel(createdAt) }),
+        h(Detail, { label: 'Ended', value: dateLabel(finishedAt) }),
+        h(DurationDetail, { session, live: isOngoingSession(session) })
+      )
+    ),
+    h('section', { className: 'task-detail-section' },
+      h('h3', null, 'Recorded work'),
+      h('div', { className: 'task-details-grid' },
+        h(Detail, { label: 'Tool calls', value: taskToolCallCount(session) ?? 'Not recorded' }),
+        h(Detail, { label: 'Project files', value: fileCounts.product }),
+        h(Detail, { label: 'Support artifacts', value: fileCounts.support }),
+        h(Detail, { label: 'Failed calls', value: session.failedToolCallCount ?? session.failures ?? 'Not recorded' }),
+        h(Detail, { label: 'Validation', value: validation })
+      )
+    ),
+    session.objective ? h('section', { className: 'task-detail-section' },
+      h('h3', null, 'Original objective'),
+      h('p', { className: 'task-details-long-text' }, session.objective)
+    ) : null,
+    session.summary || session.resultSummary || session.errorSummary || session.endReason
+      ? h('section', { className: 'task-detail-section' },
+        h('h3', null, 'Outcome'),
+        h('p', { className: 'task-details-long-text' }, session.summary || session.resultSummary || session.errorSummary || session.endReason)
+      ) : null
   );
 }
 
@@ -822,8 +862,9 @@ function TaskIdentifier({ label, value }) {
 function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
   const tabs = [
     { id: 'overview', label: 'Overview' },
+    { id: 'details', label: 'Details' },
     { id: 'changes', label: 'Changes', badge: counts.changes, countLabel: `${counts.changes || 0} changed files` },
-    { id: 'activity', label: 'Activity', badge: counts.activity, countLabel: counts.activityLabel },
+    { id: 'activity', label: 'Activity' },
     { id: 'processes', label: 'Processes', badge: counts.processes, countLabel: counts.processesLabel }
   ];
   const tabIds = tabs.map(t => t.id);
@@ -1030,16 +1071,6 @@ function taskActivityHref(session, eventParams = {}) {
   });
 }
 
-function taskChangesHref(taskId, file) {
-  const params = getRouteParams();
-  return routeHref('code', {
-    workspace: params.get('workspace') || '',
-    task: taskId, file, from: 'tasks',
-    search: params.get('search'),
-    taskStatus: params.get('taskStatus')
-  });
-}
-
 function OriginalRequest({ objective }) {
   if (!objective) return null;
   return h('details', { className: 'task-detail-section task-original-request' },
@@ -1048,13 +1079,12 @@ function OriginalRequest({ objective }) {
   );
 }
 
-function TaskTraceSection({ session, activityHasMore = false, activityTotalCount, onLoadMoreActivity }) {
+function TaskTraceSection({ session, activityHasMore = false, onLoadMoreActivity }) {
   const [visibleCount, setVisibleCount] = useState(DETAIL_EVENT_PREVIEW);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState('');
   const ordered = orderSessionEvents(session.events || []);
   const recent = ordered.slice(0, visibleCount);
-  const total = Math.max(Number(session.recordedEventCount || 0), Number.isFinite(activityTotalCount) ? activityTotalCount : 0, ordered.length);
   const hasBuffered = ordered.length > visibleCount;
   const canLoadMore = activityHasMore && typeof onLoadMoreActivity === 'function';
   const showMore = async () => {
@@ -1078,8 +1108,7 @@ function TaskTraceSection({ session, activityHasMore = false, activityTotalCount
   };
   return h('section', { className: 'task-detail-section task-activity-summary' },
     h('div', { className: 'task-detail-heading' },
-      h('h3', null, 'Recent activity'),
-      h('span', null, `${total} recorded${activityHasMore ? ' · more available' : ''}`)
+      h('h3', null, 'Recent activity')
     ),
     recent.length ? h('div', { className: 'task-event-scroll', role: 'list', 'aria-label': 'Recent task activity' },
       recent.map((event, index) => h('div', { role: 'listitem', key: activityEventId(event) || index },

@@ -95,7 +95,7 @@ try {
     [{ path: 'tools', owner: 'system' }, false, 'tools'],
     [{ path: 'extensions', owner: 'extensions' }, true, 'extensions'],
     [{ path: 'settings/connection', owner: 'settings' }, false, 'settings'],
-    [{ path: 'code', owner: 'code' }, false, 'tasks']
+    [{ path: 'tasks', owner: 'tasks' }, false, 'tasks']
   ]) {
     const markup = renderToStaticMarkup(React.createElement(DesktopSidebar, {
       collapsed: false, extensionsEnabled: enabled, route, toggleSidebar() {}

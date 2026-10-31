@@ -131,7 +131,6 @@ registerReactSection('home', createLazyRoute(() => import('../features/home/reac
 registerReactSection('activity', createLazyRoute(() => import('../features/activity/react.js'), 'createActivityRoute', useDashboardSlices, 'activity'));
 registerReactSection('tasks', createLazyRoute(() => import('../features/sessions/react.js'), 'createSessionsRoute', useDashboardSlices, 'tasks'));
 registerReactSection('workspaces', createLazyRoute(() => import('../features/workspaces/react.js'), 'createWorkspacesRoute', useDashboardSlices, 'workspaces'));
-registerReactSection('code', createLazyRoute(() => import('../features/code/react.js'), 'createCodeRoute', useDashboardSlices, 'code'));
 registerReactSection('browser', createLazyRoute(() => import('../features/browser/react.js'), 'createBrowserRoute', undefined, 'browser'));
 registerReactSection('extensions', createLazyRoute(() => import('../features/extensions/react.js'), 'createExtensionsRoute', undefined, 'extensions'));
 registerReactSection('processes', createLazyRoute(() => import('../features/processes/react.js'), 'createProcessesRoute', useDashboardSlices, 'processes'));
@@ -469,7 +468,7 @@ function DesktopSidebar({ collapsed, extensionsEnabled, route, toggleSidebar }) 
       h('div', { className: 'sidebar-group' },
         h('div', { className: 'sidebar-group-label' }, 'Work'),
         h('nav', { className: 'nav', 'aria-label': 'Work navigation' },
-          DESKTOP_WORK_NAV_ITEMS.map(item => h(NavLink, { key: item.id, item, active: route.path === item.path || (item.id === 'tasks' && route.path === 'code') }))
+          DESKTOP_WORK_NAV_ITEMS.map(item => h(NavLink, { key: item.id, item, active: route.path === item.path }))
         )
       ),
       h('div', { className: 'sidebar-group secondary-nav' },

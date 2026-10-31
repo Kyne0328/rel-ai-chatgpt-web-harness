@@ -26,7 +26,7 @@ contextBridge.exposeInMainWorld('relaiCodeProbe', {
 
 contextBridge.exposeInMainWorld('relaiDesktop', {
   codeWorkspace: {
-    editors: async () => ({ editors: [] }),
+    editors: async () => ({ editors: [{ id: 'vscode', label: 'Visual Studio Code' }] }),
     get: async taskId => {
       taskRequests.push(taskId);
       if (taskId === 'unavailable-task' && !unavailableTaskAvailable) throw new Error('Retained task unavailable.');

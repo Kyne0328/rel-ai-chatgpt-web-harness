@@ -1,1 +1,0 @@
-import{t as e}from"./taskEvents-DoKgbj0p.js";function t(t={}){let r=e(t,{preferId:!0});return`event:${n(JSON.stringify(r))}`}function n(e){let t=14695981039346656037n;for(let n=0;n<e.length;n+=1)t^=BigInt(e.charCodeAt(n)),t=BigInt.asUintN(64,t*1099511628211n);return t.toString(16).padStart(16,`0`)}export{t};

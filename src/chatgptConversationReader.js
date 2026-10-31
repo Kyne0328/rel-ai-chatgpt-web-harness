@@ -20,10 +20,15 @@ const PATHS = [
 
 // Opaque host session IDs cannot identify a Web chat. Retain only exact work
 // IDs from bounded JSON tool receipts so discovery can prove the association.
-function workReceipts(text) {
-  if (typeof text !== 'string' || text.length > MAX_RECEIPT_CHARS) return [];
-  let receipt;
-  try { receipt = JSON.parse(text); } catch { return []; }
+function workReceipts(input) {
+  // Hosts may put MCP text blocks directly in content.parts rather than
+  // serializing those blocks into strings first.
+  if (typeof input === 'string' && input.length > MAX_RECEIPT_CHARS) return [];
+  let receipt = input;
+  if (typeof input === 'string') {
+    try { receipt = JSON.parse(input); } catch { return []; }
+  }
+  if (!receipt || typeof receipt !== 'object') return [];
   const receipts = new Map();
   const visit = (value, depth) => {
     if (!value || typeof value !== 'object' || depth > 3 || receipts.size >= 8) return;
@@ -34,10 +39,13 @@ function workReceipts(text) {
       receipts.set(value.work_id + ':' + linkId, { workId: value.work_id, linkId });
     }
     visit(value.structuredContent, depth + 1);
+    const readText = text => {
+      if (typeof text !== 'string' || text.length > MAX_RECEIPT_CHARS) return;
+      try { visit(JSON.parse(text), depth + 1); } catch {}
+    };
+    if (value.type === 'text') readText(value.text);
     for (const part of Array.isArray(value.content) ? value.content.slice(0, 8) : []) {
-      if (part?.type === 'text' && typeof part.text === 'string' && part.text.length <= MAX_RECEIPT_CHARS) {
-        try { visit(JSON.parse(part.text), depth + 1); } catch {}
-      }
+      if (part?.type === 'text') readText(part.text);
     }
   };
   visit(receipt, 0);

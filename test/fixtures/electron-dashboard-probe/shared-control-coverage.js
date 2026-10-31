@@ -101,10 +101,10 @@ export async function exerciseSharedControlCoverage({ win, waitFor, waitForCaptu
       };
     })()`);
     for (const theme of ['dark', 'light']) {
-      await evaluate(`(() => { document.documentElement.dataset.theme = ${JSON.stringify(theme)}; location.hash = '#code?task=shared-controls-retained&file=src%2Fcontrols.js'; })()`);
+      await evaluate(`(() => { document.documentElement.dataset.theme = ${JSON.stringify(theme)}; location.hash = '#tasks?task=shared-controls-retained&tab=changes&file=src%2Fcontrols.js'; })()`);
       let fieldsReady = true;
       try {
-        await waitFor(win, `document.querySelector('[data-code-task]')?.value === 'shared-controls-retained' && document.querySelector('[data-code-search]') && document.querySelector('[data-code-file="src/controls.js"]')`, 5000);
+        await waitFor(win, `document.querySelector('#session-tab-changes')?.getAttribute('aria-selected') === 'true' && document.querySelector('[data-code-search]') && document.querySelector('[data-code-file="src/controls.js"]')`, 5000);
       } catch (error) {
         if (!String(error.message).startsWith('Timed out waiting for:')) throw error;
         fieldsReady = false;
@@ -116,7 +116,7 @@ export async function exerciseSharedControlCoverage({ win, waitFor, waitForCaptu
       await evaluate(`document.activeElement?.blur()`);
       await waitForCapturePaint(win);
       const fields = await evaluate(`(${measureChangesFields.toString()})(document, getComputedStyle)`);
-      check(theme + ': Changes has enabled task and file-filter fields', fields.some(field => field.id === 'codeTaskSelect') && fields.some(field => field.search), fields);
+      check(theme + ': Tasks Changes has an enabled file-filter field', fields.some(field => field.search), fields);
       for (const field of fields) {
         check(theme + ': enabled ' + field.name + ' boundary is at least 3:1 against adjacent fills',
           field.borderWidth > 0 && field.insideRatio >= 3 && field.outsideRatio >= 3, field);
@@ -312,7 +312,7 @@ function measureChangesFields(document, getComputedStyle) {
   const background = element => element ? over(rgba(getComputedStyle(element).backgroundColor), background(element.parentElement)) : [255, 255, 255, 1];
   const luminance = rgb => rgb.slice(0, 3).map(value => value / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4).reduce((sum, value, index) => sum + value * [0.2126, 0.7152, 0.0722][index], 0);
   const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05);
-  return [...document.querySelectorAll('.code-task-control select, .code-toolbar-actions select, .code-explorer-head input')]
+  return [...document.querySelectorAll('.task-diff-embedded-toolbar select, .code-explorer-head input')]
     .filter(field => !field.disabled && field.getBoundingClientRect().width > 0)
     .map(field => {
       const style = getComputedStyle(field), inside = background(field), outside = background(field.parentElement);

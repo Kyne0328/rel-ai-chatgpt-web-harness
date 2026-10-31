@@ -1,7 +1,6 @@
 const CANONICAL_PATHS = new Set([
   'home',
   'tasks',
-  'code',
   'browser',
   'extensions',
   'workspaces',
@@ -20,7 +19,6 @@ const CANONICAL_PATHS = new Set([
 const ALLOWED_PARAMS = {
   home: new Set(['workspace']),
   tasks: new Set(['workspace', 'task', 'search', 'taskStatus', 'tab', 'file']),
-  code: new Set(['task', 'file', 'workspace', 'search', 'taskStatus', 'from']),
   browser: new Set(['tunnel']),
   'settings/connection': new Set(['tunnel']),
   workspaces: new Set(['workspace', 'focus', 'create']),
@@ -45,6 +43,7 @@ function normalizeRouteKey(value) {
   const resolved = resolvePath(requestedPath);
   const input = new URLSearchParams(resolved.recognized && separator >= 0 ? raw.slice(separator + 1) : '');
   const output = sanitizeParams(resolved.path, input);
+  if (requestedPath === 'code') output.set('tab', 'changes');
   const query = output.toString();
   return `${resolved.path}${query ? `?${query}` : ''}`;
 }
@@ -58,6 +57,7 @@ function routeAllowsParam(path, key) {
 }
 
 function resolvePath(path) {
+  if (path === 'code') return { path: 'tasks', recognized: true };
   const recognized = CANONICAL_PATHS.has(path);
   return { path: recognized ? path : 'home', recognized };
 }
@@ -92,7 +92,10 @@ function sanitizeValue(key, value) {
   if (key === 'range') return ANALYTICS_RANGES.has(text.toLowerCase()) ? text.toLowerCase() : '';
   if (key === 'start' || key === 'end') return DATE_PATTERN.test(text) ? text : '';
   if (key === 'from') return text === 'tasks' ? text : '';
-  if (key === 'tab') return ['overview', 'changes', 'activity', 'processes', 'technical'].includes(text) ? text : '';
+  if (key === 'tab') {
+    const tab = text === 'technical' ? 'details' : text;
+    return ['overview', 'details', 'changes', 'activity', 'processes'].includes(tab) ? tab : '';
+  }
   if (key === 'taskStatus' || key === 'returnTaskStatus') return TASK_STATUSES.has(text.toLowerCase()) ? text.toLowerCase() : '';
   if (key === 'status') return STATUSES.has(text.toLowerCase()) ? text.toLowerCase() : '';
   const limit = key === 'search' || key === 'returnSearch' ? 200 : key === 'file' ? 1000 : 160;

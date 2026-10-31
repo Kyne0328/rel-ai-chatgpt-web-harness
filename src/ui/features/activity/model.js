@@ -207,9 +207,8 @@ export function activityDisplayAction(entry) {
     const verb = action === 'read' ? 'Read' : 'Updated';
     return `${verb} ${count} file${count === 1 ? '' : 's'}`;
   }
-  return displayText(entry?.operation)
-    || displayText(entry?.tool?.operation)
-    || displayText(entry?.tool?.title)
+  return [entry?.operation, entry?.tool?.operation, entry?.tool?.title]
+    .map(displayText).find(value => value && !isGenericSuccess(value))
     || activityToolLabel(entry?.tool?.name || entry?.tool || action || entry?.type);
 }
 
@@ -256,7 +255,12 @@ export function activityDescription(entry) {
 }
 
 function isGenericSuccess(text) {
-  return /^(completed successfully|successfully completed)\.?$/i.test(text.trim());
+  return /^(completed successfully|successfully completed|action completed)\.?$/i.test(text.trim());
+}
+
+export function activityOperationLabel(entry) {
+  const action = displayText(entry?.action || entry?.metadata?.internalOperation || entry?.tool?.name || entry?.tool || entry?.type);
+  return action ? action.replace(/^relai_/, '').replaceAll('_', ' ') : 'Operation type not recorded';
 }
 
 export function activityToolLabel(tool) {

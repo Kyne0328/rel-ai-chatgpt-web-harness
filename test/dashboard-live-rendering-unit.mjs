@@ -9,6 +9,11 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
 const dashboard = read('public/dashboard.js');
+const { taskToolCallCount } = await import('../src/ui/features/sessions/model.js');
+assert.equal(taskToolCallCount({ toolCallCount: 0, recordedEventCount: 6 }), 0, 'zero tool calls must remain zero even when activity exists');
+assert.equal(taskToolCallCount({ toolCallCount: 2, recordedEventCount: 114 }), 2, 'event counts must not inflate tool-call counts');
+assert.equal(taskToolCallCount({ calls: 5 }), 5, 'legacy task call counts remain supported');
+assert.equal(taskToolCallCount({ recordedEventCount: 6 }), null, 'missing call counts must not be invented from activity');
 
 const settingsReact = read('src/ui/features/settings/react.js');
 
@@ -90,9 +95,14 @@ assert.match(sessionsReact, /fetchJson\(`\$\{TASK_SESSION_URL\}\?task=/, 'task h
 assert.doesNotMatch(sessionsReact, /Request ID|Trace ID/, 'session diagnostics must not present per-call protocol identifiers as stable task identifiers');
 assert.doesNotMatch(functionSource(sessionsReact, 'PlanSection'), /task-plan-collapsible|h\('details'/, 'task plans must remain visible instead of using a disclosure control');
 assert.doesNotMatch(sessionsReact, /modeLabel.*Planned.*Direct/s, 'durable task rows must not expose obsolete Direct versus Planned mode labels');
-assert.match(sessionsReact, /label: 'Tool calls'/, 'task inspector must retain tool-call counts after list simplification');
+assert.match(sessionsReact, /label: 'Tool calls'/, 'task inspector must retain truthful tool-call counts after list simplification');
+assert.doesNotMatch(sessionsReact, /const toolCalls = .*recordedEventCount/, 'task list must not label events as tool calls');
+assert.doesNotMatch(sessionsReact, /label: 'Activity events'/, 'task Details must not expose a second competing work-count metric');
+assert.doesNotMatch(sessionsReact, /id: 'activity', label: 'Activity', badge:/, 'the Activity tab must not present an event count beside Tool calls');
+assert.doesNotMatch(sessionsReact, /\$\{total\} recorded/, 'task Activity must not reintroduce an event total in its heading');
+assert.match(sessionsReact, /session-panel-details/, 'a dedicated task Details panel must be discoverable');
 assert.match(sessionsReact, /label: 'Project files'/, 'task inspector must retain the Project files count');
-assert.match(sessionsReact, /href: taskChangesHref\(id\)/, 'Overview must link to the dedicated Changes viewer instead of rendering a duplicate file list');
+assert.doesNotMatch(sessionsReact, /taskChangesHref|taskChangesTabHref|task-files-summary/, 'Overview must not link to a retired separate Changes surface');
 assert.doesNotMatch(sessionsReact, /ChangedFilesSection|ChangedFileGroup|FileList\(/, 'Overview must not duplicate the Changes file browser');
 assert.doesNotMatch(sessionsReact, /taskProgressHtml|Key activity|workflowTechnicalHtml/, 'Tasks must not reintroduce misleading per-tool whole-task progress or obsolete workflow guidance');
 assert.match(sessionsReact, /h\(PlanSection, \{ plan: session\.plan \}\)/, 'task Overview must render the durable plan directly');
@@ -112,8 +122,8 @@ assert.match(sessionsReact, /data-load-more-task-activity/, 'Task Activity must 
 assert.doesNotMatch(sessionsReact, /TaskEventInspector|setSelected\(event\)/, 'Task Activity must not duplicate the full event inspector');
 assert.match(sessionsReact, /event: activityEventId\(event\)/, 'task event links must deep-link into the exact Activity event');
 assert.doesNotMatch(sessionsReact, /data-session-details|TechnicalDetails|data-export-task-trace/, 'Tasks must not expose internal technical records or trace export');
-assert.match(sessionsReact, /data-task-identifiers/, 'Task Overview must retain the identifiers needed for manual continuation');
-assert.match(sessionsReact, /label: 'Chat ID', value: session\.goalMode\.conversationId/, 'Linked ChatGPT conversation IDs must be available to copy');
+assert.match(sessionsReact, /data-task-identifiers/, 'Task Details must retain identifiers needed for manual continuation');
+assert.match(sessionsReact, /label: 'Conversation ID', value: conversationId/, 'Linked ChatGPT conversation IDs must be available to copy');
 assert.doesNotMatch(sessionsReact, /task-other-processes/, 'task Processes must not show unrelated project processes');
 assert.match(processesReact, /key: row\.processId/, 'Process rows must reconcile by canonical process identity');
 assert.match(processesReact, /postJson\('\/api\/processes\/stop'/, 'Process stop must retain the existing backend lifecycle endpoint');
@@ -382,18 +392,15 @@ for (const streamId of ['a', 'b']) {
   };
   const requests = [];
   let displayed = null;
-  let route = 'code';
   const context = {
     useCallback: fn => fn,
-    mode: 'standalone', activeRef: { current: true }, onSelectFileRef: { current: null }, requestedPathRef: { current: '' },
+    activeRef: { current: true }, onSelectFileRef: { current: null }, requestedPathRef: { current: '' },
     workspaceRequestRef: { current: 0 }, diffRequestRef: { current: 0 },
     taskIdRef: { current: 'task-a' }, filePathRef: { current: 'src/a.js' }, pendingDiffPathRef: { current: '' },
     bridge: {
       get: async () => ({ work_id: 'task-a', changedFiles: ['src/a.js'] }),
       diff: () => new Promise((resolve, reject) => requests.push({ resolve, reject }))
     },
-    currentRoutePath: () => route,
-    readRequestedTaskId: () => 'task-a', readRequestedFilePath: () => 'src/a.js',
     changedTextFiles: workspace => workspace.changedFiles,
     taskId: task => task?.work_id || '',
     setWorkspace() {}, setWorkspaceError() {}, setWorkspaceLoading() {}, setFilePath() {},
@@ -420,11 +427,11 @@ for (const streamId of ['a', 'b']) {
   requests.length = 0;
   assert.equal(displayed.content, 'latest-revision', 'old in-flight diff must not overwrite a newer response');
   const departed = context.load('task-a', 'src/a.js');
-  route = 'activity';
-  requests.shift().reject(new Error('late old-route error'));
+  context.activeRef.current = false;
+  requests.shift().reject(new Error('late inactive-tab error'));
   await departed;
-  assert.equal(displayed.content, 'latest-revision', 'late failures must not alter a different route');
-  assert.match(source, /selectedTask\?\.changeRevision/, 'live refresh must track the selected task revision');
+  assert.equal(displayed.content, 'latest-revision', 'late failures must not alter an inactive Tasks tab');
+  assert.match(source, /selectedTaskId, changeRevision/, 'live refresh must track the task revision');
 
   let assignments = 0;
   let restorations = 0;
@@ -457,10 +464,8 @@ for (const streamId of ['a', 'b']) {
   const { changeRevision: _first, ...firstSummary } = first;
   const { changeRevision: _second, ...secondSummary } = second;
   assert.deepEqual(firstSummary, secondSummary, 'fixture summaries stay identical while the actual task revision changes');
-  const source = read('src/ui/features/code/react.js');
-  const context = { classifyTaskChangedFiles: files => ({ productChangedFileCount: files.length }) };
-  vm.runInNewContext(functionSource(source, 'codeTasks') + '\n' + functionSource(source, 'taskId') + '\n' + functionSource(source, 'taskLabel') + '\n globalThis.tasks = codeTasks;', context);
-  assert.notEqual(context.tasks({ tasks: [first] })[0].changeRevision, context.tasks({ tasks: [second] })[0].changeRevision);
+  assert.match(read('src/ui/features/code/react.js'), /selectedTaskId, changeRevision/,
+    'the integrated Tasks diff must refresh when its authoritative task revision changes');
 }
 
 

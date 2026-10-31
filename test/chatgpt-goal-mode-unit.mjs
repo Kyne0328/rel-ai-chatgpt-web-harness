@@ -2615,6 +2615,30 @@ test('code.text receipts survive projection while empty host results cannot auth
   assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
 });
 
+test('structured MCP text parts bind delayed receipts without trusting other speakers or branches', async () => {
+  const workId = 'structured-receipt', link = { version: 1, link_id: 'm'.repeat(32) };
+  const tree = linkedConversation(ID, workId, link);
+  tree.mapping.receipt.message.content.parts = [{ type: 'text',
+    text: JSON.stringify({ work_id: workId, chat_link: link }) }];
+  const deps = { workId, linkId: link.link_id, explicitGoal: true, conversationCorrelation: ID,
+    nativeTransport: async () => ({ ok: true, data: await readConversationProjection(response(tree)) }) };
+  tree.mapping.receipt.message.content.parts = [];
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent', 'unapproved receipt is not visible');
+  tree.mapping.receipt.message.content.parts = [{ type: 'text',
+    text: JSON.stringify({ work_id: workId, chat_link: link }) }];
+  assert.equal((await findRecentGoalCommand(deps)).state, 'matched', 'approved tool text can link');
+  tree.mapping.receipt.message.content.parts = [{ structuredContent: { work_id: workId, chat_link: link } }];
+  assert.equal((await findRecentGoalCommand(deps)).state, 'matched', 'structured output can link');
+  tree.mapping.receipt.message.author.role = 'assistant';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent', 'assistant-authored receipt is not proof');
+  tree.mapping.receipt.message.author.role = 'tool';
+  tree.mapping.receipt.message.content.parts[0].structuredContent.chat_link.link_id = 'n'.repeat(32);
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent', 'wrong link token is not proof');
+  tree.mapping.receipt.message.content.parts[0].structuredContent.chat_link.link_id = link.link_id;
+  tree.mapping.a.parent = 'u';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent', 'off-branch receipt is not proof');
+});
+
 function resourceLinkedConversation(id, workId, link) {
   const tree = linkedConversation(id, workId, link);
   tree.mapping.receipt.message = { id: 'resource-read', author: { role: 'tool', name: 'api_tool.read_resource' },

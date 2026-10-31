@@ -5,7 +5,6 @@ function route(id, label, path, description, group) {
 const WORK_NAV_ITEMS = Object.freeze([
   route('home', 'Overview', 'home', 'Connection status, projects, and recent tasks.', 'Work'),
   route('tasks', 'Tasks', 'tasks', 'See active and completed Rel.AI tasks.', 'Work'),
-  route('code', 'Changes', 'code', 'Review current and committed file changes for a Rel.AI task.', 'Work'),
   route('browser', 'Browser', 'browser', 'View and take over the live local browser session used by Rel.AI.', 'Work'),
   route('workspaces', 'Projects', 'workspaces', 'Choose which project folders Rel.AI can use.', 'Work'),
   route('activity', 'Activity', 'activity', 'See Rel.AI actions and their results.', 'Work')
@@ -31,7 +30,7 @@ export const EXTENSIONS_NAV_ITEM = route(
   'Application'
 );
 
-export const DESKTOP_WORK_NAV_ITEMS = Object.freeze(WORK_NAV_ITEMS.filter(item => !['activity', 'code'].includes(item.id)));
+export const DESKTOP_WORK_NAV_ITEMS = Object.freeze(WORK_NAV_ITEMS.filter(item => item.id !== 'activity'));
 export const DESKTOP_SYSTEM_NAV_ITEMS = Object.freeze([
   SYSTEM_NAV_ITEMS.find(item => item.id === 'processes'),
   WORK_NAV_ITEMS.find(item => item.id === 'activity'),
@@ -66,16 +65,18 @@ export const DESKTOP_UTILITY_NAV_ITEMS = Object.freeze([
 export const DESKTOP_NAV_ITEMS = Object.freeze([
   ...DESKTOP_WORK_NAV_ITEMS, ...DESKTOP_SYSTEM_NAV_ITEMS, ...DESKTOP_UTILITY_NAV_ITEMS, ...DESKTOP_SECONDARY_NAV_ITEMS
 ]);
-export const MOBILE_NAV_ITEMS = Object.freeze([...WORK_NAV_ITEMS.filter(item => item.id !== 'code'), ...APPLICATION_NAV_ITEMS]);
+export const MOBILE_NAV_ITEMS = Object.freeze([...WORK_NAV_ITEMS, ...APPLICATION_NAV_ITEMS]);
 
 const ROUTES = new Map([...WORK_NAV_ITEMS, ...DESKTOP_NAV_ITEMS, EXTENSIONS_NAV_ITEM, ...SYSTEM_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => [item.path, item]));
 
 export function routeMetadata(path) {
-  return ROUTES.get(String(path || '').toLowerCase()) || ROUTES.get('home');
+  const id = String(path || '').toLowerCase();
+  return ROUTES.get(id === 'code' ? 'tasks' : id) || ROUTES.get('home');
 }
 
 export function desktopNavigationOwner(sectionId) {
   const id = String(sectionId || '').toLowerCase();
+  if (id === 'code') return 'tasks';
   if (SYSTEM_NAV_ITEMS.some(item => item.id === id)) return 'system';
   if (SETTINGS_NAV_ITEMS.some(item => item.id === id)) return 'settings';
   return id;

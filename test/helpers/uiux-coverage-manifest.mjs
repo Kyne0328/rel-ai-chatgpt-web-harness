@@ -3,7 +3,7 @@ import { navigationCommands } from '../../src/ui/navigation-catalog.js';
 // Canonical routes are derived from the product catalog so adding a destination
 // cannot silently omit it from the rendered accessibility/reflow sweep.
 const regions = {
-  home: '[data-home-react]', tasks: '[data-sessions-react]', code: '[data-code-react]',
+  home: '[data-home-react]', tasks: '[data-sessions-react]',
   browser: '.browser-route', workspaces: '[data-workspaces-react]',
   activity: '.activity-master-detail', processes: '[data-processes-react]',
   diagnostics: '.diagnostic-page', tools: '[data-tools-react]', usage: '[data-usage-react]',

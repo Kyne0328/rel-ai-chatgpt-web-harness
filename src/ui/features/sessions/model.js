@@ -43,6 +43,13 @@ export function sessionCountLabel(sessions = [], workspace = '') {
   return `${sessions.length} task${sessions.length === 1 ? '' : 's'}${workspace ? ` in ${workspace}` : ''}`;
 }
 
+export function taskToolCallCount(session = {}) {
+  const value = session.toolCallCount ?? session.calls;
+  if (value == null || value === '') return null;
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? Math.floor(count) : null;
+}
+
 export function sessionIdentifier(session = {}) {
   return String(session.id || session.taskId || session.work_id || '').trim();
 }
@@ -207,11 +214,6 @@ export function orderChangedFiles(files = []) {
 
 export function orderSessionEvents(events = []) {
   return [...events].sort((left, right) => eventTimestampMs(right) - eventTimestampMs(left));
-}
-
-export function taskTraceJsonl(session = {}) {
-  const entries = Array.isArray(session.trace?.entries) ? session.trace.entries : [];
-  return entries.length ? `${entries.map(entry => JSON.stringify(entry)).join('\n')}\n` : '';
 }
 
 export function operationForTool(tool) {
