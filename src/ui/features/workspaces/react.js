@@ -213,11 +213,16 @@ const WorkspaceCard = memo(function WorkspaceCard({ analytics, analyticsStatus, 
     h('footer', { className: 'workspace-actions workspace-primary-actions' },
       h('a', { className: 'buttonlike secondary', href: routeHref('tasks', { workspace: view.alias }), 'aria-label': `View tasks for ${view.alias}` }, 'View tasks'),
       h('a', { className: 'buttonlike secondary', href: routeHref('activity', { workspace: view.alias }), 'aria-label': `Activity for ${view.alias}` }, 'Activity'),
-      document.documentElement.dataset.surface === 'desktop' ? h('button', {
-        className: 'secondary', type: 'button', disabled: folderBusy, onClick: event => { void openFolder(event); }
-      }, h(Icon, { name: 'folder', size: 14 }), h('span', null, folderBusy ? 'Opening…' : 'Project folder')) : null,
-      h('button', { className: 'secondary', type: 'button', onClick: event => onEdit('edit', workspace, event.currentTarget) }, 'Edit project'),
-      h('a', { className: 'buttonlike secondary', href: routeHref('usage', { workspace: view.alias }) }, 'Analytics')
+      h('details', { className: 'workspace-more' },
+        h('summary', { 'aria-label': `More actions for ${view.alias}` }, 'More', h(Icon, { name: 'chevronDown', size: 14 })),
+        h('div', { className: 'workspace-more-menu' },
+          document.documentElement.dataset.surface === 'desktop' ? h('button', {
+            className: 'secondary', type: 'button', disabled: folderBusy, onClick: event => { void openFolder(event); }
+          }, h(Icon, { name: 'folder', size: 14 }), h('span', null, folderBusy ? 'Opening…' : 'Project folder')) : null,
+          h('button', { className: 'secondary', type: 'button', onClick: event => onEdit('edit', workspace, event.currentTarget) }, 'Edit project'),
+          h('a', { className: 'buttonlike secondary', href: routeHref('usage', { workspace: view.alias }) }, 'Analytics')
+        )
+      )
     )
   );
 });

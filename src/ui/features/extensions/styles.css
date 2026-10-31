@@ -102,6 +102,11 @@
     color: var(--ui-text-tertiary);
   }
 
+  .extensions-advanced-panel { @apply grid gap-3; }
+  .extensions-advanced-nav { @apply flex flex-wrap gap-2; }
+  .extensions-advanced-nav button { color: var(--ui-text-primary); }
+  .extensions-advanced-nav button[aria-pressed="true"] { border-color: var(--ui-action-primary); background: var(--ui-surface-raised); }
+
   /* Extensions Navigation Tabs */
   .extensions-tabs-row {
     @apply flex flex-col items-stretch gap-3;

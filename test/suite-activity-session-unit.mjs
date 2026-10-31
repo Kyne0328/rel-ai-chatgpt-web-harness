@@ -567,6 +567,28 @@ async function case_task_inspector_lifecycle_unit() {
   const retained = { id: 'retained-old', title: 'Retained task outside bootstrap', workspace: 'app', status: 'completed' };
 
   {
+    const active = { ...recent[0], status: 'planning' };
+    const app = harness(active.id);
+    const activeData = { ...data, tasks: [active, ...recent.slice(1)] };
+    app.render('SessionsPage', { data: activeData });
+    assert.equal(new URL(app.requests[0].url, 'http://localhost').searchParams.get('activityOnly'), '1',
+      'recent tasks should retain the lightweight activity request');
+    app.requests[0].resolve({ ok: true, activity: { entries: [], page: {} },
+      goalMode: { goalActive: true, state: 'rate_limited', mode: 'goal' } });
+    await settle();
+    const page = app.render('SessionsPage', { data: activeData });
+    const session = inspector(page)?.props.session;
+    assert.equal(session?.goalMode?.goalActive, true,
+      'lightweight hydration must preserve authoritative Goal Mode state even when the task summary omits it');
+    const detail = app.render('SessionInspector', inspector(page).props);
+    assert.ok(stopGoal(detail), 'a rate-limited goal must remain recognized as active');
+    const details = app.render('TaskDetailsSection', find(detail, node => node.type?.name === 'TaskDetailsSection').props);
+    assert.equal(find(details, node => node.type?.name === 'Detail' && node.props.label === 'Mode')?.props.value, 'Goal Mode',
+      'Task Details must not mislabel an active goal as a Normal task');
+    app.dispose();
+  }
+
+  {
     const app = harness();
     const currentOperations = [{ id: 'operation-without-counter', tool: 'relai_read' }];
     assert.equal(model.taskRunningOperations({ status: 'running', currentOperations }).length, 1, 'current operations remain visible when the summary omits the call counter');

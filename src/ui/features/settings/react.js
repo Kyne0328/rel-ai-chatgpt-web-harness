@@ -11,6 +11,7 @@ import { EXPERIMENTAL_FEATURES, readExperimentalFeatureEnabled, writeExperimenta
 import { getUiPreferences, setThemePreference } from '../../preferences.js';
 import { currentRoutePath, getRouteSnapshot, subscribeRoute } from '../../router.js';
 import { SETTINGS_NAV_ITEMS } from '../../navigation-catalog.js';
+import { readDeveloperOptionsUnlocked, unlockDeveloperOptions } from '../../developer-options.js';
 import { chatGptFirstPrompt, chatGptGuideSteps, CHATGPT_CONNECTOR_CREATE_URL } from './connection-guidance.js';
 import { restartConnection } from './connection-recovery.js';
 import { supportPolicyView } from './desktop-update-policy.js';
@@ -18,12 +19,6 @@ import { supportPolicyView } from './desktop-update-policy.js';
 const h = React.createElement;
 const RELEASES_URL = 'https://github.com/Kyne0328/rel-ai-chatgpt-web-harness/releases';
 const EXPERIMENTAL_FEATURE_FLAGS = Object.freeze(Object.values(EXPERIMENTAL_FEATURES));
-const DEVELOPER_OPTIONS_UNLOCK_KEY = 'relai_developer_options_unlocked';
-
-function readDeveloperOptionsUnlocked() {
-  try { return window.localStorage.getItem(DEVELOPER_OPTIONS_UNLOCK_KEY) === '1'; }
-  catch { return false; }
-}
 
 export function advanceDeveloperUnlockClicks(previous = {}, now = Date.now()) {
   if (previous.unlocked) return previous;
@@ -1240,7 +1235,7 @@ function ApplicationPage() {
     return () => { active = false; };
   }, [desktop, loadAttempt]);
   return h(React.Fragment, null,
-    h(SettingsHeader, { title: 'App' }),
+    h(SettingsHeader, { title: 'Application' }),
     lifecycleError ? h(Card, { title: 'App settings' }, h(SettingsReadError, { message: lifecycleError, onRetry: () => { setLifecycleError(''); setLoadAttempt(value => value + 1); } }))
       : lifecycle === undefined ? h('div', { className: 'settings-loading', role: 'status' }, 'Loading app settings…') : h(React.Fragment, null,
       h(StartupSettings, { initial: lifecycle }),
@@ -1261,6 +1256,7 @@ function DeveloperOptions({ enabledFeatures, onChange }) {
   return h(Card, { title: 'Developer options' },
     h('p', { className: 'settings-help' }, 'Experimental tools for developers and testers. These are optional and may change.'),
     h('div', { className: 'connection-actions' },
+      h('a', { className: 'buttonlike secondary', href: '#tools' }, 'ChatGPT tools'),
       h('a', { className: 'buttonlike secondary', href: '#extensions' }, 'Open Extensions')
     ),
     EXPERIMENTAL_FEATURE_FLAGS.map(feature => h(ToggleRow, {
@@ -1831,7 +1827,7 @@ function AboutPage({ metadata, buildId = '' }) {
     const next = advanceDeveloperUnlockClicks(unlockClicks);
     setUnlockClicks(next);
     if (!next.unlocked) return;
-    try { window.localStorage.setItem(DEVELOPER_OPTIONS_UNLOCK_KEY, '1'); } catch {}
+    unlockDeveloperOptions();
     setUnlocked(true);
     toast('Developer options unlocked. Open Settings → App to manage Extensions.', { variant: 'success' });
   };

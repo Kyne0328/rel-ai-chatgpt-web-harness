@@ -3,6 +3,7 @@ import './styles.css';
 import * as Dialog from '@radix-ui/react-dialog';
 import { fetchJson, invalidateCache, postJson } from '../../api.js';
 import { copyText } from '../../clipboard.js';
+import { readDeveloperOptionsUnlocked } from '../../developer-options.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { Icon } from '../../components/icons.js';
 import { OverlayFrame } from '../../components/overlay-frame.js';
@@ -43,6 +44,8 @@ function ExtensionDownloadProgress({ items }) {
 function createExtensionsRoute() {
   return function ExtensionsRoute() {
     const [activeTab, setActiveTab] = useState('installed');
+    const [advancedSection, setAdvancedSection] = useState('sources');
+    const [developerOptionsUnlocked] = useState(readDeveloperOptionsUnlocked);
     const [data, setData] = useState(null);
     const [busy, setBusy] = useState('');
     const [error, setError] = useState('');
@@ -298,7 +301,8 @@ function createExtensionsRoute() {
             if ((tab === 'installed' && filterStatus === 'installed')
               || (tab === 'discover' && filterStatus === 'needs_setup')) setFilterStatus('all');
           },
-          stats
+          stats,
+          developerOptionsUnlocked
         }),
         (activeTab === 'installed' || activeTab === 'discover') && data ? h(ExtensionsFilterToolbar, {
           activeTab,
@@ -349,14 +353,22 @@ function createExtensionsRoute() {
         onClearFilters: () => { setSearchQuery(''); setFilterKind('all'); setFilterStatus('all'); }
       }) : null,
 
-      data && activeTab === 'sources' ? h(SourcesPanel, {
-        data,
-        busy,
-        onAddSource: runAddSource,
-        onRemoveSource: runRemoveSource
-      }) : null,
-
-      activeTab === 'developer' ? h(DeveloperPanel, { installRoot: data?.installRoot || '' }) : null,
+      data && developerOptionsUnlocked && activeTab === 'advanced' ? h('section', {
+        id: 'extensions-panel-advanced', role: 'tabpanel', 'aria-labelledby': 'extensions-tab-advanced', tabIndex: 0,
+        className: 'extensions-advanced-panel'
+      },
+        h('nav', { className: 'extensions-advanced-nav', 'aria-label': 'Advanced extension tools' },
+          ['sources', 'developer'].map(section => h('button', {
+            key: section, type: 'button', className: 'secondary',
+            'aria-pressed': advancedSection === section,
+            'data-extension-advanced': section,
+            onClick: () => setAdvancedSection(section)
+          }, section === 'sources' ? 'Sources' : 'Developer'))
+        ),
+        advancedSection === 'sources' ? h(SourcesPanel, {
+          data, busy, onAddSource: runAddSource, onRemoveSource: runRemoveSource
+        }) : h(DeveloperPanel, { installRoot: data?.installRoot || '' })
+      ) : null,
 
       inspectedExtension ? h(ExtensionInspectorDialog, {
         extension: inspectedExtension,
@@ -371,9 +383,10 @@ function createExtensionsRoute() {
   };
 }
 
-function ExtensionTabs({ activeTab, setActiveTab, stats }) {
+function ExtensionTabs({ activeTab, setActiveTab, stats, developerOptionsUnlocked }) {
+  const tabs = developerOptionsUnlocked ? TABS : TABS.filter(([id]) => id !== 'advanced');
   const onKeyDown = event => {
-    const ids = TABS.map(([id]) => id);
+    const ids = tabs.map(([id]) => id);
     const current = ids.indexOf(activeTab);
     let next = null;
     if (event.key === 'ArrowLeft') next = (current - 1 + ids.length) % ids.length;
@@ -395,14 +408,11 @@ function ExtensionTabs({ activeTab, setActiveTab, stats }) {
         ? h('span', { className: 'extensions-tab-badge highlight', title: `${stats.updatesCount} update(s) available` }, `${stats.catalogCount} (${stats.updatesCount} updates)`)
         : h('span', { className: 'extensions-tab-badge' }, stats.catalogCount);
     }
-    if (id === 'sources' && stats) {
-      return h('span', { className: 'extensions-tab-badge' }, stats.sourcesCount);
-    }
     return null;
   };
 
   return h('div', { className: 'extensions-tabs', role: 'tablist', 'aria-label': 'Extensions sections', onKeyDown },
-    ...TABS.map(([id, label]) => h('button', {
+    ...tabs.map(([id, label]) => h('button', {
       key: id,
       type: 'button',
       role: 'tab',
@@ -1085,9 +1095,7 @@ function SourcesPanel({ data, busy, onAddSource, onRemoveSource }) {
 
   return h('section', {
     id: 'extensions-panel-sources',
-    role: 'tabpanel',
-    'aria-labelledby': 'extensions-tab-sources',
-    tabIndex: 0,
+    'aria-label': 'Extension sources',
     className: 'extensions-sources-panel'
   },
     h('div', { className: 'extensions-source-add-card' },
@@ -1186,9 +1194,7 @@ function DeveloperPanel({ installRoot }) {
 
   return h('section', {
     id: 'extensions-panel-developer',
-    role: 'tabpanel',
-    'aria-labelledby': 'extensions-tab-developer',
-    tabIndex: 0,
+    'aria-label': 'Extension development',
     className: 'extensions-developer-grid'
   },
     h('div', { className: 'card p-5 flex flex-col gap-4' },

@@ -44,10 +44,9 @@ function boundResponsePayload(value, maxBytes) {
   if (jsonBytes(result) <= maxBytes) return result;
   const compact = { ok: result.ok !== false, truncated: true, originalBytes: result.originalBytes };
   if (result.modeAcknowledgement) compact.modeAcknowledgement = result.modeAcknowledgement;
-  if (result.chatCandidatesStatus) compact.chatCandidatesStatus = result.chatCandidatesStatus;
-  if (Array.isArray(result.chatCandidates)) compact.chatCandidates = result.chatCandidates.slice(0, 5);
   if (result.chat_link?.version === 1 && /^[A-Za-z0-9_-]{32}$/.test(result.chat_link.link_id)) {
     compact.chat_link = { version: 1, link_id: result.chat_link.link_id };
+    if (typeof result.pairingMarker === 'string') compact.pairingMarker = utf8Head(result.pairingMarker, 200);
     if (result.resourceLink) compact.resourceLink = result.resourceLink;
   }
   for (const key of ['work_id', 'operationId', 'kind', 'errorCode']) if (result[key] !== undefined) compact[key] = utf8Head(result[key], 160);

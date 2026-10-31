@@ -33,4 +33,26 @@ async function readChatLinkResource(config, uri, context = {}) {
   }) }], ttlMs: 0, cacheScope: 'private' };
 }
 
-export { CHAT_LINK_RESOURCE_TEMPLATE, parseChatLinkResource, chatLinkResource, readChatLinkResource };
+// A chat-visible pairing marker avoids host resource reads and file approval.
+// It only correlates a conversation; it is never a task execution capability.
+function chatPairingMarker(workId, linkId) {
+  if (!parseChatLinkResource(`relai://chat-link/${workId}/${linkId}`)) {
+    throw new Error('Invalid chat pairing marker.');
+  }
+  return `Rel.AI Goal pairing: ${workId}:${linkId}`;
+}
+
+function parseChatPairingMarkers(text) {
+  if (typeof text !== 'string') return [];
+  const markers = [];
+  const pattern = /(?:^|\n)Rel\.AI Goal pairing: ([A-Za-z0-9_-]{1,128}):([A-Za-z0-9_-]{32})(?=\s|$)/g;
+  const sample = text.length <= 16_384 ? text : text.slice(0, 8192) + '\n' + text.slice(-8192);
+  for (const match of sample.matchAll(pattern)) {
+    if (markers.length >= 8) break;
+    markers.push({ workId: match[1], linkId: match[2] });
+  }
+  return markers;
+}
+
+export { CHAT_LINK_RESOURCE_TEMPLATE, parseChatLinkResource, chatLinkResource, readChatLinkResource,
+  chatPairingMarker, parseChatPairingMarkers };

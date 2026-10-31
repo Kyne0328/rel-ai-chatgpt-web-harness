@@ -39,6 +39,8 @@ export async function exerciseUIUXCoverage({ win, axePath, screenshotDir, auditA
       return window.__coverageOriginalFetch(...args);
     };
     delete window.relaiDesktop;
+    localStorage.setItem('relai_developer_options_unlocked', '1');
+    window.dispatchEvent(new Event('relai:developer-options-change'));
     localStorage.setItem('relai_developer_feature_extensions_enabled', '1');
     window.dispatchEvent(new CustomEvent('relai:developer-feature-change', { detail: { feature: 'extensions', enabled: true } }));
   })()`);
@@ -74,12 +76,17 @@ export async function exerciseUIUXCoverage({ win, axePath, screenshotDir, auditA
         }
         await win.webContents.executeJavaScript(`location.hash = '#extensions'`);
         await waitFor(win, `document.querySelector('[data-extension-tab="installed"]')`);
-        for (const tab of ['installed', 'discover', 'sources', 'developer']) {
+        for (const tab of ['installed', 'discover', 'advanced']) {
           await win.webContents.executeJavaScript(`document.querySelector('[data-extension-tab="${tab}"]').click()`);
           await waitFor(win, `document.querySelector('[data-extension-tab="${tab}"][aria-selected="true"]') && document.getElementById('extensions-panel-${tab}')`);
           await waitForCapturePaint(win);
           extensionTabs.push(await win.webContents.executeJavaScript(`({ tab: ${JSON.stringify(tab)}, theme: ${JSON.stringify(theme)}, viewport: ${JSON.stringify(viewport.name)}, horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1, panelPresent: Boolean(document.getElementById('extensions-panel-${tab}')) })`));
           if (viewport.name === 'desktop') accessibility.push(await auditAccessibility(win, axePath, `extensions/${tab}:${theme}`));
+          if (tab === 'advanced') {
+            await win.webContents.executeJavaScript(`document.querySelector('[data-extension-advanced="developer"]').click()`);
+            await waitFor(win, `document.querySelector('[data-extension-advanced="developer"][aria-pressed="true"]') && document.getElementById('extensions-panel-developer')`);
+            if (viewport.name === 'desktop') accessibility.push(await auditAccessibility(win, axePath, `extensions/developer:${theme}`));
+          }
         }
       }
     }
@@ -114,7 +121,9 @@ async function exerciseExtensionSelection(win, waitFor) {
   await win.webContents.executeJavaScript(`(() => { const search = document.querySelector('.extensions-search-input'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(search, 'fixture'); search.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await waitFor(win, `document.querySelector('.extensions-search-input')?.value === 'fixture'`);
   const afterName = await win.webContents.executeJavaScript(`(() => { const search = document.querySelector('.extensions-search-input'); return search.getAttribute('aria-label') || [...(search.labels || [])].map(label => label.textContent.trim()).join(' '); })()`);
-  await win.webContents.executeJavaScript(`document.querySelector('[data-extension-tab="developer"]').click()`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-extension-tab="advanced"]').click()`);
+  await waitFor(win, `document.querySelector('[data-extension-tab="advanced"][aria-selected="true"]')`);
+  await win.webContents.executeJavaScript(`document.querySelector('[data-extension-advanced="developer"]').click()`);
   await waitFor(win, `document.querySelector('input[type="radio"]')`);
   const radiosBefore = await win.webContents.executeJavaScript(`(() => { const radios = [...document.querySelectorAll('input[type="radio"]')]; (radios.find(input => input.checked) || radios[0]).focus(); return radios.map(input => ({ value: input.value, checked: input.checked })); })()`);
   win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });

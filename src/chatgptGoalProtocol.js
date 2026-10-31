@@ -261,26 +261,6 @@ async function listProjectChats(projectId, cursor, deps = {}) {
   return { items: result.items, cursor: result.cursor || null };
 }
 
-// Metadata hints for a newly requested Goal/Loop. A title can suggest a chat,
-// but only a matching work receipt on its active branch can authorize binding.
-async function recentGoalChatCandidates(deps = {}) {
-  const { items } = await conversationPage(deps);
-  const recent = items.filter(item => UUID.test(String(item?.id || ''))).slice(0, 5);
-  let projectNames = new Map();
-  try {
-    const sidebar = await listGoalProjects(deps, '', 1);
-    const names = new Map(sidebar.projects.map(project => [project.id, project.name]));
-    projectNames = new Map(sidebar.previews.map(item => [item.id, names.get(item.projectId) || '']));
-  } catch {
-    // A Project sidebar failure must not discard usable ordinary chat hints.
-  }
-  return recent.map(item => ({
-    id: item.id,
-    title: String(item.title || '(untitled)').replace(/\p{Cc}/gu, ' ').slice(0, 120),
-    ...(projectNames.get(item.id) ? { projectName: projectNames.get(item.id).slice(0, 120) } : {})
-  }));
-}
-
 async function getConversation(id, deps = {}) {
   return requestChatgpt('/backend-api/conversation/' + assertConversationId(id),
     { signal: deps.signal, projectConversation: true }, deps);
@@ -381,7 +361,8 @@ async function latestGoalCatalogue(deps, state) {
   state.scan = scan;
   let fallbackReads = 0;
   if (!scan.ordinary) {
-    let ordinary = await conversationPage(deps);
+    let ordinary = scan.initialOrdinary || await conversationPage(deps);
+    delete scan.initialOrdinary;
     scan.items = recentChats(ordinary.items);
     let offset = ordinary.items.length;
     // Page through ordinary-chat metadata too. The first page alone can omit
@@ -454,6 +435,39 @@ async function sharedGoalEvidence(deps) {
     const shared = { ...deps, signal: AbortSignal.timeout(120_000) };
     const freshness = goalDiscoveryFreshAfter(deps);
     try {
+      // A new Goal normally originates in the most recently updated ordinary
+      // chat. Inspect that single chat before paginating Projects or old chats.
+      // This fast path is reserved for new assistant pairing markers; older
+      // resource/tool receipts retain the complete ambiguity-aware catalogue.
+      if (deps.pairingMarkerEnabled && !state.scan
+        && (!state.catalogue || Date.now() - state.catalogue.at >= CATALOGUE_TTL_MS
+          || state.catalogue.at < freshness)) {
+        const ordinary = await conversationPage(shared);
+        state.scan = { cursor: '', seen: [], items: [], startedAt: Date.now(),
+          initialOrdinary: ordinary };
+        const first = recentChats(ordinary.items, 1)[0];
+        if (first) {
+          let proof;
+          try {
+            proof = discoveryEvidence(await getConversation(first.id, shared));
+          } catch (error) {
+            if (![403, 404].includes(error?.status)) throw error;
+            proof = { receipts: [], workIds: [] };
+          }
+          const entry = { ...first, at: Date.now(), proof };
+          state.evidence = [...(state.evidence || []).filter(item => item.id !== first.id), entry].slice(-RECENT_GOAL_CHATS);
+          if (proof.receipts.some(receipt => receipt.source === 'assistant_pairing'
+            && receipt.workId === deps.workId && receipt.linkId === deps.linkId
+            && receipt.messageId && receipt.receiptMessageId)) {
+            scope.goalIndex = state;
+            if (claim?.token && !deps.discoveryStore.save(claim.token, state)) {
+              throw Object.assign(new Error('Chat discovery lease changed; rechecking account evidence.'),
+                { deferred: true, retryAt: Date.now() + 5_000 });
+            }
+            return [entry];
+          }
+        }
+      }
       const candidates = await latestGoalCatalogue(shared, state);
       const candidateIds = new Map(candidates.map(item => [item.id, item]));
       const byId = new Map((state.evidence || [])
@@ -605,14 +619,20 @@ function goalCommandEvidence(conversation) {
   let user = null;
   for (const node of messages) {
     if (node.message?.author?.role === 'user') user = node.message;
-    if (node.message?.author?.role !== 'tool' || !user) continue;
-    for (const receipt of node.message?.content?.workReceipts
-      || (node.message?.content?.workIds || []).map(workId => ({ workId, linkId: '' }))) {
+    if (!user) continue;
+    const message = node.message;
+    const role = message?.author?.role;
+    const markerReceipts = role === 'assistant' && message.end_turn === true
+      && message.status === 'finished_successfully' ? message.content?.pairingReceipts || [] : [];
+    const nodeReceipts = role === 'tool' ? message.content?.workReceipts
+      || (message.content?.workIds || []).map(workId => ({ workId, linkId: '' })) : markerReceipts;
+    for (const receipt of nodeReceipts) {
       // Work may start after a long reasoning/setup phase in the same turn.
       // Date its proof by the tool response; older responses without a timestamp
       // retain the conservative initiating-user fallback.
-      receipts.push({ ...receipt, receiptMessageId: String(node.message.id || '').trim(),
-        timestamp: Number(node.message.create_time ?? user.create_time) * 1_000,
+      receipts.push({ ...receipt, ...(role === 'assistant' ? { source: 'assistant_pairing' } : {}),
+        receiptMessageId: String(message.id || '').trim(),
+        timestamp: Number(message.create_time ?? user.create_time) * 1_000,
         messageId: String(user.id || '').trim(), command: parseGoalCommand(user) });
     }
   }
@@ -807,4 +827,4 @@ async function evaluateGoalHelper(packet, deps = {}) {
   return result;
 }
 
-export { hasChatLinkReceipt, latestGoalCommand, initiatingGoalCommand, evaluateGoalHelper, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, recentGoalChatCandidates, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };
+export { hasChatLinkReceipt, latestGoalCommand, initiatingGoalCommand, evaluateGoalHelper, configureGoalBrowserTransport, hasGoalBrowserTransport, parseConversationUrl, chatgptCredentials, getConversation, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, goalContinuationPrompt, sendContinue };

@@ -27,7 +27,8 @@ assert.doesNotMatch(reactShell, /SidebarAccordion|setOpenAccordion/, 'desktop na
 assert.ok(!DESKTOP_NAV_ITEMS.some(item => item.id === EXTENSIONS_NAV_ITEM.id), 'Extensions must stay out of the default sidebar catalog');
 assert.match(reactShell, /extensionsEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'The Extensions feature flag must add Extensions to the application navigation');
 assert.match(reactShell, /SYSTEM_NAV_ITEMS/);
-assert.match(reactShell, /SETTINGS_NAV_ITEMS/);
+assert.match(reactShell, /MOBILE_MORE_NAV_ITEMS/);
+assert.doesNotMatch(reactShell, /mobile-nav-group-title/, 'mobile More must not duplicate the Settings submenu');
 assert.match(reactShell, /id: 'sidebarToggle'/);
 assert.match(reactShell, /'aria-controls': 'desktopSidebar'/);
 assert.match(reactShell, /localStorage\.setItem\('relai_sidebar_collapsed'/);
@@ -87,12 +88,11 @@ try {
     assert.doesNotMatch(markup, /project access|live status|class="dot"/);
     const ids = [...markup.matchAll(/data-nav-id="([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(ids, DESKTOP_NAV_ITEMS.map(item => item.id));
-    assert.match(markup, /aria-label="System navigation"/);
+    assert.match(markup, /aria-label="Monitor navigation"/);
     assert.match(markup, /aria-label="Utilities navigation"/);
     assert.match(markup, /data-nav-id="processes"[^>]*aria-current="page"/);
   }
   for (const [route, enabled, current] of [
-    [{ path: 'tools', owner: 'system' }, false, 'tools'],
     [{ path: 'extensions', owner: 'extensions' }, true, 'extensions'],
     [{ path: 'settings/connection', owner: 'settings' }, false, 'settings'],
     [{ path: 'tasks', owner: 'tasks' }, false, 'tasks']
@@ -102,8 +102,9 @@ try {
     }));
     assert.match(markup, new RegExp(`data-nav-id="${current}"[^>]*aria-current="page"`));
     assert.doesNotMatch(markup, /data-nav-id="(?:connection|code)"/);
-    if (['tools', 'extensions'].includes(current)) assert.match(markup, /aria-label="Utilities navigation"/);
+    if (current === 'extensions') assert.match(markup, /aria-label="Utilities navigation"/);
     assert.equal(markup.includes('data-nav-id="extensions"'), enabled);
+    assert.doesNotMatch(markup, /data-nav-id="tools"/, 'ChatGPT tools must stay in Developer options');
   }
 
 } finally {

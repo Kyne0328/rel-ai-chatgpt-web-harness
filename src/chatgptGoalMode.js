@@ -12,9 +12,9 @@ import { evaluateGoalDecision } from './chatgptGoalEvaluator.js';
 import { isTerminalTaskStatus } from './taskState.js';
 import { principalFingerprint } from './mcp/principal.ts';
 import { principalTunnelId } from './mcp/tunnelIdentity.js';
-import { hasChatLinkReceipt, chatgptCredentials, hasGoalBrowserTransport, recentGoalChatCandidates, getConversation, findRecentGoalCommand, latestGoalCommand, initiatingGoalCommand, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
+import { hasChatLinkReceipt, chatgptCredentials, hasGoalBrowserTransport, getConversation, findRecentGoalCommand, latestGoalCommand, initiatingGoalCommand, turnState, parseConversationUrl, stopStalledTurn, goalContinuationPrompt, sendContinue } from './chatgptGoalProtocol.js';
 import { goalMessageExists } from './chatgptConversationReader.js';
-import { chatLinkResource } from './chatgptChatLink.js';
+import { chatPairingMarker } from './chatgptChatLink.js';
 
 const DETECTION_PREFIX = 'chatgpt_goal_detection:';
 const RATE_LIMIT_PREFIX = 'chatgpt_goal_rate_limit:';
@@ -132,7 +132,7 @@ function coordinatedGoalDeps(config, record, deps) {
   }, { readonly: true, missingValue: {} });
   return { ...deps, discoveryStore: goalDiscoveryStore(config, record), chatgptProjectName: record.chatgptProjectName || '',
     chatgptProjectId: record.chatgptProjectId || '',
-    ...(link ? { linkId: link.linkId, issuedAt: link.issuedAt } : {}),
+    ...(link ? { linkId: link.linkId, issuedAt: link.issuedAt, pairingMarkerEnabled: link.kind === 'marker' } : {}),
     tunnelId: record.tunnelId || '', cooldownUntil: limit.until || 0,
     rateLimitCount: limit.count || 0, rateLimitReason: limit.reason || 'upstream',
     onRateLimit: value => withStateDatabase(config, db => {
@@ -143,13 +143,6 @@ function coordinatedGoalDeps(config, record, deps) {
           reason: value.until >= (old.until || 0) ? value.reason : old.reason || 'upstream',
           endpoint: value.endpoint, lastAt: value.at }));
     }, { transaction: true }) };
-}
-
-async function goalChatCandidates(config, workId, context) {
-  const goal = requireOwnedGoal(config, { work_id: workId }, context);
-  if (!goal.active || goal.binding) return [];
-  // Keep task creation responsive when the remote catalogue is slow or signed out.
-  return recentGoalChatCandidates(coordinatedGoalDeps(config, goal, { signal: AbortSignal.timeout(5_000) }));
 }
 
 function verifiedCorrelation(config, record) {
@@ -623,8 +616,8 @@ function callerGoal(config, goal, context) {
   if (!context?.connector || !goal.active || goal.binding) return result;
   const link = readChatLink(config, goal);
   if (!link) return result;
-  return { ...result, resourceLink: chatLinkResource(goal.workId, link.linkId),
-    nextAction: 'Read the returned chat linking receipt resource once in this originating chat. Do not display its URI or ask the user for a URL. Then continue the work.' };
+  return { ...result, pairingMarker: chatPairingMarker(goal.workId, link.linkId),
+    nextAction: 'Include pairingMarker exactly once as a plain-text line in your next normal reply to this chat. No file read or materialization is needed. Chat linking is not ready until verified.' };
 }
 
 function statusForTask(config, goal) {
@@ -1033,4 +1026,4 @@ function stopGoalMonitor() {
   for (const controller of activePolls.values()) controller.abort();
 }
 
-export { activateGoal, pauseGoal, resumeGoal, updateGoal, goalChatCandidates, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor, finishGoalMonitor };
+export { activateGoal, pauseGoal, resumeGoal, updateGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor, finishGoalMonitor };

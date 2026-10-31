@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseConversationUrl, activeMessages, turnState, recentGoalChatCandidates, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
+import { parseConversationUrl, activeMessages, turnState, findRecentGoalCommand, findGoalConversation, stopStalledTurn, sendContinue, configureGoalBrowserTransport, hasGoalBrowserTransport, getConversation } from '../src/chatgptGoalProtocol.js';
 import { updateGoal as updateGoalOptions, activateGoal, resumeGoal, resolvedGoalPlan, unfinishedTurnUpdate, goalStatus, stopGoal, dashboardGoalStatus, stopDashboardGoal, resumeAuthenticatedGoals, pollGoal, startGoalMonitor, stopGoalMonitor } from '../src/chatgptGoalMode.js';
 import { getToolSchemas } from '../src/tools/schema.js';
 import { parseGoalCommand, validateWorkMode } from '../src/goalCommands.js';
@@ -17,7 +17,7 @@ import { recordTaskActivityEvent, clearTaskHistory, readTaskHistorySessionRecord
 import { HANDLERS } from '../src/tools/handlers.js';
 import { validateToolOutput } from '../src/tools/outputValidation.js';
 import { serializeConnectorResult } from '../src/tools/connector.js';
-import { chatLinkResource, readChatLinkResource } from '../src/chatgptChatLink.js';
+import { chatLinkResource, readChatLinkResource, chatPairingMarker } from '../src/chatgptChatLink.js';
 import { toolResult } from '../src/mcp/results.js';
 import { getPublicToolSchemas } from '../src/tools/schema.js';
 import { createStdioPrincipal, principalFingerprint } from '../src/mcp/principal.ts';
@@ -2018,10 +2018,12 @@ test('connector begin delivers its durable linking receipt through output valida
     assert.equal(output.work_id, f.work_id);
     assert.equal(output.chat_link.version, 1);
     assert.equal(output.chat_link.link_id, readChatLink(f.config, loadGoal(f.config, f.work_id)).linkId);
+    assert.equal(output.pairingMarker, chatPairingMarker(f.work_id, output.chat_link.link_id));
+    assert.equal(value.resourceLink, undefined);
   });
 });
 
-test('Goal begin returns bounded account chat hints and exact selection still verifies the active-branch receipt', async t => {
+test('Goal begin avoids chat metadata reads and manual hints still require the active-branch receipt', async t => {
   await withMonitoredGoal(t, async f => {
     f.patchGoal({ binding: null, conversationId: '', observedNode: '', stableSince: 0 });
     const requests = [];
@@ -2041,18 +2043,16 @@ test('Goal begin returns bounded account chat hints and exact selection still ve
       const ctx = { ...f.context, connector: true };
       const result = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(f.config,
         { mode: 'goal', title: 'Find this chat' }, ctx));
-      assert.equal(result.chatCandidatesStatus, 'available');
-      assert.deepEqual(result.chatCandidates, [
-        { id: ID, title: 'Test chat retrieval API', projectName: 'Project 1' },
-        { id: OTHER, title: 'Other work' }
-      ]);
+      assert.equal(requests.length, 0, 'Goal begin must not request account metadata');
+      assert.equal(result.chatCandidates, undefined);
+      assert.equal(result.resourceLink, undefined, 'Goal begin must not trigger materialization');
       assert.equal(result.chat_link.version, 1);
-      assert.match(result.nextAction, /goal_resume/);
-      assert.ok(requests.every(request => !request.headers?.authorization && !request.headers?.cookie));
+      assert.equal(result.pairingMarker, chatPairingMarker(f.work_id, result.chat_link.link_id));
+      assert.match(result.nextAction, /pairingMarker/);
       await validateToolOutput(f.config, 'relai_work', { mode: 'goal', action: 'begin' }, result);
       const output = serializeConnectorResult({ mode: 'goal', publicName: 'relai_work', action: 'begin',
         operationName: 'work.begin', value: result, args: {}, workId: f.work_id });
-      assert.deepEqual(output.chatCandidates, result.chatCandidates);
+      assert.equal(output.pairingMarker, result.pairingMarker);
 
       resumeGoal(f.config, { work_id: f.work_id, conversationUrl: 'https://chatgpt.com/c/' + OTHER }, ctx);
       await pollGoal(f.config, f.work_id, { nativeTransport: async request => {
@@ -2120,19 +2120,7 @@ test('candidate waits for a delayed tool receipt, then links without a catalogue
   });
 });
 
-test('Goal chat candidate lookup ignores missing Project metadata and bounds untrusted titles', async () => {
-  const requests = [];
-  const result = await recentGoalChatCandidates({ nativeTransport: async request => {
-    requests.push(request);
-    if (request.path?.includes('/conversations?offset=')) return { ok: true,
-      data: { items: [{ id: ID, title: 'A'.repeat(300) }] } };
-    return { ok: false, status: 401 };
-  } });
-  assert.deepEqual(result, [{ id: ID, title: 'A'.repeat(120) }]);
-  assert.equal(requests.length, 2);
-});
-
-test('Goal begin preserves accepted intent and receipt when the catalogue is unauthorized', async t => {
+test('Goal begin does not depend on account catalogue access', async t => {
   await withMonitoredGoal(t, async f => {
     f.patchGoal({ binding: null, conversationId: '' });
     configureGoalBrowserTransport(async () => ({ ok: false, status: 401 }));
@@ -2140,8 +2128,9 @@ test('Goal begin preserves accepted intent and receipt when the catalogue is una
       const result = await runWithToolActivity({ taskId: f.work_id }, () => HANDLERS.startTask(
         f.config, { mode: 'goal', title: 'Unauthenticated catalogue' }, { ...f.context, connector: true }));
       assert.equal(result.modeAcknowledgement.effective, 'goal');
-      assert.equal(result.chatCandidatesStatus, 'unavailable');
       assert.equal(result.chatCandidates, undefined);
+      assert.equal(result.resourceLink, undefined);
+      assert.equal(result.pairingMarker, chatPairingMarker(f.work_id, result.chat_link.link_id));
       assert.equal(result.chat_link.version, 1);
       assert.equal(loadGoal(f.config, f.work_id).active, true);
       await validateToolOutput(f.config, 'relai_work', { mode: 'goal', action: 'begin' }, result);
@@ -2648,6 +2637,65 @@ function resourceLinkedConversation(id, workId, link) {
   return tree;
 }
 
+test('assistant pairing marker links after a delayed reply without any materialized resource', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const workId = 'approval-free-goal', link = { version: 1, link_id: 'r'.repeat(32) };
+  const tree = conversation(ID, '/goal Verify approval-free linking');
+  const marker = chatPairingMarker(workId, link.link_id);
+  const deps = { workId, linkId: link.link_id, explicitGoal: true, conversationCorrelation: ID,
+    nativeTransport: async () => ({ ok: true, data: await readConversationProjection(response(tree)) }) };
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent');
+  t.mock.timers.tick(55_000);
+  tree.mapping.a.message.create_time = Date.now() / 1000;
+  tree.mapping.a.message.content.parts = ['Goal Mode is enabled.\n' + marker];
+  assert.equal((await findRecentGoalCommand(deps)).conversationId, ID,
+    'a reply after 50 seconds must link without a resource read');
+  tree.mapping.a.message.status = 'in_progress';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent',
+    'an unfinished assistant message cannot establish a link');
+  tree.mapping.a.message.status = 'finished_successfully';
+  tree.mapping.a.message.author.role = 'user';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent',
+    'user-authored markers cannot establish a link');
+  tree.mapping.a.message.author.role = 'assistant';
+  tree.mapping.a.parent = 'root';
+  assert.equal((await findRecentGoalCommand(deps)).state, 'absent',
+    'a marker without an initiating user ancestor is invalid');
+});
+
+test('new marker goals verify the newest chat before any Project catalogue scan', async () => {
+  const workId = 'fast-marker-work', link = { version: 1, link_id: 's'.repeat(32) };
+  const chats = [rankedChat(1, 3000), rankedChat(2, 2900)];
+  const tree = conversation(chats[0].id, '/goal Fast link');
+  tree.mapping.a.message.content.parts = ['Started.\n' + chatPairingMarker(workId, link.link_id)];
+  const fixture = discoveryFixture({ ordinary: chats,
+    pages: [[projectPreview(1, [rankedChat(3, 4000)])]],
+    trees: { [chats[0].id]: tree } });
+  const result = await findRecentGoalCommand({ workId, linkId: link.link_id,
+    pairingMarkerEnabled: true, explicitGoal: true, nativeTransport: fixture.transport });
+  assert.equal(result.conversationId, chats[0].id);
+  assert.deepEqual(fixture.requests.map(req => req.path), [
+    '/backend-api/conversations?offset=0&limit=20&order=updated&is_archived=false',
+    '/backend-api/conversation/' + chats[0].id,
+    '/backend-api/conversation/' + chats[0].id
+  ], 'first-chat match needs only catalogue head plus two fresh body checks');
+});
+
+test('newest-chat marker miss falls back to newer Project conversation', async () => {
+  const workId = 'project-marker-work', link = { version: 1, link_id: 't'.repeat(32) };
+  const ordinary = rankedChat(1, 2000), project = rankedChat(2, 4000);
+  const tree = conversation(project.id, '/goal Project link');
+  tree.mapping.a.message.content.parts = ['Started.\n' + chatPairingMarker(workId, link.link_id)];
+  const fixture = discoveryFixture({ ordinary: [ordinary],
+    pages: [[projectPreview(1, [project])]], trees: { [project.id]: tree } });
+  const result = await findRecentGoalCommand({ workId, linkId: link.link_id,
+    pairingMarkerEnabled: true, explicitGoal: true, nativeTransport: fixture.transport });
+  assert.equal(result.conversationId, project.id);
+  assert.equal(fixture.requests.filter(req => req.path.includes('/conversations?offset=')).length, 1,
+    'fallback must reuse the first metadata page');
+  assert.equal(fixture.requests.some(req => req.path.includes('snorlax/sidebar')), true);
+});
+
 test('redacted resource reads link only exact successful tool references on the active branch', async () => {
   const workId = 'reference-result', link = { version: 1, link_id: 'k'.repeat(32) };
   const original = resourceLinkedConversation(ID, workId, link);
@@ -2672,7 +2720,7 @@ test('redacted resource reads link only exact successful tool references on the 
     nativeTransport: fixture.transport })).state, 'ambiguous');
 });
 
-test('chat receipt resources enforce owner, tunnel and grant and reissue for pending goals', async t => {
+test('legacy receipt resources enforce owner and grants while pending goals advertise only markers', async t => {
   await withMonitoredGoal(t, async f => {
     const principal = createStdioPrincipal();
     const context = { ...f.context, principal, connector: true };
@@ -2687,8 +2735,9 @@ test('chat receipt resources enforce owner, tunnel and grant and reissue for pen
     await assert.rejects(() => readChatLinkResource(f.config, uri, context), /unavailable/);
     f.patchGoal({ tunnelId: '' });
     const status = goalStatus(f.config, { work_id: f.work_id }, context);
-    assert.equal(status.resourceLink.uri, uri);
-    assert.equal(toolResult(status).content.find(c => c.type === 'resource_link').uri, uri);
+    assert.equal(status.pairingMarker, chatPairingMarker(f.work_id, link.link_id));
+    assert.equal(status.resourceLink, undefined);
+    assert.equal(toolResult(status).content.some(c => c.type === 'resource_link'), false);
     stopGoal(f.config, { work_id: f.work_id }, context);
     assert.equal(goalStatus(f.config, { work_id: f.work_id }, context).resourceLink, undefined);
   });
@@ -2697,6 +2746,33 @@ test('chat receipt resources enforce owner, tunnel and grant and reissue for pen
     f.patchGoal({ owner: principalFingerprint(context.principal), binding: null, conversationId: '' });
     const link = ensureChatLink(f.config, f.work_id, context);
     await assert.rejects(() => readChatLinkResource(f.config, chatLinkResource(f.work_id, link.link_id).uri, context), /authorization grant/);
+  });
+});
+
+test('approval-free marker discovery binds Goal Mode and sends one verified continuation', async t => {
+  await withMonitoredGoal(t, async f => {
+    const link = ensureChatLink(f.config, f.work_id, { ...f.context, connector: true });
+    f.patchGoal({ binding: null, conversationId: '', conversationCorrelation: 'opaque-host',
+      observedNode: '', stableSince: 0 });
+    const chat = rankedChat(1, 3000);
+    const tree = conversation(chat.id, '/goal Continue the work');
+    tree.mapping.a.message.content.parts = ['Goal Mode started.\n' + chatPairingMarker(f.work_id, link.link_id)];
+    const fixture = discoveryFixture({ ordinary: [chat], trees: { [chat.id]: tree } });
+    const sends = [];
+    const nativeTransport = async request => {
+      if (request.action === 'continue') { sends.push(request); return { ok: true, accepted: true }; }
+      return fixture.transport(request);
+    };
+    await pollGoal(f.config, f.work_id, { nativeTransport });
+    assert.equal(f.status().chatLink.state, 'linked');
+    assert.equal(f.status().conversationId, chat.id);
+    assert.equal(sends.length, 0);
+    assert.equal(fixture.requests.some(request => request.action === 'read_resource'), false);
+    t.mock.timers.tick(31_000);
+    await pollGoal(f.config, f.work_id, { nativeTransport });
+    await pollGoal(f.config, f.work_id, { nativeTransport });
+    assert.equal(sends.length, 1);
+    assert.equal(f.status().continuationCount, 1);
   });
 });
 

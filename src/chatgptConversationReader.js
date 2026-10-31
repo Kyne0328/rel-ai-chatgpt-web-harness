@@ -1,7 +1,7 @@
 // Stream-projected view of ChatGPT conversations. Never retain response history,
 // attachment bodies, or unrelated metadata in Goal Mode.
 import { JSONParser } from '@streamparser/json';
-import { parseChatLinkResource } from './chatgptChatLink.js';
+import { parseChatLinkResource, parseChatPairingMarkers } from './chatgptChatLink.js';
 
 const MAX_TRANSFER_BYTES = 256 * 1024 * 1024; // Wire safety bound, not RAM buffering.
 const MAX_NODES = 100_000;
@@ -126,6 +126,13 @@ function conversationProjection() {
     if (stack.length === 6 && stack[4]?.key === 'content' && stack[5]?.key === 'parts'
       && Number.isSafeInteger(key) && key >= 0) {
       const parts = message.content.parts;
+      // Assistant text is not persisted. Retain only bounded pairing IDs.
+      if (key < 8) {
+        const markers = parseChatPairingMarkers(value);
+        if (markers.length) message.content.pairingReceipts = [
+          ...(message.content.pairingReceipts || []), ...markers
+        ].slice(0, 8);
+      }
       const receipts = workReceipts(value);
       const workIds = receipts.map(receipt => receipt.workId);
       if (workIds.length && key < 8) message.content.workIds = [...new Set([

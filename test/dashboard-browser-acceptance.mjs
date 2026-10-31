@@ -125,7 +125,7 @@ try {
   assert.equal(result.liveToolUpdate.sameRouteNode, true, 'an MCP tool request must not remount the active dashboard route');
   assert.deepEqual(result.navigationInteractions.map(item => item.hash), [
     '#home', '#tasks', '#workspaces', '#activity',
-    '#processes', '#diagnostics', '#tools', '#usage',
+    '#processes', '#diagnostics', '#usage',
     '#settings/connection', '#settings', '#settings/application', '#settings/about'
   ]);
   for (const interaction of result.navigationInteractions) {
@@ -192,7 +192,7 @@ try {
   assert.equal(result.taskInteraction.immediate, true, 'Task summary detail must render synchronously on selection before history hydration');
   assert.equal(result.taskInteraction.inspector, true);
   assert.equal(result.taskInteraction.selectedRow, true);
-  assert.deepEqual(result.taskInteraction.tabs, ['overview', 'details', 'changes', 'activity', 'processes']);
+  assert.deepEqual(result.taskInteraction.tabs, ['overview', 'changes', 'activity', 'processes', 'details']);
   assert.ok(result.taskInteraction.detailText.length > 100);
   assert.equal(result.taskInteraction.technicalDetailsAbsent, true, 'task detail must not expose the removed technical disclosure');
   assert.equal(result.taskInteraction.taskIdCopyAvailable, true, 'task details must offer a copyable task ID for manual continuation');

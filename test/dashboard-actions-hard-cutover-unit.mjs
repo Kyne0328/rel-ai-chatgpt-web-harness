@@ -109,6 +109,8 @@ try {
   assert.equal(dashboardGoalStatus({ stateDir }, clientTask.work_id)?.goalActive, true);
   assert.equal(dashboardTaskSession(clientTask.work_id)?.session?.goalMode?.goalActive, true,
     'selected task detail must expose whether Goal Mode is active');
+  assert.equal(dashboardTaskSession(clientTask.work_id, { activityOnly: true })?.goalMode?.goalActive, true,
+    'lightweight task activity must carry Goal Mode state for the task inspector');
   const goalStopReq = Readable.from([Buffer.from(JSON.stringify({ action: 'goal_stop', work_id: clientTask.work_id }))]);
   goalStopReq.headers = { 'content-type': 'application/json' };
   const goalStopResponse = responseRecorder();
@@ -117,6 +119,8 @@ try {
   assert.equal(goalStopResponse.json().goalActive, false);
   assert.equal(goalStopResponse.json().state, 'stopped');
   assert.equal(dashboardTaskSession(clientTask.work_id)?.session?.goalMode?.goalActive, false);
+  assert.equal(dashboardTaskSession(clientTask.work_id, { activityOnly: true })?.goalMode?.goalActive, false,
+    'lightweight task activity must reflect a stopped Goal Mode');
   const ownerGoal = await callTool('relai_work', { action: 'goal_status', work_id: clientTask.work_id },
     { principal: clientPrincipal, publicHttpOnly: false });
   assert.equal(ownerGoal.state, 'stopped', 'the original MCP owner must still inspect Goal Mode');

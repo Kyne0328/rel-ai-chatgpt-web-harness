@@ -7,7 +7,7 @@ import { Icon } from '../src/ui/components/icons.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DESKTOP_NAV_ITEMS, MOBILE_MORE_NAV_ITEMS, MOBILE_NAV_ITEMS, MOBILE_PRIMARY_NAV_ITEMS, SETTINGS_NAV_ITEMS, SYSTEM_NAV_ITEMS, navigationCommands, routeMetadata } from '../src/ui/navigation-catalog.js';
+import { DESKTOP_NAV_ITEMS, MOBILE_MORE_NAV_ITEMS, MOBILE_NAV_ITEMS, MOBILE_PRIMARY_NAV_ITEMS, SETTINGS_NAV_ITEMS, navigationCommands, routeMetadata } from '../src/ui/navigation-catalog.js';
 import { normalizeRouteKey } from '../src/ui/route-policy.js';
 import { repositorySummary } from '../src/ui/features/workspaces/model.js';
 import { advanceDeveloperUnlockClicks } from '../src/ui/features/settings/react.js';
@@ -42,16 +42,18 @@ assert.match(settingsReact, /Remove saved data for \$\{site\.host\}/, 'Privacy &
 assert.match(settingsReact, /Clear all browser data/, 'Privacy & data must retain an explicit all-sites reset');
 
 const desktopNavIds = DESKTOP_NAV_ITEMS.map(item => item.id);
-const mobileDestinations = MOBILE_NAV_ITEMS.flatMap(item => item.id === 'system' ? SYSTEM_NAV_ITEMS : item.id === 'settings' ? SETTINGS_NAV_ITEMS : [item]);
+const mobileDestinations = [...MOBILE_NAV_ITEMS, ...SETTINGS_NAV_ITEMS];
 assert.deepEqual(
   [...new Set(mobileDestinations.map(item => item.href))].sort(),
   [...new Set([...DESKTOP_NAV_ITEMS, ...SETTINGS_NAV_ITEMS].map(item => item.href))].sort(),
   'flat desktop and grouped mobile navigation must keep the same reachable destinations'
 );
 assert.deepEqual(MOBILE_PRIMARY_NAV_ITEMS.map(item => item.id), ['home', 'tasks', 'workspaces', 'activity']);
-assert.deepEqual(MOBILE_MORE_NAV_ITEMS.map(item => item.id), ['browser', 'system', 'settings']);
+assert.deepEqual(MOBILE_MORE_NAV_ITEMS.map(item => item.id), ['browser', 'processes', 'usage', 'diagnostics', 'settings']);
 assert.equal(new Set(desktopNavIds).size, desktopNavIds.length, 'primary navigation destinations must be unique');
-for (const required of ['home', 'tasks', 'workspaces', 'activity', 'browser', 'processes', 'tools', 'diagnostics', 'usage', 'settings']) assert.ok(desktopNavIds.includes(required), `${required} must remain reachable`);
+for (const required of ['home', 'tasks', 'workspaces', 'activity', 'browser', 'processes', 'diagnostics', 'usage', 'settings']) assert.ok(desktopNavIds.includes(required), `${required} must remain reachable`);
+assert.ok(!desktopNavIds.includes('tools'), 'ChatGPT tools must be available only through Developer options');
+assert.deepEqual(desktopNavIds, ['home', 'tasks', 'workspaces', 'browser', 'activity', 'processes', 'usage', 'diagnostics', 'settings']);
 assert.ok(!desktopNavIds.includes('code') && !desktopNavIds.includes('connection'), 'Changes and Connection stay contextual rather than duplicating sidebar entries');
 assert.equal(routeMetadata('code').id, 'tasks', 'legacy Changes metadata must resolve to Tasks');
 assert.ok(!navigationCommands().some(item => item.id === 'code'), 'retired Changes must not appear in quick navigation');
@@ -62,13 +64,17 @@ assert.equal(routeMetadata('extensions').id, 'extensions', 'Extensions must rema
 assert.ok(!navigationCommands().some(item => item.id === 'extensions'), 'Extensions must stay out of quick navigation by default');
 assert.ok(navigationCommands({ includeExtensions: true }).some(item => item.id === 'extensions'), 'The Extensions feature flag must add Extensions to quick navigation');
 const settingsNavIds = SETTINGS_NAV_ITEMS.map(item => item.id);
-assert.deepEqual(settingsNavIds, ['connection', 'preferences', 'privacy', 'application', 'about'], 'Settings must follow connection, preferences, privacy/data, app lifecycle, then about');
+assert.deepEqual(settingsNavIds, ['preferences', 'connection', 'privacy', 'application', 'about'], 'Settings must put the default Preferences destination first');
+assert.equal(SETTINGS_NAV_ITEMS.find(item => item.id === 'application')?.label, 'Application');
+assert.ok(!navigationCommands().some(item => item.id === 'tools'), 'normal quick navigation must hide developer-only ChatGPT tools');
+assert.ok(navigationCommands({ includeDeveloperTools: true }).some(item => item.id === 'tools'), 'developer quick navigation must retain ChatGPT tools');
 assert.equal(SETTINGS_NAV_ITEMS.find(item => item.id === 'connection')?.href, '#settings/connection');
 assert.equal(normalizeRouteKey('settings/privacy'), 'settings/privacy', 'Privacy & data must be a canonical settings route instead of falling back to Overview');
 assert.match(extensionsReact, /confirmPermissions: true/, 'Extension installation must require permission review confirmation');
 assert.match(settingsReact, /developerOptionsUnlocked \? h\(DeveloperOptions, \{/, 'Developer options must stay hidden until they are unlocked');
 assert.match(settingsReact, /writeExperimentalFeatureEnabled\(feature, enabled\)/, 'Developer feature changes must persist independently');
 assert.match(settingsReact, /href: '#extensions'/, 'Developer options must offer a direct Extensions action');
+assert.match(settingsReact, /href: '#tools'/, 'Developer options must offer ChatGPT tools');
 assert.match(settingsReact, /label: 'Build'/, 'Build identifier must expose the developer options unlock');
 assert.doesNotMatch(settingsReact, /label: 'Developer mode'/, 'Developer options must not use a global Developer mode toggle');
 assert.match(reactShell, /extensionsEnabled \? h\(NavLink, \{ item: EXTENSIONS_NAV_ITEM/, 'The Extensions flag must expose Extensions in desktop navigation');

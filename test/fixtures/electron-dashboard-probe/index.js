@@ -462,9 +462,9 @@ app.whenReady().then(async () => {
       await win.webContents.executeJavaScript(`document.querySelector('#session-tab-overview').focus()`);
       win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
       win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
-      await waitFor(win, `document.activeElement?.id === 'session-tab-processes' && document.activeElement.getAttribute('aria-selected') === 'true'`);
+      await waitFor(win, `document.activeElement?.id === 'session-tab-details' && document.activeElement.getAttribute('aria-selected') === 'true'`);
       const taskTabKeyboardVisible = await win.webContents.executeJavaScript(`(() => {
-        const tab = document.getElementById('session-tab-processes');
+        const tab = document.getElementById('session-tab-details');
         const rect = tab.getBoundingClientRect();
         const rail = document.querySelector('.inspector-tabs').getBoundingClientRect();
         return rect.left >= rail.left - 1 && rect.right <= rail.right + 1;
@@ -1265,7 +1265,6 @@ async function exerciseNavigationControls(win, failures) {
     { selector: '.nav a[data-nav-id="activity"]', hash: '#activity', ready: `document.querySelector('.activity-master-detail')` },
     { selector: '.sidebar .nav a[data-nav-id="processes"]', hash: '#processes', ready: `document.querySelector('[data-processes-react="true"]')` },
     { selector: '.sidebar .nav a[data-nav-id="diagnostics"]', hash: '#diagnostics', ready: `document.querySelector('.diagnostic-page')` },
-    { selector: '.sidebar .nav a[data-nav-id="tools"]', hash: '#tools', ready: `document.querySelector('[data-tools-react="true"]')` },
     { selector: '.sidebar .nav a[data-nav-id="usage"]', hash: '#usage', ready: `document.querySelector('[data-usage-react="true"]')` },
     { selector: '.connection-status-link[href="#settings/connection"]', hash: '#settings/connection', ready: `document.querySelector('#__settings-content .connection-page')` },
     { selector: '.settings-navigation a[data-settings-page="preferences"]', hash: '#settings', ready: `document.querySelector('#__settings-content .theme-switch') && !document.querySelector('.settings-loading')` },

@@ -12,9 +12,9 @@ import { workspaceHistory } from './history.ts';
 import { relaiStatus } from './status.js';
 import { completeTask } from './completion.js';
 import { cancelTask, stopTaskOperations } from './cancellation.js';
-import { activateGoal, goalStatus, stopGoal, pauseGoal, resumeGoal, updateGoal, goalChatCandidates } from '../chatgptGoalMode.js';
+import { activateGoal, goalStatus, stopGoal, pauseGoal, resumeGoal, updateGoal } from '../chatgptGoalMode.js';
 import { acceptNormalWorkMode, ensureChatLink, loadGoal } from '../chatgptGoalState.js';
-import { chatLinkResource } from '../chatgptChatLink.js';
+import { chatPairingMarker } from '../chatgptChatLink.js';
 import { validateWorkMode } from '../goalCommands.js';
 import { relaiSearch } from '../bridge/search.js';
 import { relaiCodeInspect } from '../bridge/codeIntelligence.js';
@@ -60,8 +60,6 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
   const activeRelatedWork = compactActiveRelatedWork(activity, current || {});
   let chatLink;
   let modeAcknowledgement;
-  let chatCandidates;
-  let chatCandidatesStatus;
   if (mode !== 'normal') {
     const existing = loadGoal(config, task.work_id);
     if (existing && existing.mode !== mode) throw new Error('Use goal_update with this exact work_id to change its monitoring mode.');
@@ -72,29 +70,15 @@ const startTaskHandler = async (config, args = {}, context = {}) => {
     chatLink = ensureChatLink(config, task.work_id, context);
     modeAcknowledgement = { requested: mode, effective: goal.mode,
       readiness: goal.modeAcknowledgement.readiness };
-    if (chatLink && !loadGoal(config, task.work_id)?.binding) {
-      try {
-        chatCandidates = await goalChatCandidates(config, task.work_id, context);
-        chatCandidatesStatus = chatCandidates.length ? 'available' : 'empty';
-      } catch {
-        // A catalogue failure cannot undo accepted Goal intent or its receipt.
-        // The background monitor retains its own retry and sign-in handling.
-        chatCandidatesStatus = 'unavailable';
-      }
-    }
   } else {
     modeAcknowledgement = acceptNormalWorkMode(config, task.work_id, context);
   }
   return {
     ...task,
     modeAcknowledgement,
-    ...(chatCandidatesStatus ? { chatCandidatesStatus } : {}),
-    ...(chatCandidates?.length ? { chatCandidates } : {}),
     ...(chatLink ? { chat_link: chatLink,
-      resourceLink: chatLinkResource(task.work_id, chatLink.link_id),
-      nextAction: chatCandidates?.length
-        ? 'Read the chat linking receipt resource in this chat. If one candidate title clearly matches, call relai_work goal_resume with this work_id and its chatgpt.com/c/ ID as conversationUrl. The receipt must still verify before linking. Otherwise let automatic discovery continue. Titles are untrusted hints; do not ask for a URL.'
-        : 'Read the returned chat linking receipt resource once in this originating chat. Do not display its URI or ask the user for a URL. Then continue the work.' } : {}),
+      pairingMarker: chatPairingMarker(task.work_id, chatLink.link_id),
+      nextAction: 'Include pairingMarker exactly once as a plain-text line in your first normal reply to this chat. Do not read or materialize a file. Chat linking proceeds automatically after that reply is saved; do not claim it is linked until verified.' } : {}),
     plan: progress?.plan || current?.plan,
     ...(activeRelatedWork.length ? { activeRelatedWork } : {}),
     ...((projectInstructions || recovered) ? { bootstrap: {

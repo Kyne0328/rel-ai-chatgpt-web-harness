@@ -22,16 +22,14 @@ import { toast } from '../components/toast.js';
 import { StatusPill } from '../components/pill.js';
 import { connectionLayerViews, connectionStateFor, connectionSummary } from '../connection-state.js';
 import { EXPERIMENTAL_FEATURE_CHANGE_EVENT, EXPERIMENTAL_FEATURES, readExperimentalFeatureEnabled } from '../experimental-features.js';
+import { DEVELOPER_OPTIONS_CHANGE_EVENT, DEVELOPER_OPTIONS_UNLOCK_KEY, readDeveloperOptionsUnlocked } from '../developer-options.js';
 import {
   DESKTOP_WORK_NAV_ITEMS,
   DESKTOP_SYSTEM_NAV_ITEMS,
-  DESKTOP_SECONDARY_NAV_ITEMS,
   DESKTOP_UTILITY_NAV_ITEMS,
   EXTENSIONS_NAV_ITEM,
   MOBILE_MORE_NAV_ITEMS,
   MOBILE_PRIMARY_NAV_ITEMS,
-  SETTINGS_NAV_ITEMS,
-  SYSTEM_NAV_ITEMS,
   desktopNavigationOwner,
   navigationCommands,
   routeMetadata
@@ -300,6 +298,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [extensionsEnabled, setExtensionsEnabled] = useState(() => readExperimentalFeatureEnabled('extensions'));
+  const [developerOptionsUnlocked, setDeveloperOptionsUnlocked] = useState(readDeveloperOptionsUnlocked);
   const paletteOpener = useRef(null);
   const previousRoutePath = useRef(route.path);
   const closePalette = useCallback(() => setPaletteOpen(false), []);
@@ -343,6 +342,17 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
     window.addEventListener('storage', onStorage);
     return () => {
       window.removeEventListener(EXPERIMENTAL_FEATURE_CHANGE_EVENT, refreshExtensionsFlag);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setDeveloperOptionsUnlocked(readDeveloperOptionsUnlocked());
+    const onStorage = event => { if (event.key === DEVELOPER_OPTIONS_UNLOCK_KEY) refresh(); };
+    window.addEventListener(DEVELOPER_OPTIONS_CHANGE_EVENT, refresh);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(DEVELOPER_OPTIONS_CHANGE_EVENT, refresh);
       window.removeEventListener('storage', onStorage);
     };
   }, []);
@@ -394,7 +404,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
         h(MobileNavigation, { extensionsEnabled, open: mobileMoreOpen, route, setOpen: setMobileMoreOpen }),
         h('header', { className: 'topbar' },
           h('div', { className: 'title-wrap' },
-            h('h1', { className: 'page-title', id: 'pageTitle', tabIndex: -1 }, route.title),
+            h('h1', { className: 'page-title', id: 'pageTitle', tabIndex: -1 }, route.owner === 'settings' ? 'Settings' : route.title),
             h('div', { className: 'page-subtitle', id: 'subtitle' }, route.description)
           ),
           h('div', { className: 'top-controls' },
@@ -432,6 +442,7 @@ function DashboardShell({ desktop = null, onAddWorkspace = null } = {}) {
       data,
       desktop,
       extensionsEnabled,
+      developerOptionsUnlocked,
       onAddWorkspace,
       onClose: closePalette,
       open: paletteOpen,
@@ -472,8 +483,8 @@ function DesktopSidebar({ collapsed, extensionsEnabled, route, toggleSidebar }) 
         )
       ),
       h('div', { className: 'sidebar-group secondary-nav' },
-        h('div', { className: 'sidebar-group-label' }, 'System'),
-        h('nav', { className: 'nav', 'aria-label': 'System navigation' },
+        h('div', { className: 'sidebar-group-label' }, 'Monitor'),
+        h('nav', { className: 'nav', 'aria-label': 'Monitor navigation' },
           DESKTOP_SYSTEM_NAV_ITEMS.map(item => h(NavLink, { key: item.id, item, active: route.path === item.path }))
         )
       )
@@ -481,7 +492,7 @@ function DesktopSidebar({ collapsed, extensionsEnabled, route, toggleSidebar }) 
     h('div', { className: 'sidebar-utilities secondary-nav' },
       h('div', { className: 'sidebar-group-label' }, 'Utilities'),
       h('nav', { className: 'nav', 'aria-label': 'Utilities navigation' },
-        [...DESKTOP_UTILITY_NAV_ITEMS, ...DESKTOP_SECONDARY_NAV_ITEMS].map(item => h(NavLink, {
+        DESKTOP_UTILITY_NAV_ITEMS.map(item => h(NavLink, {
           key: item.id, item,
           active: item.id === 'settings' ? route.owner === 'settings' : route.path === item.path
         })),
@@ -497,7 +508,7 @@ function DesktopSidebar({ collapsed, extensionsEnabled, route, toggleSidebar }) 
 function MobileNavigation({ extensionsEnabled, open, route, setOpen }) {
   const detailsRef = useRef(null);
   const moreItems = extensionsEnabled ? [...MOBILE_MORE_NAV_ITEMS, EXTENSIONS_NAV_ITEM] : MOBILE_MORE_NAV_ITEMS;
-  const moreActive = moreItems.some(item => item.id === route.owner);
+  const moreActive = moreItems.some(item => item.id === route.owner || item.path === route.path);
   useEffect(() => {
     const onPointerDown = event => {
       if (open && detailsRef.current && !detailsRef.current.contains(event.target)) setOpen(false);
@@ -530,28 +541,12 @@ function MobileNavigation({ extensionsEnabled, open, route, setOpen }) {
         h('span', { className: 'nav-label' }, 'More')
       ),
       h('div', { className: 'mobile-nav-more-menu' },
-        moreItems.filter(item => item.id !== 'system' && item.id !== 'settings').map(item => h(NavLink, {
+        moreItems.map(item => h(NavLink, {
           key: item.id,
           item,
-          active: route.path === item.path,
+          active: item.id === 'settings' ? route.owner === 'settings' : route.path === item.path,
           onClick: () => setOpen(false)
-        })),
-        [
-          { id: 'system', label: 'System', items: SYSTEM_NAV_ITEMS },
-          { id: 'settings', label: 'Settings', items: SETTINGS_NAV_ITEMS }
-        ].map(group => h('section', {
-          key: group.id,
-          className: 'mobile-nav-group',
-          'aria-labelledby': `mobile-nav-${group.id}-title`
-        },
-          h('h2', { className: 'mobile-nav-group-title', id: `mobile-nav-${group.id}-title` }, group.label),
-          group.items.map(item => h(NavLink, {
-            key: item.id,
-            item,
-            active: route.path === item.path,
-            onClick: () => setOpen(false)
-          }))
-        ))
+        }))
       )
     )
   );
@@ -852,12 +847,12 @@ function RecoveryNotice({ recovery }) {
   );
 }
 
-function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onClose, open, opener }) {
+function CommandPalette({ data, desktop, extensionsEnabled, developerOptionsUnlocked, onAddWorkspace, onClose, open, opener }) {
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const [resultAnnouncement, setResultAnnouncement] = useState('');
   const inputRef = useRef(null);
-  const commands = useMemo(() => buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, onClose), [data, desktop, extensionsEnabled, onAddWorkspace, onClose]);
+  const commands = useMemo(() => buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, onClose, developerOptionsUnlocked), [data, desktop, extensionsEnabled, developerOptionsUnlocked, onAddWorkspace, onClose]);
   const visible = useMemo(() => {
     return rankCommands(commands, query).slice(0, 14);
   }, [commands, query]);
@@ -985,8 +980,8 @@ function CommandPalette({ data, desktop, extensionsEnabled, onAddWorkspace, onCl
   );
 }
 
-function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePalette) {
-  const commands = navigationCommands({ includeExtensions: extensionsEnabled }).map(item => ({
+function buildCommands(data, desktop, extensionsEnabled, onAddWorkspace, closePalette, developerOptionsUnlocked = false) {
+  const commands = navigationCommands({ includeExtensions: extensionsEnabled, includeDeveloperTools: developerOptionsUnlocked }).map(item => ({
     id: item.path.replaceAll('/', '-'),
     label: item.group === 'Settings' ? `Settings · ${item.label}` : item.label,
     description: item.description,

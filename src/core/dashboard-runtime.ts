@@ -295,9 +295,9 @@ export function dashboardTaskSession(taskId: string, request: JsonRecord = {}): 
       totalCount: activityPage.totalCount ?? activityPage.entries.length
     }
   };
-  if (request.activityOnly === true) return { ok: true, activity };
-  const audit = readAudit(config, { taskId, limit: 10000 });
   const goalMode = dashboardGoalStatus(config, taskId);
+  if (request.activityOnly === true) return { ok: true, activity, ...(goalMode ? { goalMode } : {}) };
+  const audit = readAudit(config, { taskId, limit: 10000 });
   return {
     ok: true,
     session: {

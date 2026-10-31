@@ -113,13 +113,14 @@ function toolResourceLinkContent(payload) {
 function toolLinkingReceiptContent(payload) {
   const link = payload?.chat_link;
   const resource = parseChatLinkResource(payload?.resourceLink?.uri);
-  if (!resource || resource.workId !== payload.work_id || link?.version !== 1
-    || link.link_id !== resource.linkId) return null;
+  if (!payload?.work_id || link?.version !== 1 || !/^[A-Za-z0-9_-]{32}$/.test(link.link_id)
+    || (resource && (resource.workId !== payload.work_id || resource.linkId !== link.link_id))) return null;
+  const workId = resource?.workId || payload.work_id;
   // A standalone JSON tool-result part survives hosts that omit resource-read
   // metadata but retain text. The browser reader still demands the exact
   // receipt on the active branch before binding a goal.
   return { type: MCP_CONTENT_TYPES.TEXT, text: JSON.stringify({
-    work_id: resource.workId, chat_link: { version: 1, link_id: resource.linkId }
+    work_id: workId, chat_link: { version: 1, link_id: link.link_id }
   }) };
 }
 

@@ -22,7 +22,7 @@ function ensureChatLinkRow(db, workId, context) {
   const key = LINK_PREFIX + workId;
   const row = db.prepare('SELECT value FROM state_meta WHERE key=?').get(key);
   const link = row ? JSON.parse(row.value) : {
-    workId, owner, tunnelId, issuedAt: Date.now(), linkId: randomBytes(24).toString('base64url')
+    workId, owner, tunnelId, issuedAt: Date.now(), linkId: randomBytes(24).toString('base64url'), kind: 'marker'
   };
   if (link.owner !== owner || link.tunnelId !== tunnelId) throw new Error('Chat linking owner mismatch.');
   if (!row) db.prepare('INSERT INTO state_meta(key,value) VALUES(?,?)').run(key, JSON.stringify(link));

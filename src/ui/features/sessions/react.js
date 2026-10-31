@@ -200,7 +200,7 @@ function SessionsPage({ data = {} }) {
       .then(response => {
         if (cancelled || request !== hydrationRequest.current) return;
         const returnedSession = summary && response?.activity?.entries
-          ? { ...summary, events: response.activity.entries }
+          ? { ...summary, ...(response.goalMode ? { goalMode: response.goalMode } : {}), events: response.activity.entries }
           : response?.session;
         if (response?.ok === false || !returnedSession) {
           const unavailable = response?.httpStatus === 404 || (response?.ok !== false && !returnedSession);
@@ -448,7 +448,7 @@ function SessionsPage({ data = {} }) {
               })
             : !requestedId ? h('div', { className: 'inspector-empty' },
                 h('strong', null, 'Select a task'),
-                h('span', null, 'Review its progress, changes, checks, and activity.')
+                h('span', null, 'Review its progress, changes, activity, and commands.')
               ) : null
         )
       )
@@ -760,9 +760,6 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
       h(FailureHistorySection, { session }),
       h(OriginalRequest, { objective: session.objective })
     ),
-    h('div', { className: 'inspector-panel', id: 'session-panel-details', role: 'tabpanel', 'aria-labelledby': 'session-tab-details', tabIndex: 0, hidden: activeTab !== 'details', 'data-session-panel': 'details' },
-      h(TaskDetailsSection, { session, state, fileCounts })
-    ),
     h('div', { className: 'inspector-panel', id: 'session-panel-changes', role: 'tabpanel', 'aria-labelledby': 'session-tab-changes', tabIndex: 0, hidden: activeTab !== 'changes', 'data-session-panel': 'changes' },
       changesVisited ? h(Suspense, {
         fallback: h('div', { className: 'code-editor-message', role: 'status' }, 'Loading diff viewer…')
@@ -785,7 +782,9 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
         commandOperations: taskCommands, active: activeTab === 'processes', controlKey,
         onStopOperation: operationId => controlTask('stop', operationId) })
     ),
-
+    h('div', { className: 'inspector-panel', id: 'session-panel-details', role: 'tabpanel', 'aria-labelledby': 'session-tab-details', tabIndex: 0, hidden: activeTab !== 'details', 'data-session-panel': 'details' },
+      h(TaskDetailsSection, { session, state, fileCounts })
+    )
   );
 }
 
@@ -862,10 +861,10 @@ function TaskIdentifier({ label, value }) {
 function SessionTabs({ activeTab, setActiveTab, counts = {} }) {
   const tabs = [
     { id: 'overview', label: 'Overview' },
-    { id: 'details', label: 'Details' },
     { id: 'changes', label: 'Changes', badge: counts.changes, countLabel: `${counts.changes || 0} changed files` },
     { id: 'activity', label: 'Activity' },
-    { id: 'processes', label: 'Processes', badge: counts.processes, countLabel: counts.processesLabel }
+    { id: 'processes', label: 'Commands', badge: counts.processes, countLabel: counts.processesLabel },
+    { id: 'details', label: 'Task info' }
   ];
   const tabIds = tabs.map(t => t.id);
   const onKeyDown = event => {
