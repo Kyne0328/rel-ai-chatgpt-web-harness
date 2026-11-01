@@ -275,7 +275,6 @@ function createExtensionsRoute() {
     return h('div', { className: 'section extensions-page', 'data-extensions-react': '' },
       h('div', { className: 'section-head' },
         h('div', { className: 'extensions-header-copy' },
-          h('h2', null, 'Extensions'),
           h('p', null, 'Extensions add reusable skills and local tools to ChatGPT.')
         ),
         h('div', { className: 'section-head-actions' },

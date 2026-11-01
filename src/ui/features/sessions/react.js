@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom';
 import { fetchJson, postJson, reconcileUnconfirmedResult, requestDashboardRefresh } from '../../api.js';
 import { confirmAction } from '../../components/confirm-dialog.js';
 import { copyText } from '../../clipboard.js';
+import { readDeveloperOptionsUnlocked } from '../../developer-options.js';
 import { Icon } from '../../components/icons.js';
 import { toast } from '../../components/toast.js';
 import { formatDuration, timeAgo } from '../../utils.js';
@@ -693,6 +694,8 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
   const commandIds = new Set(taskCommands.map(command => String(command.operationId || '')));
   const otherOperations = taskRunningOperations(session).filter(operation =>
     !commandIds.has(String(operation.id || operation.operationId || operation.invocationId || '')));
+  const goalSignInRequired = session.goalMode?.state === 'needs_auth' || Boolean(session.goalMode?.authRequired);
+  const goalSignInAvailable = goalSignInRequired && readDeveloperOptionsUnlocked();
   const tabCounts = {
     changes: fileCounts.product + fileCounts.support,
     processes: ownedProcessCount + taskCommands.length + otherOperations.length,
@@ -707,7 +710,7 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
       ),
       h('div', { className: 'task-detail-header-actions' },
         h(StatusPill, { state }),
-        session.goalMode?.state === 'needs_auth' || session.goalMode?.authRequired ? h('a', { href: routeHref('settings/connection', { tunnel: session.goalMode.tunnelId }), className: 'buttonlike secondary' }, 'Sign in to ChatGPT') : null,
+        goalSignInAvailable ? h('a', { href: routeHref('settings/application', { tunnel: session.goalMode.tunnelId }), className: 'buttonlike secondary' }, 'Sign in to ChatGPT') : null,
         activeGoal ? h('button', {
           className: 'secondary', type: 'button', 'data-stop-goal': '',
           title: 'Stop automatic ChatGPT continuations without cancelling the task.',
@@ -726,6 +729,9 @@ function SessionInspector({ session, activeTab, setActiveTab, activityHasMore, o
         }, controlKey === 'cancel' ? 'Cancelling…' : 'Cancel task') : null
       )
     ),
+    goalSignInRequired && !goalSignInAvailable ? h('p', { className: 'connection-notice warn', role: 'note', 'data-goal-auth-unlock': '' },
+      'This task uses experimental Goal Mode. To sign in, open Settings → About and select the Build value five times to unlock Developer Options. Then return to this task or open Settings → Application. ',
+      h('a', { href: routeHref('settings/about') }, 'Open Settings → About')) : null,
     controlNotice ? h('p', { className: 'connection-notice', role: 'status' }, controlNotice) : null,
     h('div', { className: 'inspector-navigation' },
       h(SessionTabs, { activeTab, setActiveTab, counts: tabCounts })

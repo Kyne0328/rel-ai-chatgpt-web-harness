@@ -21,6 +21,7 @@ const ALLOWED_PARAMS = {
   tasks: new Set(['workspace', 'task', 'search', 'taskStatus', 'tab', 'file']),
   browser: new Set(['tunnel']),
   'settings/connection': new Set(['tunnel']),
+  'settings/application': new Set(['tunnel']),
   workspaces: new Set(['workspace', 'focus', 'create']),
   processes: new Set(['workspace']),
   activity: new Set(['workspace', 'search', 'time', 'tool', 'status', 'task', 'event', 'from', 'returnTask', 'returnWorkspace', 'returnSearch', 'returnTaskStatus']),

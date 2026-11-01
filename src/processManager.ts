@@ -2064,7 +2064,12 @@ export function wrappedCmdStartupIsAtPrompt(record: ManagedProcessRecord, range:
   // Only strip this ordered prefix at the start of the controlled transcript.
   const withoutControls = range.text
     .replace(/^(?:\x1B\[(?:0m|0K))*\x1B\]0;[\x20-\x7E]{0,256}\x07/, '')
-    .replace(/\x1B\[(?:0m|0K|\?25[hl])/g, '');
+    .replace(/\x1B\[(?:0m|0K|\?25[hl])/g, '')
+    // ConPTY can finish its startup banner with a cursor reposition before
+    // the blank separator. Accept only this bounded sequence there; cursor
+    // controls in the exact prompt, or after input, remain ineligible.
+    .replace(/\r\x1B\[1A\x1B\[([1-9][0-9]{0,2})G(?=\r\n\r\n)/, (sequence, column) =>
+      Number(column) <= columns ? '' : sequence);
   if (/[\r\n]/.test(withoutControls.replace(/\r\n/g, ''))) return false;
   const visible = withoutControls.replace(/\r\n/g, '\n');
   if (!/^[\x20-\x7E\n]*$/.test(visible)) return false;

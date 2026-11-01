@@ -898,10 +898,10 @@ async function case_route_policy_unit() {
   assert.equal(normalizeRouteKey('activity?status=active'), 'activity?status=active');
   assert.equal(normalizeRouteKey('activity?status=other'), 'activity?status=other');
   assert.equal(normalizeRouteKey('tasks?workspace=app&task=task-123'), 'tasks?workspace=app&task=task-123', 'task deep links must preserve the selected task');
-  assert.equal(normalizeRouteKey('code?task=task-123&file=src/app.js'), 'code?task=task-123&file=src%2Fapp.js', 'Changes deep links must preserve the selected changed file');
+  assert.equal(normalizeRouteKey('code?task=task-123&file=src/app.js'), 'tasks?task=task-123&file=src%2Fapp.js&tab=changes', 'legacy Changes links must open the selected file in the Tasks changes tab');
   assert.equal(normalizeRouteKey('tasks?workspace=app&task=retained&search=fix+labels&taskStatus=attention'), 'tasks?workspace=app&task=retained&search=fix+labels&taskStatus=attention', 'Task search, status and explicit selection must survive navigation');
-  assert.equal(normalizeRouteKey('code?workspace=app&task=retained&file=missing.js&from=tasks&search=fix+labels&taskStatus=attention'), 'code?workspace=app&task=retained&file=missing.js&from=tasks&search=fix+labels&taskStatus=attention', 'Changes must retain the bounded Tasks return context and requested file');
-  assert.equal(normalizeRouteKey('code?task=retained&from=https://example.com&taskStatus=invalid&token=secret'), 'code?task=retained', 'Return context must reject arbitrary destinations, statuses and secrets');
+  assert.equal(normalizeRouteKey('code?workspace=app&task=retained&file=missing.js&from=tasks&search=fix+labels&taskStatus=attention'), 'tasks?workspace=app&task=retained&file=missing.js&search=fix+labels&taskStatus=attention&tab=changes', 'legacy Changes links must retain task filters and the requested file on the canonical Tasks page');
+  assert.equal(normalizeRouteKey('code?task=retained&from=https://example.com&taskStatus=invalid&token=secret'), 'tasks?task=retained&tab=changes', 'legacy Changes links must reject arbitrary destinations, statuses and secrets');
   assert.equal(normalizeRouteKey('tasks?taskStatus=all&search=%00hello%0Aworld'), 'tasks?search=helloworld');
   assert.equal(new URLSearchParams(normalizeRouteKey(`tasks?search=${'x'.repeat(250)}`).split('?')[1]).get('search').length, 200, 'Task queries must stay bounded');
   assert.equal(new URLSearchParams(normalizeRouteKey(`code?from=tasks&search=${'x'.repeat(250)}`).split('?')[1]).get('search').length, 200, 'Returned Task queries must use the same bound');
@@ -927,6 +927,8 @@ async function case_route_policy_unit() {
   assert.equal(normalizeRouteKey('settings/connection?tunnel=tunnel_accountB12345'), 'settings/connection?tunnel=tunnel_accountB12345');
   assert.equal(normalizeRouteKey('settings/connection?tunnel=..%2Fprivate&token=secret'), 'settings/connection');
   assert.equal(routeAllowsParam('settings/connection', 'tunnel'), true);
+  assert.equal(normalizeRouteKey('settings/application?tunnel=tunnel_accountB12345'), 'settings/application?tunnel=tunnel_accountB12345', 'developer Goal Mode account links must preserve the selected tunnel');
+  assert.equal(normalizeRouteKey('settings/application?tunnel=..%2Fprivate&token=secret'), 'settings/application', 'developer account links must reject malformed tunnel IDs and secrets');
   assert.equal(routeAllowsParam('workspaces', 'create'), true);
   assert.equal(routeAllowsParam('activity', 'token'), false);
   assert.equal(routeAllowsParam('settings', 'workspace'), false);

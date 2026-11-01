@@ -6,7 +6,7 @@
 .sessions-toolbar { min-height: 48px; flex: 0 0 auto; }
 .sessions-summary-line { @apply min-w-0 text-[13px] font-medium; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
 .sessions-filter-actions { @apply flex-wrap; }
-.sessions-search { @apply min-w-[220px] flex-[2_1_280px]; }
+.sessions-search { @apply min-w-[180px] flex-1; }
 .sessions-search input { width: 100%; min-width: 0; }
 .task-list { @apply flex flex-col gap-0; }
 .sessions-history-card { display: flex; min-height: 0; flex: 1 1 0; flex-direction: column; }

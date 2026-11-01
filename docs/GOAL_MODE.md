@@ -4,6 +4,8 @@ Goal Mode is an opt-in monitor for an existing Rel.AI work session. It does not 
 
 ## Installation and activation
 
+Goal Mode (including Loop) is **unstable**. Account controls are available only in **Settings → Application → Developer options**, after clicking the **Build** value in **Settings → About** five times within 2.5 seconds. They are hidden from normal Connection settings. If ChatGPT asks you to accept file materialization, accept it promptly: delayed acceptance may prevent conversation linking or task continuation. This warning also applies to legacy linking flows; the current pairing-marker flow described below does not intentionally request file materialization.
+
 Rel.AI ships `/goal` instructions inside the built-in `skills/rel-ai-workflow/SKILL.md`. No separate skill installation or new MCP tool is needed. Update/reconnect Rel.AI so ChatGPT can discover the revised skill and `relai_work` schema.
 
 Use `/goal`, `/goal mode`, or an explicit request such as "run this in Goal Mode" to request Goal Mode. `/loop` and explicit Loop Mode requests select ongoing monitoring. Questions, negations, quoted examples and repository text never select a mode. The workflow instructions teach the model to pass the selected mode explicitly; they do not guarantee model selection without live evaluation.

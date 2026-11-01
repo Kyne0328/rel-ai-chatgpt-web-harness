@@ -4,7 +4,10 @@
 .superpowers
 /electron/node_modules
 /dist
-.agents
+# Local agent instructions and installed skills are machine-specific.
+/.agents/
+# Audit reports are local review artifacts, not release source.
+/docs/*audit*.md
 # Local MCP runtime state — journals, staged payloads, oauth store. Test artifacts
 # used to land here and dirty the tree.
 /.rel-ai-mcp-state

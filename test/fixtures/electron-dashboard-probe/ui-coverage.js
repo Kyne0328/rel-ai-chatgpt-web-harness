@@ -65,7 +65,9 @@ export async function exerciseUIUXCoverage({ win, axePath, screenshotDir, auditA
             }).slice(0, 8).map(element => ({ tag: element.tagName, className: String(element.className), width: element.getBoundingClientRect().width }));
             return { hash: location.hash, title: title?.textContent.trim(), viewportWidth: innerWidth, viewportHeight: innerHeight,
               horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
-              regionHasContent: Boolean(region?.textContent.trim()), quickNavigationName: quick?.getAttribute('aria-label') || '', overflow };
+              regionHasContent: Boolean(region?.textContent.trim()),
+              duplicatePageHeading: [...(region?.querySelectorAll('h1, h2, h3') || [])].some(heading => heading.textContent.trim() === title?.textContent.trim()),
+              quickNavigationName: quick?.getAttribute('aria-label') || '', overflow };
           })()`);
           const screenshot = path.join(screenshotDir, `coverage-${route.route.replaceAll('/', '-')}-${theme}-${viewport.name}.png`);
           fs.writeFileSync(screenshot, (await win.webContents.capturePage()).toPNG());
@@ -141,7 +143,8 @@ async function exerciseNarrowNavigation(win, waitFor, waitForCapturePaint) {
     await win.webContents.executeJavaScript(`location.hash = '#tasks'`);
     await waitFor(win, `document.querySelector('[data-sessions-react]')`);
     await waitForCapturePaint(win);
-    for (const route of UIUX_ROUTE_COVERAGE.filter(item => ['processes', 'diagnostics', 'tools', 'usage'].includes(item.route) || item.route.startsWith('settings'))) {
+    // Developer-only Tools is covered by the route sweep, not the standard navigation checks.
+    for (const route of UIUX_ROUTE_COVERAGE.filter(item => ['processes', 'diagnostics', 'usage'].includes(item.route) || item.route.startsWith('settings'))) {
       if (route.route.startsWith('settings/')) {
         await win.webContents.executeJavaScript(`(() => {
           for (const details of document.querySelectorAll('.mobile-nav details, .sidebar details')) details.open = true;

@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## [1.3.0] — 2026-11-01
+
+### Changes
+
+- **Bump the desktop app and MCP runtime to 1.3.0.**
+
+- **Hide unstable Goal Mode account controls behind Developer options.** Move sign-in and account management from Connection settings to Settings → Application → Developer options. Mark Goal Mode unstable and warn that delayed acceptance of a ChatGPT file-materialization request may prevent conversation linking or task continuation. Keep existing task Stop Goal controls available.
+
+- **Retire idle Windows task shells after ConPTY repositions its startup banner.** Recognize the bounded cursor sequence before the startup separator while retaining exact prompt, no-input, lifecycle and terminal-control protections.
+
+- **Update security overrides for the editor and Electron build tools.** Use DOMPurify 3.4.17 and Undici 7.30.1 / 6.29.1 without changing their major versions. Midscene's transitive Zod 3 dependency remains an unresolved release-audit blocker.
 
 - **Show startup progress earlier and make busy work easier to follow.** Move the branded splash ahead of desktop lifecycle persistence during visible foreground launches, distinguish automatic recovery in the progress animation, record desktop launch and lazy-route timing, show current work directly on task rows, and safely reconcile delayed project and task-control results using read-only state checks.
 

@@ -107,7 +107,7 @@ function createBrowserRoute() {
           const status = await browser.goalLoginStatus({ tunnelId: state.goalTunnelId });
           delay = Math.max(delay, Number(status?.retryAfterMs || 0));
           if (!disposed && status?.browserOpen && status.state === 'signed_in') {
-            setNotice('ChatGPT sign-in verified. Manage your Goal Mode accounts in Connection settings.');
+            setNotice('ChatGPT sign-in verified. Manage your Goal Mode accounts in Settings → Application → Developer options.');
             return;
           }
         } catch (cause) {
@@ -209,7 +209,7 @@ function createBrowserRoute() {
             ? `${handoffTitle(handoffReason)} Complete this step in the local browser. Enter passwords and verification codes here, not in ChatGPT. When finished, confirm in ChatGPT.`
             : 'Manual control is active. Return control to resume AI interaction.'
         ),
-        handoffReason === 'goal_login' ? h('a', { className: 'buttonlike secondary compact-button', href: routeHref('settings/connection') }, 'Goal Mode settings') : null,
+        handoffReason === 'goal_login' ? h('a', { className: 'buttonlike secondary compact-button', href: routeHref('settings/application') }, 'Goal Mode settings') : null,
         handoffReason ? null : h('button', { className: 'secondary compact-button', type: 'button', disabled: busy === 'control' || busy === 'stop', onClick: () => { void run('control', () => browser.setControl('ai')); } }, busy === 'control' ? 'Returning…' : 'Return to AI')
       ) : null,
       permissionRequest ? h('div', { className: 'browser-permission-banner', role: 'region', 'aria-label': 'Site permission request' },

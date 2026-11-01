@@ -255,7 +255,11 @@ try {
   assert.equal(result.goalAccounts.retainedAccount, 'a@example.invalid', 'account selection, automatic sign-in check and scoped sign-out must preserve the other account');
   assert.equal(result.goalAccounts.narrowOverflow, false, 'account controls must stay usable without horizontal page overflow on a narrow window');
   assert.equal(result.goalAccounts.deepLinkPreservedCard, true, 'tunnel deep links must update the mounted account selector');
-  assert.equal(result.goalAccounts.inventoryPreservedCard, true, 'adding and removing tunnels must refresh the mounted account inventory');
+  assert.equal(result.goalAccounts.inventoryRefreshed, true, 'returning from tunnel settings must load the updated account inventory');
+  assert.equal(result.goalAccounts.hiddenBeforeUnlock, true, 'Goal Mode must stay hidden and avoid account reads until developer options are unlocked');
+  assert.equal(result.goalAccounts.hiddenInConnection, true, 'normal Connection settings must not show Goal Mode');
+  assert.equal(result.goalAccounts.unstable, true, 'Goal Mode must be marked unstable');
+  assert.match(result.goalAccounts.materializationWarning, /accept file materialization.*promptly.*Delayed acceptance may prevent Goal Mode/s);
   assert.equal(result.goalAccounts.browserScopedChecks, true, 'automatic browser sign-in checks must inspect only the displayed login account');
   assert.equal(result.operationDiagnosticsRemoved, true, 'operation/build diagnostic panels must stay out of the production UI');
   assert.deepEqual(result.responsive.map(item => item.name), [
@@ -340,6 +344,7 @@ try {
   }
   for (const route of result.uiuxCoverage.routes) {
     assert.equal(route.regionHasContent, true, JSON.stringify(route));
+    if (route.route === 'extensions') assert.equal(route.duplicatePageHeading, false, 'Extensions must not repeat its page title as a section heading');
     assert.equal(route.horizontalOverflow, false, JSON.stringify(route));
     assert.ok(fs.existsSync(route.screenshot), 'missing screenshot: ' + route.screenshot);
     if (route.viewport === 'reflow-320') assert.ok(route.viewportWidth >= 319 && route.viewportWidth <= 320, JSON.stringify(route));

@@ -1456,6 +1456,7 @@ async function exerciseUniformTunnels(win) {
 
 async function exerciseGoalAccounts(win) {
   await win.webContents.executeJavaScript(`(() => {
+    localStorage.removeItem('relai_developer_options_unlocked');
     const accounts = [
       { tunnelId: 'tunnel_accountA12345', label: 'Personal', enabled: true, state: 'signed_in', browserOpen: false, account: { email: 'a@example.invalid' } },
       { tunnelId: 'tunnel_accountB12345', label: 'School', enabled: true, state: 'sign_in_required', browserOpen: false }
@@ -1484,15 +1485,27 @@ async function exerciseGoalAccounts(win) {
       goalLoginStart: async input => { probe.starts.push(input.tunnelId); const account = accounts.find(item => item.tunnelId === input.tunnelId); account.browserOpen = true; return { ok: true, browserOpen: true, tunnelId: input.tunnelId }; },
       goalLoginSignOut: async input => { probe.outs.push(input.tunnelId); const account = accounts.find(item => item.tunnelId === input.tunnelId); delete account.account; account.state = 'sign_in_required'; account.browserOpen = false; return structuredClone(account); }
     } };
-    location.hash = '#settings/connection?tunnel=tunnel_accountB12345';
+    location.hash = '#settings/application?tunnel=tunnel_accountB12345';
   })()`);
+  await waitFor(win, `document.querySelector('[data-settings-react="application"]') && !document.querySelector('.settings-loading')`);
+  const hiddenBeforeUnlock = await win.webContents.executeJavaScript(`!document.querySelector('.connection-goal-account') && window.__goalAccountsProbe.statusRequests.length === 0`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/about'`);
+  await waitFor(win, `document.querySelector('.about-build-trigger')`);
+  for (let click = 0; click < 5; click++) {
+    await win.webContents.executeJavaScript(`document.querySelector('.about-build-trigger').click()`);
+  }
+  await waitFor(win, `localStorage.getItem('relai_developer_options_unlocked') === '1'`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/connection'`);
+  await waitFor(win, `document.querySelector('.connection-page')`);
+  const hiddenInConnection = await win.webContents.executeJavaScript(`!document.querySelector('.connection-goal-account')`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/application?tunnel=tunnel_accountB12345'`);
   await waitFor(win, `document.querySelector('[aria-label="ChatGPT Goal Mode connection"]')?.value === 'tunnel_accountB12345' && document.querySelector('.connection-goal-account button.primary')?.disabled === false`);
   await win.webContents.executeJavaScript(`(() => {
     window.__goalAccountsProbe.card = document.querySelector('.connection-goal-account');
-    location.hash = '#settings/connection?tunnel=tunnel_accountA12345';
+    location.hash = '#settings/application?tunnel=tunnel_accountA12345';
   })()`);
   await waitFor(win, `document.querySelector('.connection-goal-identity')?.textContent === 'a@example.invalid'`);
-  await win.webContents.executeJavaScript(`location.hash = '#settings/connection?tunnel=tunnel_accountB12345'`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/application?tunnel=tunnel_accountB12345'`);
   await win.webContents.executeJavaScript(`(() => {
     const select = document.querySelector('[aria-label="ChatGPT Goal Mode connection"]');
     select.value = 'tunnel_accountB12345'; select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1531,7 +1544,11 @@ async function exerciseGoalAccounts(win) {
   await waitFor(win, `document.querySelector('.connection-goal-identity')?.textContent === 'a@example.invalid'`);
   const result = await win.webContents.executeJavaScript(`({ starts: window.__goalAccountsProbe.starts, outs: window.__goalAccountsProbe.outs,
     retainedAccount: document.querySelector('.connection-goal-identity').textContent,
+    unstable: document.querySelector('#goalModeTitle').textContent.includes('Unstable'),
+    materializationWarning: document.querySelector('.connection-goal-account [role="note"]').textContent,
     deepLinkPreservedCard: document.querySelector('.connection-goal-account') === window.__goalAccountsProbe.card })`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/connection'`);
+  await waitFor(win, `document.querySelector('#tunnelSettings')`);
   await win.webContents.executeJavaScript(`(() => {
     document.querySelector('#tunnelSettings').open = true;
     document.querySelector('.additional-tunnels-heading button').click();
@@ -1546,15 +1563,21 @@ async function exerciseGoalAccounts(win) {
   })()`);
   await waitFor(win, `document.querySelector('#additionalTunnelId')?.value === 'tunnel_accountC12345'`);
   await win.webContents.executeJavaScript(`document.querySelector('.additional-tunnel-form-actions button').click()`);
+  await waitFor(win, `document.querySelectorAll('.additional-tunnel-row').length === 3`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/application'`);
   await waitFor(win, `document.querySelectorAll('.connection-goal-select option').length === 3`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/connection'`);
+  await waitFor(win, `document.querySelectorAll('.additional-tunnel-row').length === 3`);
   await win.webContents.executeJavaScript(`(() => {
     const row = [...document.querySelectorAll('.additional-tunnel-row')].find(row => row.textContent.includes('tunnel_accountC12345'));
     [...row.querySelectorAll('button')].find(button => button.textContent === 'Remove').click();
   })()`);
   await waitFor(win, `document.querySelector('.modal-actions')`);
   await win.webContents.executeJavaScript(`[...document.querySelectorAll('.modal-actions button')].find(button => button.textContent === 'Remove tunnel').click()`);
+  await waitFor(win, `document.querySelectorAll('.additional-tunnel-row').length === 2 && !document.querySelector('.modal-actions')`);
+  await win.webContents.executeJavaScript(`location.hash = '#settings/application'`);
   await waitFor(win, `document.querySelectorAll('.connection-goal-select option').length === 2`);
-  result.inventoryPreservedCard = await win.webContents.executeJavaScript(`document.querySelector('.connection-goal-account') === window.__goalAccountsProbe.card`);
+  result.inventoryRefreshed = true;
   await win.webContents.executeJavaScript(`(() => {
     const account = window.__goalAccountsProbe.accounts[1];
     account.browserOpen = true;
@@ -1571,5 +1594,5 @@ async function exerciseGoalAccounts(win) {
   result.browserScopedChecks = await win.webContents.executeJavaScript(`window.__goalAccountsProbe.statusRequests
     .slice(window.__goalAccountsProbe.browserStatusStart).every(input => input?.tunnelId === 'tunnel_accountB12345')`);
   await win.webContents.executeJavaScript(`(() => { delete window.relaiDesktop; delete window.__goalAccountsProbe; location.hash = '#tasks'; })()`);
-  return { ...result, narrowOverflow, accessibility };
+  return { ...result, hiddenBeforeUnlock, hiddenInConnection, narrowOverflow, accessibility };
 }

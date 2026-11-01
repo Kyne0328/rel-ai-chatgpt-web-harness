@@ -488,7 +488,6 @@ const cssSource = fs.readFileSync(path.join(root, 'src/ui/styles/app.css'), 'utf
 const sessionCssSource = fs.readFileSync(path.join(root, 'src/ui/features/sessions/styles.css'), 'utf8');
 
 assert.match(sessionsSource, /sessions-summary-line/, 'Tasks surface must retain a compact user-facing summary in its toolbar');
-assert.match(sessionsSource, /Review its progress, changes, checks, and activity\./, 'Tasks empty inspector must explain what selecting a task reveals');
 assert.match(sessionsSource, /function TaskIdentifier\(/, 'Task details must preserve copyable identifiers for manual continuation');
 assert.match(sessionsSource, /'aria-label': `Copy \$\{label\}`/, 'Identifier copy controls must have accessible names');
 assert.doesNotMatch(sessionsSource, /Client task capability|Native MCP tasks|Native task ID/);

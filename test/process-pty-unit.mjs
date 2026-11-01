@@ -80,6 +80,22 @@ assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, { ...titleRange, text: tit
 assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, { ...titleRange, text: `unexpected\r\n${titleFixture}` }), false,
   'a later OSC title cannot disguise arbitrary preceding output as startup');
 
+const repositionedBanner = `startup banner\r\nstartup notice\r\x1b[1A\x1b[44G\r\n\r\n${titleFixtureCwd}>`;
+const startupRange = text => ({ ...titleRange, text, totalBytes: Buffer.byteLength(text) });
+assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, startupRange(repositionedBanner)), true,
+  'a bounded ConPTY banner reposition before the blank separator preserves the exact startup prompt');
+for (const text of [
+  repositionedBanner.replace('[1A', '[2A'),
+  repositionedBanner.replace('[44G', '[81G'),
+  repositionedBanner.replace('\r\n\r\n', '\r\n'),
+  repositionedBanner.replace(`${titleFixtureCwd}>`, `${titleFixtureCwd}\x1b[1A>`)
+]) {
+  assert.equal(wrappedCmdStartupIsAtPrompt(titleRecord, startupRange(text)), false,
+    'other cursor movements, missing separators and prompt controls cannot authorize retirement');
+}
+assert.equal(wrappedCmdStartupIsAtPrompt({ ...titleRecord, ptyLastInputSeq: 1 }, startupRange(repositionedBanner)), false,
+  'a banner reposition cannot restore startup proof after input');
+
 async function startTarget(purpose) {
   const originalBind = WindowsProcessJob.prototype.bind;
   selectedJob = undefined;

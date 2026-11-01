@@ -48,16 +48,6 @@
 }
 
 @layer components {
-.overview-grid { @apply grid gap-3; grid-template-columns: repeat(3, minmax(0,1fr)); }
-.overview-grid-two { grid-template-columns: repeat(2, minmax(0,1fr)); }
-.summary-metrics { @apply gap-0 overflow-hidden rounded-lg; background: var(--ui-surface-primary); border: 1px solid var(--ui-border-subtle); }
-.summary-metrics .metric { @apply rounded-none border-0 border-r p-4 last:border-r-0; border-color: var(--ui-border-default); }
-.metric-label { @apply text-[13px] font-semibold uppercase tracking-[.06em] leading-5; color: var(--ui-text-secondary); }
-.metric-value { @apply mt-1 text-2xl font-extrabold; }
-.metric-sub { @apply mt-1 text-[13px] leading-6; color: var(--ui-text-secondary); max-width: 65ch; }
-.metric.good .metric-value { color: var(--ui-status-success-foreground); }
-.metric.warn .metric-value { color: var(--ui-status-warning-foreground); }
-.metric.bad .metric-value { color: var(--ui-status-danger-foreground); }
 .layout-grid { @apply grid gap-3; grid-template-columns: minmax(0,1fr) minmax(0,1fr); }
 
 .overview-hero {
@@ -73,7 +63,6 @@
 .overview-kicker { @apply mb-2 text-[13px] font-bold uppercase tracking-[.08em]; color: var(--ui-action-primary); }
 .overview-title { @apply max-w-4xl text-[clamp(28px,3vw,42px)] font-extrabold leading-[1.08]; }
 .overview-description { @apply mt-3 text-[15px] leading-7; color: var(--ui-text-secondary); max-width: 65ch; }
-.overview-actions { @apply mt-5 flex flex-wrap gap-2; }
 
 .task-overview { @apply grid items-center gap-4 p-4; grid-template-columns: 42px minmax(0,1fr) auto; }
 .task-overview.multiple { @apply items-start; grid-template-columns: 42px minmax(0,1fr); }
@@ -113,12 +102,6 @@
 .overview-active-task-copy > span { @apply truncate text-[13px]; color: var(--ui-text-secondary); }
 .overview-active-task-row .status-pill { @apply justify-self-end; }
 .overview-active-task-more { @apply inline-flex min-h-11 items-center text-[13px] font-semibold; color: var(--ui-action-primary); }
-.attention-list { @apply p-0; }
-.attention-item { @apply grid min-h-16 items-center gap-3 border-b px-4 py-3 last:border-b-0; grid-template-columns: auto minmax(0,1fr) auto; border-color: var(--ui-border-subtle); }
-.attention-icon { @apply size-2 rounded-full; background: var(--ui-status-warning-foreground); }
-.attention-icon.bad { background: var(--ui-status-danger-foreground); }
-.attention-title { @apply text-[13px] font-semibold leading-5; }
-.attention-copy { @apply mt-0.5 text-[13px] leading-6; color: var(--ui-text-secondary); }
 .compact-workspace-list { @apply p-0; }
 .compact-workspace { @apply flex min-h-14 items-center justify-between gap-3 border-b px-4 py-3 last:border-b-0; border-color: var(--ui-border-subtle); }
 .compact-workspace-path { @apply mt-0.5 max-w-[520px] text-[13px] leading-5; overflow-wrap: anywhere; color: var(--ui-text-secondary); }
@@ -170,14 +153,9 @@
 .home-analytics-loading { @apply grid gap-0; grid-template-columns: repeat(4,minmax(0,1fr)); border-top: 1px solid var(--ui-border-subtle); }
 .home-analytics-loading span { @apply block min-h-24 border-r last:border-r-0; border-color: var(--ui-border-subtle); background: linear-gradient(110deg, var(--ui-surface-primary) 24%, var(--ui-surface-secondary) 38%, var(--ui-surface-primary) 52%); background-size: 220% 100%; animation: skeleton-sweep 1.3s ease-in-out infinite; }
 
-.overview-grid-compact { grid-template-columns: repeat(3,minmax(0,1fr)); }
-.attention-card { border-color: color-mix(in srgb, var(--ui-status-warning-foreground) 28%, var(--ui-border-default)); }
-.metric-meta { @apply mt-1 text-[13px] leading-5; color: var(--ui-text-secondary); }
 }
 
 @media (max-width: 760px) {
-  .overview-grid, .overview-grid-two { grid-template-columns: 1fr; }
-  .summary-metrics .metric { @apply border-b border-r-0 last:border-b-0; border-color: var(--ui-border-default); }
   .overview-hero { @apply p-5; }
   .task-overview { grid-template-columns: 38px minmax(0,1fr); }
   .task-overview-meta { grid-column: 2; @apply flex-row items-center justify-start; }

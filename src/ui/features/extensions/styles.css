@@ -13,7 +13,7 @@
   }
 
   .extensions-header-copy p {
-    @apply mt-1 text-[13px] leading-relaxed max-w-2xl;
+    @apply text-[13px] leading-relaxed max-w-2xl;
     color: var(--ui-text-secondary);
   }
 

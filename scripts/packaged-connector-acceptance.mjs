@@ -159,7 +159,7 @@ try {
   });
   assert.equal(read.items?.[0]?.content, 'packaged connector acceptance\n');
 
-  const edited = await callTool(primarySession, 18, 'relai_edit', {
+  const edited = await callToolSettled(primarySession, 18, 'relai_edit', {
     workspace: 'acceptance',
     work_id: taskId,
     path: 'acceptance.txt',

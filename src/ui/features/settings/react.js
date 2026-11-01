@@ -137,8 +137,6 @@ function SettingsReadError({ message, onRetry, busy = false }) {
 
 function ConnectionPage({ data }) {
   const controlsRef = useRef(null);
-  const [connectionsRevision, setConnectionsRevision] = useState(0);
-  const connectionsChanged = useCallback(() => setConnectionsRevision(revision => revision + 1), []);
   const state = connectionStateFor(data);
   const summary = connectionSummary(state);
   const action = connectionPrimaryAction(state);
@@ -186,14 +184,13 @@ function ConnectionPage({ data }) {
     h(ConnectionLayers, { state, summary }),
     guideMode ? h(ConnectionGuide, { mode: guideMode, tunnelId, workspaceAlias }) : null,
     h('section', { id: 'connectionControls', className: 'connection-controls-section', ref: controlsRef },
-      h(DesktopConnectionSettings, { expanded: String(state.publicEndpoint?.status || '') === 'disabled', primaryTunnel, onConnectionsChange: connectionsChanged })
+      h(DesktopConnectionSettings, { expanded: String(state.publicEndpoint?.status || '') === 'disabled', primaryTunnel })
     ),
-    h(GoalModeAccount, { browser: window.relaiDesktop?.browser, connectionsRevision }),
     typeof window.relaiDesktop?.logout === 'function' ? h(Card, { title: 'Connection controls' }, h(LogoutRow)) : null
   );
 }
 
-function GoalModeAccount({ browser, connectionsRevision }) {
+function GoalModeAccount({ browser }) {
   const route = useSyncExternalStore(subscribeRoute, getRouteSnapshot, getRouteSnapshot);
   const routeTunnelId = new URLSearchParams(route.search).get('tunnel') || '';
   const [status, setStatus] = useState(null);
@@ -239,7 +236,7 @@ function GoalModeAccount({ browser, connectionsRevision }) {
   useEffect(() => {
     void refresh().catch(() => {});
     return invalidateRequests;
-  }, [refresh, invalidateRequests, connectionsRevision]);
+  }, [refresh, invalidateRequests]);
   const hasConnections = Array.isArray(status?.connections);
   useEffect(() => {
     // Keep the initial connection inventory before loading a deep-linked account;
@@ -291,11 +288,12 @@ function GoalModeAccount({ browser, connectionsRevision }) {
     : state === 'sign_in_required' || state === 'unverified' ? 'warn' : 'neutral';
   return h('section', { className: 'card connection-goal-account', 'aria-labelledby': 'goalModeTitle' },
     h('div', { className: 'card-head' },
-      h('h3', { id: 'goalModeTitle' }, 'Goal Mode'),
+      h('h3', { id: 'goalModeTitle' }, 'Goal Mode — Unstable'),
       h(StatusPill, { label, tone, role: 'status' })
     ),
     h('div', { className: 'card-body connection-goal-body' },
       h('p', { className: 'connection-goal-description' }, 'Sign in to let Goal Mode continue unfinished ChatGPT tasks.'),
+      h('p', { className: 'connection-notice warn', role: 'note' }, 'Goal Mode is unstable and may not work. If ChatGPT asks you to accept file materialization, accept it promptly. Delayed acceptance may prevent Goal Mode from linking the conversation or continuing the task.'),
       Array.isArray(connections) && !connections.length
         ? h('p', { className: 'settings-help' }, 'Add a tunnel in Connection settings to sign in.') : null,
       h('div', { className: 'connection-goal-account-row' },
@@ -407,7 +405,7 @@ function ConnectionGuide({ mode, tunnelId, workspaceAlias }) {
   );
 }
 
-function DesktopConnectionSettings({ expanded = false, primaryTunnel = null, onConnectionsChange }) {
+function DesktopConnectionSettings({ expanded = false, primaryTunnel = null }) {
   const [form, setForm] = useState(null);
   const [saved, setSaved] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -546,7 +544,6 @@ function DesktopConnectionSettings({ expanded = false, primaryTunnel = null, onC
         disabled: saveState === 'saving',
         onBusyChange: setTunnelBusy,
         onChange: async ({ connections, statuses }) => {
-          onConnectionsChange?.();
           setForm(current => ({ ...current, additionalTunnels: connections, additionalTunnelStatuses: statuses }));
           const settings = await desktop.getSettings();
           setForm(current => ({ ...current, tunnelId: settings.tunnelId || '', tunnelLabel: settings.tunnelLabel || 'Connection 1',
@@ -1253,19 +1250,21 @@ function ApplicationPage() {
 }
 
 function DeveloperOptions({ enabledFeatures, onChange }) {
-  return h(Card, { title: 'Developer options' },
-    h('p', { className: 'settings-help' }, 'Experimental tools for developers and testers. These are optional and may change.'),
-    h('div', { className: 'connection-actions' },
-      h('a', { className: 'buttonlike secondary', href: '#tools' }, 'ChatGPT tools'),
-      h('a', { className: 'buttonlike secondary', href: '#extensions' }, 'Open Extensions')
-    ),
-    EXPERIMENTAL_FEATURE_FLAGS.map(feature => h(ToggleRow, {
-      key: feature.id,
-      label: feature.label,
-      help: feature.help,
-      checked: enabledFeatures[feature.id] === true,
-      onChange: enabled => onChange(feature.id, enabled)
-    }))
+  return h('section', { className: 'section', 'aria-label': 'Developer options' },
+    h(Card, { title: 'Developer options' },
+      h('p', { className: 'settings-help' }, 'Experimental tools for developers and testers. These are optional and may change.'),
+      h('div', { className: 'connection-actions' },
+        h('a', { className: 'buttonlike secondary', href: '#tools' }, 'ChatGPT tools'),
+        h('a', { className: 'buttonlike secondary', href: '#extensions' }, 'Open Extensions')
+      ),
+      EXPERIMENTAL_FEATURE_FLAGS.map(feature => h(ToggleRow, {
+        key: feature.id,
+        label: feature.label,
+        help: feature.help,
+        checked: enabledFeatures[feature.id] === true,
+        onChange: enabled => onChange(feature.id, enabled)
+      }))),
+    h(GoalModeAccount, { browser: window.relaiDesktop?.browser })
   );
 }
 
@@ -1829,7 +1828,7 @@ function AboutPage({ metadata, buildId = '' }) {
     if (!next.unlocked) return;
     unlockDeveloperOptions();
     setUnlocked(true);
-    toast('Developer options unlocked. Open Settings → App to manage Extensions.', { variant: 'success' });
+    toast('Developer options unlocked. Open Settings → Application for experimental features and unstable Goal Mode.', { variant: 'success' });
   };
   const repositoryUrl = validatedGitHubUrl(metadata.repositoryUrl);
   const developer = metadata.developer || {};

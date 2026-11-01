@@ -1217,7 +1217,7 @@ async function case_extension_source_cache_unit() {
     const after = { ...before, sources: action === 'add_source' ? [{ id: 'existing' }, { id: 'new' }] : [] };
     const cache = new Map([['/api/extensions', before]]);
     const requests = [];
-    let stateIndex = 0;
+    let initialDataInjected = false;
     const fetchJson = async (url, options = {}) => {
       requests.push({ url, options });
       if (options.cache !== 'no-store' && cache.has(url)) return cache.get(url);
@@ -1226,7 +1226,15 @@ async function case_extension_source_cache_unit() {
     };
     const context = {
       React: { createElement: (type, props, ...children) => ({ type, props: props || {}, children }) },
-      useState: initial => [stateIndex++ === 0 ? 'sources' : stateIndex === 2 ? before : initial, () => {}],
+      readDeveloperOptionsUnlocked: () => true,
+      useState: initial => {
+        if (initial === null && !initialDataInjected) {
+          initialDataInjected = true;
+          return [before, () => {}];
+        }
+        const value = typeof initial === 'function' ? initial() : initial;
+        return [value === 'installed' ? 'advanced' : value, () => {}];
+      },
       useRef: initial => ({ current: initial }),
       useMemo: compute => compute(),
       useEffect: () => {},

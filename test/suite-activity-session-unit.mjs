@@ -444,7 +444,7 @@ async function case_task_inspector_lifecycle_unit() {
 
   // Run the actual page/inspector callbacks with deterministic hook state and
   // effect cleanup. Child elements remain inspectable without a browser build.
-  function harness(task = '') {
+  function harness(task = '', developerUnlocked = false) {
     const componentSlots = new Map();
     let slots = [];
     const requests = [];
@@ -516,7 +516,8 @@ async function case_task_inspector_lifecycle_unit() {
       requestDashboardRefresh: () => { refreshes += 1; },
       toast() {},
       confirmAction: async () => true,
-      routeHref: () => '#activity',
+      routeHref: (path, query) => `#${path}${query?.tunnel ? `?tunnel=${encodeURIComponent(query.tunnel)}` : ''}`,
+      readDeveloperOptionsUnlocked: () => developerUnlocked,
       orderWorkspacesAlphabetically: rows => rows
     };
     vm.runInNewContext(source + '\nglobalThis.components = { SessionsPage, SessionInspector, SessionTabs, TaskDetailsSection, TaskProcessesSection, CurrentOperations, TaskTraceSection };', context);
@@ -565,6 +566,19 @@ async function case_task_inspector_lifecycle_unit() {
   }));
   const data = { tasks: recent, config: { workspaces: [] } };
   const retained = { id: 'retained-old', title: 'Retained task outside bootstrap', workspace: 'app', status: 'completed' };
+
+  {
+    const app = harness('');
+    const page = app.render('SessionsPage', { data });
+    const empty = find(page, node => node.props?.className === 'inspector-empty');
+    assert.ok(empty, 'an unselected task inspector must show guidance');
+    assert.match(find(empty, node => node.type === 'strong')?.children.join('') || '', /select|choose/i,
+      'the empty inspector must explain how to open a task');
+    assert.match(find(empty, node => node.type === 'span')?.children.join('') || '', /progress|changes|activity|commands/i,
+      'the empty inspector must describe the task information available');
+    assert.equal(inspector(page), null, 'an unselected inspector must not show another task’s details');
+    app.dispose();
+  }
 
   {
     const active = { ...recent[0], status: 'planning' };
@@ -657,6 +671,31 @@ async function case_task_inspector_lifecycle_unit() {
     const empty = app.render('TaskProcessesSection', { session: completed, taskId: active.id, active: true });
     assert.ok(find(empty, node => node.type === 'strong' && node.children.includes('No running operations or managed commands')));
     app.dispose();
+  }
+
+  {
+    const needsAuth = { ...retained, goalMode: { goalActive: false, state: 'needs_auth', authRequired: true, tunnelId: 'tunnel_example' } };
+    const locked = harness('', false);
+    const lockedDetail = locked.render('SessionInspector', { session: needsAuth, activeTab: 'overview' });
+    const recovery = find(lockedDetail, node => Object.hasOwn(node.props, 'data-goal-auth-unlock'));
+    assert.ok(recovery, 'existing Goal Mode tasks must explain how to unlock hidden sign-in settings');
+    assert.ok(find(recovery, node => node.type === 'a' && node.props.href === '#settings/about'),
+      'the unlock notice must link to About, not inaccessible developer controls');
+    assert.match(recovery.children[0], /Build value five times/);
+    assert.equal(find(lockedDetail, node => node.type === 'a' && node.children.includes('Sign in to ChatGPT')), null,
+      'locked users must not see a dead-end Goal Mode sign-in link');
+    locked.dispose();
+
+    const unlocked = harness('', true);
+    const unlockedDetail = unlocked.render('SessionInspector', { session: needsAuth, activeTab: 'overview' });
+    assert.equal(find(unlockedDetail, node => Object.hasOwn(node.props, 'data-goal-auth-unlock')), null,
+      'unlock instructions must disappear when developer options are available');
+    assert.ok(find(unlockedDetail, node => node.type === 'a' && node.props.href === '#settings/application?tunnel=tunnel_example'
+      && node.children.includes('Sign in to ChatGPT')), 'unlocked users must get the account-specific sign-in route');
+    const normal = unlocked.render('SessionInspector', { session: retained, activeTab: 'overview' });
+    assert.equal(find(normal, node => Object.hasOwn(node.props, 'data-goal-auth-unlock')), null,
+      'ordinary tasks must not mention experimental Goal Mode');
+    unlocked.dispose();
   }
 
   {

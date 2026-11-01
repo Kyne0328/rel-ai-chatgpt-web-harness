@@ -66,7 +66,7 @@ assert.match(reactCode, /needsSetupCount/);
 assert.match(reactCode, /Show setup needed/, 'Extensions must surface installed packages that still require setup');
 assert.match(reactCode, /ExtensionsFilterToolbar/);
 assert.match(reactCode, /ExtensionInspectorDialog/);
-assert.ok(TABS.some(([id]) => id === 'sources'), 'Extensions navigation must expose source management');
+assert.ok(TABS.some(([id]) => id === 'advanced'), 'Extensions navigation must retain advanced source management');
 assert.match(reactCode, /function SourcesPanel/);
 assert.match(reactCode, /Add an extension source/);
 assert.match(reactCode, /type: 'url'/, 'Source input must use native URL validation');
@@ -89,13 +89,21 @@ const context = {
   TABS, TEMPLATES, PERMISSION_METADATA,
   EXTENSION_SCHEMA_URL: 'https://example.test/schema',
   useMemo: compute => compute(),
+  readDeveloperOptionsUnlocked: () => true,
   useEffect: () => {}
 };
 let slots = [];
 let cursor = 0;
+let initialRouteData = null;
 context.useState = initial => {
   const index = cursor++;
-  if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial;
+  if (!(index in slots)) {
+    slots[index] = typeof initial === 'function' ? initial() : initial;
+    if (initial === null && initialRouteData) {
+      slots[index] = initialRouteData;
+      initialRouteData = null;
+    }
+  }
   return [slots[index], value => { slots[index] = typeof value === 'function' ? value(slots[index]) : value; }];
 };
 context.useRef = initial => context.useState(() => ({ current: initial }))[0];
@@ -105,6 +113,11 @@ vm.runInNewContext(
   context
 );
 const render = (component, props = {}) => { cursor = 0; return component(props); };
+for (const developerOptionsUnlocked of [false, true]) {
+  const tabs = render(context.components.ExtensionTabs, { activeTab: 'installed', developerOptionsUnlocked });
+  assert.equal(flatten(tabs).some(node => node.props['data-extension-tab'] === 'advanced'), developerOptionsUnlocked,
+    'advanced source management must be visible only after developer unlock');
+}
 let filterState = { activeTab: 'installed', searchQuery: '', filterKind: 'all', filterStatus: 'all', installedCount: 3 };
 const toolbar = () => render(context.components.ExtensionsFilterToolbar, {
   ...filterState,
@@ -159,7 +172,7 @@ assert.deepEqual(radios.filter(node => node.props.checked).map(node => node.prop
 assert.equal(textOf(flatten(developer).find(node => node.type === 'pre')), TEMPLATES.cliBinary.code, 'Selected template controls the displayed code');
 
 slots = [];
-slots[1] = { ok: true, installed: [], catalog: [], sources: [] };
+initialRouteData = { ok: true, installed: [], catalog: [], sources: [] };
 const route = () => render(context.components.Route);
 const routeComponent = (tree, name) => flatten(tree).find(node => node.type === context.components[name]);
 routeComponent(route(), 'ExtensionsFilterToolbar').props.setFilterStatus('needs_setup');
@@ -172,6 +185,9 @@ routeComponent(route(), 'ExtensionTabs').props.setActiveTab('discover');
 routeComponent(route(), 'ExtensionsFilterToolbar').props.setFilterStatus('installed');
 routeComponent(route(), 'ExtensionTabs').props.setActiveTab('installed');
 assert.equal(routeComponent(route(), 'ExtensionsFilterToolbar').props.filterStatus, 'all', 'Discover-only status must not filter the Installed section');
+routeComponent(route(), 'ExtensionTabs').props.setActiveTab('advanced');
+assert.ok(flatten(route()).some(node => node.type?.name === 'SourcesPanel' && typeof node.props.onAddSource === 'function'),
+  'unlocked advanced navigation must expose source management actions');
 
 // 7. Inspector presentation retains workflow callbacks, complete identifiers, and a focus fallback.
 slots = [];

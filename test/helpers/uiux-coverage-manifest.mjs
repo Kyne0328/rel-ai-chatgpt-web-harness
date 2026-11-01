@@ -14,7 +14,7 @@ const regions = {
   'settings/about': '[data-settings-react="about"]', extensions: '[data-extensions-react]'
 };
 
-export const UIUX_ROUTE_COVERAGE = Object.freeze(navigationCommands({ includeExtensions: true }).map(route => {
+export const UIUX_ROUTE_COVERAGE = Object.freeze(navigationCommands({ includeExtensions: true, includeDeveloperTools: true }).map(route => {
   if (!regions[route.path]) throw new Error(`UI/UX coverage region missing for ${route.path}`);
   return Object.freeze({ route: route.path, label: route.label, region: regions[route.path] });
 }));

@@ -134,6 +134,8 @@ Use Rel.AI MCP with workspace "myapp". Implement this change, run the relevant c
 
 ### Goal and Loop from chat
 
+Goal Mode (including Loop) is **unstable**. Its account controls are hidden in **Settings → Application → Developer options**. Unlock Developer options by clicking the **Build** value in **Settings → About** five times within 2.5 seconds. If ChatGPT asks you to accept file materialization, accept it promptly; delayed acceptance may prevent conversation linking or task continuation.
+
 Start either mode in the same ChatGPT conversation:
 
 - `/goal Finish the repair and verify the affected tests` works toward a finite, evidence-backed outcome.

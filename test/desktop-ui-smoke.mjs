@@ -252,6 +252,24 @@ const settingsNodes = value => !value || typeof value !== 'object' ? []
   : [value, ...(value.children || []).flatMap(settingsNodes)];
 const settleSettingsReads = () => new Promise(resolve => setImmediate(resolve));
 
+// Goal account setup is reachable only through unlocked developer options.
+for (const unlocked of [false, true]) {
+  const harness = settingsReadHarness(['ApplicationPage', 'DeveloperOptions', 'GoalModeAccount'], {
+    readDeveloperOptionsUnlocked: () => unlocked
+  });
+  harness.render('ApplicationPage');
+  await settleSettingsReads();
+  const tree = harness.render('ApplicationPage');
+  const developerOptions = settingsNodes(tree).find(node => node.type === harness.context.DeveloperOptions);
+  assert.equal(Boolean(developerOptions), unlocked, 'Application settings must gate Goal Mode behind developer unlock');
+  if (developerOptions) {
+    const developerTree = harness.render('DeveloperOptions', developerOptions.props);
+    assert.ok(settingsNodes(developerTree).some(node => node.type === harness.context.GoalModeAccount),
+      'Developer options must contain Goal Mode account setup');
+  }
+  harness.unmount();
+}
+
 for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'storage']) {
   let reads = 0;
   const readResult = async () => {
@@ -295,15 +313,17 @@ for (const kind of ['notifications', 'lifecycle', 'telemetry', 'browser', 'stora
     async goalLoginStatus() { return ++calls === 1 ? { ok: false, error: 'Synthetic sign-in read failure' } : { connections: [] }; }
   };
   const harness = settingsReadHarness(['GoalModeAccount']);
-  harness.render('GoalModeAccount', { browser, connectionsRevision: 0 });
+  harness.render('GoalModeAccount', { browser });
   await settleSettingsReads();
-  let tree = harness.render('GoalModeAccount', { browser, connectionsRevision: 0 });
+  let tree = harness.render('GoalModeAccount', { browser });
+  assert.match(JSON.stringify(tree), /Goal Mode — Unstable/);
+  assert.match(JSON.stringify(tree), /accept file materialization.*promptly.*Delayed acceptance may prevent Goal Mode/);
   const retry = settingsNodes(tree).find(node => node.type === 'button' && node.children.includes('Retry sign-in status'));
   assert.ok(retry);
   assert.equal(retry.props.disabled, false, 'Missing initial account status must not disable its recovery action');
   retry.props.onClick();
   await settleSettingsReads();
-  tree = harness.render('GoalModeAccount', { browser, connectionsRevision: 0 });
+  tree = harness.render('GoalModeAccount', { browser });
   assert.equal(calls, 2);
   assert.doesNotMatch(JSON.stringify(tree), /Synthetic sign-in read failure/);
   harness.unmount();

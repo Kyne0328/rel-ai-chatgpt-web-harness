@@ -123,15 +123,15 @@ try {
   const imageBytes = Buffer.from(screenshot.image.data, 'base64');
   assert.equal(imageBytes.subarray(1, 4).toString('ascii'), 'PNG');
 
-  const expandedSettings = await runUiAction(workspace, {}, {
+  const openedSettings = await runUiAction(workspace, {}, {
     action: 'interact',
     sessionId,
     interaction: 'click',
-    target: { by: 'css', value: 'summary[aria-label="Settings"]' },
+    target: { by: 'role', value: 'link', name: 'Settings', exact: true },
     work_id: taskId
   }, context);
-  assert.equal(expandedSettings.ok, true);
-  assert.equal(expandedSettings.interaction, 'click');
+  assert.equal(openedSettings.ok, true);
+  assert.equal(openedSettings.interaction, 'click');
 
   const navigated = await runUiAction(workspace, {}, {
     action: 'navigate',
