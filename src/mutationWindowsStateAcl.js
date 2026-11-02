@@ -64,9 +64,17 @@ async function privatelyOwnedWindowsPaths(files) {
       for (let attempt = 0; attempt < 3 && !verified; attempt++) {
         const before = batch.map(fingerprint);
         const identities = batch.map(fileIdentity);
-        const { stdout } = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
-          env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
-        });
+        let stdout;
+        try {
+          ({ stdout } = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
+            env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
+          }));
+        } catch (error) {
+          // An active native writer can briefly prevent Get-Acl from opening
+          // the receipt. A failed check grants no authority; retry the probe.
+          if (attempt === 2) throw error;
+          continue;
+        }
         if (stdout !== 'OK') return false;
         if (batch.some((file, index) => fileIdentity(file) !== identities[index])) continue;
         if (batch.some((file, index) => fingerprint(file) !== before[index])) {

@@ -25,6 +25,16 @@ try {
   const receipt = JSON.parse(fs.readFileSync(path.join(root, 'desktop-smoke-ready.json'), 'utf8'));
   assert.equal(receipt.ready, true);
   assert.equal(receipt.pid, process.pid);
+  const hiddenContents = new EventEmitter();
+  hiddenContents.isDestroyed = () => false;
+  hiddenContents.isLoadingMainFrame = () => true;
+  hiddenContents.getURL = () => 'about:blank';
+  assert.equal(await recordDesktopSmokeReadiness({ app, env, BrowserWindow: {
+    getAllWindows: () => [
+      { isDestroyed: () => false, isVisible: () => false, webContents: hiddenContents },
+      { isDestroyed: () => false, isVisible: () => true, webContents: contents }
+    ]
+  }, timeoutMs: 20 }), true, 'hidden auxiliary windows do not block the foreground renderer');
   await assert.rejects(recordDesktopSmokeReadiness({ app, BrowserWindow: { getAllWindows: () => [] }, env }), /without a renderer/);
   contents.getURL = () => 'about:blank';
   await assert.rejects(recordDesktopSmokeReadiness({ app, BrowserWindow, env, timeoutMs: 20 }), /timed out/);

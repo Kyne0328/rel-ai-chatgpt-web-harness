@@ -9,7 +9,9 @@ export async function recordDesktopSmokeReadiness({ app, BrowserWindow, env = pr
       || path.resolve(app.getPath('userData')) !== path.resolve(env.REL_AI_ELECTRON_DEV_USER_DATA)) {
     throw new Error('Desktop smoke readiness requires a unique isolated user-data directory.');
   }
-  const windows = BrowserWindow.getAllWindows().filter(window => !window.isDestroyed());
+  // Hidden auxiliary windows may intentionally stay blank; require the
+  // foreground renderer instead of waiting on every background window.
+  const windows = BrowserWindow.getAllWindows().filter(window => !window.isDestroyed() && window.isVisible?.() !== false);
   if (!windows.length) throw new Error('Desktop started without a renderer window.');
   await Promise.all(windows.map(window => waitForRenderer(window.webContents, timeoutMs)));
   const receipt = { ready: true, nonce, pid: process.pid, rendererCount: windows.length };
