@@ -1,8 +1,14 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { verifyDashboardGeneratedState } from './dashboard-generated-integrity.mjs';
+import {
+  dashboardAssetHashes,
+  dashboardGeneratedManifestPath,
+  dashboardSourceHash,
+  verifyDashboardGeneratedState
+} from './dashboard-generated-integrity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const publicRoot = process.env.REL_AI_GENERATED_PUBLIC_ROOT
@@ -41,5 +47,20 @@ function verifyGenerator(name, message) {
 }
 
 function staleDashboardError() {
-  return new Error('Generated dashboard assets are stale. Run npm run build:frontend and keep public/dashboard-app.js, public/dashboard-react.js, public/dashboard.css, generated dashboard chunks, and public/dashboard-generated-manifest.json with the source change.');
+  const explanation = [];
+  try {
+    const manifest = JSON.parse(fs.readFileSync(dashboardGeneratedManifestPath(publicRoot), 'utf8'));
+    const currentSource = dashboardSourceHash(root);
+    if (manifest.sourceHash !== currentSource) {
+      explanation.push(`source fingerprint: recorded ${manifest.sourceHash}, current ${currentSource}`);
+    }
+    const actualAssets = dashboardAssetHashes(publicRoot);
+    const expectedAssets = manifest.assets || {};
+    const changedAssets = [...new Set([...Object.keys(expectedAssets), ...Object.keys(actualAssets)])]
+      .filter(name => actualAssets[name] !== expectedAssets[name]).sort();
+    if (changedAssets.length) explanation.push(`asset mismatches: ${changedAssets.join(', ')}`);
+  } catch (error) {
+    explanation.push(`manifest unreadable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return new Error(`Generated dashboard assets are stale. ${explanation.join('; ')}. Run npm run build:frontend and keep public/dashboard-app.js, public/dashboard-react.js, public/dashboard.css, generated dashboard chunks, and public/dashboard-generated-manifest.json with the source change.`);
 }
