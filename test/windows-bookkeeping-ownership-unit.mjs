@@ -40,12 +40,23 @@ const run = handler => executeToolCall({
   definition: { behavior: { concurrencyScope: 'mutation' }, handler }, started: Date.now()
 });
 const originalSpawn = childProcess.spawn;
+// Recovery intentionally refuses shared writable state. Windows CI profiles
+// can grant inherited Users access to newly created temporary directories.
+// Keep the fixture private rather than weakening the production ACL check.
+const powershell = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const ownerSid = childProcess.execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+  '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { encoding: 'utf8', windowsHide: true }).trim();
+function restrictFixtureState(directory) {
+  childProcess.execFileSync(path.join(process.env.SystemRoot, 'System32', 'icacls.exe'),
+    [directory, '/inheritance:r', '/grant:r', `*${ownerSid}:(OI)(CI)F`], { windowsHide: true, stdio: 'ignore' });
+}
 try {
   // The native owner survives loss of its Node parent and its output reader.
   // Killing the controller before a final receipt must still be recoverable
   // through the witnessed kernel job, without using PID absence as proof.
   for (const backend of ['companion', 'powershell']) {
     const fixtureState = fs.mkdtempSync(path.join(os.homedir(), 'relai-native-restart-'));
+    restrictFixtureState(fixtureState);
     const launched = childProcess.spawn(process.execPath, ['--input-type=module', '-e', `
       import fs from 'node:fs';
       import {spawn} from 'node:child_process';
