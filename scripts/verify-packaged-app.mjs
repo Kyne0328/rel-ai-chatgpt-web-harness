@@ -52,6 +52,7 @@ const zoektIndexRelativePath = resourcePath('bin', 'zoekt', platform, sourceZoek
 const requiredFiles = [
   spec.executableName,
   resourcePath('app.asar'),
+  resourcePath('app-icon.png'),
   resourcePath('node_modules', '@modelcontextprotocol', 'server', 'package.json'),
   resourcePath('node_modules', '@modelcontextprotocol', 'node', 'package.json'),
   resourcePath('node_modules', '@modelcontextprotocol', 'core', 'package.json'),
@@ -124,10 +125,13 @@ assertExecutable(path.join(packageDirectory, zoektSearchRelativePath), platform)
 assertExecutable(path.join(packageDirectory, zoektIndexRelativePath), platform);
 assertPackagedSevenZipExecutable(resourcesRoot, platform, targetArch);
 
+assert.deepEqual(fs.readFileSync(path.join(resourcesRoot, 'app-icon.png')),
+  fs.readFileSync(path.join(root, 'electron', 'build', 'icon.png')),
+  'Packaged runtime icon must match the configured Electron icon.');
 const asarPath = path.join(resourcesRoot, 'app.asar');
 const asarEntries = new Set(listPackage(asarPath).map(entry => entry.replaceAll('\\', '/').replace(/^\//, '')));
 const electronPackage = JSON.parse(fs.readFileSync(path.join(root, 'electron', 'package.json'), 'utf8'));
-assertElectronRuntimeCoverage({ electronRoot: path.join(root, 'electron'), electronPackage, asarEntries });
+assertElectronRuntimeCoverage({ electronRoot: path.join(root, 'electron'), electronPackage, asarEntries, platform });
 for (const relativePath of ['preload.cjs', 'chatgpt-goal-helper.js', 'startup-background.js', 'secure-tunnel-runtime.js', 'tunnel-credentials.js', 'service-process.js', 'service-process-client.js', 'runtime-log-snapshot.js', 'service-activity-projection.js', 'renderer/app.css', 'renderer/color-tokens.css', 'renderer/splash.html', 'renderer/wizard.html']) {
   assert.ok(asarEntries.has(relativePath), `Packaged ASAR is missing: ${relativePath}`);
 }

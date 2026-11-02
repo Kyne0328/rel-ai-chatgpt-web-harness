@@ -8,7 +8,8 @@ const execFileAsync = promisify(execFile);
 // before relying on the short-lived, metadata-bound result for local operations.
 const SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
-  "$paths = @(ConvertFrom-Json -InputObject $env:RELAI_MUTATION_ACL_PATHS)",
+  // Windows PowerShell 5 returns a JSON array as one object; cast to flatten it.
+  "$paths = [string[]](ConvertFrom-Json -InputObject $env:RELAI_MUTATION_ACL_PATHS)",
   "$me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
   "$trusted = @($me, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-0')",
   "$writeMask = 0x000D0156",

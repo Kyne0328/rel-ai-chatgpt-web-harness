@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { isSecureLinuxSandboxConfiguration } from '../scripts/validate-installed-release.mjs';
+import { assertElectronRuntimeCoverage } from '../scripts/packaged-runtime-parity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8');
@@ -91,6 +92,17 @@ assert.match(installedReleaseValidation, /createInstallerTestContext/,
   'Windows production-identity validation must retain the installer safety guard');
 assert.match(installedReleaseValidation, /resources[',\s]+['"]package-type/,
   'Linux release validation must keep the electron-updater DEB package-type marker check');
+
+const runtimeOptions = { electronRoot: path.join(root, 'electron'), electronPackage };
+const linuxRuntime = assertElectronRuntimeCoverage({ ...runtimeOptions, platform: 'linux' });
+assert.ok(!linuxRuntime.includes('build/icon.png'), 'Linux icon is an external runtime resource, not an ASAR entry');
+assert.ok(!linuxRuntime.includes('build/update-status-helper.ps1'), 'Linux must not require the Windows updater helper');
+assert.doesNotThrow(() => assertElectronRuntimeCoverage({ ...runtimeOptions, platform: 'linux', asarEntries: new Set(linuxRuntime) }));
+const windowsRuntime = assertElectronRuntimeCoverage({ ...runtimeOptions, platform: 'win32' });
+assert.ok(windowsRuntime.includes('build/update-status-helper.ps1'), 'Windows updater helper must remain packaged');
+assert.throws(() => assertElectronRuntimeCoverage({ ...runtimeOptions, platform: 'win32',
+  asarEntries: new Set(windowsRuntime.filter(file => file !== 'build/update-status-helper.ps1')) }),
+/Packaged ASAR is missing Electron runtime source: build\/update-status-helper\.ps1/);
 
 const rootOwnedSetuidSandbox = { uid: 0, mode: 0o104755 };
 const rootOwnedNamespaceSandbox = { uid: 0, mode: 0o100755 };

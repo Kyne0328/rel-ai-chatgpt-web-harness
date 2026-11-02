@@ -150,7 +150,7 @@ function assertPackagedRuntimeParity(options) {
 
 // Guard desktop modules and renderer assets independently of the hand-maintained
 // Electron files allowlist. New source files must be packaged, not just their imports.
-function assertElectronRuntimeCoverage({ electronRoot, electronPackage, asarEntries }) {
+function assertElectronRuntimeCoverage({ electronRoot, electronPackage, asarEntries, platform = process.platform }) {
   const fileEntries = electronPackage.build?.files || [];
   const literalEntries = new Set(fileEntries.filter(value =>
     typeof value === 'string' && !value.startsWith('!') && !value.includes('*')));
@@ -160,7 +160,9 @@ function assertElectronRuntimeCoverage({ electronRoot, electronPackage, asarEntr
   const renderer = collectTree(path.join(electronRoot, 'renderer'))
     .filter(file => !file.endsWith('.map'))
     .map(file => `renderer/${file}`);
-  const runtimeFiles = [...modules, ...renderer, 'build/icon.png', 'build/update-status-helper.ps1'];
+  // The icon is installed as a filesystem-backed extraResource, not loaded from ASAR.
+  // The updater helper is a Windows-only runtime dependency.
+  const runtimeFiles = [...modules, ...renderer, ...(platform === 'win32' ? ['build/update-status-helper.ps1'] : [])];
   for (const file of runtimeFiles) {
     const included = file.startsWith('renderer/') ? fileEntries.includes('renderer/**') : literalEntries.has(file);
     assert.ok(included, `Electron files allowlist omits runtime source: ${file}`);
