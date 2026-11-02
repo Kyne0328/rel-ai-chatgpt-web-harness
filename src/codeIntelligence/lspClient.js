@@ -55,6 +55,9 @@ class LspClient {
       cwd: this.cwd,
       env: this.env,
       shell: false,
+      // Unix process-tree termination uses the child PID as the process-group ID.
+      // Give each LSP server its own group so shutdown can actually stop it.
+      detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     });

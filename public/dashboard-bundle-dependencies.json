@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "outputs": {
-    "dashboard-app.js": "7319a8d3c7761ea4ea2ee77095d4359b039f776f277fd08b585bbcf41ccde8be",
+    "dashboard-app.js": "c0ea54c523d71478aa3be14d180d3542118075a8ffe10f41aeb8dc551204de42",
     "dashboard-chunks/activity-event-0YWs55Lf.js": "7283249591be0fbadd7b8f65c6c4316df847eec38db427a7c837271526dbbfbc",
     "dashboard-chunks/api-DFRYYUQg.js": "c0bec206acef84b58e9a01505585a96622ff2b25f7a6ed986a37de64ac55b88b",
     "dashboard-chunks/charts-CoaZszkE.js": "9879b3e831cac0ec346d93d7205ca9a593c99a5d47a17ddbce57e33f40e56370",
@@ -9,35 +9,35 @@
     "dashboard-chunks/clock-CpMTwOBn.js": "9c7221eb29af31a6c049cd60cb9091e2e7805e70b07068647e8e0aab5b55116e",
     "dashboard-chunks/connection-recovery-BwVHk0_m.js": "4d0f3bb2ec4769012df59465a2b7478d84e42c8810a0eee71578aadfb86cf7c1",
     "dashboard-chunks/data-DkKeNxaR.js": "022f390a7d9699943c72e55e9cc3b3ed1fa49908690ac667de61e8f26828f0c6",
-    "dashboard-chunks/diagnostics-react-VkR0Vlok.js": "98534e03c0c528764939afb84e9057d6bd03bc949efd27dc02b3bf13abe4f7f5",
+    "dashboard-chunks/diagnostics-react-B0ZXke9E.js": "e9aa86d8f49049bbf07a4bc414e3f1a8c380d969c5b95002aa8d53f62b33bbd5",
     "dashboard-chunks/drawer-BG0Qdj-1.js": "07b88b43d63504df3744fe605c2c014ad0dc907f4d8cc200116105d85005be1a",
     "dashboard-chunks/filter-drawer-lQXgVzkH.js": "eec4db8ce1ece1c1dbf3cc8a9a5df355e504df0f21f1ac85328116714dc69a65",
     "dashboard-chunks/jsx-runtime-BbBzJpM0.js": "37118325f73866d30da715688c324ec8007839f33dd1c6ccdcbdac12829a2731",
-    "dashboard-chunks/main-lXSV5D8h.js": "f191258857c55bb22b48a433defb348bb8f759baf3fddb858862d2f7ce75d364",
+    "dashboard-chunks/main-vsdwxjPu.js": "716803bcf97a9ca8f823852d4c3c025438740e77af2d49fd7ec78ed077bc487c",
     "dashboard-chunks/model-B_Q2XtUF.js": "9eba910df53dcbf67e6a0aba9211093e6e5b05d089dce353ad02bc25e37caa09",
     "dashboard-chunks/model-CWzc7Ye0.js": "dbd55e333d2bb17a67e4ef26c33edcd7b4a14eadab87dc6ea982e84eb0b76465",
-    "dashboard-chunks/onboarding-BbB9kIse.js": "42288246b79ea14d20d9b18430681dd1f7a38d18c108c555bc34e01825fa00a7",
+    "dashboard-chunks/onboarding-iVQ33Xfy.js": "ebcbc48e655385947175ce17eba47d4987aa1789f324802c1af3c8e943969249",
     "dashboard-chunks/overlay-frame-CByjqrMl.js": "423199514fa2284a7fc2c395a181dff2d5fc4f4cea80bda34b937f4382c9978f",
     "dashboard-chunks/overlay-store-DujJbpUi.js": "f3d2f73dbd9fef25a2b8d940a66755dd530d2129c0fc7175cc0ec532a29109e5",
-    "dashboard-chunks/react-BLdMmIOG.js": "9f81d8830cdf794d0d50a8039ec19f92ffe1bbf17865994ecbadbeb8cefe0f97",
-    "dashboard-chunks/react-Bq3PWCnh.js": "55a502fd5fb52a3c1d22d520e4517f253fd7aa5724a2d46980ee8e72e6030601",
-    "dashboard-chunks/react-Buzkv9U5.js": "879c1f6174594180f779f24bd0ab6d569ae2c2b417441f6559ac6808edfeb3d3",
-    "dashboard-chunks/react-BVOj0kFW.js": "cde1f68434418bd334e6cbb395e80e506920f96da288b3be810dc205bacd1f29",
-    "dashboard-chunks/react-C0EFvWzi.js": "fe73e00fc43dbea18337815b5ee6d0c6f21853bd4da579b97af76930c06a7ee5",
-    "dashboard-chunks/react-CFHq-RVU.js": "dd3e1110c5a5ccee9154f96fa2f27450b94fd364c1dc1115735a43e54cb942d6",
-    "dashboard-chunks/react-CYLFHm2Y.js": "c98ebe2380097178b92900b75927e2b4129dc59833e46de1d79fcb4d5050444d",
-    "dashboard-chunks/react-DL7rfvOT.js": "c7bf974ffa797a7fb668d15fbac3f250be073a8e0bad57ba0de9bc9078693f23",
+    "dashboard-chunks/react-B1t9v_eC.js": "adc8cde9a41d52e6223b6b922ef8812c2f52647a76ad6f1d56a83675400d2080",
+    "dashboard-chunks/react-BOwi40eO.js": "4b90d0ef03cdad1cef91982b45a31ba49e0bd52eb4a6e58865a790489a670f5c",
+    "dashboard-chunks/react-Br5AW1ZL.js": "76221f05b8a1304599a0af8458a1b6b4f7e7ab844770648d6f7bb3dcc0543902",
+    "dashboard-chunks/react-BWgTVbMq.js": "48a0eebe0c55c7e1cb16e67e471784ba4ac47a56090c5438a0cd65a4dd293d8f",
+    "dashboard-chunks/react-C7O6TM9k.js": "0efe6ca134f66f019ede7bc40296593c20383672397f72e1963686479424bd50",
+    "dashboard-chunks/react-CENCmzB0.js": "3b461700ae1e2b53c7d51d3b400d953e41a632fee399e1aec8249f7c454521c9",
+    "dashboard-chunks/react-ClKBq2tz.js": "7e49b1940b299100e347938d2e21581aa56a20c5dc90d4dfb6aed51991adcc2e",
+    "dashboard-chunks/react-Cp3fZ2Ka.js": "c3848fa8d2858f1975dd38373f745221f28b39bfc09a04f97d1bfe5b8949fa16",
+    "dashboard-chunks/react-DA1IukCo.js": "89561fab94de4e9b0f0fee3ebdb5084ee15b20443c70a00308eb793d456ca87e",
     "dashboard-chunks/react-dom-BABjc_Xt.js": "06457e74d9972e5ce60787ca2f5d08fe26006c04483e89d27bae16032989dc9b",
     "dashboard-chunks/react-DvXU6kJ2.js": "d2f40f3cf9c8f62f6abb6988cf470484b3bfd50d0cd8a33416dacc1d8c6f669d",
-    "dashboard-chunks/react-fOQimPhE.js": "81bb85375bad99f355c7b6f4cf4db8c79037712b68408417a3952425d42efb04",
     "dashboard-chunks/react-ia9hwJm0.js": "38090186209e8fec247452ba7e6bf83ff807428fe87c10342f7137fe030b0496",
-    "dashboard-chunks/react-NqwQ8VL_.js": "a952941ddfa330051e1f447ffd5510ac64502e8acc5a19b73cdb374be19541b7",
+    "dashboard-chunks/react-RYD5Zwhl.js": "6f59343d82606a77fde69cdd1974c522289a7b4106e58fdbece3532c0bb71dd9",
     "dashboard-chunks/sparkline-CgdqXBm7.js": "587ecfc0a1bc72a77d507cc2cf381f8c606489df2588894d102ce27ad0980628",
     "dashboard-chunks/task-identity-DzrSUv2-.js": "462c0d379ccd6ff4e15abcc0b8c520d2bf2670b6f79069b9cfc6a5cd229d00b4",
     "dashboard-chunks/taskState-CkkCt25c.js": "6e879c5bf5feefba584ea2a7f31c5ab272bb5c232922f531a17fd50272aafb65",
     "dashboard-chunks/tooltip-CKrIPUKY.js": "595176904825ceb167f072c95e3a293424bff7153adf1df9c41e29c28777c2dd",
     "dashboard-chunks/utils-DjJbNUvl.js": "e77a4c50d2f1e9e214501de36b5a34a258371fab3434db59622fbe4c35d3f1c5",
-    "dashboard-react.js": "e43a23fdee538816e2ff5715fac68ece78ec13f0bce0a605208cb734839ba13c"
+    "dashboard-react.js": "51a3ad2e47edc3cc59c2a315382f8d0398f8032f296f8d176ea2da6278fb3fa1"
   },
   "components": [
     {
@@ -295,9 +295,9 @@
     {
       "type": "library",
       "name": "@tanstack/react-virtual",
-      "version": "3.14.22",
-      "purl": "pkg:npm/%40tanstack/react-virtual@3.14.22",
-      "bom-ref": "pkg:npm/%40tanstack/react-virtual@3.14.22",
+      "version": "3.14.25",
+      "purl": "pkg:npm/%40tanstack/react-virtual@3.14.25",
+      "bom-ref": "pkg:npm/%40tanstack/react-virtual@3.14.25",
       "licenses": [
         {
           "license": {
@@ -309,9 +309,9 @@
     {
       "type": "library",
       "name": "@tanstack/virtual-core",
-      "version": "3.19.7",
-      "purl": "pkg:npm/%40tanstack/virtual-core@3.19.7",
-      "bom-ref": "pkg:npm/%40tanstack/virtual-core@3.19.7",
+      "version": "3.19.10",
+      "purl": "pkg:npm/%40tanstack/virtual-core@3.19.10",
+      "bom-ref": "pkg:npm/%40tanstack/virtual-core@3.19.10",
       "licenses": [
         {
           "license": {
@@ -365,9 +365,9 @@
     {
       "type": "library",
       "name": "lucide-react",
-      "version": "1.61.0",
-      "purl": "pkg:npm/lucide-react@1.61.0",
-      "bom-ref": "pkg:npm/lucide-react@1.61.0",
+      "version": "1.66.0",
+      "purl": "pkg:npm/lucide-react@1.66.0",
+      "bom-ref": "pkg:npm/lucide-react@1.66.0",
       "licenses": [
         {
           "license": {
@@ -553,12 +553,12 @@
         "pkg:npm/%40radix-ui/react-use-controllable-state@1.3.0",
         "pkg:npm/%40radix-ui/react-use-effect-event@0.0.5",
         "pkg:npm/%40radix-ui/react-use-layout-effect@1.1.4",
-        "pkg:npm/%40tanstack/react-virtual@3.14.22",
-        "pkg:npm/%40tanstack/virtual-core@3.19.7",
+        "pkg:npm/%40tanstack/react-virtual@3.14.25",
+        "pkg:npm/%40tanstack/virtual-core@3.19.10",
         "pkg:npm/aria-hidden@1.2.6",
         "pkg:npm/chart.js@4.6.1",
         "pkg:npm/get-nonce@1.0.1",
-        "pkg:npm/lucide-react@1.61.0",
+        "pkg:npm/lucide-react@1.66.0",
         "pkg:npm/react-chartjs-2@5.3.1",
         "pkg:npm/react-dom@19.3.1",
         "pkg:npm/react-remove-scroll-bar@2.3.8",
@@ -716,15 +716,15 @@
       ]
     },
     {
-      "ref": "pkg:npm/%40tanstack/react-virtual@3.14.22",
+      "ref": "pkg:npm/%40tanstack/react-virtual@3.14.25",
       "dependsOn": [
-        "pkg:npm/%40tanstack/virtual-core@3.19.7",
+        "pkg:npm/%40tanstack/virtual-core@3.19.10",
         "pkg:npm/react-dom@19.3.1",
         "pkg:npm/react@19.3.1"
       ]
     },
     {
-      "ref": "pkg:npm/%40tanstack/virtual-core@3.19.7",
+      "ref": "pkg:npm/%40tanstack/virtual-core@3.19.10",
       "dependsOn": []
     },
     {
@@ -742,7 +742,7 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/lucide-react@1.61.0",
+      "ref": "pkg:npm/lucide-react@1.66.0",
       "dependsOn": [
         "pkg:npm/react@19.3.1"
       ]
