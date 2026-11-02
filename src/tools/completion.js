@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { cleanupTaskManagedProcesses } from '../processManager.js';
 import { resolveWorkspace } from '../config.js';
 import { clearSessionPolicy, resolvePolicy } from '../policyResolver.js';
@@ -54,7 +55,7 @@ async function completeTask(config, args = {}, handlerContext = {}) {
       summary, validationStatus: 'not_required', validationAt: '', validationFingerprint: '',
       changedFiles: [], completionSource
     }, handlerContext, goal);
-    assertCompletionGoalUnchanged(config, requestedTaskId, goal);
+    await assertCompletionGoalUnchanged(config, requestedTaskId, goal, signal);
     return finalizeProjectlessTask(config, requestedTaskId, goal, summary, completionSource, explicitComplete);
   }
   const authority = readCompletionIntegrity(config, requestedTaskId, workspace.alias);
@@ -144,7 +145,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
       completionSource: String(options.completionSource || WORK_FINISH_SOURCE), workspace: workspace.alias
     }, options.processContext || {}, goal);
   }
-  assertCompletionGoalUnchanged(config, taskId, goal);
+  await assertCompletionGoalUnchanged(config, taskId, goal, options.signal);
   const processCleanup = await cleanupTaskManagedProcesses(config, workspace.alias, taskId, {
     ...options.processContext, taskId, workspace: workspace.alias
   });
@@ -158,7 +159,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
       nextAction: 'Inspect processCleanup.leftovers and recover only the exact owned process IDs. If cleanup cannot be verified, preserve the evidence and cancel the work session instead of claiming completion.'
     };
   }
-  assertCompletionGoalUnchanged(config, taskId, goal);
+  await assertCompletionGoalUnchanged(config, taskId, goal, options.signal);
   const scratchCleanup = await cleanupTaskScratch(config, workspace, taskId, authority, options.signal);
   const changedFiles = Array.isArray(options.changedFiles)
     ? unique(options.changedFiles.map(String).filter(Boolean))
@@ -201,7 +202,7 @@ async function finalizeValidatedTask(config, workspace, options = {}) {
   }
   options.signal?.throwIfAborted?.();
   const finalGoal = await refreshedCompletionGoal(config, workspace, taskId, options.signal);
-  assertCompletionGoalUnchanged(config, taskId, goal);
+  await assertCompletionGoalUnchanged(config, taskId, goal, options.signal);
   if ((!options.explicitComplete && requiresLoopIteration(finalGoal)) || requiresGoalEvidence(finalGoal)) {
     throw taskError('GOAL_STATE_CHANGED', 'Goal/Loop completion evidence changed during finalization. The work remains open.');
   }
@@ -316,8 +317,23 @@ function requiresLoopIteration(goal) {
   return goal?.mode === 'loop' && goal.state !== 'stopped';
 }
 
-function assertCompletionGoalUnchanged(config, taskId, observedGoal) {
-  const latest = loadGoal(config, taskId);
+// Retry transient SQLite WAL contention without blocking the main service thread.
+async function loadCompletionGoal(config, taskId, signal) {
+  const retryUntil = performance.now() + 500;
+  for (;;) {
+    signal?.throwIfAborted?.();
+    try { return loadGoal(config, taskId); }
+    catch (error) {
+      const busy = (Number(error?.errcode) & 0xff) === 5 || error?.code === 'SQLITE_BUSY';
+      if (!busy || performance.now() >= retryUntil) throw error;
+      await delay(Math.min(25, Math.max(0, retryUntil - performance.now())), undefined,
+        signal ? { signal } : {});
+    }
+  }
+}
+
+async function assertCompletionGoalUnchanged(config, taskId, observedGoal, signal) {
+  const latest = await loadCompletionGoal(config, taskId, signal);
   if ((latest?.revision ?? null) !== (observedGoal?.revision ?? null)) {
     throw taskError('GOAL_STATE_CHANGED', 'Goal/Loop changed during finalization. Inspect the exact work_id before retrying.');
   }
@@ -326,7 +342,7 @@ function assertCompletionGoalUnchanged(config, taskId, observedGoal) {
 // Achievement is a receipt tied to semantic task and repository state, not a
 // permanent Boolean. A later mutation or plan change requires fresh evaluation.
 async function refreshedCompletionGoal(config, workspace, taskId, signal) {
-  const goal = loadGoal(config, taskId);
+  const goal = await loadCompletionGoal(config, taskId, signal);
   if (!goal || goal.mode !== 'goal' || goal.strategy !== 'adaptive'
     || goal.objectiveAchieved !== true) return goal;
   const accepted = goal.achievementEvidence;
@@ -335,7 +351,7 @@ async function refreshedCompletionGoal(config, workspace, taskId, signal) {
     ? await factualValidationState(config, workspace, authority, { signal })
     : { status: 'not_required', fingerprint: '' };
   signal?.throwIfAborted?.();
-  assertCompletionGoalUnchanged(config, taskId, goal);
+  await assertCompletionGoalUnchanged(config, taskId, goal, signal);
   const task = getToolActivity().tasks.find(item => String(item.id || item.taskId || '') === taskId)
     || readTaskHistorySession(config, taskId, { reconcileInactive: false });
   const currentAuthority = workspace ? readCompletionIntegrity(config, taskId, workspace.alias) : null;
