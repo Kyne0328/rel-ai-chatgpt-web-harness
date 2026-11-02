@@ -43,6 +43,9 @@ import { readDesktopSettings, saveDesktopSettings } from './desktop-settings.js'
 const electronRoot = path.dirname(fileURLToPath(import.meta.url));
 const preloadPath = path.join(electronRoot, 'preload.cjs');
 const rendererRoot = path.join(electronRoot, 'renderer');
+const smokeLog = stage => {
+  if (process.env.REL_AI_DESKTOP_SMOKE_NONCE) console.error(`[rel-ai-smoke] ${stage}`);
+};
 
 async function createDesktopHost(options = {}) {
   const {
@@ -72,6 +75,7 @@ async function createDesktopHost(options = {}) {
   registerLocalScheme(protocol);
   configureApplicationIdentity(app);
 
+  smokeLog('desktop host resource imports start');
   const [connection, configModule, errorContracts, processEnvironment, browserProfiles, goalState] = await Promise.all([
     importResourceModule('src/connectionProfile.js'),
     importResourceModule('src/config.js'),
@@ -80,6 +84,7 @@ async function createDesktopHost(options = {}) {
     importResourceModule('src/browser/browserProfile.ts'),
     importResourceModule('src/chatgptGoalState.js')
   ]);
+  smokeLog('desktop host resource imports complete');
   const { ERROR_CODES } = errorContracts;
   let processModulePromise = null;
   const terminateProcessTree = async (...args) => {
@@ -502,13 +507,16 @@ async function createDesktopHost(options = {}) {
   }
 
   async function startDesktop() {
+    smokeLog('desktop start begin');
     const gotLock = app.requestSingleInstanceLock();
+    smokeLog(`desktop instance lock: ${gotLock}`);
     if (!gotLock) {
       app.quit();
       return { ok: false, reason: 'second-instance' };
     }
     bindApplicationEvents();
     await app.whenReady();
+    smokeLog('desktop app ready');
 
     const basicPasswordStoreEnabled = configureTunnelSafeStorage({
       safeStorage,
@@ -538,6 +546,7 @@ async function createDesktopHost(options = {}) {
       writeControllerRuntimeMarker(app),
       desktopLifecycle.start()
     ]);
+    smokeLog('desktop lifecycle ready');
     runtimeLogs.append('Desktop lifecycle ready.', { source: 'desktop-performance', details: { elapsedMs: Math.round(performance.now() - launchStarted) } });
     dashboardWindowManager.setThemePreference(lifecycleStatus.themePreference);
     desktopPower.setKeepAwakeEnabled(lifecycleStatus.keepAwake === true);
@@ -548,6 +557,7 @@ async function createDesktopHost(options = {}) {
     serviceProcessClient.updateContext({ reducedBackgroundWork: lifecycleStatus.reducedBackgroundWork === true });
     desktopTray.setup();
     routeInitialWindow(lifecycleStatus);
+    smokeLog('initial desktop window routed');
     desktopPower.start();
     if (process.platform === 'darwin') {
       app.on('activate', () => {

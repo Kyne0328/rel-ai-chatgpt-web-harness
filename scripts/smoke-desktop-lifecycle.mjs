@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 export async function smokeDesktopLifecycle({ executable, argv = [], stateDirectory,
-  timeoutMs = 60000, stableMs = 500, shutdownMs = 5000, env = process.env, spawnImpl = spawn, terminateImpl = terminateOwned }) {
+  timeoutMs = 25000, stableMs = 500, shutdownMs = 5000, env = process.env, spawnImpl = spawn, terminateImpl = terminateOwned }) {
   fs.mkdirSync(stateDirectory, { recursive: true });
   const runDirectory = fs.mkdtempSync(path.join(stateDirectory, 'desktop-smoke-'));
   const userData = path.join(runDirectory, 'profile');
@@ -18,6 +18,7 @@ export async function smokeDesktopLifecycle({ executable, argv = [], stateDirect
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...env, REL_AI_MCP_STATE_DIR: path.join(runDirectory, 'state'),
       REL_AI_ELECTRON_DEV_USER_DATA: userData, REL_AI_DESKTOP_SMOKE_NONCE: nonce,
+      ELECTRON_ENABLE_LOGGING: '1',
       REL_AI_OFFICIAL_BUILD: '0', REL_AI_MAINTAINER_USAGE_ENDPOINT: '',
       REL_AI_MAINTAINER_DIAGNOSTICS_ENDPOINT: '', REL_AI_OTEL_EXPORTER_OTLP_ENDPOINT: '',
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: '' }
@@ -53,7 +54,13 @@ export async function smokeDesktopLifecycle({ executable, argv = [], stateDirect
       receipt = null;
       await delay(25);
     }
-    if (!receipt) throw new Error(`Desktop did not report verified renderer readiness.\n${output}`);
+    if (!receipt) {
+      const state = ['profile', 'state'].map(name => {
+        const directory = path.join(runDirectory, name);
+        return { name, files: fs.existsSync(directory) ? fs.readdirSync(directory) : [] };
+      });
+      throw new Error(`Desktop did not report verified renderer readiness. ${JSON.stringify(state)}\n${output}`);
+    }
     await delay(stableMs);
     assertRunning();
     // Ask the main process to run its shutdown coordinator. Signalling the

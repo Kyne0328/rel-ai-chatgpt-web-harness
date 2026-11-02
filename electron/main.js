@@ -30,6 +30,11 @@ import { launchUpdateStatusHelper } from './update-status-helper.js';
 import { normalizeWizardConfig, saveLauncherConfig } from './launcher-config.js';
 import { registerLocalScheme } from './local-protocol.js';
 
+const smokeLog = stage => {
+  if (process.env.REL_AI_DESKTOP_SMOKE_NONCE) console.error(`[rel-ai-smoke] ${stage}`);
+};
+smokeLog('main evaluated');
+
 // Application identity must be set before any app.getPath('userData') call.
 // Otherwise the update guard resolves the default package-derived profile
 // (rel-ai-mcp-launcher) instead of the canonical profile (Rel.AI MCP), and
@@ -46,6 +51,7 @@ const updateLaunchGuard = updateInstallLaunchGuard(app, {
   packaged: app.isPackaged,
   argv: process.argv
 });
+smokeLog('main preflight complete');
 
 async function launchDesktop() {
   let shouldStartDesktop = !updateLaunchGuard.blocked;
@@ -84,6 +90,7 @@ async function launchDesktop() {
 
   if (shouldStartDesktop) {
     const hasSingleInstanceLock = app.requestSingleInstanceLock();
+    smokeLog(`instance lock: ${hasSingleInstanceLock}`);
     if (!hasSingleInstanceLock) {
       app.quit();
     } else {
@@ -91,6 +98,7 @@ async function launchDesktop() {
         import('electron-updater'),
         import('./desktop-host.js')
       ]);
+      smokeLog('desktop module imported');
       const { autoUpdater } = electronUpdater;
       const desktop = await createDesktopHost({
         app,
@@ -116,10 +124,13 @@ async function launchDesktop() {
         saveLauncherConfig
       });
 
+      smokeLog('desktop host created');
       // Electron waits for ESM evaluation before emitting ready. Do not await a
       // startup promise that itself waits for app.whenReady() at module scope.
       void desktop.start().then(async result => {
+        smokeLog(`desktop started: ${result?.ok === true}`);
         if (result?.ok) await recordDesktopSmokeReadiness({ app, BrowserWindow });
+        smokeLog('readiness recorded');
         if (result?.ok && updateLaunchGuard.reason === 'updated_launch') {
           void desktop.completeApplicationUpdate(updateLaunchGuard.marker).catch(error => {
             console.error('[rel-ai-mcp] Update completion recording failed:', error);
