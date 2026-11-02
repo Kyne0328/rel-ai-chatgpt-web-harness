@@ -129,8 +129,11 @@ async function launchDesktop() {
       // startup promise that itself waits for app.whenReady() at module scope.
       void desktop.start().then(async result => {
         smokeLog(`desktop started: ${result?.ok === true}`);
-        if (result?.ok) await recordDesktopSmokeReadiness({ app, BrowserWindow });
-        smokeLog('readiness recorded');
+        if (result?.ok) {
+          smokeLog('renderer readiness check begin');
+          await recordDesktopSmokeReadiness({ app, BrowserWindow });
+          smokeLog('renderer readiness check complete');
+        }
         if (result?.ok && updateLaunchGuard.reason === 'updated_launch') {
           void desktop.completeApplicationUpdate(updateLaunchGuard.marker).catch(error => {
             console.error('[rel-ai-mcp] Update completion recording failed:', error);

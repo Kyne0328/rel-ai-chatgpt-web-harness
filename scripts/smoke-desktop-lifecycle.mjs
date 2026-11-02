@@ -147,7 +147,7 @@ async function boundedClose(closed, timeoutMs) {
   finally { clearTimeout(timer); }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  const [executable, stateDirectory] = process.argv.slice(2);
+  const [executable, stateDirectory, ...argv] = process.argv.slice(2);
   if (!executable || !stateDirectory) throw new Error('Pass the application executable and isolated smoke-state directory.');
-  await smokeDesktopLifecycle({ executable, stateDirectory });
+  await smokeDesktopLifecycle({ executable, stateDirectory, argv });
 }

@@ -15,4 +15,4 @@ test "$(stat -c '%u:%g:%a' "$sandbox_helper")" = '0:0:4755'
 
 timeout --signal=TERM --kill-after=5s 45s \
   xvfb-run --auto-servernum dbus-run-session -- \
-  node "$script_directory/smoke-desktop-lifecycle.mjs" "$app" "$state_directory"
+  node "$script_directory/smoke-desktop-lifecycle.mjs" "$app" "$state_directory" --disable-gpu

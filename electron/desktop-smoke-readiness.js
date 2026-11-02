@@ -13,6 +13,7 @@ export async function recordDesktopSmokeReadiness({ app, BrowserWindow, env = pr
   // foreground renderer instead of waiting on every background window.
   const windows = BrowserWindow.getAllWindows().filter(window => !window.isDestroyed() && window.isVisible?.() !== false);
   if (!windows.length) throw new Error('Desktop started without a renderer window.');
+  console.error('[rel-ai-smoke] checking ' + windows.length + ' visible renderer window(s)');
   await Promise.all(windows.map(window => waitForRenderer(window.webContents, timeoutMs)));
   const receipt = { ready: true, nonce, pid: process.pid, rendererCount: windows.length };
   const target = path.join(app.getPath('userData'), 'desktop-smoke-ready.json');

@@ -143,7 +143,7 @@ try {
   assert.ok(manifest.build.files.includes('desktop-smoke-readiness.js'), 'The Electron main import must ship in the application archive.');
   cases.push('packaged-readiness-module');
   const shell = fs.readFileSync(new URL('../scripts/smoke-linux-desktop.sh', import.meta.url), 'utf8');
-  assert.match(shell, /node "\$script_directory\/smoke-desktop-lifecycle\.mjs"/);
+  assert.match(shell, /node "\$script_directory\/smoke-desktop-lifecycle\.mjs" "\$app" "\$state_directory" --disable-gpu/, 'headless Linux CI uses software rendering while preserving the packaged desktop probe');
   assert.doesNotMatch(shell, /wait "\$app_pid"\s+exit \$\?/);
   console.log(JSON.stringify({ passed: cases, nativeLinuxPackageAcceptance: 'not run' }));
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
