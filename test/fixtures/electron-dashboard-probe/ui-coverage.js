@@ -130,7 +130,8 @@ async function exerciseExtensionSelection(win, waitFor) {
   const radiosBefore = await win.webContents.executeJavaScript(`(() => { const radios = [...document.querySelectorAll('input[type="radio"]')]; (radios.find(input => input.checked) || radios[0]).focus(); return radios.map(input => ({ value: input.value, checked: input.checked })); })()`);
   win.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });
   win.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Right' });
-  await waitFor(win, `document.activeElement?.matches('input[type="radio"]') && document.activeElement.checked`);
+  const selectedBefore = radiosBefore.find(input => input.checked)?.value;
+  await waitFor(win, `document.activeElement?.matches('input[type="radio"]') && document.activeElement.checked && document.activeElement.value !== ${JSON.stringify(selectedBefore)}`);
   const radiosAfter = await win.webContents.executeJavaScript(`[...document.querySelectorAll('input[type="radio"]')].map(input => ({ value: input.value, checked: input.checked }))`);
   return { before, afterName, toggledBackToAll: true, radiosBefore, radiosAfter };
 }
