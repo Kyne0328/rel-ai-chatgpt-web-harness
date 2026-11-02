@@ -212,7 +212,8 @@ try {
       await assert.rejects(
         createValidationFingerprint(app, config, {
           paths: ['large-fingerprint.bin'],
-          status: { changedFiles: ['large-fingerprint.bin'], branch: 'main', unborn: false },
+          status: { ok: true, changedFiles: ['large-fingerprint.bin'], branch: 'main', unborn: false, repositoryHead: 'fixture' },
+          repositoryWide: false,
           signal: controller.signal
         }),
         error => controller.signal.aborted

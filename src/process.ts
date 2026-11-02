@@ -890,6 +890,11 @@ async function runProcess(command: string, args: readonly string[] = [], options
         forcedTermination: result.isForcefullyTerminated === true || terminationOutcome?.forced === true
       } : {}),
       queueWaitMs,
+      // A naturally completed Unix command is confirmed once its isolated
+      // process group has disappeared; do not mark every clean exit unknown.
+      ...(!terminationOutcome && process.platform !== 'win32' && rootExitConfirmed
+        && !inheritedPipeDrain && !isProcessGroupAlive(subprocess.pid)
+        ? { terminationConfirmed: true } : {}),
       durationMs: Number(result.durationMs || 0),
       stdoutBytes,
       stderrBytes,
