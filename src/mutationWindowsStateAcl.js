@@ -31,6 +31,10 @@ function fingerprint(file) {
   const stat = fs.lstatSync(file);
   return [stat.dev, stat.ino, stat.ctimeMs, stat.mtimeMs, stat.size, stat.mode, stat.nlink].join(':');
 }
+function fileIdentity(file) {
+  const stat = fs.lstatSync(file);
+  return [stat.dev, stat.ino, stat.birthtimeMs, stat.mode, stat.nlink].join(':');
+}
 function privatelyOwnedWindowsState(file) {
   if (process.platform !== 'win32') return false;
   try {
@@ -59,11 +63,24 @@ async function privatelyOwnedWindowsPaths(files) {
       // are sampled. Retry changed metadata; never cache a mismatched proof.
       for (let attempt = 0; attempt < 3 && !verified; attempt++) {
         const before = batch.map(fingerprint);
+        const identities = batch.map(fileIdentity);
         const { stdout } = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
           env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
         });
         if (stdout !== 'OK') return false;
-        if (batch.some((file, index) => fingerprint(file) !== before[index])) continue;
+        if (batch.some((file, index) => fileIdentity(file) !== identities[index])) continue;
+        if (batch.some((file, index) => fingerprint(file) !== before[index])) {
+          // Native job receipts are rewritten while their process is running.
+          // Recheck the actual ACL instead of treating content writes as an
+          // ownership change. Never cache a proof for a changing file.
+          const confirmation = await execFileAsync(exe, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', SCRIPT], {
+            env, encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096
+          });
+          if (confirmation.stdout !== 'OK') return false;
+          if (batch.some((file, index) => fileIdentity(file) !== identities[index])) continue;
+          verified = true;
+          continue;
+        }
         const at = Date.now();
         for (let j = 0; j < batch.length; j++) checked.set(batch[j], { stamp: before[j], at });
         verified = true;

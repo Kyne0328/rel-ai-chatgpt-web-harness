@@ -22,6 +22,7 @@ import { planEdit } from '../src/executionPlanner.ts';
 import { readGitObservation } from '../src/repo/gitObservation.ts';
 import { listMutationProcessRecords, recordCurrentMutationProcess, removeMutationProcessRecord, runWithMutationProcessOwnership } from '../src/mutationProcessOwnership.js';
 import { inspectOwnedExecution } from '../src/executionRecovery.js';
+import { privatelyOwnedWindowsPaths } from '../src/mutationWindowsStateAcl.js';
 import { recoverMutationRecordsAtStartup } from '../src/mutationAutoRecovery.js';
 
 assert.equal(process.platform, 'win32', 'This is a Windows-only acceptance executable; run it in the native Windows gate.');
@@ -51,6 +52,24 @@ function restrictFixtureState(directory) {
     [directory, '/inheritance:r', '/grant:r', `*${ownerSid}:(OI)(CI)F`], { windowsHide: true, stdio: 'ignore' });
 }
 try {
+  // Native job receipts change while PowerShell checks native permissions.
+  const activeState = fs.mkdtempSync(path.join(os.homedir(), 'relai-acl-active-'));
+  restrictFixtureState(activeState);
+  const activeReceipt = path.join(activeState, 'receipt.json');
+  fs.writeFileSync(activeReceipt, '{}');
+  const heartbeat = setInterval(() => fs.writeFileSync(activeReceipt, JSON.stringify({ at: Date.now() })), 15);
+  try {
+    assert.equal(await privatelyOwnedWindowsPaths([activeState, activeReceipt]), true,
+      'private ACL verification must tolerate active receipt writes');
+  } finally {
+    clearInterval(heartbeat);
+  }
+  childProcess.execFileSync(path.join(process.env.SystemRoot, 'System32', 'icacls.exe'),
+    [activeReceipt, '/grant', '*S-1-5-11:W'], { windowsHide: true, stdio: 'ignore' });
+  assert.equal(await privatelyOwnedWindowsPaths([activeReceipt]), false,
+    'ACL recheck must reject write access granted to unrelated principals');
+  fs.rmSync(activeState, { recursive: true, force: true });
+
   // The native owner survives loss of its Node parent and its output reader.
   // Killing the controller before a final receipt must still be recoverable
   // through the witnessed kernel job, without using PID absence as proof.

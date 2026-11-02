@@ -61,6 +61,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
+      - name: Use declared npm
+        run: node scripts/ensure-package-manager.mjs
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Verify mutation termination and recovery boundaries
         shell: bash

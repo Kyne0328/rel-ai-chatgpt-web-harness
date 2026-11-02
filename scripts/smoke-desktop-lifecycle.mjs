@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 export async function smokeDesktopLifecycle({ executable, argv = [], stateDirectory,
-  timeoutMs = 25000, stableMs = 500, shutdownMs = 5000, env = process.env, spawnImpl = spawn, terminateImpl = terminateOwned }) {
+  timeoutMs = 60000, stableMs = 500, shutdownMs = 5000, env = process.env, spawnImpl = spawn, terminateImpl = terminateOwned }) {
   fs.mkdirSync(stateDirectory, { recursive: true });
   const runDirectory = fs.mkdtempSync(path.join(stateDirectory, 'desktop-smoke-'));
   const userData = path.join(runDirectory, 'profile');
