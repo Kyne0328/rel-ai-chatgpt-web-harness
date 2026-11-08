@@ -578,7 +578,7 @@
   "dependencies": {
     "electron-updater": "6.8.11",
     "node-pty": "1.1.0",
-    "p-retry": "^8.0.1"
+    "p-retry": "^9.0.0"
   },
   "overrides": {
     "@electron/get@5.0.0": {
